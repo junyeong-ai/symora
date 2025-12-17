@@ -1,0 +1,76 @@
+[package]
+name = "symora"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Symbol-centric code intelligence CLI for AI coding agents"
+license = "MIT"
+repository = "https://github.com/junyeong-ai/symora"
+keywords = ["cli", "lsp", "symbol", "code-intelligence", "ai"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "symora"
+path = "src/main.rs"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.48", features = ["full", "process", "sync"] }
+futures = "0.3"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_repr = "0.1"
+toml = "0.8"
+
+# Error Handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# AST Parsing (13 languages + C via cpp)
+tree-sitter = "0.26"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-bash = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-php = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-lua = "0.2"
+tree-sitter-kotlin-sg = "0.4"
+streaming-iterator = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+dirs = "5.0"
+walkdir = "2.5"
+async-trait = "0.1"
+ignore = "0.4"
+
+# Unix file locking (for daemon)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.14"
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true

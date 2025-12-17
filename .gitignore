@@ -1,0 +1,42 @@
+# Project-specific
+.claude/*
+!.claude/skills/
+!.claude/skills/**
+.serena/
+.specify/
+specs/
+
+# Symora data (user-specific)
+.symora/
+
+# Rust
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Models cache (large files)
+/models/
+*.onnx
+*.safetensors
+
+# Test artifacts
+*.profraw
+coverage/
