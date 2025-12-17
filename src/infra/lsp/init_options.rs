@@ -1242,21 +1242,24 @@ fn vue_init_options() -> Value {
 }
 
 fn detect_java_home() -> Option<String> {
-    std::env::var("JAVA_HOME").ok().or_else(|| {
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("/usr/libexec/java_home")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            None
-        }
-    })
+    if let Ok(java_home) = std::env::var("JAVA_HOME") {
+        return Some(java_home);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/usr/libexec/java_home")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 fn detect_maven_settings() -> Option<String> {
