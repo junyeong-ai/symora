@@ -64,6 +64,18 @@ symora calls incoming src/order.rs:42:5  # 호출 계층 분석
 
 ---
 
+## 지원 플랫폼
+
+| 플랫폼 | 지원 | 비고 |
+|--------|:----:|------|
+| Linux (x86_64, aarch64) | ✅ | 전체 기능 |
+| macOS (Apple Silicon) | ✅ | 전체 기능 |
+| Windows | ❌ | Unix 소켓 의존성 |
+
+> Symora는 데몬 IPC에 Unix 도메인 소켓을 사용합니다. Windows 지원은 현재 계획에 없습니다.
+
+---
+
 ## 빠른 시작
 
 ```bash

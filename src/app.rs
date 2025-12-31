@@ -8,6 +8,7 @@ use crate::config;
 use crate::models::config::SymoraConfig;
 use crate::services::ast_query::{AstQueryService, DefaultAstQueryService};
 use crate::services::config::{ConfigService, DefaultConfigService};
+#[cfg(unix)]
 use crate::services::daemon_lsp::DaemonLspService;
 use crate::services::lsp::{DefaultLspService, LspService};
 use crate::services::project::{DefaultProjectService, ProjectService};
@@ -43,9 +44,17 @@ impl App {
         let project = Arc::new(DefaultProjectService::new(&root));
         let ast = Arc::new(DefaultAstQueryService::new()?);
 
+        // On Unix, use daemon mode if requested; on other platforms, always use direct LSP
+        #[cfg(unix)]
         let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
             Arc::new(DaemonLspService::new(&root))
         } else {
+            Arc::new(DefaultLspService::new(&root))
+        };
+
+        #[cfg(not(unix))]
+        let lsp: Arc<dyn LspService + Send + Sync> = {
+            let _ = use_daemon; // Suppress unused variable warning
             Arc::new(DefaultLspService::new(&root))
         };
 

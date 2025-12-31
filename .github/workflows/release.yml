@@ -22,8 +22,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -56,20 +54,11 @@ jobs:
         run: |
           version="${GITHUB_REF#refs/tags/v}"
           target="${{ matrix.target }}"
-
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            binary="target/$target/release/symora.exe"
-            archive="symora-v${version}-${target}.zip"
-            cp "$binary" symora.exe
-            7z a "$archive" symora.exe
-            echo "ASSET=$archive" >> $GITHUB_ENV
-          else
-            binary="target/$target/release/symora"
-            archive="symora-v${version}-${target}.tar.gz"
-            cp "$binary" symora
-            tar -czf "$archive" symora
-            echo "ASSET=$archive" >> $GITHUB_ENV
-          fi
+          binary="target/$target/release/symora"
+          archive="symora-v${version}-${target}.tar.gz"
+          cp "$binary" symora
+          tar -czf "$archive" symora
+          echo "ASSET=$archive" >> $GITHUB_ENV
 
       - name: Generate checksum
         shell: bash

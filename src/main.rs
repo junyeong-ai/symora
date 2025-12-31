@@ -9,6 +9,7 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use symora::app::App;
+#[cfg(unix)]
 use symora::cli::commands::daemon::{DaemonArgs, DaemonCommand};
 use symora::cli::{Cli, Commands};
 
@@ -61,12 +62,17 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Determine if we need daemon mode
     // Daemon server itself doesn't use daemon client
+    #[cfg(unix)]
     let use_daemon = !matches!(
         &cli.command,
         Commands::Daemon(DaemonArgs {
             command: DaemonCommand::Start
         }) | Commands::Doctor(_)
     );
+
+    // On non-Unix platforms, daemon is not available
+    #[cfg(not(unix))]
+    let use_daemon = !matches!(&cli.command, Commands::Doctor(_));
 
     // Initialize application
     let app = App::with_daemon(use_daemon)
@@ -108,7 +114,8 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         // Batch mode
         Commands::Batch(args) => commands::batch::execute(args, app).await,
 
-        // Daemon management
+        // Daemon management (Unix only)
+        #[cfg(unix)]
         Commands::Daemon(args) => commands::daemon::execute(args, app).await,
     }
 }

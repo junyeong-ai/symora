@@ -12,10 +12,12 @@ pub use output::OutputContext;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(unix)]
+use commands::daemon::DaemonArgs;
 use commands::{
     actions::ActionsArgs, batch::BatchArgs, calls::CallsArgs, config::ConfigArgs,
-    daemon::DaemonArgs, diagnostics::DiagnosticsArgs, doctor::DoctorArgs, edit::EditArgs,
-    find::FindArgs, hover::HoverArgs, impact::ImpactArgs, init::InitArgs, rename::RenameArgs,
+    diagnostics::DiagnosticsArgs, doctor::DoctorArgs, edit::EditArgs, find::FindArgs,
+    hover::HoverArgs, impact::ImpactArgs, init::InitArgs, rename::RenameArgs,
     search::SearchArgs, signature::SignatureArgs, status::StatusArgs,
 };
 
@@ -111,6 +113,7 @@ pub enum Commands {
     /// Execute multiple commands in batch
     Batch(BatchArgs),
 
-    /// Daemon server management (start, stop, status)
+    /// Daemon server management (start, stop, status) - Unix only
+    #[cfg(unix)]
     Daemon(DaemonArgs),
 }

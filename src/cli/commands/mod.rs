@@ -6,6 +6,7 @@ pub mod actions;
 pub mod batch;
 pub mod calls;
 pub mod config;
+#[cfg(unix)]
 pub mod daemon;
 pub mod diagnostics;
 pub mod doctor;

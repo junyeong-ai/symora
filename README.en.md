@@ -64,6 +64,18 @@ symora calls incoming src/order.rs:42:5  # call hierarchy analysis
 
 ---
 
+## Supported Platforms
+
+| Platform | Support | Notes |
+|----------|:-------:|-------|
+| Linux (x86_64, aarch64) | ✅ | Full features |
+| macOS (Apple Silicon) | ✅ | Full features |
+| Windows | ❌ | Unix socket dependency |
+
+> Symora uses Unix domain sockets for daemon IPC. Windows support is not planned.
+
+---
+
 ## Quick Start
 
 ```bash
