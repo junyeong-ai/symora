@@ -50,6 +50,10 @@ pub struct SymbolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<SymbolOutput>>,
@@ -76,6 +80,8 @@ impl SymbolOutput {
                 )
             }),
             container: symbol.container.clone(),
+            signature: None,
+            documentation: None,
             body: symbol.body.clone(),
             children: if symbol.children.is_empty() {
                 None
@@ -89,6 +95,16 @@ impl SymbolOutput {
                 )
             },
         }
+    }
+
+    pub fn with_signature(mut self, signature: Option<String>) -> Self {
+        self.signature = signature;
+        self
+    }
+
+    pub fn without_body(mut self) -> Self {
+        self.body = None;
+        self
     }
 }
 
@@ -168,10 +184,20 @@ pub struct CallsResponse {
     pub calls: Vec<CallHierarchyOutput>,
 }
 
+/// Safety hint for impact analysis
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyHint {
+    Safe,
+    NeedsReview,
+    PotentiallyBreaking,
+}
+
 /// Impact file output
 #[derive(Debug, Serialize)]
 pub struct ImpactFileOutput {
     pub file: String,
+    pub is_test: bool,
     pub reference_count: usize,
     pub references: Vec<ImpactReferenceOutput>,
 }
@@ -187,7 +213,10 @@ pub struct ImpactReferenceOutput {
 pub struct ImpactResponse {
     pub target: LocationOutput,
     pub depth: u32,
+    pub safety_hint: SafetyHint,
     pub total_references: usize,
+    pub test_refs_count: usize,
+    pub production_refs_count: usize,
     pub affected_files_count: usize,
     pub affected_files: Vec<ImpactFileOutput>,
 }
