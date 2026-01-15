@@ -10,6 +10,7 @@ use crate::cli::ParsedLocation;
 use crate::cli::response::{
     DefinitionResponse, LocationOutput, ReferencesResponse, SymbolOutput, SymbolsResponse,
 };
+use crate::cli::utils::extract_signature;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 
@@ -40,8 +41,12 @@ pub enum FindCommand {
         lang: Option<String>,
 
         /// Include symbol body (source code)
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "signature")]
         body: bool,
+
+        /// Include only signature (function declaration without body)
+        #[arg(long, conflicts_with = "body")]
+        signature: bool,
 
         /// Include nested symbols up to depth (0 = top-level only)
         #[arg(short, long, default_value = "0")]
@@ -112,6 +117,7 @@ pub async fn execute(args: FindArgs, app: &App) -> Result<()> {
             symbol,
             lang,
             body,
+            signature,
             depth,
             kind,
             exclude,
@@ -182,8 +188,13 @@ pub async fn execute(args: FindArgs, app: &App) -> Result<()> {
             } else {
                 depth
             };
+            let need_body = body || signature;
             let options = FindSymbolsOptions::new().with_depth(effective_depth);
-            let options = if body { options.with_body() } else { options };
+            let options = if need_body {
+                options.with_body()
+            } else {
+                options
+            };
 
             match app.lsp.find_symbols(&abs_path, options).await {
                 Ok(mut symbols) => {
@@ -203,7 +214,14 @@ pub async fn execute(args: FindArgs, app: &App) -> Result<()> {
                         count: limited.len(),
                         symbols: limited
                             .iter()
-                            .map(|s| SymbolOutput::from_symbol(s, ctx.root()))
+                            .map(|s| {
+                                let mut output = SymbolOutput::from_symbol(s, ctx.root());
+                                if signature {
+                                    let sig = extract_signature(s.body.as_deref());
+                                    output = output.with_signature(sig).without_body();
+                                }
+                                output
+                            })
                             .collect(),
                     };
                     ctx.print_success_flat(response);
