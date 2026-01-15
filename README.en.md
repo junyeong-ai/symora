@@ -61,6 +61,9 @@ symora calls incoming src/order.rs:42:5  # call hierarchy analysis
 | Rename refactoring | ❌ | ✅ LSP |
 | Text search | ✅ | ✅ ripgrep |
 | AST search | ❌ | ✅ tree-sitter |
+| Usage metrics | ❌ | ✅ LSP |
+| Doc coverage | ❌ | ✅ LSP |
+| Pattern edit | ❌ | ✅ tree-sitter |
 
 ---
 
@@ -99,6 +102,42 @@ symora calls incoming src/main.rs:10:5           # find callers
 symora rename src/main.rs:10:5 new_name          # rename symbol
 symora impact src/main.rs:10:5                   # impact analysis
 symora diagnostics src/main.rs                   # LSP diagnostics
+symora diagnostics src/main.rs --with-context    # include AI-friendly context
+symora diagnostics src/main.rs --with-suggestions # include fix suggestions
+```
+
+### Usage Finder
+```bash
+# Search symbol usage and analyze metrics
+symora usage "process" --lang rust               # search symbols by pattern
+symora usage "Order" --lang rust --sort refs     # sort by reference count
+symora usage "Config" --lang rust --with-metrics # include detailed metrics
+symora usage "*" --lang rust --filter no-docs    # find undocumented symbols
+symora usage "*" --lang rust --filter has-tests  # only symbols with tests
+symora usage "*" --lang rust --filter not-test-file # exclude test files
+symora usage "fn" --lang rust --max-symbols 100  # limit symbols to analyze
+```
+
+| Option | Description |
+|--------|-------------|
+| `--sort refs\|name` | Sort criteria (default: refs) |
+| `--filter` | has-tests, has-docs, no-docs, not-test-file |
+| `--with-metrics` | Show reference count, test status, doc status |
+| `--max-symbols N` | Max symbols to analyze (default: 50) |
+| `--limit N` | Limit output results (default: 10) |
+
+### Refactoring
+```bash
+symora actions list src/main.rs:10:5              # list available code actions
+symora actions list src/main.rs:10:5 --kind refactor  # refactoring only
+symora actions apply src/main.rs:10:5 "Extract..."    # apply action
+```
+
+### Pattern Edit (Structural)
+```bash
+# Structural code editing with tree-sitter patterns
+symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
+symora edit src/main.rs:10:5 --old "foo" --new "bar"  # standard edit
 ```
 
 ### Code Search
@@ -145,6 +184,7 @@ symora daemon status    # check daemon status
 | LSP timeout | `symora daemon restart` |
 | Kotlin no methods | `symora search ast "function_declaration" --lang kotlin` |
 | Python slow on large project | Use AST search or wait |
+| Usage search slow | Use `--max-symbols 30` to reduce analysis scope |
 
 ---
 

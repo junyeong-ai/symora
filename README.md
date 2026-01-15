@@ -61,6 +61,9 @@ symora calls incoming src/order.rs:42:5  # 호출 계층 분석
 | 리네임 리팩토링 | ❌ | ✅ LSP |
 | 텍스트 검색 | ✅ | ✅ ripgrep |
 | AST 검색 | ❌ | ✅ tree-sitter |
+| 사용량 메트릭 | ❌ | ✅ LSP |
+| 문서 커버리지 | ❌ | ✅ LSP |
+| 구조적 편집 | ❌ | ✅ tree-sitter |
 
 ---
 
@@ -99,6 +102,42 @@ symora calls incoming src/main.rs:10:5           # 호출자 찾기
 symora rename src/main.rs:10:5 new_name          # 리네이밍
 symora impact src/main.rs:10:5                   # 영향 분석
 symora diagnostics src/main.rs                   # LSP 진단
+symora diagnostics src/main.rs --with-context    # AI 친화적 컨텍스트 포함
+symora diagnostics src/main.rs --with-suggestions # 수정 제안 포함
+```
+
+### 사용량 분석 (Usage Finder)
+```bash
+# 심볼 사용량 검색 및 메트릭 분석
+symora usage "process" --lang rust               # 패턴으로 심볼 검색
+symora usage "Order" --lang rust --sort refs     # 참조 수로 정렬
+symora usage "Config" --lang rust --with-metrics # 상세 메트릭 포함
+symora usage "*" --lang rust --filter no-docs    # 문서 미작성 심볼 찾기
+symora usage "*" --lang rust --filter has-tests  # 테스트 있는 심볼만
+symora usage "*" --lang rust --filter not-test-file # 테스트 파일 제외
+symora usage "fn" --lang rust --max-symbols 100  # 분석 심볼 수 제한
+```
+
+| 옵션 | 설명 |
+|------|------|
+| `--sort refs\|name` | 정렬 기준 (기본: refs) |
+| `--filter` | has-tests, has-docs, no-docs, not-test-file |
+| `--with-metrics` | 참조 수, 테스트 유무, 문서 유무 표시 |
+| `--max-symbols N` | 분석할 최대 심볼 수 (기본: 50) |
+| `--limit N` | 출력 결과 수 제한 (기본: 10) |
+
+### 리팩토링
+```bash
+symora actions list src/main.rs:10:5              # 사용 가능한 코드 액션
+symora actions list src/main.rs:10:5 --kind refactor  # 리팩토링만
+symora actions apply src/main.rs:10:5 "Extract..."    # 액션 적용
+```
+
+### 구조적 편집 (Pattern Edit)
+```bash
+# tree-sitter 패턴으로 구조적 코드 편집
+symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
+symora edit src/main.rs:10:5 --old "foo" --new "bar"  # 일반 편집
 ```
 
 ### 코드 검색
@@ -145,6 +184,7 @@ symora daemon status    # 데몬 상태 확인
 | LSP 타임아웃 | `symora daemon restart` |
 | Kotlin 메서드 미반환 | `symora search ast "function_declaration" --lang kotlin` |
 | Python 대규모 프로젝트 느림 | AST 검색 사용 또는 대기 |
+| Usage 검색 느림 | `--max-symbols 30` 으로 분석 범위 축소 |
 
 ---
 

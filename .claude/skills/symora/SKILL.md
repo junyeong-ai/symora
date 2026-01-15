@@ -1,6 +1,6 @@
 ---
 name: symora
-version: 1.0.0
+version: 1.1.0
 description: Navigates and analyzes code semantically using Language Server Protocol with 30+ language support. Use when asked to go to definition, find references/usages, show who calls this function, trace call hierarchy, rename symbol across files, get type info via hover, list symbols in file, search by symbol name, or perform AST-based code search (tree-sitter). Supports Rust, Go, Java, TypeScript, Python, C/C++, Kotlin, PHP. Prefer over grep/ripgrep for semantic code queries.
 allowed-tools: Bash
 ---
@@ -21,6 +21,11 @@ LSP-based code intelligence CLI. **All output is JSON** — pipe through `jq` fo
 | Get type/docs info | `symora hover file:line:col` |
 | List symbols in file | `symora find symbol file.rs` |
 | Search by symbol name | `symora find symbol --name "Config"` |
+| Find most used symbols | `symora usage "pattern" --lang rust --sort refs` |
+| Find undocumented symbols | `symora usage "*" --lang rust --filter no-docs` |
+| Get error context for AI | `symora diagnostics file --with-context` |
+| Extract method/variable | `symora actions list file:line:col --kind refactor` |
+| Pattern-based edit | `symora edit pattern file --pattern "func" --replacement "..."` |
 
 **Location format**: `file:line:column` (all 1-indexed)
 
@@ -115,8 +120,88 @@ symora search text "error" --type rust --limit 0 | jq '.count'
 # Get diagnostics (errors, warnings)
 symora diagnostics src/main.rs | jq '.diagnostics[] | "\(.severity): \(.message)"'
 
+# AI-friendly diagnostics with surrounding code context
+symora diagnostics src/main.rs --with-context | jq '.diagnostics[] | {message, context}'
+
+# Diagnostics with fix suggestions
+symora diagnostics src/main.rs --with-suggestions | jq '.diagnostics[] | {message, suggestions}'
+
 # Function signature
 symora signature src/main.rs:10:5 | jq '.signatures[0]'
+```
+
+### 7. Usage Analysis
+
+```bash
+# Search symbols by pattern with metrics
+symora usage "process" --lang rust | jq '.results[]'
+
+# Sort by reference count (most used first)
+symora usage "Order" --lang rust --sort refs | jq '.results[] | {name, file}'
+
+# Include detailed metrics (ref count, has tests, has docs)
+symora usage "Config" --lang rust --with-metrics | jq '.results[] | {name, metrics}'
+
+# Find undocumented symbols (doc coverage analysis)
+symora usage "*" --lang rust --filter no-docs | jq '.results[].name'
+
+# Find symbols with tests
+symora usage "*" --lang rust --filter has-tests | jq '.results[].name'
+
+# Exclude test files from results
+symora usage "*" --lang rust --filter not-test-file | jq '.results[]'
+
+# Combine filters
+symora usage "*" --lang rust --filter no-docs,not-test-file | jq '.count'
+
+# Performance: limit symbols to analyze (default: 50)
+symora usage "fn" --lang rust --max-symbols 100 --limit 20 | jq '.results[]'
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--lang` | Language filter (required) | - |
+| `--sort refs\|name` | Sort by reference count or name | refs |
+| `--filter` | has-tests, has-docs, no-docs, not-test-file | - |
+| `--with-metrics` | Include ref count, test/doc status | false |
+| `--with-snippet` | Include code snippet | false |
+| `--max-symbols N` | Max symbols to analyze | 50 |
+| `--limit N` | Max results to display | 10 |
+
+### 8. Refactoring Actions
+
+```bash
+# List all available code actions at location
+symora actions list src/main.rs:10:5 | jq '.actions[]'
+
+# Filter by action kind (refactor, quickfix, source)
+symora actions list src/main.rs:10:5 --kind refactor | jq '.actions[].title'
+
+# Apply a specific action by title
+symora actions apply src/main.rs:10:5 "Extract method" | jq '.changes'
+
+# Common refactoring actions (availability depends on LSP server)
+# - Extract method/function
+# - Extract variable/constant
+# - Inline variable
+# - Convert to async/await
+# - Generate impl block
+```
+
+### 9. Pattern Edit (Structural)
+
+```bash
+# Edit code by tree-sitter AST pattern
+symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
+
+# {match} placeholder is replaced with the matched code
+# Example: Add deprecation comment to all functions
+
+# Standard position-based edit
+symora edit src/main.rs:10:5 --old "old_text" --new "new_text"
+
+# Edit by symbol path
+symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() -> Self { Self::default() }"
 ```
 
 ## Symbol Path Filter
@@ -141,6 +226,13 @@ symora find symbol src/main.rs --symbol "MyClass/*"
 | `--dry-run` | Preview changes without applying |
 | `--depth N` | Include nested symbols |
 | `--body` | Include symbol source code |
+| `--with-context` | Include surrounding code context (diagnostics) |
+| `--with-suggestions` | Include fix suggestions (diagnostics) |
+| `--with-metrics` | Include usage metrics (usage) |
+| `--filter` | Filter results: has-tests, has-docs, no-docs, not-test-file (usage) |
+| `--max-symbols N` | Limit symbols to analyze for performance (usage, default: 50) |
+| `--pattern` | tree-sitter AST pattern for structural edit |
+| `--replacement` | Replacement text with `{match}` placeholder |
 
 ## LSP Support Matrix
 
@@ -152,6 +244,8 @@ symora find symbol src/main.rs --symbol "MyClass/*"
 | hover | ✅ | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ✅ |
 | calls | ✅ | ✅ | ✅ | ⚠️ | ❌ | ❌ | ❌ | ⚠️ |
 | rename | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ✅ |
+| actions | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| usage | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
 
 Legend: ✅ Full | ⚠️ Limited/Slow | ❌ Not Supported
 
@@ -233,6 +327,31 @@ symora find symbol main.c --kind class | jq '.symbols[].name'
 symora search ast "(function_definition)" --lang python | jq '.matches | length'
 ```
 
+## Advanced Patterns
+
+```bash
+# Documentation coverage analysis
+symora usage "*" --lang rust --filter no-docs --with-metrics | jq '.results[] | {name, file, line}'
+
+# Find most referenced symbols (hot spots)
+symora usage "*" --lang rust --sort refs --limit 20 | jq '.results[] | {name, refs: .metrics.references}'
+
+# Find untested symbols in non-test files
+symora usage "*" --lang rust --filter not-test-file | jq '[.results[] | select(.metrics.has_tests == false)] | length'
+
+# Error context with fix suggestions
+symora diagnostics src/main.rs --with-context --with-suggestions | jq '.diagnostics[] | {message, severity, context, suggestions}'
+
+# Check available refactoring at cursor
+symora actions list src/main.rs:10:5 --kind refactor | jq '.actions[].title'
+
+# Add deprecation comment to all functions
+symora edit pattern src/main.rs --pattern "function_item" --replacement "/// @deprecated\n{match}"
+
+# Check test coverage for symbols
+symora usage "Handler" --lang rust --with-metrics | jq '.results[] | {name, has_tests: .metrics.has_tests, test_files: .metrics.test_files}'
+```
+
 ## Troubleshooting
 
 ```bash
@@ -254,3 +373,6 @@ symora daemon status
 | Kotlin no methods | Use `symora search ast "function_declaration"` |
 | Python timeout | Use AST search as fallback |
 | Invalid regex error | Check regex syntax (ripgrep regex) |
+| Usage search slow | Use `--max-symbols 30` to reduce scope |
+| No refactoring actions | LSP may not support at that location |
+| Pattern edit no matches | Check AST node type with `symora search nodes` |
