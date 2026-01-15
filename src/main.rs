@@ -108,8 +108,13 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Impact(args) => commands::impact::execute(args, app).await,
         Commands::Edit(args) => commands::edit::execute(args, app).await,
 
-        // Search (AST pattern)
+        // Context and expansion
+        Commands::Context(args) => commands::context::execute(args, app).await,
+        Commands::Expand(args) => commands::expand::execute(args, app).await,
+
+        // Search and usage
         Commands::Search(args) => commands::search::execute(args, app).await,
+        Commands::Usage(args) => commands::usage::execute(args, app).await,
 
         // Batch mode
         Commands::Batch(args) => commands::batch::execute(args, app).await,

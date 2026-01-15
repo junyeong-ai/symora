@@ -6,6 +6,7 @@ pub mod commands;
 pub mod location;
 pub mod output;
 pub mod response;
+pub mod utils;
 
 pub use location::ParsedLocation;
 pub use output::OutputContext;
@@ -16,9 +17,10 @@ use clap::{Parser, Subcommand};
 use commands::daemon::DaemonArgs;
 use commands::{
     actions::ActionsArgs, batch::BatchArgs, calls::CallsArgs, config::ConfigArgs,
-    diagnostics::DiagnosticsArgs, doctor::DoctorArgs, edit::EditArgs, find::FindArgs,
-    hover::HoverArgs, impact::ImpactArgs, init::InitArgs, rename::RenameArgs,
-    search::SearchArgs, signature::SignatureArgs, status::StatusArgs,
+    context::ContextArgs, diagnostics::DiagnosticsArgs, doctor::DoctorArgs, edit::EditArgs,
+    expand::ExpandArgs, find::FindArgs, hover::HoverArgs, impact::ImpactArgs, init::InitArgs,
+    rename::RenameArgs, search::SearchArgs, signature::SignatureArgs, status::StatusArgs,
+    usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -112,6 +114,15 @@ pub enum Commands {
 
     /// Execute multiple commands in batch
     Batch(BatchArgs),
+
+    /// Gather all context for a symbol (definition, refs, callers, types)
+    Context(ContextArgs),
+
+    /// Expand a function call to show its definition inline
+    Expand(ExpandArgs),
+
+    /// Find usage examples with metrics
+    Usage(UsageArgs),
 
     /// Daemon server management (start, stop, status) - Unix only
     #[cfg(unix)]

@@ -6,11 +6,13 @@ pub mod actions;
 pub mod batch;
 pub mod calls;
 pub mod config;
+pub mod context;
 #[cfg(unix)]
 pub mod daemon;
 pub mod diagnostics;
 pub mod doctor;
 pub mod edit;
+pub mod expand;
 pub mod find;
 pub mod hover;
 pub mod impact;
@@ -19,3 +21,4 @@ pub mod rename;
 pub mod search;
 pub mod signature;
 pub mod status;
+pub mod usage;
