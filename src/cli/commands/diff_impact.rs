@@ -116,7 +116,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 
     let changed_files: std::collections::HashSet<_> = hunks.iter().map(|h| &h.file).collect();
     let total_refs: usize = changes.iter().map(|c| c.reference_count).sum();
-    let with_tests = changes.iter().filter(|c| c.test_reference_count > 0).count();
+    let with_tests = changes
+        .iter()
+        .filter(|c| c.test_reference_count > 0)
+        .count();
     let without_tests = changes.len().saturating_sub(with_tests);
     let coverage_ratio = if changes.is_empty() {
         1.0
@@ -264,7 +267,8 @@ async fn analyze_hunks(
             }
 
             // Find symbols affected by this hunk
-            let affected_symbols: Vec<_> = (hunk.start_line..hunk.start_line + hunk.line_count.max(1))
+            let affected_symbols: Vec<_> = (hunk.start_line
+                ..hunk.start_line + hunk.line_count.max(1))
                 .filter_map(|line| find_symbol_at_line(&symbols, line))
                 .collect();
 

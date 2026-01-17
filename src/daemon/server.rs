@@ -1136,9 +1136,10 @@ async fn handle_search_symbols(
         return Err(RpcError::internal_error(&e.to_string()));
     }
 
-    let kind_filter: Option<Vec<crate::models::symbol::SymbolKind>> = p.kind.as_ref().map(|k| {
-        vec![crate::models::symbol::SymbolKind::from_str_loose(k)]
-    });
+    let kind_filter: Option<Vec<crate::models::symbol::SymbolKind>> = p
+        .kind
+        .as_ref()
+        .map(|k| vec![crate::models::symbol::SymbolKind::from_str_loose(k)]);
 
     let results = ctx
         .search
@@ -1172,7 +1173,10 @@ async fn handle_search_content(
         return Err(RpcError::internal_error(&e.to_string()));
     }
 
-    let language = p.language.as_ref().map(|l| crate::models::symbol::Language::from_str_loose(l));
+    let language = p
+        .language
+        .as_ref()
+        .map(|l| crate::models::symbol::Language::from_str_loose(l));
 
     let results = ctx
         .search
@@ -1203,9 +1207,13 @@ async fn handle_index_build(
         return Err(RpcError::internal_error(&e.to_string()));
     }
 
-    let languages: Option<Vec<crate::models::symbol::Language>> = p.languages.as_ref().map(|langs| {
-        langs.iter().map(|l| crate::models::symbol::Language::from_str_loose(l)).collect()
-    });
+    let languages: Option<Vec<crate::models::symbol::Language>> =
+        p.languages.as_ref().map(|langs| {
+            langs
+                .iter()
+                .map(|l| crate::models::symbol::Language::from_str_loose(l))
+                .collect()
+        });
 
     let options = IndexOptions {
         force: p.force,

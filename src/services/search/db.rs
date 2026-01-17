@@ -49,28 +49,31 @@ impl SearchDb {
 
         let results = self
             .conn
-            .call(move |conn| -> Result<Vec<SymbolSearchResult>, rusqlite::Error> {
-                let mut stmt = conn.prepare(SEARCH_SYMBOLS_QUERY)?;
-                stmt.query_map(rusqlite::params![query, limit], |row| {
-                    Ok(SymbolSearchResult {
-                        name: row.get(0)?,
-                        kind: SymbolKind::from_str_loose(row.get::<_, String>(1)?.as_str()),
-                        container: row.get(2)?,
-                        line: row.get(3)?,
-                        column: row.get(4)?,
-                        file: PathBuf::from(row.get::<_, String>(5)?),
-                        score: row.get::<_, f64>(6)?.abs(),
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()
-            })
+            .call(
+                move |conn| -> Result<Vec<SymbolSearchResult>, rusqlite::Error> {
+                    let mut stmt = conn.prepare(SEARCH_SYMBOLS_QUERY)?;
+                    stmt.query_map(rusqlite::params![query, limit], |row| {
+                        Ok(SymbolSearchResult {
+                            name: row.get(0)?,
+                            kind: SymbolKind::from_str_loose(row.get::<_, String>(1)?.as_str()),
+                            container: row.get(2)?,
+                            line: row.get(3)?,
+                            column: row.get(4)?,
+                            file: PathBuf::from(row.get::<_, String>(5)?),
+                            score: row.get::<_, f64>(6)?.abs(),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                },
+            )
             .await
             .map_err(|e| SearchError::Database(e.to_string()))?;
 
         match kind_filter {
-            Some(kinds) if !kinds.is_empty() => {
-                Ok(results.into_iter().filter(|r| kinds.contains(&r.kind)).collect())
-            }
+            Some(kinds) if !kinds.is_empty() => Ok(results
+                .into_iter()
+                .filter(|r| kinds.contains(&r.kind))
+                .collect()),
             _ => Ok(results),
         }
     }
@@ -86,31 +89,33 @@ impl SearchDb {
         let lang_str = language.map(|l| l.lsp_id().to_string());
 
         self.conn
-            .call(move |conn| -> Result<Vec<ContentSearchResult>, rusqlite::Error> {
-                let row_mapper = |row: &rusqlite::Row| {
-                    Ok(ContentSearchResult {
-                        content: row.get(0)?,
-                        line: row.get(1)?,
-                        file: PathBuf::from(row.get::<_, String>(2)?),
-                        score: row.get::<_, f64>(4)?.abs(),
-                    })
-                };
+            .call(
+                move |conn| -> Result<Vec<ContentSearchResult>, rusqlite::Error> {
+                    let row_mapper = |row: &rusqlite::Row| {
+                        Ok(ContentSearchResult {
+                            content: row.get(0)?,
+                            line: row.get(1)?,
+                            file: PathBuf::from(row.get::<_, String>(2)?),
+                            score: row.get::<_, f64>(4)?.abs(),
+                        })
+                    };
 
-                let rows: Vec<ContentSearchResult> = match &lang_str {
-                    Some(lang) => {
-                        let mut stmt = conn.prepare(SEARCH_CONTENT_WITH_LANG_QUERY)?;
-                        stmt.query_map(rusqlite::params![query, lang, limit], row_mapper)?
-                            .collect::<Result<Vec<_>, _>>()?
-                    }
-                    None => {
-                        let mut stmt = conn.prepare(SEARCH_CONTENT_QUERY)?;
-                        stmt.query_map(rusqlite::params![query, limit], row_mapper)?
-                            .collect::<Result<Vec<_>, _>>()?
-                    }
-                };
+                    let rows: Vec<ContentSearchResult> = match &lang_str {
+                        Some(lang) => {
+                            let mut stmt = conn.prepare(SEARCH_CONTENT_WITH_LANG_QUERY)?;
+                            stmt.query_map(rusqlite::params![query, lang, limit], row_mapper)?
+                                .collect::<Result<Vec<_>, _>>()?
+                        }
+                        None => {
+                            let mut stmt = conn.prepare(SEARCH_CONTENT_QUERY)?;
+                            stmt.query_map(rusqlite::params![query, limit], row_mapper)?
+                                .collect::<Result<Vec<_>, _>>()?
+                        }
+                    };
 
-                Ok(rows)
-            })
+                    Ok(rows)
+                },
+            )
             .await
             .map_err(|e| SearchError::Database(e.to_string()))
     }
@@ -137,7 +142,11 @@ impl SearchDb {
             .map_err(|e| SearchError::Database(e.to_string()))
     }
 
-    pub async fn needs_reindex(&self, path: &Path, current_mtime: u64) -> Result<bool, SearchError> {
+    pub async fn needs_reindex(
+        &self,
+        path: &Path,
+        current_mtime: u64,
+    ) -> Result<bool, SearchError> {
         let path_str = path.display().to_string();
 
         self.conn
@@ -161,7 +170,10 @@ impl SearchDb {
 
         self.conn
             .call(move |conn| -> Result<(), rusqlite::Error> {
-                conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path_str])?;
+                conn.execute(
+                    "DELETE FROM files WHERE path = ?1",
+                    rusqlite::params![path_str],
+                )?;
                 Ok(())
             })
             .await
@@ -290,8 +302,14 @@ impl SearchDb {
     pub async fn optimize(&self) -> Result<(), SearchError> {
         self.conn
             .call(|conn| -> Result<(), rusqlite::Error> {
-                conn.execute("INSERT INTO symbols_fts(symbols_fts) VALUES('optimize')", [])?;
-                conn.execute("INSERT INTO content_fts(content_fts) VALUES('optimize')", [])?;
+                conn.execute(
+                    "INSERT INTO symbols_fts(symbols_fts) VALUES('optimize')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO content_fts(content_fts) VALUES('optimize')",
+                    [],
+                )?;
                 conn.execute("VACUUM", [])?;
                 Ok(())
             })

@@ -6,6 +6,4 @@ mod schema;
 mod types;
 
 pub use index::SearchIndex;
-pub use types::{
-    ContentSearchResult, IndexOptions, IndexStats, SearchConfig, SymbolSearchResult,
-};
+pub use types::{ContentSearchResult, IndexOptions, IndexStats, SearchConfig, SymbolSearchResult};

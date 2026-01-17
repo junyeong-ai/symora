@@ -130,8 +130,8 @@ impl SearchIndex {
         });
 
         let default_extensions: Vec<&str> = vec![
-            "rs", "go", "py", "ts", "tsx", "js", "jsx", "java", "kt", "scala", "c", "cpp",
-            "cc", "h", "hpp", "cs", "rb", "php", "swift", "lua", "sh", "bash",
+            "rs", "go", "py", "ts", "tsx", "js", "jsx", "java", "kt", "scala", "c", "cpp", "cc",
+            "h", "hpp", "cs", "rb", "php", "swift", "lua", "sh", "bash",
         ];
 
         let extensions: Vec<&str> = match &options.languages {
@@ -147,13 +147,20 @@ impl SearchIndex {
         paths
             .into_iter()
             .filter_map(|p| {
-                if let Some(paths) = &options.paths {
-                    if !paths.iter().any(|prefix| p.starts_with(prefix)) {
-                        return None;
-                    }
+                if let Some(paths) = &options.paths
+                    && !paths.iter().any(|prefix| p.starts_with(prefix))
+                {
+                    return None;
                 }
                 let lang = Language::from_path(&p);
-                Some((p, if lang == Language::Unknown { None } else { Some(lang) }))
+                Some((
+                    p,
+                    if lang == Language::Unknown {
+                        None
+                    } else {
+                        Some(lang)
+                    },
+                ))
             })
             .collect()
     }
@@ -350,11 +357,7 @@ fn extract_identifier(s: &str) -> Option<String> {
         }
     }
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn file_mtime(path: &Path) -> u64 {
@@ -475,11 +478,13 @@ mod tests {
 
     #[test]
     fn parse_typescript_function() {
-        let sym = parse_symbol_from_line("function handleRequest() {", Language::TypeScript, 1).unwrap();
+        let sym =
+            parse_symbol_from_line("function handleRequest() {", Language::TypeScript, 1).unwrap();
         assert_eq!(sym.name, "handleRequest");
         assert_eq!(sym.kind, SymbolKind::Function);
 
-        let sym = parse_symbol_from_line("export function main() {", Language::TypeScript, 1).unwrap();
+        let sym =
+            parse_symbol_from_line("export function main() {", Language::TypeScript, 1).unwrap();
         assert_eq!(sym.name, "main");
         assert_eq!(sym.kind, SymbolKind::Function);
     }
@@ -490,7 +495,8 @@ mod tests {
         assert_eq!(sym.name, "Server");
         assert_eq!(sym.kind, SymbolKind::Class);
 
-        let sym = parse_symbol_from_line("export class Handler {", Language::TypeScript, 1).unwrap();
+        let sym =
+            parse_symbol_from_line("export class Handler {", Language::TypeScript, 1).unwrap();
         assert_eq!(sym.name, "Handler");
         assert_eq!(sym.kind, SymbolKind::Class);
     }
@@ -523,7 +529,8 @@ mod tests {
         assert_eq!(sym.name, "Server");
         assert_eq!(sym.kind, SymbolKind::Class);
 
-        let sym = parse_symbol_from_line("data class User(val name: String)", Language::Kotlin, 1).unwrap();
+        let sym = parse_symbol_from_line("data class User(val name: String)", Language::Kotlin, 1)
+            .unwrap();
         assert_eq!(sym.name, "User");
         assert_eq!(sym.kind, SymbolKind::Class);
     }

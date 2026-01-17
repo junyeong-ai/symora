@@ -246,7 +246,6 @@ impl SearchError {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("Config parse error: {0}")]

@@ -200,9 +200,10 @@ impl CallHierarchyOutput {
                 item.location.column,
                 root,
             ),
-            call_site: item.call_site.as_ref().map(|cs| {
-                LocationOutput::from_path(&cs.file, cs.line, cs.column, root)
-            }),
+            call_site: item
+                .call_site
+                .as_ref()
+                .map(|cs| LocationOutput::from_path(&cs.file, cs.line, cs.column, root)),
         }
     }
 }
