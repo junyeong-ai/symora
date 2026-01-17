@@ -1,5 +1,6 @@
 //! Global Configuration Singleton
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -96,6 +97,8 @@ pub struct RuntimeConfig {
     base_timeout: Duration,
     pub max_file_size_bytes: u64,
     pub auto_restart: bool,
+    /// Custom project entry files per language (overrides defaults in find_project_entry)
+    pub entry_files: HashMap<String, Vec<String>>,
 }
 
 impl Default for RuntimeConfig {
@@ -104,6 +107,7 @@ impl Default for RuntimeConfig {
             base_timeout: Duration::from_secs(30),
             max_file_size_bytes: 10 * 1024 * 1024,
             auto_restart: true,
+            entry_files: HashMap::new(),
         }
     }
 }
@@ -114,6 +118,7 @@ impl From<&SymoraConfig> for RuntimeConfig {
             base_timeout: Duration::from_secs(config.lsp.timeout_secs),
             max_file_size_bytes: u64::from(config.search.max_file_size_mb) * 1024 * 1024,
             auto_restart: config.lsp.auto_restart,
+            entry_files: config.project.entry_files.clone(),
         }
     }
 }
@@ -161,6 +166,14 @@ pub fn max_file_size_bytes() -> u64 {
 
 pub fn auto_restart() -> bool {
     config().auto_restart
+}
+
+/// Get custom entry files for a language from config
+/// Returns None if no custom entries are configured
+pub fn entry_files_for(language: Language) -> Option<Vec<String>> {
+    let config = config();
+    let lang_key = language.lsp_id();
+    config.entry_files.get(lang_key).cloned()
 }
 
 pub fn is_initialized() -> bool {

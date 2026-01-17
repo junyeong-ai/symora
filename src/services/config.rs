@@ -157,13 +157,37 @@ fn merge_config(base: SymoraConfig, overlay: SymoraConfig) -> SymoraConfig {
                 } else {
                     overlay.project.languages
                 },
-                ignored_paths: overlay.project.ignored_paths,
+                ignored_paths: merge_vec(base.project.ignored_paths, overlay.project.ignored_paths),
+                entry_files: {
+                    let mut merged = base.project.entry_files;
+                    merged.extend(overlay.project.entry_files);
+                    merged
+                },
             }
         },
         lsp: overlay.lsp,
         search: overlay.search,
         output: overlay.output,
-        daemon: base.daemon, // daemon settings from global only
+        daemon: base.daemon,
+        test: crate::models::config::TestConfig {
+            file_patterns: merge_vec(base.test.file_patterns, overlay.test.file_patterns),
+            dir_patterns: merge_vec(base.test.dir_patterns, overlay.test.dir_patterns),
+            markers: merge_vec(base.test.markers, overlay.test.markers),
+        },
+    }
+}
+
+fn merge_vec(base: Vec<String>, overlay: Vec<String>) -> Vec<String> {
+    if overlay.is_empty() {
+        base
+    } else {
+        let mut merged = base;
+        for item in overlay {
+            if !merged.contains(&item) {
+                merged.push(item);
+            }
+        }
+        merged
     }
 }
 

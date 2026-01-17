@@ -23,6 +23,9 @@ pub struct SymoraConfig {
 
     #[serde(default)]
     pub daemon: DaemonSettings,
+
+    #[serde(default)]
+    pub test: TestConfig,
 }
 
 /// Project configuration
@@ -38,6 +41,11 @@ pub struct ProjectConfig {
     /// Paths to ignore
     #[serde(default = "default_ignored_paths")]
     pub ignored_paths: Vec<String>,
+
+    /// Custom project entry files per language (overrides defaults)
+    /// Example: entry_files = { rust = ["Cargo.toml", "rust-toolchain.toml"] }
+    #[serde(default)]
+    pub entry_files: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Default for ProjectConfig {
@@ -46,6 +54,7 @@ impl Default for ProjectConfig {
             name: None,
             languages: Vec::new(),
             ignored_paths: default_ignored_paths(),
+            entry_files: std::collections::HashMap::new(),
         }
     }
 }
@@ -64,7 +73,6 @@ fn default_ignored_paths() -> Vec<String> {
     ]
 }
 
-/// LSP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspConfig {
     #[serde(default = "defaults::timeout_secs")]
@@ -84,9 +92,6 @@ pub struct LspConfig {
 
     #[serde(default = "defaults::calls_limit")]
     pub calls_limit: usize,
-
-    #[serde(default)]
-    pub servers: LspServerCommands,
 }
 
 impl Default for LspConfig {
@@ -98,7 +103,6 @@ impl Default for LspConfig {
             impl_limit: defaults::impl_limit(),
             symbol_limit: defaults::symbol_limit(),
             calls_limit: defaults::calls_limit(),
-            servers: LspServerCommands::default(),
         }
     }
 }
@@ -149,29 +153,6 @@ mod defaults {
     }
 }
 
-/// LSP server commands per language
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LspServerCommands {
-    #[serde(default)]
-    pub kotlin: Option<String>,
-
-    #[serde(default)]
-    pub rust: Option<String>,
-
-    #[serde(default)]
-    pub typescript: Option<String>,
-
-    #[serde(default)]
-    pub python: Option<String>,
-
-    #[serde(default)]
-    pub go: Option<String>,
-
-    #[serde(default)]
-    pub java: Option<String>,
-}
-
-/// Search configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
     #[serde(default = "defaults::search_limit")]
@@ -179,9 +160,6 @@ pub struct SearchConfig {
 
     #[serde(default = "defaults::max_file_size_mb")]
     pub max_file_size_mb: u32,
-
-    #[serde(default)]
-    pub ripgrep_path: Option<String>,
 }
 
 impl Default for SearchConfig {
@@ -189,7 +167,6 @@ impl Default for SearchConfig {
         Self {
             limit: defaults::search_limit(),
             max_file_size_mb: defaults::max_file_size_mb(),
-            ripgrep_path: None,
         }
     }
 }
@@ -240,6 +217,22 @@ impl Default for DaemonSettings {
             idle_timeout_mins: defaults::idle_timeout_mins(),
         }
     }
+}
+
+/// Test file detection configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TestConfig {
+    /// Additional file suffix patterns (e.g., "Check.kt", "Verify.java")
+    #[serde(default)]
+    pub file_patterns: Vec<String>,
+
+    /// Additional directory patterns (e.g., "/verification/", "/checks/")
+    #[serde(default)]
+    pub dir_patterns: Vec<String>,
+
+    /// Additional test markers for test name extraction (e.g., "@MyTest", "verify {")
+    #[serde(default)]
+    pub markers: Vec<String>,
 }
 
 #[cfg(test)]
