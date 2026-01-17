@@ -17,10 +17,10 @@ use clap::{Parser, Subcommand};
 use commands::daemon::DaemonArgs;
 use commands::{
     actions::ActionsArgs, batch::BatchArgs, calls::CallsArgs, config::ConfigArgs,
-    context::ContextArgs, diagnostics::DiagnosticsArgs, doctor::DoctorArgs, edit::EditArgs,
-    expand::ExpandArgs, find::FindArgs, hover::HoverArgs, impact::ImpactArgs, init::InitArgs,
-    rename::RenameArgs, search::SearchArgs, signature::SignatureArgs, status::StatusArgs,
-    usage::UsageArgs,
+    context::ContextArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
+    doctor::DoctorArgs, edit::EditArgs, expand::ExpandArgs, find::FindArgs, hover::HoverArgs,
+    impact::ImpactArgs, init::InitArgs, rename::RenameArgs, search::SearchArgs,
+    signature::SignatureArgs, status::StatusArgs, usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -108,6 +108,9 @@ pub enum Commands {
 
     /// Impact analysis for symbol changes
     Impact(ImpactArgs),
+
+    /// Analyze impact of git diff changes
+    DiffImpact(DiffImpactArgs),
 
     /// Text editing operations
     Edit(EditArgs),

@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 #[cfg(unix)]
 pub mod daemon;
+pub mod diff_impact;
 pub mod diagnostics;
 pub mod doctor;
 pub mod edit;

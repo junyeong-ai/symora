@@ -106,6 +106,7 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         // Code transformation
         Commands::Actions(args) => commands::actions::execute(args, app).await,
         Commands::Impact(args) => commands::impact::execute(args, app).await,
+        Commands::DiffImpact(args) => commands::diff_impact::execute(args, app).await,
         Commands::Edit(args) => commands::edit::execute(args, app).await,
 
         // Context and expansion
