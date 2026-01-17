@@ -7,7 +7,7 @@ LSP-based code intelligence CLI. Rust + async + daemon architecture.
 ```
 src/
 ├── main.rs, app.rs       # Entry, DI container (App holds all services)
-├── cli/commands/         # Command handlers (19 commands)
+├── cli/commands/         # Command handlers (20 commands)
 ├── daemon/               # Unix socket server, JSON-RPC protocol
 ├── services/             # LspService trait, DaemonLspService, AstQueryService
 │   └── search/           # BM25 search (SearchIndex, SearchDb, FTS5 schema)
@@ -111,7 +111,7 @@ join_all(futures).await
 Priority: Project > Global > Defaults
 
 ### Test File Detection Config
-Custom patterns for test file detection (used by `usage`, `impact`, `context`):
+Custom patterns for test file detection (used by `usage`, `impact`, `context`, `diff-impact`):
 ```toml
 [test]
 file_patterns = ["_check.rs", "Verify.java"]  # Custom file suffixes
@@ -187,6 +187,31 @@ src/services/search/
 5. `daemon/server.rs` — Add handler
 6. `daemon/client.rs` — Add client method
 7. `cli/commands/search.rs` — Add CLI subcommand
+
+## Impact Analysis
+
+### Context Command
+Gather all related context for a symbol in a single call:
+```bash
+symora context src/main.rs:16:5 --all      # Include callers, callees, types, tests
+symora context src/main.rs:16:5 --callers  # Include only callers
+symora context src/main.rs:16:5 --callees  # Include only callees
+```
+
+### Diff-Impact Command
+Analyze impact of git diff changes. Parses git diff to identify changed functions/methods, then uses LSP to find all references and callers:
+```bash
+symora diff-impact                          # Compare against HEAD
+symora diff-impact main                     # Compare against main branch
+symora diff-impact --staged                 # Analyze staged changes only
+symora diff-impact --callers                # Include caller analysis
+symora diff-impact --max-symbols 30         # Limit symbols analyzed
+```
+
+Output includes:
+- Changed files and symbols count
+- Test coverage ratio (symbols with/without test references)
+- Per-symbol: reference count, test vs production references, callers
 
 ## Key Types
 

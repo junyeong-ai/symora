@@ -64,6 +64,7 @@ symora calls incoming src/order.rs:42:5  # call hierarchy analysis
 | Usage metrics | ❌ | ✅ LSP |
 | Doc coverage | ❌ | ✅ LSP |
 | Pattern edit | ❌ | ✅ tree-sitter |
+| Git Diff Impact | ❌ | ✅ LSP |
 
 ---
 
@@ -139,9 +140,26 @@ symora actions apply src/main.rs:10:5 "Extract..."    # apply action
 
 ### Context Gathering
 ```bash
+symora context src/main.rs:10:5 --all                # all context (callers, callees, types, tests)
 symora context src/main.rs:10:5 --callers --callees  # callers/callees
 symora context src/main.rs:10:5 --types --tests      # type definitions, related tests
 ```
+
+### Git Diff Impact Analysis
+```bash
+symora diff-impact                        # compare against HEAD
+symora diff-impact main                   # compare against main branch
+symora diff-impact --staged               # analyze staged changes only
+symora diff-impact --callers              # include caller analysis
+symora diff-impact --max-symbols 30       # limit symbols to analyze
+```
+
+| Output | Description |
+|--------|-------------|
+| `changed_symbols_count` | Number of changed symbols |
+| `test_coverage.coverage_ratio` | Test coverage ratio |
+| `changes[].reference_count` | Reference count per symbol |
+| `changes[].callers` | Caller list (--callers option) |
 
 ### Batch Processing
 ```bash

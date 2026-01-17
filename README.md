@@ -64,6 +64,7 @@ symora calls incoming src/order.rs:42:5  # 호출 계층 분석
 | 사용량 메트릭 | ❌ | ✅ LSP |
 | 문서 커버리지 | ❌ | ✅ LSP |
 | 구조적 편집 | ❌ | ✅ tree-sitter |
+| Git Diff 영향 분석 | ❌ | ✅ LSP |
 
 ---
 
@@ -139,9 +140,26 @@ symora actions apply src/main.rs:10:5 "Extract..."    # 액션 적용
 
 ### 컨텍스트 수집
 ```bash
+symora context src/main.rs:10:5 --all                # 모든 컨텍스트 (호출자, 피호출자, 타입, 테스트)
 symora context src/main.rs:10:5 --callers --callees  # 호출자/피호출자
 symora context src/main.rs:10:5 --types --tests      # 타입 정의, 관련 테스트
 ```
+
+### Git Diff 영향 분석
+```bash
+symora diff-impact                        # HEAD와 비교
+symora diff-impact main                   # main 브랜치와 비교
+symora diff-impact --staged               # 스테이징된 변경만 분석
+symora diff-impact --callers              # 호출자 분석 포함
+symora diff-impact --max-symbols 30       # 분석할 심볼 수 제한
+```
+
+| 출력 | 설명 |
+|------|------|
+| `changed_symbols_count` | 변경된 심볼 수 |
+| `test_coverage.coverage_ratio` | 테스트 커버리지 비율 |
+| `changes[].reference_count` | 심볼별 참조 수 |
+| `changes[].callers` | 호출자 목록 (--callers 옵션) |
 
 ### 배치 처리
 ```bash

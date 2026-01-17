@@ -33,7 +33,10 @@ LSP-based code intelligence CLI. **All output is JSON** — pipe through `jq` fo
 | Get error context for AI | `symora diagnostics file --with-context` |
 | Extract method/variable | `symora actions list file:line:col --kind refactor` |
 | Pattern-based edit | `symora edit pattern file --pattern "func" --lang rust --text "..."` |
+| Gather all context | `symora context file:line:col --all` |
 | Gather related context | `symora context file:line:col --callers --callees` |
+| Analyze git diff impact | `symora diff-impact --callers` |
+| Analyze staged changes | `symora diff-impact --staged --callers` |
 | Batch refs lookup | `symora batch refs loc1 loc2 loc3` |
 
 **Location format**: `file:line:column` (all 1-indexed)
@@ -92,8 +95,15 @@ symora calls outgoing src/main.rs:42:5 | jq '.calls[].name'
 symora impact src/main.rs:42:5 | jq '.affected_files[]'
 
 # Context gathering: related code for AI analysis
+symora context src/main.rs:42:5 --all | jq '.'           # All context (callers, callees, types, tests)
 symora context src/main.rs:42:5 --callers --callees | jq '.callers, .callees'
 symora context src/main.rs:42:5 --types --tests | jq '.types, .tests'
+
+# Diff impact: analyze changes in git diff
+symora diff-impact | jq '.changes[]'                      # Changes against HEAD
+symora diff-impact main | jq '.changes[]'                 # Changes against main branch
+symora diff-impact --staged | jq '.changes[]'             # Staged changes only
+symora diff-impact --callers | jq '.changes[] | {name, callers}'  # Include callers
 
 # Batch operations: multiple locations at once
 symora batch refs loc1 loc2 loc3 | jq '.results[]'
