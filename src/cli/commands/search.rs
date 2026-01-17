@@ -1,19 +1,21 @@
 //! Search command implementation
 //!
-//! Provides three search modes:
-//! - `text`: Fast regex search using ripgrep
+//! Provides four search modes:
+//! - `symbols`: BM25 ranked symbol search using SQLite FTS5
+//! - `content`: BM25 ranked content search using SQLite FTS5
 //! - `ast`: Structural search using tree-sitter queries
 //! - `nodes`: List available node types for AST search
+//! - `index`: Manage search index (build/status/clear)
 
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
-use tokio::process::Command;
+use serde::Serialize;
 
 use crate::app::App;
+#[cfg(unix)]
+use crate::daemon::DaemonClient;
 use crate::infra::ast::{format_query_error, get_node_types, supported_languages};
 use crate::models::symbol::Language;
 
@@ -25,34 +27,32 @@ pub struct SearchArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SearchCommand {
-    /// Fast regex search using ripgrep
-    Text {
-        /// Regex pattern to search for
-        pattern: String,
+    /// BM25 ranked symbol search
+    Symbols {
+        /// Search query
+        query: String,
 
-        /// Search path (defaults to project root)
+        /// Symbol kind filter (function, class, struct, etc.)
         #[arg(short, long)]
-        path: Option<PathBuf>,
+        kind: Option<String>,
 
-        /// File type filter (rust, ts, py, go, java, etc.)
-        #[arg(short = 't', long = "type")]
-        file_type: Option<String>,
-
-        /// Case insensitive search
+        /// Maximum results
         #[arg(short, long)]
-        ignore_case: bool,
-
-        /// Match whole words only
-        #[arg(short, long)]
-        word: bool,
-
-        /// Maximum results (0 = unlimited, default from config)
-        #[arg(long)]
         limit: Option<usize>,
+    },
 
-        /// Context lines before and after match
-        #[arg(short = 'C', long, default_value = "0")]
-        context: u32,
+    /// BM25 ranked content search
+    Content {
+        /// Search query
+        query: String,
+
+        /// Language filter
+        #[arg(short, long = "lang")]
+        language: Option<String>,
+
+        /// Maximum results
+        #[arg(short, long)]
+        limit: Option<usize>,
     },
 
     /// Structural search using tree-sitter AST patterns
@@ -79,28 +79,87 @@ pub enum SearchCommand {
         #[arg(short, long = "lang")]
         language: String,
     },
+
+    /// Manage search index
+    Index {
+        #[command(subcommand)]
+        command: IndexCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IndexCommand {
+    /// Build or rebuild the search index
+    Build {
+        /// Force rebuild (ignore existing index)
+        #[arg(short, long)]
+        force: bool,
+
+        /// Languages to index (comma-separated)
+        #[arg(short, long = "lang")]
+        languages: Option<String>,
+    },
+
+    /// Show index status
+    Status,
+
+    /// Clear the search index
+    Clear,
 }
 
 // === Response Types ===
 
 #[derive(Serialize)]
-struct TextSearchResponse {
+struct SymbolSearchResponse {
     count: usize,
-    matches: Vec<TextMatchOutput>,
+    results: Vec<SymbolResultOutput>,
 }
 
 #[derive(Serialize)]
-struct TextMatchOutput {
+struct SymbolResultOutput {
+    name: String,
+    kind: String,
     file: String,
     line: u32,
     column: u32,
-    text: String,
-    #[serde(rename = "match")]
-    matched: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    context_before: Option<Vec<String>>,
+    container: Option<String>,
+    score: f64,
+}
+
+#[derive(Serialize)]
+struct ContentSearchResponse {
+    count: usize,
+    results: Vec<ContentResultOutput>,
+}
+
+#[derive(Serialize)]
+struct ContentResultOutput {
+    file: String,
+    line: u32,
+    content: String,
+    score: f64,
+}
+
+#[derive(Serialize)]
+struct IndexStatusResponse {
+    file_count: usize,
+    symbol_count: usize,
+    content_line_count: usize,
+    index_size_bytes: u64,
+    last_indexed: u64,
+    is_indexing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    context_after: Option<Vec<String>>,
+    progress: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct IndexBuildResponse {
+    status: String,
+    file_count: usize,
+    symbol_count: usize,
+    content_line_count: usize,
+    index_size_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -135,70 +194,21 @@ struct NodeTypeOutput {
     query: String,
 }
 
-// === ripgrep JSON types ===
-
-#[derive(Deserialize)]
-struct RgMessage {
-    #[serde(rename = "type")]
-    msg_type: String,
-    data: Option<RgData>,
-}
-
-#[derive(Deserialize)]
-struct RgData {
-    path: Option<RgPath>,
-    lines: Option<RgLines>,
-    line_number: Option<u32>,
-    submatches: Option<Vec<RgSubmatch>>,
-}
-
-#[derive(Deserialize)]
-struct RgPath {
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct RgLines {
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct RgSubmatch {
-    #[serde(rename = "match")]
-    matched: RgMatch,
-    start: u32,
-}
-
-#[derive(Deserialize)]
-struct RgMatch {
-    text: String,
-}
-
 pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
     let cfg = app.config();
 
     match args.command {
-        SearchCommand::Text {
-            pattern,
-            path,
-            file_type,
-            ignore_case,
-            word,
+        SearchCommand::Symbols { query, kind, limit } => {
+            let limit = limit.unwrap_or(cfg.search.limit);
+            execute_symbol_search(app, &query, kind.as_deref(), limit).await
+        }
+        SearchCommand::Content {
+            query,
+            language,
             limit,
-            context,
         } => {
             let limit = limit.unwrap_or(cfg.search.limit);
-            execute_text_search(
-                app,
-                &pattern,
-                path,
-                file_type,
-                ignore_case,
-                word,
-                limit,
-                context,
-            )
-            .await
+            execute_content_search(app, &query, language.as_deref(), limit).await
         }
         SearchCommand::Ast {
             pattern,
@@ -210,294 +220,198 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
             execute_ast_search(app, &pattern, &language, path, limit).await
         }
         SearchCommand::Nodes { language } => execute_list_nodes(app, &language),
+        SearchCommand::Index { command } => execute_index_command(app, command).await,
     }
 }
 
-/// Validate search pattern
-fn validate_pattern(pattern: &str) -> Result<&str, &'static str> {
-    let trimmed = pattern.trim();
-    if trimmed.is_empty() {
-        return Err("Search pattern cannot be empty");
-    }
-    // Check for whitespace-only patterns (after trim, so this catches original whitespace)
-    if pattern.chars().all(|c| c.is_whitespace()) {
-        return Err("Search pattern cannot contain only whitespace");
-    }
-    Ok(trimmed)
-}
-
-async fn execute_text_search(
+async fn execute_symbol_search(
     app: &App,
-    pattern: &str,
-    path: Option<PathBuf>,
-    file_type: Option<String>,
-    ignore_case: bool,
-    word: bool,
+    query: &str,
+    kind: Option<&str>,
     limit: usize,
-    context: u32,
 ) -> Result<()> {
     let ctx = &app.output;
 
-    // Validate and normalize pattern
-    let pattern = match validate_pattern(pattern) {
-        Ok(p) => p,
-        Err(msg) => {
-            ctx.print_error(msg);
-            return Ok(());
-        }
-    };
-
-    let search_path = path.unwrap_or_else(|| app.root().to_path_buf());
-
-    // Build ripgrep command
-    // Note: ripgrep's --max-count is per-file, not total. We apply limit during parsing.
-    let mut cmd = Command::new("rg");
-    cmd.arg("--json");
-
-    if ignore_case {
-        cmd.arg("-i");
+    let query = query.trim();
+    if query.is_empty() {
+        ctx.print_error("Search query cannot be empty");
+        return Ok(());
     }
 
-    if word {
-        cmd.arg("-w");
-    }
+    #[cfg(unix)]
+    {
+        let client = DaemonClient::new(app.root());
+        match client.search_symbols(query, Some(limit), kind).await {
+            Ok(response) => {
+                let count = response["count"].as_u64().unwrap_or(0) as usize;
+                let results: Vec<SymbolResultOutput> = response["results"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|r| SymbolResultOutput {
+                                name: r["name"].as_str().unwrap_or("").to_string(),
+                                kind: r["kind"].as_str().unwrap_or("").to_string(),
+                                file: ctx.relative_path(&std::path::PathBuf::from(
+                                    r["file"].as_str().unwrap_or(""),
+                                )),
+                                line: r["line"].as_u64().unwrap_or(0) as u32,
+                                column: r["column"].as_u64().unwrap_or(0) as u32,
+                                container: r["container"]
+                                    .as_str()
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string()),
+                                score: r["score"].as_f64().unwrap_or(0.0),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-    if context > 0 {
-        cmd.arg("-C").arg(context.to_string());
-    }
-
-    // Validate and map file type to ripgrep type
-    if let Some(ref ft) = file_type {
-        match validate_file_type(ft) {
-            Ok(rg_type) => {
-                cmd.arg("-t").arg(rg_type);
+                ctx.print_success_flat(SymbolSearchResponse { count, results });
             }
-            Err(err_msg) => {
-                ctx.print_error(&err_msg);
-                return Ok(());
-            }
-        }
-    }
-
-    cmd.arg(pattern).arg(&search_path);
-
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let output = cmd.output().await;
-
-    match output {
-        Ok(output) => {
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            match exit_code {
-                0 => {
-                    // Success - matches found, parse JSON output
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let matches = parse_ripgrep_output(&stdout, ctx.root(), limit);
-                    let response = TextSearchResponse {
-                        count: matches.len(),
-                        matches,
-                    };
-                    ctx.print_success_flat(response);
-                }
-                1 => {
-                    // No matches found - valid success with empty results
-                    let response = TextSearchResponse {
-                        count: 0,
-                        matches: vec![],
-                    };
-                    ctx.print_success_flat(response);
-                }
-                2 => {
-                    // Error - invalid regex or other ripgrep error
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let stderr = stderr.trim();
-                    if stderr.is_empty() {
-                        ctx.print_error("Search failed: invalid pattern or configuration");
-                    } else {
-                        // Extract just the error message (strip "rg: " prefix if present)
-                        let error_msg = stderr
-                            .lines()
-                            .find(|l| l.contains("error:") || l.starts_with("rg:"))
-                            .map(|l| l.trim_start_matches("rg: "))
-                            .unwrap_or(stderr);
-                        ctx.print_error(&format!("Search failed: {}", error_msg));
-                    }
-                }
-                _ => {
-                    // Other exit codes - check stderr for context
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if stderr.contains("not found") || stderr.contains("No such file") {
-                        ctx.print_error(
-                            "ripgrep (rg) not found. Install: brew install ripgrep (macOS) or cargo install ripgrep",
-                        );
-                    } else {
-                        ctx.print_error(&format!(
-                            "Search failed (exit code {}): {}",
-                            exit_code,
-                            stderr.trim()
-                        ));
-                    }
-                }
+            Err(e) => {
+                ctx.print_error(&format!("Symbol search failed: {}", e));
             }
         }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                ctx.print_error(
-                    "ripgrep (rg) not found. Install: brew install ripgrep (macOS) or cargo install ripgrep",
-                );
-            } else {
-                ctx.print_error(&format!("Failed to execute ripgrep: {}", e));
-            }
-        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctx.print_error("BM25 search requires daemon mode (Unix only)");
     }
 
     Ok(())
 }
 
-fn parse_ripgrep_output(
-    stdout: &str,
-    root: &std::path::Path,
+async fn execute_content_search(
+    app: &App,
+    query: &str,
+    language: Option<&str>,
     limit: usize,
-) -> Vec<TextMatchOutput> {
-    let capacity = if limit == 0 { 1000 } else { limit.min(1000) };
-    let mut matches = Vec::with_capacity(capacity);
+) -> Result<()> {
+    let ctx = &app.output;
 
-    for line in stdout.lines() {
-        if limit > 0 && matches.len() >= limit {
-            break;
+    let query = query.trim();
+    if query.is_empty() {
+        ctx.print_error("Search query cannot be empty");
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        let client = DaemonClient::new(app.root());
+        match client.search_content(query, Some(limit), language).await {
+            Ok(response) => {
+                let count = response["count"].as_u64().unwrap_or(0) as usize;
+                let results: Vec<ContentResultOutput> = response["results"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|r| ContentResultOutput {
+                                file: ctx.relative_path(&std::path::PathBuf::from(
+                                    r["file"].as_str().unwrap_or(""),
+                                )),
+                                line: r["line"].as_u64().unwrap_or(0) as u32,
+                                content: r["content"].as_str().unwrap_or("").to_string(),
+                                score: r["score"].as_f64().unwrap_or(0.0),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                ctx.print_success_flat(ContentSearchResponse { count, results });
+            }
+            Err(e) => {
+                ctx.print_error(&format!("Content search failed: {}", e));
+            }
         }
+    }
 
-        if line.is_empty() {
-            continue;
-        }
+    #[cfg(not(unix))]
+    {
+        ctx.print_error("BM25 search requires daemon mode (Unix only)");
+    }
 
-        if let Ok(msg) = serde_json::from_str::<RgMessage>(line)
-            && msg.msg_type == "match"
-            && let Some(data) = msg.data
-        {
-            let file = data
-                .path
-                .map(|p| {
-                    let path = std::path::Path::new(&p.text);
-                    if let Ok(rel) = path.strip_prefix(root) {
-                        rel.display().to_string()
-                    } else {
-                        p.text
+    Ok(())
+}
+
+async fn execute_index_command(app: &App, command: IndexCommand) -> Result<()> {
+    let ctx = &app.output;
+
+    #[cfg(unix)]
+    {
+        let client = DaemonClient::new(app.root());
+
+        match command {
+            IndexCommand::Build { force, languages } => {
+                let langs: Option<Vec<String>> = languages.map(|s| {
+                    s.split(',')
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                });
+
+                match client.index_build(force, langs).await {
+                    Ok(response) => {
+                        let stats = &response["stats"];
+                        ctx.print_success_flat(IndexBuildResponse {
+                            status: "completed".to_string(),
+                            file_count: stats["file_count"].as_u64().unwrap_or(0) as usize,
+                            symbol_count: stats["symbol_count"].as_u64().unwrap_or(0) as usize,
+                            content_line_count: stats["content_line_count"].as_u64().unwrap_or(0)
+                                as usize,
+                            index_size_bytes: stats["index_size_bytes"].as_u64().unwrap_or(0),
+                        });
                     }
-                })
-                .unwrap_or_default();
-
-            let text = data
-                .lines
-                .map(|l| l.text.trim_end().to_string())
-                .unwrap_or_default();
-
-            let line_number = data.line_number.unwrap_or(0);
-
-            let (column, matched) = data
-                .submatches
-                .and_then(|subs| subs.into_iter().next())
-                .map(|sub| (sub.start + 1, sub.matched.text))
-                .unwrap_or((1, String::new()));
-
-            matches.push(TextMatchOutput {
-                file,
-                line: line_number,
-                column,
-                text,
-                matched,
-                context_before: None,
-                context_after: None,
-            });
+                    Err(e) => {
+                        ctx.print_error(&format!("Index build failed: {}", e));
+                    }
+                }
+            }
+            IndexCommand::Status => match client.index_status().await {
+                Ok(response) => {
+                    ctx.print_success_flat(IndexStatusResponse {
+                        file_count: response["file_count"].as_u64().unwrap_or(0) as usize,
+                        symbol_count: response["symbol_count"].as_u64().unwrap_or(0) as usize,
+                        content_line_count: response["content_line_count"].as_u64().unwrap_or(0)
+                            as usize,
+                        index_size_bytes: response["index_size_bytes"].as_u64().unwrap_or(0),
+                        last_indexed: response["last_indexed"].as_u64().unwrap_or(0),
+                        is_indexing: response["is_indexing"].as_bool().unwrap_or(false),
+                        progress: response["progress"].as_f64().map(|p| p as f32),
+                    });
+                }
+                Err(e) => {
+                    ctx.print_error(&format!("Failed to get index status: {}", e));
+                }
+            },
+            IndexCommand::Clear => match client.index_clear().await {
+                Ok(_) => {
+                    ctx.print_success_flat(serde_json::json!({ "cleared": true }));
+                }
+                Err(e) => {
+                    ctx.print_error(&format!("Failed to clear index: {}", e));
+                }
+            },
         }
     }
 
-    matches
-}
-
-/// Supported file types for text search
-const SUPPORTED_FILE_TYPES: &[(&str, &str)] = &[
-    ("rust", "rust"),
-    ("rs", "rust"),
-    ("typescript", "ts"),
-    ("ts", "ts"),
-    ("tsx", "ts"),
-    ("javascript", "js"),
-    ("js", "js"),
-    ("jsx", "js"),
-    ("python", "py"),
-    ("py", "py"),
-    ("go", "go"),
-    ("golang", "go"),
-    ("java", "java"),
-    ("kotlin", "kotlin"),
-    ("kt", "kotlin"),
-    ("c", "c"),
-    ("cpp", "cpp"),
-    ("c++", "cpp"),
-    ("csharp", "csharp"),
-    ("cs", "csharp"),
-    ("ruby", "ruby"),
-    ("rb", "ruby"),
-    ("php", "php"),
-    ("lua", "lua"),
-    ("bash", "sh"),
-    ("sh", "sh"),
-    ("json", "json"),
-    ("yaml", "yaml"),
-    ("yml", "yaml"),
-    ("toml", "toml"),
-    ("md", "md"),
-    ("markdown", "md"),
-    ("html", "html"),
-    ("css", "css"),
-    ("sql", "sql"),
-    ("swift", "swift"),
-    ("scala", "scala"),
-    ("elixir", "elixir"),
-    ("haskell", "haskell"),
-    ("hs", "haskell"),
-];
-
-fn map_file_type(ft: &str) -> Option<&'static str> {
-    let lower = ft.to_lowercase();
-    SUPPORTED_FILE_TYPES
-        .iter()
-        .find(|(alias, _)| *alias == lower.as_str())
-        .map(|(_, rg_type)| *rg_type)
-}
-
-fn validate_file_type(ft: &str) -> Result<&'static str, String> {
-    match map_file_type(ft) {
-        Some(rg_type) => Ok(rg_type),
-        None => {
-            let valid_types: Vec<_> = SUPPORTED_FILE_TYPES
-                .iter()
-                .map(|(alias, _)| *alias)
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            Err(format!(
-                "Unknown file type: '{}'. Supported: {}",
-                ft,
-                valid_types.join(", ")
-            ))
-        }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        ctx.print_error("Search index requires daemon mode (Unix only)");
     }
+
+    Ok(())
 }
 
 /// Normalize AST pattern by auto-wrapping simple node types with parentheses.
-/// Simple node types contain only alphanumeric characters and underscores.
 fn normalize_ast_pattern(pattern: &str) -> String {
     let trimmed = pattern.trim();
 
-    // Already wrapped in parentheses - return as-is
     if trimmed.starts_with('(') {
         return trimmed.to_string();
     }
 
-    // Check if it's a simple node type (alphanumeric + underscore only)
     let is_simple = !trimmed.is_empty()
         && trimmed
             .chars()
@@ -506,8 +420,6 @@ fn normalize_ast_pattern(pattern: &str) -> String {
     if is_simple {
         format!("({})", trimmed)
     } else {
-        // Complex pattern that doesn't start with '(' - likely an error
-        // Return as-is and let tree-sitter provide the error message
         trimmed.to_string()
     }
 }
@@ -521,7 +433,6 @@ async fn execute_ast_search(
 ) -> Result<()> {
     let ctx = &app.output;
 
-    // Validate pattern (trim and check for empty/whitespace-only)
     let pattern = pattern.trim();
     if pattern.is_empty() {
         ctx.print_error(
@@ -563,7 +474,6 @@ async fn execute_ast_search(
             ctx.print_success_flat(response);
         }
         Err(crate::error::SearchError::InvalidPattern(e)) => {
-            // Use enhanced error message with hints
             ctx.print_error(&format_query_error(lang, &e));
         }
         Err(crate::error::SearchError::UnsupportedLanguage(l)) => {
