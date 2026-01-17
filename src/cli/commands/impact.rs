@@ -13,7 +13,6 @@ use crate::cli::ParsedLocation;
 use crate::cli::response::{
     ImpactFileOutput, ImpactReferenceOutput, ImpactResponse, LocationOutput, SafetyHint,
 };
-use crate::cli::utils::is_test_file;
 
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
@@ -28,6 +27,7 @@ pub struct ImpactArgs {
 pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let test_matcher = app.test_matcher();
 
     match app
         .lsp
@@ -46,7 +46,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 
             for r in &project_refs {
                 let file_str = ctx.relative_path(&r.file);
-                let is_test = is_test_file(&r.file);
+                let is_test = test_matcher.is_test_file(&r.file);
 
                 if is_test {
                     test_refs_count += 1;

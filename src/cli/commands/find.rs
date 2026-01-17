@@ -10,7 +10,7 @@ use crate::cli::ParsedLocation;
 use crate::cli::response::{
     DefinitionResponse, LocationOutput, ReferencesResponse, SymbolOutput, SymbolsResponse,
 };
-use crate::cli::utils::extract_signature;
+use crate::cli::utils::{extract_signature, read_line_at};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 
@@ -77,6 +77,10 @@ pub enum FindCommand {
     Refs {
         /// File path with position (file:line:column)
         location: String,
+
+        /// Include source code snippet at each reference
+        #[arg(long)]
+        with_snippet: bool,
 
         /// Maximum results (default from config: lsp.refs_limit)
         #[arg(long)]
@@ -230,7 +234,11 @@ pub async fn execute(args: FindArgs, app: &App) -> Result<()> {
             }
         }
 
-        FindCommand::Refs { location, limit } => {
+        FindCommand::Refs {
+            location,
+            with_snippet,
+            limit,
+        } => {
             let limit = limit.unwrap_or(cfg.lsp.refs_limit);
             let loc = ParsedLocation::parse(&location)?.to_absolute()?;
 
@@ -246,14 +254,21 @@ pub async fn execute(args: FindArgs, app: &App) -> Result<()> {
                         .take(limit)
                         .collect();
 
+                    let references: Vec<LocationOutput> = project_refs
+                        .iter()
+                        .map(|l| {
+                            let mut output =
+                                LocationOutput::from_path(&l.file, l.line, l.column, ctx.root());
+                            if with_snippet && let Ok(s) = read_line_at(&l.file, l.line) {
+                                output.snippet = Some(s);
+                            }
+                            output
+                        })
+                        .collect();
+
                     let response = ReferencesResponse {
-                        count: project_refs.len(),
-                        references: project_refs
-                            .iter()
-                            .map(|l| {
-                                LocationOutput::from_path(&l.file, l.line, l.column, ctx.root())
-                            })
-                            .collect(),
+                        count: references.len(),
+                        references,
                     };
                     ctx.print_success_flat(response);
                 }

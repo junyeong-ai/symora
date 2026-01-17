@@ -15,6 +15,8 @@ pub struct LocationOutput {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 
 impl LocationOutput {
@@ -23,6 +25,7 @@ impl LocationOutput {
             file: file.into(),
             line,
             column,
+            snippet: None,
         }
     }
 
@@ -33,7 +36,17 @@ impl LocationOutput {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| path.display().to_string());
 
-        Self { file, line, column }
+        Self {
+            file,
+            line,
+            column,
+            snippet: None,
+        }
+    }
+
+    pub fn with_snippet(mut self, snippet: String) -> Self {
+        self.snippet = Some(snippet);
+        self
     }
 }
 

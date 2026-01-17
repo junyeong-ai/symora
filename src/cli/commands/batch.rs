@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
+use crate::cli::utils::read_line_at;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Symbol;
 
@@ -50,6 +51,10 @@ pub enum BatchSubcommand {
         /// File path (required with --symbols)
         #[arg(long, short)]
         file: Option<String>,
+
+        /// Include source code snippet at each reference
+        #[arg(long)]
+        with_snippet: bool,
     },
 
     /// Batch definition lookups for multiple locations
@@ -114,6 +119,7 @@ struct BatchResponse {
 enum BatchOp {
     Hover,
     Refs,
+    RefsWithSnippet,
     Def,
     Callers,
     Callees,
@@ -124,7 +130,14 @@ pub async fn execute(args: BatchArgs, app: &App) -> Result<()> {
 
     match args.command {
         Some(BatchSubcommand::Hover { locations }) => {
-            let results = execute_batch(locations, BatchOp::Hover, args.parallel, app).await;
+            let results = execute_batch(
+                locations,
+                BatchOp::Hover,
+                args.parallel,
+                args.fail_fast,
+                app,
+            )
+            .await;
             ctx.print_success_flat(results);
         }
 
@@ -132,16 +145,27 @@ pub async fn execute(args: BatchArgs, app: &App) -> Result<()> {
             locations,
             symbols,
             file,
+            with_snippet,
         }) => {
             if let Some(pattern) = symbols {
+                let file = file
+                    .as_ref()
+                    .expect("clap requires file when symbols is provided");
                 let results =
-                    execute_batch_by_symbols(&file.unwrap(), &pattern, args.parallel, app).await?;
+                    execute_batch_by_symbols(file, &pattern, args.parallel, with_snippet, app)
+                        .await?;
                 ctx.print_success_flat(results);
             } else {
+                let op = if with_snippet {
+                    BatchOp::RefsWithSnippet
+                } else {
+                    BatchOp::Refs
+                };
                 let results = execute_batch(
                     locations.unwrap_or_default(),
-                    BatchOp::Refs,
+                    op,
                     args.parallel,
+                    args.fail_fast,
                     app,
                 )
                 .await;
@@ -150,17 +174,32 @@ pub async fn execute(args: BatchArgs, app: &App) -> Result<()> {
         }
 
         Some(BatchSubcommand::Def { locations }) => {
-            let results = execute_batch(locations, BatchOp::Def, args.parallel, app).await;
+            let results =
+                execute_batch(locations, BatchOp::Def, args.parallel, args.fail_fast, app).await;
             ctx.print_success_flat(results);
         }
 
         Some(BatchSubcommand::Callers { locations }) => {
-            let results = execute_batch(locations, BatchOp::Callers, args.parallel, app).await;
+            let results = execute_batch(
+                locations,
+                BatchOp::Callers,
+                args.parallel,
+                args.fail_fast,
+                app,
+            )
+            .await;
             ctx.print_success_flat(results);
         }
 
         Some(BatchSubcommand::Callees { locations }) => {
-            let results = execute_batch(locations, BatchOp::Callees, args.parallel, app).await;
+            let results = execute_batch(
+                locations,
+                BatchOp::Callees,
+                args.parallel,
+                args.fail_fast,
+                app,
+            )
+            .await;
             ctx.print_success_flat(results);
         }
 
@@ -176,11 +215,13 @@ async fn execute_batch(
     locations: Vec<String>,
     op: BatchOp,
     parallel: bool,
+    fail_fast: bool,
     app: &App,
 ) -> BatchResponse {
     let mut results = Vec::with_capacity(locations.len());
 
     if parallel {
+        // Note: fail_fast doesn't apply to parallel execution
         let futures: Vec<_> = locations
             .iter()
             .enumerate()
@@ -190,7 +231,12 @@ async fn execute_batch(
         results = futures::future::join_all(futures).await;
     } else {
         for (index, loc) in locations.iter().enumerate() {
-            results.push(execute_single_op(loc, &op, app, index).await);
+            let result = execute_single_op(loc, &op, app, index).await;
+            let failed = !result.success;
+            results.push(result);
+            if failed && fail_fast {
+                break;
+            }
         }
     }
 
@@ -227,8 +273,9 @@ async fn execute_single_op(loc_str: &str, op: &BatchOp, app: &App, index: usize)
                     "content": h.map(|hov| hov.content)
                 })
             }),
-        BatchOp::Refs => {
+        BatchOp::Refs | BatchOp::RefsWithSnippet => {
             let ctx = &app.output;
+            let with_snippet = matches!(op, BatchOp::RefsWithSnippet);
             app.lsp
                 .find_references(&loc.file, loc.line, loc.column)
                 .await
@@ -240,10 +287,18 @@ async fn execute_single_op(loc_str: &str, op: &BatchOp, app: &App, index: usize)
                         .collect();
                     serde_json::json!({
                         "count": project_refs.len(),
-                        "references": project_refs.iter().map(|r| serde_json::json!({
-                            "file": r.file.display().to_string(),
-                            "line": r.line,
-                        })).collect::<Vec<_>>()
+                        "references": project_refs.iter().map(|r| {
+                            let mut obj = serde_json::json!({
+                                "file": r.file.display().to_string(),
+                                "line": r.line,
+                            });
+                            if with_snippet
+                                && let Ok(snippet) = read_line_at(&r.file, r.line)
+                            {
+                                obj["snippet"] = serde_json::json!(snippet);
+                            }
+                            obj
+                        }).collect::<Vec<_>>()
                     })
                 })
         }
@@ -313,6 +368,7 @@ async fn execute_batch_by_symbols(
     file: &str,
     pattern: &str,
     parallel: bool,
+    with_snippet: bool,
     app: &App,
 ) -> Result<BatchResponse> {
     let path = Path::new(file);
@@ -341,7 +397,13 @@ async fn execute_batch_by_symbols(
         })
         .collect();
 
-    Ok(execute_batch(locations, BatchOp::Refs, parallel, app).await)
+    let op = if with_snippet {
+        BatchOp::RefsWithSnippet
+    } else {
+        BatchOp::Refs
+    };
+    // Note: fail_fast=false for symbol-based batch (no interactive control)
+    Ok(execute_batch(locations, op, parallel, false, app).await)
 }
 
 async fn execute_stdin_mode(parallel: bool, fail_fast: bool, app: &App) -> Result<()> {
@@ -423,7 +485,7 @@ async fn execute_stdin_command_inner(
 
     match cmd {
         StdinCommand::FindSymbol { file } => {
-            let path = std::env::current_dir().unwrap().join(file);
+            let path = std::env::current_dir()?.join(file);
             app.lsp
                 .find_symbols(&path, FindSymbolsOptions::default())
                 .await

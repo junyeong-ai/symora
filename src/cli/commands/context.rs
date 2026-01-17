@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::response::LocationOutput;
-use crate::cli::utils::{extract_signature, find_symbol_at_line, is_test_file};
+use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_line};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::services::lsp::LspService;
 
@@ -99,6 +99,7 @@ pub struct ReferenceInfo {
 pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let test_matcher = app.test_matcher();
 
     let response = gather_context(
         app.lsp.as_ref(),
@@ -107,6 +108,7 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         loc.column,
         &args,
         ctx.root(),
+        &test_matcher,
     )
     .await;
 
@@ -125,6 +127,7 @@ async fn gather_context(
     column: u32,
     args: &ContextArgs,
     root: &Path,
+    test_matcher: &TestMatcher,
 ) -> Result<ContextResponse> {
     let (refs_result, symbols_result) = tokio::join!(
         lsp.find_references(file, line, column),
@@ -151,7 +154,7 @@ async fn gather_context(
     let refs_with_test_flag: Vec<_> = refs
         .iter()
         .filter(|r| r.file != file || r.line != line)
-        .map(|r| (r, is_test_file(&r.file)))
+        .map(|r| (r, test_matcher.is_test_file(&r.file)))
         .collect();
 
     let test_refs: Vec<_> = refs_with_test_flag
@@ -254,18 +257,18 @@ async fn gather_context(
     };
 
     let tests = if args.tests {
-        test_refs
-            .iter()
-            .take(5)
-            .filter_map(|r| {
-                let content = std::fs::read_to_string(&r.file).ok()?;
-                let test_name = extract_test_name(&content, r.line)?;
-                Some(TestInfo {
+        let mut tests = Vec::with_capacity(5);
+        for r in test_refs.iter().take(5) {
+            if let Ok(content) = tokio::fs::read_to_string(&r.file).await
+                && let Some(test_name) = extract_test_name(&content, r.line)
+            {
+                tests.push(TestInfo {
                     name: test_name,
                     location: LocationOutput::from_path(&r.file, r.line, r.column, root),
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        tests
     } else {
         vec![]
     };
@@ -292,13 +295,36 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
         let idx = line_idx.saturating_sub(i);
         let line_content = lines.get(idx)?;
 
-        if line_content.contains("#[test]")
-            || line_content.contains("fn test_")
-            || line_content.contains("func Test")
-            || line_content.contains("def test_")
-            || line_content.contains("it(")
-            || line_content.contains("test(")
-        {
+        // Test markers by language
+        let is_test_marker = line_content.contains("#[test]")           // Rust
+            || line_content.contains("#[tokio::test]")                  // Rust async
+            || line_content.contains("#[rstest]")                       // Rust rstest
+            || line_content.contains("@Test")                           // Java, Kotlin JUnit
+            || line_content.contains("@ParameterizedTest")              // JUnit 5
+            || line_content.contains("[Test]")                          // C# NUnit
+            || line_content.contains("[Fact]")                          // C# xUnit
+            || line_content.contains("[Theory]")                        // C# xUnit
+            || line_content.contains("[TestMethod]")                    // C# MSTest
+            || line_content.contains("/** @test */")                    // PHP
+            || line_content.contains("fn test_")                        // Rust
+            || line_content.contains("func Test")                       // Go, Swift
+            || line_content.contains("def test_")                       // Python
+            || line_content.contains("function test")                   // PHP
+            || line_content.contains("it(")                             // JS/TS Mocha/Jest
+            || line_content.contains("test(")                           // JS/TS Jest, Dart, Elixir
+            || line_content.contains("it \"")                           // Ruby RSpec
+            || line_content.contains("it '")                            // Ruby RSpec
+            || line_content.contains("it {")                            // Kotest
+            || line_content.contains("should(")                         // Kotest
+            || line_content.contains("test \"")                         // Elixir
+            || line_content.contains("describe(")                       // JS/TS, Kotest
+            || line_content.contains("describe \"")                     // Ruby
+            || line_content.contains("context(")                        // Kotest, RSpec
+            || line_content.contains("given(")                          // Kotest BehaviorSpec
+            || line_content.contains("When(")                           // Kotest BehaviorSpec
+            || line_content.contains("Then("); // Kotest BehaviorSpec
+
+        if is_test_marker {
             if let Some(fn_line) = lines.get(idx + 1)
                 && let Some(name) = extract_fn_name(fn_line)
             {
@@ -314,20 +340,45 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
 }
 
 fn extract_fn_name(line: &str) -> Option<String> {
-    for (prefix, offset) in [("fn ", 3), ("func ", 5), ("def ", 4)] {
+    // Function declaration patterns by language
+    for (prefix, offset) in [
+        ("fn ", 3),           // Rust
+        ("func ", 5),         // Go, Swift
+        ("def ", 4),          // Python, Ruby, Elixir
+        ("fun ", 4),          // Kotlin
+        ("function ", 9),     // PHP, JS
+        ("void ", 5),         // Java, C#
+        ("public void ", 12), // Java, C#
+        ("async ", 6),        // JS/TS async
+    ] {
         if let Some(pos) = line.find(prefix) {
             let rest = &line[pos + offset..];
-            let name = rest.split(['(', '<', ' ', ':']).next()?;
-            return Some(name.to_string());
+            let name = rest.split(['(', '<', ' ', ':', '{']).next()?;
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
         }
     }
 
-    for prefix in ["it(", "test("] {
+    // String-based test names (JS/TS, Ruby, Elixir)
+    for prefix in [
+        "it(",
+        "test(",
+        "it \"",
+        "it '",
+        "test \"",
+        "describe(",
+        "describe \"",
+    ] {
         if let Some(pos) = line.find(prefix) {
             let rest = &line[pos + prefix.len()..];
-            let name = rest.trim_start_matches(['\'', '"']);
-            let name = name.split(['\'', '"']).next()?;
-            return Some(name.to_string());
+            let rest = rest.trim_start_matches(['\'', '"', '(']);
+            let name = rest.split(['\'', '"', ',', ')']).next()?;
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
         }
     }
 

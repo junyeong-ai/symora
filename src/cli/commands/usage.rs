@@ -9,7 +9,7 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 
 use crate::app::App;
-use crate::cli::utils::is_test_file;
+use crate::cli::utils::{TestMatcher, read_line_at};
 use crate::models::symbol::Language;
 use crate::models::symbol::Symbol;
 
@@ -46,6 +46,10 @@ pub struct UsageArgs {
     #[arg(long, default_value = "50")]
     pub max_symbols: usize,
 
+    /// Minimum references required (find important symbols)
+    #[arg(long)]
+    pub min_refs: Option<usize>,
+
     /// Language filter (for workspace search)
     #[arg(long, short)]
     pub lang: Option<String>,
@@ -61,12 +65,16 @@ pub enum SortMetric {
 pub enum Filter {
     /// Only show symbols that have tests
     HasTests,
+    /// Only show symbols that lack tests (for test coverage)
+    NoTests,
     /// Only show symbols that have documentation
     HasDocs,
     /// Only show symbols that lack documentation (for doc coverage)
     NoDocs,
     /// Exclude symbols defined in test files
     NotTestFile,
+    /// Only show symbols with zero references (dead code detection)
+    ZeroRefs,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,18 +146,22 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
 
     let filters = args.filter.as_deref().unwrap_or_default();
     let filter_names: Vec<String> = filters.iter().map(|f| format!("{:?}", f)).collect();
+    let test_matcher = app.test_matcher();
 
     // Apply pre-filter for NotTestFile (no LSP calls needed)
     if filters.contains(&Filter::NotTestFile) {
-        symbols.retain(|s| !is_test_file(&s.location.file));
+        symbols.retain(|s| !test_matcher.is_test_file(&s.location.file));
     }
 
     // Fast path: sort by name without LSP calls for references
     // Only fetch references for limited results
     let needs_refs_for_sort = matches!(args.sort, SortMetric::References);
     let needs_refs_for_filter = filters.contains(&Filter::HasTests)
+        || filters.contains(&Filter::NoTests)
         || filters.contains(&Filter::HasDocs)
-        || filters.contains(&Filter::NoDocs);
+        || filters.contains(&Filter::NoDocs)
+        || filters.contains(&Filter::ZeroRefs)
+        || args.min_refs.is_some();
     let needs_refs = needs_refs_for_sort || needs_refs_for_filter || args.with_metrics;
 
     let results = if !needs_refs {
@@ -173,7 +185,15 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         let limited_symbols: Vec<_> = sorted_symbols.iter().take(args.limit).collect();
         let total = sorted_symbols.len();
 
-        let results = fetch_refs_parallel(app, &limited_symbols, ctx.root(), &args, filters).await;
+        let results = fetch_refs_parallel(
+            app,
+            &limited_symbols,
+            ctx.root(),
+            &args,
+            filters,
+            &test_matcher,
+        )
+        .await;
         (results, total)
     } else {
         // Slow path: need references for sorting or filtering
@@ -181,8 +201,15 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         let symbols_to_process: Vec<_> = symbols.iter().take(args.max_symbols).collect();
         let truncated = symbols.len() > args.max_symbols;
 
-        let all_results =
-            fetch_refs_parallel(app, &symbols_to_process, ctx.root(), &args, filters).await;
+        let all_results = fetch_refs_parallel(
+            app,
+            &symbols_to_process,
+            ctx.root(),
+            &args,
+            filters,
+            &test_matcher,
+        )
+        .await;
 
         if truncated {
             eprintln!(
@@ -243,7 +270,11 @@ fn build_result_without_refs(
 ) -> UsageResult {
     let signature = crate::cli::utils::extract_signature(symbol.body.as_deref());
     let snippet = if with_snippet {
-        symbol.body.clone()
+        // workspace_symbols doesn't include body, so read from file
+        symbol
+            .body
+            .clone()
+            .or_else(|| read_line_at(&symbol.location.file, symbol.location.line).ok())
     } else {
         None
     };
@@ -270,6 +301,7 @@ async fn fetch_refs_parallel(
     root: &std::path::Path,
     args: &UsageArgs,
     filters: &[Filter],
+    test_matcher: &TestMatcher,
 ) -> Vec<UsageResult> {
     // Use semaphore for fine-grained concurrency control
     // This is faster than batch processing because it keeps MAX_CONCURRENT requests in flight
@@ -282,7 +314,7 @@ async fn fetch_refs_parallel(
             let sem = Arc::clone(&semaphore);
             async move {
                 let _permit = sem.acquire().await.ok()?;
-                fetch_single_symbol_refs(app, symbol, root, args, filters).await
+                fetch_single_symbol_refs(app, symbol, root, args, filters, test_matcher).await
             }
         })
         .collect();
@@ -301,6 +333,7 @@ async fn fetch_single_symbol_refs(
     root: &std::path::Path,
     args: &UsageArgs,
     filters: &[Filter],
+    test_matcher: &TestMatcher,
 ) -> Option<UsageResult> {
     let refs = app
         .lsp
@@ -315,9 +348,26 @@ async fn fetch_single_symbol_refs(
     let ref_count = refs.len();
 
     // Use iterator to check for tests without collecting all test refs
-    let has_tests = refs.iter().any(|r| is_test_file(&r.file));
+    let has_tests = refs.iter().any(|r| test_matcher.is_test_file(&r.file));
 
     if filters.contains(&Filter::HasTests) && !has_tests {
+        return None;
+    }
+
+    // Filter: only symbols without tests (for test coverage analysis)
+    if filters.contains(&Filter::NoTests) && has_tests {
+        return None;
+    }
+
+    // Filter: only symbols with zero references (dead code detection)
+    if filters.contains(&Filter::ZeroRefs) && ref_count > 0 {
+        return None;
+    }
+
+    // Filter: only symbols with at least N references (find important symbols)
+    if let Some(min) = args.min_refs
+        && ref_count < min
+    {
         return None;
     }
 
@@ -354,7 +404,7 @@ async fn fetch_single_symbol_refs(
         // Only collect up to 3 test files (avoid allocating entire list)
         let test_files: Vec<String> = refs
             .iter()
-            .filter(|r| is_test_file(&r.file))
+            .filter(|r| test_matcher.is_test_file(&r.file))
             .take(3)
             .map(|r| {
                 r.file
@@ -381,7 +431,11 @@ async fn fetch_single_symbol_refs(
     };
 
     let snippet = if args.with_snippet {
-        symbol.body.clone()
+        // workspace_symbols doesn't include body, so read from file
+        symbol
+            .body
+            .clone()
+            .or_else(|| read_line_at(&symbol.location.file, symbol.location.line).ok())
     } else {
         None
     };
