@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
-use crate::cli::response::LocationOutput;
+use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_line};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::services::lsp::LspService;
@@ -17,6 +17,10 @@ use crate::services::lsp::LspService;
 pub struct ContextArgs {
     /// Location (file:line:column)
     pub location: String,
+
+    /// Include all context (callers, callees, types, tests)
+    #[arg(short, long)]
+    pub all: bool,
 
     /// Include callers (incoming calls)
     #[arg(long)]
@@ -39,9 +43,9 @@ pub struct ContextArgs {
 pub struct ContextResponse {
     pub target: TargetInfo,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub callers: Vec<CallerInfo>,
+    pub callers: Vec<CallHierarchyOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub callees: Vec<CalleeInfo>,
+    pub callees: Vec<CallHierarchyOutput>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<TypeInfo>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -59,22 +63,6 @@ pub struct TargetInfo {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CallerInfo {
-    pub name: String,
-    pub location: LocationOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub call_site: Option<LocationOutput>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CalleeInfo {
-    pub name: String,
-    pub location: LocationOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub call_site: Option<LocationOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,25 +160,14 @@ async fn gather_context(
         })
         .collect();
 
-    let callers = if args.callers {
+    let callers = if args.callers || args.all {
         lsp.incoming_calls(file, line, column)
             .await
             .map(|calls| {
                 calls
-                    .into_iter()
+                    .iter()
                     .take(10)
-                    .map(|c| CallerInfo {
-                        name: c.name,
-                        location: LocationOutput::from_path(
-                            &c.location.file,
-                            c.location.line,
-                            c.location.column,
-                            root,
-                        ),
-                        call_site: c.call_site.map(|cs| {
-                            LocationOutput::from_path(&cs.file, cs.line, cs.column, root)
-                        }),
-                    })
+                    .map(|c| CallHierarchyOutput::from_item(c, root))
                     .collect()
             })
             .unwrap_or_default()
@@ -198,25 +175,14 @@ async fn gather_context(
         vec![]
     };
 
-    let callees = if args.callees {
+    let callees = if args.callees || args.all {
         lsp.outgoing_calls(file, line, column)
             .await
             .map(|calls| {
                 calls
-                    .into_iter()
+                    .iter()
                     .take(10)
-                    .map(|c| CalleeInfo {
-                        name: c.name,
-                        location: LocationOutput::from_path(
-                            &c.location.file,
-                            c.location.line,
-                            c.location.column,
-                            root,
-                        ),
-                        call_site: c.call_site.map(|cs| {
-                            LocationOutput::from_path(&cs.file, cs.line, cs.column, root)
-                        }),
-                    })
+                    .map(|c| CallHierarchyOutput::from_item(c, root))
                     .collect()
             })
             .unwrap_or_default()
@@ -224,7 +190,7 @@ async fn gather_context(
         vec![]
     };
 
-    let types = if args.types {
+    let types = if args.types || args.all {
         match lsp.goto_type_definition(file, line, column).await {
             Ok(Some(type_loc)) => {
                 if let Ok(type_symbols) = lsp
@@ -256,7 +222,7 @@ async fn gather_context(
         vec![]
     };
 
-    let tests = if args.tests {
+    let tests = if args.tests || args.all {
         let mut tests = Vec::with_capacity(5);
         for r in test_refs.iter().take(5) {
             if let Ok(content) = tokio::fs::read_to_string(&r.file).await
