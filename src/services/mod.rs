@@ -4,8 +4,10 @@ pub mod ast_query;
 pub mod config;
 #[cfg(unix)]
 pub mod daemon_lsp;
+pub mod graph;
 pub mod lsp;
 pub mod project;
+pub mod search;
 
 pub use ast_query::{AstQueryService, DefaultAstQueryService};
 pub use config::{ConfigService, DefaultConfigService};
