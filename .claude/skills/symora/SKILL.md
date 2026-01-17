@@ -146,6 +146,13 @@ symora search ast "class_declaration" --lang csharp | jq '.matches[].text'
 symora search nodes --lang typescript
 ```
 
+| Search Type | Options | Notes |
+|-------------|---------|-------|
+| `symbols` | `--kind`, `--limit` | BM25 ranked, requires index |
+| `content` | `--lang`, `--limit` | BM25 ranked, requires index |
+| `ast` | `--lang` (required), `--path`, `--limit` | tree-sitter patterns |
+| `index` | `build [--force] [--lang]`, `status`, `clear` | Stored at `.symora/search.db` |
+
 ### 6. Check Code Health
 
 ```bash
@@ -210,39 +217,7 @@ symora usage "fn" --lang rust --max-symbols 100 --limit 20 | jq '.results[]'
 | `--max-symbols N` | Max symbols to analyze | 50 |
 | `--limit N` | Max results to display | 10 |
 
-### 8. BM25 Search (Ranked)
-
-```bash
-# Symbol search - searches indexed symbol names with BM25 ranking
-symora search symbols "execute"                  # Basic search
-symora search symbols "Handler" --kind class     # Filter by kind
-symora search symbols "Config" --kind struct     # Structs
-symora search symbols "Service" --kind interface # Interfaces/traits
-symora search symbols "process" --limit 10       # Limit results
-
-# Content search - searches indexed code lines with BM25 ranking
-symora search content "async fn"                 # Basic search
-symora search content "TODO" --lang rust         # Filter by language
-symora search content "error handling" --lang python --limit 20
-
-# Index management (required before first search)
-symora search index build                        # Build/update
-symora search index build --force                # Force rebuild
-symora search index build --lang rust,kotlin     # Specific languages
-symora search index status                       # Show stats
-symora search index clear                        # Clear index
-```
-
-| Option | Description |
-|--------|-------------|
-| `--kind` | Symbol kind filter: function, class, struct, interface, trait |
-| `--lang` | Language filter for content search |
-| `--limit N` | Max results (default: 100) |
-| `--force` | Force full index rebuild |
-
-**Note**: Index is stored at `.symora/search.db`. Build once, searches are instant.
-
-### 9. Refactoring Actions
+### 8. Refactoring Actions
 
 ```bash
 # List all available code actions at location
@@ -262,7 +237,7 @@ symora actions apply src/main.rs:10:5 "Extract method" | jq '.changes'
 # - Generate impl block
 ```
 
-### 10. Pattern Edit (Structural)
+### 9. Pattern Edit (Structural)
 
 ```bash
 # Edit code by tree-sitter AST pattern
