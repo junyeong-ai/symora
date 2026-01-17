@@ -83,6 +83,10 @@ impl App {
         &self.config
     }
 
+    pub fn test_matcher(&self) -> crate::cli::utils::TestMatcher {
+        crate::cli::utils::TestMatcher::from_config(&self.config.test)
+    }
+
     pub fn is_daemon_mode(&self) -> bool {
         self.daemon_mode
     }

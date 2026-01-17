@@ -15,11 +15,19 @@ use tokio::sync::{RwLock, Semaphore, broadcast};
 
 use crate::config;
 use crate::daemon::dto::{LocationDto, SymbolDto};
-use crate::daemon::handlers::*;
+use crate::daemon::handlers::{
+    ApplyActionParams, CodeActionJson, CodeLensCommandJson, CodeLensJson, FileChangeJson,
+    FileParams, FoldingRangeJson, IndexBuildParams, InlayHintJson, PositionParams, RangeParams,
+    RenameParams, SearchContentParams, SearchSymbolsParams, SelectionRangeJson,
+    SelectionRangeParams, TypeHierarchyItemJson, WorkspaceSymbolParams,
+};
 use crate::daemon::protocol::{Request, RequestId, Response, RpcError, methods};
 use crate::models::config::SymoraConfig;
 use crate::models::lsp::FindSymbolsOptions;
+use crate::models::symbol::Location;
+use crate::services::graph::{CallInfo, CodeGraph, GraphConfig, TypeHierarchyInfo};
 use crate::services::lsp::{DefaultLspService, LspService};
+use crate::services::search::{IndexOptions, SearchConfig, SearchIndex};
 
 type ProjectsMap = Arc<RwLock<HashMap<PathBuf, Arc<ProjectContext>>>>;
 
@@ -83,6 +91,8 @@ impl DaemonConfig {
 
 struct ProjectContext {
     lsp: Arc<dyn LspService + Send + Sync>,
+    graph: Arc<CodeGraph>,
+    search: Arc<SearchIndex>,
     last_used: RwLock<Instant>,
     request_count: AtomicU64,
 }
@@ -91,6 +101,8 @@ impl ProjectContext {
     fn new(path: &Path) -> Self {
         Self {
             lsp: Arc::new(DefaultLspService::new(path)),
+            graph: Arc::new(CodeGraph::new(GraphConfig::default())),
+            search: Arc::new(SearchIndex::new(path, SearchConfig::default())),
             last_used: RwLock::new(Instant::now()),
             request_count: AtomicU64::new(0),
         }
@@ -208,6 +220,21 @@ impl DaemonServer {
     }
 
     async fn cleanup_idle_servers(&self) {
+        {
+            let projects = self.projects.read().await;
+            for (_, ctx) in projects.iter() {
+                let expired = ctx.graph.cleanup_expired().await;
+                if expired > 0 {
+                    tracing::debug!("Cleaned up {} expired graph entries", expired);
+                }
+
+                let search_expired = ctx.search.cleanup_expired().await;
+                if search_expired > 0 {
+                    tracing::debug!("Cleaned up {} expired search entries", search_expired);
+                }
+            }
+        }
+
         let idle: Vec<_> = {
             let projects = self.projects.read().await;
             projects
@@ -234,6 +261,7 @@ impl DaemonServer {
         }
 
         for (path, ctx) in idle {
+            ctx.graph.clear().await;
             ctx.lsp.shutdown().await;
             tracing::info!("Removed idle project: {:?}", path);
         }
@@ -242,6 +270,7 @@ impl DaemonServer {
     async fn cleanup(&self) {
         let projects = self.projects.read().await;
         for (_, ctx) in projects.iter() {
+            ctx.graph.clear().await;
             ctx.lsp.shutdown().await;
         }
         let _ = tokio::fs::remove_file(&self.config.socket_path).await;
@@ -365,34 +394,107 @@ async fn dispatch(
 
         // Position-based operations
         methods::FIND_REFS => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(refs) = ctx.graph.get_references(&location).await {
+                return Ok(serde_json::json!({
+                    "count": refs.len(),
+                    "references": refs.iter().map(LocationDto::from).collect::<Vec<_>>(),
+                    "cached": true
+                }));
+            }
+
             let refs = ctx.lsp.find_references(&f, l, c).await?;
+
+            if let Some(hover) = ctx.lsp.hover(&f, l, c).await?
+                && let Some(name) = hover.extract_symbol_name()
+            {
+                ctx.graph.cache_references(
+                    &location,
+                    &name,
+                    crate::models::symbol::SymbolKind::Function,
+                    &refs,
+                ).await;
+            }
+
             Ok(serde_json::json!({
                 "count": refs.len(),
-                "references": refs.iter().map(LocationDto::from).collect::<Vec<_>>()
+                "references": refs.iter().map(LocationDto::from).collect::<Vec<_>>(),
+                "cached": false
             }))
         }).await,
 
         methods::FIND_DEF => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(def) = ctx.graph.get_definition(&location).await {
+                return Ok(serde_json::json!({
+                    "definition": LocationDto::from(&def),
+                    "cached": true
+                }));
+            }
+
             let def = ctx.lsp.goto_definition(&f, l, c).await?;
+
+            if let Some(ref def_loc) = def {
+                ctx.graph.cache_definition(&location, def_loc).await;
+            }
+
             Ok(match def {
-                Some(loc) => serde_json::json!({ "definition": LocationDto::from(&loc) }),
+                Some(loc) => serde_json::json!({
+                    "definition": LocationDto::from(&loc),
+                    "cached": false
+                }),
                 None => serde_json::json!({ "definition": null, "message": "No definition found" }),
             })
         }).await,
 
         methods::FIND_TYPEDEF => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(def) = ctx.graph.get_type_definition(&location).await {
+                return Ok(serde_json::json!({
+                    "definition": LocationDto::from(&def),
+                    "cached": true
+                }));
+            }
+
             let def = ctx.lsp.goto_type_definition(&f, l, c).await?;
+
+            if let Some(ref def_loc) = def {
+                ctx.graph.cache_type_definition(&location, def_loc).await;
+            }
+
             Ok(match def {
-                Some(loc) => serde_json::json!({ "definition": LocationDto::from(&loc) }),
+                Some(loc) => serde_json::json!({
+                    "definition": LocationDto::from(&loc),
+                    "cached": false
+                }),
                 None => serde_json::json!({ "definition": null, "message": "No type definition found" }),
             })
         }).await,
 
         methods::FIND_IMPL => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(impls) = ctx.graph.get_implementations(&location).await {
+                return Ok(serde_json::json!({
+                    "count": impls.len(),
+                    "implementations": impls.iter().map(LocationDto::from).collect::<Vec<_>>(),
+                    "cached": true
+                }));
+            }
+
             let impls = ctx.lsp.find_implementations(&f, l, c).await?;
+
+            if !impls.is_empty() {
+                ctx.graph.cache_implementations(&location, &impls).await;
+            }
+
             Ok(serde_json::json!({
                 "count": impls.len(),
-                "implementations": impls.iter().map(LocationDto::from).collect::<Vec<_>>()
+                "implementations": impls.iter().map(LocationDto::from).collect::<Vec<_>>(),
+                "cached": false
             }))
         }).await,
 
@@ -425,45 +527,84 @@ async fn dispatch(
         }).await,
 
         methods::CALLS_INCOMING => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(calls) = ctx.graph.get_incoming_calls(&location).await {
+                return Ok(serde_json::json!({
+                    "count": calls.len(),
+                    "calls": calls_to_json(&calls),
+                    "cached": true
+                }));
+            }
+
             let calls = ctx.lsp.incoming_calls(&f, l, c).await?;
+
+            if let Some(hover) = ctx.lsp.hover(&f, l, c).await?
+                && let Some(name) = hover.extract_symbol_name()
+            {
+                ctx.graph.cache_incoming_calls(
+                    &location,
+                    &name,
+                    crate::models::symbol::SymbolKind::Function,
+                    &calls,
+                ).await;
+            }
+
             Ok(serde_json::json!({
                 "count": calls.len(),
-                "calls": calls.iter().map(|c| serde_json::json!({
-                    "name": c.name,
-                    "kind": c.kind.to_string(),
-                    "file": c.location.file.display().to_string(),
-                    "line": c.location.line,
-                    "column": c.location.column,
-                    "call_site": c.call_site.as_ref().map(|cs| serde_json::json!({
-                        "file": cs.file.display().to_string(),
-                        "line": cs.line,
-                        "column": cs.column,
-                    })),
-                })).collect::<Vec<_>>()
+                "calls": call_hierarchy_to_json(&calls),
+                "cached": false
             }))
         }).await,
 
         methods::CALLS_OUTGOING => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(calls) = ctx.graph.get_outgoing_calls(&location).await {
+                return Ok(serde_json::json!({
+                    "count": calls.len(),
+                    "calls": calls_to_json(&calls),
+                    "cached": true
+                }));
+            }
+
             let calls = ctx.lsp.outgoing_calls(&f, l, c).await?;
+
+            if let Some(hover) = ctx.lsp.hover(&f, l, c).await?
+                && let Some(name) = hover.extract_symbol_name()
+            {
+                ctx.graph.cache_outgoing_calls(
+                    &location,
+                    &name,
+                    crate::models::symbol::SymbolKind::Function,
+                    &calls,
+                ).await;
+            }
+
             Ok(serde_json::json!({
                 "count": calls.len(),
-                "calls": calls.iter().map(|c| serde_json::json!({
-                    "name": c.name,
-                    "kind": c.kind.to_string(),
-                    "file": c.location.file.display().to_string(),
-                    "line": c.location.line,
-                    "column": c.location.column,
-                    "call_site": c.call_site.as_ref().map(|cs| serde_json::json!({
-                        "file": cs.file.display().to_string(),
-                        "line": cs.line,
-                        "column": cs.column,
-                    })),
-                })).collect::<Vec<_>>()
+                "calls": call_hierarchy_to_json(&calls),
+                "cached": false
             }))
         }).await,
 
         methods::SUPERTYPES => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(items) = ctx.graph.get_supertypes(&location).await {
+                return Ok(serde_json::json!({
+                    "count": items.len(),
+                    "items": type_hierarchy_to_json(&items),
+                    "cached": true
+                }));
+            }
+
             let items = ctx.lsp.supertypes(&f, l, c).await?;
+
+            if !items.is_empty() {
+                ctx.graph.cache_supertypes(&location, &items).await;
+            }
+
             Ok(serde_json::json!({
                 "count": items.len(),
                 "items": items.iter().map(|item| TypeHierarchyItemJson {
@@ -473,12 +614,28 @@ async fn dispatch(
                     line: item.location.line,
                     column: item.location.column,
                     detail: item.detail.clone(),
-                }).collect::<Vec<_>>()
+                }).collect::<Vec<_>>(),
+                "cached": false
             }))
         }).await,
 
         methods::SUBTYPES => handle_position(&params, projects, |ctx, f, l, c| async move {
+            let location = Location::point(f.clone(), l, c);
+
+            if let Some(items) = ctx.graph.get_subtypes(&location).await {
+                return Ok(serde_json::json!({
+                    "count": items.len(),
+                    "items": type_hierarchy_to_json(&items),
+                    "cached": true
+                }));
+            }
+
             let items = ctx.lsp.subtypes(&f, l, c).await?;
+
+            if !items.is_empty() {
+                ctx.graph.cache_subtypes(&location, &items).await;
+            }
+
             Ok(serde_json::json!({
                 "count": items.len(),
                 "items": items.iter().map(|item| TypeHierarchyItemJson {
@@ -488,7 +645,8 @@ async fn dispatch(
                     line: item.location.line,
                     column: item.location.column,
                     detail: item.detail.clone(),
-                }).collect::<Vec<_>>()
+                }).collect::<Vec<_>>(),
+                "cached": false
             }))
         }).await,
 
@@ -573,6 +731,13 @@ async fn dispatch(
         methods::SELECTION_RANGES => handle_selection_ranges(&params, projects).await,
         methods::APPLY_CODE_ACTION => handle_apply_action(&params, projects).await,
 
+        // Search operations (BM25 ranked)
+        methods::SEARCH_SYMBOLS => handle_search_symbols(&params, projects).await,
+        methods::SEARCH_CONTENT => handle_search_content(&params, projects).await,
+        methods::INDEX_BUILD => handle_index_build(&params, projects).await,
+        methods::INDEX_STATUS => handle_index_status(&params, projects).await,
+        methods::INDEX_CLEAR => handle_index_clear(&params, projects).await,
+
         _ => Err(RpcError::method_not_found(&request.method)),
     }
 }
@@ -641,6 +806,68 @@ where
 }
 
 // ============================================================================
+// Response Helpers
+// ============================================================================
+
+fn calls_to_json(calls: &[CallInfo]) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "kind": c.kind.to_string(),
+                "file": c.location.file.display().to_string(),
+                "line": c.location.line,
+                "column": c.location.column,
+                "call_site": c.call_site.as_ref().map(|cs| serde_json::json!({
+                    "file": cs.file.display().to_string(),
+                    "line": cs.line,
+                    "column": cs.column,
+                })),
+            })
+        })
+        .collect()
+}
+
+fn type_hierarchy_to_json(items: &[TypeHierarchyInfo]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "name": item.name,
+                "kind": item.kind.to_string(),
+                "file": item.location.file.display().to_string(),
+                "line": item.location.line,
+                "column": item.location.column,
+                "detail": item.detail,
+            })
+        })
+        .collect()
+}
+
+fn call_hierarchy_to_json(
+    calls: &[crate::models::lsp::CallHierarchyItem],
+) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "kind": c.kind.to_string(),
+                "file": c.location.file.display().to_string(),
+                "line": c.location.line,
+                "column": c.location.column,
+                "call_site": c.call_site.as_ref().map(|cs| serde_json::json!({
+                    "file": cs.file.display().to_string(),
+                    "line": cs.line,
+                    "column": cs.column,
+                })),
+            })
+        })
+        .collect()
+}
+
+// ============================================================================
 // Special Handlers
 // ============================================================================
 
@@ -650,15 +877,44 @@ async fn handle_status(
     start_time: Instant,
 ) -> Result<serde_json::Value, RpcError> {
     let guard = projects.read().await;
-    let active: Vec<_> = guard
-        .iter()
-        .map(|(path, ctx)| {
-            serde_json::json!({
-                "project": path.display().to_string(),
-                "requests": ctx.request_count.load(Ordering::Relaxed),
-            })
-        })
-        .collect();
+
+    let mut total_nodes = 0u64;
+    let mut total_edges = 0u64;
+    let mut total_files = 0u64;
+    let mut total_hits = 0u64;
+    let mut total_misses = 0u64;
+
+    let mut active = Vec::with_capacity(guard.len());
+    for (path, ctx) in guard.iter() {
+        let graph_stats = ctx.graph.stats();
+        let nodes = ctx.graph.node_count().await;
+        let edges = ctx.graph.edge_count().await;
+        let files = ctx.graph.file_count().await;
+
+        total_nodes += nodes as u64;
+        total_edges += edges as u64;
+        total_files += files as u64;
+        total_hits += graph_stats.cache_hits;
+        total_misses += graph_stats.cache_misses;
+
+        active.push(serde_json::json!({
+            "project": path.display().to_string(),
+            "requests": ctx.request_count.load(Ordering::Relaxed),
+            "graph": {
+                "nodes": nodes,
+                "edges": edges,
+                "files": files,
+                "hit_rate": graph_stats.hit_rate,
+            }
+        }));
+    }
+
+    let total_requests = total_hits + total_misses;
+    let overall_hit_rate = if total_requests > 0 {
+        total_hits as f64 / total_requests as f64
+    } else {
+        0.0
+    };
 
     Ok(serde_json::json!({
         "running": true,
@@ -667,6 +923,14 @@ async fn handle_status(
         "socket_path": config.socket_path.display().to_string(),
         "active_projects": active.len(),
         "projects": active,
+        "graph_totals": {
+            "nodes": total_nodes,
+            "edges": total_edges,
+            "files": total_files,
+            "cache_hits": total_hits,
+            "cache_misses": total_misses,
+            "hit_rate": overall_hit_rate,
+        }
     }))
 }
 
@@ -741,6 +1005,10 @@ async fn handle_rename(
         .rename(Path::new(&p.file), p.line, p.column, &p.new_name)
         .await
         .map_err(RpcError::from)?;
+
+    for change in &result.changes {
+        ctx.graph.invalidate_file(&change.file).await;
+    }
 
     Ok(serde_json::json!({
         "changes": result.changes.iter().map(|c| FileChangeJson {
@@ -834,6 +1102,10 @@ async fn handle_apply_action(
         .await
         .map_err(RpcError::from)?;
 
+    for change in &result.changes {
+        ctx.graph.invalidate_file(&change.file).await;
+    }
+
     Ok(serde_json::json!({
         "changes": result.changes.iter().map(|c| serde_json::json!({
             "file": c.file.display().to_string(),
@@ -845,5 +1117,166 @@ async fn handle_apply_action(
                 "new_text": e.new_text,
             })).collect::<Vec<_>>()
         })).collect::<Vec<_>>()
+    }))
+}
+
+// ============================================================================
+// Search Handlers (BM25 Ranked)
+// ============================================================================
+
+async fn handle_search_symbols(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+) -> Result<serde_json::Value, RpcError> {
+    let p: SearchSymbolsParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project).await?;
+    ctx.touch().await;
+
+    if let Err(e) = ctx.search.init().await {
+        return Err(RpcError::internal_error(&e.to_string()));
+    }
+
+    let kind_filter: Option<Vec<crate::models::symbol::SymbolKind>> = p.kind.as_ref().map(|k| {
+        vec![crate::models::symbol::SymbolKind::from_str_loose(k)]
+    });
+
+    let results = ctx
+        .search
+        .search_symbols(&p.query, p.limit, kind_filter.as_deref())
+        .await
+        .map_err(|e| RpcError::internal_error(&e.to_string()))?;
+
+    Ok(serde_json::json!({
+        "count": results.len(),
+        "results": results.iter().map(|r| serde_json::json!({
+            "name": r.name,
+            "kind": r.kind.to_string(),
+            "file": r.file.display().to_string(),
+            "line": r.line,
+            "column": r.column,
+            "container": r.container,
+            "score": r.score,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+async fn handle_search_content(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+) -> Result<serde_json::Value, RpcError> {
+    let p: SearchContentParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project).await?;
+    ctx.touch().await;
+
+    if let Err(e) = ctx.search.init().await {
+        return Err(RpcError::internal_error(&e.to_string()));
+    }
+
+    let language = p.language.as_ref().map(|l| crate::models::symbol::Language::from_str_loose(l));
+
+    let results = ctx
+        .search
+        .search_content(&p.query, p.limit, language)
+        .await
+        .map_err(|e| RpcError::internal_error(&e.to_string()))?;
+
+    Ok(serde_json::json!({
+        "count": results.len(),
+        "results": results.iter().map(|r| serde_json::json!({
+            "file": r.file.display().to_string(),
+            "line": r.line,
+            "content": r.content,
+            "score": r.score,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+async fn handle_index_build(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+) -> Result<serde_json::Value, RpcError> {
+    let p: IndexBuildParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project).await?;
+    ctx.touch().await;
+
+    if let Err(e) = ctx.search.init().await {
+        return Err(RpcError::internal_error(&e.to_string()));
+    }
+
+    let languages: Option<Vec<crate::models::symbol::Language>> = p.languages.as_ref().map(|langs| {
+        langs.iter().map(|l| crate::models::symbol::Language::from_str_loose(l)).collect()
+    });
+
+    let options = IndexOptions {
+        force: p.force,
+        languages,
+        paths: None,
+    };
+
+    let stats = ctx
+        .search
+        .index(options)
+        .await
+        .map_err(|e| RpcError::internal_error(&e.to_string()))?;
+
+    Ok(serde_json::json!({
+        "status": "completed",
+        "stats": {
+            "file_count": stats.file_count,
+            "symbol_count": stats.symbol_count,
+            "content_line_count": stats.content_line_count,
+            "index_size_bytes": stats.index_size_bytes,
+        }
+    }))
+}
+
+async fn handle_index_status(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+) -> Result<serde_json::Value, RpcError> {
+    let p: FileParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project).await?;
+    ctx.touch().await;
+
+    if let Err(e) = ctx.search.init().await {
+        return Err(RpcError::internal_error(&e.to_string()));
+    }
+
+    let stats = ctx
+        .search
+        .stats()
+        .await
+        .map_err(|e| RpcError::internal_error(&e.to_string()))?;
+
+    Ok(serde_json::json!({
+        "file_count": stats.file_count,
+        "symbol_count": stats.symbol_count,
+        "content_line_count": stats.content_line_count,
+        "index_size_bytes": stats.index_size_bytes,
+        "last_indexed": stats.last_indexed,
+        "is_indexing": stats.is_indexing,
+        "progress": stats.progress,
+    }))
+}
+
+async fn handle_index_clear(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+) -> Result<serde_json::Value, RpcError> {
+    let p: FileParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project).await?;
+    ctx.touch().await;
+
+    if let Err(e) = ctx.search.init().await {
+        return Err(RpcError::internal_error(&e.to_string()));
+    }
+
+    ctx.search
+        .clear()
+        .await
+        .map_err(|e| RpcError::internal_error(&e.to_string()))?;
+
+    Ok(serde_json::json!({
+        "cleared": true
     }))
 }

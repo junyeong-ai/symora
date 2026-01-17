@@ -382,6 +382,79 @@ impl DaemonClient {
     }
 
     // ========================================================================
+    // Search Operations (BM25 Ranked)
+    // ========================================================================
+
+    pub async fn search_symbols(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        kind: Option<&str>,
+    ) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "query": query,
+            "limit": limit,
+            "kind": kind,
+        });
+        self.request_with_project(methods::SEARCH_SYMBOLS, params)
+            .await
+            .and_then(Self::extract_result)
+    }
+
+    pub async fn search_content(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        language: Option<&str>,
+    ) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "query": query,
+            "limit": limit,
+            "language": language,
+        });
+        self.request_with_project(methods::SEARCH_CONTENT, params)
+            .await
+            .and_then(Self::extract_result)
+    }
+
+    pub async fn index_build(
+        &self,
+        force: bool,
+        languages: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "force": force,
+            "languages": languages,
+        });
+        self.request_with_project(methods::INDEX_BUILD, params)
+            .await
+            .and_then(Self::extract_result)
+    }
+
+    pub async fn index_status(&self) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "file": "",
+        });
+        self.request_with_project(methods::INDEX_STATUS, params)
+            .await
+            .and_then(Self::extract_result)
+    }
+
+    pub async fn index_clear(&self) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "file": "",
+        });
+        self.request_with_project(methods::INDEX_CLEAR, params)
+            .await
+            .and_then(Self::extract_result)
+    }
+
+    // ========================================================================
     // Daemon Control Operations
     // ========================================================================
 

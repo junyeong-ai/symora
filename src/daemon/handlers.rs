@@ -72,6 +72,35 @@ pub struct PositionInput {
     pub column: u32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchSymbolsParams {
+    pub project: String,
+    pub query: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchContentParams {
+    pub project: String,
+    pub query: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IndexBuildParams {
+    pub project: String,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub languages: Option<Vec<String>>,
+}
+
 // ============================================================================
 // Response Types (handler-specific JSON shapes)
 // ============================================================================

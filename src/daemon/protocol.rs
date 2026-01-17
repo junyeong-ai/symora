@@ -165,6 +165,13 @@ pub mod methods {
     pub const PING: &str = "ping";
     pub const STATUS: &str = "status";
     pub const SHUTDOWN: &str = "shutdown";
+
+    // Search operations (BM25 ranked)
+    pub const SEARCH_SYMBOLS: &str = "search_symbols";
+    pub const SEARCH_CONTENT: &str = "search_content";
+    pub const INDEX_BUILD: &str = "index_build";
+    pub const INDEX_STATUS: &str = "index_status";
+    pub const INDEX_CLEAR: &str = "index_clear";
 }
 
 /// Client-side response DTOs for deserialization
