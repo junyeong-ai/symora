@@ -91,26 +91,120 @@ pub(super) fn check_feature_support(
 }
 
 pub(super) fn find_project_entry(root: &Path, language: Language) -> Option<PathBuf> {
-    let config_files: &[&str] = match language {
-        Language::TypeScript | Language::JavaScript => {
-            &["tsconfig.json", "jsconfig.json", "package.json"]
+    if let Some(custom_files) = crate::config::entry_files_for(language) {
+        for pattern in &custom_files {
+            if pattern.contains('*') {
+                if let Some(found) = find_file_by_glob(root, pattern) {
+                    return Some(found);
+                }
+            } else {
+                let path = root.join(pattern);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
         }
-        Language::Python => &["pyproject.toml", "setup.py", "setup.cfg"],
+    }
+
+    let config_files: &[&str] = match language {
+        Language::TypeScript | Language::JavaScript | Language::Vue => &[
+            "tsconfig.json",
+            "jsconfig.json",
+            "angular.json",
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.ts",
+            "nuxt.config.ts",
+            "nuxt.config.js",
+            "vite.config.ts",
+            "vite.config.js",
+            "package.json",
+            "turbo.json",
+            "nx.json",
+            "lerna.json",
+            "pnpm-workspace.yaml",
+        ],
+        Language::Python => &[
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "poetry.lock",
+            "uv.lock",
+            "pdm.lock",
+        ],
         Language::Rust => &["Cargo.toml"],
-        Language::Kotlin => &["build.gradle.kts", "build.gradle", "settings.gradle.kts"],
-        Language::Java => &["pom.xml", "build.gradle", "build.gradle.kts"],
-        Language::Go => &["go.mod"],
+        Language::Go => &["go.work", "go.mod"],
+        Language::Cpp => &["CMakeLists.txt", "meson.build", "Makefile"],
+        Language::Zig => &["build.zig"],
+        Language::Java | Language::Kotlin => &[
+            "settings.gradle.kts",
+            "settings.gradle",
+            "build.gradle.kts",
+            "build.gradle",
+            "pom.xml",
+            "WORKSPACE",
+        ],
+        Language::Scala => &[
+            "build.sbt",
+            "settings.gradle.kts",
+            "settings.gradle",
+            "build.gradle.kts",
+            "build.gradle",
+            "pom.xml",
+        ],
+        Language::Clojure => &["deps.edn", "project.clj"],
+        Language::CSharp => &["*.sln", "*.csproj", "global.json"],
+        Language::FSharp => &["*.sln", "*.fsproj", "global.json"],
+        Language::Ruby => &["Gemfile", "*.gemspec", "Rakefile"],
+        Language::PHP => &["composer.json"],
+        Language::Perl => &["Makefile.PL", "cpanfile", "dist.ini"],
+        Language::Lua => &["*.rockspec"],
+        Language::Bash => &["Makefile"],
+        Language::PowerShell => &["*.psd1"],
+        Language::Haskell => &["package.yaml", "*.cabal", "stack.yaml", "cabal.project"],
+        Language::Elixir => &["mix.exs"],
+        Language::Erlang => &["rebar.config", "Makefile"],
+        Language::OCaml => &["dune-project", "*.opam"],
+        Language::Elm => &["elm.json"],
+        Language::Swift => &["Package.swift", "*.xcodeproj", "*.xcworkspace"],
+        Language::Dart => &["pubspec.yaml"],
+        Language::Terraform => &["*.tf"],
+        Language::Nix => &["flake.nix", "shell.nix", "default.nix"],
+        Language::Julia => &["Project.toml"],
+        Language::R => &["DESCRIPTION", "*.Rproj"],
+        Language::Fortran => &["CMakeLists.txt", "Makefile"],
+        Language::Markdown | Language::Yaml | Language::Toml | Language::Rego => &[],
         _ => &[],
     };
 
-    for config in config_files {
-        let path = root.join(config);
-        if path.exists() {
-            return Some(path);
+    for pattern in config_files {
+        if pattern.contains('*') {
+            if let Some(found) = find_file_by_glob(root, pattern) {
+                return Some(found);
+            }
+        } else {
+            let path = root.join(pattern);
+            if path.exists() {
+                return Some(path);
+            }
         }
     }
 
     find_first_file(root, language)
+}
+
+fn find_file_by_glob(root: &Path, pattern: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let pattern_suffix = pattern.trim_start_matches('*');
+
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(pattern_suffix) {
+            return Some(entry.path());
+        }
+    }
+    None
 }
 
 pub(super) fn find_first_file(root: &Path, language: Language) -> Option<PathBuf> {

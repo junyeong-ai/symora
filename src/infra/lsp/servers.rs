@@ -79,19 +79,19 @@ impl Platform {
 // Server Configuration
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct InstallInstructions {
-    pub macos: String,
-    pub linux: String,
-    pub windows: String,
+    pub macos: &'static str,
+    pub linux: &'static str,
+    pub windows: &'static str,
 }
 
 impl InstallInstructions {
-    pub fn current(&self) -> &str {
+    pub fn current(&self) -> &'static str {
         match Platform::current() {
-            Platform::MacOS => &self.macos,
-            Platform::Linux => &self.linux,
-            Platform::Windows => &self.windows,
+            Platform::MacOS => self.macos,
+            Platform::Linux => self.linux,
+            Platform::Windows => self.windows,
         }
     }
 }
@@ -186,9 +186,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "rustup component add rust-analyzer".to_string(),
-                linux: "rustup component add rust-analyzer".to_string(),
-                windows: "rustup component add rust-analyzer".to_string(),
+                macos: "rustup component add rust-analyzer",
+                linux: "rustup component add rust-analyzer",
+                windows: "rustup component add rust-analyzer",
             },
             tier: ServerTier::Fast,
         },
@@ -209,9 +209,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             ],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install llvm".to_string(),
-                linux: "apt install clangd".to_string(),
-                windows: "Download from https://clangd.llvm.org/installation".to_string(),
+                macos: "brew install llvm",
+                linux: "apt install clangd",
+                windows: "Download from https://clangd.llvm.org/installation",
             },
             tier: ServerTier::Fast,
         },
@@ -225,9 +225,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install zls".to_string(),
-                linux: "Download from https://github.com/zigtools/zls/releases".to_string(),
-                windows: "Download from https://github.com/zigtools/zls/releases".to_string(),
+                macos: "brew install zls",
+                linux: "Download from https://github.com/zigtools/zls/releases",
+                windows: "Download from https://github.com/zigtools/zls/releases",
             },
             tier: ServerTier::Fast,
         },
@@ -243,9 +243,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install jdtls".to_string(),
-                linux: "Download from https://download.eclipse.org/jdtls/snapshots/".to_string(),
-                windows: "Download from https://download.eclipse.org/jdtls/snapshots/".to_string(),
+                macos: "brew install jdtls",
+                linux: "Download from https://download.eclipse.org/jdtls/snapshots/",
+                windows: "Download from https://download.eclipse.org/jdtls/snapshots/",
             },
             tier: ServerTier::Slow,
         },
@@ -259,10 +259,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--help",
             install: InstallInstructions {
-                macos: "brew install JetBrains/utils/kotlin-lsp".to_string(),
-                linux: "Download from https://github.com/JetBrains/kotlin-lsp/releases".to_string(),
-                windows: "Download from https://github.com/JetBrains/kotlin-lsp/releases"
-                    .to_string(),
+                macos: "brew install JetBrains/utils/kotlin-lsp",
+                linux: "Download from https://github.com/JetBrains/kotlin-lsp/releases",
+                windows: "Download from https://github.com/JetBrains/kotlin-lsp/releases",
             },
             tier: ServerTier::Slow,
         },
@@ -276,9 +275,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install metals".to_string(),
-                linux: "cs install metals".to_string(),
-                windows: "cs install metals".to_string(),
+                macos: "brew install metals",
+                linux: "cs install metals",
+                windows: "cs install metals",
             },
             tier: ServerTier::Slow,
         },
@@ -292,11 +291,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install clojure-lsp/brew/clojure-lsp-native".to_string(),
-                linux: "Download from https://github.com/clojure-lsp/clojure-lsp/releases"
-                    .to_string(),
-                windows: "Download from https://github.com/clojure-lsp/clojure-lsp/releases"
-                    .to_string(),
+                macos: "brew install clojure-lsp/brew/clojure-lsp-native",
+                linux: "Download from https://github.com/clojure-lsp/clojure-lsp/releases",
+                windows: "Download from https://github.com/clojure-lsp/clojure-lsp/releases",
             },
             tier: ServerTier::Standard,
         },
@@ -312,9 +309,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "dotnet tool install -g csharp-ls".to_string(),
-                linux: "dotnet tool install -g csharp-ls".to_string(),
-                windows: "dotnet tool install -g csharp-ls".to_string(),
+                macos: "dotnet tool install -g csharp-ls",
+                linux: "dotnet tool install -g csharp-ls",
+                windows: "dotnet tool install -g csharp-ls",
             },
             tier: ServerTier::Standard,
         },
@@ -328,9 +325,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--adaptive-lsp-server-enabled", "--project-graph-enabled"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "dotnet tool install -g fsautocomplete".to_string(),
-                linux: "dotnet tool install -g fsautocomplete".to_string(),
-                windows: "dotnet tool install -g fsautocomplete".to_string(),
+                macos: "dotnet tool install -g fsautocomplete",
+                linux: "dotnet tool install -g fsautocomplete",
+                windows: "dotnet tool install -g fsautocomplete",
             },
             tier: ServerTier::Standard,
         },
@@ -346,9 +343,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g typescript typescript-language-server".to_string(),
-                linux: "npm install -g typescript typescript-language-server".to_string(),
-                windows: "npm install -g typescript typescript-language-server".to_string(),
+                macos: "npm install -g typescript typescript-language-server",
+                linux: "npm install -g typescript typescript-language-server",
+                windows: "npm install -g typescript typescript-language-server",
             },
             tier: ServerTier::Slow,
         },
@@ -362,9 +359,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g typescript typescript-language-server".to_string(),
-                linux: "npm install -g typescript typescript-language-server".to_string(),
-                windows: "npm install -g typescript typescript-language-server".to_string(),
+                macos: "npm install -g typescript typescript-language-server",
+                linux: "npm install -g typescript typescript-language-server",
+                windows: "npm install -g typescript typescript-language-server",
             },
             tier: ServerTier::Slow,
         },
@@ -378,9 +375,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g @vue/language-server".to_string(),
-                linux: "npm install -g @vue/language-server".to_string(),
-                windows: "npm install -g @vue/language-server".to_string(),
+                macos: "npm install -g @vue/language-server",
+                linux: "npm install -g @vue/language-server",
+                windows: "npm install -g @vue/language-server",
             },
             tier: ServerTier::Standard,
         },
@@ -396,9 +393,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g pyright".to_string(),
-                linux: "npm install -g pyright".to_string(),
-                windows: "npm install -g pyright".to_string(),
+                macos: "npm install -g pyright",
+                linux: "npm install -g pyright",
+                windows: "npm install -g pyright",
             },
             tier: ServerTier::Slow,
         },
@@ -412,9 +409,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "gem install ruby-lsp".to_string(),
-                linux: "gem install ruby-lsp".to_string(),
-                windows: "gem install ruby-lsp".to_string(),
+                macos: "gem install ruby-lsp",
+                linux: "gem install ruby-lsp",
+                windows: "gem install ruby-lsp",
             },
             tier: ServerTier::Standard,
         },
@@ -428,9 +425,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g intelephense".to_string(),
-                linux: "npm install -g intelephense".to_string(),
-                windows: "npm install -g intelephense".to_string(),
+                macos: "npm install -g intelephense",
+                linux: "npm install -g intelephense",
+                windows: "npm install -g intelephense",
             },
             tier: ServerTier::Standard,
         },
@@ -444,9 +441,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g perlnavigator-server".to_string(),
-                linux: "npm install -g perlnavigator-server".to_string(),
-                windows: "npm install -g perlnavigator-server".to_string(),
+                macos: "npm install -g perlnavigator-server",
+                linux: "npm install -g perlnavigator-server",
+                windows: "npm install -g perlnavigator-server",
             },
             tier: ServerTier::Standard,
         },
@@ -460,11 +457,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install lua-language-server".to_string(),
-                linux: "Download from https://github.com/LuaLS/lua-language-server/releases"
-                    .to_string(),
-                windows: "Download from https://github.com/LuaLS/lua-language-server/releases"
-                    .to_string(),
+                macos: "brew install lua-language-server",
+                linux: "Download from https://github.com/LuaLS/lua-language-server/releases",
+                windows: "Download from https://github.com/LuaLS/lua-language-server/releases",
             },
             tier: ServerTier::Standard,
         },
@@ -478,9 +473,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["start"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g bash-language-server".to_string(),
-                linux: "npm install -g bash-language-server".to_string(),
-                windows: "npm install -g bash-language-server".to_string(),
+                macos: "npm install -g bash-language-server",
+                linux: "npm install -g bash-language-server",
+                windows: "npm install -g bash-language-server",
             },
             tier: ServerTier::Standard,
         },
@@ -494,9 +489,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["-NoLogo", "-NoProfile", "-Command", "Import-Module PowerShellEditorServices; Start-EditorServices -HostName symora -HostProfileId symora -HostVersion 1.0.0 -BundledModulesPath $env:PSES_BUNDLE_PATH -Stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser".to_string(),
-                linux: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser".to_string(),
-                windows: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser".to_string(),
+                macos: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser",
+                linux: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser",
+                windows: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser",
             },
             tier: ServerTier::Standard,
         },
@@ -512,9 +507,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--lsp"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "ghcup install hls".to_string(),
-                linux: "ghcup install hls".to_string(),
-                windows: "ghcup install hls".to_string(),
+                macos: "ghcup install hls",
+                linux: "ghcup install hls",
+                windows: "ghcup install hls",
             },
             tier: ServerTier::Slow,
         },
@@ -528,10 +523,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install elixir-ls".to_string(),
-                linux: "Download from https://github.com/elixir-lsp/elixir-ls/releases".to_string(),
-                windows: "Download from https://github.com/elixir-lsp/elixir-ls/releases"
-                    .to_string(),
+                macos: "brew install elixir-ls",
+                linux: "Download from https://github.com/elixir-lsp/elixir-ls/releases",
+                windows: "Download from https://github.com/elixir-lsp/elixir-ls/releases",
             },
             tier: ServerTier::Standard,
         },
@@ -545,10 +539,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install erlang_ls".to_string(),
-                linux: "Download from https://github.com/erlang-ls/erlang_ls/releases".to_string(),
-                windows: "Download from https://github.com/erlang-ls/erlang_ls/releases"
-                    .to_string(),
+                macos: "brew install erlang_ls",
+                linux: "Download from https://github.com/erlang-ls/erlang_ls/releases",
+                windows: "Download from https://github.com/erlang-ls/erlang_ls/releases",
             },
             tier: ServerTier::Standard,
         },
@@ -562,9 +555,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g @elm-tooling/elm-language-server".to_string(),
-                linux: "npm install -g @elm-tooling/elm-language-server".to_string(),
-                windows: "npm install -g @elm-tooling/elm-language-server".to_string(),
+                macos: "npm install -g @elm-tooling/elm-language-server",
+                linux: "npm install -g @elm-tooling/elm-language-server",
+                windows: "npm install -g @elm-tooling/elm-language-server",
             },
             tier: ServerTier::Standard,
         },
@@ -578,9 +571,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "opam install ocaml-lsp-server".to_string(),
-                linux: "opam install ocaml-lsp-server".to_string(),
-                windows: "opam install ocaml-lsp-server".to_string(),
+                macos: "opam install ocaml-lsp-server",
+                linux: "opam install ocaml-lsp-server",
+                windows: "opam install ocaml-lsp-server",
             },
             tier: ServerTier::Standard,
         },
@@ -596,9 +589,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["serve"],
             version_arg: "version",
             install: InstallInstructions {
-                macos: "go install golang.org/x/tools/gopls@latest".to_string(),
-                linux: "go install golang.org/x/tools/gopls@latest".to_string(),
-                windows: "go install golang.org/x/tools/gopls@latest".to_string(),
+                macos: "go install golang.org/x/tools/gopls@latest",
+                linux: "go install golang.org/x/tools/gopls@latest",
+                windows: "go install golang.org/x/tools/gopls@latest",
             },
             tier: ServerTier::Fast,
         },
@@ -612,9 +605,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "Included with Xcode".to_string(),
-                linux: "Download from https://swift.org/download/".to_string(),
-                windows: "Download from https://swift.org/download/".to_string(),
+                macos: "Included with Xcode",
+                linux: "Download from https://swift.org/download/",
+                windows: "Download from https://swift.org/download/",
             },
             tier: ServerTier::Standard,
         },
@@ -628,9 +621,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["language-server", "--protocol=lsp"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install dart".to_string(),
-                linux: "apt install dart".to_string(),
-                windows: "choco install dart-sdk".to_string(),
+                macos: "brew install dart",
+                linux: "apt install dart",
+                windows: "choco install dart-sdk",
             },
             tier: ServerTier::Standard,
         },
@@ -646,9 +639,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["serve"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install hashicorp/tap/terraform-ls".to_string(),
-                linux: "Download from https://releases.hashicorp.com/terraform-ls/".to_string(),
-                windows: "choco install terraform-ls".to_string(),
+                macos: "brew install hashicorp/tap/terraform-ls",
+                linux: "Download from https://releases.hashicorp.com/terraform-ls/",
+                windows: "choco install terraform-ls",
             },
             tier: ServerTier::Standard,
         },
@@ -662,9 +655,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "npm install -g yaml-language-server".to_string(),
-                linux: "npm install -g yaml-language-server".to_string(),
-                windows: "npm install -g yaml-language-server".to_string(),
+                macos: "npm install -g yaml-language-server",
+                linux: "npm install -g yaml-language-server",
+                windows: "npm install -g yaml-language-server",
             },
             tier: ServerTier::Standard,
         },
@@ -678,9 +671,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["lsp", "stdio"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install taplo".to_string(),
-                linux: "cargo install taplo-cli --locked".to_string(),
-                windows: "cargo install taplo-cli --locked".to_string(),
+                macos: "brew install taplo",
+                linux: "cargo install taplo-cli --locked",
+                windows: "cargo install taplo-cli --locked",
             },
             tier: ServerTier::Standard,
         },
@@ -694,9 +687,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "nix profile install nixpkgs#nil".to_string(),
-                linux: "nix profile install nixpkgs#nil".to_string(),
-                windows: "nix profile install nixpkgs#nil".to_string(),
+                macos: "nix profile install nixpkgs#nil",
+                linux: "nix profile install nixpkgs#nil",
+                windows: "nix profile install nixpkgs#nil",
             },
             tier: ServerTier::Standard,
         },
@@ -710,9 +703,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["language-server"],
             version_arg: "version",
             install: InstallInstructions {
-                macos: "brew install styrainc/packages/regal".to_string(),
-                linux: "Download from https://github.com/StyraInc/regal/releases".to_string(),
-                windows: "Download from https://github.com/StyraInc/regal/releases".to_string(),
+                macos: "brew install styrainc/packages/regal",
+                linux: "Download from https://github.com/StyraInc/regal/releases",
+                windows: "Download from https://github.com/StyraInc/regal/releases",
             },
             tier: ServerTier::Standard,
         },
@@ -728,9 +721,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["--slave", "-e", "languageserver::run()"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "R -e 'install.packages(\"languageserver\")'".to_string(),
-                linux: "R -e 'install.packages(\"languageserver\")'".to_string(),
-                windows: "R -e 'install.packages(\"languageserver\")'".to_string(),
+                macos: "R -e 'install.packages(\"languageserver\")'",
+                linux: "R -e 'install.packages(\"languageserver\")'",
+                windows: "R -e 'install.packages(\"languageserver\")'",
             },
             tier: ServerTier::Standard,
         },
@@ -749,9 +742,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             ],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'".to_string(),
-                linux: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'".to_string(),
-                windows: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'".to_string(),
+                macos: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'",
+                linux: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'",
+                windows: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'",
             },
             tier: ServerTier::Standard,
         },
@@ -765,9 +758,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &[],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "pip install fortls".to_string(),
-                linux: "pip install fortls".to_string(),
-                windows: "pip install fortls".to_string(),
+                macos: "pip install fortls",
+                linux: "pip install fortls",
+                windows: "pip install fortls",
             },
             tier: ServerTier::Standard,
         },
@@ -783,11 +776,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             args: &["server"],
             version_arg: "--version",
             install: InstallInstructions {
-                macos: "brew install marksman".to_string(),
-                linux: "Download from https://github.com/artempyanykh/marksman/releases"
-                    .to_string(),
-                windows: "Download from https://github.com/artempyanykh/marksman/releases"
-                    .to_string(),
+                macos: "brew install marksman",
+                linux: "Download from https://github.com/artempyanykh/marksman/releases",
+                windows: "Download from https://github.com/artempyanykh/marksman/releases",
             },
             tier: ServerTier::Standard,
         },
@@ -803,7 +794,7 @@ pub struct ServerHealth {
     pub name: &'static str,
     pub installed: bool,
     pub version: Option<String>,
-    pub install_instruction: String,
+    pub install_instruction: &'static str,
 }
 
 /// Check health of all configured servers
@@ -820,7 +811,7 @@ pub fn check_all_servers() -> Vec<ServerHealth> {
             name: config.name,
             installed,
             version,
-            install_instruction: config.install.current().to_string(),
+            install_instruction: config.install.current(),
         });
     }
 
