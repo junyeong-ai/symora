@@ -94,7 +94,6 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
         "search": {
             "limit": config.search.limit,
             "max_file_size_mb": config.search.max_file_size_mb,
-            "ripgrep_path": config.search.ripgrep_path,
         },
         "output": {
             "format": config.output.format,

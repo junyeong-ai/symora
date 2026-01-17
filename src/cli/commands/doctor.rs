@@ -50,7 +50,7 @@ struct ServerEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    install_command: Option<String>,
+    install_command: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     limited_features: Vec<String>,
 }
