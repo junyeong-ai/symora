@@ -59,7 +59,7 @@ symora calls incoming src/order.rs:42:5  # call hierarchy analysis
 | Type information | ❌ | ✅ LSP |
 | Call hierarchy | ❌ | ✅ LSP |
 | Rename refactoring | ❌ | ✅ LSP |
-| Text search | ✅ | ✅ ripgrep |
+| Ranked search | ❌ | ✅ BM25 (FTS5) |
 | AST search | ❌ | ✅ tree-sitter |
 | Usage metrics | ❌ | ✅ LSP |
 | Doc coverage | ❌ | ✅ LSP |
@@ -96,6 +96,7 @@ symora find symbol src/main.rs
 symora find symbol src/main.rs --kind function   # symbol discovery
 symora find def src/main.rs:10:5                 # go to definition
 symora find refs src/main.rs:10:5                # find references
+symora find refs src/main.rs:10:5 --with-snippet # references + source code
 symora find impl src/main.rs:10:5                # find implementations
 symora hover src/main.rs:10:5                    # type/doc info
 symora calls incoming src/main.rs:10:5           # find callers
@@ -110,19 +111,22 @@ symora diagnostics src/main.rs --with-suggestions # include fix suggestions
 ```bash
 # Search symbol usage and analyze metrics
 symora usage "process" --lang rust               # search symbols by pattern
-symora usage "Order" --lang rust --sort refs     # sort by reference count
+symora usage "Order" --lang rust --sort references     # sort by reference count
 symora usage "Config" --lang rust --with-metrics # include detailed metrics
 symora usage "*" --lang rust --filter no-docs    # find undocumented symbols
-symora usage "*" --lang rust --filter has-tests  # only symbols with tests
-symora usage "*" --lang rust --filter not-test-file # exclude test files
-symora usage "fn" --lang rust --max-symbols 100  # limit symbols to analyze
+symora usage "*" --lang rust --filter no-tests   # find untested symbols
+symora usage "*" --lang rust --filter zero-refs  # dead code detection
+symora usage "*" --lang rust --min-refs 5        # important symbols (5+ refs)
+symora usage "fn" --lang rust --with-snippet     # include code snippet
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--sort refs\|name` | Sort criteria (default: refs) |
-| `--filter` | has-tests, has-docs, no-docs, not-test-file |
+| `--sort references\|name` | Sort criteria (default: references) |
+| `--filter` | has-tests, no-tests, has-docs, no-docs, not-test-file, zero-refs |
 | `--with-metrics` | Show reference count, test status, doc status |
+| `--with-snippet` | Include source code snippet |
+| `--min-refs N` | Minimum references filter (find important symbols) |
 | `--max-symbols N` | Max symbols to analyze (default: 50) |
 | `--limit N` | Limit output results (default: 10) |
 
@@ -133,19 +137,50 @@ symora actions list src/main.rs:10:5 --kind refactor  # refactoring only
 symora actions apply src/main.rs:10:5 "Extract..."    # apply action
 ```
 
+### Context Gathering
+```bash
+symora context src/main.rs:10:5 --callers --callees  # callers/callees
+symora context src/main.rs:10:5 --types --tests      # type definitions, related tests
+```
+
+### Batch Processing
+```bash
+symora batch refs loc1 loc2 loc3                    # batch lookup multiple locations
+symora batch refs loc1 loc2 --with-snippet          # include snippets
+symora batch refs loc1 loc2 --parallel --fail-fast  # parallel execution, stop on failure
+```
+
 ### Pattern Edit (Structural)
 ```bash
 # Structural code editing with tree-sitter patterns
-symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
-symora edit src/main.rs:10:5 --old "foo" --new "bar"  # standard edit
+symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "// NEW" --dry-run
+symora edit replace src/main.rs:10:1 --text "new code" --dry-run
 ```
 
 ### Code Search
 ```bash
-symora search text "TODO" --type rust            # ripgrep-based
-symora search ast "function_item" --lang rust    # tree-sitter AST
+# BM25 Ranked Search (SQLite FTS5)
+symora search symbols "execute" --kind function  # symbol search
+symora search symbols "Handler" --limit 10       # limit results
+symora search content "async fn" --lang rust     # content search
+symora search content "TODO" --limit 20          # limit results
+
+# Search Index Management
+symora search index build                        # build index
+symora search index build --force --lang rust    # force rebuild
+symora search index status                       # index status
+symora search index clear                        # clear index
+
+# AST Search (tree-sitter)
+symora search ast "function_item" --lang rust    # structural search
 symora search nodes --lang rust                  # list node types
 ```
+
+| Search Type | Purpose | Ranking |
+|-------------|---------|---------|
+| `symbols` | Symbol name search | BM25 |
+| `content` | Code line search | BM25 |
+| `ast` | Structural pattern search | - |
 
 > **Location format**: `file:line:column` (1-indexed)
 > **`--limit 0`**: unlimited results

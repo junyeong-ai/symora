@@ -59,7 +59,7 @@ symora calls incoming src/order.rs:42:5  # 호출 계층 분석
 | 타입 정보 | ❌ | ✅ LSP |
 | 호출 계층 | ❌ | ✅ LSP |
 | 리네임 리팩토링 | ❌ | ✅ LSP |
-| 텍스트 검색 | ✅ | ✅ ripgrep |
+| 랭킹 검색 | ❌ | ✅ BM25 (FTS5) |
 | AST 검색 | ❌ | ✅ tree-sitter |
 | 사용량 메트릭 | ❌ | ✅ LSP |
 | 문서 커버리지 | ❌ | ✅ LSP |
@@ -96,6 +96,7 @@ symora find symbol src/main.rs
 symora find symbol src/main.rs --kind function   # 심볼 탐색
 symora find def src/main.rs:10:5                 # 정의로 이동
 symora find refs src/main.rs:10:5                # 참조 찾기
+symora find refs src/main.rs:10:5 --with-snippet # 참조 + 소스 코드
 symora find impl src/main.rs:10:5                # 구현체 찾기
 symora hover src/main.rs:10:5                    # 타입/문서 정보
 symora calls incoming src/main.rs:10:5           # 호출자 찾기
@@ -110,19 +111,22 @@ symora diagnostics src/main.rs --with-suggestions # 수정 제안 포함
 ```bash
 # 심볼 사용량 검색 및 메트릭 분석
 symora usage "process" --lang rust               # 패턴으로 심볼 검색
-symora usage "Order" --lang rust --sort refs     # 참조 수로 정렬
+symora usage "Order" --lang rust --sort references     # 참조 수로 정렬
 symora usage "Config" --lang rust --with-metrics # 상세 메트릭 포함
 symora usage "*" --lang rust --filter no-docs    # 문서 미작성 심볼 찾기
-symora usage "*" --lang rust --filter has-tests  # 테스트 있는 심볼만
-symora usage "*" --lang rust --filter not-test-file # 테스트 파일 제외
-symora usage "fn" --lang rust --max-symbols 100  # 분석 심볼 수 제한
+symora usage "*" --lang rust --filter no-tests   # 테스트 미커버리지 심볼
+symora usage "*" --lang rust --filter zero-refs  # 미사용 코드 탐지
+symora usage "*" --lang rust --min-refs 5        # 중요 심볼 (5+ 참조)
+symora usage "fn" --lang rust --with-snippet     # 코드 스니펫 포함
 ```
 
 | 옵션 | 설명 |
 |------|------|
-| `--sort refs\|name` | 정렬 기준 (기본: refs) |
-| `--filter` | has-tests, has-docs, no-docs, not-test-file |
+| `--sort references\|name` | 정렬 기준 (기본: references) |
+| `--filter` | has-tests, no-tests, has-docs, no-docs, not-test-file, zero-refs |
 | `--with-metrics` | 참조 수, 테스트 유무, 문서 유무 표시 |
+| `--with-snippet` | 소스 코드 스니펫 포함 |
+| `--min-refs N` | 최소 참조 수 필터 (중요 심볼 찾기) |
 | `--max-symbols N` | 분석할 최대 심볼 수 (기본: 50) |
 | `--limit N` | 출력 결과 수 제한 (기본: 10) |
 
@@ -133,19 +137,50 @@ symora actions list src/main.rs:10:5 --kind refactor  # 리팩토링만
 symora actions apply src/main.rs:10:5 "Extract..."    # 액션 적용
 ```
 
+### 컨텍스트 수집
+```bash
+symora context src/main.rs:10:5 --callers --callees  # 호출자/피호출자
+symora context src/main.rs:10:5 --types --tests      # 타입 정의, 관련 테스트
+```
+
+### 배치 처리
+```bash
+symora batch refs loc1 loc2 loc3                    # 여러 위치 일괄 조회
+symora batch refs loc1 loc2 --with-snippet          # 스니펫 포함
+symora batch refs loc1 loc2 --parallel --fail-fast  # 병렬 실행, 실패 시 중단
+```
+
 ### 구조적 편집 (Pattern Edit)
 ```bash
 # tree-sitter 패턴으로 구조적 코드 편집
-symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
-symora edit src/main.rs:10:5 --old "foo" --new "bar"  # 일반 편집
+symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "// NEW" --dry-run
+symora edit replace src/main.rs:10:1 --text "new code" --dry-run
 ```
 
 ### 코드 검색
 ```bash
-symora search text "TODO" --type rust            # ripgrep 기반
-symora search ast "function_item" --lang rust    # tree-sitter AST
+# BM25 랭킹 검색 (SQLite FTS5)
+symora search symbols "execute" --kind function  # 심볼 검색
+symora search symbols "Handler" --limit 10       # 결과 제한
+symora search content "async fn" --lang rust     # 콘텐츠 검색
+symora search content "TODO" --limit 20          # 결과 제한
+
+# 검색 인덱스 관리
+symora search index build                        # 인덱스 빌드
+symora search index build --force --lang rust    # 강제 재빌드
+symora search index status                       # 인덱스 상태
+symora search index clear                        # 인덱스 삭제
+
+# AST 검색 (tree-sitter)
+symora search ast "function_item" --lang rust    # 구조적 검색
 symora search nodes --lang rust                  # 노드 타입 조회
 ```
+
+| 검색 타입 | 용도 | 랭킹 |
+|----------|------|------|
+| `symbols` | 심볼 이름 검색 | BM25 |
+| `content` | 코드 라인 검색 | BM25 |
+| `ast` | 구조적 패턴 검색 | - |
 
 > **위치 형식**: `file:line:column` (1-indexed)
 > **`--limit 0`**: 무제한 결과

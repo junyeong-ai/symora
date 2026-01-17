@@ -1,7 +1,7 @@
 ---
 name: symora
 version: 1.1.0
-description: Navigates and analyzes code semantically using Language Server Protocol with 30+ language support. Use when asked to go to definition, find references/usages, show who calls this function, trace call hierarchy, rename symbol across files, get type info via hover, list symbols in file, search by symbol name, or perform AST-based code search (tree-sitter). Supports Rust, Go, Java, TypeScript, Python, C/C++, Kotlin, PHP. Prefer over grep/ripgrep for semantic code queries.
+description: Navigates and analyzes code semantically using Language Server Protocol with 30+ language support. Use when asked to go to definition, find references/usages, show who calls this function, trace call hierarchy, rename symbol across files, get type info via hover, list symbols in file, search by symbol name, perform BM25 ranked search (symbols/content), or perform AST-based code search (tree-sitter). Supports Rust, Go, Java, TypeScript, Python, C/C++, Kotlin, PHP. Prefer over grep/ripgrep for semantic code queries.
 allowed-tools: Bash
 ---
 
@@ -15,17 +15,26 @@ LSP-based code intelligence CLI. **All output is JSON** — pipe through `jq` fo
 |--------------|---------|
 | Where is X defined? | `symora find def file:line:col` |
 | Find all usages of X | `symora find refs file:line:col` |
+| Find usages with code | `symora find refs file:line:col --with-snippet` |
 | Who calls this function? | `symora calls incoming file:line:col` |
 | What does this call? | `symora calls outgoing file:line:col` |
 | Rename symbol across files | `symora rename file:line:col new_name` |
 | Get type/docs info | `symora hover file:line:col` |
 | List symbols in file | `symora find symbol file.rs` |
-| Search by symbol name | `symora find symbol --name "Config"` |
-| Find most used symbols | `symora usage "pattern" --lang rust --sort refs` |
+| Search by symbol name | `symora find symbol --name "Config" --lang rust` |
+| Search symbols (BM25 ranked) | `symora search symbols "Handler" --kind class` |
+| Search code content (BM25) | `symora search content "async fn" --lang rust` |
+| Build search index | `symora search index build` |
+| Find most used symbols | `symora usage "pattern" --lang rust --sort references` |
 | Find undocumented symbols | `symora usage "*" --lang rust --filter no-docs` |
+| Find untested symbols | `symora usage "*" --lang rust --filter no-tests` |
+| Find dead code | `symora usage "*" --lang rust --filter zero-refs` |
+| Find important symbols | `symora usage "*" --lang rust --min-refs 5` |
 | Get error context for AI | `symora diagnostics file --with-context` |
 | Extract method/variable | `symora actions list file:line:col --kind refactor` |
-| Pattern-based edit | `symora edit pattern file --pattern "func" --replacement "..."` |
+| Pattern-based edit | `symora edit pattern file --pattern "func" --lang rust --text "..."` |
+| Gather related context | `symora context file:line:col --callers --callees` |
+| Batch refs lookup | `symora batch refs loc1 loc2 loc3` |
 
 **Location format**: `file:line:column` (all 1-indexed)
 
@@ -59,6 +68,9 @@ symora find def src/main.rs:10:5 | jq '.definition'
 # Find all references
 symora find refs src/main.rs:10:5 | jq '.references[] | "\(.file):\(.line)"'
 
+# Find references with source code snippets
+symora find refs src/main.rs:10:5 --with-snippet | jq '.references[] | {file, line, snippet}'
+
 # Find implementations of trait/interface
 symora find impl src/main.rs:10:5 | jq '.references[]'
 
@@ -78,6 +90,15 @@ symora calls outgoing src/main.rs:42:5 | jq '.calls[].name'
 
 # Impact analysis: files affected by changes
 symora impact src/main.rs:42:5 | jq '.affected_files[]'
+
+# Context gathering: related code for AI analysis
+symora context src/main.rs:42:5 --callers --callees | jq '.callers, .callees'
+symora context src/main.rs:42:5 --types --tests | jq '.types, .tests'
+
+# Batch operations: multiple locations at once
+symora batch refs loc1 loc2 loc3 | jq '.results[]'
+symora batch refs loc1 loc2 --with-snippet | jq '.results[].references[].snippet'
+symora batch refs loc1 loc2 --parallel --fail-fast | jq '.results[]'
 ```
 
 ### 4. Refactor Code
@@ -99,8 +120,22 @@ symora edit insert-after src/main.rs --symbol "Config" --text "\nimpl Default fo
 ### 5. Search Code
 
 ```bash
-# Text search (ripgrep) - all languages
-symora search text "TODO" --type rust | jq '.matches[] | "\(.file):\(.line)"'
+# BM25 ranked symbol search (SQLite FTS5)
+symora search symbols "execute" | jq '.results[] | {name, file, line, score}'
+symora search symbols "Handler" --kind class | jq '.results[].name'
+symora search symbols "process" --limit 10 | jq '.results[]'
+
+# BM25 ranked content search
+symora search content "async fn" | jq '.results[] | "\(.file):\(.line)"'
+symora search content "TODO" --lang rust | jq '.results[].content'
+symora search content "error handling" --limit 20 | jq '.results[]'
+
+# Search index management
+symora search index build                    # Build/update index
+symora search index build --force            # Force full rebuild
+symora search index build --lang rust,python # Specific languages
+symora search index status | jq '.'          # Index stats
+symora search index clear                    # Clear index
 
 # AST search (tree-sitter) - 13 languages
 # Python, TypeScript/TSX, JavaScript, Rust, Go, Java, Kotlin, C++, C#, Bash, Ruby, Lua, PHP
@@ -109,9 +144,6 @@ symora search ast "class_declaration" --lang csharp | jq '.matches[].text'
 
 # List available node types for a language
 symora search nodes --lang typescript
-
-# Unlimited results
-symora search text "error" --type rust --limit 0 | jq '.count'
 ```
 
 ### 6. Check Code Health
@@ -137,7 +169,7 @@ symora signature src/main.rs:10:5 | jq '.signatures[0]'
 symora usage "process" --lang rust | jq '.results[]'
 
 # Sort by reference count (most used first)
-symora usage "Order" --lang rust --sort refs | jq '.results[] | {name, file}'
+symora usage "Order" --lang rust --sort references | jq '.results[] | {name, file}'
 
 # Include detailed metrics (ref count, has tests, has docs)
 symora usage "Config" --lang rust --with-metrics | jq '.results[] | {name, metrics}'
@@ -147,6 +179,15 @@ symora usage "*" --lang rust --filter no-docs | jq '.results[].name'
 
 # Find symbols with tests
 symora usage "*" --lang rust --filter has-tests | jq '.results[].name'
+
+# Find symbols without tests (test coverage analysis)
+symora usage "*" --lang rust --filter no-tests | jq '.results[].name'
+
+# Find dead code (zero references)
+symora usage "*" --lang rust --filter zero-refs | jq '.results[].name'
+
+# Find important symbols (5+ references)
+symora usage "*" --lang rust --min-refs 5 | jq '.results[]'
 
 # Exclude test files from results
 symora usage "*" --lang rust --filter not-test-file | jq '.results[]'
@@ -161,14 +202,47 @@ symora usage "fn" --lang rust --max-symbols 100 --limit 20 | jq '.results[]'
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--lang` | Language filter (required) | - |
-| `--sort refs\|name` | Sort by reference count or name | refs |
-| `--filter` | has-tests, has-docs, no-docs, not-test-file | - |
+| `--sort references\|name` | Sort by reference count or name | references |
+| `--filter` | has-tests, no-tests, has-docs, no-docs, not-test-file, zero-refs | - |
 | `--with-metrics` | Include ref count, test/doc status | false |
 | `--with-snippet` | Include code snippet | false |
+| `--min-refs N` | Minimum references filter (find important symbols) | - |
 | `--max-symbols N` | Max symbols to analyze | 50 |
 | `--limit N` | Max results to display | 10 |
 
-### 8. Refactoring Actions
+### 8. BM25 Search (Ranked)
+
+```bash
+# Symbol search - searches indexed symbol names with BM25 ranking
+symora search symbols "execute"                  # Basic search
+symora search symbols "Handler" --kind class     # Filter by kind
+symora search symbols "Config" --kind struct     # Structs
+symora search symbols "Service" --kind interface # Interfaces/traits
+symora search symbols "process" --limit 10       # Limit results
+
+# Content search - searches indexed code lines with BM25 ranking
+symora search content "async fn"                 # Basic search
+symora search content "TODO" --lang rust         # Filter by language
+symora search content "error handling" --lang python --limit 20
+
+# Index management (required before first search)
+symora search index build                        # Build/update
+symora search index build --force                # Force rebuild
+symora search index build --lang rust,kotlin     # Specific languages
+symora search index status                       # Show stats
+symora search index clear                        # Clear index
+```
+
+| Option | Description |
+|--------|-------------|
+| `--kind` | Symbol kind filter: function, class, struct, interface, trait |
+| `--lang` | Language filter for content search |
+| `--limit N` | Max results (default: 100) |
+| `--force` | Force full index rebuild |
+
+**Note**: Index is stored at `.symora/search.db`. Build once, searches are instant.
+
+### 9. Refactoring Actions
 
 ```bash
 # List all available code actions at location
@@ -188,11 +262,11 @@ symora actions apply src/main.rs:10:5 "Extract method" | jq '.changes'
 # - Generate impl block
 ```
 
-### 9. Pattern Edit (Structural)
+### 10. Pattern Edit (Structural)
 
 ```bash
 # Edit code by tree-sitter AST pattern
-symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
+symora edit pattern src/main.rs --pattern "function_item" --lang rust --text "// DEPRECATED\n{match}"
 
 # {match} placeholder is replaced with the matched code
 # Example: Add deprecation comment to all functions
@@ -229,10 +303,18 @@ symora find symbol src/main.rs --symbol "MyClass/*"
 | `--with-context` | Include surrounding code context (diagnostics) |
 | `--with-suggestions` | Include fix suggestions (diagnostics) |
 | `--with-metrics` | Include usage metrics (usage) |
-| `--filter` | Filter results: has-tests, has-docs, no-docs, not-test-file (usage) |
+| `--filter` | Filter results: has-tests, no-tests, has-docs, no-docs, not-test-file, zero-refs (usage) |
+| `--min-refs N` | Minimum references filter (usage) |
 | `--max-symbols N` | Limit symbols to analyze for performance (usage, default: 50) |
 | `--pattern` | tree-sitter AST pattern for structural edit |
-| `--replacement` | Replacement text with `{match}` placeholder |
+| `--text` | Replacement text with `{match}` placeholder (edit pattern) |
+| `--with-snippet` | Include source code snippet (find refs, batch, usage) |
+| `--parallel` | Execute batch operations in parallel |
+| `--fail-fast` | Stop batch on first failure |
+| `--callers` | Include callers in context |
+| `--callees` | Include callees in context |
+| `--types` | Include type definitions in context |
+| `--tests` | Include related tests in context |
 
 ## LSP Support Matrix
 
@@ -246,6 +328,7 @@ symora find symbol src/main.rs --symbol "MyClass/*"
 | rename | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ✅ |
 | actions | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | usage | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
+| search (BM25) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 Legend: ✅ Full | ⚠️ Limited/Slow | ❌ Not Supported
 
@@ -330,11 +413,18 @@ symora search ast "(function_definition)" --lang python | jq '.matches | length'
 ## Advanced Patterns
 
 ```bash
+# BM25 ranked search - find relevant code quickly
+symora search symbols "Handler" --kind class | jq '.results[] | {name, file, score}'
+symora search content "error" --lang rust --limit 50 | jq '.results[] | "\(.file):\(.line) \(.content)"'
+
+# Build index for new project
+symora search index build --force | jq '.stats'
+
 # Documentation coverage analysis
 symora usage "*" --lang rust --filter no-docs --with-metrics | jq '.results[] | {name, file, line}'
 
 # Find most referenced symbols (hot spots)
-symora usage "*" --lang rust --sort refs --limit 20 | jq '.results[] | {name, refs: .metrics.references}'
+symora usage "*" --lang rust --sort references --limit 20 | jq '.results[] | {name, refs: .metrics.references}'
 
 # Find untested symbols in non-test files
 symora usage "*" --lang rust --filter not-test-file | jq '[.results[] | select(.metrics.has_tests == false)] | length'
@@ -346,10 +436,25 @@ symora diagnostics src/main.rs --with-context --with-suggestions | jq '.diagnost
 symora actions list src/main.rs:10:5 --kind refactor | jq '.actions[].title'
 
 # Add deprecation comment to all functions
-symora edit pattern src/main.rs --pattern "function_item" --replacement "/// @deprecated\n{match}"
+symora edit pattern src/main.rs --pattern "function_item" --lang rust --text "/// @deprecated\n{match}"
 
 # Check test coverage for symbols
 symora usage "Handler" --lang rust --with-metrics | jq '.results[] | {name, has_tests: .metrics.has_tests, test_files: .metrics.test_files}'
+
+# Find dead code (zero references)
+symora usage "*" --lang rust --filter zero-refs | jq '.results[] | {name, file}'
+
+# Find important symbols (5+ references)
+symora usage "*" --lang rust --min-refs 5 --with-metrics | jq '.results[] | {name, refs: .metrics.references}'
+
+# Batch refs lookup with snippets for multiple locations
+symora batch refs src/main.rs:10:5 src/lib.rs:20:3 --with-snippet | jq '.results[].references[]'
+
+# Context gathering for AI analysis
+symora context src/main.rs:42:5 --callers --callees --types | jq '{callers, callees, types}'
+
+# Combine context with tests for comprehensive view
+symora context src/main.rs:42:5 --callers --tests | jq '{callers: .callers[].name, tests: .tests[]}'
 ```
 
 ## Troubleshooting
@@ -372,7 +477,8 @@ symora daemon status
 | Slow first request | Normal - LSP indexing (wait 10-30s) |
 | Kotlin no methods | Use `symora search ast "function_declaration"` |
 | Python timeout | Use AST search as fallback |
-| Invalid regex error | Check regex syntax (ripgrep regex) |
 | Usage search slow | Use `--max-symbols 30` to reduce scope |
 | No refactoring actions | LSP may not support at that location |
 | Pattern edit no matches | Check AST node type with `symora search nodes` |
+| BM25 search no results | Run `symora search index build` first |
+| Index build fails | Check disk space, run `symora search index clear` |

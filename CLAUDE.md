@@ -7,15 +7,17 @@ LSP-based code intelligence CLI. Rust + async + daemon architecture.
 ```
 src/
 ├── main.rs, app.rs       # Entry, DI container (App holds all services)
-├── cli/commands/         # Command handlers (18 commands)
+├── cli/commands/         # Command handlers (19 commands)
 ├── daemon/               # Unix socket server, JSON-RPC protocol
 ├── services/             # LspService trait, DaemonLspService, AstQueryService
+│   └── search/           # BM25 search (SearchIndex, SearchDb, FTS5 schema)
 ├── infra/lsp/            # LSP client, 36 language server configs
 ├── models/               # Symbol, Location, Language, SymbolKind
 └── error.rs              # LspError, SearchError
 ```
 
 **Flow**: CLI → App → DaemonLspService → Unix Socket → DaemonServer → LspService → LSP Server
+**Search Flow**: CLI → DaemonClient → DaemonServer → SearchIndex → SQLite FTS5
 
 ## Extension Points
 
@@ -108,6 +110,17 @@ join_all(futures).await
 
 Priority: Project > Global > Defaults
 
+### Test File Detection Config
+Custom patterns for test file detection (used by `usage`, `impact`, `context`):
+```toml
+[test]
+file_patterns = ["_check.rs", "Verify.java"]  # Custom file suffixes
+dir_patterns = ["/verification/"]              # Custom directory patterns
+markers = ["@MyTest"]                          # Custom test markers
+```
+
+Built-in patterns support 25+ languages: JUnit, Kotest, xUnit, pytest, RSpec, Jest, etc.
+
 ## LSP Support Matrix
 
 | Feature | Rust | Go | Java | TS/JS | Kotlin | Python | PHP | C/C++ |
@@ -133,45 +146,47 @@ symora search ast "function_item" --lang rust
 symora search nodes --lang csharp  # list node types
 ```
 
-## AI Agent Commands
+## BM25 Search (SQLite FTS5)
 
-### Usage Finder
-Search and analyze symbol usage with metrics:
+Ranked search using SQLite FTS5 with BM25 scoring. Index stored at `.symora/search.db`.
+
 ```bash
-symora usage "pattern" --lang rust           # Required: --lang
-symora usage "*" --lang rust --filter no-docs  # Find undocumented symbols
-symora usage "*" --lang rust --sort refs --with-metrics
+# Symbol search (searches symbol names with BM25 ranking)
+symora search symbols "execute"                  # basic search
+symora search symbols "Handler" --kind class     # filter by kind
+symora search symbols "process" --limit 10       # limit results
+
+# Content search (searches code lines with BM25 ranking)
+symora search content "async fn"                 # basic search
+symora search content "TODO" --lang rust         # filter by language
+symora search content "error" --limit 20         # limit results
+
+# Index management
+symora search index build                        # build/update index
+symora search index build --force                # force full rebuild
+symora search index build --lang rust,python     # specific languages
+symora search index status                       # show index stats
+symora search index clear                        # clear index
 ```
 
-Options:
-- `--sort refs|name` - Sort by reference count or name
-- `--filter has-tests,has-docs,no-docs,not-test-file` - Filter results
-- `--with-metrics` - Include reference count, test/doc status
-- `--max-symbols N` - Limit symbols to analyze (default: 50, for performance)
-- `--limit N` - Limit output (default: 10)
-
-### Enhanced Diagnostics
-```bash
-symora diagnostics src/main.rs --with-context     # AI-friendly error context
-symora diagnostics src/main.rs --with-suggestions # Include fix suggestions
+### Search Module Structure
+```
+src/services/search/
+├── mod.rs           # Public exports
+├── index.rs         # SearchIndex (indexing, search methods)
+├── db.rs            # Async SQLite FTS5 wrapper (tokio-rusqlite)
+├── schema.rs        # FTS5 table definitions, triggers
+└── types.rs         # SearchConfig, SymbolSearchResult, ContentSearchResult
 ```
 
-### Refactoring Actions
-```bash
-symora actions list src/main.rs:10:5              # All available actions
-symora actions list src/main.rs:10:5 --kind refactor  # Refactoring only
-symora actions apply src/main.rs:10:5 "Extract method"
-```
-
-### Pattern Edit (Structural)
-Edit code using tree-sitter AST patterns:
-```bash
-symora edit pattern src/main.rs --pattern "function_item" --replacement "// DEPRECATED\n{match}"
-```
-
-- `{match}` placeholder for matched content
-- Validates file size (100MB limit) and write permissions
-- UTF-8 safe character handling
+### Add Search Operation
+1. `services/search/db.rs` — Add query method
+2. `services/search/index.rs` — Add public wrapper
+3. `daemon/handlers.rs` — Add params struct
+4. `daemon/protocol.rs` — Add method constant
+5. `daemon/server.rs` — Add handler
+6. `daemon/client.rs` — Add client method
+7. `cli/commands/search.rs` — Add CLI subcommand
 
 ## Key Types
 
