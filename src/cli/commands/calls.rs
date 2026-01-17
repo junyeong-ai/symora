@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::output::OutputContext;
-use crate::cli::response::{CallHierarchyOutput, CallsResponse, LocationOutput};
+use crate::cli::response::{CallHierarchyOutput, CallsResponse};
 use crate::models::lsp::CallHierarchyItem;
 
 #[derive(Args, Debug)]
@@ -117,18 +117,7 @@ fn build_response(
         count: calls.len(),
         calls: calls
             .iter()
-            .map(|c| CallHierarchyOutput {
-                name: c.name.clone(),
-                location: LocationOutput::from_path(
-                    &c.location.file,
-                    c.location.line,
-                    c.location.column,
-                    ctx.root(),
-                ),
-                call_site: c.call_site.as_ref().map(|site| {
-                    LocationOutput::from_path(&site.file, site.line, site.column, ctx.root())
-                }),
-            })
+            .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
             .collect(),
     }
 }

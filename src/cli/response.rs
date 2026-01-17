@@ -189,6 +189,24 @@ pub struct CallHierarchyOutput {
     pub call_site: Option<LocationOutput>,
 }
 
+impl CallHierarchyOutput {
+    /// Convert from internal CallHierarchyItem to output format
+    pub fn from_item(item: &crate::models::lsp::CallHierarchyItem, root: &Path) -> Self {
+        Self {
+            name: item.name.clone(),
+            location: LocationOutput::from_path(
+                &item.location.file,
+                item.location.line,
+                item.location.column,
+                root,
+            ),
+            call_site: item.call_site.as_ref().map(|cs| {
+                LocationOutput::from_path(&cs.file, cs.line, cs.column, root)
+            }),
+        }
+    }
+}
+
 /// Response for calls command
 #[derive(Debug, Serialize)]
 pub struct CallsResponse {
