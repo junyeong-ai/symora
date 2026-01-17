@@ -222,7 +222,30 @@ pub enum SearchError {
 
     #[error("Search failed: {0}")]
     Failed(String),
+
+    #[error("Search index not initialized. Run: symora search index build")]
+    NotInitialized,
+
+    #[error("Indexing already in progress")]
+    AlreadyIndexing,
+
+    #[error("Database error: {0}")]
+    Database(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
+
+impl SearchError {
+    pub fn not_initialized() -> Self {
+        Self::NotInitialized
+    }
+
+    pub fn already_indexing() -> Self {
+        Self::AlreadyIndexing
+    }
+}
+
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
