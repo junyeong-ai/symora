@@ -10,7 +10,8 @@ use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_line};
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::config::LspConfig;
+use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::services::lsp::LspService;
 
 #[derive(Args, Debug)]
@@ -42,16 +43,35 @@ pub struct ContextArgs {
 #[derive(Debug, Serialize)]
 pub struct ContextResponse {
     pub target: TargetInfo,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub callers: Vec<CallHierarchyOutput>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub callees: Vec<CallHierarchyOutput>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub types: Vec<TypeInfo>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tests: Vec<TestInfo>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub references: Vec<ReferenceInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callers: Option<ContextSection<CallHierarchyOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callees: Option<ContextSection<CallHierarchyOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub types: Option<ContextSection<TypeInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tests: Option<ContextSection<TestInfo>>,
+    pub references: ContextSection<ReferenceInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextSection<T> {
+    pub items: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl<T> ContextSection<T> {
+    fn success(items: Vec<T>) -> Self {
+        Self { items, error: None }
+    }
+
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            items: vec![],
+            error: Some(msg.into()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -84,10 +104,26 @@ pub struct ReferenceInfo {
     pub is_test: bool,
 }
 
+struct ContextLimits {
+    calls: usize,
+    refs: usize,
+    tests: usize,
+}
+
+impl From<&LspConfig> for ContextLimits {
+    fn from(cfg: &LspConfig) -> Self {
+        Self {
+            calls: cfg.calls_limit,
+            refs: cfg.refs_limit,
+            tests: cfg.tests_limit,
+        }
+    }
+}
+
 pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
-    let test_matcher = app.test_matcher();
+    let limits = ContextLimits::from(&app.config().lsp);
 
     let response = gather_context(
         app.lsp.as_ref(),
@@ -96,7 +132,8 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         loc.column,
         &args,
         ctx.root(),
-        &test_matcher,
+        &app.test_matcher(),
+        &limits,
     )
     .await;
 
@@ -116,6 +153,7 @@ async fn gather_context(
     args: &ContextArgs,
     root: &Path,
     test_matcher: &TestMatcher,
+    limits: &ContextLimits,
 ) -> Result<ContextResponse> {
     let (refs_result, symbols_result) = tokio::join!(
         lsp.find_references(file, line, column),
@@ -151,92 +189,39 @@ async fn gather_context(
         .map(|(r, _)| *r)
         .collect();
 
-    let references: Vec<ReferenceInfo> = refs_with_test_flag
-        .iter()
-        .take(20)
-        .map(|(r, is_test)| ReferenceInfo {
-            location: LocationOutput::from_path(&r.file, r.line, r.column, root),
-            is_test: *is_test,
-        })
-        .collect();
+    let references = ContextSection::success(
+        refs_with_test_flag
+            .iter()
+            .take(limits.refs)
+            .map(|(r, is_test)| ReferenceInfo {
+                location: LocationOutput::from_path(&r.file, r.line, r.column, root),
+                is_test: *is_test,
+            })
+            .collect(),
+    );
 
     let callers = if args.callers || args.all {
-        lsp.incoming_calls(file, line, column)
-            .await
-            .map(|calls| {
-                calls
-                    .iter()
-                    .take(10)
-                    .map(|c| CallHierarchyOutput::from_item(c, root))
-                    .collect()
-            })
-            .unwrap_or_default()
+        Some(fetch_calls(lsp, file, line, column, root, limits.calls, true).await)
     } else {
-        vec![]
+        None
     };
 
     let callees = if args.callees || args.all {
-        lsp.outgoing_calls(file, line, column)
-            .await
-            .map(|calls| {
-                calls
-                    .iter()
-                    .take(10)
-                    .map(|c| CallHierarchyOutput::from_item(c, root))
-                    .collect()
-            })
-            .unwrap_or_default()
+        Some(fetch_calls(lsp, file, line, column, root, limits.calls, false).await)
     } else {
-        vec![]
+        None
     };
 
     let types = if args.types || args.all {
-        match lsp.goto_type_definition(file, line, column).await {
-            Ok(Some(type_loc)) => {
-                if let Ok(type_symbols) = lsp
-                    .find_symbols(&type_loc.file, FindSymbolsOptions::default())
-                    .await
-                {
-                    let type_sym = find_symbol_at_line(&type_symbols, type_loc.line);
-                    vec![TypeInfo {
-                        name: type_sym
-                            .map(|s| s.name.clone())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        kind: type_sym
-                            .map(|s| s.kind.to_string())
-                            .unwrap_or_else(|| "type".to_string()),
-                        location: LocationOutput::from_path(
-                            &type_loc.file,
-                            type_loc.line,
-                            type_loc.column,
-                            root,
-                        ),
-                    }]
-                } else {
-                    vec![]
-                }
-            }
-            _ => vec![],
-        }
+        Some(fetch_types(lsp, file, line, column, root).await)
     } else {
-        vec![]
+        None
     };
 
     let tests = if args.tests || args.all {
-        let mut tests = Vec::with_capacity(5);
-        for r in test_refs.iter().take(5) {
-            if let Ok(content) = tokio::fs::read_to_string(&r.file).await
-                && let Some(test_name) = extract_test_name(&content, r.line)
-            {
-                tests.push(TestInfo {
-                    name: test_name,
-                    location: LocationOutput::from_path(&r.file, r.line, r.column, root),
-                });
-            }
-        }
-        tests
+        Some(fetch_tests(&test_refs, root, limits.tests).await)
     } else {
-        vec![]
+        None
     };
 
     Ok(ContextResponse {
@@ -247,6 +232,91 @@ async fn gather_context(
         tests,
         references,
     })
+}
+
+async fn fetch_calls(
+    lsp: &dyn LspService,
+    file: &Path,
+    line: u32,
+    column: u32,
+    root: &Path,
+    limit: usize,
+    incoming: bool,
+) -> ContextSection<CallHierarchyOutput> {
+    let result: Result<Vec<CallHierarchyItem>, _> = if incoming {
+        lsp.incoming_calls(file, line, column).await
+    } else {
+        lsp.outgoing_calls(file, line, column).await
+    };
+
+    match result {
+        Ok(calls) => {
+            let items = calls
+                .iter()
+                .take(limit)
+                .map(|c| CallHierarchyOutput::from_item(c, root))
+                .collect();
+            ContextSection::success(items)
+        }
+        Err(e) => ContextSection::error(e.to_string()),
+    }
+}
+
+async fn fetch_types(
+    lsp: &dyn LspService,
+    file: &Path,
+    line: u32,
+    column: u32,
+    root: &Path,
+) -> ContextSection<TypeInfo> {
+    match lsp.goto_type_definition(file, line, column).await {
+        Ok(Some(type_loc)) => {
+            let type_symbols = lsp
+                .find_symbols(&type_loc.file, FindSymbolsOptions::default())
+                .await
+                .unwrap_or_default();
+
+            let type_sym = find_symbol_at_line(&type_symbols, type_loc.line);
+            let items = vec![TypeInfo {
+                name: type_sym
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                kind: type_sym
+                    .map(|s| s.kind.to_string())
+                    .unwrap_or_else(|| "type".to_string()),
+                location: LocationOutput::from_path(
+                    &type_loc.file,
+                    type_loc.line,
+                    type_loc.column,
+                    root,
+                ),
+            }];
+            ContextSection::success(items)
+        }
+        Ok(None) => ContextSection::success(vec![]),
+        Err(e) => ContextSection::error(e.to_string()),
+    }
+}
+
+async fn fetch_tests(
+    test_refs: &[&crate::models::symbol::Location],
+    root: &Path,
+    limit: usize,
+) -> ContextSection<TestInfo> {
+    let mut items = Vec::with_capacity(limit);
+
+    for r in test_refs.iter().take(limit) {
+        if let Ok(content) = tokio::fs::read_to_string(&r.file).await {
+            if let Some(test_name) = extract_test_name(&content, r.line) {
+                items.push(TestInfo {
+                    name: test_name,
+                    location: LocationOutput::from_path(&r.file, r.line, r.column, root),
+                });
+            }
+        }
+    }
+
+    ContextSection::success(items)
 }
 
 fn extract_test_name(content: &str, line: u32) -> Option<String> {
@@ -261,40 +331,11 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
         let idx = line_idx.saturating_sub(i);
         let line_content = lines.get(idx)?;
 
-        // Test markers by language
-        let is_test_marker = line_content.contains("#[test]")           // Rust
-            || line_content.contains("#[tokio::test]")                  // Rust async
-            || line_content.contains("#[rstest]")                       // Rust rstest
-            || line_content.contains("@Test")                           // Java, Kotlin JUnit
-            || line_content.contains("@ParameterizedTest")              // JUnit 5
-            || line_content.contains("[Test]")                          // C# NUnit
-            || line_content.contains("[Fact]")                          // C# xUnit
-            || line_content.contains("[Theory]")                        // C# xUnit
-            || line_content.contains("[TestMethod]")                    // C# MSTest
-            || line_content.contains("/** @test */")                    // PHP
-            || line_content.contains("fn test_")                        // Rust
-            || line_content.contains("func Test")                       // Go, Swift
-            || line_content.contains("def test_")                       // Python
-            || line_content.contains("function test")                   // PHP
-            || line_content.contains("it(")                             // JS/TS Mocha/Jest
-            || line_content.contains("test(")                           // JS/TS Jest, Dart, Elixir
-            || line_content.contains("it \"")                           // Ruby RSpec
-            || line_content.contains("it '")                            // Ruby RSpec
-            || line_content.contains("it {")                            // Kotest
-            || line_content.contains("should(")                         // Kotest
-            || line_content.contains("test \"")                         // Elixir
-            || line_content.contains("describe(")                       // JS/TS, Kotest
-            || line_content.contains("describe \"")                     // Ruby
-            || line_content.contains("context(")                        // Kotest, RSpec
-            || line_content.contains("given(")                          // Kotest BehaviorSpec
-            || line_content.contains("When(")                           // Kotest BehaviorSpec
-            || line_content.contains("Then("); // Kotest BehaviorSpec
-
-        if is_test_marker {
-            if let Some(fn_line) = lines.get(idx + 1)
-                && let Some(name) = extract_fn_name(fn_line)
-            {
-                return Some(name);
+        if is_test_marker(line_content) {
+            if let Some(fn_line) = lines.get(idx + 1) {
+                if let Some(name) = extract_fn_name(fn_line) {
+                    return Some(name);
+                }
             }
             if let Some(name) = extract_fn_name(line_content) {
                 return Some(name);
@@ -305,18 +346,53 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
     None
 }
 
+fn is_test_marker(line: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "#[test]",
+        "#[tokio::test]",
+        "#[rstest]",
+        "@Test",
+        "@ParameterizedTest",
+        "[Test]",
+        "[Fact]",
+        "[Theory]",
+        "[TestMethod]",
+        "/** @test */",
+        "fn test_",
+        "func Test",
+        "def test_",
+        "function test",
+        "it(",
+        "test(",
+        "it \"",
+        "it '",
+        "it {",
+        "should(",
+        "test \"",
+        "describe(",
+        "describe \"",
+        "context(",
+        "given(",
+        "When(",
+        "Then(",
+    ];
+
+    MARKERS.iter().any(|m| line.contains(m))
+}
+
 fn extract_fn_name(line: &str) -> Option<String> {
-    // Function declaration patterns by language
-    for (prefix, offset) in [
-        ("fn ", 3),           // Rust
-        ("func ", 5),         // Go, Swift
-        ("def ", 4),          // Python, Ruby, Elixir
-        ("fun ", 4),          // Kotlin
-        ("function ", 9),     // PHP, JS
-        ("void ", 5),         // Java, C#
-        ("public void ", 12), // Java, C#
-        ("async ", 6),        // JS/TS async
-    ] {
+    const FN_PATTERNS: &[(&str, usize)] = &[
+        ("fn ", 3),
+        ("func ", 5),
+        ("def ", 4),
+        ("fun ", 4),
+        ("function ", 9),
+        ("void ", 5),
+        ("public void ", 12),
+        ("async ", 6),
+    ];
+
+    for &(prefix, offset) in FN_PATTERNS {
         if let Some(pos) = line.find(prefix) {
             let rest = &line[pos + offset..];
             let name = rest.split(['(', '<', ' ', ':', '{']).next()?;
@@ -327,16 +403,11 @@ fn extract_fn_name(line: &str) -> Option<String> {
         }
     }
 
-    // String-based test names (JS/TS, Ruby, Elixir)
-    for prefix in [
-        "it(",
-        "test(",
-        "it \"",
-        "it '",
-        "test \"",
-        "describe(",
-        "describe \"",
-    ] {
+    const STRING_PATTERNS: &[&str] = &[
+        "it(", "test(", "it \"", "it '", "test \"", "describe(", "describe \"",
+    ];
+
+    for prefix in STRING_PATTERNS {
         if let Some(pos) = line.find(prefix) {
             let rest = &line[pos + prefix.len()..];
             let rest = rest.trim_start_matches(['\'', '"', '(']);

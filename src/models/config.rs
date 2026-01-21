@@ -92,6 +92,9 @@ pub struct LspConfig {
 
     #[serde(default = "defaults::calls_limit")]
     pub calls_limit: usize,
+
+    #[serde(default = "defaults::tests_limit")]
+    pub tests_limit: usize,
 }
 
 impl Default for LspConfig {
@@ -103,6 +106,7 @@ impl Default for LspConfig {
             impl_limit: defaults::impl_limit(),
             symbol_limit: defaults::symbol_limit(),
             calls_limit: defaults::calls_limit(),
+            tests_limit: defaults::tests_limit(),
         }
     }
 }
@@ -110,7 +114,7 @@ impl Default for LspConfig {
 mod defaults {
     // LSP
     pub fn timeout_secs() -> u64 {
-        30
+        60  // Increased for large monorepos
     }
     pub fn auto_restart() -> bool {
         true
@@ -126,6 +130,9 @@ mod defaults {
     }
     pub fn calls_limit() -> usize {
         100
+    }
+    pub fn tests_limit() -> usize {
+        10
     }
 
     // Search
@@ -242,9 +249,10 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = SymoraConfig::default();
-        assert_eq!(config.lsp.timeout_secs, 30);
+        assert_eq!(config.lsp.timeout_secs, 60);
         assert_eq!(config.lsp.refs_limit, 500);
         assert_eq!(config.lsp.calls_limit, 100);
+        assert_eq!(config.lsp.tests_limit, 10);
         assert_eq!(config.search.limit, 100);
         assert_eq!(config.output.format, "json");
         assert_eq!(config.daemon.idle_timeout_mins, 30);
