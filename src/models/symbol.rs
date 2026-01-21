@@ -600,27 +600,22 @@ impl SymbolKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
-    // === Systems Languages ===
     Rust,
     Cpp,
     Zig,
 
-    // === JVM Languages ===
     Java,
     Kotlin,
     Scala,
     Clojure,
 
-    // === .NET Languages ===
     CSharp,
     FSharp,
 
-    // === Web Languages ===
     TypeScript,
     JavaScript,
     Vue,
 
-    // === Scripting Languages ===
     Python,
     Ruby,
     PHP,
@@ -629,31 +624,26 @@ pub enum Language {
     Bash,
     PowerShell,
 
-    // === Functional Languages ===
     Haskell,
     Elixir,
     Erlang,
     Elm,
     OCaml,
 
-    // === Mobile/Application Languages ===
     Go,
     Swift,
     Dart,
 
-    // === Config/DevOps Languages ===
     Terraform,
     Yaml,
     Toml,
     Nix,
     Rego,
 
-    // === Scientific Languages ===
     R,
     Julia,
     Fortran,
 
-    // === Documentation ===
     Markdown,
 
     #[default]

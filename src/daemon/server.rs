@@ -29,9 +29,7 @@ use crate::services::store::{IndexOptions, Store, StoreConfig};
 
 type ProjectsMap = Arc<RwLock<HashMap<PathBuf, Arc<ProjectContext>>>>;
 
-// ============================================================================
 // Configuration
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -83,9 +81,7 @@ impl DaemonConfig {
     }
 }
 
-// ============================================================================
 // Project Context
-// ============================================================================
 
 struct ProjectContext {
     lsp: Arc<dyn LspService + Send + Sync>,
@@ -113,9 +109,7 @@ impl ProjectContext {
     }
 }
 
-// ============================================================================
 // Daemon Server
-// ============================================================================
 
 pub struct DaemonServer {
     config: DaemonConfig,
@@ -220,19 +214,17 @@ impl DaemonServer {
     }
 
     async fn cleanup_idle_servers(&self) {
-        {
-            let projects = self.projects.read().await;
+        let idle: Vec<_> = {
+            let mut projects = self.projects.write().await;
+
             for (_, ctx) in projects.iter() {
                 let expired = ctx.store.cleanup_expired().await;
                 if expired > 0 {
                     tracing::debug!("Cleaned up {} expired cache entries", expired);
                 }
             }
-        }
 
-        let idle: Vec<_> = {
-            let projects = self.projects.read().await;
-            projects
+            let idle_paths: Vec<_> = projects
                 .iter()
                 .filter(|(_, ctx)| {
                     ctx.last_used
@@ -240,23 +232,19 @@ impl DaemonServer {
                         .map(|t| t.elapsed() > self.config.idle_timeout)
                         .unwrap_or(false)
                 })
-                .map(|(p, c)| (p.clone(), Arc::clone(c)))
+                .map(|(p, _)| p.clone())
+                .collect();
+
+            idle_paths
+                .into_iter()
+                .filter_map(|path| projects.remove(&path).map(|ctx| (path, ctx)))
                 .collect()
         };
 
-        if idle.is_empty() {
-            return;
-        }
-
-        {
-            let mut projects = self.projects.write().await;
-            for (path, _) in &idle {
-                projects.remove(path);
-            }
-        }
-
         for (path, ctx) in idle {
-            let _ = ctx.store.clear().await;
+            if let Err(e) = ctx.store.clear().await {
+                tracing::warn!("Failed to clear store for {:?}: {}", path, e);
+            }
             ctx.lsp.shutdown().await;
             tracing::info!("Removed idle project: {:?}", path);
         }
@@ -264,12 +252,18 @@ impl DaemonServer {
 
     async fn cleanup(&self) {
         let projects = self.projects.read().await;
-        for (_, ctx) in projects.iter() {
-            let _ = ctx.store.clear().await;
+        for (path, ctx) in projects.iter() {
+            if let Err(e) = ctx.store.clear().await {
+                tracing::debug!("Failed to clear store for {:?}: {}", path, e);
+            }
             ctx.lsp.shutdown().await;
         }
-        let _ = tokio::fs::remove_file(&self.config.socket_path).await;
-        let _ = tokio::fs::remove_file(&self.config.pid_path).await;
+        if let Err(e) = tokio::fs::remove_file(&self.config.socket_path).await {
+            tracing::debug!("Failed to remove socket: {}", e);
+        }
+        if let Err(e) = tokio::fs::remove_file(&self.config.pid_path).await {
+            tracing::debug!("Failed to remove pid file: {}", e);
+        }
     }
 
     pub fn shutdown(&self) {
@@ -277,9 +271,7 @@ impl DaemonServer {
     }
 }
 
-// ============================================================================
 // Connection Handling
-// ============================================================================
 
 async fn handle_connection(
     stream: UnixStream,
@@ -365,9 +357,7 @@ async fn process_request(
     (response, is_shutdown)
 }
 
-// ============================================================================
 // Request Dispatch
-// ============================================================================
 
 async fn dispatch(
     request: &Request,
@@ -586,9 +576,7 @@ async fn dispatch(
     }
 }
 
-// ============================================================================
 // Handler Helpers
-// ============================================================================
 
 fn parse_params<T: DeserializeOwned>(params: &serde_json::Value) -> Result<T, RpcError> {
     serde_json::from_value(params.clone()).map_err(|e| RpcError::invalid_params(&e.to_string()))
@@ -649,9 +637,7 @@ where
         .map_err(RpcError::from)
 }
 
-// ============================================================================
 // Response Helpers
-// ============================================================================
 
 fn call_hierarchy_to_json(
     calls: &[crate::models::lsp::CallHierarchyItem],
@@ -675,9 +661,7 @@ fn call_hierarchy_to_json(
         .collect()
 }
 
-// ============================================================================
 // Special Handlers
-// ============================================================================
 
 async fn handle_status(
     projects: &ProjectsMap,
@@ -907,9 +891,7 @@ async fn handle_apply_action(
     }))
 }
 
-// ============================================================================
 // Search Handlers
-// ============================================================================
 
 async fn handle_search_symbols(
     params: &serde_json::Value,

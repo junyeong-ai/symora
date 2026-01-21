@@ -10,9 +10,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 // Re-export commonly used types from models
 pub use crate::models::lsp::{Position, Range, TextEdit, WorkspaceEdit};
 
-// ============================================================================
 // JSON-RPC 2.0 Core Types
-// ============================================================================
 
 /// JSON-RPC 2.0 Request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,9 +151,7 @@ impl Message {
     }
 }
 
-// ============================================================================
 // LSP Initialize Types
-// ============================================================================
 
 /// Text document identifier
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,9 +390,7 @@ pub struct ServerInfo {
     pub version: Option<String>,
 }
 
-// ============================================================================
 // LSP Symbol Types
-// ============================================================================
 
 /// Symbol kind (LSP standard - integer values)
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Eq)]
@@ -489,9 +483,7 @@ pub struct SymbolInformation {
     pub container_name: Option<String>,
 }
 
-// ============================================================================
 // LSP Hover Types
-// ============================================================================
 
 /// Hover result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -525,9 +517,7 @@ pub enum MarkedString {
     LanguageString { language: String, value: String },
 }
 
-// ============================================================================
 // LSP Diagnostic Types
-// ============================================================================
 
 /// Diagnostic severity (LSP standard - integer values)
 #[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Eq)]
@@ -572,9 +562,7 @@ pub struct LspDiagnosticRelatedInformation {
     pub message: String,
 }
 
-// ============================================================================
 // LSP Call Hierarchy Types
-// ============================================================================
 
 /// Call hierarchy item
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -605,9 +593,7 @@ pub struct CallHierarchyOutgoingCall {
     pub from_ranges: Vec<Range>,
 }
 
-// ============================================================================
 // Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

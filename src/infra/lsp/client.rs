@@ -955,7 +955,9 @@ impl LspClient {
                         "{} language server termination timed out, forcing kill",
                         self.language
                     );
-                    let _ = child.kill().await;
+                    if let Err(e) = child.kill().await {
+                        tracing::debug!("{} failed to kill process: {}", self.language, e);
+                    }
                 }
             }
         }
