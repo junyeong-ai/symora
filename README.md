@@ -59,7 +59,7 @@ symora calls incoming src/order.rs:42:5  # 호출 계층 분석
 | 타입 정보 | ❌ | ✅ LSP |
 | 호출 계층 | ❌ | ✅ LSP |
 | 리네임 리팩토링 | ❌ | ✅ LSP |
-| 랭킹 검색 | ❌ | ✅ BM25 (FTS5) |
+| 코드 검색 | ❌ | ✅ SQLite |
 | AST 검색 | ❌ | ✅ tree-sitter |
 | 사용량 메트릭 | ❌ | ✅ LSP |
 | 문서 커버리지 | ❌ | ✅ LSP |
@@ -101,6 +101,7 @@ symora find refs src/main.rs:10:5 --with-snippet # 참조 + 소스 코드
 symora find impl src/main.rs:10:5                # 구현체 찾기
 symora hover src/main.rs:10:5                    # 타입/문서 정보
 symora calls incoming src/main.rs:10:5           # 호출자 찾기
+symora calls incoming src/main.rs:10:5 --no-fallback  # fallback 비활성화
 symora rename src/main.rs:10:5 new_name          # 리네이밍
 symora impact src/main.rs:10:5                   # 영향 분석
 symora diagnostics src/main.rs                   # LSP 진단
@@ -110,7 +111,6 @@ symora diagnostics src/main.rs --with-suggestions # 수정 제안 포함
 
 ### 사용량 분석 (Usage Finder)
 ```bash
-# 심볼 사용량 검색 및 메트릭 분석
 symora usage "process" --lang rust               # 패턴으로 심볼 검색
 symora usage "Order" --lang rust --sort references     # 참조 수로 정렬
 symora usage "Config" --lang rust --with-metrics # 상세 메트릭 포함
@@ -170,14 +170,15 @@ symora batch refs loc1 loc2 --parallel --fail-fast  # 병렬 실행, 실패 시 
 
 ### 구조적 편집 (Pattern Edit)
 ```bash
-# tree-sitter 패턴으로 구조적 코드 편집
 symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "// NEW" --dry-run
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
+symora edit insert-after src/main.rs --symbol "MyFunc" --text "// comment" --dry-run
+symora edit insert-before src/main.rs:10:5 --text "// comment" --dry-run
 ```
 
 ### 코드 검색
 ```bash
-# BM25 랭킹 검색 (SQLite FTS5)
+# 심볼/콘텐츠 검색 (SQLite LIKE 기반, 서브스트링 매칭 지원)
 symora search symbols "execute" --kind function  # 심볼 검색
 symora search symbols "Handler" --limit 10       # 결과 제한
 symora search content "async fn" --lang rust     # 콘텐츠 검색
@@ -194,11 +195,11 @@ symora search ast "function_item" --lang rust    # 구조적 검색
 symora search nodes --lang rust                  # 노드 타입 조회
 ```
 
-| 검색 타입 | 용도 | 랭킹 |
+| 검색 타입 | 용도 | 엔진 |
 |----------|------|------|
-| `symbols` | 심볼 이름 검색 | BM25 |
-| `content` | 코드 라인 검색 | BM25 |
-| `ast` | 구조적 패턴 검색 | - |
+| `symbols` | 심볼 이름 검색 | SQLite |
+| `content` | 코드 라인 검색 | SQLite |
+| `ast` | 구조적 패턴 검색 | tree-sitter |
 
 > **위치 형식**: `file:line:column` (1-indexed)
 > **`--limit 0`**: 무제한 결과
@@ -207,7 +208,7 @@ symora search nodes --lang rust                  # 노드 타입 조회
 
 ## 지원 언어 (36개)
 
-Rust, TypeScript, Python, Go, Java, Kotlin, C++, C#, Swift, Ruby, PHP, Haskell 등
+Rust, TypeScript, Python, Go, Java, Kotlin, C++, C#, Swift, Ruby, PHP, Haskell, TOML 등
 
 ```bash
 symora doctor  # 설치된 언어 서버 확인
@@ -222,6 +223,20 @@ symora config init           # 프로젝트 설정 (.symora/config.toml)
 symora config init --global  # 글로벌 설정
 ```
 
+주요 설정:
+```toml
+[lsp]
+timeout_secs = 60       # LSP 타임아웃 (기본: 60초)
+refs_limit = 500        # 참조 결과 제한
+calls_limit = 100       # 호출 계층 제한
+tests_limit = 10        # 테스트 결과 제한
+
+[test]
+file_patterns = ["_check.rs"]  # 커스텀 테스트 파일 패턴
+dir_patterns = ["/verification/"]
+markers = ["@MyTest"]
+```
+
 ---
 
 ## 문제 해결
@@ -230,6 +245,7 @@ symora config init --global  # 글로벌 설정
 symora doctor           # 의존성 확인
 symora daemon restart   # 데몬 재시작
 symora daemon status    # 데몬 상태 확인
+symora -v <command>     # 디버그 로깅 활성화
 ```
 
 | 문제 | 해결 |
@@ -238,6 +254,7 @@ symora daemon status    # 데몬 상태 확인
 | Kotlin 메서드 미반환 | `symora search ast "function_declaration" --lang kotlin` |
 | Python 대규모 프로젝트 느림 | AST 검색 사용 또는 대기 |
 | Usage 검색 느림 | `--max-symbols 30` 으로 분석 범위 축소 |
+| Call hierarchy 미지원 | `--no-fallback` 없이 실행 (자동 refs fallback) |
 
 ---
 

@@ -59,7 +59,7 @@ symora calls incoming src/order.rs:42:5  # call hierarchy analysis
 | Type information | ❌ | ✅ LSP |
 | Call hierarchy | ❌ | ✅ LSP |
 | Rename refactoring | ❌ | ✅ LSP |
-| Ranked search | ❌ | ✅ BM25 (FTS5) |
+| Code search | ❌ | ✅ SQLite |
 | AST search | ❌ | ✅ tree-sitter |
 | Usage metrics | ❌ | ✅ LSP |
 | Doc coverage | ❌ | ✅ LSP |
@@ -101,6 +101,7 @@ symora find refs src/main.rs:10:5 --with-snippet # references + source code
 symora find impl src/main.rs:10:5                # find implementations
 symora hover src/main.rs:10:5                    # type/doc info
 symora calls incoming src/main.rs:10:5           # find callers
+symora calls incoming src/main.rs:10:5 --no-fallback  # disable fallback
 symora rename src/main.rs:10:5 new_name          # rename symbol
 symora impact src/main.rs:10:5                   # impact analysis
 symora diagnostics src/main.rs                   # LSP diagnostics
@@ -110,7 +111,6 @@ symora diagnostics src/main.rs --with-suggestions # include fix suggestions
 
 ### Usage Finder
 ```bash
-# Search symbol usage and analyze metrics
 symora usage "process" --lang rust               # search symbols by pattern
 symora usage "Order" --lang rust --sort references     # sort by reference count
 symora usage "Config" --lang rust --with-metrics # include detailed metrics
@@ -170,20 +170,21 @@ symora batch refs loc1 loc2 --parallel --fail-fast  # parallel execution, stop o
 
 ### Pattern Edit (Structural)
 ```bash
-# Structural code editing with tree-sitter patterns
 symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "// NEW" --dry-run
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
+symora edit insert-after src/main.rs --symbol "MyFunc" --text "// comment" --dry-run
+symora edit insert-before src/main.rs:10:5 --text "// comment" --dry-run
 ```
 
 ### Code Search
 ```bash
-# BM25 Ranked Search (SQLite FTS5)
+# Symbol/content search (SQLite LIKE-based, supports substring matching)
 symora search symbols "execute" --kind function  # symbol search
 symora search symbols "Handler" --limit 10       # limit results
 symora search content "async fn" --lang rust     # content search
 symora search content "TODO" --limit 20          # limit results
 
-# Search Index Management
+# Search index management
 symora search index build                        # build index
 symora search index build --force --lang rust    # force rebuild
 symora search index status                       # index status
@@ -194,11 +195,11 @@ symora search ast "function_item" --lang rust    # structural search
 symora search nodes --lang rust                  # list node types
 ```
 
-| Search Type | Purpose | Ranking |
-|-------------|---------|---------|
-| `symbols` | Symbol name search | BM25 |
-| `content` | Code line search | BM25 |
-| `ast` | Structural pattern search | - |
+| Search Type | Purpose | Engine |
+|-------------|---------|--------|
+| `symbols` | Symbol name search | SQLite |
+| `content` | Code line search | SQLite |
+| `ast` | Structural pattern search | tree-sitter |
 
 > **Location format**: `file:line:column` (1-indexed)
 > **`--limit 0`**: unlimited results
@@ -207,7 +208,7 @@ symora search nodes --lang rust                  # list node types
 
 ## Supported Languages (36)
 
-Rust, TypeScript, Python, Go, Java, Kotlin, C++, C#, Swift, Ruby, PHP, Haskell, and more
+Rust, TypeScript, Python, Go, Java, Kotlin, C++, C#, Swift, Ruby, PHP, Haskell, TOML, and more
 
 ```bash
 symora doctor  # check installed language servers
@@ -222,6 +223,20 @@ symora config init           # project config (.symora/config.toml)
 symora config init --global  # global config
 ```
 
+Key settings:
+```toml
+[lsp]
+timeout_secs = 60       # LSP timeout (default: 60s)
+refs_limit = 500        # Reference results limit
+calls_limit = 100       # Call hierarchy limit
+tests_limit = 10        # Test results limit
+
+[test]
+file_patterns = ["_check.rs"]  # Custom test file patterns
+dir_patterns = ["/verification/"]
+markers = ["@MyTest"]
+```
+
 ---
 
 ## Troubleshooting
@@ -230,6 +245,7 @@ symora config init --global  # global config
 symora doctor           # check dependencies
 symora daemon restart   # restart daemon
 symora daemon status    # check daemon status
+symora -v <command>     # enable debug logging
 ```
 
 | Issue | Solution |
@@ -238,6 +254,7 @@ symora daemon status    # check daemon status
 | Kotlin no methods | `symora search ast "function_declaration" --lang kotlin` |
 | Python slow on large project | Use AST search or wait |
 | Usage search slow | Use `--max-symbols 30` to reduce analysis scope |
+| Call hierarchy unsupported | Run without `--no-fallback` (auto refs fallback) |
 
 ---
 
