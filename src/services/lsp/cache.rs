@@ -62,7 +62,6 @@ impl SymbolCache {
     {
         let hash = crate::infra::hash_content(content);
 
-        // Fast path: check cache with read lock
         {
             let mut entries = self.entries.write().await;
             if let Some(entry) = entries.get_mut(path)
@@ -70,21 +69,15 @@ impl SymbolCache {
             {
                 entry.last_accessed = Instant::now();
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                tracing::trace!("Symbol cache hit: {}", path.display());
                 return Ok(Arc::clone(&entry.symbols));
             }
         }
 
-        // Cache miss - compute symbols
         self.misses.fetch_add(1, Ordering::Relaxed);
-        tracing::trace!("Symbol cache miss: {}", path.display());
         let symbols = Arc::new(compute().await?);
 
-        // Store in cache with eviction
         {
             let mut entries = self.entries.write().await;
-
-            // Evict if at capacity
             if entries.len() >= self.max_entries {
                 self.evict_lru(&mut entries);
             }

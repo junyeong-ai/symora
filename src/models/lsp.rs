@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::symbol::{Location, SymbolKind};
 
-// ============================================================================
 // Core LSP Types
-// ============================================================================
 
 /// Position within a document (0-indexed, LSP standard)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -61,9 +59,7 @@ impl Range {
     }
 }
 
-// ============================================================================
 // Text Edit Types
-// ============================================================================
 
 /// Text edit unit
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,9 +123,7 @@ pub struct FileChange {
     pub edit_count: usize,
 }
 
-// ============================================================================
 // Hover Types
-// ============================================================================
 
 /// Hover information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,9 +313,7 @@ fn extract_name(s: &str) -> String {
         .collect()
 }
 
-// ============================================================================
 // Rename Types
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareRenameResult {
@@ -334,9 +326,7 @@ pub struct RenameResult {
     pub changes: Vec<FileChange>,
 }
 
-// ============================================================================
 // Call Hierarchy Types
-// ============================================================================
 
 /// Call hierarchy item
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,9 +339,7 @@ pub struct CallHierarchyItem {
     pub call_site: Option<Location>,
 }
 
-// ============================================================================
 // Type Hierarchy Types
-// ============================================================================
 
 /// Type hierarchy item (for supertypes/subtypes)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,9 +353,7 @@ pub struct TypeHierarchyItem {
     pub detail: Option<String>,
 }
 
-// ============================================================================
 // Inlay Hints Types
-// ============================================================================
 
 /// Inlay hint for inline type/parameter annotations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,9 +403,7 @@ impl std::fmt::Display for InlayHintKind {
     }
 }
 
-// ============================================================================
 // Folding Range Types
-// ============================================================================
 
 /// Folding range for code folding
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -480,9 +464,7 @@ impl std::fmt::Display for FoldingRangeKind {
     }
 }
 
-// ============================================================================
 // Selection Range Types
-// ============================================================================
 
 /// Selection range for smart expand/shrink selection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,9 +500,7 @@ impl SelectionRange {
     }
 }
 
-// ============================================================================
 // Code Lens Types
-// ============================================================================
 
 /// Code lens for inline information/actions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,9 +527,7 @@ pub struct CodeLensCommand {
     pub arguments: Vec<serde_json::Value>,
 }
 
-// ============================================================================
 // Code Action Types
-// ============================================================================
 
 /// Code action
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -637,9 +615,7 @@ pub struct FileChangeWithEdits {
     pub edits: Vec<TextEdit>,
 }
 
-// ============================================================================
 // Signature Help Types
-// ============================================================================
 
 /// Parameter information for function signatures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -680,9 +656,7 @@ pub struct SignatureHelp {
     pub active_parameter: Option<u32>,
 }
 
-// ============================================================================
 // Symbol Query Options
-// ============================================================================
 
 /// Options for find_symbols query
 #[derive(Debug, Clone, Default)]
@@ -709,9 +683,7 @@ impl FindSymbolsOptions {
     }
 }
 
-// ============================================================================
 // Server Status
-// ============================================================================
 
 /// LSP server status
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -738,9 +710,7 @@ impl std::fmt::Display for ServerStatus {
     }
 }
 
-// ============================================================================
 // URI Utilities
-// ============================================================================
 
 /// Convert file path to RFC 3986 compliant file:// URI
 pub fn path_to_uri(path: &Path) -> String {
@@ -814,9 +784,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-// ============================================================================
 // Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

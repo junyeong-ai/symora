@@ -105,8 +105,6 @@ impl Store {
         self.is_indexing.load(Ordering::SeqCst)
     }
 
-    // ============ Search Operations ============
-
     pub async fn search_symbols(
         &self,
         query: &str,
@@ -192,8 +190,6 @@ impl Store {
             })
             .await
     }
-
-    // ============ Maintenance Operations ============
 
     pub async fn invalidate_file(&self, path: &Path) {
         let path_str = path.display().to_string();
@@ -288,8 +284,6 @@ impl Store {
             })
             .await
     }
-
-    // ============ Indexing Operations ============
 
     pub async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
         if self.is_indexing.swap(true, Ordering::SeqCst) {

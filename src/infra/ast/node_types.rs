@@ -102,9 +102,7 @@ pub fn format_query_error(language: Language, error: &str) -> String {
     )
 }
 
-// =============================================================================
 // Python - tree-sitter-python/src/node-types.json
-// =============================================================================
 const PYTHON: &[NodeType] = &[
     NodeType::new("class", "class_definition", "class MyClass:"),
     NodeType::new("function", "function_definition", "def my_func():"),
@@ -120,9 +118,7 @@ const PYTHON: &[NodeType] = &[
     NodeType::new("lambda", "lambda", "lambda x: x"),
 ];
 
-// =============================================================================
 // TypeScript - tree-sitter-typescript/typescript/src/node-types.json
-// =============================================================================
 const TYPESCRIPT: &[NodeType] = &[
     NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("class", "abstract_class_declaration", "abstract class X {}"),
@@ -138,9 +134,7 @@ const TYPESCRIPT: &[NodeType] = &[
     NodeType::new("variable", "variable_declaration", "var x = ..."),
 ];
 
-// =============================================================================
 // JavaScript - tree-sitter-javascript/src/node-types.json
-// =============================================================================
 const JAVASCRIPT: &[NodeType] = &[
     NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("function", "function_declaration", "function myFunc() {}"),
@@ -160,9 +154,7 @@ const JAVASCRIPT: &[NodeType] = &[
     NodeType::new("for", "for_in_statement", "for (x in obj) {}"),
 ];
 
-// =============================================================================
 // Rust - tree-sitter-rust/src/node-types.json
-// =============================================================================
 const RUST: &[NodeType] = &[
     NodeType::new("struct", "struct_item", "struct S {}"),
     NodeType::new("enum", "enum_item", "enum E {}"),
@@ -178,9 +170,7 @@ const RUST: &[NodeType] = &[
     NodeType::new("attribute", "attribute_item", "#[derive(...)]"),
 ];
 
-// =============================================================================
 // Go - tree-sitter-go/src/node-types.json
-// =============================================================================
 const GO: &[NodeType] = &[
     NodeType::new("struct", "struct_type", "type S struct {}"),
     NodeType::new("interface", "interface_type", "type I interface {}"),
@@ -196,9 +186,7 @@ const GO: &[NodeType] = &[
     NodeType::new("for", "for_statement", "for i := range x {}"),
 ];
 
-// =============================================================================
 // Java - tree-sitter-java/src/node-types.json
-// =============================================================================
 const JAVA: &[NodeType] = &[
     NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("interface", "interface_declaration", "interface I {}"),
@@ -218,9 +206,7 @@ const JAVA: &[NodeType] = &[
     NodeType::new("for", "for_statement", "for (;;) {}"),
 ];
 
-// =============================================================================
 // Kotlin - fwcd/tree-sitter-kotlin/src/node-types.json
-// =============================================================================
 const KOTLIN: &[NodeType] = &[
     NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("object", "object_declaration", "object Singleton {}"),
@@ -236,9 +222,7 @@ const KOTLIN: &[NodeType] = &[
     NodeType::new("when", "when_expression", "when (x) {}"),
 ];
 
-// =============================================================================
 // C++ - tree-sitter-cpp/src/node-types.json
-// =============================================================================
 const CPP: &[NodeType] = &[
     NodeType::new("class", "class_specifier", "class MyClass {}"),
     NodeType::new("struct", "struct_specifier", "struct S {}"),
@@ -254,9 +238,7 @@ const CPP: &[NodeType] = &[
     NodeType::new("for", "for_statement", "for (;;) {}"),
 ];
 
-// =============================================================================
 // C# - tree-sitter-c-sharp/src/node-types.json
-// =============================================================================
 const CSHARP: &[NodeType] = &[
     NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("interface", "interface_declaration", "interface I {}"),
@@ -272,9 +254,7 @@ const CSHARP: &[NodeType] = &[
     NodeType::new("delegate", "delegate_declaration", "delegate void D();"),
 ];
 
-// =============================================================================
 // Bash - tree-sitter-bash/src/node-types.json
-// =============================================================================
 const BASH: &[NodeType] = &[
     NodeType::new("function", "function_definition", "my_func() {}"),
     NodeType::new("variable", "variable_assignment", "VAR=value"),
@@ -288,9 +268,7 @@ const BASH: &[NodeType] = &[
     NodeType::new("redirect", "redirected_statement", "cmd > file"),
 ];
 
-// =============================================================================
 // Ruby - tree-sitter-ruby/src/node-types.json
-// =============================================================================
 const RUBY: &[NodeType] = &[
     NodeType::new("class", "class", "class MyClass"),
     NodeType::new("module", "module", "module MyModule"),
@@ -306,9 +284,7 @@ const RUBY: &[NodeType] = &[
     NodeType::new("for", "for", "for x in items"),
 ];
 
-// =============================================================================
 // Lua - tree-sitter-lua/src/node-types.json
-// =============================================================================
 const LUA: &[NodeType] = &[
     NodeType::new("function", "function_definition", "function f() end"),
     NodeType::new("function", "function_declaration", "local function f()"),
@@ -322,9 +298,7 @@ const LUA: &[NodeType] = &[
     NodeType::new("repeat", "repeat_statement", "repeat until cond"),
 ];
 
-// =============================================================================
 // PHP - tree-sitter-php/php/src/node-types.json
-// =============================================================================
 const PHP: &[NodeType] = &[
     NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("interface", "interface_declaration", "interface I {}"),

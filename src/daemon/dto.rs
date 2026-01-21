@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::lsp::CallHierarchyItem;
 use crate::models::symbol::{Location, Symbol, SymbolKind};
 
-// ============================================================================
 // Location DTOs
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocationDto {
@@ -49,9 +47,7 @@ impl From<LocationDto> for Location {
     }
 }
 
-// ============================================================================
 // Symbol DTOs
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolDto {
@@ -131,9 +127,7 @@ impl SymbolDto {
     }
 }
 
-// ============================================================================
 // Call Hierarchy DTOs
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallItemDto {
@@ -159,9 +153,7 @@ impl From<&CallHierarchyItem> for CallItemDto {
     }
 }
 
-// ============================================================================
 // Diagnostic DTOs
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticDto {
@@ -171,9 +163,7 @@ pub struct DiagnosticDto {
     pub column: u32,
 }
 
-// ============================================================================
 // Signature DTOs
-// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureDto {
@@ -192,9 +182,7 @@ pub struct ParameterDto {
     pub documentation: Option<String>,
 }
 
-// ============================================================================
 // Response Wrapper Types
-// ============================================================================
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SymbolsResponse {

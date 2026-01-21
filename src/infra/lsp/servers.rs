@@ -8,9 +8,7 @@ use std::time::Duration;
 
 use crate::models::symbol::Language;
 
-// ============================================================================
 // Server Performance Tiers
-// ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerTier {
@@ -52,9 +50,7 @@ impl ServerTier {
     }
 }
 
-// ============================================================================
 // Platform Detection
-// ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -75,9 +71,7 @@ impl Platform {
     }
 }
 
-// ============================================================================
 // Server Configuration
-// ============================================================================
 
 #[derive(Debug, Clone, Copy)]
 pub struct InstallInstructions {
@@ -176,8 +170,6 @@ impl ServerConfig {
 pub fn defaults() -> HashMap<Language, ServerConfig> {
     let mut configs = HashMap::new();
 
-    // ========== Fast Tier: Systems Languages ==========
-
     configs.insert(
         Language::Rust,
         ServerConfig {
@@ -232,8 +224,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             tier: ServerTier::Fast,
         },
     );
-
-    // ========== JVM Languages ==========
 
     configs.insert(
         Language::Java,
@@ -299,8 +289,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         },
     );
 
-    // ========== .NET Languages ==========
-
     configs.insert(
         Language::CSharp,
         ServerConfig {
@@ -332,8 +320,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             tier: ServerTier::Standard,
         },
     );
-
-    // ========== Web Languages ==========
 
     configs.insert(
         Language::TypeScript,
@@ -382,8 +368,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             tier: ServerTier::Standard,
         },
     );
-
-    // ========== Scripting Languages ==========
 
     configs.insert(
         Language::Python,
@@ -497,8 +481,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         },
     );
 
-    // ========== Functional Languages ==========
-
     configs.insert(
         Language::Haskell,
         ServerConfig {
@@ -579,8 +561,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         },
     );
 
-    // ========== Mobile/Application Languages ==========
-
     configs.insert(
         Language::Go,
         ServerConfig {
@@ -628,8 +608,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             tier: ServerTier::Standard,
         },
     );
-
-    // ========== Config/DevOps Languages ==========
 
     configs.insert(
         Language::Terraform,
@@ -711,8 +689,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         },
     );
 
-    // ========== Scientific Languages ==========
-
     configs.insert(
         Language::R,
         ServerConfig {
@@ -765,8 +741,6 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             tier: ServerTier::Standard,
         },
     );
-
-    // ========== Documentation ==========
 
     configs.insert(
         Language::Markdown,

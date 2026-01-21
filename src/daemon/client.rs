@@ -53,9 +53,7 @@ pub struct DaemonClient {
     next_request_id: AtomicU64,
 }
 
-// ============================================================================
 // Macros for RPC Method Generation
-// ============================================================================
 
 /// Generates position-based RPC methods (file, line, column)
 macro_rules! rpc_position {
@@ -108,9 +106,7 @@ impl DaemonClient {
         }
     }
 
-    // ========================================================================
     // Connection Management
-    // ========================================================================
 
     /// Ensure daemon is running, starting it if necessary
     pub async fn ensure_running(&self) -> Result<(), LspError> {
@@ -219,9 +215,7 @@ impl DaemonClient {
         Ok(())
     }
 
-    // ========================================================================
     // Request Infrastructure
-    // ========================================================================
 
     async fn send_request(
         &self,
@@ -300,9 +294,7 @@ impl DaemonClient {
             .ok_or_else(|| LspError::Protocol("Empty response".to_string()))
     }
 
-    // ========================================================================
     // Position-based LSP Operations (file, line, column)
-    // ========================================================================
 
     rpc_position! {
         find_references => methods::FIND_REFS,
@@ -319,9 +311,7 @@ impl DaemonClient {
         code_actions => methods::CODE_ACTIONS,
     }
 
-    // ========================================================================
     // File-based LSP Operations
-    // ========================================================================
 
     rpc_file! {
         diagnostics => methods::DIAGNOSTICS,
@@ -329,9 +319,7 @@ impl DaemonClient {
         code_lens => methods::CODE_LENS,
     }
 
-    // ========================================================================
     // Custom Parameter Operations
-    // ========================================================================
 
     pub async fn find_symbols_with_options(
         &self,
@@ -439,9 +427,7 @@ impl DaemonClient {
             .and_then(Self::extract_result)
     }
 
-    // ========================================================================
     // Search Operations
-    // ========================================================================
 
     pub async fn search_symbols(
         &self,
@@ -512,9 +498,7 @@ impl DaemonClient {
             .and_then(Self::extract_result)
     }
 
-    // ========================================================================
     // Daemon Control Operations
-    // ========================================================================
 
     pub async fn status(&self) -> Result<serde_json::Value, LspError> {
         self.send_request(methods::STATUS, None, Duration::from_secs(30))

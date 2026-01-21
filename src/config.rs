@@ -104,7 +104,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            base_timeout: Duration::from_secs(60), // Increased for large monorepos
+            base_timeout: Duration::from_secs(60),
             max_file_size_bytes: 10 * 1024 * 1024,
             auto_restart: true,
             entry_files: HashMap::new(),

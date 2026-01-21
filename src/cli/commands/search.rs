@@ -107,8 +107,6 @@ pub enum IndexCommand {
     Clear,
 }
 
-// === Response Types ===
-
 #[derive(Serialize)]
 struct SymbolSearchResponse {
     count: usize,

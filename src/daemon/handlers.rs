@@ -4,9 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
 // Request Parameter Types
-// ============================================================================
 
 #[derive(Debug, Deserialize)]
 pub struct PositionParams {
@@ -101,9 +99,7 @@ pub struct IndexBuildParams {
     pub languages: Option<Vec<String>>,
 }
 
-// ============================================================================
 // Response Types (handler-specific JSON shapes)
-// ============================================================================
 
 #[derive(Serialize)]
 pub struct CodeActionJson {

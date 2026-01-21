@@ -112,9 +112,8 @@ impl Default for LspConfig {
 }
 
 mod defaults {
-    // LSP
     pub fn timeout_secs() -> u64 {
-        60 // Increased for large monorepos
+        60
     }
     pub fn auto_restart() -> bool {
         true

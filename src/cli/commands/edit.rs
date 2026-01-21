@@ -52,9 +52,7 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-// ============================================================================
 // Target Resolution Helpers
-// ============================================================================
 
 /// Specifies position relative to symbol for insert operations
 #[derive(Clone, Copy)]
