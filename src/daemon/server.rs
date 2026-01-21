@@ -24,10 +24,8 @@ use crate::daemon::handlers::{
 use crate::daemon::protocol::{Request, RequestId, Response, RpcError, methods};
 use crate::models::config::SymoraConfig;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::Location;
-use crate::services::graph::{CallInfo, CodeGraph, GraphConfig, TypeHierarchyInfo};
 use crate::services::lsp::{DefaultLspService, LspService};
-use crate::services::search::{IndexOptions, SearchConfig, SearchIndex};
+use crate::services::store::{IndexOptions, Store, StoreConfig};
 
 type ProjectsMap = Arc<RwLock<HashMap<PathBuf, Arc<ProjectContext>>>>;
 
@@ -91,18 +89,19 @@ impl DaemonConfig {
 
 struct ProjectContext {
     lsp: Arc<dyn LspService + Send + Sync>,
-    graph: Arc<CodeGraph>,
-    search: Arc<SearchIndex>,
+    store: Arc<Store>,
     last_used: RwLock<Instant>,
     request_count: AtomicU64,
 }
 
 impl ProjectContext {
-    fn new(path: &Path) -> Self {
+    async fn new(path: &Path) -> Self {
+        let store = Store::open(path, StoreConfig::default())
+            .await
+            .expect("Failed to open store");
         Self {
             lsp: Arc::new(DefaultLspService::new(path)),
-            graph: Arc::new(CodeGraph::new(GraphConfig::default())),
-            search: Arc::new(SearchIndex::new(path, SearchConfig::default())),
+            store: Arc::new(store),
             last_used: RwLock::new(Instant::now()),
             request_count: AtomicU64::new(0),
         }
@@ -127,7 +126,8 @@ pub struct DaemonServer {
 }
 
 impl DaemonServer {
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+    /// Maximum time for a single request. Set high for index_build on large repos.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(660);
 
     pub fn new(config: DaemonConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -223,14 +223,9 @@ impl DaemonServer {
         {
             let projects = self.projects.read().await;
             for (_, ctx) in projects.iter() {
-                let expired = ctx.graph.cleanup_expired().await;
+                let expired = ctx.store.cleanup_expired().await;
                 if expired > 0 {
-                    tracing::debug!("Cleaned up {} expired graph entries", expired);
-                }
-
-                let search_expired = ctx.search.cleanup_expired().await;
-                if search_expired > 0 {
-                    tracing::debug!("Cleaned up {} expired search entries", search_expired);
+                    tracing::debug!("Cleaned up {} expired cache entries", expired);
                 }
             }
         }
@@ -261,7 +256,7 @@ impl DaemonServer {
         }
 
         for (path, ctx) in idle {
-            ctx.graph.clear().await;
+            let _ = ctx.store.clear().await;
             ctx.lsp.shutdown().await;
             tracing::info!("Removed idle project: {:?}", path);
         }
@@ -270,7 +265,7 @@ impl DaemonServer {
     async fn cleanup(&self) {
         let projects = self.projects.read().await;
         for (_, ctx) in projects.iter() {
-            ctx.graph.clear().await;
+            let _ = ctx.store.clear().await;
             ctx.lsp.shutdown().await;
         }
         let _ = tokio::fs::remove_file(&self.config.socket_path).await;
@@ -394,107 +389,34 @@ async fn dispatch(
 
         // Position-based operations
         methods::FIND_REFS => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(refs) = ctx.graph.get_references(&location).await {
-                return Ok(serde_json::json!({
-                    "count": refs.len(),
-                    "references": refs.iter().map(LocationDto::from).collect::<Vec<_>>(),
-                    "cached": true
-                }));
-            }
-
             let refs = ctx.lsp.find_references(&f, l, c).await?;
-
-            if let Some(hover) = ctx.lsp.hover(&f, l, c).await?
-                && let Some(name) = hover.extract_symbol_name()
-            {
-                ctx.graph.cache_references(
-                    &location,
-                    &name,
-                    crate::models::symbol::SymbolKind::Function,
-                    &refs,
-                ).await;
-            }
-
             Ok(serde_json::json!({
                 "count": refs.len(),
-                "references": refs.iter().map(LocationDto::from).collect::<Vec<_>>(),
-                "cached": false
+                "references": refs.iter().map(LocationDto::from).collect::<Vec<_>>()
             }))
         }).await,
 
         methods::FIND_DEF => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(def) = ctx.graph.get_definition(&location).await {
-                return Ok(serde_json::json!({
-                    "definition": LocationDto::from(&def),
-                    "cached": true
-                }));
-            }
-
             let def = ctx.lsp.goto_definition(&f, l, c).await?;
-
-            if let Some(ref def_loc) = def {
-                ctx.graph.cache_definition(&location, def_loc).await;
-            }
-
             Ok(match def {
-                Some(loc) => serde_json::json!({
-                    "definition": LocationDto::from(&loc),
-                    "cached": false
-                }),
+                Some(loc) => serde_json::json!({ "definition": LocationDto::from(&loc) }),
                 None => serde_json::json!({ "definition": null, "message": "No definition found" }),
             })
         }).await,
 
         methods::FIND_TYPEDEF => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(def) = ctx.graph.get_type_definition(&location).await {
-                return Ok(serde_json::json!({
-                    "definition": LocationDto::from(&def),
-                    "cached": true
-                }));
-            }
-
             let def = ctx.lsp.goto_type_definition(&f, l, c).await?;
-
-            if let Some(ref def_loc) = def {
-                ctx.graph.cache_type_definition(&location, def_loc).await;
-            }
-
             Ok(match def {
-                Some(loc) => serde_json::json!({
-                    "definition": LocationDto::from(&loc),
-                    "cached": false
-                }),
+                Some(loc) => serde_json::json!({ "definition": LocationDto::from(&loc) }),
                 None => serde_json::json!({ "definition": null, "message": "No type definition found" }),
             })
         }).await,
 
         methods::FIND_IMPL => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(impls) = ctx.graph.get_implementations(&location).await {
-                return Ok(serde_json::json!({
-                    "count": impls.len(),
-                    "implementations": impls.iter().map(LocationDto::from).collect::<Vec<_>>(),
-                    "cached": true
-                }));
-            }
-
             let impls = ctx.lsp.find_implementations(&f, l, c).await?;
-
-            if !impls.is_empty() {
-                ctx.graph.cache_implementations(&location, &impls).await;
-            }
-
             Ok(serde_json::json!({
                 "count": impls.len(),
-                "implementations": impls.iter().map(LocationDto::from).collect::<Vec<_>>(),
-                "cached": false
+                "implementations": impls.iter().map(LocationDto::from).collect::<Vec<_>>()
             }))
         }).await,
 
@@ -527,84 +449,23 @@ async fn dispatch(
         }).await,
 
         methods::CALLS_INCOMING => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(calls) = ctx.graph.get_incoming_calls(&location).await {
-                return Ok(serde_json::json!({
-                    "count": calls.len(),
-                    "calls": calls_to_json(&calls),
-                    "cached": true
-                }));
-            }
-
             let calls = ctx.lsp.incoming_calls(&f, l, c).await?;
-
-            if let Some(hover) = ctx.lsp.hover(&f, l, c).await?
-                && let Some(name) = hover.extract_symbol_name()
-            {
-                ctx.graph.cache_incoming_calls(
-                    &location,
-                    &name,
-                    crate::models::symbol::SymbolKind::Function,
-                    &calls,
-                ).await;
-            }
-
             Ok(serde_json::json!({
                 "count": calls.len(),
-                "calls": call_hierarchy_to_json(&calls),
-                "cached": false
+                "calls": call_hierarchy_to_json(&calls)
             }))
         }).await,
 
         methods::CALLS_OUTGOING => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(calls) = ctx.graph.get_outgoing_calls(&location).await {
-                return Ok(serde_json::json!({
-                    "count": calls.len(),
-                    "calls": calls_to_json(&calls),
-                    "cached": true
-                }));
-            }
-
             let calls = ctx.lsp.outgoing_calls(&f, l, c).await?;
-
-            if let Some(hover) = ctx.lsp.hover(&f, l, c).await?
-                && let Some(name) = hover.extract_symbol_name()
-            {
-                ctx.graph.cache_outgoing_calls(
-                    &location,
-                    &name,
-                    crate::models::symbol::SymbolKind::Function,
-                    &calls,
-                ).await;
-            }
-
             Ok(serde_json::json!({
                 "count": calls.len(),
-                "calls": call_hierarchy_to_json(&calls),
-                "cached": false
+                "calls": call_hierarchy_to_json(&calls)
             }))
         }).await,
 
         methods::SUPERTYPES => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(items) = ctx.graph.get_supertypes(&location).await {
-                return Ok(serde_json::json!({
-                    "count": items.len(),
-                    "items": type_hierarchy_to_json(&items),
-                    "cached": true
-                }));
-            }
-
             let items = ctx.lsp.supertypes(&f, l, c).await?;
-
-            if !items.is_empty() {
-                ctx.graph.cache_supertypes(&location, &items).await;
-            }
-
             Ok(serde_json::json!({
                 "count": items.len(),
                 "items": items.iter().map(|item| TypeHierarchyItemJson {
@@ -614,28 +475,12 @@ async fn dispatch(
                     line: item.location.line,
                     column: item.location.column,
                     detail: item.detail.clone(),
-                }).collect::<Vec<_>>(),
-                "cached": false
+                }).collect::<Vec<_>>()
             }))
         }).await,
 
         methods::SUBTYPES => handle_position(&params, projects, |ctx, f, l, c| async move {
-            let location = Location::point(f.clone(), l, c);
-
-            if let Some(items) = ctx.graph.get_subtypes(&location).await {
-                return Ok(serde_json::json!({
-                    "count": items.len(),
-                    "items": type_hierarchy_to_json(&items),
-                    "cached": true
-                }));
-            }
-
             let items = ctx.lsp.subtypes(&f, l, c).await?;
-
-            if !items.is_empty() {
-                ctx.graph.cache_subtypes(&location, &items).await;
-            }
-
             Ok(serde_json::json!({
                 "count": items.len(),
                 "items": items.iter().map(|item| TypeHierarchyItemJson {
@@ -645,8 +490,7 @@ async fn dispatch(
                     line: item.location.line,
                     column: item.location.column,
                     detail: item.detail.clone(),
-                }).collect::<Vec<_>>(),
-                "cached": false
+                }).collect::<Vec<_>>()
             }))
         }).await,
 
@@ -731,7 +575,7 @@ async fn dispatch(
         methods::SELECTION_RANGES => handle_selection_ranges(&params, projects).await,
         methods::APPLY_CODE_ACTION => handle_apply_action(&params, projects).await,
 
-        // Search operations (BM25 ranked)
+        // Search operations
         methods::SEARCH_SYMBOLS => handle_search_symbols(&params, projects).await,
         methods::SEARCH_CONTENT => handle_search_content(&params, projects).await,
         methods::INDEX_BUILD => handle_index_build(&params, projects).await,
@@ -763,9 +607,9 @@ async fn get_context(
         }
     }
 
-    let ctx = Arc::new(ProjectContext::new(&path));
+    let ctx = Arc::new(ProjectContext::new(&path).await);
     let mut guard = projects.write().await;
-    guard.insert(path, Arc::clone(&ctx));
+    guard.insert(path.clone(), Arc::clone(&ctx));
     Ok(ctx)
 }
 
@@ -809,42 +653,6 @@ where
 // Response Helpers
 // ============================================================================
 
-fn calls_to_json(calls: &[CallInfo]) -> Vec<serde_json::Value> {
-    calls
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "name": c.name,
-                "kind": c.kind.to_string(),
-                "file": c.location.file.display().to_string(),
-                "line": c.location.line,
-                "column": c.location.column,
-                "call_site": c.call_site.as_ref().map(|cs| serde_json::json!({
-                    "file": cs.file.display().to_string(),
-                    "line": cs.line,
-                    "column": cs.column,
-                })),
-            })
-        })
-        .collect()
-}
-
-fn type_hierarchy_to_json(items: &[TypeHierarchyInfo]) -> Vec<serde_json::Value> {
-    items
-        .iter()
-        .map(|item| {
-            serde_json::json!({
-                "name": item.name,
-                "kind": item.kind.to_string(),
-                "file": item.location.file.display().to_string(),
-                "line": item.location.line,
-                "column": item.location.column,
-                "detail": item.detail,
-            })
-        })
-        .collect()
-}
-
 fn call_hierarchy_to_json(
     calls: &[crate::models::lsp::CallHierarchyItem],
 ) -> Vec<serde_json::Value> {
@@ -878,43 +686,26 @@ async fn handle_status(
 ) -> Result<serde_json::Value, RpcError> {
     let guard = projects.read().await;
 
-    let mut total_nodes = 0u64;
-    let mut total_edges = 0u64;
+    let mut total_symbols = 0u64;
     let mut total_files = 0u64;
-    let mut total_hits = 0u64;
-    let mut total_misses = 0u64;
 
     let mut active = Vec::with_capacity(guard.len());
     for (path, ctx) in guard.iter() {
-        let graph_stats = ctx.graph.stats();
-        let nodes = ctx.graph.node_count().await;
-        let edges = ctx.graph.edge_count().await;
-        let files = ctx.graph.file_count().await;
+        let stats = ctx.store.stats().await.unwrap_or_default();
 
-        total_nodes += nodes as u64;
-        total_edges += edges as u64;
-        total_files += files as u64;
-        total_hits += graph_stats.cache_hits;
-        total_misses += graph_stats.cache_misses;
+        total_symbols += stats.symbol_count as u64;
+        total_files += stats.file_count as u64;
 
         active.push(serde_json::json!({
             "project": path.display().to_string(),
             "requests": ctx.request_count.load(Ordering::Relaxed),
-            "graph": {
-                "nodes": nodes,
-                "edges": edges,
-                "files": files,
-                "hit_rate": graph_stats.hit_rate,
+            "store": {
+                "symbols": stats.symbol_count,
+                "files": stats.file_count,
+                "content_lines": stats.content_line_count,
             }
         }));
     }
-
-    let total_requests = total_hits + total_misses;
-    let overall_hit_rate = if total_requests > 0 {
-        total_hits as f64 / total_requests as f64
-    } else {
-        0.0
-    };
 
     Ok(serde_json::json!({
         "running": true,
@@ -923,13 +714,9 @@ async fn handle_status(
         "socket_path": config.socket_path.display().to_string(),
         "active_projects": active.len(),
         "projects": active,
-        "graph_totals": {
-            "nodes": total_nodes,
-            "edges": total_edges,
+        "store_totals": {
+            "symbols": total_symbols,
             "files": total_files,
-            "cache_hits": total_hits,
-            "cache_misses": total_misses,
-            "hit_rate": overall_hit_rate,
         }
     }))
 }
@@ -1007,7 +794,7 @@ async fn handle_rename(
         .map_err(RpcError::from)?;
 
     for change in &result.changes {
-        ctx.graph.invalidate_file(&change.file).await;
+        ctx.store.invalidate_file(&change.file).await;
     }
 
     Ok(serde_json::json!({
@@ -1103,7 +890,7 @@ async fn handle_apply_action(
         .map_err(RpcError::from)?;
 
     for change in &result.changes {
-        ctx.graph.invalidate_file(&change.file).await;
+        ctx.store.invalidate_file(&change.file).await;
     }
 
     Ok(serde_json::json!({
@@ -1121,7 +908,7 @@ async fn handle_apply_action(
 }
 
 // ============================================================================
-// Search Handlers (BM25 Ranked)
+// Search Handlers
 // ============================================================================
 
 async fn handle_search_symbols(
@@ -1132,18 +919,14 @@ async fn handle_search_symbols(
     let ctx = get_context(projects, &p.project).await?;
     ctx.touch().await;
 
-    if let Err(e) = ctx.search.init().await {
-        return Err(RpcError::internal_error(&e.to_string()));
-    }
-
-    let kind_filter: Option<Vec<crate::models::symbol::SymbolKind>> = p
+    let kind_filter = p
         .kind
         .as_ref()
-        .map(|k| vec![crate::models::symbol::SymbolKind::from_str_loose(k)]);
+        .map(|k| crate::models::symbol::SymbolKind::from_str_loose(k));
 
     let results = ctx
-        .search
-        .search_symbols(&p.query, p.limit, kind_filter.as_deref())
+        .store
+        .search_symbols(&p.query, p.limit.unwrap_or(100), kind_filter)
         .await
         .map_err(|e| RpcError::internal_error(&e.to_string()))?;
 
@@ -1155,7 +938,6 @@ async fn handle_search_symbols(
             "file": r.file.display().to_string(),
             "line": r.line,
             "column": r.column,
-            "container": r.container,
             "score": r.score,
         })).collect::<Vec<_>>()
     }))
@@ -1169,18 +951,14 @@ async fn handle_search_content(
     let ctx = get_context(projects, &p.project).await?;
     ctx.touch().await;
 
-    if let Err(e) = ctx.search.init().await {
-        return Err(RpcError::internal_error(&e.to_string()));
-    }
-
     let language = p
         .language
         .as_ref()
         .map(|l| crate::models::symbol::Language::from_str_loose(l));
 
     let results = ctx
-        .search
-        .search_content(&p.query, p.limit, language)
+        .store
+        .search_content(&p.query, p.limit.unwrap_or(100), language)
         .await
         .map_err(|e| RpcError::internal_error(&e.to_string()))?;
 
@@ -1203,10 +981,6 @@ async fn handle_index_build(
     let ctx = get_context(projects, &p.project).await?;
     ctx.touch().await;
 
-    if let Err(e) = ctx.search.init().await {
-        return Err(RpcError::internal_error(&e.to_string()));
-    }
-
     let languages: Option<Vec<crate::models::symbol::Language>> =
         p.languages.as_ref().map(|langs| {
             langs
@@ -1218,11 +992,10 @@ async fn handle_index_build(
     let options = IndexOptions {
         force: p.force,
         languages,
-        paths: None,
     };
 
     let stats = ctx
-        .search
+        .store
         .index(options)
         .await
         .map_err(|e| RpcError::internal_error(&e.to_string()))?;
@@ -1246,12 +1019,8 @@ async fn handle_index_status(
     let ctx = get_context(projects, &p.project).await?;
     ctx.touch().await;
 
-    if let Err(e) = ctx.search.init().await {
-        return Err(RpcError::internal_error(&e.to_string()));
-    }
-
     let stats = ctx
-        .search
+        .store
         .stats()
         .await
         .map_err(|e| RpcError::internal_error(&e.to_string()))?;
@@ -1275,11 +1044,7 @@ async fn handle_index_clear(
     let ctx = get_context(projects, &p.project).await?;
     ctx.touch().await;
 
-    if let Err(e) = ctx.search.init().await {
-        return Err(RpcError::internal_error(&e.to_string()));
-    }
-
-    ctx.search
+    ctx.store
         .clear()
         .await
         .map_err(|e| RpcError::internal_error(&e.to_string()))?;
@@ -1288,3 +1053,4 @@ async fn handle_index_clear(
         "cleared": true
     }))
 }
+

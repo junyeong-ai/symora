@@ -1,27 +1,8 @@
-//! Search types and configuration
-
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::models::symbol::{Language, SymbolKind};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchConfig {
-    pub max_results: usize,
-    pub ttl_secs: u64,
-    pub index_content: bool,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            max_results: 100,
-            ttl_secs: 3600,
-            index_content: true,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolSearchResult {
@@ -30,7 +11,6 @@ pub struct SymbolSearchResult {
     pub file: PathBuf,
     pub line: u32,
     pub column: u32,
-    pub container: Option<String>,
     pub score: f64,
 }
 
@@ -56,15 +36,20 @@ pub struct IndexStats {
 #[derive(Debug, Clone, Default)]
 pub struct IndexOptions {
     pub force: bool,
-    pub paths: Option<Vec<PathBuf>>,
     pub languages: Option<Vec<Language>>,
 }
 
-#[derive(Debug)]
-pub struct SymbolIndexEntry {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub container: Option<String>,
-    pub line: u32,
-    pub column: u32,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreConfig {
+    pub ttl_secs: u64,
+    pub index_content: bool,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            ttl_secs: 3600,
+            index_content: true,
+        }
+    }
 }
