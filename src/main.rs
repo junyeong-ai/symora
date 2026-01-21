@@ -14,16 +14,24 @@ use symora::cli::commands::daemon::{DaemonArgs, DaemonCommand};
 use symora::cli::{Cli, Commands};
 
 fn main() {
-    // Initialize tracing with quiet defaults for AI agent consumption
-    // Use RUST_LOG=symora=debug for verbose output
+    // Pre-parse args to check for --verbose flag before tracing init
+    let args: Vec<String> = std::env::args().collect();
+    let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
+
+    // Initialize tracing with appropriate level
+    let env_filter = if verbose {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "symora=debug".into())
+    } else {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "symora=warn".into())
+    };
+
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "symora=warn".into()),
-        )
+        .with(env_filter)
         .with(
             tracing_subscriber::fmt::layer()
-                .with_target(false)
+                .with_target(verbose)
                 .compact(),
         )
         .init();
