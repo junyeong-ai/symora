@@ -3,7 +3,7 @@
 //! Provides symbol-aware text editing operations.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -11,7 +11,7 @@ use clap::{Args, Subcommand};
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::Language;
+use crate::models::symbol::{Language, Symbol};
 
 /// Maximum file size for editing (100MB)
 const MAX_EDIT_FILE_SIZE: u64 = 100 * 1024 * 1024;
@@ -52,6 +52,54 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+// ============================================================================
+// Target Resolution Helpers
+// ============================================================================
+
+/// Specifies position relative to symbol for insert operations
+#[derive(Clone, Copy)]
+enum InsertMode {
+    /// Insert after symbol (at end position)
+    After,
+    /// Insert before symbol (at start position)
+    Before,
+}
+
+/// Resolve file path from target string, handling relative paths
+fn resolve_file_path(app: &App, target: &str) -> PathBuf {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        app.root().join(path)
+    }
+}
+
+/// Lookup symbol by path pattern in a file
+async fn lookup_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
+    let mut symbols = app
+        .lsp
+        .find_symbols(file, FindSymbolsOptions::new().with_depth(10))
+        .await?;
+    Symbol::compute_paths_for_all(&mut symbols);
+    Symbol::find_by_path(&symbols, pattern)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", pattern))
+}
+
+/// Find the symbol containing a specific line position
+async fn find_symbol_at_position(app: &App, file: &Path, line: u32) -> Result<Symbol> {
+    let symbols = app
+        .lsp
+        .find_symbols(file, FindSymbolsOptions::default())
+        .await?;
+    symbols
+        .iter()
+        .find(|s| s.location.line <= line && s.location.end_line.is_none_or(|end| end >= line))
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line))
+}
+
 #[derive(Args, Debug)]
 pub struct EditArgs {
     #[command(subcommand)]
@@ -80,16 +128,11 @@ pub enum EditCommand {
 
     /// Insert text after a symbol or position
     InsertAfter {
-        /// File path (use with --symbol)
-        #[arg(required_unless_present = "location")]
-        file: Option<String>,
+        /// Target: file:line[:col] (location) or file path (with --symbol)
+        target: String,
 
-        /// Location (file:line:column)
-        #[arg(conflicts_with = "file")]
-        location: Option<String>,
-
-        /// Symbol path (e.g., "Class/method")
-        #[arg(short = 's', long, requires = "file")]
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
         symbol: Option<String>,
 
         /// Text to insert
@@ -103,16 +146,11 @@ pub enum EditCommand {
 
     /// Insert text before a symbol or position
     InsertBefore {
-        /// File path (use with --symbol)
-        #[arg(required_unless_present = "location")]
-        file: Option<String>,
+        /// Target: file:line[:col] (location) or file path (with --symbol)
+        target: String,
 
-        /// Location (file:line:column)
-        #[arg(conflicts_with = "file")]
-        location: Option<String>,
-
-        /// Symbol path (e.g., "Class/method")
-        #[arg(short = 's', long, requires = "file")]
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
         symbol: Option<String>,
 
         /// Text to insert
@@ -126,16 +164,11 @@ pub enum EditCommand {
 
     /// Replace a symbol's body (by location or symbol path)
     Symbol {
-        /// File path (use with --symbol option)
-        #[arg(required_unless_present = "location")]
-        file: Option<String>,
+        /// Target: file:line[:col] (location) or file path (with --symbol)
+        target: String,
 
-        /// Location pointing to the symbol (file:line:column)
-        #[arg(conflicts_with = "file")]
-        location: Option<String>,
-
-        /// Symbol path (e.g., "Class/method")
-        #[arg(short = 's', long, requires = "file")]
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
         symbol: Option<String>,
 
         /// New text for the symbol
@@ -205,37 +238,36 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
         }
 
         EditCommand::InsertAfter {
-            file,
-            location,
+            target,
             symbol,
             text,
             dry_run,
         } => {
-            let (file_path, line, col) = resolve_target(app, file, location, symbol).await?;
+            let (file_path, line, col) =
+                resolve_insert_position(app, &target, symbol, InsertMode::After).await?;
             let result = apply_insert(&file_path, line, col, &text, false, dry_run)?;
             ctx.print_success_flat(result);
         }
 
         EditCommand::InsertBefore {
-            file,
-            location,
+            target,
             symbol,
             text,
             dry_run,
         } => {
-            let (file_path, line, col) = resolve_target(app, file, location, symbol).await?;
+            let (file_path, line, col) =
+                resolve_insert_position(app, &target, symbol, InsertMode::Before).await?;
             let result = apply_insert(&file_path, line, col, &text, true, dry_run)?;
             ctx.print_success_flat(result);
         }
 
         EditCommand::Symbol {
-            file,
-            location,
+            target,
             symbol,
             text,
             dry_run,
         } => {
-            let (file_path, target_symbol) = resolve_symbol(app, file, location, symbol).await?;
+            let (file_path, target_symbol) = resolve_symbol(app, &target, symbol).await?;
 
             let start_line = target_symbol.location.line;
             let start_col = target_symbol.location.column;
@@ -271,104 +303,71 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
-/// Resolve target position from file+symbol or location
-async fn resolve_target(
+/// Resolve position for insert operations with mode-aware positioning.
+/// Auto-detects location format (file:line[:col]) vs file path (requires --symbol).
+///
+/// BUG FIX: InsertBefore now correctly uses the symbol's start position,
+/// not end position (which was the previous buggy behavior).
+async fn resolve_insert_position(
     app: &App,
-    file: Option<String>,
-    location: Option<String>,
+    target: &str,
     symbol_path: Option<String>,
-) -> Result<(std::path::PathBuf, u32, u32)> {
-    use crate::models::symbol::Symbol;
-
-    if let Some(loc_str) = location {
-        let loc = ParsedLocation::parse(&loc_str)?.to_absolute()?;
+    mode: InsertMode,
+) -> Result<(PathBuf, u32, u32)> {
+    // Location mode: use specified position directly
+    if ParsedLocation::is_location_format(target) {
+        let loc = ParsedLocation::parse(target)?.to_absolute()?;
         return Ok((loc.file, loc.line, loc.column));
     }
 
-    let file =
-        file.ok_or_else(|| anyhow::anyhow!("File path is required when location is not provided"))?;
-    let symbol_pattern =
-        symbol_path.ok_or_else(|| anyhow::anyhow!("--symbol is required when using file"))?;
+    // Symbol mode: --symbol is required
+    let pattern = symbol_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--symbol is required when target is a file path. \
+             Use file:line:col format for position-based editing."
+        )
+    })?;
 
-    let path = std::path::Path::new(&file);
-    let abs_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        app.root().join(path)
+    let file = resolve_file_path(app, target);
+    let symbol = lookup_symbol_by_path(app, &file, &pattern).await?;
+
+    // Mode-aware position selection (fixes InsertBefore bug)
+    let (line, column) = match mode {
+        InsertMode::After => (
+            symbol.location.end_line.unwrap_or(symbol.location.line),
+            symbol.location.end_column.unwrap_or(1),
+        ),
+        InsertMode::Before => (symbol.location.line, symbol.location.column),
     };
 
-    let mut symbols = app
-        .lsp
-        .find_symbols(&abs_path, FindSymbolsOptions::new().with_depth(10))
-        .await?;
-    Symbol::compute_paths_for_all(&mut symbols);
-
-    let target = Symbol::find_by_path(&symbols, &symbol_pattern)
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", symbol_pattern))?;
-
-    let end_line = target.location.end_line.unwrap_or(target.location.line);
-    let end_col = target.location.end_column.unwrap_or(1);
-
-    Ok((abs_path, end_line, end_col))
+    Ok((file, line, column))
 }
 
-/// Resolve symbol from file+symbol or location
+/// Resolve full symbol from target for operations needing complete symbol info.
+/// Auto-detects location format (file:line[:col]) vs file path (requires --symbol).
 async fn resolve_symbol(
     app: &App,
-    file: Option<String>,
-    location: Option<String>,
+    target: &str,
     symbol_path: Option<String>,
-) -> Result<(std::path::PathBuf, crate::models::symbol::Symbol)> {
-    use crate::models::symbol::Symbol;
-
-    if let Some(loc_str) = location {
-        let loc = ParsedLocation::parse(&loc_str)?.to_absolute()?;
-        let symbols = app
-            .lsp
-            .find_symbols(&loc.file, FindSymbolsOptions::default())
-            .await?;
-
-        let target = symbols
-            .iter()
-            .find(|s| {
-                s.location.line <= loc.line && s.location.end_line.is_none_or(|end| end >= loc.line)
-            })
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No symbol found at {}:{}:{}",
-                    loc.file.display(),
-                    loc.line,
-                    loc.column
-                )
-            })?;
-
-        return Ok((loc.file, target));
+) -> Result<(PathBuf, Symbol)> {
+    // Location mode: find symbol at position
+    if ParsedLocation::is_location_format(target) {
+        let loc = ParsedLocation::parse(target)?.to_absolute()?;
+        let symbol = find_symbol_at_position(app, &loc.file, loc.line).await?;
+        return Ok((loc.file, symbol));
     }
 
-    let file =
-        file.ok_or_else(|| anyhow::anyhow!("File path is required when location is not provided"))?;
-    let symbol_pattern =
-        symbol_path.ok_or_else(|| anyhow::anyhow!("--symbol is required when using file"))?;
+    // Symbol mode: --symbol is required
+    let pattern = symbol_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--symbol is required when target is a file path. \
+             Use file:line:col format for position-based editing."
+        )
+    })?;
 
-    let path = std::path::Path::new(&file);
-    let abs_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        app.root().join(path)
-    };
-
-    let mut symbols = app
-        .lsp
-        .find_symbols(&abs_path, FindSymbolsOptions::new().with_depth(10))
-        .await?;
-    Symbol::compute_paths_for_all(&mut symbols);
-
-    let target = Symbol::find_by_path(&symbols, &symbol_pattern)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", symbol_pattern))?;
-
-    Ok((abs_path, target))
+    let file = resolve_file_path(app, target);
+    let symbol = lookup_symbol_by_path(app, &file, &pattern).await?;
+    Ok((file, symbol))
 }
 
 /// Apply a replace edit to a file
