@@ -252,36 +252,33 @@ impl DaemonClient {
         Ok(serde_json::from_str(&line)?)
     }
 
+    fn inject_project(&self, params: &mut serde_json::Value) {
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(
+                "project".to_string(),
+                serde_json::Value::String(self.project_root.display().to_string()),
+            );
+        }
+    }
+
     async fn request_with_project(
         &self,
         method: &str,
         mut params: serde_json::Value,
         file: Option<&Path>,
     ) -> Result<Response, LspError> {
-        if let Some(obj) = params.as_object_mut() {
-            obj.insert(
-                "project".to_string(),
-                serde_json::Value::String(self.project_root.display().to_string()),
-            );
-        }
+        self.inject_project(&mut params);
         let timeout = calculate_timeout(file, method);
         self.send_request(method, Some(params), timeout).await
     }
 
-    /// Request with project injection and explicit timeout.
-    /// Use when language is known but file path is not (e.g., workspace_symbols).
     async fn request_with_project_timeout(
         &self,
         method: &str,
         mut params: serde_json::Value,
         timeout: Duration,
     ) -> Result<Response, LspError> {
-        if let Some(obj) = params.as_object_mut() {
-            obj.insert(
-                "project".to_string(),
-                serde_json::Value::String(self.project_root.display().to_string()),
-            );
-        }
+        self.inject_project(&mut params);
         self.send_request(method, Some(params), timeout).await
     }
 

@@ -275,6 +275,11 @@ impl WorkspaceSymbolCache {
             .map(|(k, e)| (k.clone(), e.created_at))
         {
             entries.remove(&oldest_key);
+            tracing::trace!(
+                "Evicted workspace cache: {:?} {}",
+                oldest_key.language,
+                oldest_key.query
+            );
         }
     }
 
