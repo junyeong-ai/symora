@@ -366,14 +366,98 @@ pub(super) fn select_best_definition(
     locations.first()
 }
 
+/// Find the innermost callable symbol (function, method, constructor) containing a position.
+/// Searches nested symbol trees to find the most specific match.
+pub fn find_containing_callable(symbols: &[Symbol], target_line: u32) -> Option<&Symbol> {
+    fn search_recursive<'a>(
+        symbols: &'a [Symbol],
+        target_line: u32,
+        current_best: Option<&'a Symbol>,
+    ) -> Option<&'a Symbol> {
+        let mut best = current_best;
+
+        for symbol in symbols {
+            let start = symbol.location.line;
+            let end = symbol.location.end_line.unwrap_or(start);
+
+            if start <= target_line && target_line <= end {
+                // This symbol contains the target line
+                if symbol.kind.is_callable() {
+                    // Update best if this is more specific (smaller range)
+                    let should_update = best.is_none_or(|b| {
+                        let best_start = b.location.line;
+                        let best_end = b.location.end_line.unwrap_or(best_start);
+                        (end - start) < (best_end - best_start)
+                    });
+                    if should_update {
+                        best = Some(symbol);
+                    }
+                }
+
+                // Recursively search children
+                if !symbol.children.is_empty() {
+                    best = search_recursive(&symbol.children, target_line, best);
+                }
+            }
+        }
+
+        best
+    }
+
+    search_recursive(symbols, target_line, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_to_lsp_position() {
         let pos = to_lsp_position(10, 5);
         assert_eq!(pos.line, 9);
         assert_eq!(pos.character, 4);
+    }
+
+    #[test]
+    fn test_find_containing_callable() {
+        use crate::models::symbol::{Symbol, SymbolKind};
+
+        // Create a nested symbol structure
+        let inner_fn = Symbol::new(
+            "inner_fn".to_string(),
+            SymbolKind::Function,
+            Location::new(PathBuf::from("test.rs"), 5, 1, 10, 1),
+        );
+
+        let outer_fn = Symbol::new(
+            "outer_fn".to_string(),
+            SymbolKind::Function,
+            Location::new(PathBuf::from("test.rs"), 1, 1, 15, 1),
+        )
+        .with_children(vec![inner_fn]);
+
+        let class = Symbol::new(
+            "MyClass".to_string(),
+            SymbolKind::Class,
+            Location::new(PathBuf::from("test.rs"), 1, 1, 20, 1),
+        )
+        .with_children(vec![outer_fn.clone()]);
+
+        let symbols = vec![class];
+
+        // Line 7 should find inner_fn (most specific callable)
+        let result = find_containing_callable(&symbols, 7);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "inner_fn");
+
+        // Line 12 should find outer_fn (inner_fn doesn't contain it)
+        let result = find_containing_callable(&symbols, 12);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "outer_fn");
+
+        // Line 18 should find nothing (outside all callables)
+        let result = find_containing_callable(&symbols, 18);
+        assert!(result.is_none());
     }
 }
