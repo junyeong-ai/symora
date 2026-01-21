@@ -104,7 +104,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            base_timeout: Duration::from_secs(30),
+            base_timeout: Duration::from_secs(60),  // Increased for large monorepos
             max_file_size_bytes: 10 * 1024 * 1024,
             auto_restart: true,
             entry_files: HashMap::new(),
@@ -223,21 +223,21 @@ mod tests {
     fn test_timeout_calculation() {
         let config = RuntimeConfig::default();
 
-        // Rust normal request: 30s * 1.5 * 1.0 = 45s
+        // Rust normal request: 60s * 1.5 * 1.0 = 90s
         let rust_timeout = config.timeout_for(Language::Rust, "textDocument/hover");
-        assert_eq!(rust_timeout, Duration::from_secs(45));
+        assert_eq!(rust_timeout, Duration::from_secs(90));
 
-        // Kotlin workspace operation: 30s * 10.0 * 6.0 = 1800s
+        // Kotlin workspace operation: 60s * 10.0 * 6.0 = 3600s
         let kotlin_timeout = config.timeout_for(Language::Kotlin, "workspace/symbol");
-        assert_eq!(kotlin_timeout, Duration::from_secs(1800));
+        assert_eq!(kotlin_timeout, Duration::from_secs(3600));
 
-        // Python initialization: 30s * 8.0 * 2.0 = 480s
+        // Python initialization: 60s * 8.0 * 2.0 = 960s
         let python_timeout = config.timeout_for(Language::Python, "initialize");
-        assert_eq!(python_timeout, Duration::from_secs(480));
+        assert_eq!(python_timeout, Duration::from_secs(960));
 
-        // TypeScript rename: 30s * 2.5 * 10.0 = 750s
+        // TypeScript rename: 60s * 2.5 * 10.0 = 1500s
         let ts_rename = config.timeout_for(Language::TypeScript, "textDocument/rename");
-        assert_eq!(ts_rename, Duration::from_secs(750));
+        assert_eq!(ts_rename, Duration::from_secs(1500));
     }
 
     #[test]
