@@ -968,11 +968,36 @@ impl LspClient {
     }
 
     pub async fn sync_document(&self, uri: &str, content: &str) -> Result<(), LspError> {
+        self.sync_document_inner(uri, content, false).await?;
+        Ok(())
+    }
+
+    pub async fn acquire_document(
+        self: &Arc<Self>,
+        uri: &str,
+        content: &str,
+    ) -> Result<DocumentSyncGuard, LspError> {
+        self.sync_document_inner(uri, content, true).await?;
+        Ok(DocumentSyncGuard {
+            uri: uri.to_string(),
+            client: Arc::clone(self),
+        })
+    }
+
+    async fn sync_document_inner(
+        &self,
+        uri: &str,
+        content: &str,
+        acquire: bool,
+    ) -> Result<(), LspError> {
         let evicted = {
             let mut cache = self.document_cache.write().await;
             let language_id = self.language.to_string().to_lowercase();
 
             if let Some(state) = cache.get_mut(uri) {
+                if acquire {
+                    state.acquire();
+                }
                 if state.needs_update(content) {
                     state.update(content);
                     self.invalidate_index();
@@ -987,7 +1012,10 @@ impl LspClient {
                 }
                 None
             } else {
-                let state = DocumentState::new(content);
+                let mut state = DocumentState::new(content);
+                if acquire {
+                    state.acquire();
+                }
                 self.invalidate_index();
                 self.notify(
                     "textDocument/didOpen",
@@ -1014,64 +1042,6 @@ impl LspClient {
                 .await;
         }
         Ok(())
-    }
-
-    pub async fn acquire_document(
-        self: &Arc<Self>,
-        uri: &str,
-        content: &str,
-    ) -> Result<DocumentSyncGuard, LspError> {
-        let evicted = {
-            let mut cache = self.document_cache.write().await;
-            let language_id = self.language.to_string().to_lowercase();
-
-            if let Some(state) = cache.get_mut(uri) {
-                state.acquire();
-                if state.needs_update(content) {
-                    state.update(content);
-                    self.invalidate_index();
-                    self.notify(
-                        "textDocument/didChange",
-                        Some(serde_json::json!({
-                            "textDocument": { "uri": uri, "version": state.version },
-                            "contentChanges": [{ "text": content }]
-                        })),
-                    )
-                    .await?;
-                }
-                None
-            } else {
-                let state = DocumentState::new(content);
-                self.invalidate_index();
-                self.notify(
-                    "textDocument/didOpen",
-                    Some(serde_json::json!({
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": language_id,
-                            "version": state.version,
-                            "text": content
-                        }
-                    })),
-                )
-                .await?;
-                cache.insert(uri.to_string(), state)
-            }
-        };
-
-        if let Some(evicted_uri) = evicted {
-            let _ = self
-                .notify(
-                    "textDocument/didClose",
-                    Some(serde_json::json!({ "textDocument": { "uri": evicted_uri } })),
-                )
-                .await;
-        }
-
-        Ok(DocumentSyncGuard {
-            uri: uri.to_string(),
-            client: Arc::clone(self),
-        })
     }
 
     async fn release_document(&self, uri: &str) {
