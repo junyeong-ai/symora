@@ -10,14 +10,14 @@ src/
 ├── cli/commands/         # Command handlers (20 commands)
 ├── daemon/               # Unix socket server, JSON-RPC protocol
 ├── services/             # LspService trait, DaemonLspService, AstQueryService
-│   └── search/           # BM25 search (SearchIndex, SearchDb, FTS5 schema)
+│   └── store/            # SQLite Store (symbols, content search)
 ├── infra/lsp/            # LSP client, 36 language server configs
 ├── models/               # Symbol, Location, Language, SymbolKind
-└── error.rs              # LspError, SearchError
+└── error.rs              # LspError, SearchError, StoreError
 ```
 
 **Flow**: CLI → App → DaemonLspService → Unix Socket → DaemonServer → LspService → LSP Server
-**Search Flow**: CLI → DaemonClient → DaemonServer → SearchIndex → SQLite FTS5
+**Search Flow**: CLI → DaemonClient → DaemonServer → Store → SQLite
 
 ## Extension Points
 
@@ -169,19 +169,20 @@ symora search index status                       # show index stats
 symora search index clear                        # clear index
 ```
 
-### Search Module Structure
+### Store Module Structure
 ```
-src/services/search/
-├── mod.rs           # Public exports
-├── index.rs         # SearchIndex (indexing, search methods)
-├── db.rs            # Async SQLite FTS5 wrapper (tokio-rusqlite)
-├── schema.rs        # FTS5 table definitions, triggers
-└── types.rs         # SearchConfig, SymbolSearchResult, ContentSearchResult
+src/services/store/
+├── mod.rs           # Public exports (Store, types)
+├── db.rs            # Async SQLite wrapper (tokio-rusqlite)
+├── schema.rs        # DDL, search queries (WAL mode)
+├── index.rs         # Store implementation
+├── symbols.rs       # SymbolExtractor (tree-sitter)
+└── types.rs         # StoreConfig, SymbolSearchResult, ContentSearchResult
 ```
 
 ### Add Search Operation
-1. `services/search/db.rs` — Add query method
-2. `services/search/index.rs` — Add public wrapper
+1. `services/store/schema.rs` — Add SQL query constant
+2. `services/store/index.rs` — Add public method
 3. `daemon/handlers.rs` — Add params struct
 4. `daemon/protocol.rs` — Add method constant
 5. `daemon/server.rs` — Add handler
