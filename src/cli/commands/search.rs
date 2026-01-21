@@ -1,8 +1,8 @@
 //! Search command implementation
 //!
 //! Provides four search modes:
-//! - `symbols`: BM25 ranked symbol search using SQLite FTS5
-//! - `content`: BM25 ranked content search using SQLite FTS5
+//! - `symbols`: Ranked symbol search using SQLite LIKE (supports substring matching)
+//! - `content`: Ranked content search using SQLite LIKE (supports substring matching)
 //! - `ast`: Structural search using tree-sitter queries
 //! - `nodes`: List available node types for AST search
 //! - `index`: Manage search index (build/status/clear)
@@ -27,7 +27,7 @@ pub struct SearchArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SearchCommand {
-    /// BM25 ranked symbol search
+    /// LIKE-based symbol search
     Symbols {
         /// Search query
         query: String,
@@ -41,7 +41,7 @@ pub enum SearchCommand {
         limit: Option<usize>,
     },
 
-    /// BM25 ranked content search
+    /// LIKE-based content search
     Content {
         /// Search query
         query: String,
@@ -51,7 +51,7 @@ pub enum SearchCommand {
         language: Option<String>,
 
         /// Maximum results
-        #[arg(short, long)]
+        #[arg(long)]
         limit: Option<usize>,
     },
 
@@ -276,7 +276,7 @@ async fn execute_symbol_search(
 
     #[cfg(not(unix))]
     {
-        ctx.print_error("BM25 search requires daemon mode (Unix only)");
+        ctx.print_error("Search requires daemon mode (Unix only)");
     }
 
     Ok(())
@@ -328,7 +328,7 @@ async fn execute_content_search(
 
     #[cfg(not(unix))]
     {
-        ctx.print_error("BM25 search requires daemon mode (Unix only)");
+        ctx.print_error("Search requires daemon mode (Unix only)");
     }
 
     Ok(())
