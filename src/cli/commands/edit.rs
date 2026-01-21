@@ -126,7 +126,7 @@ pub enum EditCommand {
 
     /// Insert text after a symbol or position
     InsertAfter {
-        /// Target: file:line[:col] (location) or file path (with --symbol)
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
         /// Symbol path when target is a file (e.g., "Class/method")
@@ -144,7 +144,7 @@ pub enum EditCommand {
 
     /// Insert text before a symbol or position
     InsertBefore {
-        /// Target: file:line[:col] (location) or file path (with --symbol)
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
         /// Symbol path when target is a file (e.g., "Class/method")
@@ -162,7 +162,7 @@ pub enum EditCommand {
 
     /// Replace a symbol's body (by location or symbol path)
     Symbol {
-        /// Target: file:line[:col] (location) or file path (with --symbol)
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
         /// Symbol path when target is a file (e.g., "Class/method")
@@ -302,7 +302,7 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
 }
 
 /// Resolve position for insert operations with mode-aware positioning.
-/// Auto-detects location format (file:line[:col]) vs file path (requires --symbol).
+/// Auto-detects location format (`file:line[:col]`) vs file path (requires --symbol).
 ///
 /// BUG FIX: InsertBefore now correctly uses the symbol's start position,
 /// not end position (which was the previous buggy behavior).
@@ -342,7 +342,7 @@ async fn resolve_insert_position(
 }
 
 /// Resolve full symbol from target for operations needing complete symbol info.
-/// Auto-detects location format (file:line[:col]) vs file path (requires --symbol).
+/// Auto-detects location format (`file:line[:col]`) vs file path (requires --symbol).
 async fn resolve_symbol(
     app: &App,
     target: &str,

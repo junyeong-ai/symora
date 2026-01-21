@@ -12,7 +12,7 @@ pub struct ParsedLocation {
 }
 
 impl ParsedLocation {
-    /// Detect if input is a file:line[:col] location format.
+    /// Detect if input is a `file:line[:col]` location format.
     /// Handles Windows paths (C:\...) correctly by checking for :digit pattern.
     pub fn is_location_format(input: &str) -> bool {
         let input = input.trim();

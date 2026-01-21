@@ -116,7 +116,7 @@ impl Symbol {
     /// - Relative path: "Class/method" (matches as suffix)
     /// - Absolute path: "/Class/method" (exact match from root)
     /// - Wildcards: "*/method", "Class/*"
-    /// - Overload index: "method[0]", "Class/method[1]"
+    /// - Overload index: `method[0]`, `Class/method[1]`
     pub fn matches_path(&self, pattern: &str) -> bool {
         let path = self.path();
 
@@ -349,8 +349,8 @@ impl Symbol {
     }
 
     /// Strip type parameters and parameter lists from symbol names.
-    /// Java/Kotlin LSP servers return names like "myMethod(int, String) <T>" but we want "myMethod".
-    /// This enables proper overload handling via overload_idx.
+    /// Java/Kotlin LSP servers return names like `myMethod(int, String) <T>` but we want `myMethod`.
+    /// This enables proper overload handling via `overload_idx`.
     pub fn strip_type_parameters(name: &str) -> String {
         let name = name.trim();
 
