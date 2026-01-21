@@ -166,12 +166,43 @@ pub mod methods {
     pub const STATUS: &str = "status";
     pub const SHUTDOWN: &str = "shutdown";
 
-    // Search operations (BM25 ranked)
+    // Search operations
     pub const SEARCH_SYMBOLS: &str = "search_symbols";
     pub const SEARCH_CONTENT: &str = "search_content";
     pub const INDEX_BUILD: &str = "index_build";
     pub const INDEX_STATUS: &str = "index_status";
     pub const INDEX_CLEAR: &str = "index_clear";
+
+    /// Map daemon method to LSP method for timeout calculation.
+    /// Returns None for daemon-only operations (ping, status, index).
+    pub fn to_lsp_method(daemon_method: &str) -> Option<&'static str> {
+        match daemon_method {
+            FIND_REFS => Some("textDocument/references"),
+            FIND_DEF => Some("textDocument/definition"),
+            FIND_TYPEDEF => Some("textDocument/typeDefinition"),
+            FIND_IMPL => Some("textDocument/implementation"),
+            FIND_SYMBOL => Some("textDocument/documentSymbol"),
+            WORKSPACE_SYMBOL => Some("workspace/symbol"),
+            HOVER => Some("textDocument/hover"),
+            SIGNATURE_HELP => Some("textDocument/signatureHelp"),
+            DIAGNOSTICS => Some("textDocument/publishDiagnostics"),
+            CALLS_INCOMING => Some("callHierarchy/incomingCalls"),
+            CALLS_OUTGOING => Some("callHierarchy/outgoingCalls"),
+            SUPERTYPES => Some("typeHierarchy/supertypes"),
+            SUBTYPES => Some("typeHierarchy/subtypes"),
+            INLAY_HINTS => Some("textDocument/inlayHint"),
+            FOLDING_RANGES => Some("textDocument/foldingRange"),
+            SELECTION_RANGES => Some("textDocument/selectionRange"),
+            CODE_LENS => Some("textDocument/codeLens"),
+            CODE_ACTIONS => Some("textDocument/codeAction"),
+            APPLY_CODE_ACTION => Some("codeAction/resolve"),
+            PREPARE_RENAME => Some("textDocument/prepareRename"),
+            RENAME => Some("textDocument/rename"),
+            PING | STATUS | SHUTDOWN | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS
+            | SEARCH_CONTENT => None,
+            _ => Some("textDocument/hover"),
+        }
+    }
 }
 
 /// Client-side response DTOs for deserialization
