@@ -23,7 +23,10 @@ impl ParsedLocation {
         // Check for Windows drive letter (e.g., "C:\path")
         let is_windows = input.len() > 2
             && input.as_bytes().get(1) == Some(&b':')
-            && input.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic());
+            && input
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic());
 
         let search_start = if is_windows { 2 } else { 0 };
         let search_range = &input[search_start..];
