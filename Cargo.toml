@@ -60,6 +60,7 @@ ignore = "0.4"
 
 # SQLite (symbol/content indexing)
 tokio-rusqlite = "0.7"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Unix file locking (for daemon)
 [target.'cfg(unix)'.dependencies]
