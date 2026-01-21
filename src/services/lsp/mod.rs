@@ -2,10 +2,11 @@
 
 mod cache;
 mod converters;
-mod helpers;
+pub mod helpers;
 mod service;
 
 pub use cache::{SymbolCache, WorkspaceSymbolCache};
+pub use helpers::find_containing_callable;
 
 use std::path::Path;
 
