@@ -82,40 +82,39 @@ impl FileFilter {
         })
     }
 
-    /// Load all .gitignore files from root directory
-    /// Uses WalkBuilder to respect gitignore while discovering nested .gitignore files
     fn load_gitignore(root: &Path) -> Option<Gitignore> {
         let mut builder = GitignoreBuilder::new(root);
+        let mut found_any = false;
 
-        // Load root .gitignore first
         let gitignore_path = root.join(".gitignore");
-        if gitignore_path.exists()
-            && let Some(err) = builder.add(&gitignore_path)
-        {
-            tracing::warn!("Failed to parse .gitignore: {}", err);
+        if gitignore_path.exists() {
+            found_any = true;
+            if let Some(err) = builder.add(&gitignore_path) {
+                tracing::warn!("Failed to parse .gitignore: {}", err);
+            }
         }
 
-        // Use WalkBuilder to walk directories, respecting gitignore
-        // This prevents walking into ignored directories like node_modules, .gradle, etc.
         let walker = WalkBuilder::new(root)
-            .hidden(false) // Don't skip hidden to find nested .gitignore files
-            .git_ignore(true) // Respect gitignore while walking
+            .hidden(false)
+            .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .max_depth(Some(10)) // Limit depth to prevent very deep recursion
+            .max_depth(Some(10))
             .build();
 
         for entry in walker.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.file_name() == Some(std::ffi::OsStr::new(".gitignore"))
                 && path != gitignore_path
-                && let Some(err) = builder.add(path)
             {
-                tracing::warn!("Failed to parse {:?}: {}", path, err);
+                found_any = true;
+                if let Some(err) = builder.add(path) {
+                    tracing::warn!("Failed to parse {:?}: {}", path, err);
+                }
             }
         }
 
-        builder.build().ok()
+        if found_any { builder.build().ok() } else { None }
     }
 
     /// Load .symora/ignore file
@@ -163,76 +162,80 @@ impl FileFilter {
 
     /// Check if a path should be ignored
     pub fn is_ignored(&self, path: &Path) -> bool {
-        // Get relative path from root
         let relative = match path.strip_prefix(&self.config.root) {
             Ok(p) => p,
             Err(_) => path,
         };
-
         let is_dir = path.is_dir();
 
-        // Check if any path component matches default ignore patterns
-        for component in relative.components() {
-            if let std::path::Component::Normal(name) = component
-                && let Some(name_str) = name.to_str()
-            {
-                // Check against default ignore patterns (catches .gradle, node_modules, etc.)
-                for pattern in DEFAULT_IGNORE_PATTERNS {
-                    if pattern.starts_with('*') {
-                        // Glob pattern (e.g., "*.log")
-                        let suffix = pattern.trim_start_matches('*');
-                        if name_str.ends_with(suffix) {
-                            return true;
-                        }
-                    } else if name_str == *pattern {
-                        return true;
-                    }
-                }
+        if let Some(ref gitignore) = self.gitignore
+            && let Some(result) = Self::check_path_hierarchy(relative, is_dir, gitignore)
+        {
+            return result;
+        }
+
+        if let Some(ref ignore) = self.symora_ignore
+            && let Some(result) = Self::check_path_hierarchy(relative, is_dir, ignore)
+        {
+            return result;
+        }
+
+        if let Some(ref overrides) = self.overrides {
+            match overrides.matched(relative, is_dir) {
+                ignore::Match::Whitelist(_) => return false,
+                ignore::Match::Ignore(_) => return true,
+                ignore::Match::None => {}
             }
         }
 
-        // Check hidden files/directories (starting with .)
         if !self.config.include_hidden {
             for component in relative.components() {
                 if let std::path::Component::Normal(name) = component
                     && let Some(s) = name.to_str()
+                    && s.starts_with('.')
+                    && s != ".symora"
                 {
-                    // Skip .symora itself since we need it for config
-                    if s.starts_with('.') && s != ".symora" {
-                        return true;
-                    }
+                    return true;
                 }
             }
         }
 
-        // Check .symora/ignore (highest priority for custom patterns)
-        if let Some(ref ignore) = self.symora_ignore {
-            match ignore.matched(relative, is_dir) {
-                ignore::Match::Ignore(_) => return true,
-                ignore::Match::Whitelist(_) => return false,
-                ignore::Match::None => {}
-            }
-        }
-
-        // Check overrides (config patterns)
-        if let Some(ref overrides) = self.overrides {
-            match overrides.matched(relative, is_dir) {
-                ignore::Match::Ignore(_) => return true,
-                ignore::Match::Whitelist(_) => return false,
-                ignore::Match::None => {}
-            }
-        }
-
-        // Check .gitignore
-        if let Some(ref gitignore) = self.gitignore {
-            match gitignore.matched(relative, is_dir) {
-                ignore::Match::Ignore(_) => return true,
-                ignore::Match::Whitelist(_) => return false,
-                ignore::Match::None => {}
+        if self.gitignore.is_none() {
+            for component in relative.components() {
+                if let std::path::Component::Normal(name) = component
+                    && let Some(name_str) = name.to_str()
+                    && matches_default_pattern(name_str)
+                {
+                    return true;
+                }
             }
         }
 
         false
+    }
+
+    fn check_path_hierarchy(relative: &Path, is_dir: bool, gitignore: &Gitignore) -> Option<bool> {
+        // Check full path first (for negation patterns at leaf level)
+        match gitignore.matched(relative, is_dir) {
+            ignore::Match::Whitelist(_) => return Some(false),
+            ignore::Match::Ignore(_) => return Some(true),
+            ignore::Match::None => {}
+        }
+
+        // Check each ancestor directory
+        let mut current = PathBuf::new();
+        for component in relative.components() {
+            if let std::path::Component::Normal(name) = component {
+                current.push(name);
+                if current != relative {
+                    match gitignore.matched(&current, true) {
+                        ignore::Match::Ignore(_) => return Some(true),
+                        ignore::Match::Whitelist(_) | ignore::Match::None => {}
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Check if a path should be included (inverse of is_ignored)
@@ -288,9 +291,17 @@ impl FileFilter {
     }
 }
 
-/// Default ignore patterns for code projects
-/// These are applied when .gitignore is not available or as fallback
-pub const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+fn matches_default_pattern(name: &str) -> bool {
+    DEFAULT_IGNORE_PATTERNS.iter().any(|p| {
+        if let Some(suffix) = p.strip_prefix('*') {
+            name.ends_with(suffix)
+        } else {
+            name == *p
+        }
+    })
+}
+
+const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     // Version control
     ".git",
     ".svn",
@@ -393,5 +404,58 @@ mod tests {
 
         assert!(filter.should_include(&root.join("main.rs")));
         assert!(!filter.should_include(&root.join("main.test.rs")));
+    }
+
+    #[test]
+    fn test_gitignore_negation_pattern() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // .gitignore with negation: ignore build/ but include src/**/build/
+        fs::write(
+            root.join(".gitignore"),
+            "build/\n!src/**/build/\nnode_modules/\n",
+        )
+        .unwrap();
+
+        // Create directories and files
+        fs::create_dir_all(root.join("build")).unwrap();
+        fs::write(root.join("build/output.js"), "").unwrap();
+
+        fs::create_dir_all(root.join("src/app/build")).unwrap();
+        fs::write(root.join("src/app/build/output.js"), "").unwrap();
+
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "").unwrap();
+
+        let filter = FileFilter::with_gitignore(root);
+
+        // build/ should be ignored
+        assert!(!filter.should_include(&root.join("build")));
+        assert!(!filter.should_include(&root.join("build/output.js")));
+
+        // src/**/build/ should be included (negation pattern)
+        assert!(filter.should_include(&root.join("src/app/build")));
+        assert!(filter.should_include(&root.join("src/app/build/output.js")));
+
+        // node_modules/ should be ignored
+        assert!(!filter.should_include(&root.join("node_modules")));
+    }
+
+    #[test]
+    fn test_default_patterns_fallback_without_gitignore() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+
+        // No .gitignore - should use DEFAULT_IGNORE_PATTERNS
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let filter = FileFilter::with_gitignore(root);
+
+        assert!(filter.should_include(&root.join("main.rs")));
+        assert!(!filter.should_include(&root.join("node_modules")));
+        assert!(!filter.should_include(&root.join("target")));
     }
 }
