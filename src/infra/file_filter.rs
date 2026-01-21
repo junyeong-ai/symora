@@ -114,7 +114,11 @@ impl FileFilter {
             }
         }
 
-        if found_any { builder.build().ok() } else { None }
+        if found_any {
+            builder.build().ok()
+        } else {
+            None
+        }
     }
 
     /// Load .symora/ignore file

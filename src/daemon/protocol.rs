@@ -198,8 +198,8 @@ pub mod methods {
             APPLY_CODE_ACTION => Some("codeAction/resolve"),
             PREPARE_RENAME => Some("textDocument/prepareRename"),
             RENAME => Some("textDocument/rename"),
-            PING | STATUS | SHUTDOWN | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS
-            | SEARCH_CONTENT => None,
+            PING | STATUS | SHUTDOWN | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR
+            | SEARCH_SYMBOLS | SEARCH_CONTENT => None,
             _ => Some("textDocument/hover"),
         }
     }

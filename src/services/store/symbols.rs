@@ -1,8 +1,8 @@
 //! Symbol extraction using tree-sitter
 
 use std::sync::Mutex;
-use tree_sitter::{Parser, Query, QueryCursor};
 use streaming_iterator::StreamingIterator;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 use crate::models::symbol::{Language, SymbolKind};
 
@@ -38,7 +38,9 @@ impl SymbolExtractor {
             rust: Mutex::new(Self::create_parser(tree_sitter_rust::LANGUAGE.into())),
             go: Mutex::new(Self::create_parser(tree_sitter_go::LANGUAGE.into())),
             python: Mutex::new(Self::create_parser(tree_sitter_python::LANGUAGE.into())),
-            typescript: Mutex::new(Self::create_parser(tree_sitter_typescript::LANGUAGE_TSX.into())),
+            typescript: Mutex::new(Self::create_parser(
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
+            )),
             javascript: Mutex::new(Self::create_parser(tree_sitter_javascript::LANGUAGE.into())),
             java: Mutex::new(Self::create_parser(tree_sitter_java::LANGUAGE.into())),
             kotlin: Mutex::new(Self::create_parser(tree_sitter_kotlin_sg::LANGUAGE.into())),
@@ -84,23 +86,51 @@ impl SymbolExtractor {
         symbols
     }
 
-    fn get_parser_info(&self, language: Language) -> Option<(&Mutex<Parser>, tree_sitter::Language, &'static str)> {
+    fn get_parser_info(
+        &self,
+        language: Language,
+    ) -> Option<(&Mutex<Parser>, tree_sitter::Language, &'static str)> {
         match language {
             Language::Rust => Some((&self.rust, tree_sitter_rust::LANGUAGE.into(), RUST_QUERY)),
             Language::Go => Some((&self.go, tree_sitter_go::LANGUAGE.into(), GO_QUERY)),
-            Language::Python => Some((&self.python, tree_sitter_python::LANGUAGE.into(), PYTHON_QUERY)),
-            Language::TypeScript => Some((&self.typescript, tree_sitter_typescript::LANGUAGE_TSX.into(), TYPESCRIPT_QUERY)),
-            Language::JavaScript => Some((&self.javascript, tree_sitter_javascript::LANGUAGE.into(), JAVASCRIPT_QUERY)),
+            Language::Python => Some((
+                &self.python,
+                tree_sitter_python::LANGUAGE.into(),
+                PYTHON_QUERY,
+            )),
+            Language::TypeScript => Some((
+                &self.typescript,
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
+                TYPESCRIPT_QUERY,
+            )),
+            Language::JavaScript => Some((
+                &self.javascript,
+                tree_sitter_javascript::LANGUAGE.into(),
+                JAVASCRIPT_QUERY,
+            )),
             Language::Java => Some((&self.java, tree_sitter_java::LANGUAGE.into(), JAVA_QUERY)),
-            Language::Kotlin => Some((&self.kotlin, tree_sitter_kotlin_sg::LANGUAGE.into(), KOTLIN_QUERY)),
+            Language::Kotlin => Some((
+                &self.kotlin,
+                tree_sitter_kotlin_sg::LANGUAGE.into(),
+                KOTLIN_QUERY,
+            )),
             Language::Cpp => Some((&self.cpp, tree_sitter_cpp::LANGUAGE.into(), CPP_QUERY)),
-            Language::CSharp => Some((&self.csharp, tree_sitter_c_sharp::LANGUAGE.into(), CSHARP_QUERY)),
+            Language::CSharp => Some((
+                &self.csharp,
+                tree_sitter_c_sharp::LANGUAGE.into(),
+                CSHARP_QUERY,
+            )),
             Language::PHP => Some((&self.php, tree_sitter_php::LANGUAGE_PHP.into(), PHP_QUERY)),
             _ => None,
         }
     }
 
-    fn extract_from_match(&self, m: &tree_sitter::QueryMatch, content: &str, language: Language) -> Option<ExtractedSymbol> {
+    fn extract_from_match(
+        &self,
+        m: &tree_sitter::QueryMatch,
+        content: &str,
+        language: Language,
+    ) -> Option<ExtractedSymbol> {
         let capture = m.captures.first()?;
         let node = capture.node;
 
@@ -116,13 +146,20 @@ impl SymbolExtractor {
         })
     }
 
-    fn extract_name_and_kind(&self, node: tree_sitter::Node, content: &str, language: Language) -> Option<(String, SymbolKind)> {
+    fn extract_name_and_kind(
+        &self,
+        node: tree_sitter::Node,
+        content: &str,
+        language: Language,
+    ) -> Option<(String, SymbolKind)> {
         let node_type = node.kind();
         let kind = node_type_to_symbol_kind(node_type, language);
 
         // Find name child node based on language conventions
         let name_node = find_name_node(node, language)?;
-        let name = content.get(name_node.start_byte()..name_node.end_byte())?.to_string();
+        let name = content
+            .get(name_node.start_byte()..name_node.end_byte())?
+            .to_string();
 
         if name.is_empty() || name.starts_with('_') && name.len() == 1 {
             return None;
@@ -144,7 +181,8 @@ fn find_name_node(node: tree_sitter::Node, language: Language) -> Option<tree_si
             // Kotlin function uses simple_identifier
             node.child_by_field_name("simple_identifier")
         }),
-        Language::Cpp => node.child_by_field_name("declarator")
+        Language::Cpp => node
+            .child_by_field_name("declarator")
             .and_then(|d| d.child_by_field_name("declarator"))
             .or_else(|| node.child_by_field_name("name")),
         Language::CSharp => node.child_by_field_name("name"),
@@ -158,8 +196,12 @@ fn find_name_node(node: tree_sitter::Node, language: Language) -> Option<tree_si
         for i in 0..count {
             if let Some(child) = node.child(i as u32) {
                 let kind = child.kind();
-                if kind == "identifier" || kind == "name" || kind == "simple_identifier"
-                   || kind == "type_identifier" || kind == "property_identifier" {
+                if kind == "identifier"
+                    || kind == "name"
+                    || kind == "simple_identifier"
+                    || kind == "type_identifier"
+                    || kind == "property_identifier"
+                {
                     return Some(child);
                 }
             }
@@ -171,9 +213,14 @@ fn find_name_node(node: tree_sitter::Node, language: Language) -> Option<tree_si
 fn node_type_to_symbol_kind(node_type: &str, _language: Language) -> SymbolKind {
     match node_type {
         // Functions
-        "function_item" | "function_definition" | "function_declaration"
-        | "method_declaration" | "method_definition" | "arrow_function"
-        | "function_expression" | "func_literal" => SymbolKind::Function,
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "method_declaration"
+        | "method_definition"
+        | "arrow_function"
+        | "function_expression"
+        | "func_literal" => SymbolKind::Function,
 
         // Methods
         "method_item" => SymbolKind::Method,
@@ -188,20 +235,29 @@ fn node_type_to_symbol_kind(node_type: &str, _language: Language) -> SymbolKind 
         "enum_item" | "enum_declaration" | "enum_specifier" => SymbolKind::Enum,
 
         // Interfaces/Traits
-        "interface_declaration" | "interface_type" | "trait_item" | "protocol_declaration" => SymbolKind::Interface,
+        "interface_declaration" | "interface_type" | "trait_item" | "protocol_declaration" => {
+            SymbolKind::Interface
+        }
 
         // Modules
-        "mod_item" | "module_declaration" | "namespace_declaration" | "package_declaration" => SymbolKind::Module,
+        "mod_item" | "module_declaration" | "namespace_declaration" | "package_declaration" => {
+            SymbolKind::Module
+        }
 
         // Types
-        "type_item" | "type_alias" | "type_alias_declaration" | "type_declaration" => SymbolKind::TypeParameter,
+        "type_item" | "type_alias" | "type_alias_declaration" | "type_declaration" => {
+            SymbolKind::TypeParameter
+        }
 
         // Constants
         "const_item" | "const_declaration" => SymbolKind::Constant,
 
         // Variables
-        "let_declaration" | "variable_declaration" | "var_declaration"
-        | "short_var_declaration" | "static_item" => SymbolKind::Variable,
+        "let_declaration"
+        | "variable_declaration"
+        | "var_declaration"
+        | "short_var_declaration"
+        | "static_item" => SymbolKind::Variable,
 
         // Fields/Properties
         "field_declaration" | "property_declaration" | "field_definition" => SymbolKind::Field,

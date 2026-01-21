@@ -306,13 +306,13 @@ async fn fetch_tests(
     let mut items = Vec::with_capacity(limit);
 
     for r in test_refs.iter().take(limit) {
-        if let Ok(content) = tokio::fs::read_to_string(&r.file).await {
-            if let Some(test_name) = extract_test_name(&content, r.line) {
-                items.push(TestInfo {
-                    name: test_name,
-                    location: LocationOutput::from_path(&r.file, r.line, r.column, root),
-                });
-            }
+        if let Ok(content) = tokio::fs::read_to_string(&r.file).await
+            && let Some(test_name) = extract_test_name(&content, r.line)
+        {
+            items.push(TestInfo {
+                name: test_name,
+                location: LocationOutput::from_path(&r.file, r.line, r.column, root),
+            });
         }
     }
 
@@ -332,10 +332,10 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
         let line_content = lines.get(idx)?;
 
         if is_test_marker(line_content) {
-            if let Some(fn_line) = lines.get(idx + 1) {
-                if let Some(name) = extract_fn_name(fn_line) {
-                    return Some(name);
-                }
+            if let Some(fn_line) = lines.get(idx + 1)
+                && let Some(name) = extract_fn_name(fn_line)
+            {
+                return Some(name);
             }
             if let Some(name) = extract_fn_name(line_content) {
                 return Some(name);
@@ -404,7 +404,13 @@ fn extract_fn_name(line: &str) -> Option<String> {
     }
 
     const STRING_PATTERNS: &[&str] = &[
-        "it(", "test(", "it \"", "it '", "test \"", "describe(", "describe \"",
+        "it(",
+        "test(",
+        "it \"",
+        "it '",
+        "test \"",
+        "describe(",
+        "describe \"",
     ];
 
     for prefix in STRING_PATTERNS {

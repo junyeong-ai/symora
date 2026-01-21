@@ -1053,4 +1053,3 @@ async fn handle_index_clear(
         "cleared": true
     }))
 }
-
