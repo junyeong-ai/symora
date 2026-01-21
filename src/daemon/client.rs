@@ -13,9 +13,38 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::config;
 use crate::daemon::protocol::{Request, Response, methods};
 use crate::daemon::server::DaemonConfig;
 use crate::error::LspError;
+use crate::models::symbol::Language;
+
+/// Calculate timeout using the centralized config system.
+/// Integrates language-specific multipliers with operation-type multipliers.
+fn calculate_timeout(file: Option<&Path>, method: &str) -> Duration {
+    // Daemon-only operations with fixed timeouts
+    match method {
+        methods::PING | methods::STATUS | methods::SHUTDOWN => return Duration::from_secs(30),
+        methods::INDEX_BUILD => return Duration::from_secs(600),
+        methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
+        methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
+        _ => {}
+    }
+
+    // Determine language from file path
+    let language = file.map(Language::from_path).unwrap_or(Language::Unknown);
+
+    // Map daemon method to LSP method for config lookup
+    let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
+
+    config::timeout_for(language, lsp_method)
+}
+
+/// Calculate timeout for operations where language is known but file path is not.
+fn calculate_timeout_for_language(language: Language, method: &str) -> Duration {
+    let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
+    config::timeout_for(language, lsp_method)
+}
 
 /// Daemon client for CLI commands
 pub struct DaemonClient {
@@ -44,7 +73,9 @@ macro_rules! rpc_position {
                     "line": line,
                     "column": column
                 });
-                self.request_with_project($method, params).await.and_then(Self::extract_result)
+                self.request_with_project($method, params, Some(file))
+                    .await
+                    .and_then(Self::extract_result)
             }
         )*
     };
@@ -59,7 +90,9 @@ macro_rules! rpc_file {
                 let params = serde_json::json!({
                     "file": file.display().to_string()
                 });
-                self.request_with_project($method, params).await.and_then(Self::extract_result)
+                self.request_with_project($method, params, Some(file))
+                    .await
+                    .and_then(Self::extract_result)
             }
         )*
     };
@@ -177,7 +210,9 @@ impl DaemonClient {
     }
 
     async fn ping(&self) -> Result<(), LspError> {
-        let response = self.send_request(methods::PING, None).await?;
+        let response = self
+            .send_request(methods::PING, None, Duration::from_secs(30))
+            .await?;
         if response.error.is_some() {
             return Err(LspError::Protocol("Ping failed".to_string()));
         }
@@ -192,6 +227,7 @@ impl DaemonClient {
         &self,
         method: &str,
         params: Option<serde_json::Value>,
+        timeout_duration: Duration,
     ) -> Result<Response, LspError> {
         let stream = UnixStream::connect(&self.config.socket_path)
             .await
@@ -209,12 +245,13 @@ impl DaemonClient {
         writer.flush().await?;
 
         let mut line = String::new();
-        timeout(Duration::from_secs(30), reader.read_line(&mut line))
+        timeout(timeout_duration, reader.read_line(&mut line))
             .await
             .map_err(|_| {
                 LspError::Timeout(format!(
-                    "Operation '{}' timed out after 30s. Try 'symora daemon restart'",
-                    method
+                    "Operation '{}' timed out after {}s. Try 'symora daemon restart'",
+                    method,
+                    timeout_duration.as_secs()
                 ))
             })??;
 
@@ -225,6 +262,7 @@ impl DaemonClient {
         &self,
         method: &str,
         mut params: serde_json::Value,
+        file: Option<&Path>,
     ) -> Result<Response, LspError> {
         if let Some(obj) = params.as_object_mut() {
             obj.insert(
@@ -232,7 +270,25 @@ impl DaemonClient {
                 serde_json::Value::String(self.project_root.display().to_string()),
             );
         }
-        self.send_request(method, Some(params)).await
+        let timeout = calculate_timeout(file, method);
+        self.send_request(method, Some(params), timeout).await
+    }
+
+    /// Request with project injection and explicit timeout.
+    /// Use when language is known but file path is not (e.g., workspace_symbols).
+    async fn request_with_project_timeout(
+        &self,
+        method: &str,
+        mut params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Response, LspError> {
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(
+                "project".to_string(),
+                serde_json::Value::String(self.project_root.display().to_string()),
+            );
+        }
+        self.send_request(method, Some(params), timeout).await
     }
 
     fn extract_result(response: Response) -> Result<serde_json::Value, LspError> {
@@ -289,7 +345,7 @@ impl DaemonClient {
             "body": include_body,
             "depth": depth
         });
-        self.request_with_project(methods::FIND_SYMBOL, params)
+        self.request_with_project(methods::FIND_SYMBOL, params, Some(file))
             .await
             .and_then(Self::extract_result)
     }
@@ -308,7 +364,7 @@ impl DaemonClient {
             "column": column,
             "new_name": new_name
         });
-        self.request_with_project(methods::RENAME, params)
+        self.request_with_project(methods::RENAME, params, Some(file))
             .await
             .and_then(Self::extract_result)
     }
@@ -329,7 +385,7 @@ impl DaemonClient {
             "end_line": end_line,
             "end_column": end_column
         });
-        self.request_with_project(methods::INLAY_HINTS, params)
+        self.request_with_project(methods::INLAY_HINTS, params, Some(file))
             .await
             .and_then(Self::extract_result)
     }
@@ -346,7 +402,7 @@ impl DaemonClient {
                 .map(|(l, c)| serde_json::json!({"line": l, "column": c}))
                 .collect::<Vec<_>>()
         });
-        self.request_with_project(methods::SELECTION_RANGES, params)
+        self.request_with_project(methods::SELECTION_RANGES, params, Some(file))
             .await
             .and_then(Self::extract_result)
     }
@@ -357,11 +413,13 @@ impl DaemonClient {
         language: &str,
     ) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
+        let lang = Language::from_str_loose(language);
         let params = serde_json::json!({
             "query": query,
             "language": language
         });
-        self.request_with_project(methods::WORKSPACE_SYMBOL, params)
+        let timeout = calculate_timeout_for_language(lang, methods::WORKSPACE_SYMBOL);
+        self.request_with_project_timeout(methods::WORKSPACE_SYMBOL, params, timeout)
             .await
             .and_then(Self::extract_result)
     }
@@ -376,13 +434,13 @@ impl DaemonClient {
             "file": file.display().to_string(),
             "action": action
         });
-        self.request_with_project(methods::APPLY_CODE_ACTION, params)
+        self.request_with_project(methods::APPLY_CODE_ACTION, params, Some(file))
             .await
             .and_then(Self::extract_result)
     }
 
     // ========================================================================
-    // Search Operations (BM25 Ranked)
+    // Search Operations
     // ========================================================================
 
     pub async fn search_symbols(
@@ -397,7 +455,7 @@ impl DaemonClient {
             "limit": limit,
             "kind": kind,
         });
-        self.request_with_project(methods::SEARCH_SYMBOLS, params)
+        self.request_with_project(methods::SEARCH_SYMBOLS, params, None)
             .await
             .and_then(Self::extract_result)
     }
@@ -414,7 +472,7 @@ impl DaemonClient {
             "limit": limit,
             "language": language,
         });
-        self.request_with_project(methods::SEARCH_CONTENT, params)
+        self.request_with_project(methods::SEARCH_CONTENT, params, None)
             .await
             .and_then(Self::extract_result)
     }
@@ -429,7 +487,7 @@ impl DaemonClient {
             "force": force,
             "languages": languages,
         });
-        self.request_with_project(methods::INDEX_BUILD, params)
+        self.request_with_project(methods::INDEX_BUILD, params, None)
             .await
             .and_then(Self::extract_result)
     }
@@ -439,7 +497,7 @@ impl DaemonClient {
         let params = serde_json::json!({
             "file": "",
         });
-        self.request_with_project(methods::INDEX_STATUS, params)
+        self.request_with_project(methods::INDEX_STATUS, params, None)
             .await
             .and_then(Self::extract_result)
     }
@@ -449,7 +507,7 @@ impl DaemonClient {
         let params = serde_json::json!({
             "file": "",
         });
-        self.request_with_project(methods::INDEX_CLEAR, params)
+        self.request_with_project(methods::INDEX_CLEAR, params, None)
             .await
             .and_then(Self::extract_result)
     }
@@ -459,13 +517,15 @@ impl DaemonClient {
     // ========================================================================
 
     pub async fn status(&self) -> Result<serde_json::Value, LspError> {
-        self.send_request(methods::STATUS, None)
+        self.send_request(methods::STATUS, None, Duration::from_secs(30))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn shutdown(&self) -> Result<(), LspError> {
-        let _ = self.send_request(methods::SHUTDOWN, None).await;
+        let _ = self
+            .send_request(methods::SHUTDOWN, None, Duration::from_secs(30))
+            .await;
         self.wait_for_shutdown().await
     }
 
