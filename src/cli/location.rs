@@ -12,6 +12,36 @@ pub struct ParsedLocation {
 }
 
 impl ParsedLocation {
+    /// Detect if input is a file:line[:col] location format.
+    /// Handles Windows paths (C:\...) correctly by checking for :digit pattern.
+    pub fn is_location_format(input: &str) -> bool {
+        let input = input.trim();
+        if input.is_empty() {
+            return false;
+        }
+
+        // Check for Windows drive letter (e.g., "C:\path")
+        let is_windows = input.len() > 2
+            && input.as_bytes().get(1) == Some(&b':')
+            && input.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic());
+
+        let search_start = if is_windows { 2 } else { 0 };
+        let search_range = &input[search_start..];
+
+        // Look for :digit pattern which indicates line number
+        for (byte_idx, ch) in search_range.char_indices() {
+            if ch == ':' {
+                let abs_pos = search_start + byte_idx;
+                let after = &input[abs_pos + 1..];
+                if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// Parse location string and convert to absolute path in one step
     pub fn parse_absolute(input: &str) -> Result<Self> {
         Self::parse(input)?.to_absolute()
@@ -310,5 +340,24 @@ mod tests {
             column: 1,
         };
         assert!(loc_invalid.validate_position_with_content(content).is_err());
+    }
+
+    #[test]
+    fn test_is_location_format() {
+        // Valid location formats
+        assert!(ParsedLocation::is_location_format("src/main.rs:10"));
+        assert!(ParsedLocation::is_location_format("src/main.rs:10:5"));
+        assert!(ParsedLocation::is_location_format("/path/to/file.rs:1:1"));
+        assert!(ParsedLocation::is_location_format("file.rs:100"));
+        assert!(ParsedLocation::is_location_format("C:\\path\\file.rs:10:5"));
+        assert!(ParsedLocation::is_location_format("D:\\test.rs:1"));
+
+        // Not location formats (plain file paths)
+        assert!(!ParsedLocation::is_location_format("src/main.rs"));
+        assert!(!ParsedLocation::is_location_format("/path/to/file.rs"));
+        assert!(!ParsedLocation::is_location_format("C:\\path\\file.rs"));
+        assert!(!ParsedLocation::is_location_format("file.rs"));
+        assert!(!ParsedLocation::is_location_format(""));
+        assert!(!ParsedLocation::is_location_format("file:name.rs")); // colon not followed by digit
     }
 }
