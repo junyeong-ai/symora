@@ -769,6 +769,7 @@ pub struct ServerHealth {
     pub installed: bool,
     pub version: Option<String>,
     pub install_instruction: &'static str,
+    pub tier: ServerTier,
 }
 
 /// Check health of all configured servers
@@ -786,11 +787,12 @@ pub fn check_all_servers() -> Vec<ServerHealth> {
             installed,
             version,
             install_instruction: config.install.current(),
+            tier: config.tier,
         });
     }
 
     // Sort by language name for consistent output
-    results.sort_by(|a, b| format!("{:?}", a.language).cmp(&format!("{:?}", b.language)));
+    results.sort_by(|a, b| a.language.to_string().cmp(&b.language.to_string()));
 
     results
 }

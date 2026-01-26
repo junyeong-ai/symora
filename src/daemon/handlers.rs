@@ -107,12 +107,8 @@ pub struct CodeActionJson {
     pub kind: String,
     pub is_preferred: bool,
     pub diagnostics: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct FileChangeJson {
-    pub file: String,
-    pub edit_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]

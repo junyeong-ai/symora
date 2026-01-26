@@ -14,15 +14,15 @@ use crate::error::LspError;
 use crate::infra::lsp::protocol::{
     CallHierarchyIncomingCall, CallHierarchyOutgoingCall, DocumentSymbol, Hover,
     LspCallHierarchyItem, LspDiagnosticSeverity, LspLocation, Position, SymbolInformation,
-    TextDocumentIdentifier, TextDocumentPositionParams, WorkspaceEdit,
+    TextDocumentIdentifier, TextDocumentPositionParams,
 };
 use crate::infra::lsp::{HealthMonitor, LspClient, LspFeature, LspManager};
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeActionKind, CodeLens, CodeLensCommand,
-    FileChange, FindSymbolsOptions, FoldingRange, FoldingRangeKind, HoverInfo, InlayHint,
-    InlayHintKind, PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus,
-    SignatureHelp, TypeHierarchyItem, path_to_uri, uri_to_path,
+    FindSymbolsOptions, FoldingRange, FoldingRangeKind, HoverInfo, InlayHint, InlayHintKind,
+    PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus, SignatureHelp,
+    TypeHierarchyItem, path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -780,37 +780,8 @@ impl LspService for DefaultLspService {
             ));
         }
 
-        let edit: WorkspaceEdit = serde_json::from_value(result)
-            .map_err(|e| LspError::Protocol(format!("Invalid rename response: {}", e)))?;
-
-        let changes = if let Some(changes_map) = edit.changes {
-            changes_map
-                .into_iter()
-                .map(|(uri, edits)| FileChange {
-                    file: uri_to_path(&uri),
-                    edit_count: edits.len(),
-                })
-                .collect()
-        } else if let Some(doc_changes) = edit.document_changes {
-            doc_changes
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let text_doc = item.get("textDocument")?;
-                            let uri = text_doc.get("uri")?.as_str()?;
-                            let edits = item.get("edits")?.as_array()?;
-                            Some(FileChange {
-                                file: uri_to_path(uri),
-                                edit_count: edits.len(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        // Use parse_workspace_edit to get full edits for file modification
+        let changes = parse_workspace_edit(&result);
 
         Ok(RenameResult { changes })
     }
@@ -1257,20 +1228,50 @@ impl LspService for DefaultLspService {
         let client = self.get_client_for_file(file).await?;
         let _ = self.sync_document(&client, file).await?;
 
-        let raw_data = action.data.as_ref().unwrap_or(&serde_json::Value::Null);
-        let edit = raw_data.get("edit").cloned();
-
-        let edit = if edit.is_none() && action.data.is_some() {
-            let resolved: Option<serde_json::Value> = client
-                .request("codeAction/resolve", action.data.clone())
-                .await
-                .ok()
-                .flatten();
-
-            resolved.and_then(|r| r.get("edit").cloned())
-        } else {
-            edit
+        // Get the raw LSP CodeAction data
+        let raw_action = match &action.data {
+            Some(data) => data,
+            None => {
+                tracing::warn!("Code action has no data, cannot apply");
+                return Ok(ApplyActionResult { changes: vec![] });
+            }
         };
+
+        // First, check if the action already has an edit
+        let mut edit = raw_action.get("edit").cloned();
+
+        // If no edit, try to resolve the action to get the edit
+        if edit.is_none() {
+            tracing::debug!("Code action has no edit, attempting resolve");
+
+            match client
+                .request::<Option<serde_json::Value>>(
+                    "codeAction/resolve",
+                    Some(raw_action.clone()),
+                )
+                .await
+            {
+                Ok(Some(resolved)) => {
+                    edit = resolved.get("edit").cloned();
+                    if edit.is_none() {
+                        // Some actions use command instead of edit
+                        if let Some(command) = resolved.get("command") {
+                            tracing::debug!(
+                                "Resolved action has command instead of edit: {:?}",
+                                command.get("command")
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!("codeAction/resolve returned null");
+                }
+                Err(e) => {
+                    // Log the error but don't fail - the action might still work
+                    tracing::debug!("codeAction/resolve failed: {}", e);
+                }
+            }
+        }
 
         let changes = if let Some(edit) = edit {
             parse_workspace_edit(&edit)

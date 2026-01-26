@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
+use crate::cli::commands::edit::apply_workspace_edits;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Symbol;
 
@@ -72,24 +73,35 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
         .await
     {
         Ok(result) => {
-            let changes: Vec<FileChangeOutput> = result
-                .changes
-                .iter()
-                .map(|fc| FileChangeOutput {
-                    file: ctx.relative_path(&fc.file),
-                    edit_count: fc.edit_count,
-                })
-                .collect();
+            // Apply workspace edits to files
+            match apply_workspace_edits(&result.changes, args.dry_run) {
+                Ok(applied_changes) => {
+                    let changes: Vec<FileChangeOutput> = applied_changes
+                        .iter()
+                        .map(|fc| FileChangeOutput {
+                            file: ctx.relative_path(&fc.file),
+                            edit_count: fc.edit_count,
+                        })
+                        .collect();
 
-            let response = RenameResponse {
-                old_name,
-                new_name: args.new_name,
-                dry_run: args.dry_run,
-                affected_files: changes.len(),
-                changes,
-                message: None,
-            };
-            ctx.print_success_flat(response);
+                    let response = RenameResponse {
+                        old_name,
+                        new_name: args.new_name,
+                        dry_run: args.dry_run,
+                        affected_files: changes.len(),
+                        changes,
+                        message: if args.dry_run {
+                            Some(
+                                "Preview only. Run without --dry-run to apply changes.".to_string(),
+                            )
+                        } else {
+                            None
+                        },
+                    };
+                    ctx.print_success_flat(response);
+                }
+                Err(e) => ctx.print_error(&format!("Failed to apply rename: {}", e)),
+            }
         }
         Err(e) => ctx.print_error(&e.to_string()),
     }

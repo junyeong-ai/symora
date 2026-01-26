@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::cli::OutputContext;
+use crate::cli::{OutputContext, OutputOptions};
 use crate::config;
 use crate::models::config::SymoraConfig;
 use crate::services::ast_query::{AstQueryService, DefaultAstQueryService};
@@ -25,26 +25,20 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new() -> anyhow::Result<Self> {
-        Self::with_daemon(true).await
-    }
-
-    pub async fn with_daemon(use_daemon: bool) -> anyhow::Result<Self> {
+    pub async fn new(output_options: OutputOptions, use_daemon: bool) -> anyhow::Result<Self> {
         let root = std::env::current_dir()?;
 
         tracing::debug!("Initializing Symora at {:?}", root);
 
-        let output = OutputContext::new(root.clone());
+        let output = OutputContext::new(root.clone(), output_options);
         let config_service = Arc::new(DefaultConfigService::new(&root));
         let config = config_service.load(false).await.unwrap_or_default();
 
-        // Initialize global config singleton (thread-safe, no unsafe)
         config::init(&config);
 
         let project = Arc::new(DefaultProjectService::new(&root));
         let ast = Arc::new(DefaultAstQueryService::new()?);
 
-        // On Unix, use daemon mode if requested; on other platforms, always use direct LSP
         #[cfg(unix)]
         let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
             Arc::new(DaemonLspService::new(&root))
@@ -54,7 +48,7 @@ impl App {
 
         #[cfg(not(unix))]
         let lsp: Arc<dyn LspService + Send + Sync> = {
-            let _ = use_daemon; // Suppress unused variable warning
+            let _ = use_daemon;
             Arc::new(DefaultLspService::new(&root))
         };
 

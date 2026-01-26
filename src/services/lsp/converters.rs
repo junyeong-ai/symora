@@ -43,43 +43,28 @@ pub(super) fn convert_symbol_kind(kind: LspSymbolKind) -> SymbolKind {
     }
 }
 
-pub(super) fn convert_location(loc: &LspLocation) -> Location {
-    let is_default_range = loc.range.start.line == 0
-        && loc.range.start.character == 0
-        && loc.range.end.line == 0
-        && loc.range.end.character == 0;
-
-    if is_default_range {
-        tracing::debug!("LSP returned location without range data: {}", loc.uri);
-    }
-
+fn location_from_range(file: std::path::PathBuf, range: &Range) -> Location {
     Location {
-        file: uri_to_path(&loc.uri),
-        line: loc.range.start.line + 1,
-        column: loc.range.start.character + 1,
-        end_line: Some(loc.range.end.line + 1),
-        end_column: Some(loc.range.end.character + 1),
+        file,
+        line: range.start.line + 1,
+        column: range.start.character + 1,
+        range_start_line: None,
+        range_start_column: None,
+        end_line: Some(range.end.line + 1),
+        end_column: Some(range.end.character + 1),
     }
+}
+
+pub(super) fn convert_location(loc: &LspLocation) -> Location {
+    location_from_range(uri_to_path(&loc.uri), &loc.range)
 }
 
 pub(super) fn range_to_location(file: &Path, range: &Range) -> Location {
-    Location {
-        file: file.to_path_buf(),
-        line: range.start.line + 1,
-        column: range.start.character + 1,
-        end_line: Some(range.end.line + 1),
-        end_column: Some(range.end.character + 1),
-    }
+    location_from_range(file.to_path_buf(), range)
 }
 
 pub(super) fn uri_range_to_location(uri: &str, range: &Range) -> Location {
-    Location {
-        file: uri_to_path(uri),
-        line: range.start.line + 1,
-        column: range.start.character + 1,
-        end_line: Some(range.end.line + 1),
-        end_column: Some(range.end.character + 1),
-    }
+    location_from_range(uri_to_path(uri), range)
 }
 
 pub(super) fn extract_hover_content(contents: &HoverContents) -> String {
@@ -110,10 +95,12 @@ pub(super) fn convert_document_symbols(
     symbols
         .iter()
         .map(|doc_sym| {
-            let location = Location::new(
+            let location = Location::full(
                 file.to_path_buf(),
                 doc_sym.selection_range.start.line + 1,
                 doc_sym.selection_range.start.character + 1,
+                doc_sym.range.start.line + 1,
+                doc_sym.range.start.character + 1,
                 doc_sym.range.end.line + 1,
                 doc_sym.range.end.character + 1,
             );
@@ -153,30 +140,22 @@ pub(super) fn convert_document_symbols(
         .collect()
 }
 
-pub(super) fn extract_body(content: &str, location: &Location) -> Option<String> {
+fn extract_lines(content: &str, start: usize, end: usize) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
-    let start_line = location.line.saturating_sub(1) as usize;
-    let end_line = location.end_line.unwrap_or(location.line).saturating_sub(1) as usize;
-
-    if start_line >= lines.len() {
+    if start >= lines.len() {
         return None;
     }
+    Some(lines[start..=end.min(lines.len() - 1)].join("\n"))
+}
 
-    let end_line = end_line.min(lines.len() - 1);
-    Some(lines[start_line..=end_line].join("\n"))
+pub(super) fn extract_body(content: &str, location: &Location) -> Option<String> {
+    let start = location.line.saturating_sub(1) as usize;
+    let end = location.end_line.unwrap_or(location.line).saturating_sub(1) as usize;
+    extract_lines(content, start, end)
 }
 
 pub(super) fn extract_body_from_range(content: &str, range: &Range) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    let start_line = range.start.line as usize;
-    let end_line = range.end.line as usize;
-
-    if start_line >= lines.len() {
-        return None;
-    }
-
-    let end_line = end_line.min(lines.len() - 1);
-    Some(lines[start_line..=end_line].join("\n"))
+    extract_lines(content, range.start.line as usize, range.end.line as usize)
 }
 
 pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWithEdits> {
