@@ -1,25 +1,28 @@
 //! Command implementations for Symora
-//!
-//! Each command is implemented in its own module.
 
 pub mod actions;
-pub mod batch;
-pub mod calls;
+pub mod callees;
+pub mod callers;
 pub mod config;
 pub mod context;
 #[cfg(unix)]
 pub mod daemon;
+pub mod def;
 pub mod diagnostics;
 pub mod diff_impact;
 pub mod doctor;
 pub mod edit;
-pub mod expand;
-pub mod find;
 pub mod hover;
 pub mod impact;
+pub mod impl_cmd;
 pub mod init;
+pub mod refs;
 pub mod rename;
 pub mod search;
 pub mod signature;
 pub mod status;
+pub mod subtypes;
+pub mod supertypes;
+pub mod symbols;
+pub mod typedef;
 pub mod usage;
