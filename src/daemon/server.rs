@@ -16,10 +16,10 @@ use tokio::sync::{RwLock, Semaphore, broadcast};
 use crate::config;
 use crate::daemon::dto::{LocationDto, SymbolDto};
 use crate::daemon::handlers::{
-    ApplyActionParams, CodeActionJson, CodeLensCommandJson, CodeLensJson, FileChangeJson,
-    FileParams, FoldingRangeJson, IndexBuildParams, InlayHintJson, PositionParams, RangeParams,
-    RenameParams, SearchContentParams, SearchSymbolsParams, SelectionRangeJson,
-    SelectionRangeParams, TypeHierarchyItemJson, WorkspaceSymbolParams,
+    ApplyActionParams, CodeActionJson, CodeLensCommandJson, CodeLensJson, FileParams,
+    FoldingRangeJson, IndexBuildParams, InlayHintJson, PositionParams, RangeParams, RenameParams,
+    SearchContentParams, SearchSymbolsParams, SelectionRangeJson, SelectionRangeParams,
+    TypeHierarchyItemJson, WorkspaceSymbolParams,
 };
 use crate::daemon::protocol::{Request, RequestId, Response, RpcError, methods};
 use crate::models::config::SymoraConfig;
@@ -507,6 +507,7 @@ async fn dispatch(
                     kind: a.kind.to_string(),
                     is_preferred: a.is_preferred,
                     diagnostics: a.diagnostics.clone(),
+                    data: a.data.clone(),
                 }).collect::<Vec<_>>()
             }))
         }).await,
@@ -726,7 +727,7 @@ async fn handle_find_symbols(
 
     Ok(serde_json::json!({
         "count": symbols.len(),
-        "symbols": symbols.iter().map(SymbolDto::from_symbol).collect::<Vec<_>>()
+        "symbols": symbols.iter().map(SymbolDto::from).collect::<Vec<_>>()
     }))
 }
 
@@ -782,10 +783,16 @@ async fn handle_rename(
     }
 
     Ok(serde_json::json!({
-        "changes": result.changes.iter().map(|c| FileChangeJson {
-            file: c.file.display().to_string(),
-            edit_count: c.edit_count,
-        }).collect::<Vec<_>>()
+        "changes": result.changes.iter().map(|c| serde_json::json!({
+            "file": c.file.display().to_string(),
+            "edits": c.edits.iter().map(|e| serde_json::json!({
+                "range": {
+                    "start": { "line": e.range.start.line, "character": e.range.start.character },
+                    "end": { "line": e.range.end.line, "character": e.range.end.character }
+                },
+                "new_text": e.new_text,
+            })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
     }))
 }
 

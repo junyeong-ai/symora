@@ -1,7 +1,4 @@
-//! Shared Data Transfer Objects for daemon communication
-//!
-//! These types are used for both serialization (server -> client)
-//! and deserialization (client <- server).
+//! Data Transfer Objects for daemon communication
 
 use std::path::PathBuf;
 
@@ -9,8 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::lsp::CallHierarchyItem;
 use crate::models::symbol::{Location, Symbol, SymbolKind};
-
-// Location DTOs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocationDto {
@@ -37,17 +32,17 @@ impl From<&Location> for LocationDto {
 
 impl From<LocationDto> for Location {
     fn from(dto: LocationDto) -> Self {
-        Location::with_end(
-            PathBuf::from(dto.file),
-            dto.line,
-            dto.column,
-            dto.end_line,
-            dto.end_column,
-        )
+        Location {
+            file: PathBuf::from(dto.file),
+            line: dto.line,
+            column: dto.column,
+            range_start_line: None,
+            range_start_column: None,
+            end_line: dto.end_line,
+            end_column: dto.end_column,
+        }
     }
 }
-
-// Symbol DTOs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolDto {
@@ -56,6 +51,10 @@ pub struct SymbolDto {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_start_column: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,14 +67,16 @@ pub struct SymbolDto {
     pub children: Option<Vec<SymbolDto>>,
 }
 
-impl SymbolDto {
-    pub fn from_symbol(s: &Symbol) -> Self {
+impl From<&Symbol> for SymbolDto {
+    fn from(s: &Symbol) -> Self {
         Self {
             name: s.name.clone(),
             kind: s.kind.to_string(),
             file: s.location.file.display().to_string(),
             line: s.location.line,
             column: s.location.column,
+            range_start_line: s.location.range_start_line,
+            range_start_column: s.location.range_start_column,
             end_line: s.location.end_line,
             end_column: s.location.end_column,
             container: s.container.clone(),
@@ -83,51 +84,49 @@ impl SymbolDto {
             children: if s.children.is_empty() {
                 None
             } else {
-                Some(s.children.iter().map(Self::from_symbol).collect())
+                Some(s.children.iter().map(Self::from).collect())
             },
         }
     }
+}
 
-    pub fn into_symbol(self) -> Symbol {
+impl From<SymbolDto> for Symbol {
+    fn from(dto: SymbolDto) -> Self {
         let name = Symbol::normalize_name(
-            &self.name,
-            &PathBuf::from(&self.file),
-            SymbolKind::from_str_loose(&self.kind),
+            &dto.name,
+            &PathBuf::from(&dto.file),
+            SymbolKind::from_str_loose(&dto.kind),
         );
 
-        let mut symbol = Symbol::new(
-            name,
-            SymbolKind::from_str_loose(&self.kind),
-            Location::with_end(
-                PathBuf::from(self.file),
-                self.line,
-                self.column,
-                self.end_line,
-                self.end_column,
-            ),
-        );
+        let location = Location {
+            file: PathBuf::from(dto.file),
+            line: dto.line,
+            column: dto.column,
+            range_start_line: dto.range_start_line,
+            range_start_column: dto.range_start_column,
+            end_line: dto.end_line,
+            end_column: dto.end_column,
+        };
 
-        if let Some(container) = self.container
+        let mut symbol = Symbol::new(name, SymbolKind::from_str_loose(&dto.kind), location);
+
+        if let Some(container) = dto.container
             && !container.is_empty()
         {
             symbol = symbol.with_container(container);
         }
 
-        if let Some(body) = self.body {
+        if let Some(body) = dto.body {
             symbol = symbol.with_body(body);
         }
 
-        if let Some(children) = self.children {
-            let child_symbols: Vec<Symbol> =
-                children.into_iter().map(|c| c.into_symbol()).collect();
-            symbol = symbol.with_children(child_symbols);
+        if let Some(children) = dto.children {
+            symbol = symbol.with_children(children.into_iter().map(Symbol::from).collect());
         }
 
         symbol
     }
 }
-
-// Call Hierarchy DTOs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallItemDto {
@@ -153,8 +152,6 @@ impl From<&CallHierarchyItem> for CallItemDto {
     }
 }
 
-// Diagnostic DTOs
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticDto {
     pub message: String,
@@ -162,8 +159,6 @@ pub struct DiagnosticDto {
     pub line: u32,
     pub column: u32,
 }
-
-// Signature DTOs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureDto {
@@ -181,8 +176,6 @@ pub struct ParameterDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
 }
-
-// Response Wrapper Types
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SymbolsResponse {

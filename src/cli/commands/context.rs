@@ -1,4 +1,6 @@
 //! Context command - gather all related code context in a single call
+//!
+//! Provides comprehensive context for AI coding agents with pure fact data.
 
 use std::path::Path;
 
@@ -8,7 +10,9 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
-use crate::cli::response::{CallHierarchyOutput, LocationOutput};
+use crate::cli::response::{
+    CallHierarchyOutput, LocationOutput, RefsSummary, Section, TargetInfo, TestInfo, TypeInfo,
+};
 use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_line};
 use crate::models::config::LspConfig;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
@@ -38,70 +42,31 @@ pub struct ContextArgs {
     /// Include related tests (detected by file patterns)
     #[arg(long)]
     pub tests: bool,
+
+    /// Include source body of target symbol
+    #[arg(long)]
+    pub body: bool,
 }
 
+/// Context response with pure fact data
 #[derive(Debug, Serialize)]
 pub struct ContextResponse {
+    /// Target symbol information
     pub target: TargetInfo,
+    /// Reference summary (pure fact)
+    pub refs: RefsSummary,
+    /// Callers (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub callers: Option<ContextSection<CallHierarchyOutput>>,
+    pub callers: Option<Section<CallHierarchyOutput>>,
+    /// Callees (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub callees: Option<ContextSection<CallHierarchyOutput>>,
+    pub callees: Option<Section<CallHierarchyOutput>>,
+    /// Type definitions (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub types: Option<ContextSection<TypeInfo>>,
+    pub types: Option<Section<TypeInfo>>,
+    /// Related tests (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tests: Option<ContextSection<TestInfo>>,
-    pub references: ContextSection<ReferenceInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ContextSection<T> {
-    pub items: Vec<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-impl<T> ContextSection<T> {
-    fn success(items: Vec<T>) -> Self {
-        Self { items, error: None }
-    }
-
-    fn error(msg: impl Into<String>) -> Self {
-        Self {
-            items: vec![],
-            error: Some(msg.into()),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct TargetInfo {
-    pub name: String,
-    pub kind: String,
-    pub location: LocationOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TypeInfo {
-    pub name: String,
-    pub kind: String,
-    pub location: LocationOutput,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TestInfo {
-    pub name: String,
-    pub location: LocationOutput,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ReferenceInfo {
-    pub location: LocationOutput,
-    pub is_test: bool,
+    pub tests: Option<Section<TestInfo>>,
 }
 
 struct ContextLimits {
@@ -163,23 +128,40 @@ async fn gather_context(
     let symbols = symbols_result.unwrap_or_default();
     let target_symbol = find_symbol_at_line(&symbols, line);
 
-    let target = TargetInfo {
-        name: target_symbol
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| "unknown".to_string()),
-        kind: target_symbol
-            .map(|s| s.kind.to_string())
-            .unwrap_or_else(|| "unknown".to_string()),
-        location: LocationOutput::from_path(file, line, column, root),
-        signature: target_symbol.and_then(|s| extract_signature(s.body.as_deref())),
-        body: target_symbol.and_then(|s| s.body.clone()),
+    // Build target info using unified TargetInfo
+    let target = match target_symbol {
+        Some(sym) => {
+            let signature = extract_signature(sym.body.as_deref());
+            let body = if args.body || args.all {
+                sym.body.clone()
+            } else {
+                None
+            };
+            TargetInfo::from_symbol(sym, root)
+                .with_signature(signature)
+                .with_body(body)
+        }
+        None => {
+            let file_str = file
+                .strip_prefix(root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| file.display().to_string());
+            TargetInfo::new(
+                format!("symbol@{}:{}", line, column),
+                "unknown".to_string(),
+                file_str,
+                line,
+            )
+        }
     };
 
+    // Process references
     let refs = refs_result.unwrap_or_default();
 
     let refs_with_test_flag: Vec<_> = refs
         .iter()
         .filter(|r| r.file != file || r.line != line)
+        .take(limits.refs)
         .map(|r| (r, test_matcher.is_test_file(&r.file)))
         .collect();
 
@@ -189,17 +171,19 @@ async fn gather_context(
         .map(|(r, _)| *r)
         .collect();
 
-    let references = ContextSection::success(
-        refs_with_test_flag
-            .iter()
-            .take(limits.refs)
-            .map(|(r, is_test)| ReferenceInfo {
-                location: LocationOutput::from_path(&r.file, r.line, r.column, root),
-                is_test: *is_test,
-            })
-            .collect(),
-    );
+    let prod_count = refs_with_test_flag
+        .iter()
+        .filter(|(_, is_test)| !*is_test)
+        .count();
 
+    // Build refs summary (pure fact)
+    let refs_summary = RefsSummary {
+        total: refs_with_test_flag.len(),
+        test: test_refs.len(),
+        prod: prod_count,
+    };
+
+    // Fetch optional sections
     let callers = if args.callers || args.all {
         Some(fetch_calls(lsp, file, line, column, root, limits.calls, true).await)
     } else {
@@ -226,11 +210,11 @@ async fn gather_context(
 
     Ok(ContextResponse {
         target,
+        refs: refs_summary,
         callers,
         callees,
         types,
         tests,
-        references,
     })
 }
 
@@ -242,7 +226,7 @@ async fn fetch_calls(
     root: &Path,
     limit: usize,
     incoming: bool,
-) -> ContextSection<CallHierarchyOutput> {
+) -> Section<CallHierarchyOutput> {
     let result: Result<Vec<CallHierarchyItem>, _> = if incoming {
         lsp.incoming_calls(file, line, column).await
     } else {
@@ -251,14 +235,15 @@ async fn fetch_calls(
 
     match result {
         Ok(calls) => {
-            let items = calls
+            let total = calls.len();
+            let items: Vec<CallHierarchyOutput> = calls
                 .iter()
                 .take(limit)
                 .map(|c| CallHierarchyOutput::from_item(c, root))
                 .collect();
-            ContextSection::success(items)
+            Section::with_limit(items, total)
         }
-        Err(e) => ContextSection::error(e.to_string()),
+        Err(e) => Section::error(e.to_string()),
     }
 }
 
@@ -268,7 +253,7 @@ async fn fetch_types(
     line: u32,
     column: u32,
     root: &Path,
-) -> ContextSection<TypeInfo> {
+) -> Section<TypeInfo> {
     match lsp.goto_type_definition(file, line, column).await {
         Ok(Some(type_loc)) => {
             let type_symbols = lsp
@@ -291,10 +276,10 @@ async fn fetch_types(
                     root,
                 ),
             }];
-            ContextSection::success(items)
+            Section::new(items)
         }
-        Ok(None) => ContextSection::success(vec![]),
-        Err(e) => ContextSection::error(e.to_string()),
+        Ok(None) => Section::new(vec![]),
+        Err(e) => Section::error(e.to_string()),
     }
 }
 
@@ -302,7 +287,7 @@ async fn fetch_tests(
     test_refs: &[&crate::models::symbol::Location],
     root: &Path,
     limit: usize,
-) -> ContextSection<TestInfo> {
+) -> Section<TestInfo> {
     let mut items = Vec::with_capacity(limit);
 
     for r in test_refs.iter().take(limit) {
@@ -316,7 +301,7 @@ async fn fetch_tests(
         }
     }
 
-    ContextSection::success(items)
+    Section::new(items)
 }
 
 fn extract_test_name(content: &str, line: u32) -> Option<String> {

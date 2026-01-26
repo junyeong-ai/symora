@@ -305,7 +305,7 @@ mod tests {
                 Ok(vec![Symbol::new(
                     "main".to_string(),
                     SymbolKind::Function,
-                    Location::new(PathBuf::from("/test/file.rs"), 1, 1, 1, 12),
+                    Location::point(PathBuf::from("/test/file.rs"), 1, 1),
                 )])
             })
             .await
@@ -340,7 +340,7 @@ mod tests {
                 Ok(vec![Symbol::new(
                     "foo".to_string(),
                     SymbolKind::Function,
-                    Location::new(PathBuf::from("/test/file.rs"), 1, 1, 1, 10),
+                    Location::point(PathBuf::from("/test/file.rs"), 1, 1),
                 )])
             })
             .await
@@ -352,7 +352,7 @@ mod tests {
                 Ok(vec![Symbol::new(
                     "bar".to_string(),
                     SymbolKind::Function,
-                    Location::new(PathBuf::from("/test/file.rs"), 1, 1, 1, 10),
+                    Location::point(PathBuf::from("/test/file.rs"), 1, 1),
                 )])
             })
             .await
@@ -375,7 +375,7 @@ mod tests {
                     Ok(vec![Symbol::new(
                         format!("test{}", i),
                         SymbolKind::Function,
-                        Location::new(path_clone, 1, 1, 1, 10),
+                        Location::point(path_clone, 1, 1),
                     )])
                 })
                 .await

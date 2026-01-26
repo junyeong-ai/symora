@@ -42,26 +42,31 @@ pub struct DiffImpactResponse {
     pub changed_files_count: usize,
     pub changed_symbols_count: usize,
     pub total_references: usize,
-    pub test_coverage: TestCoverage,
+    pub coverage: DiffCoverage,
     pub changes: Vec<ChangedSymbolImpact>,
 }
 
+/// Test coverage summary for diff analysis (aggregate over all changed symbols)
 #[derive(Debug, Serialize)]
-pub struct TestCoverage {
-    pub symbols_with_tests: usize,
-    pub symbols_without_tests: usize,
-    pub coverage_ratio: f32,
+pub struct DiffCoverage {
+    pub with_tests: usize,
+    pub without_tests: usize,
+    pub ratio: f32,
 }
 
+/// Changed symbol impact data (pure fact)
 #[derive(Debug, Serialize)]
 pub struct ChangedSymbolImpact {
     pub name: String,
     pub kind: String,
     pub location: LocationOutput,
     pub change_type: ChangeType,
-    pub reference_count: usize,
-    pub test_reference_count: usize,
-    pub production_reference_count: usize,
+    /// Total reference count
+    pub refs: usize,
+    /// Test code references
+    pub test_refs: usize,
+    /// Production code references
+    pub prod_refs: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<CallHierarchyOutput>,
 }
@@ -94,10 +99,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             changed_files_count: 0,
             changed_symbols_count: 0,
             total_references: 0,
-            test_coverage: TestCoverage {
-                symbols_with_tests: 0,
-                symbols_without_tests: 0,
-                coverage_ratio: 1.0,
+            coverage: DiffCoverage {
+                with_tests: 0,
+                without_tests: 0,
+                ratio: 1.0,
             },
             changes: vec![],
         });
@@ -115,11 +120,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     .await;
 
     let changed_files: std::collections::HashSet<_> = hunks.iter().map(|h| &h.file).collect();
-    let total_refs: usize = changes.iter().map(|c| c.reference_count).sum();
-    let with_tests = changes
-        .iter()
-        .filter(|c| c.test_reference_count > 0)
-        .count();
+    let total_refs: usize = changes.iter().map(|c| c.refs).sum();
+    let with_tests = changes.iter().filter(|c| c.test_refs > 0).count();
     let without_tests = changes.len().saturating_sub(with_tests);
     let coverage_ratio = if changes.is_empty() {
         1.0
@@ -132,10 +134,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         changed_files_count: changed_files.len(),
         changed_symbols_count: changes.len(),
         total_references: total_refs,
-        test_coverage: TestCoverage {
-            symbols_with_tests: with_tests,
-            symbols_without_tests: without_tests,
-            coverage_ratio,
+        coverage: DiffCoverage {
+            with_tests,
+            without_tests,
+            ratio: coverage_ratio,
         },
         changes,
     };
@@ -286,10 +288,7 @@ async fn analyze_hunks(
                 let impact = analyze_symbol_impact(
                     lsp,
                     file,
-                    sym.location.line,
-                    sym.location.column,
-                    &sym.name,
-                    &sym.kind.to_string(),
+                    sym,
                     hunk.change_type.clone(),
                     root,
                     test_matcher,
@@ -306,19 +305,18 @@ async fn analyze_hunks(
     changes
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn analyze_symbol_impact(
     lsp: &dyn LspService,
     file: &Path,
-    line: u32,
-    column: u32,
-    name: &str,
-    kind: &str,
+    sym: &crate::models::symbol::Symbol,
     change_type: ChangeType,
     root: &Path,
     test_matcher: &TestMatcher,
     include_callers: bool,
 ) -> ChangedSymbolImpact {
+    let line = sym.location.line;
+    let column = sym.location.column;
+
     let refs = lsp
         .find_references(file, line, column)
         .await
@@ -354,13 +352,13 @@ async fn analyze_symbol_impact(
     };
 
     ChangedSymbolImpact {
-        name: name.to_string(),
-        kind: kind.to_string(),
+        name: sym.name.clone(),
+        kind: sym.kind.to_string(),
         location: LocationOutput::from_path(file, line, column, root),
         change_type,
-        reference_count: test_count + prod_count,
-        test_reference_count: test_count,
-        production_reference_count: prod_count,
+        refs: test_count + prod_count,
+        test_refs: test_count,
+        prod_refs: prod_count,
         callers,
     }
 }

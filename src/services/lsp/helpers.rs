@@ -427,20 +427,20 @@ mod tests {
         let inner_fn = Symbol::new(
             "inner_fn".to_string(),
             SymbolKind::Function,
-            Location::new(PathBuf::from("test.rs"), 5, 1, 10, 1),
+            Location::full(PathBuf::from("test.rs"), 5, 1, 5, 1, 10, 1),
         );
 
         let outer_fn = Symbol::new(
             "outer_fn".to_string(),
             SymbolKind::Function,
-            Location::new(PathBuf::from("test.rs"), 1, 1, 15, 1),
+            Location::full(PathBuf::from("test.rs"), 1, 1, 1, 1, 15, 1),
         )
         .with_children(vec![inner_fn]);
 
         let class = Symbol::new(
             "MyClass".to_string(),
             SymbolKind::Class,
-            Location::new(PathBuf::from("test.rs"), 1, 1, 20, 1),
+            Location::full(PathBuf::from("test.rs"), 1, 1, 1, 1, 20, 1),
         )
         .with_children(vec![outer_fn.clone()]);
 

@@ -209,7 +209,9 @@ pub mod methods {
 pub mod dto {
     use serde::Deserialize;
 
-    use crate::daemon::dto::{CallItemDto, DiagnosticDto, LocationDto, SignatureDto, SymbolDto};
+    use crate::daemon::dto::{
+        CallItemDto, DiagnosticDto, FileChangeDto, LocationDto, SignatureDto, SymbolDto,
+    };
 
     // Re-export shared DTOs from daemon::dto
     pub use crate::daemon::dto::{HoverResponse, RangeDto, ReferencesResponse};
@@ -262,13 +264,7 @@ pub mod dto {
 
     #[derive(Debug, Deserialize)]
     pub struct RenameResponse {
-        pub changes: Vec<FileChangeSummary>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct FileChangeSummary {
-        pub file: String,
-        pub edit_count: usize,
+        pub changes: Vec<FileChangeDto>,
     }
 
     #[derive(Debug, Deserialize)]
@@ -283,6 +279,7 @@ pub mod dto {
         pub kind: Option<String>,
         pub is_preferred: bool,
         pub diagnostics: Vec<String>,
+        pub data: Option<serde_json::Value>,
     }
 
     #[derive(Debug, Deserialize)]

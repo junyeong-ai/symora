@@ -1,13 +1,53 @@
 //! Response types for CLI output
-//!
-//! Defines shared response types for commands.
-//! All types implement Serialize for consistent JSON output.
 
 use std::path::Path;
 
 use serde::Serialize;
 
 use crate::models::symbol::Symbol;
+
+/// Generic section for list responses
+#[derive(Debug, Clone, Serialize)]
+pub struct Section<T> {
+    pub count: usize,
+    pub items: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl<T> Section<T> {
+    pub fn new(items: Vec<T>) -> Self {
+        let count = items.len();
+        Self {
+            count,
+            items,
+            truncated: None,
+            error: None,
+        }
+    }
+
+    pub fn with_limit(items: Vec<T>, total: usize) -> Self {
+        let count = items.len();
+        let truncated = if count < total { Some(true) } else { None };
+        Self {
+            count,
+            items,
+            truncated,
+            error: None,
+        }
+    }
+
+    pub fn error(msg: impl Into<String>) -> Self {
+        Self {
+            count: 0,
+            items: vec![],
+            truncated: None,
+            error: Some(msg.into()),
+        }
+    }
+}
 
 /// Location in a file (relative path by default)
 #[derive(Debug, Clone, Serialize)]
@@ -121,20 +161,6 @@ impl SymbolOutput {
     }
 }
 
-/// Response for find symbol command
-#[derive(Debug, Serialize)]
-pub struct SymbolsResponse {
-    pub count: usize,
-    pub symbols: Vec<SymbolOutput>,
-}
-
-/// Response for find refs command
-#[derive(Debug, Serialize)]
-pub struct ReferencesResponse {
-    pub count: usize,
-    pub references: Vec<LocationOutput>,
-}
-
 /// Response for find def command
 #[derive(Debug, Serialize)]
 pub struct DefinitionResponse {
@@ -208,49 +234,175 @@ impl CallHierarchyOutput {
     }
 }
 
-/// Response for calls command
+/// Target symbol info (unified for impact/context commands)
 #[derive(Debug, Serialize)]
-pub struct CallsResponse {
-    pub direction: String,
-    pub count: usize,
-    pub calls: Vec<CallHierarchyOutput>,
-}
-
-/// Safety hint for impact analysis
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SafetyHint {
-    Safe,
-    NeedsReview,
-    PotentiallyBreaking,
-}
-
-/// Impact file output
-#[derive(Debug, Serialize)]
-pub struct ImpactFileOutput {
+pub struct TargetInfo {
+    pub name: String,
+    pub kind: String,
     pub file: String,
-    pub is_test: bool,
-    pub reference_count: usize,
-    pub references: Vec<ImpactReferenceOutput>,
+    pub line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
+impl TargetInfo {
+    pub fn new(name: String, kind: String, file: String, line: u32) -> Self {
+        Self {
+            name,
+            kind,
+            file,
+            line,
+            signature: None,
+            body: None,
+        }
+    }
+
+    pub fn from_symbol(symbol: &Symbol, root: &Path) -> Self {
+        let file = symbol
+            .location
+            .file
+            .strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| symbol.location.file.display().to_string());
+
+        Self {
+            name: symbol.name.clone(),
+            kind: symbol.kind.to_string(),
+            file,
+            line: symbol.location.line,
+            signature: None,
+            body: None,
+        }
+    }
+
+    pub fn with_signature(mut self, signature: Option<String>) -> Self {
+        self.signature = signature;
+        self
+    }
+
+    pub fn with_body(mut self, body: Option<String>) -> Self {
+        self.body = body;
+        self
+    }
+}
+
+/// Reference summary (minimal pure fact data)
 #[derive(Debug, Serialize)]
-pub struct ImpactReferenceOutput {
+pub struct RefsSummary {
+    /// Total references
+    pub total: usize,
+    /// Test code references
+    pub test: usize,
+    /// Production code references
+    pub prod: usize,
+}
+
+/// Extended reference statistics (full pure fact data for impact analysis)
+#[derive(Debug, Serialize)]
+pub struct RefStats {
+    /// Total reference count
+    pub total: usize,
+    /// Test code references
+    pub test: usize,
+    /// Production code references
+    pub prod: usize,
+    /// Affected file count
+    pub files: usize,
+    /// Affected module count
+    pub modules: usize,
+    /// Whether the symbol is exported (public API)
+    pub is_exported: bool,
+}
+
+impl From<&RefStats> for RefsSummary {
+    fn from(stats: &RefStats) -> Self {
+        Self {
+            total: stats.total,
+            test: stats.test,
+            prod: stats.prod,
+        }
+    }
+}
+
+/// Type definition information
+#[derive(Debug, Serialize)]
+pub struct TypeInfo {
+    pub name: String,
+    pub kind: String,
+    pub location: LocationOutput,
+}
+
+/// Type hierarchy item output (for supertypes/subtypes commands)
+#[derive(Debug, Clone, Serialize)]
+pub struct TypeHierarchyOutput {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
-/// Response for impact command
+impl TypeHierarchyOutput {
+    pub fn from_item(item: &crate::models::lsp::TypeHierarchyItem, root: &std::path::Path) -> Self {
+        let file = item
+            .location
+            .file
+            .strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| item.location.file.display().to_string());
+
+        Self {
+            name: item.name.clone(),
+            kind: item.kind.to_string(),
+            file,
+            line: item.location.line,
+            column: item.location.column,
+            detail: item.detail.clone(),
+        }
+    }
+}
+
+/// Test information
+#[derive(Debug, Serialize)]
+pub struct TestInfo {
+    pub name: String,
+    pub location: LocationOutput,
+}
+
+/// Test coverage information (pure fact data)
+#[derive(Debug, Serialize)]
+pub struct TestCoverage {
+    /// Test reference count
+    pub count: usize,
+    /// Test files referencing this symbol
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+}
+
+/// Affected file info for impact analysis
+#[derive(Debug, Serialize)]
+pub struct AffectedFile {
+    pub file: String,
+    pub is_test: bool,
+    pub refs: usize,
+}
+
+/// Response for impact command (pure fact data - no heuristic judgments)
 #[derive(Debug, Serialize)]
 pub struct ImpactResponse {
-    pub target: LocationOutput,
-    pub depth: u32,
-    pub safety_hint: SafetyHint,
-    pub total_references: usize,
-    pub test_refs_count: usize,
-    pub production_refs_count: usize,
-    pub affected_files_count: usize,
-    pub affected_files: Vec<ImpactFileOutput>,
+    /// Target symbol info
+    pub target: TargetInfo,
+    /// Reference statistics
+    pub refs: RefStats,
+    /// Test coverage information
+    pub coverage: TestCoverage,
+    /// Affected files
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AffectedFile>,
 }
 
 /// Project status output
@@ -290,33 +442,4 @@ pub struct ConfigResponse {
     pub config: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-}
-
-/// Parameter information for signature help
-#[derive(Debug, Serialize)]
-pub struct ParameterOutput {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub documentation: Option<String>,
-}
-
-/// Signature information
-#[derive(Debug, Serialize)]
-pub struct SignatureOutput {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub documentation: Option<String>,
-    pub parameters: Vec<ParameterOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_parameter: Option<u32>,
-}
-
-/// Response for signature help command
-#[derive(Debug, Serialize)]
-pub struct SignatureHelpResponse {
-    pub signatures: Vec<SignatureOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_signature: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_parameter: Option<u32>,
 }

@@ -52,6 +52,112 @@ fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+// Workspace Edit Applier
+
+use crate::models::lsp::{FileChangeWithEdits, TextEdit};
+
+/// Apply workspace edits from LSP to actual files.
+/// Used by rename and actions apply commands.
+///
+/// Returns the number of files modified and details of changes.
+pub fn apply_workspace_edits(
+    changes: &[FileChangeWithEdits],
+    dry_run: bool,
+) -> Result<Vec<AppliedFileChange>> {
+    let mut results = Vec::new();
+
+    for change in changes {
+        let file = &change.file;
+
+        if !dry_run {
+            validate_file_for_edit(file)?;
+        }
+
+        let content = fs::read_to_string(file)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?;
+
+        let new_content = apply_text_edits(&content, &change.edits)?;
+
+        if !dry_run {
+            fs::write(file, &new_content)
+                .with_context(|| format!("Failed to write file: {}", file.display()))?;
+        }
+
+        results.push(AppliedFileChange {
+            file: file.clone(),
+            edit_count: change.edits.len(),
+            applied: !dry_run,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Result of applying edits to a single file
+#[derive(Debug, Clone)]
+pub struct AppliedFileChange {
+    pub file: PathBuf,
+    pub edit_count: usize,
+    pub applied: bool,
+}
+
+/// Apply multiple text edits to content.
+/// Edits are sorted by position (reverse order) to maintain correct offsets.
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
+    if edits.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    // Sort edits by position in reverse order (bottom to top, right to left)
+    // This ensures earlier edits don't affect the positions of later edits
+    let mut sorted_edits: Vec<_> = edits.iter().collect();
+    sorted_edits.sort_by(|a, b| {
+        let a_start = (a.range.start.line, a.range.start.character);
+        let b_start = (b.range.start.line, b.range.start.character);
+        b_start.cmp(&a_start) // Reverse order
+    });
+
+    let mut result = content.to_string();
+
+    for edit in sorted_edits {
+        let start_line = edit.range.start.line as usize;
+        let end_line = edit.range.end.line as usize;
+        let start_char = edit.range.start.character as usize;
+        let end_char = edit.range.end.character as usize;
+
+        // Calculate byte offsets
+        let start_offset = line_char_to_byte_offset(&result, start_line, start_char);
+        let end_offset = line_char_to_byte_offset(&result, end_line, end_char);
+
+        if start_offset <= end_offset && end_offset <= result.len() {
+            result.replace_range(start_offset..end_offset, &edit.new_text);
+        } else {
+            // If offsets are invalid, skip this edit with a warning
+            tracing::warn!(
+                "Invalid edit range: {:?} -> {:?} in content of {} bytes",
+                edit.range,
+                (start_offset, end_offset),
+                result.len()
+            );
+        }
+    }
+
+    Ok(result)
+}
+
+fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> usize {
+    let mut byte_offset = 0;
+
+    for (current_line, line_content) in content.lines().enumerate() {
+        if current_line == line {
+            return byte_offset + char_to_byte_index(line_content, character);
+        }
+        byte_offset += line_content.len() + 1;
+    }
+
+    content.len()
+}
+
 // Target Resolution Helpers
 
 /// Specifies position relative to symbol for insert operations
@@ -267,8 +373,9 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
         } => {
             let (file_path, target_symbol) = resolve_symbol(app, &target, symbol).await?;
 
-            let start_line = target_symbol.location.line;
-            let start_col = target_symbol.location.column;
+            // Use effective_start() to get the full declaration start position
+            // This includes modifiers like "pub fn", not just the symbol name
+            let (start_line, start_col) = target_symbol.location.effective_start();
             let end_line = target_symbol.location.end_line.unwrap_or(start_line);
             let end_col = target_symbol.location.end_column.unwrap_or(0);
 
@@ -506,6 +613,10 @@ fn apply_replace(
 }
 
 /// Apply an insert edit to a file
+///
+/// Behavior depends on whether a specific column is provided:
+/// - Line-based (column=1): Insert as a new line before/after the target line
+/// - Position-based (column>1): Insert at the specific position within the line
 fn apply_insert(
     file: &Path,
     line: u32,
@@ -514,42 +625,62 @@ fn apply_insert(
     before: bool,
     dry_run: bool,
 ) -> Result<serde_json::Value> {
-    // Validate file before editing
     if !dry_run {
         validate_file_for_edit(file)?;
     }
 
     let content = fs::read_to_string(file).context("Failed to read file")?;
     let lines: Vec<&str> = content.lines().collect();
-
-    // Convert 1-indexed to 0-indexed (character-based)
     let line_idx = (line.saturating_sub(1)) as usize;
-    let char_idx = (column.saturating_sub(1)) as usize;
 
     if line_idx >= lines.len() {
         anyhow::bail!("Line {} is out of range", line);
     }
 
-    // Build the new content
+    // Determine if this is a line-based or position-based insert
+    // Line-based: column=1 means "insert as a new line"
+    // Position-based: column>1 means "insert at this character position"
+    let is_line_based = column == 1;
+
     let mut result = String::new();
 
-    for (i, line_content) in lines.iter().enumerate() {
-        if i == line_idx {
-            // UTF-8 safe: convert character index to byte index
-            let safe_col_byte = char_to_byte_index(line_content, char_idx);
-            // Both before and after insert at the same position
-            // The difference is semantic (for user clarity)
-            result.push_str(&line_content[..safe_col_byte]);
-            result.push_str(text);
-            result.push_str(&line_content[safe_col_byte..]);
-            result.push('\n');
-        } else {
+    if is_line_based {
+        // Line-based insertion: add text as a new line
+        for (i, line_content) in lines.iter().enumerate() {
+            if before && i == line_idx {
+                // Insert new line BEFORE target line
+                result.push_str(text);
+                result.push('\n');
+            }
+
             result.push_str(line_content);
             result.push('\n');
+
+            if !before && i == line_idx {
+                // Insert new line AFTER target line
+                result.push_str(text);
+                result.push('\n');
+            }
+        }
+    } else {
+        // Position-based insertion: insert at specific character position
+        let char_idx = (column.saturating_sub(1)) as usize;
+
+        for (i, line_content) in lines.iter().enumerate() {
+            if i == line_idx {
+                let safe_col_byte = char_to_byte_index(line_content, char_idx);
+                result.push_str(&line_content[..safe_col_byte]);
+                result.push_str(text);
+                result.push_str(&line_content[safe_col_byte..]);
+                result.push('\n');
+            } else {
+                result.push_str(line_content);
+                result.push('\n');
+            }
         }
     }
 
-    // Remove trailing newline if original didn't have one
+    // Preserve original trailing newline behavior
     if !content.ends_with('\n') && result.ends_with('\n') {
         result.pop();
     }
@@ -566,7 +697,8 @@ fn apply_insert(
             "mode": mode,
             "file": file.display().to_string(),
             "text": text,
-            "position": {"line": line, "column": column}
+            "position": {"line": line, "column": column},
+            "line_based": is_line_based
         }))
     } else {
         fs::write(file, &result).context("Failed to write file")?;
@@ -576,7 +708,8 @@ fn apply_insert(
             "mode": mode,
             "file": file.display().to_string(),
             "text": text,
-            "position": {"line": line, "column": column}
+            "position": {"line": line, "column": column},
+            "line_based": is_line_based
         }))
     }
 }

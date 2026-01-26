@@ -17,8 +17,8 @@ use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeActionKind, CodeLens, CodeLensCommand,
-    FileChange, FileChangeWithEdits, FindSymbolsOptions, FoldingRange, FoldingRangeKind, HoverInfo,
-    InlayHint, InlayHintKind, ParameterInfo, Position, PrepareRenameResult, Range, RenameResult,
+    FileChangeWithEdits, FindSymbolsOptions, FoldingRange, FoldingRangeKind, HoverInfo, InlayHint,
+    InlayHintKind, ParameterInfo, Position, PrepareRenameResult, Range, RenameResult,
     SelectionRange, ServerStatus, SignatureHelp, SignatureInfo, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
@@ -54,11 +54,7 @@ impl LspService for DaemonLspService {
 
         let response: SymbolsResponse = parse(result)?;
 
-        Ok(response
-            .symbols
-            .into_iter()
-            .map(|dto| dto.into_symbol())
-            .collect())
+        Ok(response.symbols.into_iter().map(Symbol::from).collect())
     }
 
     async fn workspace_symbols(
@@ -86,7 +82,7 @@ impl LspService for DaemonLspService {
                     dto.column,
                 );
                 if seen.insert(key) {
-                    Some(dto.into_symbol())
+                    Some(dto.into())
                 } else {
                     None
                 }
@@ -273,9 +269,16 @@ impl LspService for DaemonLspService {
             changes: response
                 .changes
                 .into_iter()
-                .map(|c| FileChange {
+                .map(|c| FileChangeWithEdits {
                     file: PathBuf::from(c.file),
-                    edit_count: c.edit_count,
+                    edits: c
+                        .edits
+                        .into_iter()
+                        .map(|e| TextEdit {
+                            range: e.range.into(),
+                            new_text: e.new_text,
+                        })
+                        .collect(),
                 })
                 .collect(),
         })
@@ -481,7 +484,7 @@ impl LspService for DaemonLspService {
                 is_preferred: a.is_preferred,
                 diagnostics: a.diagnostics,
                 edit: None,
-                data: None,
+                data: a.data,
             })
             .collect())
     }

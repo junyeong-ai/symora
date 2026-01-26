@@ -323,7 +323,7 @@ pub struct PrepareRenameResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RenameResult {
-    pub changes: Vec<FileChange>,
+    pub changes: Vec<FileChangeWithEdits>,
 }
 
 // Call Hierarchy Types
