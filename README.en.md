@@ -8,7 +8,7 @@
 
 **LSP-based Code Intelligence CLI for AI Coding Agents**
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fsymora-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1teleaEDv4O3n3dV60RfP947Mm9/SQc0teleIFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5teleuhDuDj5eUcAUoahrdY/56teleebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98teleJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/symora)
 
 **English** | [한국어](README.md)
@@ -33,7 +33,7 @@ Inspired by [Serena](https://github.com/oraios/serena).
 | Interface | MCP server | Bash commands |
 | Language | Python | Rust |
 
-Run `symora find refs src/main.rs:10:5` right after installation — instant integration with Claude Code skills or shell-based AI agents.
+Run `symora refs src/main.rs:10:5` right after installation — instant integration with Claude Code skills or shell-based AI agents.
 
 ---
 
@@ -46,10 +46,10 @@ grep finds text. **Symora analyzes code structure through LSP.**
 grep -r "processOrder" .
 
 # Symora: LSP-based code analysis
-symora find refs src/order.rs:42:5       # all locations referencing this symbol
-symora find def src/api.rs:15:10         # symbol definition location
-symora hover src/api.rs:15:10            # type info and documentation
-symora calls incoming src/order.rs:42:5  # call hierarchy analysis
+symora refs src/order.rs:42:5       # all locations referencing this symbol
+symora def src/api.rs:15:10         # symbol definition location
+symora hover src/api.rs:15:10       # type info and documentation
+symora callers src/order.rs:42:5    # call hierarchy analysis
 ```
 
 | Feature | grep/ripgrep | Symora |
@@ -85,7 +85,23 @@ symora calls incoming src/order.rs:42:5  # call hierarchy analysis
 ```bash
 cargo install --path .
 symora doctor          # check language servers
-symora find symbol src/main.rs
+symora symbols src/main.rs
+```
+
+---
+
+## Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-c, --compact` | Compact output for AI tools (single-line JSON, saves tokens) |
+| `-q, --quiet` | Quiet mode (errors only, no output on success) |
+| `-v, --verbose` | Enable debug logging |
+
+```bash
+symora -c refs src/main.rs:10:5       # AI-friendly compact output
+symora -q rename src/main.rs:10:5 foo # No output on success
+symora -v status                      # Debug logs
 ```
 
 ---
@@ -94,19 +110,25 @@ symora find symbol src/main.rs
 
 ### LSP-based Analysis
 ```bash
-symora find symbol src/main.rs --kind function   # symbol discovery
-symora find def src/main.rs:10:5                 # go to definition
-symora find refs src/main.rs:10:5                # find references
-symora find refs src/main.rs:10:5 --with-snippet # references + source code
-symora find impl src/main.rs:10:5                # find implementations
-symora hover src/main.rs:10:5                    # type/doc info
-symora calls incoming src/main.rs:10:5           # find callers
-symora calls incoming src/main.rs:10:5 --no-fallback  # disable fallback
-symora rename src/main.rs:10:5 new_name          # rename symbol
-symora impact src/main.rs:10:5                   # impact analysis
-symora diagnostics src/main.rs                   # LSP diagnostics
+symora symbols src/main.rs --kind function   # symbol discovery
+symora def src/main.rs:10:5                  # go to definition
+symora refs src/main.rs:10:5                 # find references
+symora refs src/main.rs:10:5 --snippet       # references + source code
+symora impl src/main.rs:10:5                 # find implementations
+symora hover src/main.rs:10:5                # type/doc info
+symora callers src/main.rs:10:5              # find callers
+symora callers src/main.rs:10:5 --no-fallback  # disable fallback
+symora callees src/main.rs:10:5              # find callees
+symora supertypes src/main.rs:10:5           # find parent types
+symora subtypes src/main.rs:10:5             # find child types
+symora signature src/main.rs:10:5            # function signature info
+symora rename src/main.rs:10:5 new_name      # rename symbol
+symora impact src/main.rs:10:5               # impact analysis
+symora diagnostics src/main.rs               # LSP diagnostics
 symora diagnostics src/main.rs --with-context    # include AI-friendly context
 symora diagnostics src/main.rs --with-suggestions # include fix suggestions
+symora actions list src/main.rs:10:5         # list code actions
+symora actions apply src/main.rs:10:5 "extract" # apply action by title
 ```
 
 ### Usage Finder
@@ -131,13 +153,6 @@ symora usage "fn" --lang rust --with-snippet     # include code snippet
 | `--max-symbols N` | Max symbols to analyze (default: 50) |
 | `--limit N` | Limit output results (default: 10) |
 
-### Refactoring
-```bash
-symora actions list src/main.rs:10:5              # list available code actions
-symora actions list src/main.rs:10:5 --kind refactor  # refactoring only
-symora actions apply src/main.rs:10:5 "Extract..."    # apply action
-```
-
 ### Context Gathering
 ```bash
 symora context src/main.rs:10:5 --all                # all context (callers, callees, types, tests)
@@ -157,16 +172,9 @@ symora diff-impact --max-symbols 30       # limit symbols to analyze
 | Output | Description |
 |--------|-------------|
 | `changed_symbols_count` | Number of changed symbols |
-| `test_coverage.coverage_ratio` | Test coverage ratio |
-| `changes[].reference_count` | Reference count per symbol |
+| `coverage.ratio` | Test coverage ratio |
+| `changes[].refs` | Reference count per symbol |
 | `changes[].callers` | Caller list (--callers option) |
-
-### Batch Processing
-```bash
-symora batch refs loc1 loc2 loc3                    # batch lookup multiple locations
-symora batch refs loc1 loc2 --with-snippet          # include snippets
-symora batch refs loc1 loc2 --parallel --fail-fast  # parallel execution, stop on failure
-```
 
 ### Pattern Edit (Structural)
 ```bash
@@ -174,6 +182,7 @@ symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "//
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
 symora edit insert-after src/main.rs --symbol "MyFunc" --text "// comment" --dry-run
 symora edit insert-before src/main.rs:10:5 --text "// comment" --dry-run
+symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() {}" --dry-run
 ```
 
 ### Code Search

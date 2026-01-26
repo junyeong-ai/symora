@@ -1,9 +1,9 @@
 ---
 name: symora
-version: 0.3.0
+version: 0.5.0
 description: Navigates and analyzes code semantically using Language Server Protocol with 36 language support. Use when asked to go to definition, find references/usages, show who calls this function, trace call hierarchy, rename symbol across files, get type info via hover, list symbols in file, search by symbol name, perform code search (symbols/content), or perform AST-based code search (tree-sitter). Supports Rust, Go, Java, TypeScript, Python, C/C++, Kotlin, PHP, TOML. Prefer over grep/ripgrep for semantic code queries.
 argument-hint: "[file:line:col] or [command] [args]"
-allowed-tools: Bash
+allowed-tools: Bash(symora*)
 ---
 
 # symora
@@ -14,15 +14,15 @@ LSP-based code intelligence CLI for AI coding agents. **All output is JSON** —
 
 | User Request | Command |
 |--------------|---------|
-| Where is X defined? | `symora find def file:line:col` |
-| Find all usages of X | `symora find refs file:line:col` |
-| Find usages with code | `symora find refs file:line:col --with-snippet` |
-| Who calls this function? | `symora calls incoming file:line:col` |
-| What does this call? | `symora calls outgoing file:line:col` |
+| Where is X defined? | `symora def file:line:col` |
+| Find all usages of X | `symora refs file:line:col` |
+| Find usages with code | `symora refs file:line:col --snippet` |
+| Who calls this function? | `symora callers file:line:col` |
+| What does this call? | `symora callees file:line:col` |
 | Rename symbol across files | `symora rename file:line:col new_name` |
 | Get type/docs info | `symora hover file:line:col` |
-| List symbols in file | `symora find symbol file.rs` |
-| Search by symbol name | `symora find symbol --name "Config" --lang rust` |
+| List symbols in file | `symora symbols file.rs` |
+| Search by symbol name | `symora symbols --name "Config" --lang rust` |
 | Search symbols | `symora search symbols "Handler" --kind class` |
 | Search code content | `symora search content "async fn" --lang rust` |
 | Build search index | `symora search index build` |
@@ -33,8 +33,28 @@ LSP-based code intelligence CLI for AI coding agents. **All output is JSON** —
 | Get error context for AI | `symora diagnostics file --with-context` |
 | Gather all context | `symora context file:line:col --all` |
 | Analyze git diff impact | `symora diff-impact --callers` |
+| List code actions | `symora actions list file:line:col` |
+| Apply code action | `symora actions apply file:line:col "title"` |
+| Find parent types | `symora supertypes file:line:col` |
+| Find child types | `symora subtypes file:line:col` |
+| Get function signature | `symora signature file:line:col` |
+| Diagnose environment | `symora doctor` |
 
 **Location format**: `file:line:column` (all 1-indexed)
+
+## Global Options
+
+| Option | Description |
+|--------|-------------|
+| `-c, --compact` | Compact output (single-line JSON, saves tokens for AI tools) |
+| `-q, --quiet` | Quiet mode (errors only, no output on success) |
+| `-v, --verbose` | Enable debug logging |
+
+```bash
+symora -c refs src/main.rs:10:5       # AI-friendly compact output
+symora -q rename src/main.rs:10:5 foo # No output on success
+symora -v status                      # Debug logs
+```
 
 ## Core Workflows
 
@@ -42,16 +62,16 @@ LSP-based code intelligence CLI for AI coding agents. **All output is JSON** —
 
 ```bash
 # Find all symbols in file
-symora find symbol src/main.rs | jq '.symbols[] | {name, kind, line}'
+symora symbols src/main.rs | jq '.items[] | {name, kind, line: .location.line}'
 
 # Find specific kind
-symora find symbol src/main.rs --kind function | jq '.symbols[].name'
+symora symbols src/main.rs --kind function | jq '.items[].name'
 
 # Find Rust traits (alias for interface)
-symora find symbol src/main.rs --kind trait | jq '.symbols[].name'
+symora symbols src/main.rs --kind trait | jq '.items[].name'
 
 # Find by name across workspace
-symora find symbol --name "Config" --lang rust | jq '.symbols[]'
+symora symbols --name "Config" --lang rust | jq '.items[]'
 
 # Get type info and documentation
 symora hover src/main.rs:10:5 | jq -r '.content'
@@ -61,33 +81,42 @@ symora hover src/main.rs:10:5 | jq -r '.content'
 
 ```bash
 # Go to definition
-symora find def src/main.rs:10:5 | jq '.definition'
+symora def src/main.rs:10:5 | jq '.definition'
 
 # Find all references
-symora find refs src/main.rs:10:5 | jq '.references[] | "\(.file):\(.line)"'
+symora refs src/main.rs:10:5 | jq '.items[] | "\(.file):\(.line)"'
 
 # Find references with source code snippets
-symora find refs src/main.rs:10:5 --with-snippet | jq '.references[] | {file, line, snippet}'
+symora refs src/main.rs:10:5 --snippet | jq '.items[] | {file, line, snippet}'
 
 # Find implementations of trait/interface
-symora find impl src/main.rs:10:5 | jq '.references[]'
+symora impl src/main.rs:10:5 | jq '.items[]'
 
 # Chain: definition → references
-def=$(symora find def src/main.rs:10:5 | jq -r '"\(.definition.file):\(.definition.line):\(.definition.column)"')
-symora find refs "$def" | jq '.count'
+def=$(symora def src/main.rs:10:5 | jq -r '"\(.definition.file):\(.definition.line):\(.definition.column)"')
+symora refs "$def" | jq '.count'
 ```
 
-### 3. Analyze Call Hierarchy
+### 3. Analyze Call and Type Hierarchy
 
 ```bash
 # Who calls this function?
-symora calls incoming src/main.rs:42:5 | jq '.calls[] | {name, file, line}'
+symora callers src/main.rs:42:5 | jq '.items[] | {name, file: .location.file, line: .location.line}'
 
 # What does this function call?
-symora calls outgoing src/main.rs:42:5 | jq '.calls[].name'
+symora callees src/main.rs:42:5 | jq '.items[].name'
 
 # Disable auto refs-fallback when call hierarchy unsupported
-symora calls incoming src/main.rs:42:5 --no-fallback | jq '.calls[]'
+symora callers src/main.rs:42:5 --no-fallback | jq '.items[]'
+
+# Find parent types (superclasses, interfaces)
+symora supertypes src/main.rs:10:5 | jq '.items[] | {name, file}'
+
+# Find child types (subclasses, implementations)
+symora subtypes src/main.rs:10:5 | jq '.items[] | {name, file}'
+
+# Get function signature at call site
+symora signature src/main.rs:42:10 | jq '.signatures[] | {label, parameters}'
 
 # Impact analysis: files affected by changes
 symora impact src/main.rs:42:5 | jq '.affected_files[]'
@@ -102,11 +131,6 @@ symora diff-impact | jq '.changes[]'                      # Changes against HEAD
 symora diff-impact main | jq '.changes[]'                 # Changes against main branch
 symora diff-impact --staged | jq '.changes[]'             # Staged changes only
 symora diff-impact --callers | jq '.changes[] | {name, callers}'  # Include callers
-
-# Batch operations: multiple locations at once
-symora batch refs loc1 loc2 loc3 | jq '.results[]'
-symora batch refs loc1 loc2 --with-snippet | jq '.results[].references[].snippet'
-symora batch refs loc1 loc2 --parallel --fail-fast | jq '.results[]'
 ```
 
 ### 4. Refactor Code
@@ -117,6 +141,18 @@ symora rename src/main.rs:10:5 new_name --dry-run | jq '.changes[]'
 
 # Apply rename
 symora rename src/main.rs:10:5 new_name | jq '.changes | length'
+
+# List available code actions (quickfix, refactor, etc.)
+symora actions list src/main.rs:10:5 | jq '.items[] | {title, kind}'
+
+# List only quickfix actions
+symora actions list src/main.rs:10:5 --kind quickfix | jq '.items[].title'
+
+# Preview action (dry-run)
+symora actions apply src/main.rs:10:5 "Extract" --dry-run | jq '.'
+
+# Apply code action by title (partial match)
+symora actions apply src/main.rs:10:5 "Extract function" | jq '.changes[]'
 
 # Edit symbol body by path
 symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() -> Self { Self::default() }"
@@ -175,9 +211,6 @@ symora diagnostics src/main.rs --with-context | jq '.diagnostics[] | {message, c
 
 # Diagnostics with fix suggestions
 symora diagnostics src/main.rs --with-suggestions | jq '.diagnostics[] | {message, suggestions}'
-
-# Function signature
-symora signature src/main.rs:10:5 | jq '.signatures[0]'
 ```
 
 ### 7. Usage Analysis
@@ -228,20 +261,7 @@ symora usage "fn" --lang rust --max-symbols 100 --limit 20 | jq '.results[]'
 | `--max-symbols N` | Max symbols to analyze | 50 |
 | `--limit N` | Max results to display | 10 |
 
-### 8. Refactoring Actions
-
-```bash
-# List all available code actions at location
-symora actions list src/main.rs:10:5 | jq '.actions[]'
-
-# Filter by action kind (refactor, quickfix, source)
-symora actions list src/main.rs:10:5 --kind refactor | jq '.actions[].title'
-
-# Apply a specific action by title
-symora actions apply src/main.rs:10:5 "Extract method" | jq '.changes'
-```
-
-### 9. Pattern Edit (Structural)
+### 8. Pattern Edit (Structural)
 
 ```bash
 # Edit code by tree-sitter AST pattern
@@ -258,6 +278,16 @@ symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() -> Self { 
 
 ## Key Options
 
+**Global Options** (apply to all commands):
+
+| Option | Description |
+|--------|-------------|
+| `-c, --compact` | Compact output (single-line JSON, saves tokens) |
+| `-q, --quiet` | Quiet mode (errors only) |
+| `-v, --verbose` | Enable debug logging |
+
+**Command Options**:
+
 | Option | Description |
 |--------|-------------|
 | `--kind` | function, class, method, struct, enum, interface, trait, field, variable, constant |
@@ -268,21 +298,20 @@ symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() -> Self { 
 | `--with-context` | Include surrounding code context (diagnostics) |
 | `--with-suggestions` | Include fix suggestions (diagnostics) |
 | `--with-metrics` | Include usage metrics (usage) |
-| `--with-snippet` | Include source code snippet (find refs, batch, usage) |
-| `--no-fallback` | Disable auto refs-fallback (calls incoming) |
-| `-v, --verbose` | Enable debug logging |
+| `--snippet` | Include source code snippet (refs, usage) |
+| `--no-fallback` | Disable auto refs-fallback (callers) |
 
 ## LSP Support Matrix
 
 | Feature | Rust | Go | Java | TS/JS | Kotlin | Python | PHP | C/C++ |
 |---------|:----:|:--:|:----:|:-----:|:------:|:------:|:---:|:-----:|
-| find symbol | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ✅ |
-| find def | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ |
-| find refs | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
+| symbols | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ✅ |
+| def | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ |
+| refs | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
 | hover | ✅ | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ✅ |
-| calls | ✅ | ✅ | ✅ | ⚠️ | ❌* | ❌* | ❌* | ⚠️ |
+| callers/callees | ✅ | ✅ | ✅ | ⚠️ | ❌* | ❌* | ❌* | ⚠️ |
+| supertypes/subtypes | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
 | rename | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ✅ |
-| actions | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | usage | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
 | search | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
@@ -300,7 +329,7 @@ Legend: ✅ Full | ⚠️ Limited/Slow | ❌ Not Supported | ❌* Auto refs-fall
 - **Best practice**:
   ```bash
   # Classes via LSP
-  symora find symbol file.kt | jq '.symbols[]'
+  symora symbols file.kt | jq '.items[]'
 
   # Methods via AST (recommended)
   symora search ast "function_declaration" --lang kotlin --path file.kt
@@ -325,7 +354,8 @@ Legend: ✅ Full | ⚠️ Limited/Slow | ❌ Not Supported | ❌* Auto refs-fall
 ## Troubleshooting
 
 ```bash
-symora doctor           # Check LSP server status
+symora doctor           # Diagnose all language servers
+symora doctor rust      # Check specific language
 symora daemon restart   # Restart daemon (fixes most issues)
 symora daemon status    # Check daemon status
 symora -v <command>     # Enable debug logging
@@ -334,7 +364,7 @@ symora -v <command>     # Enable debug logging
 | Issue | Solution |
 |-------|----------|
 | LSP timeout | `symora daemon restart` |
-| Empty results | Check `symora doctor` for LSP server |
+| Empty results | Run `symora doctor` to check LSP server |
 | Slow first request | Normal - LSP indexing (wait 10-30s) |
 | Kotlin no methods | Use `symora search ast "function_declaration"` |
 | Python timeout | Use AST search as fallback |

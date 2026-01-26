@@ -7,7 +7,7 @@ LSP-based code intelligence CLI. Rust + async + daemon architecture.
 ```
 src/
 ├── main.rs, app.rs       # Entry, DI container (App holds all services)
-├── cli/commands/         # Command handlers (20+ commands)
+├── cli/commands/         # Command handlers (25 commands)
 ├── daemon/               # Unix socket server, JSON-RPC protocol
 ├── services/             # LspService trait, DaemonLspService, AstQueryService
 │   └── store/            # SQLite Store (symbols, content search)
@@ -32,7 +32,7 @@ src/
 2. `infra/lsp/servers.rs` — Add `ServerConfig` in `defaults()`
 
 ### Add LSP Operation
-1. `services/lsp.rs` — Add to `LspService` trait + implement
+1. `services/lsp/service.rs` — Add to `LspService` trait + implement
 2. `services/daemon_lsp.rs` — Add RPC wrapper method
 3. `daemon/protocol.rs` — Add method constant
 4. `daemon/server.rs` — Add dispatch handler
@@ -56,8 +56,15 @@ Position::new(line.saturating_sub(1), col.saturating_sub(1))
 
 ### Output
 ```rust
-ctx.print_success_flat(response)  // JSON to stdout
-ctx.print_error(msg)              // JSON error
+// OutputOptions (from CLI global flags)
+pub struct OutputOptions {
+    pub compact: bool,  // -c: Single-line JSON (AI-friendly, saves tokens)
+    pub quiet: bool,    // -q: Suppress success output (errors only)
+}
+
+// OutputContext uses options
+ctx.print_success_flat(response)  // JSON to stdout (respects compact/quiet)
+ctx.print_error(msg)              // JSON error (always printed)
 ctx.relative_path(path)           // Strip project root from paths
 ```
 
@@ -131,18 +138,42 @@ pub fn to_lsp_method(daemon_method: &str) -> Option<&'static str> {
 
 ### Generic Section Pattern
 ```rust
-// context.rs - Consistent section structure for optional data
-#[derive(Debug, Serialize)]
-pub struct ContextSection<T> {
+// response.rs - Consistent section structure for all list responses
+#[derive(Debug, Clone, Serialize)]
+pub struct Section<T> {
+    pub count: usize,
     pub items: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-impl<T> ContextSection<T> {
-    fn success(items: Vec<T>) -> Self { Self { items, error: None } }
-    fn error(msg: impl Into<String>) -> Self { Self { items: vec![], error: Some(msg.into()) } }
+impl<T> Section<T> {
+    fn new(items: Vec<T>) -> Self { /* ... */ }
+    fn with_limit(items: Vec<T>, total: usize) -> Self { /* ... */ }
+    fn error(msg: impl Into<String>) -> Self { /* ... */ }
 }
+```
+
+### Pure Fact Data (No Heuristic Judgments)
+```rust
+// impact.rs - LLM judges, not the tool
+// ❌ SafetyHint (removed) - arbitrary thresholds don't scale
+// ✅ RefStats - pure counts for LLM to interpret in context
+
+#[derive(Debug, Serialize)]
+pub struct RefStats {
+    pub total: usize,      // Total references
+    pub test: usize,       // Test code references
+    pub prod: usize,       // Production code references
+    pub files: usize,      // Affected file count
+    pub modules: usize,    // Affected module count
+    pub is_exported: bool, // Public API (keyword fact)
+}
+
+// LLM can judge: "42 prod refs in 100K LOC project = low impact"
+// vs: "42 prod refs in 5K LOC project = high impact"
 ```
 
 ### Config-Based Limits
@@ -174,16 +205,14 @@ async fn find_symbol_at_position(app: &App, file: &Path, line: u32) -> Result<Sy
 
 ### Refs Fallback for Call Hierarchy
 ```rust
-// calls.rs - Automatic fallback when call hierarchy unsupported
-async fn execute_incoming(location, limit, no_fallback, app) {
-    match app.lsp.incoming_calls(...).await {
-        Ok(calls) => { /* use call hierarchy */ },
-        Err(e) if !no_fallback && is_unsupported(&e) => {
-            // Fallback to references + filter callable symbols
-            incoming_calls_from_refs(app, file, line, column, limit).await
-        },
-        Err(e) => { /* report error */ }
-    }
+// callers.rs - Automatic fallback when call hierarchy unsupported
+match app.lsp.incoming_calls(&loc.file, loc.line, loc.column).await {
+    Ok(calls) => { /* use call hierarchy */ },
+    Err(ref e) if !args.no_fallback && is_not_supported(e) => {
+        // Fallback to references + filter callable symbols
+        fallback_from_refs(app, &loc.file, loc.line, loc.column, limit).await
+    },
+    Err(e) => { /* report error */ }
 }
 ```
 
