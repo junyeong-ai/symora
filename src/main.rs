@@ -1,9 +1,4 @@
 //! Symora - Symbol-centric Code Intelligence CLI
-//!
-//! "Open the Gate to Code Structure"
-//!
-//! A powerful CLI tool for AI coding agents that provides LSP-based
-//! semantic code analysis with symbol-level precision.
 
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -11,14 +6,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use symora::app::App;
 #[cfg(unix)]
 use symora::cli::commands::daemon::{DaemonArgs, DaemonCommand};
-use symora::cli::{Cli, Commands};
+use symora::cli::{Cli, Commands, OutputOptions};
 
 fn main() {
-    // Pre-parse args to check for --verbose flag before tracing init
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
 
-    // Initialize tracing with appropriate level
     let env_filter = if verbose {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "symora=debug".into())
@@ -36,58 +29,43 @@ fn main() {
         )
         .init();
 
-    // Run async main and handle errors with JSON output
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!(
-                r#"{{"success":false,"error":"Failed to create runtime: {}"}}"#,
-                e
-            );
+            eprintln!(r#"{{"error":"Failed to create runtime: {}"}}"#, e);
             std::process::exit(1);
         }
     };
-    let result = runtime.block_on(async_main());
 
-    if let Err(e) = result {
-        // All errors are output as JSON for consistent AI agent consumption
-        let response = serde_json::json!({
-            "success": false,
-            "error": e.to_string()
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&response)
-                .unwrap_or_else(|_| { format!(r#"{{"success":false,"error":"{}"}}"#, e) })
-        );
+    if let Err(e) = runtime.block_on(async_main()) {
+        println!(r#"{{"error":"{}"}}"#, e);
         std::process::exit(2);
     }
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Determine if we need daemon mode
-    // Daemon server itself doesn't use daemon client
+    let output_options = OutputOptions {
+        compact: cli.compact,
+        quiet: cli.quiet,
+    };
+
     #[cfg(unix)]
     let use_daemon = !matches!(
         &cli.command,
         Commands::Daemon(DaemonArgs {
             command: DaemonCommand::Start
-        }) | Commands::Doctor(_)
+        })
     );
 
-    // On non-Unix platforms, daemon is not available
     #[cfg(not(unix))]
-    let use_daemon = !matches!(&cli.command, Commands::Doctor(_));
+    let use_daemon = true;
 
-    // Initialize application
-    let app = App::with_daemon(use_daemon)
+    let app = App::new(output_options, use_daemon)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
 
-    // Execute command
     execute_command(cli.command, &app).await
 }
 
@@ -95,40 +73,43 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
     use symora::cli::commands;
 
     match command {
-        // Project management
+        // Project
         Commands::Init(args) => commands::init::execute(args, app).await,
         Commands::Status(args) => commands::status::execute(args, app).await,
         Commands::Config(args) => commands::config::execute(args, app).await,
-        Commands::Doctor(args) => commands::doctor::execute(args, app),
+        Commands::Doctor(args) => commands::doctor::execute(args, app).await,
 
-        // Symbol operations (LSP-based)
-        Commands::Find(args) => commands::find::execute(args, app).await,
+        // Navigation
+        Commands::Symbols(args) => commands::symbols::execute(args, app).await,
+        Commands::Def(args) => commands::def::execute(args, app).await,
+        Commands::Refs(args) => commands::refs::execute(args, app).await,
+        Commands::Typedef(args) => commands::typedef::execute(args, app).await,
+        Commands::Impl(args) => commands::impl_cmd::execute(args, app).await,
+        Commands::Callers(args) => commands::callers::execute(args, app).await,
+        Commands::Callees(args) => commands::callees::execute(args, app).await,
+        Commands::Supertypes(args) => commands::supertypes::execute(args, app).await,
+        Commands::Subtypes(args) => commands::subtypes::execute(args, app).await,
         Commands::Hover(args) => commands::hover::execute(args, app).await,
         Commands::Signature(args) => commands::signature::execute(args, app).await,
-        Commands::Diagnostics(args) => commands::diagnostics::execute(args, app).await,
-        Commands::Rename(args) => commands::rename::execute(args, app).await,
 
-        // Call hierarchy
-        Commands::Calls(args) => commands::calls::execute(args, app).await,
+        // Context
+        Commands::Context(args) => commands::context::execute(args, app).await,
 
-        // Code transformation
-        Commands::Actions(args) => commands::actions::execute(args, app).await,
+        // Analysis
         Commands::Impact(args) => commands::impact::execute(args, app).await,
         Commands::DiffImpact(args) => commands::diff_impact::execute(args, app).await,
-        Commands::Edit(args) => commands::edit::execute(args, app).await,
-
-        // Context and expansion
-        Commands::Context(args) => commands::context::execute(args, app).await,
-        Commands::Expand(args) => commands::expand::execute(args, app).await,
-
-        // Search and usage
-        Commands::Search(args) => commands::search::execute(args, app).await,
         Commands::Usage(args) => commands::usage::execute(args, app).await,
+        Commands::Diagnostics(args) => commands::diagnostics::execute(args, app).await,
 
-        // Batch mode
-        Commands::Batch(args) => commands::batch::execute(args, app).await,
+        // Search
+        Commands::Search(args) => commands::search::execute(args, app).await,
 
-        // Daemon management (Unix only)
+        // Edit
+        Commands::Edit(args) => commands::edit::execute(args, app).await,
+        Commands::Rename(args) => commands::rename::execute(args, app).await,
+        Commands::Actions(args) => commands::actions::execute(args, app).await,
+
+        // Daemon
         #[cfg(unix)]
         Commands::Daemon(args) => commands::daemon::execute(args, app).await,
     }

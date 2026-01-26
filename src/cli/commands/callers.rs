@@ -1,0 +1,122 @@
+//! Callers command - find incoming calls (who calls this function?)
+
+use std::collections::HashSet;
+use std::path::Path;
+
+use anyhow::Result;
+use clap::Args;
+
+use crate::app::App;
+use crate::cli::ParsedLocation;
+use crate::cli::response::{CallHierarchyOutput, Section};
+use crate::error::LspError;
+use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
+use crate::services::lsp::find_containing_callable;
+
+#[derive(Args, Debug)]
+pub struct CallersArgs {
+    /// File path with position (file:line:column)
+    pub location: String,
+
+    /// Maximum results
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Disable fallback to references when call hierarchy unsupported
+    #[arg(long)]
+    pub no_fallback: bool,
+}
+
+pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
+    let ctx = &app.output;
+    let cfg = app.config();
+    let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
+    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+
+    let result = app
+        .lsp
+        .incoming_calls(&loc.file, loc.line, loc.column)
+        .await;
+
+    match result {
+        Ok(calls) => {
+            let total = calls.len();
+            let items: Vec<CallHierarchyOutput> = calls
+                .into_iter()
+                .take(limit)
+                .map(|c| CallHierarchyOutput::from_item(&c, ctx.root()))
+                .collect();
+
+            ctx.print_success_flat(Section::with_limit(items, total));
+        }
+        Err(ref e) if !args.no_fallback && is_not_supported(e) => {
+            match fallback_from_refs(app, &loc.file, loc.line, loc.column, limit).await {
+                Ok(calls) => {
+                    let items: Vec<CallHierarchyOutput> = calls
+                        .iter()
+                        .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
+                        .collect();
+
+                    let mut section = Section::new(items);
+                    section.truncated = Some(false);
+                    ctx.print_success_flat(section);
+                }
+                Err(e) => ctx.print_error(&e.to_string()),
+            }
+        }
+        Err(e) => ctx.print_error(&e.to_string()),
+    }
+
+    Ok(())
+}
+
+fn is_not_supported(err: &LspError) -> bool {
+    matches!(err, LspError::FeatureNotSupported { .. })
+}
+
+async fn fallback_from_refs(
+    app: &App,
+    file: &Path,
+    line: u32,
+    column: u32,
+    limit: usize,
+) -> Result<Vec<CallHierarchyItem>, LspError> {
+    let refs = app.lsp.find_references(file, line, column).await?;
+
+    let mut seen = HashSet::new();
+    let mut callers = Vec::new();
+
+    for ref_loc in refs {
+        if ref_loc.file == file && ref_loc.line == line {
+            continue;
+        }
+
+        let symbols = app
+            .lsp
+            .find_symbols(&ref_loc.file, FindSymbolsOptions::new().with_depth(10))
+            .await?;
+
+        if let Some(caller) = find_containing_callable(&symbols, ref_loc.line) {
+            let key = (
+                caller.name.clone(),
+                caller.location.file.clone(),
+                caller.location.line,
+            );
+
+            if seen.insert(key) {
+                callers.push(CallHierarchyItem {
+                    name: caller.name.clone(),
+                    kind: caller.kind,
+                    location: caller.location.clone(),
+                    call_site: Some(ref_loc),
+                });
+
+                if callers.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(callers)
+}

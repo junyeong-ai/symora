@@ -1,6 +1,4 @@
 //! CLI module for Symora
-//!
-//! Provides command-line interface using clap derive macros.
 
 pub mod commands;
 pub mod location;
@@ -9,125 +7,127 @@ pub mod response;
 pub mod utils;
 
 pub use location::ParsedLocation;
-pub use output::OutputContext;
+pub use output::{OutputContext, OutputOptions};
 
 use clap::{Parser, Subcommand};
 
 #[cfg(unix)]
 use commands::daemon::DaemonArgs;
 use commands::{
-    actions::ActionsArgs, batch::BatchArgs, calls::CallsArgs, config::ConfigArgs,
-    context::ContextArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
-    doctor::DoctorArgs, edit::EditArgs, expand::ExpandArgs, find::FindArgs, hover::HoverArgs,
-    impact::ImpactArgs, init::InitArgs, rename::RenameArgs, search::SearchArgs,
-    signature::SignatureArgs, status::StatusArgs, usage::UsageArgs,
+    actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, config::ConfigArgs,
+    context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
+    doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs, impact::ImpactArgs, impl_cmd::ImplArgs,
+    init::InitArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
+    signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
+    supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
 Symora - Symbol-centric code intelligence CLI for AI coding agents
 
-Symora provides LSP-powered code intelligence for efficient codebase navigation,
+Provides LSP-powered code intelligence for codebase navigation,
 semantic analysis, and code search. Built for AI coding agents.
 
 QUICK START:
-  1. Initialize a project:    symora init
-  2. Find symbols:            symora find symbol src/main.rs
-  3. Search code:             symora search text "pattern"
-  4. Get references:          symora find refs src/main.rs:10:5
+  symora init                    Initialize project
+  symora symbols src/main.rs     List symbols in file
+  symora refs src/main.rs:10:5   Find references
+  symora callers src/main.rs:10  Find who calls this
 
-SEARCH EXAMPLES:
-  symora search text "LspService"                    # Fast regex search
-  symora search text "fn.*async" -t rust -i          # Case insensitive, Rust only
-  symora search ast "(function_item)" -l rust        # AST pattern search
+EXAMPLES:
+  symora symbols src/lib.rs --body          Include source code
+  symora refs src/api.rs:25:10 --snippet    Include code snippets
+  symora context src/main.rs:50 --all       Get full context
+  symora impact src/api.rs:30:5             Analyze change impact
 
-LSP EXAMPLES:
-  symora hover src/main.rs:10:5
-  symora find def src/api.rs:25:10
-  symora calls incoming src/api.rs:25:10
-
-For more information: https://github.com/junyeong-ai/symora
+For more: https://github.com/anthropics/symora
 "#;
 
-/// Symora - Symbol-centric code intelligence CLI for AI coding agents
 #[derive(Parser, Debug)]
 #[command(name = "symora")]
 #[command(author, version, about, long_about = LONG_ABOUT)]
 #[command(propagate_version = true)]
-#[command(after_help = "Use 'symora <COMMAND> --help' for more information about a command.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output format (json, text)
-    #[arg(long, global = true, default_value = "json")]
-    pub format: String,
+    /// Compact output for AI tools (minimal tokens)
+    #[arg(short, long, global = true)]
+    pub compact: bool,
 
-    /// Verbose output (show debug info)
+    /// Quiet mode (errors only)
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
+    /// Enable debug logging
     #[arg(short, long, global = true)]
     pub verbose: bool,
 }
 
-/// Available commands
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Initialize a new Symora project
+    // Project
+    /// Initialize a new project
     Init(InitArgs),
-
     /// Show project status
     Status(StatusArgs),
-
     /// Configuration management
     Config(ConfigArgs),
-
-    /// Check dependencies (LSP servers, ripgrep)
+    /// Diagnose environment and language servers
     Doctor(DoctorArgs),
 
-    /// Find symbols, references, definitions (LSP)
-    Find(FindArgs),
-
-    /// Search code (text: ripgrep, ast: tree-sitter)
-    Search(SearchArgs),
-
-    /// Get hover information for a position
+    // Navigation
+    /// Find symbols in file or workspace
+    Symbols(SymbolsArgs),
+    /// Go to definition
+    Def(DefArgs),
+    /// Find all references
+    Refs(RefsArgs),
+    /// Go to type definition
+    Typedef(TypedefArgs),
+    /// Find implementations
+    Impl(ImplArgs),
+    /// Find callers (incoming calls)
+    Callers(CallersArgs),
+    /// Find callees (outgoing calls)
+    Callees(CalleesArgs),
+    /// Find parent types (supertypes)
+    Supertypes(SupertypesArgs),
+    /// Find child types (subtypes)
+    Subtypes(SubtypesArgs),
+    /// Get hover information
     Hover(HoverArgs),
-
-    /// Get function/method signature help
+    /// Get function signature at position
     Signature(SignatureArgs),
 
-    /// Get LSP diagnostics for a file
-    Diagnostics(DiagnosticsArgs),
-
-    /// Rename a symbol across the codebase
-    Rename(RenameArgs),
-
-    /// Call hierarchy (incoming/outgoing)
-    Calls(CallsArgs),
-
-    /// Code actions (quickfix, refactor, source)
-    Actions(ActionsArgs),
-
-    /// Impact analysis for symbol changes
-    Impact(ImpactArgs),
-
-    /// Analyze impact of git diff changes
-    DiffImpact(DiffImpactArgs),
-
-    /// Text editing operations
-    Edit(EditArgs),
-
-    /// Execute multiple commands in batch
-    Batch(BatchArgs),
-
-    /// Gather all context for a symbol (definition, refs, callers, types)
+    // Context
+    /// Gather all context for a symbol
     Context(ContextArgs),
 
-    /// Expand a function call to show its definition inline
-    Expand(ExpandArgs),
-
-    /// Find usage examples with metrics
+    // Analysis
+    /// Impact analysis for changes
+    Impact(ImpactArgs),
+    /// Impact analysis for git diff
+    DiffImpact(DiffImpactArgs),
+    /// Usage patterns and metrics
     Usage(UsageArgs),
+    /// LSP diagnostics
+    Diagnostics(DiagnosticsArgs),
 
-    /// Daemon server management (start, stop, status) - Unix only
+    // Search
+    /// Search code (symbols, content, ast)
+    Search(SearchArgs),
+
+    // Edit
+    /// Code editing operations
+    Edit(EditArgs),
+    /// Rename symbol
+    Rename(RenameArgs),
+    /// Code actions (refactoring, quickfix)
+    Actions(ActionsArgs),
+
+    // Daemon (Unix only)
     #[cfg(unix)]
+    /// Daemon server management
     Daemon(DaemonArgs),
 }
