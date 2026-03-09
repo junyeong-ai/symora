@@ -112,6 +112,7 @@ symora diff-impact
 ## Practical guidance
 
 - Prefer exact locations in `file:line:column` form for follow-up commands.
+- If semantic file or location commands fail unexpectedly, check `symora doctor <lang>` before assuming the workflow is broken.
 - If `context` or `refs` reports unsupported features, continue with the suggested fallback command instead of retrying the same command blindly.
 - If `usage` resolves a location but returns no workspace results, continue with `symora symbols <file>` or `symora refs <location>`.
 - If search results are truncated, narrow the query or increase `--limit`.

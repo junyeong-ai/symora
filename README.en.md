@@ -233,6 +233,7 @@ symora doctor
 - `context`, `refs`, and `usage` accept exact locations such as `file:line:column`
 - `usage` also accepts a location and resolves the symbol automatically
 - `context` includes fallback guidance when the active LSP server does not support call hierarchy or type definition well
+- semantic file/location commands require the language server for that language to be installed; check with `symora doctor <lang>` when in doubt
 - `map related` is a heuristic helper for adjacent files, not a guaranteed dependency graph
 
 ---
