@@ -110,28 +110,12 @@ impl ServerConfig {
     }
 
     pub fn is_installed(&self) -> bool {
-        // Try which/where command first (most reliable)
-        #[cfg(unix)]
-        if let Ok(output) = Command::new("which").arg(self.command).output()
-            && output.status.success()
-        {
-            return true;
-        }
-
-        #[cfg(windows)]
-        if let Ok(output) = Command::new("where").arg(self.command).output()
-            && output.status.success()
-        {
-            return true;
-        }
-
-        // Fallback: try version command
         Command::new(self.command)
             .arg(self.version_arg)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok()
+            .is_ok_and(|status| status.success())
     }
 
     /// Get installed version (if available)

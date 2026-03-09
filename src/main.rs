@@ -50,12 +50,13 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     #[cfg(unix)]
-    let use_daemon = !matches!(
-        &cli.command,
-        Commands::Daemon(DaemonArgs {
-            command: DaemonCommand::Start
-        })
-    );
+    let use_daemon = std::env::var("SYMORA_NO_DAEMON").ok().as_deref() != Some("1")
+        && !matches!(
+            &cli.command,
+            Commands::Daemon(DaemonArgs {
+                command: DaemonCommand::Start
+            })
+        );
 
     #[cfg(not(unix))]
     let use_daemon = true;
