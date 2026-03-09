@@ -139,7 +139,7 @@ Symora prints JSON by default.
 Important characteristics:
 
 - project-relative paths when possible
-- stable list-like fields such as `count`, `showing`, `truncated`, and `hints`
+- stable list-like fields such as `count`, `showing`, `items`, `truncated`, and `hints`
 - compact mode for lower token usage
 
 Global flags:
@@ -199,7 +199,7 @@ Common settings include:
 - macOS: supported
 - Windows: not supported for daemon-based workflow because Symora uses Unix domain sockets
 
-On Unix platforms, Symora uses a daemon by default for most commands and falls back to direct LSP execution where appropriate.
+On Unix platforms, Symora uses a daemon by default for most commands and falls back to direct LSP execution where appropriate. `daemon start` and `daemon restart` launch the daemon in the background and return immediately.
 
 Daemon commands:
 
