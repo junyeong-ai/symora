@@ -8,7 +8,7 @@
 
 **AI 코딩 에이전트를 위한 심볼 중심 코드 인텔리전스 CLI**
 
-[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
 [English](README.en.md) | **한국어**
