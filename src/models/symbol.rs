@@ -1,13 +1,8 @@
-//! Symbol model definitions
-//!
-//! Core types for representing code symbols from LSP.
-
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-/// Represents a code symbol from LSP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
@@ -54,10 +49,6 @@ impl Symbol {
         self
     }
 
-    pub fn has_children(&self) -> bool {
-        !self.children.is_empty()
-    }
-
     pub fn compute_paths(&mut self, parent_path: Option<&str>) {
         let base_path = match parent_path {
             Some(parent) => format!("{}/{}", parent, self.name),
@@ -74,7 +65,6 @@ impl Symbol {
         }
     }
 
-    /// Compute paths for a list of top-level symbols (includes overload detection)
     pub fn compute_paths_for_all(symbols: &mut [Symbol]) {
         Self::assign_overload_indices(symbols);
         for symbol in symbols {
@@ -105,18 +95,10 @@ impl Symbol {
         }
     }
 
-    /// Get the name_path or fall back to name
     pub fn path(&self) -> &str {
         self.name_path.as_deref().unwrap_or(&self.name)
     }
 
-    /// Check if this symbol matches a path pattern
-    /// Supports:
-    /// - Simple name: "method"
-    /// - Relative path: "Class/method" (matches as suffix)
-    /// - Absolute path: "/Class/method" (exact match from root)
-    /// - Wildcards: "*/method", "Class/*"
-    /// - Overload index: `method[0]`, `Class/method[1]`
     pub fn matches_path(&self, pattern: &str) -> bool {
         let path = self.path();
 
@@ -214,7 +196,6 @@ impl Symbol {
         value == pattern
     }
 
-    /// Filter symbols by path pattern, searching recursively
     pub fn filter_by_path(symbols: &[Symbol], pattern: &str) -> Vec<Symbol> {
         let mut results = Vec::new();
         Self::collect_matching(symbols, pattern, &mut results);
@@ -242,12 +223,10 @@ impl Symbol {
         None
     }
 
-    /// Check if symbol name contains substring (case-insensitive)
     pub fn matches_substring(&self, substring: &str) -> bool {
         self.name.to_lowercase().contains(&substring.to_lowercase())
     }
 
-    /// Filter symbols with advanced criteria
     pub fn filter_advanced(
         symbols: &[Symbol],
         pattern: Option<&str>,
@@ -318,7 +297,6 @@ impl Symbol {
         }
     }
 
-    /// Normalize symbol name - handle empty or placeholder names from LSP
     pub fn normalize_name(name: &str, file: &std::path::Path, kind: SymbolKind) -> String {
         let name = name.trim();
 
@@ -348,9 +326,6 @@ impl Symbol {
         format!("{}_{}", stem, suffix)
     }
 
-    /// Strip type parameters and parameter lists from symbol names.
-    /// Java/Kotlin LSP servers return names like `myMethod(int, String) <T>` but we want `myMethod`.
-    /// This enables proper overload handling via `overload_idx`.
     pub fn strip_type_parameters(name: &str) -> String {
         let name = name.trim();
 
@@ -372,7 +347,6 @@ impl Symbol {
     }
 }
 
-/// Symbol classification (aligned with LSP SymbolKind)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
@@ -405,7 +379,6 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    /// Convert from LSP SymbolKind number
     pub fn from_lsp(kind: u32) -> Self {
         match kind {
             1 => Self::File,
@@ -438,53 +411,10 @@ impl SymbolKind {
         }
     }
 
-    /// Convert to LSP SymbolKind number
-    pub fn to_lsp(&self) -> u32 {
-        match self {
-            Self::File => 1,
-            Self::Module => 2,
-            Self::Namespace => 3,
-            Self::Package => 4,
-            Self::Class => 5,
-            Self::Method => 6,
-            Self::Property => 7,
-            Self::Field => 8,
-            Self::Constructor => 9,
-            Self::Enum => 10,
-            Self::Interface => 11,
-            Self::Function => 12,
-            Self::Variable => 13,
-            Self::Constant => 14,
-            Self::String => 15,
-            Self::Number => 16,
-            Self::Boolean => 17,
-            Self::Array => 18,
-            Self::Object => 19,
-            Self::Key => 20,
-            Self::Null => 21,
-            Self::EnumMember => 22,
-            Self::Struct => 23,
-            Self::Event => 24,
-            Self::Operator => 25,
-            Self::TypeParameter => 26,
-        }
-    }
-
-    /// Check if this is a type definition
-    pub fn is_type(&self) -> bool {
-        matches!(
-            self,
-            Self::Class | Self::Interface | Self::Struct | Self::Enum | Self::TypeParameter
-        )
-    }
-
-    /// Check if this is callable
     pub fn is_callable(&self) -> bool {
         matches!(self, Self::Function | Self::Method | Self::Constructor)
     }
 
-    /// Check if this is a low-level/data symbol (variables, constants, literals)
-    /// Low-level symbols are typically implementation details rather than structure
     pub fn is_low_level(&self) -> bool {
         matches!(
             self,
@@ -498,11 +428,6 @@ impl SymbolKind {
                 | Self::Key
                 | Self::Null
         )
-    }
-
-    /// Check if this is a structural symbol (classes, functions, interfaces, etc.)
-    pub fn is_structural(&self) -> bool {
-        !self.is_low_level()
     }
 }
 
@@ -569,8 +494,7 @@ impl FromStr for SymbolKind {
 }
 
 impl SymbolKind {
-    /// Parse symbol kind from string with fallback to Variable for unknown kinds
-    pub fn from_str_loose(s: &str) -> Self {
+    pub fn parse_or_default(s: &str) -> Self {
         s.parse().unwrap_or(Self::Variable)
     }
 
@@ -723,7 +647,7 @@ impl Language {
     }
 
     /// Parse language from string, returning Unknown for unrecognized values
-    pub fn from_str_loose(s: &str) -> Self {
+    pub fn parse_or_default(s: &str) -> Self {
         s.parse().unwrap_or(Self::Unknown)
     }
 
@@ -790,86 +714,6 @@ impl Language {
         }
     }
 
-    /// Get directories that should be ignored for this language (build artifacts, caches, etc.)
-    pub fn ignored_directories(&self) -> &'static [&'static str] {
-        match self {
-            // Systems
-            Self::Rust => &["target"],
-            Self::Cpp => &["build", "cmake-build-debug", "cmake-build-release", "out"],
-            Self::Zig => &["zig-out", "zig-cache"],
-
-            // JVM
-            Self::Java => &["target", "build", "bin", "out", "classes", ".gradle"],
-            Self::Kotlin => &["build", "out", ".gradle", ".kotlin"],
-            Self::Scala => &["target", ".bloop", ".metals", ".bsp"],
-            Self::Clojure => &["target", ".cpcache", ".clj-kondo"],
-
-            // .NET
-            Self::CSharp => &["bin", "obj", "packages", ".vs"],
-            Self::FSharp => &["bin", "obj", "packages", ".ionide", ".fake", "paket-files"],
-
-            // Web
-            Self::TypeScript | Self::JavaScript => &[
-                "node_modules",
-                "dist",
-                "build",
-                "coverage",
-                ".next",
-                ".nuxt",
-            ],
-            Self::Vue => &["node_modules", "dist", "build", ".nuxt"],
-
-            // Scripting
-            Self::Python => &[
-                "__pycache__",
-                ".venv",
-                "venv",
-                ".env",
-                "build",
-                "dist",
-                ".eggs",
-                ".mypy_cache",
-                ".pytest_cache",
-                ".pixi",
-            ],
-            Self::Ruby => &[
-                "vendor", ".bundle", "tmp", "log", "coverage", ".yardoc", "pkg",
-            ],
-            Self::PHP => &["vendor", "node_modules", "cache"],
-            Self::Perl => &["blib", "_build", "local"],
-            Self::Lua => &[".luarocks", "lua_modules"],
-            Self::Bash | Self::PowerShell => &[],
-
-            // Functional
-            Self::Haskell => &["dist", "dist-newstyle", ".stack-work", ".cabal-sandbox"],
-            Self::Elixir => &["_build", "deps", ".elixir_ls"],
-            Self::Erlang => &["_build", "deps", "ebin"],
-            Self::Elm => &["elm-stuff"],
-            Self::OCaml => &["_build", "_opam"],
-
-            // Mobile/Application
-            Self::Go => &["vendor"],
-            Self::Swift => &[".build", "DerivedData", ".swiftpm"],
-            Self::Dart => &[".dart_tool", "build", ".pub-cache"],
-
-            // Config/DevOps
-            Self::Terraform => &[".terraform"],
-            Self::Yaml | Self::Toml => &[],
-            Self::Nix => &["result", ".direnv"],
-            Self::Rego => &[],
-
-            // Scientific
-            Self::R => &["renv"],
-            Self::Julia => &[".julia"],
-            Self::Fortran => &[],
-
-            // Documentation
-            Self::Markdown => &[],
-
-            Self::Unknown => &[],
-        }
-    }
-
     /// Get LSP language ID
     pub fn lsp_id(&self) -> &'static str {
         match self {
@@ -931,25 +775,6 @@ impl Language {
 
             Self::Unknown => "plaintext",
         }
-    }
-
-    /// Get all supported file extensions
-    pub fn all_extensions() -> Vec<&'static str> {
-        vec![
-            // Systems
-            "rs", "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "zig", // JVM
-            "java", "kt", "kts", "scala", "sc", "clj", "cljs", "cljc", "edn", // .NET
-            "cs", "fs", "fsx", "fsi", // Web
-            "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", // Scripting
-            "py", "pyi", "rb", "rake", "gemspec", "php", "pl", "pm", "t", "lua", "sh", "bash",
-            "zsh", "ps1", "psm1", "psd1", // Functional
-            "hs", "lhs", "ex", "exs", "erl", "hrl", "elm", "ml", "mli",
-            // Mobile/Application
-            "go", "swift", "dart", // Config/DevOps
-            "tf", "tfvars", "hcl", "yaml", "yml", "toml", "nix", "rego", // Scientific
-            "r", "rmd", "jl", "f", "f90", "f95", "f03", "f08", "for", // Documentation
-            "md", "markdown",
-        ]
     }
 
     /// Get all supported languages (excluding Unknown)
@@ -1219,11 +1044,11 @@ mod tests {
     }
 
     #[test]
-    fn test_symbol_kind_lsp_conversion() {
+    fn test_symbol_kind_from_lsp() {
         assert_eq!(SymbolKind::from_lsp(5), SymbolKind::Class);
         assert_eq!(SymbolKind::from_lsp(12), SymbolKind::Function);
-        assert_eq!(SymbolKind::Class.to_lsp(), 5);
-        assert_eq!(SymbolKind::Function.to_lsp(), 12);
+        assert_eq!(SymbolKind::from_lsp(6), SymbolKind::Method);
+        assert_eq!(SymbolKind::from_lsp(999), SymbolKind::Variable); // Unknown → fallback
     }
 
     #[test]
@@ -1241,15 +1066,6 @@ mod tests {
         assert!(!SymbolKind::Function.is_low_level());
         assert!(!SymbolKind::Class.is_low_level());
         assert!(!SymbolKind::Method.is_low_level());
-    }
-
-    #[test]
-    fn test_symbol_kind_is_structural() {
-        assert!(SymbolKind::Function.is_structural());
-        assert!(SymbolKind::Class.is_structural());
-        assert!(SymbolKind::Method.is_structural());
-        assert!(!SymbolKind::Variable.is_structural());
-        assert!(!SymbolKind::Constant.is_structural());
     }
 
     #[test]

@@ -1,8 +1,3 @@
-//! LSP Transport Layer
-//!
-//! Handles LSP message framing with Content-Length headers.
-//! Provides async read/write with proper buffering.
-
 use std::io;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};

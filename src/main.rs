@@ -1,5 +1,3 @@
-//! Symora - Symbol-centric Code Intelligence CLI
-
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -38,7 +36,7 @@ fn main() {
     };
 
     if let Err(e) = runtime.block_on(async_main()) {
-        println!(r#"{{"error":"{}"}}"#, e);
+        eprintln!(r#"{{"error":"{}"}}"#, e);
         std::process::exit(2);
     }
 }
@@ -66,7 +64,30 @@ async fn async_main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
 
-    execute_command(cli.command, &app).await
+    tokio::select! {
+        result = execute_command(cli.command, &app) => result,
+        _ = shutdown_signal() => {
+            tracing::debug!("Received shutdown signal");
+            Ok(())
+        }
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => {},
+            _ = sigint.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }
 
 async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
@@ -84,7 +105,7 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Def(args) => commands::def::execute(args, app).await,
         Commands::Refs(args) => commands::refs::execute(args, app).await,
         Commands::Typedef(args) => commands::typedef::execute(args, app).await,
-        Commands::Impl(args) => commands::impl_cmd::execute(args, app).await,
+        Commands::Impl(args) => commands::implementations::execute(args, app).await,
         Commands::Callers(args) => commands::callers::execute(args, app).await,
         Commands::Callees(args) => commands::callees::execute(args, app).await,
         Commands::Supertypes(args) => commands::supertypes::execute(args, app).await,
@@ -103,11 +124,19 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
 
         // Search
         Commands::Search(args) => commands::search::execute(args, app).await,
+        Commands::Map(args) => commands::map::execute(args, app).await,
 
         // Edit
         Commands::Edit(args) => commands::edit::execute(args, app).await,
         Commands::Rename(args) => commands::rename::execute(args, app).await,
         Commands::Actions(args) => commands::actions::execute(args, app).await,
+
+        // LSP Features
+        Commands::InlayHints(args) => commands::inlay_hints::execute(args, app).await,
+        Commands::Folding(args) => commands::folding::execute(args, app).await,
+        Commands::Selection(args) => commands::selection::execute(args, app).await,
+        Commands::CodeLens(args) => commands::code_lens::execute(args, app).await,
+        Commands::Format(args) => commands::format::execute(args, app).await,
 
         // Daemon
         #[cfg(unix)]

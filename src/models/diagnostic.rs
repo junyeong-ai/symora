@@ -1,11 +1,8 @@
-//! Diagnostic model for LSP integration
-
 use serde::{Deserialize, Serialize};
 
-use super::lsp::{Position, Range};
+use super::lsp::Range;
 use super::symbol::Location;
 
-/// LSP diagnostic information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub file_path: String,
@@ -23,26 +20,6 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn new(
-        file_path: String,
-        line: u32,
-        column: u32,
-        severity: DiagnosticSeverity,
-        message: String,
-    ) -> Self {
-        let pos = Position::new(line, column);
-        Self {
-            file_path,
-            range: Range::point(pos),
-            severity,
-            message,
-            code: None,
-            source: None,
-            tags: Vec::new(),
-            related_information: Vec::new(),
-        }
-    }
-
     pub fn display_line(&self) -> u32 {
         self.range.start.line + 1
     }
@@ -60,7 +37,6 @@ impl Diagnostic {
     }
 }
 
-/// Severity levels (matches LSP spec)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticSeverity {
@@ -68,18 +44,6 @@ pub enum DiagnosticSeverity {
     Warning = 2,
     Information = 3,
     Hint = 4,
-}
-
-impl DiagnosticSeverity {
-    /// Parse from LSP numeric value
-    pub fn from_lsp(value: i64) -> Self {
-        match value {
-            1 => Self::Error,
-            2 => Self::Warning,
-            3 => Self::Information,
-            _ => Self::Hint,
-        }
-    }
 }
 
 impl std::fmt::Display for DiagnosticSeverity {
@@ -110,7 +74,6 @@ impl std::str::FromStr for DiagnosticSeverity {
     }
 }
 
-/// Diagnostic tag (LSP spec)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagnosticTag {
@@ -127,7 +90,6 @@ impl std::fmt::Display for DiagnosticTag {
     }
 }
 
-/// Related diagnostic information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticRelatedInfo {
     pub location: Location,

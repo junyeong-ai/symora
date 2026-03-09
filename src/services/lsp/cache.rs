@@ -1,6 +1,5 @@
-//! Symbol caching with LRU eviction and statistics
-
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,26 +9,145 @@ use tokio::sync::RwLock;
 
 use crate::models::symbol::{Language, Symbol};
 
-struct CacheEntry {
-    content_hash: u64,
-    symbols: Arc<Vec<Symbol>>,
+struct CacheEntry<V> {
+    value: V,
+    extra_hash: u64,
     created_at: Instant,
-    last_accessed: Instant,
 }
 
-impl CacheEntry {
-    fn is_valid(&self, content_hash: u64, ttl: Duration) -> bool {
-        self.content_hash == content_hash && self.created_at.elapsed() < ttl
-    }
-}
-
-/// Thread-safe symbol cache with LRU eviction
-pub struct SymbolCache {
-    entries: RwLock<HashMap<PathBuf, CacheEntry>>,
+struct AsyncCache<K: Eq + Hash + Clone, V: Clone> {
+    entries: RwLock<HashMap<K, CacheEntry<V>>>,
     max_entries: usize,
     ttl: Duration,
     hits: AtomicU64,
     misses: AtomicU64,
+}
+
+impl<K: Eq + Hash + Clone, V: Clone> AsyncCache<K, V> {
+    fn new(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            max_entries,
+            ttl,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    /// Get a cached value or compute it. If `extra_hash` is non-zero, the entry
+    /// is only valid when both the TTL and the hash match.
+    async fn get_or_compute<F, Fut>(
+        &self,
+        key: &K,
+        extra_hash: u64,
+        compute: F,
+    ) -> Result<V, crate::error::LspError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<V, crate::error::LspError>>,
+    {
+        // Phase 1: Try read lock first (fast path)
+        {
+            let entries = self.entries.read().await;
+            if let Some(entry) = entries.get(key)
+                && entry.is_valid(extra_hash, self.ttl)
+            {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(entry.value.clone());
+            }
+        }
+
+        // Phase 2: Compute outside any lock
+        let value = compute().await?;
+
+        // Phase 3: Insert with write lock
+        let mut entries = self.entries.write().await;
+        // Double-check: another task may have computed while we waited
+        if let Some(entry) = entries.get(key)
+            && entry.is_valid(extra_hash, self.ttl)
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(entry.value.clone());
+        }
+
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        if entries.len() >= self.max_entries {
+            Self::evict_oldest(&mut entries);
+        }
+
+        entries.insert(
+            key.clone(),
+            CacheEntry {
+                value: value.clone(),
+                extra_hash,
+                created_at: Instant::now(),
+            },
+        );
+
+        Ok(value)
+    }
+
+    fn evict_oldest(entries: &mut HashMap<K, CacheEntry<V>>) {
+        if let Some(oldest_key) = entries
+            .iter()
+            .min_by_key(|(_, e)| e.created_at)
+            .map(|(k, _)| k.clone())
+        {
+            entries.remove(&oldest_key);
+        }
+    }
+
+    async fn remove(&self, key: &K) {
+        self.entries.write().await.remove(key);
+    }
+
+    async fn retain(&self, f: impl Fn(&K, &CacheEntry<V>) -> bool) {
+        self.entries.write().await.retain(|k, v| f(k, v));
+    }
+
+    async fn clear(&self) {
+        self.entries.write().await.clear();
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
+
+    async fn cleanup_expired(&self) -> usize {
+        let mut entries = self.entries.write().await;
+        let before = entries.len();
+        let ttl = self.ttl;
+        entries.retain(|_, entry| entry.created_at.elapsed() < ttl);
+        before - entries.len()
+    }
+
+    #[cfg(test)]
+    async fn stats(&self) -> CacheStats {
+        let entries = self.entries.read().await;
+        CacheStats {
+            entry_count: entries.len(),
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl<V> CacheEntry<V> {
+    fn is_valid(&self, extra_hash: u64, ttl: Duration) -> bool {
+        self.created_at.elapsed() < ttl && (extra_hash == 0 || self.extra_hash == extra_hash)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct CacheStats {
+    pub entry_count: usize,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+// --- SymbolCache: file path keyed, content-hash validated ---
+
+pub struct SymbolCache {
+    inner: AsyncCache<PathBuf, Arc<Vec<Symbol>>>,
 }
 
 impl Default for SymbolCache {
@@ -41,15 +159,10 @@ impl Default for SymbolCache {
 impl SymbolCache {
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
-            max_entries,
-            ttl,
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
+            inner: AsyncCache::new(ttl, max_entries),
         }
     }
 
-    /// Get cached symbols or compute them
     pub async fn get_or_compute<F, Fut>(
         &self,
         path: &Path,
@@ -61,123 +174,41 @@ impl SymbolCache {
         Fut: std::future::Future<Output = Result<Vec<Symbol>, crate::error::LspError>>,
     {
         let hash = crate::infra::hash_content(content);
-
-        {
-            let mut entries = self.entries.write().await;
-            if let Some(entry) = entries.get_mut(path)
-                && entry.is_valid(hash, self.ttl)
-            {
-                entry.last_accessed = Instant::now();
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(Arc::clone(&entry.symbols));
-            }
-        }
-
-        self.misses.fetch_add(1, Ordering::Relaxed);
-        let symbols = Arc::new(compute().await?);
-
-        {
-            let mut entries = self.entries.write().await;
-            if entries.len() >= self.max_entries {
-                self.evict_lru(&mut entries);
-            }
-
-            entries.insert(
-                path.to_path_buf(),
-                CacheEntry {
-                    content_hash: hash,
-                    symbols: Arc::clone(&symbols),
-                    created_at: Instant::now(),
-                    last_accessed: Instant::now(),
-                },
-            );
-        }
-
-        Ok(symbols)
+        self.inner
+            .get_or_compute(&path.to_path_buf(), hash, || async {
+                Ok(Arc::new(compute().await?))
+            })
+            .await
     }
 
-    /// Evict least recently used entry
-    fn evict_lru(&self, entries: &mut HashMap<PathBuf, CacheEntry>) {
-        if let Some((oldest_path, _)) = entries
-            .iter()
-            .min_by_key(|(_, e)| e.last_accessed)
-            .map(|(p, e)| (p.clone(), e.last_accessed))
-        {
-            entries.remove(&oldest_path);
-            tracing::trace!("Evicted cache entry: {}", oldest_path.display());
-        }
-    }
-
-    /// Invalidate cache for a specific file
     pub async fn invalidate(&self, path: &Path) {
-        let mut entries = self.entries.write().await;
-        entries.remove(path);
+        self.inner.remove(&path.to_path_buf()).await;
     }
 
-    /// Clear all cached entries
     pub async fn clear(&self) {
-        let mut entries = self.entries.write().await;
-        entries.clear();
-        self.hits.store(0, Ordering::Relaxed);
-        self.misses.store(0, Ordering::Relaxed);
+        self.inner.clear().await;
     }
 
-    /// Remove expired entries
     pub async fn cleanup_expired(&self) -> usize {
-        let mut entries = self.entries.write().await;
-        let before = entries.len();
-        let ttl = self.ttl;
-        entries.retain(|_, entry| entry.created_at.elapsed() < ttl);
-        before - entries.len()
+        self.inner.cleanup_expired().await
     }
 
-    /// Get cache statistics
+    #[cfg(test)]
     pub async fn stats(&self) -> CacheStats {
-        let entries = self.entries.read().await;
-        let total_symbols: usize = entries.values().map(|e| e.symbols.len()).sum();
-        let hits = self.hits.load(Ordering::Relaxed);
-        let misses = self.misses.load(Ordering::Relaxed);
-        CacheStats {
-            entry_count: entries.len(),
-            total_symbols,
-            hits,
-            misses,
-            hit_rate: if hits + misses > 0 {
-                hits as f64 / (hits + misses) as f64
-            } else {
-                0.0
-            },
-        }
+        self.inner.stats().await
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CacheStats {
-    pub entry_count: usize,
-    pub total_symbols: usize,
-    pub hits: u64,
-    pub misses: u64,
-    pub hit_rate: f64,
-}
+// --- WorkspaceSymbolCache: language+query keyed, TTL-only validated ---
 
-/// Workspace-level symbol cache with version tracking
 pub struct WorkspaceSymbolCache {
-    entries: RwLock<HashMap<WorkspaceCacheKey, WorkspaceCacheEntry>>,
-    server_versions: RwLock<HashMap<Language, String>>,
-    ttl: Duration,
-    max_entries: usize,
+    inner: AsyncCache<WorkspaceCacheKey, Arc<Vec<Symbol>>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct WorkspaceCacheKey {
     language: Language,
     query: String,
-}
-
-struct WorkspaceCacheEntry {
-    symbols: Arc<Vec<Symbol>>,
-    created_at: Instant,
-    server_version: String,
 }
 
 impl Default for WorkspaceSymbolCache {
@@ -189,10 +220,7 @@ impl Default for WorkspaceSymbolCache {
 impl WorkspaceSymbolCache {
     pub fn new(ttl: Duration, max_entries: usize) -> Self {
         Self {
-            entries: RwLock::new(HashMap::new()),
-            server_versions: RwLock::new(HashMap::new()),
-            ttl,
-            max_entries,
+            inner: AsyncCache::new(ttl, max_entries),
         }
     }
 
@@ -210,81 +238,18 @@ impl WorkspaceSymbolCache {
             language,
             query: query.to_string(),
         };
-
-        let current_version = self.get_server_version(language).await;
-
-        {
-            let entries = self.entries.read().await;
-            if let Some(entry) = entries.get(&key)
-                && entry.created_at.elapsed() < self.ttl
-                && entry.server_version == current_version
-            {
-                tracing::trace!("Workspace symbol cache hit: {}:{}", language, query);
-                return Ok(Arc::clone(&entry.symbols));
-            }
-        }
-
-        tracing::trace!("Workspace symbol cache miss: {}:{}", language, query);
-        let symbols = Arc::new(compute().await?);
-
-        {
-            let mut entries = self.entries.write().await;
-            if entries.len() >= self.max_entries {
-                self.evict_oldest(&mut entries);
-            }
-            entries.insert(
-                key,
-                WorkspaceCacheEntry {
-                    symbols: Arc::clone(&symbols),
-                    created_at: Instant::now(),
-                    server_version: current_version,
-                },
-            );
-        }
-
-        Ok(symbols)
-    }
-
-    pub async fn update_server_version(&self, language: Language, version: String) {
-        let mut versions = self.server_versions.write().await;
-        let old_version = versions.insert(language, version.clone());
-        if old_version.as_ref() != Some(&version) {
-            drop(versions);
-            self.invalidate_language(language).await;
-        }
-    }
-
-    async fn get_server_version(&self, language: Language) -> String {
-        self.server_versions
-            .read()
+        // extra_hash=0 means TTL-only validation
+        self.inner
+            .get_or_compute(&key, 0, || async { Ok(Arc::new(compute().await?)) })
             .await
-            .get(&language)
-            .cloned()
-            .unwrap_or_default()
     }
 
     pub async fn invalidate_language(&self, language: Language) {
-        let mut entries = self.entries.write().await;
-        entries.retain(|k, _| k.language != language);
-    }
-
-    fn evict_oldest(&self, entries: &mut HashMap<WorkspaceCacheKey, WorkspaceCacheEntry>) {
-        if let Some((oldest_key, _)) = entries
-            .iter()
-            .min_by_key(|(_, e)| e.created_at)
-            .map(|(k, e)| (k.clone(), e.created_at))
-        {
-            entries.remove(&oldest_key);
-            tracing::trace!(
-                "Evicted workspace cache: {:?} {}",
-                oldest_key.language,
-                oldest_key.query
-            );
-        }
+        self.inner.retain(|k, _| k.language != language).await;
     }
 
     pub async fn clear(&self) {
-        self.entries.write().await.clear();
+        self.inner.clear().await;
     }
 }
 
@@ -362,7 +327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_lru_eviction() {
+    async fn test_eviction() {
         let cache = SymbolCache::new(Duration::from_secs(300), 2);
 
         // Add 3 entries to a cache with max 2

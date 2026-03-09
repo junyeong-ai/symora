@@ -1,8 +1,3 @@
-//! AST parsing infrastructure for Symora
-//!
-//! Tree-sitter based parsing for AST pattern search.
-//! Supports 13 languages with verified node types.
-
 pub mod node_types;
 
 pub use node_types::{

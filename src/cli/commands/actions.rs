@@ -1,13 +1,12 @@
-//! Code Actions command - List and apply LSP code actions (refactoring, quickfix, etc.)
-
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::commands::edit::apply_workspace_edits;
-use crate::cli::response::Section;
+#[cfg(unix)]
+use crate::cli::commands::edit::invalidate_store_files;
+use crate::cli::response::{ActionOutput, ApplyActionOutput, FileChangeOutput, Section};
 
 #[derive(Args, Debug)]
 pub struct ActionsArgs {
@@ -50,33 +49,6 @@ pub struct ApplyArgs {
     pub dry_run: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ActionOutput {
-    title: String,
-    kind: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    is_preferred: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    diagnostics: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ApplyResponse {
-    title: String,
-    kind: String,
-    applied: bool,
-    files_changed: usize,
-    changes: Vec<FileChangeOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct FileChangeOutput {
-    file: String,
-    edit_count: usize,
-}
-
 pub async fn execute(args: ActionsArgs, app: &App) -> Result<()> {
     match args.command {
         ActionsCommand::List(list_args) => execute_list(list_args, app).await,
@@ -86,7 +58,7 @@ pub async fn execute(args: ActionsArgs, app: &App) -> Result<()> {
 
 async fn execute_list(args: ListArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
 
     match app.lsp.code_actions(&loc.file, loc.line, loc.column).await {
         Ok(actions) => {
@@ -110,7 +82,7 @@ async fn execute_list(args: ListArgs, app: &App) -> Result<()> {
                 })
                 .collect();
 
-            ctx.print_success_flat(Section::new(output));
+            ctx.print_success(Section::new(output));
         }
         Err(e) => ctx.print_error(&e.to_string()),
     }
@@ -120,7 +92,7 @@ async fn execute_list(args: ListArgs, app: &App) -> Result<()> {
 
 async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
 
     match app.lsp.code_actions(&loc.file, loc.line, loc.column).await {
         Ok(actions) => {
@@ -142,33 +114,37 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
             };
 
             match app.lsp.apply_code_action(&loc.file, action).await {
-                Ok(result) => {
-                    // Actually apply the edits to files
-                    match apply_workspace_edits(&result.changes, args.dry_run) {
-                        Ok(applied_changes) => {
-                            let response = ApplyResponse {
-                                title: action.title.clone(),
-                                kind: action.kind.to_string(),
-                                applied: !args.dry_run,
-                                files_changed: applied_changes.len(),
-                                changes: applied_changes
-                                    .iter()
-                                    .map(|c| FileChangeOutput {
-                                        file: ctx.relative_path(&c.file),
-                                        edit_count: c.edit_count,
-                                    })
-                                    .collect(),
-                                message: if args.dry_run {
-                                    Some("Dry run - no changes applied".to_string())
-                                } else {
-                                    None
-                                },
-                            };
-                            ctx.print_success_flat(response);
+                Ok(result) => match apply_workspace_edits(&result.changes, args.dry_run) {
+                    Ok(applied_changes) => {
+                        #[cfg(unix)]
+                        if !args.dry_run {
+                            let changed_files: Vec<_> =
+                                applied_changes.iter().map(|c| c.file.clone()).collect();
+                            invalidate_store_files(app, &changed_files).await;
                         }
-                        Err(e) => ctx.print_error(&format!("Failed to apply action: {}", e)),
+
+                        let response = ApplyActionOutput {
+                            title: action.title.clone(),
+                            kind: action.kind.to_string(),
+                            applied: !args.dry_run,
+                            files_changed: applied_changes.len(),
+                            changes: applied_changes
+                                .iter()
+                                .map(|c| FileChangeOutput {
+                                    file: ctx.relative_path(&c.file),
+                                    edit_count: c.edit_count,
+                                })
+                                .collect(),
+                            message: if args.dry_run {
+                                Some("Dry run - no changes applied".to_string())
+                            } else {
+                                None
+                            },
+                        };
+                        ctx.print_success(response);
                     }
-                }
+                    Err(e) => ctx.print_error(&format!("Failed to apply action: {}", e)),
+                },
                 Err(e) => ctx.print_error(&e.to_string()),
             }
         }

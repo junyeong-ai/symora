@@ -1,5 +1,3 @@
-//! Language-specific LSP initialization options
-
 use serde_json::{Value, json};
 use std::path::Path;
 

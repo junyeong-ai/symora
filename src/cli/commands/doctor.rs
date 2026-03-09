@@ -1,5 +1,3 @@
-//! Doctor command - Diagnose environment and language server setup
-
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -15,7 +13,7 @@ pub struct DoctorArgs {
 }
 
 #[derive(Serialize)]
-struct DoctorResponse {
+struct DoctorOutput {
     platform: String,
     languages: Vec<LanguageStatus>,
     summary: Summary,
@@ -68,7 +66,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     let installed_count = languages.iter().filter(|l| l.installed).count();
     let total = languages.len();
 
-    let response = DoctorResponse {
+    let response = DoctorOutput {
         platform: platform_to_string(Platform::current()),
         summary: Summary {
             total,
@@ -78,7 +76,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
         languages,
     };
 
-    ctx.print_success_flat(response);
+    ctx.print_success(response);
     Ok(())
 }
 

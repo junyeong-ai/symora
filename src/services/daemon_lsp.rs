@@ -1,5 +1,3 @@
-//! Daemon-backed LSP Service Implementation
-
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -7,21 +5,21 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::daemon::DaemonClient;
-use crate::daemon::protocol::dto::{
+use crate::daemon::wire::{
     ApplyActionResponse, CallsResponse, CodeActionsResponse, CodeLensResponse, DefinitionResponse,
-    DiagnosticsResponse, FoldingRangesResponse, HoverResponse, ImplementationsResponse,
-    InlayHintsResponse, PrepareRenameResponse, ReferencesResponse, RenameResponse,
-    SelectionRangesResponse, SignatureResponse, SymbolsResponse, TypeHierarchyResponse,
+    DiagnosticsResponse, FoldingRangesResponse, FormatResponse, HoverResponse,
+    ImplementationsResponse, InlayHintsResponse, PrepareRenameResponse, ReferencesResponse,
+    RenameResponse, SelectionRangesResponse, SignatureResponse, SymbolsResponse,
+    TypeHierarchyResponse,
 };
 use crate::error::LspError;
-use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity};
+use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeActionKind, CodeLens, CodeLensCommand,
-    FileChangeWithEdits, FindSymbolsOptions, FoldingRange, FoldingRangeKind, HoverInfo, InlayHint,
-    InlayHintKind, ParameterInfo, Position, PrepareRenameResult, Range, RenameResult,
-    SelectionRange, ServerStatus, SignatureHelp, SignatureInfo, TextEdit, TypeHierarchyItem,
+    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
+    HoverInfo, InlayHint, Position, PrepareRenameResult, Range, RenameResult, SelectionRange,
+    ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
-use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
+use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
 
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, LspError> {
@@ -49,7 +47,7 @@ impl LspService for DaemonLspService {
     ) -> Result<Vec<Symbol>, LspError> {
         let result = self
             .client
-            .find_symbols_with_options(file, options.include_body, options.depth)
+            .find_symbols(file, options.include_body, options.depth)
             .await?;
 
         let response: SymbolsResponse = parse(result)?;
@@ -69,25 +67,7 @@ impl LspService for DaemonLspService {
 
         let response: SymbolsResponse = parse(result)?;
 
-        let mut seen = std::collections::HashSet::new();
-        Ok(response
-            .symbols
-            .into_iter()
-            .filter_map(|dto| {
-                let key = (
-                    dto.name.clone(),
-                    dto.kind.clone(),
-                    dto.file.clone(),
-                    dto.line,
-                    dto.column,
-                );
-                if seen.insert(key) {
-                    Some(dto.into())
-                } else {
-                    None
-                }
-            })
-            .collect())
+        Ok(response.symbols.into_iter().map(Symbol::from).collect())
     }
 
     async fn find_references(
@@ -161,7 +141,7 @@ impl LspService for DaemonLspService {
             .filter(|c| !c.is_empty())
             .map(|content| HoverInfo {
                 content,
-                range: None,
+                range: response.range.map(Into::into),
             }))
     }
 
@@ -180,23 +160,7 @@ impl LspService for DaemonLspService {
         }
 
         Ok(Some(SignatureHelp {
-            signatures: response
-                .signatures
-                .into_iter()
-                .map(|s| SignatureInfo {
-                    label: s.label,
-                    documentation: s.documentation,
-                    parameters: s
-                        .parameters
-                        .into_iter()
-                        .map(|p| ParameterInfo {
-                            label: p.label,
-                            documentation: p.documentation,
-                        })
-                        .collect(),
-                    active_parameter: s.active_parameter,
-                })
-                .collect(),
+            signatures: response.signatures.into_iter().map(Into::into).collect(),
             active_signature: response.active_signature,
             active_parameter: response.active_parameter,
         }))
@@ -213,23 +177,39 @@ impl LspService for DaemonLspService {
             .map(|d| {
                 let line = d.line.saturating_sub(1);
                 let column = d.column.saturating_sub(1);
+                let end_line = d.end_line.saturating_sub(1);
+                let end_column = d.end_column.saturating_sub(1);
                 Diagnostic {
                     file_path: file.display().to_string(),
                     message: d.message,
-                    severity: match d.severity.as_str() {
-                        "Error" => DiagnosticSeverity::Error,
-                        "Warning" => DiagnosticSeverity::Warning,
-                        "Information" => DiagnosticSeverity::Information,
-                        _ => DiagnosticSeverity::Hint,
-                    },
+                    severity: d.severity.parse().unwrap_or(DiagnosticSeverity::Hint),
                     range: Range {
                         start: Position::new(line, column),
-                        end: Position::new(line, column + 1),
+                        end: Position::new(end_line, end_column),
                     },
-                    source: None,
-                    code: None,
-                    tags: vec![],
-                    related_information: vec![],
+                    source: d.source,
+                    code: d.code,
+                    tags: d
+                        .tags
+                        .iter()
+                        .filter_map(|t| match t.as_str() {
+                            "unnecessary" => Some(DiagnosticTag::Unnecessary),
+                            "deprecated" => Some(DiagnosticTag::Deprecated),
+                            _ => None,
+                        })
+                        .collect(),
+                    related_information: d
+                        .related_information
+                        .iter()
+                        .map(|ri| crate::models::diagnostic::DiagnosticRelatedInfo {
+                            location: crate::models::symbol::Location::point(
+                                PathBuf::from(&ri.file),
+                                ri.line,
+                                ri.column,
+                            ),
+                            message: ri.message.clone(),
+                        })
+                        .collect(),
                 }
             })
             .collect())
@@ -266,21 +246,7 @@ impl LspService for DaemonLspService {
         let response: RenameResponse = parse(result)?;
 
         Ok(RenameResult {
-            changes: response
-                .changes
-                .into_iter()
-                .map(|c| FileChangeWithEdits {
-                    file: PathBuf::from(c.file),
-                    edits: c
-                        .edits
-                        .into_iter()
-                        .map(|e| TextEdit {
-                            range: e.range.into(),
-                            new_text: e.new_text,
-                        })
-                        .collect(),
-                })
-                .collect(),
+            changes: response.changes.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -294,18 +260,7 @@ impl LspService for DaemonLspService {
 
         let response: CallsResponse = parse(result)?;
 
-        Ok(response
-            .calls
-            .into_iter()
-            .map(|c| CallHierarchyItem {
-                name: c.name,
-                kind: SymbolKind::from_str_loose(&c.kind),
-                location: Location::point(PathBuf::from(&c.file), c.line, c.column),
-                call_site: c
-                    .call_site
-                    .map(|cs| Location::point(PathBuf::from(cs.file), cs.line, cs.column)),
-            })
-            .collect())
+        Ok(response.calls.into_iter().map(Into::into).collect())
     }
 
     async fn outgoing_calls(
@@ -318,18 +273,7 @@ impl LspService for DaemonLspService {
 
         let response: CallsResponse = parse(result)?;
 
-        Ok(response
-            .calls
-            .into_iter()
-            .map(|c| CallHierarchyItem {
-                name: c.name,
-                kind: SymbolKind::from_str_loose(&c.kind),
-                location: Location::point(PathBuf::from(&c.file), c.line, c.column),
-                call_site: c
-                    .call_site
-                    .map(|cs| Location::point(PathBuf::from(cs.file), cs.line, cs.column)),
-            })
-            .collect())
+        Ok(response.calls.into_iter().map(Into::into).collect())
     }
 
     async fn supertypes(
@@ -340,16 +284,7 @@ impl LspService for DaemonLspService {
     ) -> Result<Vec<TypeHierarchyItem>, LspError> {
         let result = self.client.supertypes(file, line, column).await?;
         let response: TypeHierarchyResponse = parse(result)?;
-        Ok(response
-            .items
-            .into_iter()
-            .map(|item| TypeHierarchyItem {
-                name: item.name,
-                kind: SymbolKind::from_str_loose(&item.kind),
-                location: Location::point(PathBuf::from(item.file), item.line, item.column),
-                detail: item.detail,
-            })
-            .collect())
+        Ok(response.items.into_iter().map(Into::into).collect())
     }
 
     async fn subtypes(
@@ -360,16 +295,7 @@ impl LspService for DaemonLspService {
     ) -> Result<Vec<TypeHierarchyItem>, LspError> {
         let result = self.client.subtypes(file, line, column).await?;
         let response: TypeHierarchyResponse = parse(result)?;
-        Ok(response
-            .items
-            .into_iter()
-            .map(|item| TypeHierarchyItem {
-                name: item.name,
-                kind: SymbolKind::from_str_loose(&item.kind),
-                location: Location::point(PathBuf::from(item.file), item.line, item.column),
-                detail: item.detail,
-            })
-            .collect())
+        Ok(response.items.into_iter().map(Into::into).collect())
     }
 
     async fn inlay_hints(&self, file: &Path, range: Range) -> Result<Vec<InlayHint>, LspError> {
@@ -384,34 +310,13 @@ impl LspService for DaemonLspService {
             )
             .await?;
         let response: InlayHintsResponse = parse(result)?;
-        Ok(response
-            .hints
-            .into_iter()
-            .map(|h| InlayHint {
-                position: Position::new(h.line, h.character),
-                label: h.label,
-                kind: InlayHintKind::from_lsp(h.kind),
-                padding_left: h.padding_left,
-                padding_right: h.padding_right,
-            })
-            .collect())
+        Ok(response.hints.into_iter().map(Into::into).collect())
     }
 
     async fn folding_ranges(&self, file: &Path) -> Result<Vec<FoldingRange>, LspError> {
         let result = self.client.folding_ranges(file).await?;
         let response: FoldingRangesResponse = parse(result)?;
-        Ok(response
-            .ranges
-            .into_iter()
-            .map(|r| FoldingRange {
-                start_line: r.start_line,
-                end_line: r.end_line,
-                start_character: r.start_character,
-                end_character: r.end_character,
-                kind: FoldingRangeKind::from_lsp(r.kind.as_deref()),
-                collapsed_text: r.collapsed_text,
-            })
-            .collect())
+        Ok(response.ranges.into_iter().map(Into::into).collect())
     }
 
     async fn selection_ranges(
@@ -421,48 +326,13 @@ impl LspService for DaemonLspService {
     ) -> Result<Vec<SelectionRange>, LspError> {
         let result = self.client.selection_ranges(file, &positions).await?;
         let response: SelectionRangesResponse = parse(result)?;
-
-        fn convert_selection_range(
-            dto: &crate::daemon::protocol::dto::SelectionRangeDto,
-        ) -> SelectionRange {
-            SelectionRange {
-                range: Range::new(
-                    Position::new(dto.start_line, dto.start_character),
-                    Position::new(dto.end_line, dto.end_character),
-                ),
-                parent: dto
-                    .parent
-                    .as_ref()
-                    .map(|p| Box::new(convert_selection_range(p))),
-            }
-        }
-
-        Ok(response
-            .ranges
-            .iter()
-            .map(convert_selection_range)
-            .collect())
+        Ok(response.ranges.into_iter().map(Into::into).collect())
     }
 
-    async fn code_lens(&self, file: &Path) -> Result<Vec<CodeLens>, LspError> {
-        let result = self.client.code_lens(file).await?;
+    async fn code_lenses(&self, file: &Path) -> Result<Vec<CodeLens>, LspError> {
+        let result = self.client.code_lenses(file).await?;
         let response: CodeLensResponse = parse(result)?;
-        Ok(response
-            .lenses
-            .into_iter()
-            .map(|lens| CodeLens {
-                range: Range::new(
-                    Position::new(lens.start_line, lens.start_character),
-                    Position::new(lens.end_line, lens.end_character),
-                ),
-                command: lens.command.map(|cmd| CodeLensCommand {
-                    title: cmd.title,
-                    command: cmd.command,
-                    arguments: cmd.arguments,
-                }),
-                data: lens.data,
-            })
-            .collect())
+        Ok(response.lenses.into_iter().map(Into::into).collect())
     }
 
     async fn code_actions(
@@ -475,18 +345,7 @@ impl LspService for DaemonLspService {
 
         let response: CodeActionsResponse = parse(result)?;
 
-        Ok(response
-            .actions
-            .into_iter()
-            .map(|a| CodeAction {
-                title: a.title,
-                kind: CodeActionKind::from(a.kind.as_deref()),
-                is_preferred: a.is_preferred,
-                diagnostics: a.diagnostics,
-                edit: None,
-                data: a.data,
-            })
-            .collect())
+        Ok(response.actions.into_iter().map(Into::into).collect())
     }
 
     async fn apply_code_action(
@@ -502,41 +361,46 @@ impl LspService for DaemonLspService {
         let response: ApplyActionResponse = parse(result)?;
 
         Ok(ApplyActionResult {
-            changes: response
-                .changes
-                .into_iter()
-                .map(|c| FileChangeWithEdits {
-                    file: PathBuf::from(c.file),
-                    edits: c
-                        .edits
-                        .into_iter()
-                        .map(|e| TextEdit {
-                            range: e.range.into(),
-                            new_text: e.new_text,
-                        })
-                        .collect(),
-                })
-                .collect(),
+            changes: response.changes.into_iter().map(Into::into).collect(),
         })
     }
 
-    async fn is_available(&self, _language: Language) -> bool {
-        self.client.status().await.is_ok()
+    async fn format(&self, file: &Path) -> Result<Vec<TextEdit>, LspError> {
+        let result = self.client.format(file).await?;
+        let response: FormatResponse = parse(result)?;
+        Ok(response.edits.into_iter().map(Into::into).collect())
     }
 
-    async fn server_status(&self, _language: Language) -> ServerStatus {
-        match self.client.status().await {
-            Ok(_) => ServerStatus::Running,
-            Err(_) => ServerStatus::Stopped,
+    async fn is_available(&self, language: Language) -> bool {
+        match self.client.language_status(&language.to_string()).await {
+            Ok(v) => v
+                .get("available")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            Err(_) => false,
         }
     }
 
-    async fn shutdown(&self) {
-        // Daemon handles LSP server lifecycle
-    }
-
-    async fn cleanup_idle(&self, _timeout: std::time::Duration) -> usize {
-        // Daemon server handles idle cleanup internally
-        0
+    async fn server_status(&self, language: Language) -> ServerStatus {
+        match self.client.language_status(&language.to_string()).await {
+            Ok(v) => {
+                let status = v
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("stopped");
+                match status {
+                    "running" => ServerStatus::Running,
+                    "not_installed" => ServerStatus::NotInstalled {
+                        hint: v
+                            .get("install_hint")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    },
+                    "not_supported" => ServerStatus::NotSupported,
+                    _ => ServerStatus::Stopped,
+                }
+            }
+            Err(_) => ServerStatus::Stopped,
+        }
     }
 }

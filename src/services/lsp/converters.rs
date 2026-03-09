@@ -1,5 +1,3 @@
-//! Type conversion functions for LSP responses
-
 use std::path::Path;
 
 use crate::infra::lsp::protocol::{
@@ -10,6 +8,8 @@ use crate::models::lsp::{
     uri_to_path,
 };
 use crate::models::symbol::{Location, Symbol, SymbolKind};
+
+use super::helpers::char_to_byte_index;
 
 pub(super) fn convert_symbol_kind(kind: LspSymbolKind) -> SymbolKind {
     use LspSymbolKind as LspKind;
@@ -106,7 +106,7 @@ pub(super) fn convert_document_symbols(
             );
 
             let mut symbol = Symbol::new(
-                doc_sym.name.clone(),
+                Symbol::strip_type_parameters(&doc_sym.name),
                 convert_symbol_kind(doc_sym.kind),
                 location,
             );
@@ -141,11 +141,22 @@ pub(super) fn convert_document_symbols(
 }
 
 fn extract_lines(content: &str, start: usize, end: usize) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    if start >= lines.len() {
+    let selected: Vec<&str> = content.lines().skip(start).take(end - start + 1).collect();
+    if selected.is_empty() {
         return None;
     }
-    Some(lines[start..=end.min(lines.len() - 1)].join("\n"))
+    Some(selected.join("\n"))
+}
+
+pub(super) fn apply_body_recursive(symbols: &mut [Symbol], content: &str) {
+    for sym in symbols {
+        if let Some(body) = extract_body(content, &sym.location) {
+            sym.body = Some(body);
+        }
+        if !sym.children.is_empty() {
+            apply_body_recursive(&mut sym.children, content);
+        }
+    }
 }
 
 pub(super) fn extract_body(content: &str, location: &Location) -> Option<String> {
@@ -156,6 +167,18 @@ pub(super) fn extract_body(content: &str, location: &Location) -> Option<String>
 
 pub(super) fn extract_body_from_range(content: &str, range: &Range) -> Option<String> {
     extract_lines(content, range.start.line as usize, range.end.line as usize)
+}
+
+pub(super) fn parse_position(value: &serde_json::Value) -> Option<crate::models::lsp::Position> {
+    let line = value.get("line")?.as_u64()? as u32;
+    let character = value.get("character")?.as_u64()? as u32;
+    Some(crate::models::lsp::Position::new(line, character))
+}
+
+pub(super) fn parse_range(value: &serde_json::Value) -> Option<crate::models::lsp::Range> {
+    let start = parse_position(value.get("start")?)?;
+    let end = parse_position(value.get("end")?)?;
+    Some(crate::models::lsp::Range::new(start, end))
 }
 
 pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWithEdits> {
@@ -197,7 +220,7 @@ pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWi
 }
 
 pub(super) fn parse_text_edits(edits: &serde_json::Value) -> Vec<crate::models::lsp::TextEdit> {
-    use crate::models::lsp::{Position as LspPos, Range as LspRange, TextEdit as LspTextEdit};
+    use crate::models::lsp::TextEdit as LspTextEdit;
 
     let arr = match edits.as_array() {
         Some(a) => a,
@@ -206,21 +229,10 @@ pub(super) fn parse_text_edits(edits: &serde_json::Value) -> Vec<crate::models::
 
     arr.iter()
         .filter_map(|edit| {
-            let range = edit.get("range")?;
-            let start = range.get("start")?;
-            let end = range.get("end")?;
+            let range = parse_range(edit.get("range")?)?;
 
             Some(LspTextEdit {
-                range: LspRange {
-                    start: LspPos {
-                        line: start.get("line")?.as_u64()? as u32,
-                        character: start.get("character")?.as_u64()? as u32,
-                    },
-                    end: LspPos {
-                        line: end.get("line")?.as_u64()? as u32,
-                        character: end.get("character")?.as_u64()? as u32,
-                    },
-                },
+                range,
                 new_text: edit
                     .get("newText")
                     .and_then(|t| t.as_str())
@@ -261,7 +273,9 @@ pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<Signatur
                                 } else if let Some(arr) = l.as_array() {
                                     let start = arr.first()?.as_u64()? as usize;
                                     let end = arr.get(1)?.as_u64()? as usize;
-                                    label.get(start..end).map(|s| s.to_string())
+                                    let byte_start = char_to_byte_index(&label, start);
+                                    let byte_end = char_to_byte_index(&label, end);
+                                    label.get(byte_start..byte_end).map(|s| s.to_string())
                                 } else {
                                     None
                                 }

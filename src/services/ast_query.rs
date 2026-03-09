@@ -46,10 +46,11 @@ pub struct DefaultAstQueryService {
     ruby: Mutex<Parser>,
     lua: Mutex<Parser>,
     php: Mutex<Parser>,
+    max_file_size_bytes: u64,
 }
 
 impl DefaultAstQueryService {
-    pub fn new() -> Result<Self, SearchError> {
+    pub fn new(max_file_size_bytes: u64) -> Result<Self, SearchError> {
         Ok(Self {
             python: Mutex::new(Self::create_parser(tree_sitter_python::LANGUAGE.into())?),
             typescript: Mutex::new(Self::create_parser(
@@ -68,6 +69,7 @@ impl DefaultAstQueryService {
             ruby: Mutex::new(Self::create_parser(tree_sitter_ruby::LANGUAGE.into())?),
             lua: Mutex::new(Self::create_parser(tree_sitter_lua::LANGUAGE.into())?),
             php: Mutex::new(Self::create_parser(tree_sitter_php::LANGUAGE_PHP.into())?),
+            max_file_size_bytes,
         })
     }
 
@@ -175,7 +177,7 @@ impl DefaultAstQueryService {
 
 impl Default for DefaultAstQueryService {
     fn default() -> Self {
-        Self::new().expect("Failed to create AST query service")
+        Self::new(10 * 1024 * 1024).expect("Failed to create AST query service")
     }
 }
 
@@ -203,7 +205,7 @@ impl AstQueryService for DefaultAstQueryService {
         let mut all_results = Vec::new();
         let extensions: Vec<&str> = language.extensions().to_vec();
 
-        let max_size = super::max_file_size_bytes();
+        let max_size = self.max_file_size_bytes;
 
         for path in paths {
             if path.is_file() {
@@ -275,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_service_creation() {
-        let service = DefaultAstQueryService::new();
+        let service = DefaultAstQueryService::new(10 * 1024 * 1024);
         assert!(service.is_ok());
     }
 

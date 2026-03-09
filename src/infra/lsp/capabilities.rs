@@ -1,8 +1,3 @@
-//! LSP Capabilities Matrix
-//!
-//! Defines which LSP features are supported by each language server.
-//! Used for providing accurate error messages when a feature is not supported.
-
 use crate::models::symbol::Language;
 
 /// LSP feature categories

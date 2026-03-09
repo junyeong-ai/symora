@@ -1,7 +1,3 @@
-//! LSP Server Manager
-//!
-//! Manages multiple language server instances with race-safe access.
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -56,14 +52,16 @@ pub struct LspManager {
     root: PathBuf,
     clients: RwLock<HashMap<Language, ClientState>>,
     configs: HashMap<Language, ServerConfig>,
+    runtime_config: Arc<crate::config::LspRuntimeConfig>,
 }
 
 impl LspManager {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, runtime_config: Arc<crate::config::LspRuntimeConfig>) -> Self {
         Self {
             root,
             clients: RwLock::new(HashMap::new()),
             configs: servers::defaults(),
+            runtime_config,
         }
     }
 
@@ -146,7 +144,11 @@ impl LspManager {
             });
         }
 
-        let client = LspClient::new(language, self.root.clone());
+        let client = LspClient::new(
+            language,
+            self.root.clone(),
+            Arc::clone(&self.runtime_config),
+        );
         client.start(config.command, config.args).await?;
 
         tracing::info!("{:?} language server started", language);
@@ -168,7 +170,9 @@ impl LspManager {
     }
 
     pub async fn restart_client(&self, language: Language) -> Result<Arc<LspClient>, LspError> {
-        let _ = self.shutdown_client(language).await;
+        if let Err(e) = self.shutdown_client(language).await {
+            tracing::warn!("Error shutting down {:?} before restart: {}", language, e);
+        }
         tracing::info!("{:?} language server restarting", language);
         self.get_client(language).await
     }
@@ -232,27 +236,27 @@ impl LspManager {
         }
     }
 
-    pub async fn server_status(&self, language: Language) -> ServerStatus {
+    pub async fn server_status(&self, language: Language) -> ServerStatusDetail {
         let config = match self.configs.get(&language) {
             Some(c) => c,
-            None => return ServerStatus::NotSupported,
+            None => return ServerStatusDetail::NotSupported,
         };
 
         if !config.is_installed() {
-            return ServerStatus::NotInstalled {
+            return ServerStatusDetail::NotInstalled {
                 name: config.name.to_string(),
                 install_hint: config.install.current().to_string(),
             };
         }
 
         if self.is_running(language).await {
-            return ServerStatus::Running {
+            return ServerStatusDetail::Running {
                 name: config.name.to_string(),
                 version: config.version(),
             };
         }
 
-        ServerStatus::Stopped {
+        ServerStatusDetail::Stopped {
             name: config.name.to_string(),
             version: config.version(),
         }
@@ -298,13 +302,12 @@ impl LspManager {
         unhealthy
     }
 
-    pub async fn idle_duration(&self, language: Language) -> Option<Duration> {
-        let clients = self.clients.read().await;
-        clients.get(&language).map(|state| state.idle_duration())
-    }
-
     pub fn root(&self) -> &PathBuf {
         &self.root
+    }
+
+    pub fn runtime_config(&self) -> &crate::config::LspRuntimeConfig {
+        &self.runtime_config
     }
 
     pub fn config(&self, language: Language) -> Option<&ServerConfig> {
@@ -326,7 +329,7 @@ impl LspManager {
             let client = self.get_client(language).await?;
             match op(Arc::clone(&client)).await {
                 Ok(result) => Ok(result),
-                Err(e) if e.needs_restart() && crate::config::auto_restart() => {
+                Err(e) if e.needs_restart() && self.runtime_config.auto_restart => {
                     tracing::warn!("{:?} server error, restarting: {}", language, e);
                     Err(e)
                 }
@@ -338,7 +341,7 @@ impl LspManager {
 }
 
 #[derive(Debug, Clone)]
-pub enum ServerStatus {
+pub enum ServerStatusDetail {
     Running {
         name: String,
         version: Option<String>,
@@ -354,27 +357,27 @@ pub enum ServerStatus {
     NotSupported,
 }
 
-impl std::fmt::Display for ServerStatus {
+impl std::fmt::Display for ServerStatusDetail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ServerStatus::Running { name, version } => {
+            ServerStatusDetail::Running { name, version } => {
                 if let Some(v) = version {
                     write!(f, "{} {} (running)", name, v)
                 } else {
                     write!(f, "{} (running)", name)
                 }
             }
-            ServerStatus::Stopped { name, version } => {
+            ServerStatusDetail::Stopped { name, version } => {
                 if let Some(v) = version {
                     write!(f, "{} {} (stopped)", name, v)
                 } else {
                     write!(f, "{} (stopped)", name)
                 }
             }
-            ServerStatus::NotInstalled { name, install_hint } => {
+            ServerStatusDetail::NotInstalled { name, install_hint } => {
                 write!(f, "{} (not installed)\n  → Install: {}", name, install_hint)
             }
-            ServerStatus::NotSupported => write!(f, "Not supported"),
+            ServerStatusDetail::NotSupported => write!(f, "Not supported"),
         }
     }
 }
@@ -385,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_server_status_display() {
-        let status = ServerStatus::Running {
+        let status = ServerStatusDetail::Running {
             name: "rust-analyzer".to_string(),
             version: Some("2024-12-01".to_string()),
         };
@@ -393,7 +396,7 @@ mod tests {
         assert!(display.contains("running"));
         assert!(display.contains("2024-12-01"));
 
-        let status = ServerStatus::NotInstalled {
+        let status = ServerStatusDetail::NotInstalled {
             name: "pyright".to_string(),
             install_hint: "npm install -g pyright".to_string(),
         };

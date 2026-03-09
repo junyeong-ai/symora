@@ -1,11 +1,15 @@
-//! LSP Service Module
-
 mod cache;
 mod converters;
-pub mod helpers;
+mod editor;
+pub(crate) mod helpers;
+mod hierarchy;
+mod info;
+mod lifecycle;
+mod navigation;
+mod rename;
 mod service;
+mod symbols;
 
-pub use cache::{SymbolCache, WorkspaceSymbolCache};
 pub use helpers::find_containing_callable;
 
 use std::path::Path;
@@ -13,12 +17,12 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::error::LspError;
-use crate::infra::lsp::ServerStatus as InfraServerStatus;
+use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::Diagnostic;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
     HoverInfo, InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus,
-    SignatureHelp, TypeHierarchyItem,
+    SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -135,7 +139,7 @@ pub trait LspService: Send + Sync {
         positions: Vec<(u32, u32)>,
     ) -> Result<Vec<SelectionRange>, LspError>;
 
-    async fn code_lens(&self, file: &Path) -> Result<Vec<CodeLens>, LspError>;
+    async fn code_lenses(&self, file: &Path) -> Result<Vec<CodeLens>, LspError>;
 
     async fn code_actions(
         &self,
@@ -150,24 +154,22 @@ pub trait LspService: Send + Sync {
         action: &CodeAction,
     ) -> Result<ApplyActionResult, LspError>;
 
+    async fn format(&self, file: &Path) -> Result<Vec<TextEdit>, LspError>;
+
     async fn is_available(&self, language: Language) -> bool;
 
     async fn server_status(&self, language: Language) -> ServerStatus;
-
-    async fn shutdown(&self);
-
-    async fn cleanup_idle(&self, timeout: std::time::Duration) -> usize;
 }
 
-impl From<InfraServerStatus> for ServerStatus {
-    fn from(status: InfraServerStatus) -> Self {
+impl From<ServerStatusDetail> for ServerStatus {
+    fn from(status: ServerStatusDetail) -> Self {
         match status {
-            InfraServerStatus::Running { .. } => ServerStatus::Running,
-            InfraServerStatus::Stopped { .. } => ServerStatus::Stopped,
-            InfraServerStatus::NotInstalled { install_hint, .. } => ServerStatus::NotInstalled {
+            ServerStatusDetail::Running { .. } => ServerStatus::Running,
+            ServerStatusDetail::Stopped { .. } => ServerStatus::Stopped,
+            ServerStatusDetail::NotInstalled { install_hint, .. } => ServerStatus::NotInstalled {
                 hint: Some(install_hint),
             },
-            InfraServerStatus::NotSupported => ServerStatus::NotSupported,
+            ServerStatusDetail::NotSupported => ServerStatus::NotSupported,
         }
     }
 }
