@@ -6,268 +6,238 @@
 
 # Symora
 
-**LSP-based Code Intelligence CLI for AI Coding Agents**
+**Symbol-centric code intelligence CLI for AI coding agents**
 
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fsymora-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1teleaEDv4O3n3dV60RfP947Mm9/SQc0teleIFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5teleuhDuDj5eUcAUoahrdY/56teleebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98teleJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/symora)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
 **English** | [한국어](README.md)
 
 ---
 
-## The Name
+## What Symora Is
 
-**Sym** (Symbol) + **ora** (Latin: boundary, gate)
+Symora is a CLI-first code intelligence tool built for AI coding agents.
 
-An analysis tool that deciphers code's symbol structure and opens the gate to relationships across file and module boundaries.
+It combines:
 
----
+- LSP-based semantic navigation
+- SQLite-backed symbol and content search
+- tree-sitter AST search
+- a Unix daemon for reusable language-server sessions
 
-## Background
-
-Inspired by [Serena](https://github.com/oraios/serena).
-
-| | Serena | Symora |
-|---|--------|--------|
-| Design Philosophy | Framework integration | CLI-first |
-| Interface | MCP server | Bash commands |
-| Language | Python | Rust |
-
-Run `symora refs src/main.rs:10:5` right after installation — instant integration with Claude Code skills or shell-based AI agents.
+Symora is designed for shell-driven workflows, structured JSON output, and exact follow-up from a symbol or location.
 
 ---
 
-## Why Symora?
+## Why Symora
 
-grep finds text. **Symora analyzes code structure through LSP.**
+Text search is useful, but agents often need semantic answers:
+
+- what symbol is here?
+- where is it referenced?
+- what calls it?
+- what file should I inspect next?
+- what changed impact-wise?
+
+Symora is built around those workflows.
 
 ```bash
-# grep: text pattern matching
-grep -r "processOrder" .
+# rough discovery
+symora search symbols AuthUser
 
-# Symora: LSP-based code analysis
-symora refs src/order.rs:42:5       # all locations referencing this symbol
-symora def src/api.rs:15:10         # symbol definition location
-symora hover src/api.rs:15:10       # type info and documentation
-symora callers src/order.rs:42:5    # call hierarchy analysis
-```
-
-| Feature | grep/ripgrep | Symora |
-|---------|--------------|--------|
-| Go to definition | ❌ | ✅ LSP |
-| Find references | ❌ | ✅ LSP |
-| Type information | ❌ | ✅ LSP |
-| Call hierarchy | ❌ | ✅ LSP |
-| Rename refactoring | ❌ | ✅ LSP |
-| Code search | ❌ | ✅ SQLite |
-| AST search | ❌ | ✅ tree-sitter |
-| Usage metrics | ❌ | ✅ LSP |
-| Doc coverage | ❌ | ✅ LSP |
-| Pattern edit | ❌ | ✅ tree-sitter |
-| Git Diff Impact | ❌ | ✅ LSP |
-
----
-
-## Supported Platforms
-
-| Platform | Support | Notes |
-|----------|:-------:|-------|
-| Linux (x86_64, aarch64) | ✅ | Full features |
-| macOS (Apple Silicon) | ✅ | Full features |
-| Windows | ❌ | Unix socket dependency |
-
-> Symora uses Unix domain sockets for daemon IPC. Windows support is not planned.
-
----
-
-## Quick Start
-
-```bash
-cargo install --path .
-symora doctor          # check language servers
+# inspect one file semantically
+symora map file src/main.rs
 symora symbols src/main.rs
+
+# exact follow-up from a location
+symora context src/main.rs:42 --all
+symora refs src/main.rs:42
+symora usage src/main.rs:42:10
 ```
 
 ---
 
-## Global Options
+## Core Capabilities
 
-| Option | Description |
-|--------|-------------|
-| `-c, --compact` | Compact output for AI tools (single-line JSON, saves tokens) |
-| `-q, --quiet` | Quiet mode (errors only, no output on success) |
-| `-v, --verbose` | Enable debug logging |
+### Semantic Navigation
 
 ```bash
-symora -c refs src/main.rs:10:5       # AI-friendly compact output
-symora -q rename src/main.rs:10:5 foo # No output on success
-symora -v status                      # Debug logs
+symora symbols src/main.rs
+symora def src/main.rs:10:5
+symora refs src/main.rs:10:5
+symora hover src/main.rs:10:5
+symora callers src/main.rs:10:5
+symora callees src/main.rs:10:5
+symora typedef src/main.rs:10:5
+symora impl src/main.rs:10:5
+symora rename src/main.rs:10:5 new_name
 ```
 
----
+### Search and Discovery
 
-## Core Features
-
-### LSP-based Analysis
 ```bash
-symora symbols src/main.rs --kind function   # symbol discovery
-symora def src/main.rs:10:5                  # go to definition
-symora refs src/main.rs:10:5                 # find references
-symora refs src/main.rs:10:5 --snippet       # references + source code
-symora impl src/main.rs:10:5                 # find implementations
-symora hover src/main.rs:10:5                # type/doc info
-symora callers src/main.rs:10:5              # find callers
-symora callers src/main.rs:10:5 --no-fallback  # disable fallback
-symora callees src/main.rs:10:5              # find callees
-symora supertypes src/main.rs:10:5           # find parent types
-symora subtypes src/main.rs:10:5             # find child types
-symora signature src/main.rs:10:5            # function signature info
-symora rename src/main.rs:10:5 new_name      # rename symbol
-symora impact src/main.rs:10:5               # impact analysis
-symora diagnostics src/main.rs               # LSP diagnostics
-symora diagnostics src/main.rs --with-context    # include AI-friendly context
-symora diagnostics src/main.rs --with-suggestions # include fix suggestions
-symora actions list src/main.rs:10:5         # list code actions
-symora actions apply src/main.rs:10:5 "extract" # apply action by title
+symora search symbols AuthUser
+symora search content "async fn"
+symora search ast "(function_item)" --lang rust
+symora search nodes --lang rust
 ```
 
-### Usage Finder
+### Project and File Exploration
+
 ```bash
-symora usage "process" --lang rust               # search symbols by pattern
-symora usage "Order" --lang rust --sort references     # sort by reference count
-symora usage "Config" --lang rust --with-metrics # include detailed metrics
-symora usage "*" --lang rust --filter no-docs    # find undocumented symbols
-symora usage "*" --lang rust --filter no-tests   # find untested symbols
-symora usage "*" --lang rust --filter zero-refs  # dead code detection
-symora usage "*" --lang rust --min-refs 5        # important symbols (5+ refs)
-symora usage "fn" --lang rust --with-snippet     # include code snippet
+symora map summary
+symora map file src/cli/commands/search.rs
+symora map dir src/cli
+symora map related src/cli/commands/search.rs
 ```
 
-| Option | Description |
-|--------|-------------|
-| `--sort references\|name` | Sort criteria (default: references) |
-| `--filter` | has-tests, no-tests, has-docs, no-docs, not-test-file, zero-refs |
-| `--with-metrics` | Show reference count, test status, doc status |
-| `--with-snippet` | Include source code snippet |
-| `--min-refs N` | Minimum references filter (find important symbols) |
-| `--max-symbols N` | Max symbols to analyze (default: 50) |
-| `--limit N` | Limit output results (default: 10) |
+### Context and Usage Analysis
 
-### Context Gathering
 ```bash
-symora context src/main.rs:10:5 --all                # all context (callers, callees, types, tests)
-symora context src/main.rs:10:5 --callers --callees  # callers/callees
-symora context src/main.rs:10:5 --types --tests      # type definitions, related tests
+symora context src/main.rs:42 --all
+symora refs src/main.rs:42
+symora usage SearchCommand
+symora usage src/cli/commands/search.rs:30:10
+symora impact src/main.rs:42
+symora diff-impact
 ```
 
-### Git Diff Impact Analysis
-```bash
-symora diff-impact                        # compare against HEAD
-symora diff-impact main                   # compare against main branch
-symora diff-impact --staged               # analyze staged changes only
-symora diff-impact --callers              # include caller analysis
-symora diff-impact --max-symbols 30       # limit symbols to analyze
-```
+### Edit and Refactor Support
 
-| Output | Description |
-|--------|-------------|
-| `changed_symbols_count` | Number of changed symbols |
-| `coverage.ratio` | Test coverage ratio |
-| `changes[].refs` | Reference count per symbol |
-| `changes[].callers` | Caller list (--callers option) |
-
-### Pattern Edit (Structural)
 ```bash
-symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "// NEW" --dry-run
+symora actions list src/main.rs:42:5
+symora actions apply src/main.rs:42:5 "Extract method"
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
-symora edit insert-after src/main.rs --symbol "MyFunc" --text "// comment" --dry-run
-symora edit insert-before src/main.rs:10:5 --text "// comment" --dry-run
-symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() {}" --dry-run
+symora format src/main.rs
 ```
-
-### Code Search
-```bash
-# Symbol/content search (SQLite LIKE-based, supports substring matching)
-symora search symbols "execute" --kind function  # symbol search
-symora search symbols "Handler" --limit 10       # limit results
-symora search content "async fn" --lang rust     # content search
-symora search content "TODO" --limit 20          # limit results
-
-# Search index management
-symora search index build                        # build index
-symora search index build --force --lang rust    # force rebuild
-symora search index status                       # index status
-symora search index clear                        # clear index
-
-# AST Search (tree-sitter)
-symora search ast "function_item" --lang rust    # structural search
-symora search nodes --lang rust                  # list node types
-```
-
-| Search Type | Purpose | Engine |
-|-------------|---------|--------|
-| `symbols` | Symbol name search | SQLite |
-| `content` | Code line search | SQLite |
-| `ast` | Structural pattern search | tree-sitter |
-
-> **Location format**: `file:line:column` (1-indexed)
-> **`--limit 0`**: unlimited results
 
 ---
 
-## Supported Languages (36)
+## Workflow Design
 
-Rust, TypeScript, Python, Go, Java, Kotlin, C++, C#, Swift, Ruby, PHP, Haskell, TOML, and more
+Symora works best when used in this order:
+
+1. `symora map summary` for project entrypoints and major areas
+2. `symora search symbols <query>` for rough workspace discovery
+3. `symora map file <path>` for a compact file overview
+4. `symora symbols <file>` or `symora symbols --symbol <path>` for exact inspection
+5. `symora context`, `symora refs`, and `symora usage` for exact follow-up
+
+This split is intentional:
+
+- `search symbols` is for rough discovery
+- `symbols` is for exact semantic inspection
+- `map file` is a compact overview, not a full symbol dump
+
+---
+
+## Output Model
+
+Symora prints JSON by default.
+
+Important characteristics:
+
+- project-relative paths when possible
+- stable list-like fields such as `count`, `showing`, `truncated`, and `hints`
+- compact mode for lower token usage
+
+Global flags:
 
 ```bash
-symora doctor  # check installed language servers
+symora -c search symbols AuthUser   # compact JSON
+symora -q refs src/main.rs:10:5     # errors only
+symora -v status                    # debug logging
 ```
+
+---
+
+## Search Index
+
+Symora includes a persistent SQLite-backed search index.
+
+```bash
+symora search index build
+symora search index build --force --lang rust
+symora search index status
+symora search index clear
+```
+
+The index is stored under `.symora/store.db` in the current project.
+
+Search commands also include fallback behavior when indexed or semantic features are unavailable, but the index is the most reliable path for repeated local use.
 
 ---
 
 ## Configuration
 
+Config precedence:
+
+1. `.symora/config.toml`
+2. `~/.config/symora/config.toml`
+3. built-in defaults
+
+Initialize config:
+
 ```bash
-symora config init           # project config (.symora/config.toml)
-symora config init --global  # global config
+symora config init
+symora config init --global
 ```
 
-Key settings:
-```toml
-[lsp]
-timeout_secs = 60       # LSP timeout (default: 60s)
-refs_limit = 500        # Reference results limit
-calls_limit = 100       # Call hierarchy limit
-tests_limit = 10        # Test results limit
+Common settings include:
 
-[test]
-file_patterns = ["_check.rs"]  # Custom test file patterns
-dir_patterns = ["/verification/"]
-markers = ["@MyTest"]
+- LSP timeouts and limits
+- daemon behavior
+- test file patterns
+- ignored paths
+
+---
+
+## Platform and Runtime Notes
+
+- Linux: supported
+- macOS: supported
+- Windows: not supported for daemon-based workflow because Symora uses Unix domain sockets
+
+On Unix platforms, Symora uses a daemon by default for most commands and falls back to direct LSP execution where appropriate.
+
+Daemon commands:
+
+```bash
+symora daemon start
+symora daemon stop
+symora daemon restart
+symora daemon status
 ```
 
 ---
 
-## Troubleshooting
+## Installation
+
+Build from source:
 
 ```bash
-symora doctor           # check dependencies
-symora daemon restart   # restart daemon
-symora daemon status    # check daemon status
-symora -v <command>     # enable debug logging
+cargo install --path .
 ```
 
-| Issue | Solution |
-|-------|----------|
-| LSP timeout | `symora daemon restart` |
-| Kotlin no methods | `symora search ast "function_declaration" --lang kotlin` |
-| Python slow on large project | Use AST search or wait |
-| Usage search slow | Use `--max-symbols 30` to reduce analysis scope |
-| Call hierarchy unsupported | Run without `--no-fallback` (auto refs fallback) |
+Check environment and language servers:
+
+```bash
+symora doctor
+```
 
 ---
 
-## Links
+## Practical Notes
 
-- [GitHub](https://github.com/junyeong-ai/symora)
-- [Developer Guide](CLAUDE.md)
+- `context`, `refs`, and `usage` accept exact locations such as `file:line:column`
+- `usage` also accepts a location and resolves the symbol automatically
+- `context` includes fallback guidance when the active LSP server does not support call hierarchy or type definition well
+- `map related` is a heuristic helper for adjacent files, not a guaranteed dependency graph
+
+---
+
+## Repository Links
+
+- [Developer guide](CLAUDE.md)
+- [GitHub repository](https://github.com/junyeong-ai/symora)

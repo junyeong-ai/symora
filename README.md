@@ -6,268 +6,238 @@
 
 # Symora
 
-**AI 코딩 에이전트를 위한 LSP 기반 코드 인텔리전스 CLI**
+**AI 코딩 에이전트를 위한 심볼 중심 코드 인텔리전스 CLI**
 
 [![Rust](https://img.shields.io/badge/rust-1.92%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Fsymora-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1teleaEDv4O3n3dV60RfP947Mm9/SQc0teleIFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5teleuhDuDj5eUcAUoahrdY/56teleebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98teleJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/junyeong-ai/symora)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
 [English](README.en.md) | **한국어**
 
 ---
 
-## 이름의 의미
+## Symora란?
 
-**Sym** (Symbol) + **ora** (라틴어: 경계, 문)
+Symora는 AI 코딩 에이전트를 위해 설계된 CLI 우선 코드 인텔리전스 도구입니다.
 
-코드의 심볼 구조를 해독하고, 파일과 모듈의 경계를 넘어 관계의 문을 여는 분석 도구.
+다음을 결합합니다.
 
----
+- LSP 기반 의미론 탐색
+- SQLite 기반 심볼/콘텐츠 검색
+- tree-sitter AST 검색
+- 재사용 가능한 language server 세션을 위한 Unix daemon
 
-## 탄생 배경
-
-[Serena](https://github.com/oraios/serena)에서 영감을 받았습니다.
-
-| | Serena | Symora |
-|---|--------|--------|
-| 설계 철학 | 프레임워크 통합 | CLI 우선 |
-| 인터페이스 | MCP 서버 | Bash 명령 |
-| 언어 | Python | Rust |
-
-설치 후 바로 `symora refs src/main.rs:10:5` 실행 — Claude Code 스킬이나 셸 기반 AI 에이전트와 즉시 통합.
+Symora는 셸 기반 워크플로우, 구조화된 JSON 출력, 그리고 심볼이나 위치에서 시작하는 정확한 후속 분석에 맞춰 설계되었습니다.
 
 ---
 
 ## 왜 Symora인가?
 
-grep은 텍스트를 찾습니다. **Symora는 LSP를 통해 코드 구조를 분석합니다.**
+텍스트 검색도 유용하지만, 에이전트는 보통 이런 질문에 답해야 합니다.
+
+- 여기 있는 심볼은 무엇인가?
+- 어디서 참조되는가?
+- 누가 이것을 호출하는가?
+- 다음에 어느 파일을 봐야 하는가?
+- 변경 영향은 어디까지 퍼지는가?
+
+Symora는 이런 흐름을 중심으로 만들어졌습니다.
 
 ```bash
-# grep: 텍스트 패턴 매칭
-grep -r "processOrder" .
+# 대략적인 탐색
+symora search symbols AuthUser
 
-# Symora: LSP 기반 코드 분석
-symora refs src/order.rs:42:5       # 이 심볼을 참조하는 모든 위치
-symora def src/api.rs:15:10         # 심볼 정의 위치
-symora hover src/api.rs:15:10       # 타입 정보와 문서
-symora callers src/order.rs:42:5    # 호출 계층 분석
-```
-
-| 기능 | grep/ripgrep | Symora |
-|------|--------------|--------|
-| 정의로 이동 | ❌ | ✅ LSP |
-| 참조 찾기 | ❌ | ✅ LSP |
-| 타입 정보 | ❌ | ✅ LSP |
-| 호출 계층 | ❌ | ✅ LSP |
-| 리네임 리팩토링 | ❌ | ✅ LSP |
-| 코드 검색 | ❌ | ✅ SQLite |
-| AST 검색 | ❌ | ✅ tree-sitter |
-| 사용량 메트릭 | ❌ | ✅ LSP |
-| 문서 커버리지 | ❌ | ✅ LSP |
-| 구조적 편집 | ❌ | ✅ tree-sitter |
-| Git Diff 영향 분석 | ❌ | ✅ LSP |
-
----
-
-## 지원 플랫폼
-
-| 플랫폼 | 지원 | 비고 |
-|--------|:----:|------|
-| Linux (x86_64, aarch64) | ✅ | 전체 기능 |
-| macOS (Apple Silicon) | ✅ | 전체 기능 |
-| Windows | ❌ | Unix 소켓 의존성 |
-
-> Symora는 데몬 IPC에 Unix 도메인 소켓을 사용합니다. Windows 지원은 현재 계획에 없습니다.
-
----
-
-## 빠른 시작
-
-```bash
-cargo install --path .
-symora doctor          # 언어 서버 확인
+# 파일 단위 의미론 탐색
+symora map file src/main.rs
 symora symbols src/main.rs
-```
 
----
-
-## 글로벌 옵션
-
-| 옵션 | 설명 |
-|------|------|
-| `-c, --compact` | AI 도구용 압축 출력 (한 줄 JSON, 토큰 절약) |
-| `-q, --quiet` | 조용한 모드 (에러만 출력, 성공 시 무출력) |
-| `-v, --verbose` | 디버그 로깅 활성화 |
-
-```bash
-symora -c refs src/main.rs:10:5       # AI 친화적 압축 출력
-symora -q rename src/main.rs:10:5 foo # 성공 시 출력 없음
-symora -v status                      # 디버그 로그
+# 위치에서 시작하는 정확한 후속 분석
+symora context src/main.rs:42 --all
+symora refs src/main.rs:42
+symora usage src/main.rs:42:10
 ```
 
 ---
 
 ## 핵심 기능
 
-### LSP 기반 분석
+### 의미론 탐색
+
 ```bash
-symora symbols src/main.rs --kind function   # 심볼 탐색
-symora def src/main.rs:10:5                  # 정의로 이동
-symora refs src/main.rs:10:5                 # 참조 찾기
-symora refs src/main.rs:10:5 --snippet       # 참조 + 소스 코드
-symora impl src/main.rs:10:5                 # 구현체 찾기
-symora hover src/main.rs:10:5                # 타입/문서 정보
-symora callers src/main.rs:10:5              # 호출자 찾기
-symora callers src/main.rs:10:5 --no-fallback  # fallback 비활성화
-symora callees src/main.rs:10:5              # 피호출자 찾기
-symora supertypes src/main.rs:10:5           # 상위 타입 찾기
-symora subtypes src/main.rs:10:5             # 하위 타입 찾기
-symora signature src/main.rs:10:5            # 함수 시그니처 정보
-symora rename src/main.rs:10:5 new_name      # 리네이밍
-symora impact src/main.rs:10:5               # 영향 분석
-symora diagnostics src/main.rs               # LSP 진단
-symora diagnostics src/main.rs --with-context    # AI 친화적 컨텍스트 포함
-symora diagnostics src/main.rs --with-suggestions # 수정 제안 포함
-symora actions list src/main.rs:10:5         # 코드 액션 조회
-symora actions apply src/main.rs:10:5 "extract" # 액션 적용
+symora symbols src/main.rs
+symora def src/main.rs:10:5
+symora refs src/main.rs:10:5
+symora hover src/main.rs:10:5
+symora callers src/main.rs:10:5
+symora callees src/main.rs:10:5
+symora typedef src/main.rs:10:5
+symora impl src/main.rs:10:5
+symora rename src/main.rs:10:5 new_name
 ```
 
-### 사용처 조회 및 분석 (Usage Finder)
+### 검색과 탐색 시작점
+
 ```bash
-symora usage "process" --lang rust               # 패턴으로 심볼 검색
-symora usage "Order" --lang rust --sort references     # 참조 수로 정렬
-symora usage "Config" --lang rust --with-metrics # 상세 메트릭 포함
-symora usage "*" --lang rust --filter no-docs    # 문서 미작성 심볼 찾기
-symora usage "*" --lang rust --filter no-tests   # 테스트 미커버리지 심볼
-symora usage "*" --lang rust --filter zero-refs  # 미사용 코드 탐지
-symora usage "*" --lang rust --min-refs 5        # 중요 심볼 (5+ 참조)
-symora usage "fn" --lang rust --with-snippet     # 코드 스니펫 포함
+symora search symbols AuthUser
+symora search content "async fn"
+symora search ast "(function_item)" --lang rust
+symora search nodes --lang rust
 ```
 
-| 옵션 | 설명 |
-|------|------|
-| `--sort references\|name` | 정렬 기준 (기본: references) |
-| `--filter` | has-tests, no-tests, has-docs, no-docs, not-test-file, zero-refs |
-| `--with-metrics` | 참조 수, 테스트 유무, 문서 유무 표시 |
-| `--with-snippet` | 소스 코드 스니펫 포함 |
-| `--min-refs N` | 최소 참조 수 필터 (중요 심볼 찾기) |
-| `--max-symbols N` | 분석할 최대 심볼 수 (기본: 50) |
-| `--limit N` | 출력 결과 수 제한 (기본: 10) |
+### 프로젝트/파일 탐색
 
-### 컨텍스트 수집
 ```bash
-symora context src/main.rs:10:5 --all                # 모든 컨텍스트 (호출자, 피호출자, 타입, 테스트)
-symora context src/main.rs:10:5 --callers --callees  # 호출자/피호출자
-symora context src/main.rs:10:5 --types --tests      # 타입 정의, 관련 테스트
+symora map summary
+symora map file src/cli/commands/search.rs
+symora map dir src/cli
+symora map related src/cli/commands/search.rs
 ```
 
-### Git Diff 영향 분석
+### 컨텍스트와 사용 분석
+
 ```bash
-symora diff-impact                        # HEAD와 비교
-symora diff-impact main                   # main 브랜치와 비교
-symora diff-impact --staged               # 스테이징된 변경만 분석
-symora diff-impact --callers              # 호출자 분석 포함
-symora diff-impact --max-symbols 30       # 분석할 심볼 수 제한
+symora context src/main.rs:42 --all
+symora refs src/main.rs:42
+symora usage SearchCommand
+symora usage src/cli/commands/search.rs:30:10
+symora impact src/main.rs:42
+symora diff-impact
 ```
 
-| 출력 | 설명 |
-|------|------|
-| `changed_symbols_count` | 변경된 심볼 수 |
-| `coverage.ratio` | 테스트 커버리지 비율 |
-| `changes[].refs` | 심볼별 참조 수 |
-| `changes[].callers` | 호출자 목록 (--callers 옵션) |
+### 편집 및 리팩터링 보조
 
-### 구조적 편집 (Pattern Edit)
 ```bash
-symora edit pattern src/main.rs --pattern "(struct_item)" --lang rust --text "// NEW" --dry-run
+symora actions list src/main.rs:42:5
+symora actions apply src/main.rs:42:5 "Extract method"
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
-symora edit insert-after src/main.rs --symbol "MyFunc" --text "// comment" --dry-run
-symora edit insert-before src/main.rs:10:5 --text "// comment" --dry-run
-symora edit symbol src/main.rs --symbol "Config/new" --text "fn new() {}" --dry-run
+symora format src/main.rs
 ```
-
-### 코드 검색
-```bash
-# 심볼/콘텐츠 검색 (SQLite LIKE 기반, 서브스트링 매칭 지원)
-symora search symbols "execute" --kind function  # 심볼 검색
-symora search symbols "Handler" --limit 10       # 결과 제한
-symora search content "async fn" --lang rust     # 콘텐츠 검색
-symora search content "TODO" --limit 20          # 결과 제한
-
-# 검색 인덱스 관리
-symora search index build                        # 인덱스 빌드
-symora search index build --force --lang rust    # 강제 재빌드
-symora search index status                       # 인덱스 상태
-symora search index clear                        # 인덱스 삭제
-
-# AST 검색 (tree-sitter)
-symora search ast "function_item" --lang rust    # 구조적 검색
-symora search nodes --lang rust                  # 노드 타입 조회
-```
-
-| 검색 타입 | 용도 | 엔진 |
-|----------|------|------|
-| `symbols` | 심볼 이름 검색 | SQLite |
-| `content` | 코드 라인 검색 | SQLite |
-| `ast` | 구조적 패턴 검색 | tree-sitter |
-
-> **위치 형식**: `file:line:column` (1-indexed)
-> **`--limit 0`**: 무제한 결과
 
 ---
 
-## 지원 언어 (36개)
+## 권장 워크플로우
 
-Rust, TypeScript, Python, Go, Java, Kotlin, C++, C#, Swift, Ruby, PHP, Haskell, TOML 등
+Symora는 보통 아래 순서로 사용할 때 가장 잘 맞습니다.
+
+1. `symora map summary` 로 프로젝트 진입점과 주요 영역 파악
+2. `symora search symbols <query>` 로 workspace 단위 대략적 탐색
+3. `symora map file <path>` 로 파일 개요 확인
+4. `symora symbols <file>` 또는 `symora symbols --symbol <path>` 로 정확한 심볼 확인
+5. `symora context`, `symora refs`, `symora usage` 로 정밀 후속 분석
+
+이 역할 구분은 의도적입니다.
+
+- `search symbols` 는 rough discovery 용도
+- `symbols` 는 exact semantic inspection 용도
+- `map file` 은 compact overview 용도이며 전체 심볼 덤프가 아닙니다
+
+---
+
+## 출력 모델
+
+Symora는 기본적으로 JSON을 출력합니다.
+
+주요 특징:
+
+- 가능하면 프로젝트 상대 경로 사용
+- `count`, `showing`, `truncated`, `hints` 같은 안정적인 리스트 필드 사용
+- 토큰 절약을 위한 compact mode 제공
+
+전역 옵션:
 
 ```bash
-symora doctor  # 설치된 언어 서버 확인
+symora -c search symbols AuthUser   # compact JSON
+symora -q refs src/main.rs:10:5     # 에러만 출력
+symora -v status                    # 디버그 로그
 ```
+
+---
+
+## 검색 인덱스
+
+Symora는 지속성 있는 SQLite 기반 검색 인덱스를 포함합니다.
+
+```bash
+symora search index build
+symora search index build --force --lang rust
+symora search index status
+symora search index clear
+```
+
+인덱스는 현재 프로젝트의 `.symora/store.db`에 저장됩니다.
+
+검색 명령은 인덱스나 의미론 기능이 약한 상황에서 fallback도 제공하지만, 반복 사용 기준으로는 인덱스를 유지하는 것이 가장 안정적입니다.
 
 ---
 
 ## 설정
 
+설정 우선순위:
+
+1. `.symora/config.toml`
+2. `~/.config/symora/config.toml`
+3. 기본값
+
+설정 초기화:
+
 ```bash
-symora config init           # 프로젝트 설정 (.symora/config.toml)
-symora config init --global  # 글로벌 설정
+symora config init
+symora config init --global
 ```
 
-주요 설정:
-```toml
-[lsp]
-timeout_secs = 60       # LSP 타임아웃 (기본: 60초)
-refs_limit = 500        # 참조 결과 제한
-calls_limit = 100       # 호출 계층 제한
-tests_limit = 10        # 테스트 결과 제한
+주요 설정 항목:
 
-[test]
-file_patterns = ["_check.rs"]  # 커스텀 테스트 파일 패턴
-dir_patterns = ["/verification/"]
-markers = ["@MyTest"]
+- LSP timeout 및 limit
+- daemon 동작
+- 테스트 파일 패턴
+- ignore 경로
+
+---
+
+## 플랫폼 및 런타임 참고사항
+
+- Linux: 지원
+- macOS: 지원
+- Windows: daemon 기반 워크플로우는 지원하지 않음 (Unix domain socket 사용)
+
+Unix 환경에서는 대부분의 명령이 기본적으로 daemon을 사용하고, 필요 시 direct LSP 실행으로 이어집니다.
+
+Daemon 관련 명령:
+
+```bash
+symora daemon start
+symora daemon stop
+symora daemon restart
+symora daemon status
 ```
 
 ---
 
-## 문제 해결
+## 설치
+
+소스에서 설치:
 
 ```bash
-symora doctor           # 의존성 확인
-symora daemon restart   # 데몬 재시작
-symora daemon status    # 데몬 상태 확인
-symora -v <command>     # 디버그 로깅 활성화
+cargo install --path .
 ```
 
-| 문제 | 해결 |
-|------|------|
-| LSP 타임아웃 | `symora daemon restart` |
-| Kotlin 메서드 미반환 | `symora search ast "function_declaration" --lang kotlin` |
-| Python 대규모 프로젝트 느림 | AST 검색 사용 또는 대기 |
-| Usage 검색 느림 | `--max-symbols 30` 으로 분석 범위 축소 |
-| Call hierarchy 미지원 | `--no-fallback` 없이 실행 (자동 refs fallback) |
+환경 및 language server 확인:
+
+```bash
+symora doctor
+```
+
+---
+
+## 실전 사용 메모
+
+- `context`, `refs`, `usage` 는 `file:line:column` 형식 위치를 직접 받을 수 있습니다
+- `usage` 는 위치를 주면 해당 심볼 이름을 자동으로 해석합니다
+- `context` 는 active LSP 서버가 call hierarchy나 type definition을 잘 지원하지 않을 때 fallback guidance를 제공합니다
+- `map related` 는 인접 파일을 찾는 heuristic helper이며, 완전한 dependency graph는 아닙니다
 
 ---
 
 ## 링크
 
-- [GitHub](https://github.com/junyeong-ai/symora)
 - [개발자 가이드](CLAUDE.md)
+- [GitHub 저장소](https://github.com/junyeong-ai/symora)

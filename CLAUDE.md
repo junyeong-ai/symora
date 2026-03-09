@@ -1,300 +1,168 @@
-# Symora - AI Agent Development Guide
+# Symora AI Coding Guide
 
-LSP-based code intelligence CLI. Rust + async + daemon architecture.
+Symora is a symbol-centric code intelligence CLI for AI coding agents. It combines LSP-based analysis, a Unix daemon for reusable language-server sessions, SQLite-backed search, and tree-sitter-based structural search.
+
+This guide is for agents modifying Symora itself. Keep it factual, compact, and implementation-oriented.
+
+## Product Model
+
+- Symora is a CLI-first tool, not an MCP server.
+- The primary user is an AI coding agent operating through shell commands.
+- Outputs are machine-consumable JSON. Treat output shapes as an API.
+- The project must work for both small repositories and large mixed-language repositories.
 
 ## Architecture
 
-```
-src/
-├── main.rs, app.rs       # Entry, DI container (App holds all services)
-├── cli/commands/         # Command handlers (25 commands)
-├── daemon/               # Unix socket server, JSON-RPC protocol
-├── services/             # LspService trait, DaemonLspService, AstQueryService
-│   └── store/            # SQLite Store (symbols, content search)
-├── infra/lsp/            # LSP client, 36 language server configs
-├── models/               # Symbol, Location, Language, SymbolKind
-└── error.rs              # LspError, SearchError, StoreError
-```
+High-level flow:
 
-**Flow**: CLI → App → DaemonLspService → Unix Socket → DaemonServer → LspService → LSP Server
-**Search Flow**: CLI → DaemonClient → DaemonServer → Store → SQLite
+- CLI parsing and command dispatch: `src/cli/`, `src/main.rs`
+- App wiring and runtime services: `src/app.rs`
+- LSP access:
+  - direct mode: `src/services/lsp/`
+  - daemon mode: `src/services/daemon_lsp.rs`, `src/daemon/`
+- Search/indexing: `src/services/store/`
+- AST search: `src/services/ast_query.rs`
 
-## Extension Points
+Key directories:
 
-### Add Command
-1. `cli/commands/{name}.rs` — Args struct + `execute(args, app)` async fn
-2. `cli/commands/mod.rs` — `pub mod {name}`
-3. `cli/mod.rs` — Add to `Commands` enum
-4. `main.rs` — Add match arm
+- `src/cli/commands/` - command handlers
+- `src/daemon/` - Unix socket RPC server/client and dispatch
+- `src/services/lsp/` - LSP abstraction and direct implementation
+- `src/services/store/` - SQLite-backed symbol/content index
+- `src/models/` - shared domain types such as `Symbol`, `Language`, `Location`
 
-### Add Language
-1. `models/symbol.rs` — Add to `Language` enum, `from_extension()`, `lsp_id()`
-2. `infra/lsp/servers.rs` — Add `ServerConfig` in `defaults()`
+## Core Design Rules
 
-### Add LSP Operation
-1. `services/lsp/service.rs` — Add to `LspService` trait + implement
-2. `services/daemon_lsp.rs` — Add RPC wrapper method
-3. `daemon/protocol.rs` — Add method constant
-4. `daemon/server.rs` — Add dispatch handler
+### 1. Keep CLI behavior deterministic
 
-### Add Search Operation
-1. `services/store/schema.rs` — Add SQL query constant
-2. `services/store/index.rs` — Add public method
-3. `daemon/handlers.rs` — Add params struct
-4. `daemon/protocol.rs` — Add method constant
-5. `daemon/server.rs` — Add handler
-6. `daemon/client.rs` — Add client method
-7. `cli/commands/search.rs` — Add CLI subcommand
+- The same command in the same repository should produce the same meaning whether it runs through the daemon or directly.
+- Config loading, timeout calculation, and fallback behavior must stay aligned across execution modes.
 
-## Critical Patterns
+### 2. Treat JSON output as a contract
 
-### Position Indexing
-CLI uses 1-indexed, LSP uses 0-indexed:
-```rust
-Position::new(line.saturating_sub(1), col.saturating_sub(1))
-```
+- Do not casually rename fields or change response structure.
+- List-like responses should keep stable semantics for fields such as `count`, `showing`, `truncated`, `hints`, and item arrays.
+- Add guidance only when it reduces agent decision cost. Avoid decorative output.
 
-### Output
-```rust
-// OutputOptions (from CLI global flags)
-pub struct OutputOptions {
-    pub compact: bool,  // -c: Single-line JSON (AI-friendly, saves tokens)
-    pub quiet: bool,    // -q: Suppress success output (errors only)
-}
+### 3. Prefer exact semantic workflows over text heuristics
 
-// OutputContext uses options
-ctx.print_success_flat(response)  // JSON to stdout (respects compact/quiet)
-ctx.print_error(msg)              // JSON error (always printed)
-ctx.relative_path(path)           // Strip project root from paths
-```
+- Use location-first or symbol-path-first flows when possible.
+- Broad discovery is useful, but exact follow-up should resolve to real symbols and positions.
+- Keep heuristic ranking centralized and conservative.
 
-### Symbol Path (Serena-compatible)
-```rust
-Symbol::compute_paths_for_all(&mut symbols);
-Symbol::filter_by_path(&symbols, "*/update");  // Wildcard match
-Symbol::find_by_path(&symbols, "Foo/bar");     // Exact match
-```
+### 4. Large-repo behavior matters
 
-### Error Recovery
-```rust
-// Automatic retry on server termination
-self.manager.execute_with_retry(language, |client| async move {
-    client.request(...).await
-}).await
-```
+- Broad queries, language auto-detection, and concurrent LSP fan-out must remain practical on monorepos.
+- Avoid changes that only look good on tiny repositories.
 
-`LspError::is_recoverable()` → retry possible
-`LspError::needs_restart()` → requires server restart
+## Important Implementation Patterns
 
-### File I/O
-```rust
-// Single-pass validation + read (size check, binary detection)
-read_file_validated(file).await?
+### Position indexing
 
-// Edit file validation (size + write permission check)
-validate_file_for_edit(path)?  // MAX_EDIT_FILE_SIZE = 100MB
-```
+- CLI locations are 1-indexed.
+- LSP positions are 0-indexed.
+- Be careful when translating line and column values.
 
-### UTF-8 Safe String Handling
-```rust
-// Convert character index to byte index for safe slicing
-fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(s.len())
-}
-```
+### Symbol paths
 
-### Concurrent LSP Requests
-```rust
-// Semaphore-based concurrency control for parallel LSP calls
-let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_LSP_REQUESTS));
-let futures: Vec<_> = symbols.iter().map(|s| {
-    let sem = Arc::clone(&semaphore);
-    async move {
-        let _permit = sem.acquire().await.ok()?;
-        // LSP call here
-    }
-}).collect();
-join_all(futures).await
-```
+- Symbol paths are an important user-facing addressing mechanism.
+- `Symbol::compute_paths_for_all` and path-based matching are foundational for exact follow-up flows.
+- Keep path semantics stable.
 
-### Centralized Timeout Calculation
-```rust
-// daemon/client.rs - Language-aware timeout with operation multipliers
-fn calculate_timeout(file: Option<&Path>, method: &str) -> Duration {
-    let language = file.map(Language::from_path).unwrap_or(Language::Unknown);
-    let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
-    config::timeout_for(language, lsp_method)
-}
+### Output helpers
 
-// daemon/protocol.rs - Map daemon method to LSP method
-pub fn to_lsp_method(daemon_method: &str) -> Option<&'static str> {
-    match daemon_method {
-        FIND_REFS => Some("textDocument/references"),
-        CALLS_INCOMING => Some("callHierarchy/incomingCalls"),
-        // ...
-    }
-}
-```
+- `OutputContext` handles project-relative paths and compact/quiet modes.
+- Prefer returning structured values and letting output helpers serialize them.
 
-### Generic Section Pattern
-```rust
-// response.rs - Consistent section structure for all list responses
-#[derive(Debug, Clone, Serialize)]
-pub struct Section<T> {
-    pub count: usize,
-    pub items: Vec<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+### Fallback strategy
 
-impl<T> Section<T> {
-    fn new(items: Vec<T>) -> Self { /* ... */ }
-    fn with_limit(items: Vec<T>, total: usize) -> Self { /* ... */ }
-    fn error(msg: impl Into<String>) -> Self { /* ... */ }
-}
-```
+- Use fallback only when it increases success rate without producing misleading data.
+- Good fallback examples in the current codebase:
+  - location-to-symbol anchor resolution for `context`, `refs`, and `usage`
+  - semantic or document-symbol fallback when indexed symbol search is insufficient
+  - clearer unsupported-feature guidance in `context`
 
-### Pure Fact Data (No Heuristic Judgments)
-```rust
-// impact.rs - LLM judges, not the tool
-// ❌ SafetyHint (removed) - arbitrary thresholds don't scale
-// ✅ RefStats - pure counts for LLM to interpret in context
+### Search and discovery heuristics
 
-#[derive(Debug, Serialize)]
-pub struct RefStats {
-    pub total: usize,      // Total references
-    pub test: usize,       // Test code references
-    pub prod: usize,       // Production code references
-    pub files: usize,      // Affected file count
-    pub modules: usize,    // Affected module count
-    pub is_exported: bool, // Public API (keyword fact)
-}
+- Shared discovery logic lives in `src/cli/symbol_discovery.rs`.
+- Keep broad-query handling, test/noise suppression, and common hint generation centralized there when possible.
+- Do not scatter similar ranking logic across multiple commands unless there is a strong reason.
 
-// LLM can judge: "42 prod refs in 100K LOC project = low impact"
-// vs: "42 prod refs in 5K LOC project = high impact"
-```
+### Store durability
 
-### Config-Based Limits
-```rust
-// context.rs - Derive limits from config with From trait
-struct ContextLimits { calls: usize, refs: usize, tests: usize }
+- Search index persistence is part of product reliability.
+- Do not clear the index during normal daemon idle/shutdown behavior.
+- Store open/reopen paths must preserve valid SQLite databases and avoid false corruption recovery.
 
-impl From<&LspConfig> for ContextLimits {
-    fn from(cfg: &LspConfig) -> Self {
-        Self { calls: cfg.calls_limit, refs: cfg.refs_limit, tests: cfg.tests_limit }
-    }
-}
-```
+## Current Stable User Flows
 
-### Insert Mode for Edit Operations
-```rust
-// edit.rs - Mode-aware positioning for insert operations
-#[derive(Clone, Copy)]
-enum InsertMode {
-    After,   // Insert at end position (end_line, end_column)
-    Before,  // Insert at start position (line, column)
-}
+These flows are now important enough to preserve carefully:
 
-// Helper functions for target resolution
-fn resolve_file_path(app: &App, target: &str) -> PathBuf
-async fn lookup_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol>
-async fn find_symbol_at_position(app: &App, file: &Path, line: u32) -> Result<Symbol>
-```
+- Broad symbol discovery: `search symbols`
+- More specific workspace lookup: `symbols --name`
+- Exact symbol inspection: `symbols --symbol`, `symbols <file>`
+- File overview: `map file`
+- Exact location follow-up: `context`, `refs`, `usage`
+- Project overview: `map summary`
 
-### Refs Fallback for Call Hierarchy
-```rust
-// callers.rs - Automatic fallback when call hierarchy unsupported
-match app.lsp.incoming_calls(&loc.file, loc.line, loc.column).await {
-    Ok(calls) => { /* use call hierarchy */ },
-    Err(ref e) if !args.no_fallback && is_not_supported(e) => {
-        // Fallback to references + filter callable symbols
-        fallback_from_refs(app, &loc.file, loc.line, loc.column, limit).await
-    },
-    Err(e) => { /* report error */ }
-}
-```
+When changing these flows, prefer stability over novelty.
+
+## Where to Be Careful
+
+### Search / symbols / usage
+
+- These commands now share discovery heuristics and guidance patterns.
+- A change in one may unintentionally drift behavior from the others.
+
+### Map commands
+
+- `map file` is intended to be a compact overview, not a full symbol dump.
+- If you need deep detail, that belongs in `symbols`.
+
+### Context on weaker LSP servers
+
+- Some languages or servers do not support call hierarchy or type definition well.
+- Prefer better fallback messaging over pretending support exists.
 
 ## Config
 
-| Type | Path |
-|------|------|
-| Project | `.symora/config.toml` |
-| Global | `~/.config/symora/config.toml` |
+Config priority:
 
-Priority: Project > Global > Defaults
+- project config: `.symora/config.toml`
+- global config: `~/.config/symora/config.toml`
+- defaults
 
-### Key Config Values
-```toml
-[lsp]
-timeout_secs = 60       # Base timeout (default: 60s, increased for monorepos)
-refs_limit = 500        # Max references per query
-calls_limit = 100       # Max call hierarchy items
-tests_limit = 10        # Max test results in context
+When changing config behavior:
 
-[test]
-file_patterns = ["_check.rs", "Verify.java"]  # Custom test file suffixes
-dir_patterns = ["/verification/"]              # Custom test directories
-markers = ["@MyTest"]                          # Custom test markers
-```
+- keep daemon and direct mode consistent
+- avoid hidden mode-specific defaults
 
-Built-in test patterns support 25+ languages: JUnit, Kotest, xUnit, pytest, RSpec, Jest, etc.
+## Editing Guidance for Agents
 
-## LSP Support Matrix
+- Prefer minimal, high-confidence changes.
+- Do not add new commands unless a real repeated workflow gap exists.
+- Prefer removing legacy overlap instead of keeping parallel command surfaces.
+- Avoid tuning heuristics based on one attractive example. Use repeated evidence.
+- Do not add maintenance-heavy facts to docs unless they materially help users or contributors.
 
-| Feature | Rust | Go | Java | TS/JS | Kotlin | Python | PHP | C/C++ |
-|---------|:----:|:--:|:----:|:-----:|:------:|:------:|:---:|:-----:|
-| symbol/def | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ✅ |
-| refs | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
-| hover | ✅ | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ✅ |
-| calls | ✅ | ✅ | ✅ | ⚠️ | ❌ | ❌ | ❌ | ⚠️ |
-| rename | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ✅ |
+## Recommended Validation Before Finishing
 
-**Notes**:
-- Kotlin: Class-level symbols only; use AST search for methods
-- Python: Large monorepo may timeout; use AST search as fallback
-- TypeScript: Initial requests slow (15s+); subsequent requests fast
-- PHP: Rename requires Intelephense Premium
-- Call hierarchy fallback: Uses refs when LSP doesn't support callHierarchy
+At minimum, verify changes with:
 
-## AST Search (tree-sitter)
+- `cargo fmt`
+- `cargo test`
+- `cargo build --quiet`
 
-13 languages: Python, TypeScript/TSX, JavaScript, Rust, Go, Java, Kotlin, C++, C#, Bash, Ruby, Lua, PHP
+For behavior changes, also run a few real commands in:
 
-## Store Module (SQLite)
+- this repository (`./symora`)
+- at least one large external repository during local validation
 
-LIKE-based search with SQLite. Index stored at `.symora/search.db`.
+Do not encode local-only external repository assumptions into repository docs or tests.
 
-### Store Module Structure
-```
-src/services/store/
-├── mod.rs           # Public exports (Store, types)
-├── db.rs            # Async SQLite wrapper (tokio-rusqlite)
-├── schema.rs        # DDL, search queries (WAL mode)
-├── index.rs         # Store implementation
-├── symbols.rs       # SymbolExtractor (tree-sitter)
-└── types.rs         # StoreConfig, SymbolSearchResult, ContentSearchResult
-```
+## Anti-goals
 
-## Key Types
-
-- `SymbolKind`: function, class, method, field, struct, enum, interface, module, property, constructor, variable, constant, enum_member, type_parameter
-- `Language`: 36 languages with aliases (e.g., `typescript`/`ts`, `python`/`py`)
-- Location format: `file:line:column` (all 1-indexed in CLI)
-
-## Performance Notes
-
-| Command | Optimization | Notes |
-|---------|--------------|-------|
-| `usage` | Semaphore parallelization | 20 concurrent LSP requests |
-| `usage` | `--max-symbols N` | Limit analysis scope (default: 50) |
-| `edit pattern` | UTF-8 char indexing | Safe multi-byte character handling |
-| `diagnostics` | Lazy context loading | `--with-context` fetches on demand |
-| `calls incoming` | Refs fallback | Auto-fallback when call hierarchy unsupported |
-
-### Large Codebases
-- Use `--max-symbols 30` for faster usage analysis
-- TypeScript: First request ~15s (compilation), subsequent <1s
-- Python: Large monorepos may timeout; use AST search fallback
-- Default timeout increased to 60s for better monorepo support
+- Do not keep adding broad heuristic tweaks without repeated evidence.
+- Do not optimize docs for vanity metrics or volatile counts.
+- Do not introduce output changes that make agent parsing harder.
+- Do not add platform claims or feature guarantees that the code does not currently support.
