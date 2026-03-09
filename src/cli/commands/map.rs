@@ -902,6 +902,9 @@ fn focus_symbol_score(symbol: &Symbol) -> i32 {
         crate::models::symbol::SymbolKind::Module
         | crate::models::symbol::SymbolKind::Namespace
         | crate::models::symbol::SymbolKind::Package => 10,
+        crate::models::symbol::SymbolKind::Constant
+        | crate::models::symbol::SymbolKind::Variable
+        | crate::models::symbol::SymbolKind::Object => 8,
         crate::models::symbol::SymbolKind::Property
         | crate::models::symbol::SymbolKind::Field
         | crate::models::symbol::SymbolKind::EnumMember => 4,
@@ -913,11 +916,34 @@ fn focus_symbol_score(symbol: &Symbol) -> i32 {
         _ => 0,
     };
 
-    base + (symbol.children.len().min(4) as i32) + name_bonus
+    let callable_child_bonus = symbol
+        .children
+        .iter()
+        .filter(|child| {
+            matches!(
+                child.kind,
+                crate::models::symbol::SymbolKind::Function
+                    | crate::models::symbol::SymbolKind::Method
+                    | crate::models::symbol::SymbolKind::Constructor
+            )
+        })
+        .count()
+        .min(6) as i32;
+
+    base + (symbol.children.len().min(4) as i32) + callable_child_bonus + name_bonus
 }
 
 fn is_focus_symbol_candidate(symbol: &Symbol) -> bool {
-    if symbol.kind.is_low_level() {
+    let has_callable_children = symbol.children.iter().any(|child| {
+        matches!(
+            child.kind,
+            crate::models::symbol::SymbolKind::Function
+                | crate::models::symbol::SymbolKind::Method
+                | crate::models::symbol::SymbolKind::Constructor
+        )
+    });
+
+    if symbol.kind.is_low_level() && !has_callable_children {
         return false;
     }
 
@@ -933,7 +959,10 @@ fn is_focus_symbol_candidate(symbol: &Symbol) -> bool {
             | crate::models::symbol::SymbolKind::Module
             | crate::models::symbol::SymbolKind::Namespace
             | crate::models::symbol::SymbolKind::Package
-    )
+            | crate::models::symbol::SymbolKind::Constant
+            | crate::models::symbol::SymbolKind::Variable
+            | crate::models::symbol::SymbolKind::Object
+    ) || has_callable_children
 }
 
 fn map_summary_next_commands(

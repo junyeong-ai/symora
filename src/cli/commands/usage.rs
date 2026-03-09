@@ -192,6 +192,19 @@ fn usage_hints(query: &str, auto_lang: bool, showing: usize, truncated: bool) ->
     hints
 }
 
+fn usage_hints_for_empty(query: &str, auto_lang: bool, resolved_from: Option<&str>) -> Vec<String> {
+    let mut hints = usage_hints(query, auto_lang, 0, false);
+    if let Some(loc) = resolved_from {
+        hints.push(format!(
+            "Workspace symbol lookup was empty for the resolved symbol. Continue with `symora symbols {}` or `symora refs {}` for file-level follow-up.",
+            loc.split(':').next().unwrap_or(loc),
+            loc
+        ));
+    }
+    hints.truncate(3);
+    hints
+}
+
 #[derive(Debug, Serialize)]
 pub struct UsageOutput {
     pub query: String,
@@ -250,15 +263,15 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     rank_usage_symbols(&mut symbols, &resolved.query);
 
     if symbols.is_empty() {
+        let resolved_from = resolved.resolved_from.clone();
         ctx.print_success(UsageOutput {
             query: resolved.query.clone(),
-            resolved_from: resolved.resolved_from,
+            resolved_from: resolved_from.clone(),
             filters_applied: vec![],
-            hints: usage_hints(
+            hints: usage_hints_for_empty(
                 &resolved.query,
                 resolved.language_override.is_none(),
-                0,
-                false,
+                resolved_from.as_deref(),
             ),
             results: vec![],
             count: 0,
