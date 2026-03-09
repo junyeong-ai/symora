@@ -90,10 +90,24 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 items,
             });
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(&format_refs_error(&e.to_string(), &loc.file, line, column)),
     }
 
     Ok(())
+}
+
+fn format_refs_error(error: &str, file: &std::path::Path, line: u32, column: u32) -> String {
+    if error.contains("Broken pipe") || error.contains("timed out") || error.contains("timeout") {
+        format!(
+            "The language server did not respond cleanly for references here. Retry after `symora daemon restart`, or use `symora symbols {}` and `symora usage {}:{}:{}` to continue from file-level analysis.",
+            file.display(),
+            file.display(),
+            line,
+            column
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 fn refs_hints(items: &[LocationOutput], total: usize, limit: usize) -> Vec<String> {

@@ -99,7 +99,12 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
 
     match response {
         Ok(context) => ctx.print_success(context),
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(&format_analysis_transport_error(
+            &e.to_string(),
+            &loc.file,
+            loc.line,
+            loc.column,
+        )),
     }
 
     Ok(())
@@ -345,6 +350,24 @@ fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> String
 
 fn is_unsupported_lsp_feature(error: &str) -> bool {
     error.contains("does not support") || error.contains("no handler for request")
+}
+
+fn is_transport_lsp_failure(error: &str) -> bool {
+    error.contains("Broken pipe") || error.contains("timed out") || error.contains("timeout")
+}
+
+fn format_analysis_transport_error(error: &str, file: &Path, line: u32, column: u32) -> String {
+    if is_transport_lsp_failure(error) {
+        format!(
+            "The language server did not respond cleanly here. Retry after `symora daemon restart`, or continue with `symora symbols {}` and `symora usage {}:{}:{}`.",
+            file.display(),
+            file.display(),
+            line,
+            column
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 async fn fetch_tests(
