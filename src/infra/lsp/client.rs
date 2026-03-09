@@ -42,7 +42,6 @@ enum LogLevel {
 struct DocumentState {
     version: u32,
     content_hash: u64,
-    ref_count: u32,
 }
 
 impl DocumentState {
@@ -50,7 +49,6 @@ impl DocumentState {
         Self {
             version: 1,
             content_hash: crate::infra::hash_content(content),
-            ref_count: 1,
         }
     }
 
@@ -61,15 +59,6 @@ impl DocumentState {
     fn update(&mut self, new_content: &str) {
         self.version += 1;
         self.content_hash = crate::infra::hash_content(new_content);
-    }
-
-    fn acquire(&mut self) {
-        self.ref_count += 1;
-    }
-
-    fn release(&mut self) -> bool {
-        self.ref_count = self.ref_count.saturating_sub(1);
-        self.ref_count == 0
     }
 }
 
@@ -117,51 +106,12 @@ impl DocumentCache {
     }
 
     fn evict_lru(&mut self) -> Option<String> {
-        let len = self.lru_order.len();
-        for _ in 0..len {
-            if let Some(uri) = self.lru_order.pop_back() {
-                if self
-                    .docs
-                    .get(&uri)
-                    .map(|s| s.ref_count == 0)
-                    .unwrap_or(false)
-                {
-                    self.docs.remove(&uri);
-                    return Some(uri);
-                }
-                self.lru_order.push_front(uri);
-            }
+        if let Some(uri) = self.lru_order.pop_back() {
+            self.docs.remove(&uri);
+            return Some(uri);
         }
         None
     }
-
-    fn remove(&mut self, uri: &str) -> Option<DocumentState> {
-        self.lru_order.retain(|u| u != uri);
-        self.docs.remove(uri)
-    }
-}
-
-pub struct DocumentSyncGuard {
-    uri: String,
-    client: Arc<LspClient>,
-}
-
-impl Drop for DocumentSyncGuard {
-    fn drop(&mut self) {
-        let uri = self.uri.clone();
-        let client = Arc::clone(&self.client);
-        tokio::spawn(async move {
-            client.release_document(&uri).await;
-        });
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HealthStatus {
-    Healthy,
-    Initializing,
-    ShuttingDown,
-    NotRunning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +154,7 @@ pub struct LspClient {
     document_cache: RwLock<DocumentCache>,
     notification_handlers: RwLock<HashMap<String, NotificationHandler>>,
     root: PathBuf,
+    config: Arc<crate::config::LspRuntimeConfig>,
     capabilities: RwLock<Option<InitializeResult>>,
     shutdown: RwLock<bool>,
     indexing_state: AtomicU8,
@@ -213,7 +164,11 @@ pub struct LspClient {
 }
 
 impl LspClient {
-    pub fn new(language: Language, root: PathBuf) -> Arc<Self> {
+    pub fn new(
+        language: Language,
+        root: PathBuf,
+        config: Arc<crate::config::LspRuntimeConfig>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             language,
             process: Mutex::new(None),
@@ -224,6 +179,7 @@ impl LspClient {
             document_cache: RwLock::new(DocumentCache::new()),
             notification_handlers: RwLock::new(HashMap::new()),
             root,
+            config,
             capabilities: RwLock::new(None),
             shutdown: RwLock::new(false),
             indexing_state: AtomicU8::new(IndexingState::NotStarted.to_u8()),
@@ -318,23 +274,6 @@ impl LspClient {
         // Try a lightweight request to verify responsiveness
         // Using capabilities check which should be fast
         self.capabilities.read().await.is_some()
-    }
-
-    /// Get health status with details
-    pub async fn health_status(&self) -> HealthStatus {
-        if !self.is_running().await {
-            return HealthStatus::NotRunning;
-        }
-
-        if *self.shutdown.read().await {
-            return HealthStatus::ShuttingDown;
-        }
-
-        if self.capabilities.read().await.is_some() {
-            HealthStatus::Healthy
-        } else {
-            HealthStatus::Initializing
-        }
     }
 
     /// Initialize the language server
@@ -695,7 +634,7 @@ impl LspClient {
             write_request(stdin, &request).await?;
         }
 
-        let result = timeout(crate::config::timeout_for(self.language, method), rx).await;
+        let result = timeout(self.config.timeout_for(self.language, method), rx).await;
 
         match result {
             Ok(Ok(response)) => match response.into_result() {
@@ -718,17 +657,6 @@ impl LspClient {
                 )))
             }
         }
-    }
-
-    pub async fn request_with_retry<T: serde::de::DeserializeOwned>(
-        &self,
-        method: &str,
-        params: Option<Value>,
-    ) -> Result<T, LspError> {
-        use crate::infra::retry::{RetryConfig, with_retry};
-        let config = RetryConfig::for_language(self.language);
-        let params_clone = params.clone();
-        with_retry(&config, || self.request(method, params_clone.clone())).await
     }
 
     pub async fn cancel_request(&self, id: u64) {
@@ -968,36 +896,15 @@ impl LspClient {
     }
 
     pub async fn sync_document(&self, uri: &str, content: &str) -> Result<(), LspError> {
-        self.sync_document_inner(uri, content, false).await?;
-        Ok(())
+        self.sync_document_inner(uri, content).await
     }
 
-    pub async fn acquire_document(
-        self: &Arc<Self>,
-        uri: &str,
-        content: &str,
-    ) -> Result<DocumentSyncGuard, LspError> {
-        self.sync_document_inner(uri, content, true).await?;
-        Ok(DocumentSyncGuard {
-            uri: uri.to_string(),
-            client: Arc::clone(self),
-        })
-    }
-
-    async fn sync_document_inner(
-        &self,
-        uri: &str,
-        content: &str,
-        acquire: bool,
-    ) -> Result<(), LspError> {
+    async fn sync_document_inner(&self, uri: &str, content: &str) -> Result<(), LspError> {
         let evicted = {
             let mut cache = self.document_cache.write().await;
             let language_id = self.language.to_string().to_lowercase();
 
             if let Some(state) = cache.get_mut(uri) {
-                if acquire {
-                    state.acquire();
-                }
                 if state.needs_update(content) {
                     state.update(content);
                     self.invalidate_index();
@@ -1012,10 +919,7 @@ impl LspClient {
                 }
                 None
             } else {
-                let mut state = DocumentState::new(content);
-                if acquire {
-                    state.acquire();
-                }
+                let state = DocumentState::new(content);
                 self.invalidate_index();
                 self.notify(
                     "textDocument/didOpen",
@@ -1044,31 +948,6 @@ impl LspClient {
         Ok(())
     }
 
-    async fn release_document(&self, uri: &str) {
-        let should_close = {
-            let mut cache = self.document_cache.write().await;
-            if let Some(state) = cache.docs.get_mut(uri) {
-                if state.release() {
-                    cache.remove(uri);
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        };
-
-        if should_close {
-            let _ = self
-                .notify(
-                    "textDocument/didClose",
-                    Some(serde_json::json!({ "textDocument": { "uri": uri } })),
-                )
-                .await;
-        }
-    }
-
     pub fn indexing_state(&self) -> IndexingState {
         IndexingState::from_u8(self.indexing_state.load(Ordering::Acquire))
     }
@@ -1079,7 +958,7 @@ impl LspClient {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let wait = crate::config::cross_file_wait(self.language);
+            let wait = self.config.cross_file_wait(self.language);
             if !wait.is_zero() {
                 tracing::debug!(
                     "Waiting {}ms for {} cross-file indexing",
@@ -1141,7 +1020,7 @@ impl LspClient {
     }
 
     fn indexing_timeout(&self) -> Duration {
-        crate::config::indexing_wait(self.language)
+        self.config.indexing_wait(self.language)
     }
 
     /// Register a notification handler for a specific method
@@ -1259,15 +1138,6 @@ impl LspClient {
         }
     }
 
-    pub async fn close_document(&self, uri: &str) -> Result<(), LspError> {
-        self.document_cache.write().await.remove(uri);
-        self.notify(
-            "textDocument/didClose",
-            Some(serde_json::json!({ "textDocument": { "uri": uri } })),
-        )
-        .await
-    }
-
     async fn handle_server_request(&self, request: Request) {
         let response_result = match request.method.as_str() {
             "workspace/configuration" => self.handle_workspace_configuration(&request.params),
@@ -1328,6 +1198,10 @@ impl LspClient {
             text_document: TextDocumentIdentifier::new(uri),
             position: Position::new(line, column),
         }
+    }
+
+    pub fn config(&self) -> &crate::config::LspRuntimeConfig {
+        &self.config
     }
 
     pub fn language(&self) -> Language {

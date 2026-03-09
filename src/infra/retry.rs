@@ -1,5 +1,3 @@
-//! Retry utilities with exponential backoff
-
 use std::future::Future;
 use std::time::Duration;
 
@@ -27,7 +25,7 @@ impl Default for RetryConfig {
 
 impl RetryConfig {
     pub fn for_language(language: Language) -> Self {
-        if crate::config::language_profile(language).aggressive_retry {
+        if crate::config::LanguageProfile::for_language(language).aggressive_retry {
             Self::aggressive()
         } else {
             Self::default()
@@ -95,7 +93,7 @@ where
         }
     }
 
-    Err(last_error.expect("Should have an error after all retries failed"))
+    Err(last_error.unwrap_or_else(|| LspError::Protocol("No retry attempts configured".into())))
 }
 
 #[cfg(test)]

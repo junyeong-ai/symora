@@ -1,7 +1,3 @@
-//! Symbol-level edit command implementation
-//!
-//! Provides symbol-aware text editing operations.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +6,8 @@ use clap::{Args, Subcommand};
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
+#[cfg(unix)]
+use crate::daemon::DaemonClient;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
 
@@ -43,14 +41,7 @@ fn validate_file_for_edit(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Convert character index to byte index in a UTF-8 string
-/// This prevents panics when slicing strings with multi-byte characters
-fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
-}
+use crate::utils::char_to_byte_index;
 
 // Workspace Edit Applier
 
@@ -76,7 +67,7 @@ pub fn apply_workspace_edits(
         let content = fs::read_to_string(file)
             .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-        let new_content = apply_text_edits(&content, &change.edits)?;
+        let new_content = apply_text_edits(&content, &change.edits);
 
         if !dry_run {
             fs::write(file, &new_content)
@@ -103,9 +94,9 @@ pub struct AppliedFileChange {
 
 /// Apply multiple text edits to content.
 /// Edits are sorted by position (reverse order) to maintain correct offsets.
-fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
     if edits.is_empty() {
-        return Ok(content.to_string());
+        return content.to_string();
     }
 
     // Sort edits by position in reverse order (bottom to top, right to left)
@@ -142,7 +133,7 @@ fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
         }
     }
 
-    Ok(result)
+    result
 }
 
 fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> usize {
@@ -152,10 +143,26 @@ fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> usi
         if current_line == line {
             return byte_offset + char_to_byte_index(line_content, character);
         }
-        byte_offset += line_content.len() + 1;
+        byte_offset += line_content.len();
+        // Account for actual line ending bytes (\r\n = 2, \n = 1)
+        let remaining = &content.as_bytes()[byte_offset..];
+        if remaining.starts_with(b"\r\n") {
+            byte_offset += 2;
+        } else if remaining.starts_with(b"\n") {
+            byte_offset += 1;
+        }
     }
 
     content.len()
+}
+
+/// Detect the line ending style used in content
+fn detect_line_ending(content: &str) -> &'static str {
+    if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 // Target Resolution Helpers
@@ -169,21 +176,33 @@ enum InsertMode {
     Before,
 }
 
-/// Resolve file path from target string, handling relative paths
-fn resolve_file_path(app: &App, target: &str) -> PathBuf {
+/// Resolve file path from target string, handling relative paths.
+/// Canonicalizes the result and validates it is within the project root.
+fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
     let path = Path::new(target);
-    if path.is_absolute() {
+    let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
         app.root().join(path)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve path: {}", resolved.display()))?;
+    let root = app
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| app.root().to_path_buf());
+    if !canonical.starts_with(&root) {
+        anyhow::bail!("Path {} is outside the project root", canonical.display());
     }
+    Ok(canonical)
 }
 
-/// Lookup symbol by path pattern in a file
-async fn lookup_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
+/// Find symbol by path pattern in a file
+async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
     let mut symbols = app
         .lsp
-        .find_symbols(file, FindSymbolsOptions::new().with_depth(10))
+        .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
         .await?;
     Symbol::compute_paths_for_all(&mut symbols);
     Symbol::find_by_path(&symbols, pattern)
@@ -192,14 +211,12 @@ async fn lookup_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<
 }
 
 /// Find the symbol containing a specific line position
-async fn find_symbol_at_position(app: &App, file: &Path, line: u32) -> Result<Symbol> {
+async fn find_symbol_at_line(app: &App, file: &Path, line: u32) -> Result<Symbol> {
     let symbols = app
         .lsp
         .find_symbols(file, FindSymbolsOptions::default())
         .await?;
-    symbols
-        .iter()
-        .find(|s| s.location.line <= line && s.location.end_line.is_none_or(|end| end >= line))
+    crate::cli::utils::find_symbol_at_position(&symbols, line, None)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line))
 }
@@ -314,6 +331,10 @@ pub enum EditCommand {
 pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
 
+    // Track edited file for store invalidation (unix only)
+    #[cfg(unix)]
+    let mut edited_file: Option<PathBuf> = None;
+
     match args.command {
         EditCommand::Replace {
             start,
@@ -321,9 +342,10 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
             text,
             dry_run,
         } => {
-            let start_loc = ParsedLocation::parse(&start)?.to_absolute()?;
+            let start_loc =
+                ParsedLocation::parse(&start)?.to_absolute_with_root(Some(app.root()))?;
             let end_loc = if let Some(end_str) = end {
-                ParsedLocation::parse(&end_str)?.to_absolute()?
+                ParsedLocation::parse(&end_str)?.to_absolute_with_root(Some(app.root()))?
             } else {
                 start_loc.clone()
             };
@@ -338,7 +360,11 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
                 dry_run,
             )?;
 
-            ctx.print_success_flat(result);
+            #[cfg(unix)]
+            if !dry_run {
+                edited_file = Some(start_loc.file.clone());
+            }
+            ctx.print_success(result);
         }
 
         EditCommand::InsertAfter {
@@ -350,7 +376,11 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
             let (file_path, line, col) =
                 resolve_insert_position(app, &target, symbol, InsertMode::After).await?;
             let result = apply_insert(&file_path, line, col, &text, false, dry_run)?;
-            ctx.print_success_flat(result);
+            #[cfg(unix)]
+            if !dry_run {
+                edited_file = Some(file_path);
+            }
+            ctx.print_success(result);
         }
 
         EditCommand::InsertBefore {
@@ -362,7 +392,11 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
             let (file_path, line, col) =
                 resolve_insert_position(app, &target, symbol, InsertMode::Before).await?;
             let result = apply_insert(&file_path, line, col, &text, true, dry_run)?;
-            ctx.print_success_flat(result);
+            #[cfg(unix)]
+            if !dry_run {
+                edited_file = Some(file_path);
+            }
+            ctx.print_success(result);
         }
 
         EditCommand::Symbol {
@@ -383,7 +417,11 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
                 &file_path, start_line, start_col, end_line, end_col, &text, dry_run,
             )?;
 
-            ctx.print_success_flat(serde_json::json!({
+            #[cfg(unix)]
+            if !dry_run {
+                edited_file = Some(file_path);
+            }
+            ctx.print_success(serde_json::json!({
                 "symbol": target_symbol.name,
                 "name_path": target_symbol.name_path,
                 "kind": target_symbol.kind.to_string(),
@@ -399,13 +437,36 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
             index,
             dry_run,
         } => {
+            let abs_path = resolve_file_path(app, &file)?;
             let result =
-                execute_pattern_edit(app, &file, &pattern, &lang, &text, &index, dry_run).await?;
-            ctx.print_success_flat(result);
+                execute_pattern_edit(app, &abs_path, &pattern, &lang, &text, &index, dry_run)
+                    .await?;
+            #[cfg(unix)]
+            if !dry_run {
+                edited_file = Some(abs_path);
+            }
+            ctx.print_success(result);
         }
     }
 
+    // Best-effort store invalidation after successful edits
+    #[cfg(unix)]
+    if let Some(file) = edited_file {
+        invalidate_store_files(app, &[file]).await;
+    }
+
     Ok(())
+}
+
+/// Best-effort invalidation of files in the daemon's store index.
+#[cfg(unix)]
+pub(crate) async fn invalidate_store_files(app: &App, files: &[PathBuf]) {
+    let client = DaemonClient::new(app.root());
+    for file in files {
+        if let Err(e) = client.invalidate_file(file).await {
+            tracing::warn!("Store invalidation failed for {}: {}", file.display(), e);
+        }
+    }
 }
 
 /// Resolve position for insert operations with mode-aware positioning.
@@ -421,7 +482,7 @@ async fn resolve_insert_position(
 ) -> Result<(PathBuf, u32, u32)> {
     // Location mode: use specified position directly
     if ParsedLocation::is_location_format(target) {
-        let loc = ParsedLocation::parse(target)?.to_absolute()?;
+        let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
         return Ok((loc.file, loc.line, loc.column));
     }
 
@@ -433,8 +494,8 @@ async fn resolve_insert_position(
         )
     })?;
 
-    let file = resolve_file_path(app, target);
-    let symbol = lookup_symbol_by_path(app, &file, &pattern).await?;
+    let file = resolve_file_path(app, target)?;
+    let symbol = find_symbol_by_path(app, &file, &pattern).await?;
 
     // Mode-aware position selection (fixes InsertBefore bug)
     let (line, column) = match mode {
@@ -457,8 +518,8 @@ async fn resolve_symbol(
 ) -> Result<(PathBuf, Symbol)> {
     // Location mode: find symbol at position
     if ParsedLocation::is_location_format(target) {
-        let loc = ParsedLocation::parse(target)?.to_absolute()?;
-        let symbol = find_symbol_at_position(app, &loc.file, loc.line).await?;
+        let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
+        let symbol = find_symbol_at_line(app, &loc.file, loc.line).await?;
         return Ok((loc.file, symbol));
     }
 
@@ -470,8 +531,8 @@ async fn resolve_symbol(
         )
     })?;
 
-    let file = resolve_file_path(app, target);
-    let symbol = lookup_symbol_by_path(app, &file, &pattern).await?;
+    let file = resolve_file_path(app, target)?;
+    let symbol = find_symbol_by_path(app, &file, &pattern).await?;
     Ok((file, symbol))
 }
 
@@ -515,14 +576,15 @@ fn apply_replace(
         anyhow::bail!("End line {} is out of range", end_line);
     }
 
-    // Build the new content
+    // Build the new content, preserving original line ending style
+    let eol = detect_line_ending(&content);
     let mut result = String::new();
 
     // Add lines before the edit
     for (i, line) in lines.iter().enumerate() {
         if i < start_line_idx {
             result.push_str(line);
-            result.push('\n');
+            result.push_str(eol);
         } else if i == start_line_idx {
             // Add content before the edit on the start line (UTF-8 safe)
             let safe_start_byte = char_to_byte_index(line, start_char_idx);
@@ -535,7 +597,7 @@ fn apply_replace(
             if start_line_idx == end_line_idx {
                 let safe_end_byte = char_to_byte_index(line, end_char_idx);
                 result.push_str(&line[safe_end_byte..]);
-                result.push('\n');
+                result.push_str(eol);
             }
         } else if i > start_line_idx && i < end_line_idx {
             // Skip lines within the edit range
@@ -544,16 +606,20 @@ fn apply_replace(
             // Add content after the edit on the end line (UTF-8 safe)
             let safe_end_byte = char_to_byte_index(line, end_char_idx);
             result.push_str(&line[safe_end_byte..]);
-            result.push('\n');
+            result.push_str(eol);
         } else if i > end_line_idx {
             result.push_str(line);
-            result.push('\n');
+            result.push_str(eol);
         }
     }
 
-    // Remove trailing newline if original didn't have one
+    // Remove trailing line ending if original didn't have one
     if !content.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
+        if result.ends_with("\r\n") {
+            result.truncate(result.len() - 2);
+        } else {
+            result.pop();
+        }
     }
 
     // Calculate what was replaced (UTF-8 safe)
@@ -642,24 +708,23 @@ fn apply_insert(
     // Position-based: column>1 means "insert at this character position"
     let is_line_based = column == 1;
 
+    let eol = detect_line_ending(&content);
     let mut result = String::new();
 
     if is_line_based {
         // Line-based insertion: add text as a new line
         for (i, line_content) in lines.iter().enumerate() {
             if before && i == line_idx {
-                // Insert new line BEFORE target line
                 result.push_str(text);
-                result.push('\n');
+                result.push_str(eol);
             }
 
             result.push_str(line_content);
-            result.push('\n');
+            result.push_str(eol);
 
             if !before && i == line_idx {
-                // Insert new line AFTER target line
                 result.push_str(text);
-                result.push('\n');
+                result.push_str(eol);
             }
         }
     } else {
@@ -672,17 +737,21 @@ fn apply_insert(
                 result.push_str(&line_content[..safe_col_byte]);
                 result.push_str(text);
                 result.push_str(&line_content[safe_col_byte..]);
-                result.push('\n');
+                result.push_str(eol);
             } else {
                 result.push_str(line_content);
-                result.push('\n');
+                result.push_str(eol);
             }
         }
     }
 
-    // Preserve original trailing newline behavior
+    // Preserve original trailing line ending behavior
     if !content.ends_with('\n') && result.ends_with('\n') {
-        result.pop();
+        if result.ends_with("\r\n") {
+            result.truncate(result.len() - 2);
+        } else {
+            result.pop();
+        }
     }
 
     let mode = if before {
@@ -717,14 +786,14 @@ fn apply_insert(
 /// Execute a pattern-based edit using tree-sitter AST matching
 async fn execute_pattern_edit(
     app: &App,
-    file: &str,
+    file: &Path,
     pattern: &str,
     lang: &str,
     new_text: &str,
     index: &str,
     dry_run: bool,
 ) -> Result<serde_json::Value> {
-    let language = Language::from_str_loose(lang);
+    let language = Language::parse_or_default(lang);
     if language == Language::Unknown {
         anyhow::bail!(
             "Unsupported language: {}. Run 'symora search nodes --list' for supported languages.",
@@ -732,23 +801,17 @@ async fn execute_pattern_edit(
         );
     }
 
-    let path = std::path::Path::new(file);
-    let abs_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        app.root().join(path)
-    };
-
     // Validate file before editing (skips write check for dry_run)
     if !dry_run {
-        validate_file_for_edit(&abs_path)?;
-    } else if !abs_path.exists() {
-        anyhow::bail!("File not found: {}", abs_path.display());
+        validate_file_for_edit(file)?;
+    } else if !file.exists() {
+        anyhow::bail!("File not found: {}", file.display());
     }
 
+    let file_buf = file.to_path_buf();
     let matches = app
         .ast
-        .query(pattern, language, std::slice::from_ref(&abs_path))
+        .query(pattern, language, std::slice::from_ref(&file_buf))
         .await
         .map_err(|e| anyhow::anyhow!("AST query failed: {}", e))?;
 
@@ -756,7 +819,7 @@ async fn execute_pattern_edit(
         return Ok(serde_json::json!({
             "matched": false,
             "pattern": pattern,
-            "file": file,
+            "file": file.display().to_string(),
             "message": "No matches found for the pattern"
         }));
     }
@@ -782,7 +845,7 @@ async fn execute_pattern_edit(
         );
     }
 
-    let content = fs::read_to_string(&abs_path).context("Failed to read file")?;
+    let content = fs::read_to_string(file).context("Failed to read file")?;
 
     if dry_run {
         let match_info: Vec<_> = matches
@@ -803,7 +866,7 @@ async fn execute_pattern_edit(
 
         return Ok(serde_json::json!({
             "dry_run": true,
-            "file": file,
+            "file": file.display().to_string(),
             "pattern": pattern,
             "language": lang,
             "matches": match_info,
@@ -873,11 +936,11 @@ async fn execute_pattern_edit(
         result.push('\n');
     }
 
-    fs::write(&abs_path, &result).context("Failed to write file")?;
+    fs::write(file, &result).context("Failed to write file")?;
 
     Ok(serde_json::json!({
         "applied": true,
-        "file": file,
+        "file": file.display().to_string(),
         "pattern": pattern,
         "language": lang,
         "edits_applied": applied_edits.len(),

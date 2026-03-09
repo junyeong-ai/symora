@@ -1,8 +1,3 @@
-//! Tree-sitter Node Type Mappings
-//!
-//! Verified node types from official tree-sitter grammar repositories.
-//! Each mapping is sourced from the respective `src/node-types.json`.
-
 use crate::models::symbol::Language;
 
 /// Node type mapping entry

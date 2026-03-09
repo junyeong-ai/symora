@@ -1,19 +1,12 @@
-//! Output formatting for CLI commands
-
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-/// Output options from CLI flags
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OutputOptions {
-    /// Compact output for AI tools (single-line JSON, minimal tokens)
     pub compact: bool,
-    /// Quiet mode (suppress success output, errors only)
     pub quiet: bool,
 }
-
-/// Output context for consistent formatting across commands
 #[derive(Debug, Clone)]
 pub struct OutputContext {
     root: PathBuf,
@@ -39,31 +32,28 @@ impl OutputContext {
         path.starts_with(&self.root)
     }
 
+    pub fn format_path(path: &Path, root: &Path) -> String {
+        path.strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string())
+    }
+
     pub fn print_success<T: Serialize>(&self, data: T) {
         if self.options.quiet {
             return;
         }
-        let response = serde_json::json!({
-            "success": true,
-            "data": data
-        });
-        self.print_json(&response);
-    }
-
-    pub fn print_success_flat<T: Serialize>(&self, data: T) {
-        if self.options.quiet {
-            return;
-        }
-        let mut response = serde_json::to_value(data).unwrap_or(serde_json::json!({}));
-        if let Some(obj) = response.as_object_mut() {
-            obj.insert("success".to_string(), serde_json::json!(true));
-        }
+        let response = match serde_json::to_value(data) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Failed to serialize response data: {e}");
+                serde_json::json!({})
+            }
+        };
         self.print_json(&response);
     }
 
     pub fn print_error(&self, message: &str) {
         let response = serde_json::json!({
-            "success": false,
             "error": message
         });
         self.print_json(&response);

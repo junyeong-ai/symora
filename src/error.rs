@@ -1,31 +1,6 @@
-//! Error types for Symora
-
 use thiserror::Error;
 
 use crate::models::symbol::Language;
-
-pub type SymoraResult<T> = std::result::Result<T, SymoraError>;
-
-#[derive(Debug, Error)]
-pub enum SymoraError {
-    #[error("{0}")]
-    Lsp(#[from] LspError),
-
-    #[error("{0}")]
-    Search(#[from] SearchError),
-
-    #[error("{0}")]
-    Store(#[from] StoreError),
-
-    #[error("{0}")]
-    Config(#[from] ConfigError),
-
-    #[error("{0}")]
-    Project(#[from] ProjectError),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
 
 #[derive(Debug, Error)]
 pub enum LspError {
@@ -104,7 +79,7 @@ impl LspError {
                 | Self::NotConnected
                 | Self::Timeout(_)
                 | Self::RequestCancelled
-        ) || self.is_cancelled()
+        ) || matches!(self, Self::ServerError { code, .. } if *code == Self::CANCELLED_ERROR_CODE)
     }
 
     pub fn needs_restart(&self) -> bool {
@@ -118,7 +93,6 @@ impl LspError {
                || message.to_lowercase().contains("server stopped"))
     }
 
-    /// Get the affected language if this is a server-specific error
     pub fn affected_language(&self) -> Option<Language> {
         match self {
             Self::ServerTerminated { language } => Some(*language),

@@ -1,8 +1,8 @@
-//! Command implementations for Symora
-
 pub mod actions;
 pub mod callees;
 pub mod callers;
+pub mod code_lens;
+pub mod common;
 pub mod config;
 pub mod context;
 #[cfg(unix)]
@@ -12,13 +12,18 @@ pub mod diagnostics;
 pub mod diff_impact;
 pub mod doctor;
 pub mod edit;
+pub mod folding;
+pub mod format;
 pub mod hover;
 pub mod impact;
-pub mod impl_cmd;
+pub mod implementations;
 pub mod init;
+pub mod inlay_hints;
+pub mod map;
 pub mod refs;
 pub mod rename;
 pub mod search;
+pub mod selection;
 pub mod signature;
 pub mod status;
 pub mod subtypes;

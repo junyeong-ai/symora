@@ -1,6 +1,6 @@
-//! Helper functions for LSP operations
-
 use std::path::{Path, PathBuf};
+
+use std::collections::HashSet;
 
 use crate::error::LspError;
 use crate::infra::file_filter::{FileFilter, FileFilterConfig};
@@ -11,14 +11,13 @@ use crate::infra::lsp::{
 use crate::models::lsp::{TypeHierarchyItem, uri_to_path};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
-/// Read file content with validation in a single pass
-///
-/// Optimized for typical use: single file open, pre-allocated buffer.
-/// Binary detection via null byte check in first 8KB (more reliable than UTF-8 decode errors).
-pub(super) async fn read_file_validated(file: &Path) -> Result<String, LspError> {
+pub(super) async fn read_file_validated(
+    file: &Path,
+    max_file_size: u64,
+) -> Result<String, LspError> {
     use tokio::io::AsyncReadExt;
 
-    let max_size = crate::services::max_file_size_bytes();
+    let max_size = max_file_size;
     let mut f = tokio::fs::File::open(file).await?;
     let metadata = f.metadata().await?;
     let file_size = metadata.len();
@@ -48,6 +47,8 @@ pub(super) async fn read_file_validated(file: &Path) -> Result<String, LspError>
     String::from_utf8(bytes)
         .map_err(|_| LspError::Protocol(format!("Cannot process binary file: {}", file.display())))
 }
+
+pub(super) use crate::utils::char_to_byte_index;
 
 pub(super) async fn read_line_streaming(file: &Path, target_line: u32) -> Option<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -90,9 +91,13 @@ pub(super) fn check_feature_support(
     Ok(level)
 }
 
-pub(super) fn find_project_entry(root: &Path, language: Language) -> Option<PathBuf> {
-    if let Some(custom_files) = crate::config::entry_files_for(language) {
-        for pattern in &custom_files {
+pub(super) fn find_project_entry(
+    root: &Path,
+    language: Language,
+    config: &crate::config::LspRuntimeConfig,
+) -> Option<PathBuf> {
+    if let Some(custom_files) = config.entry_files_for(language) {
+        for pattern in custom_files {
             if pattern.contains('*') {
                 if let Some(found) = find_file_by_glob(root, pattern) {
                     return Some(found);
@@ -221,11 +226,6 @@ pub(super) fn find_first_file(root: &Path, language: Language) -> Option<PathBuf
     files.into_iter().next()
 }
 
-/// Parse LSP location response which can be:
-/// - null
-/// - Location (single)
-/// - Location[] (array)
-/// - LocationLink[] (rust-analyzer, clangd use this format)
 pub(super) fn parse_location_response(result: &serde_json::Value) -> Option<Vec<LspLocation>> {
     use crate::infra::lsp::protocol::LocationLink;
 
@@ -233,36 +233,34 @@ pub(super) fn parse_location_response(result: &serde_json::Value) -> Option<Vec<
         return None;
     }
 
-    // Try Location[] first (most common for multi-location responses)
-    if let Some(locations) = serde_json::from_value::<Vec<LspLocation>>(result.clone())
-        .ok()
-        .filter(|locs| !locs.is_empty())
-    {
-        return Some(locations);
+    if let Some(arr) = result.as_array() {
+        if arr.is_empty() {
+            return None;
+        }
+        // Check first element to determine format
+        if arr[0].get("targetUri").is_some() {
+            // LocationLink[] format (rust-analyzer, clangd)
+            if let Ok(links) = serde_json::from_value::<Vec<LocationLink>>(result.clone()) {
+                return Some(links.into_iter().map(|l| l.to_location()).collect());
+            }
+        }
+        // Standard Location[] format
+        serde_json::from_value::<Vec<LspLocation>>(result.clone())
+            .ok()
+            .filter(|locs| !locs.is_empty())
+    } else {
+        // Single object
+        if result.get("targetUri").is_some()
+            && let Ok(link) = serde_json::from_value::<LocationLink>(result.clone())
+        {
+            return Some(vec![link.to_location()]);
+        }
+        serde_json::from_value::<LspLocation>(result.clone())
+            .ok()
+            .map(|l| vec![l])
     }
-
-    // Try LocationLink[] (used by rust-analyzer, clangd)
-    if let Some(links) = serde_json::from_value::<Vec<LocationLink>>(result.clone())
-        .ok()
-        .filter(|links| !links.is_empty())
-    {
-        return Some(links.into_iter().map(|l| l.to_location()).collect());
-    }
-
-    // Try single Location
-    if let Ok(loc) = serde_json::from_value::<LspLocation>(result.clone()) {
-        return Some(vec![loc]);
-    }
-
-    // Try single LocationLink
-    if let Ok(link) = serde_json::from_value::<LocationLink>(result.clone()) {
-        return Some(vec![link.to_location()]);
-    }
-
-    None
 }
 
-/// Parse a type hierarchy item from LSP response
 pub(super) fn parse_type_hierarchy_item(item: &serde_json::Value) -> Option<TypeHierarchyItem> {
     let name = item.get("name")?.as_str()?.to_string();
     let kind_num = item.get("kind")?.as_u64()? as u32;
@@ -285,8 +283,6 @@ pub(super) fn parse_type_hierarchy_item(item: &serde_json::Value) -> Option<Type
     })
 }
 
-/// Create a file-level symbol as fallback when no symbols are found.
-/// This provides graceful degradation when LSP doesn't return any symbols.
 pub(super) fn create_file_level_symbol(file: &Path) -> Symbol {
     let name = file
         .file_name()
@@ -301,8 +297,23 @@ pub(super) fn create_file_level_symbol(file: &Path) -> Symbol {
     )
 }
 
-/// Filter locations to only include those within the project root.
-/// Excludes external packages, stdlib paths, and other out-of-repository references.
+pub fn dedup_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
+    let mut seen = HashSet::new();
+    symbols
+        .into_iter()
+        .filter(|s| {
+            let key = (
+                s.name.clone(),
+                s.kind,
+                s.location.file.clone(),
+                s.location.line,
+                s.location.column,
+            );
+            seen.insert(key)
+        })
+        .collect()
+}
+
 pub(super) fn filter_locations_within_project(
     locations: Vec<Location>,
     project_root: &Path,
@@ -329,8 +340,6 @@ pub(super) fn filter_locations_within_project(
         .collect()
 }
 
-/// Select the best definition from multiple locations.
-/// For TypeScript/JavaScript: prefer source files over node_modules and .d.ts files.
 pub(super) fn select_best_definition(
     locations: &[LspLocation],
     language: Language,
@@ -366,8 +375,6 @@ pub(super) fn select_best_definition(
     locations.first()
 }
 
-/// Find the innermost callable symbol (function, method, constructor) containing a position.
-/// Searches nested symbol trees to find the most specific match.
 pub fn find_containing_callable(symbols: &[Symbol], target_line: u32) -> Option<&Symbol> {
     fn search_recursive<'a>(
         symbols: &'a [Symbol],

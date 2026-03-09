@@ -15,7 +15,3 @@ pub use daemon_lsp::DaemonLspService;
 pub use lsp::{DefaultLspService, LspService};
 pub use project::{DefaultProjectService, ProjectService};
 pub use store::Store;
-
-pub(crate) fn max_file_size_bytes() -> u64 {
-    crate::config::max_file_size_bytes()
-}

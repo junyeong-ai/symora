@@ -1,11 +1,6 @@
-//! JSON-RPC 2.0 Protocol for Daemon Communication
-//!
-//! Defines the protocol for CLI-Daemon communication over Unix socket.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// JSON-RPC 2.0 Request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub jsonrpc: String,
@@ -26,7 +21,6 @@ impl Request {
     }
 }
 
-/// JSON-RPC 2.0 Response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     pub jsonrpc: String,
@@ -57,7 +51,6 @@ impl Response {
     }
 }
 
-/// Request ID
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum RequestId {
@@ -65,7 +58,6 @@ pub enum RequestId {
     String(String),
 }
 
-/// JSON-RPC Error
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcError {
     pub code: i32,
@@ -83,20 +75,8 @@ impl RpcError {
         }
     }
 
-    pub fn with_data(code: i32, message: impl Into<String>, data: Value) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: Some(data),
-        }
-    }
-
     pub fn parse_error() -> Self {
         Self::new(-32700, "Parse error")
-    }
-
-    pub fn invalid_request() -> Self {
-        Self::new(-32600, "Invalid request")
     }
 
     pub fn method_not_found(method: &str) -> Self {
@@ -109,21 +89,6 @@ impl RpcError {
 
     pub fn internal_error(msg: &str) -> Self {
         Self::new(-32603, format!("Internal error: {}", msg))
-    }
-
-    pub fn from_lsp_error(error: &crate::error::LspError) -> Self {
-        Self::new(error.error_code(), error.to_string())
-    }
-
-    pub fn server_not_installed(server: &str, hint: &str) -> Self {
-        Self::with_data(
-            -32001,
-            format!("Server not installed: {}", server),
-            serde_json::json!({
-                "server": server,
-                "install_hint": hint
-            }),
-        )
     }
 }
 
@@ -139,25 +104,30 @@ impl From<crate::error::LspError> for RpcError {
     }
 }
 
-/// RPC method constants
+impl From<crate::error::StoreError> for RpcError {
+    fn from(error: crate::error::StoreError) -> Self {
+        Self::new(-32603, format!("Store error: {}", error))
+    }
+}
+
 pub mod methods {
-    pub const FIND_SYMBOL: &str = "find_symbol";
-    pub const FIND_REFS: &str = "find_refs";
-    pub const FIND_DEF: &str = "find_def";
-    pub const FIND_TYPEDEF: &str = "find_typedef";
-    pub const FIND_IMPL: &str = "find_impl";
-    pub const WORKSPACE_SYMBOL: &str = "workspace_symbol";
+    pub const FIND_SYMBOLS: &str = "find_symbols";
+    pub const FIND_REFERENCES: &str = "find_references";
+    pub const GOTO_DEFINITION: &str = "goto_definition";
+    pub const GOTO_TYPE_DEFINITION: &str = "goto_type_definition";
+    pub const FIND_IMPLEMENTATIONS: &str = "find_implementations";
+    pub const WORKSPACE_SYMBOLS: &str = "workspace_symbols";
     pub const HOVER: &str = "hover";
     pub const SIGNATURE_HELP: &str = "signature_help";
     pub const DIAGNOSTICS: &str = "diagnostics";
-    pub const CALLS_INCOMING: &str = "calls_incoming";
-    pub const CALLS_OUTGOING: &str = "calls_outgoing";
+    pub const INCOMING_CALLS: &str = "incoming_calls";
+    pub const OUTGOING_CALLS: &str = "outgoing_calls";
     pub const SUPERTYPES: &str = "supertypes";
     pub const SUBTYPES: &str = "subtypes";
     pub const INLAY_HINTS: &str = "inlay_hints";
     pub const FOLDING_RANGES: &str = "folding_ranges";
     pub const SELECTION_RANGES: &str = "selection_ranges";
-    pub const CODE_LENS: &str = "code_lens";
+    pub const CODE_LENSES: &str = "code_lenses";
     pub const CODE_ACTIONS: &str = "code_actions";
     pub const APPLY_CODE_ACTION: &str = "apply_code_action";
     pub const PREPARE_RENAME: &str = "prepare_rename";
@@ -166,226 +136,45 @@ pub mod methods {
     pub const STATUS: &str = "status";
     pub const SHUTDOWN: &str = "shutdown";
 
-    // Search operations
+    pub const INVALIDATE_FILE: &str = "invalidate_file";
+    pub const LANGUAGE_STATUS: &str = "language_status";
+
+    pub const FORMAT: &str = "format";
+
     pub const SEARCH_SYMBOLS: &str = "search_symbols";
     pub const SEARCH_CONTENT: &str = "search_content";
     pub const INDEX_BUILD: &str = "index_build";
     pub const INDEX_STATUS: &str = "index_status";
     pub const INDEX_CLEAR: &str = "index_clear";
 
-    /// Map daemon method to LSP method for timeout calculation.
-    /// Returns None for daemon-only operations (ping, status, index).
     pub fn to_lsp_method(daemon_method: &str) -> Option<&'static str> {
         match daemon_method {
-            FIND_REFS => Some("textDocument/references"),
-            FIND_DEF => Some("textDocument/definition"),
-            FIND_TYPEDEF => Some("textDocument/typeDefinition"),
-            FIND_IMPL => Some("textDocument/implementation"),
-            FIND_SYMBOL => Some("textDocument/documentSymbol"),
-            WORKSPACE_SYMBOL => Some("workspace/symbol"),
+            FIND_REFERENCES => Some("textDocument/references"),
+            GOTO_DEFINITION => Some("textDocument/definition"),
+            GOTO_TYPE_DEFINITION => Some("textDocument/typeDefinition"),
+            FIND_IMPLEMENTATIONS => Some("textDocument/implementation"),
+            FIND_SYMBOLS => Some("textDocument/documentSymbol"),
+            WORKSPACE_SYMBOLS => Some("workspace/symbol"),
             HOVER => Some("textDocument/hover"),
             SIGNATURE_HELP => Some("textDocument/signatureHelp"),
             DIAGNOSTICS => Some("textDocument/publishDiagnostics"),
-            CALLS_INCOMING => Some("callHierarchy/incomingCalls"),
-            CALLS_OUTGOING => Some("callHierarchy/outgoingCalls"),
+            INCOMING_CALLS => Some("callHierarchy/incomingCalls"),
+            OUTGOING_CALLS => Some("callHierarchy/outgoingCalls"),
             SUPERTYPES => Some("typeHierarchy/supertypes"),
             SUBTYPES => Some("typeHierarchy/subtypes"),
             INLAY_HINTS => Some("textDocument/inlayHint"),
             FOLDING_RANGES => Some("textDocument/foldingRange"),
             SELECTION_RANGES => Some("textDocument/selectionRange"),
-            CODE_LENS => Some("textDocument/codeLens"),
+            CODE_LENSES => Some("textDocument/codeLens"),
             CODE_ACTIONS => Some("textDocument/codeAction"),
             APPLY_CODE_ACTION => Some("codeAction/resolve"),
             PREPARE_RENAME => Some("textDocument/prepareRename"),
             RENAME => Some("textDocument/rename"),
-            PING | STATUS | SHUTDOWN | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR
-            | SEARCH_SYMBOLS | SEARCH_CONTENT => None,
-            _ => Some("textDocument/hover"),
+            FORMAT => Some("textDocument/formatting"),
+            PING | STATUS | SHUTDOWN | INVALIDATE_FILE | LANGUAGE_STATUS | INDEX_BUILD
+            | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS | SEARCH_CONTENT => None,
+            _ => None,
         }
-    }
-}
-
-/// Client-side response DTOs for deserialization
-pub mod dto {
-    use serde::Deserialize;
-
-    use crate::daemon::dto::{
-        CallItemDto, DiagnosticDto, FileChangeDto, LocationDto, SignatureDto, SymbolDto,
-    };
-
-    // Re-export shared DTOs from daemon::dto
-    pub use crate::daemon::dto::{HoverResponse, RangeDto, ReferencesResponse};
-
-    #[derive(Debug, Deserialize)]
-    pub struct SymbolsResponse {
-        pub count: usize,
-        pub symbols: Vec<SymbolDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct CallsResponse {
-        pub count: usize,
-        pub calls: Vec<CallItemDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct DefinitionResponse {
-        pub definition: Option<LocationDto>,
-        #[serde(default)]
-        pub message: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct ImplementationsResponse {
-        pub count: usize,
-        pub implementations: Vec<LocationDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct SignatureResponse {
-        pub signatures: Vec<SignatureDto>,
-        pub active_signature: Option<u32>,
-        pub active_parameter: Option<u32>,
-        #[serde(default)]
-        pub message: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct DiagnosticsResponse {
-        pub count: usize,
-        pub diagnostics: Vec<DiagnosticDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct PrepareRenameResponse {
-        pub placeholder: Option<String>,
-        pub range: Option<RangeDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct RenameResponse {
-        pub changes: Vec<FileChangeDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct CodeActionsResponse {
-        pub count: usize,
-        pub actions: Vec<CodeActionDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct CodeActionDto {
-        pub title: String,
-        pub kind: Option<String>,
-        pub is_preferred: bool,
-        pub diagnostics: Vec<String>,
-        pub data: Option<serde_json::Value>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct ApplyActionResponse {
-        pub changes: Vec<FileEditDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct FileEditDto {
-        pub file: String,
-        pub edits: Vec<TextEditDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct TextEditDto {
-        pub range: RangeDto,
-        pub new_text: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct TypeHierarchyResponse {
-        pub count: usize,
-        pub items: Vec<TypeHierarchyItemDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct TypeHierarchyItemDto {
-        pub name: String,
-        pub kind: String,
-        pub file: String,
-        pub line: u32,
-        pub column: u32,
-        pub detail: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct InlayHintsResponse {
-        pub count: usize,
-        pub hints: Vec<InlayHintDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct InlayHintDto {
-        pub line: u32,
-        pub character: u32,
-        pub label: String,
-        pub kind: Option<u32>,
-        #[serde(default)]
-        pub padding_left: bool,
-        #[serde(default)]
-        pub padding_right: bool,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct FoldingRangesResponse {
-        pub count: usize,
-        pub ranges: Vec<FoldingRangeDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct FoldingRangeDto {
-        pub start_line: u32,
-        pub end_line: u32,
-        pub start_character: Option<u32>,
-        pub end_character: Option<u32>,
-        pub kind: Option<String>,
-        pub collapsed_text: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct SelectionRangesResponse {
-        pub count: usize,
-        pub ranges: Vec<SelectionRangeDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct SelectionRangeDto {
-        pub start_line: u32,
-        pub start_character: u32,
-        pub end_line: u32,
-        pub end_character: u32,
-        pub parent: Option<Box<SelectionRangeDto>>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct CodeLensResponse {
-        pub count: usize,
-        pub lenses: Vec<CodeLensDto>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct CodeLensDto {
-        pub start_line: u32,
-        pub start_character: u32,
-        pub end_line: u32,
-        pub end_character: u32,
-        pub command: Option<CodeLensCommandDto>,
-        pub data: Option<serde_json::Value>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct CodeLensCommandDto {
-        pub title: String,
-        pub command: String,
-        #[serde(default)]
-        pub arguments: Vec<serde_json::Value>,
     }
 }
 
@@ -397,12 +186,12 @@ mod tests {
     fn test_request_serialization() {
         let req = Request::new(
             1,
-            "find_symbol",
+            methods::FIND_SYMBOLS,
             Some(serde_json::json!({"file": "test.rs"})),
         );
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
-        assert!(json.contains("\"method\":\"find_symbol\""));
+        assert!(json.contains("\"method\":\"find_symbols\""));
     }
 
     #[test]

@@ -1,12 +1,11 @@
-//! CLI module for Symora
-
 pub mod commands;
 pub mod location;
 pub mod output;
 pub mod response;
+pub mod symbol_discovery;
 pub mod utils;
 
-pub use location::ParsedLocation;
+pub use location::{LocationArg, ParsedLocation};
 pub use output::{OutputContext, OutputOptions};
 
 use clap::{Parser, Subcommand};
@@ -14,12 +13,14 @@ use clap::{Parser, Subcommand};
 #[cfg(unix)]
 use commands::daemon::DaemonArgs;
 use commands::{
-    actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, config::ConfigArgs,
-    context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
-    doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs, impact::ImpactArgs, impl_cmd::ImplArgs,
-    init::InitArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
-    signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
-    supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
+    actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, code_lens::CodeLensArgs,
+    config::ConfigArgs, context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs,
+    diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs, folding::FoldingArgs,
+    format::FormatArgs, hover::HoverArgs, impact::ImpactArgs, implementations::ImplArgs,
+    init::InitArgs, inlay_hints::InlayHintsArgs, map::MapArgs, refs::RefsArgs, rename::RenameArgs,
+    search::SearchArgs, selection::SelectionArgs, signature::SignatureArgs, status::StatusArgs,
+    subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs,
+    usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -33,6 +34,13 @@ QUICK START:
   symora symbols src/main.rs     List symbols in file
   symora refs src/main.rs:10:5   Find references
   symora callers src/main.rs:10  Find who calls this
+
+EXPLORATION FLOW:
+  1. `symora map summary` for project entrypoints and major areas
+  2. `symora search symbols <query>` when you know only a rough name/path
+  3. `symora map file <path>` to inspect one file before reading full code
+  4. `symora symbols <file>` or `symora symbols --symbol <path>` for exact semantic follow-up
+  5. `symora refs <loc>` once you have the exact symbol location
 
 EXAMPLES:
   symora symbols src/lib.rs --body          Include source code
@@ -77,7 +85,7 @@ pub enum Commands {
     Doctor(DoctorArgs),
 
     // Navigation
-    /// Find symbols in file or workspace
+    /// Inspect exact file symbols or exact workspace symbol trees
     Symbols(SymbolsArgs),
     /// Go to definition
     Def(DefArgs),
@@ -115,8 +123,10 @@ pub enum Commands {
     Diagnostics(DiagnosticsArgs),
 
     // Search
-    /// Search code (symbols, content, ast)
+    /// Search rough symbol/content matches when you do not know the exact file yet
     Search(SearchArgs),
+    /// Explore project structure, file overviews, and related files
+    Map(MapArgs),
 
     // Edit
     /// Code editing operations
@@ -125,6 +135,18 @@ pub enum Commands {
     Rename(RenameArgs),
     /// Code actions (refactoring, quickfix)
     Actions(ActionsArgs),
+
+    // LSP Features
+    /// Get inlay hints for a file
+    InlayHints(InlayHintsArgs),
+    /// Get folding ranges for a file
+    Folding(FoldingArgs),
+    /// Get selection ranges at position
+    Selection(SelectionArgs),
+    /// Get code lenses for a file
+    CodeLens(CodeLensArgs),
+    /// Format a file using LSP
+    Format(FormatArgs),
 
     // Daemon (Unix only)
     #[cfg(unix)]

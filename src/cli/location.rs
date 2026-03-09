@@ -1,8 +1,18 @@
-//! Location parsing for CLI commands
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+
+#[derive(clap::Args, Debug)]
+pub struct LocationArg {
+    /// File path with position (file:line:column)
+    pub location: String,
+}
+
+impl LocationArg {
+    pub fn parse(&self) -> Result<ParsedLocation> {
+        ParsedLocation::parse(&self.location)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedLocation {
@@ -43,11 +53,6 @@ impl ParsedLocation {
         }
 
         false
-    }
-
-    /// Parse location string and convert to absolute path in one step
-    pub fn parse_absolute(input: &str) -> Result<Self> {
-        Self::parse(input)?.to_absolute()
     }
 
     pub fn parse(input: &str) -> Result<Self> {
@@ -200,12 +205,12 @@ impl ParsedLocation {
         while let Some(line) = lines.next_line().await? {
             line_num += 1;
             if line_num == self.line {
-                let col_max = line.len() + 1;
-                if self.column as usize > col_max {
+                let char_count = line.chars().count();
+                if self.column as usize > char_count + 1 {
                     bail!(
                         "Column {} exceeds line length ({} chars) at line {}",
                         self.column,
-                        line.len(),
+                        char_count,
                         self.line
                     );
                 }
@@ -221,7 +226,6 @@ impl ParsedLocation {
         )
     }
 
-    /// Validate position with pre-read content
     pub fn validate_position_with_content(&self, content: &str) -> Result<()> {
         let lines: Vec<&str> = content.lines().collect();
         let line_count = lines.len().max(1);
@@ -235,12 +239,12 @@ impl ParsedLocation {
         }
 
         if let Some(line_content) = lines.get((self.line - 1) as usize) {
-            let col_max = line_content.len() + 1;
-            if self.column as usize > col_max {
+            let char_count = line_content.chars().count();
+            if self.column as usize > char_count + 1 {
                 bail!(
                     "Column {} exceeds line length ({} chars) at line {}",
                     self.column,
-                    line_content.len(),
+                    char_count,
                     self.line
                 );
             }

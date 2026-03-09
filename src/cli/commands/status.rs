@@ -1,7 +1,3 @@
-//! Status command implementation
-//!
-//! Show project status and LSP server availability.
-
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -19,7 +15,7 @@ pub struct StatusArgs {
 }
 
 #[derive(Serialize)]
-struct StatusResponse {
+struct StatusOutput {
     initialized: bool,
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,38 +40,27 @@ pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
         languages: p.languages.iter().map(|l| l.to_string()).collect(),
     });
 
-    // Collect LSP server status
-    let languages = [
-        Language::Rust,
-        Language::TypeScript,
-        Language::Python,
-        Language::Go,
-        Language::Java,
-        Language::Kotlin,
-    ];
-
+    // Collect LSP server status for all supported languages
     let mut lsp_servers = Vec::new();
-    for lang in languages {
+    for lang in Language::all() {
         let server_status = app.lsp.server_status(lang).await;
 
-        let (status_str, name, install_hint) = match &server_status {
-            ServerStatus::Running => ("running", None, None),
-            ServerStatus::Starting => ("starting", None, None),
-            ServerStatus::Stopped => ("available", None, None),
-            ServerStatus::NotInstalled { hint } => ("not_installed", None, hint.clone()),
+        let (status_str, install_hint) = match &server_status {
+            ServerStatus::Running => ("running", None),
+            ServerStatus::Stopped => ("available", None),
+            ServerStatus::NotInstalled { hint } => ("not_installed", hint.clone()),
             ServerStatus::NotSupported => continue,
-            ServerStatus::Error(e) => ("error", Some(e.clone()), None),
         };
 
         lsp_servers.push(ServerStatusOutput {
             language: lang.to_string(),
             status: status_str.to_string(),
-            name,
+            error: None,
             install_hint: if args.detailed { install_hint } else { None },
         });
     }
 
-    let response = StatusResponse {
+    let response = StatusOutput {
         initialized: status.initialized,
         path: ctx.relative_path(app.root()),
         project,
@@ -87,6 +72,6 @@ pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
         },
     };
 
-    ctx.print_success_flat(response);
+    ctx.print_success(response);
     Ok(())
 }

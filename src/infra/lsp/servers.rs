@@ -1,7 +1,3 @@
-//! Language Server Configurations
-//!
-//! Platform-aware configurations with tiered timeout profiles.
-
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::Duration;

@@ -1,12 +1,7 @@
-//! Configuration model for Symora
-//!
-//! Simple configuration focused on LSP-first architecture.
-
 use serde::{Deserialize, Serialize};
 
 use super::symbol::Language;
 
-/// Symora configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymoraConfig {
     #[serde(default)]
@@ -19,31 +14,22 @@ pub struct SymoraConfig {
     pub search: SearchConfig,
 
     #[serde(default)]
-    pub output: OutputConfig,
-
-    #[serde(default)]
-    pub daemon: DaemonSettings,
+    pub daemon: DaemonConfig,
 
     #[serde(default)]
     pub test: TestConfig,
 }
 
-/// Project configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
-    /// Project name
     pub name: Option<String>,
 
-    /// Detected/configured languages
     #[serde(default)]
     pub languages: Vec<Language>,
 
-    /// Paths to ignore
     #[serde(default = "default_ignored_paths")]
     pub ignored_paths: Vec<String>,
 
-    /// Custom project entry files per language (overrides defaults)
-    /// Example: entry_files = { rust = ["Cargo.toml", "rust-toolchain.toml"] }
     #[serde(default)]
     pub entry_files: std::collections::HashMap<String, Vec<String>>,
 }
@@ -73,7 +59,7 @@ fn default_ignored_paths() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LspConfig {
     #[serde(default = "defaults::timeout_secs")]
     pub timeout_secs: u64,
@@ -93,6 +79,9 @@ pub struct LspConfig {
     #[serde(default = "defaults::calls_limit")]
     pub calls_limit: usize,
 
+    #[serde(default = "defaults::type_hierarchy_limit")]
+    pub type_hierarchy_limit: usize,
+
     #[serde(default = "defaults::tests_limit")]
     pub tests_limit: usize,
 }
@@ -106,12 +95,13 @@ impl Default for LspConfig {
             impl_limit: defaults::impl_limit(),
             symbol_limit: defaults::symbol_limit(),
             calls_limit: defaults::calls_limit(),
+            type_hierarchy_limit: defaults::type_hierarchy_limit(),
             tests_limit: defaults::tests_limit(),
         }
     }
 }
 
-mod defaults {
+pub(crate) mod defaults {
     pub fn timeout_secs() -> u64 {
         60
     }
@@ -130,6 +120,9 @@ mod defaults {
     pub fn calls_limit() -> usize {
         100
     }
+    pub fn type_hierarchy_limit() -> usize {
+        100
+    }
     pub fn tests_limit() -> usize {
         10
     }
@@ -142,14 +135,6 @@ mod defaults {
         5
     }
 
-    // Output
-    pub fn format() -> String {
-        "json".to_string()
-    }
-    pub fn color() -> bool {
-        true
-    }
-
     // Daemon
     pub fn max_concurrent() -> usize {
         100
@@ -159,7 +144,7 @@ mod defaults {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchConfig {
     #[serde(default = "defaults::search_limit")]
     pub limit: usize,
@@ -187,28 +172,8 @@ impl SearchConfig {
     }
 }
 
-/// Output configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OutputConfig {
-    #[serde(default = "defaults::format")]
-    pub format: String,
-
-    #[serde(default = "defaults::color")]
-    pub color: bool,
-}
-
-impl Default for OutputConfig {
-    fn default() -> Self {
-        Self {
-            format: defaults::format(),
-            color: defaults::color(),
-        }
-    }
-}
-
-/// Daemon settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DaemonSettings {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonConfig {
     #[serde(default = "defaults::max_concurrent")]
     pub max_concurrent: usize,
 
@@ -216,7 +181,7 @@ pub struct DaemonSettings {
     pub idle_timeout_mins: u64,
 }
 
-impl Default for DaemonSettings {
+impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             max_concurrent: defaults::max_concurrent(),
@@ -225,18 +190,14 @@ impl Default for DaemonSettings {
     }
 }
 
-/// Test file detection configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TestConfig {
-    /// Additional file suffix patterns (e.g., "Check.kt", "Verify.java")
     #[serde(default)]
     pub file_patterns: Vec<String>,
 
-    /// Additional directory patterns (e.g., "/verification/", "/checks/")
     #[serde(default)]
     pub dir_patterns: Vec<String>,
 
-    /// Additional test markers for test name extraction (e.g., "@MyTest", "verify {")
     #[serde(default)]
     pub markers: Vec<String>,
 }
@@ -253,7 +214,6 @@ mod tests {
         assert_eq!(config.lsp.calls_limit, 100);
         assert_eq!(config.lsp.tests_limit, 10);
         assert_eq!(config.search.limit, 100);
-        assert_eq!(config.output.format, "json");
         assert_eq!(config.daemon.idle_timeout_mins, 30);
     }
 

@@ -1,8 +1,3 @@
-//! JSON-RPC 2.0 Protocol Implementation for LSP
-//!
-//! Defines the core message types for Language Server Protocol communication.
-//! Domain types (Position, Range, TextEdit, WorkspaceEdit) are in models/lsp.rs
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_repr::{Deserialize_repr, Serialize_repr};

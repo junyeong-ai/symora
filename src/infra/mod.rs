@@ -1,7 +1,3 @@
-//! Infrastructure layer for Symora
-//!
-//! Contains low-level implementations and external integrations.
-
 pub mod ast;
 pub mod file_filter;
 pub mod lsp;

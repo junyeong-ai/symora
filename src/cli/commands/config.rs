@@ -1,5 +1,3 @@
-//! Config command implementation
-
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde::Serialize;
@@ -49,27 +47,27 @@ pub enum ConfigCommand {
 }
 
 #[derive(Serialize)]
-struct ConfigInitResponse {
+struct ConfigInitOutput {
     status: String,
     path: String,
     level: &'static str,
 }
 
 #[derive(Serialize)]
-struct ConfigShowResponse {
+struct ConfigShowOutput {
     level: &'static str,
     config: serde_json::Value,
 }
 
 #[derive(Serialize)]
-struct ConfigPathResponse {
+struct ConfigPathOutput {
     level: &'static str,
     path: String,
     exists: bool,
 }
 
 #[derive(Serialize)]
-struct ConfigEditResponse {
+struct ConfigEditOutput {
     status: String,
     path: String,
 }
@@ -90,14 +88,12 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
             "impl_limit": config.lsp.impl_limit,
             "symbol_limit": config.lsp.symbol_limit,
             "calls_limit": config.lsp.calls_limit,
+            "type_hierarchy_limit": config.lsp.type_hierarchy_limit,
+            "tests_limit": config.lsp.tests_limit,
         },
         "search": {
             "limit": config.search.limit,
             "max_file_size_mb": config.search.max_file_size_mb,
-        },
-        "output": {
-            "format": config.output.format,
-            "color": config.output.color,
         },
         "daemon": {
             "max_concurrent": config.daemon.max_concurrent,
@@ -114,7 +110,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
             let level = if global { "global" } else { "project" };
             match app.config_service.init(global, force).await {
                 Ok(path) => {
-                    let response = ConfigInitResponse {
+                    let response = ConfigInitOutput {
                         status: "created".to_string(),
                         path: if global {
                             path.display().to_string()
@@ -123,7 +119,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                         },
                         level,
                     };
-                    ctx.print_success_flat(response);
+                    ctx.print_success(response);
                 }
                 Err(e) => ctx.print_error(&e.to_string()),
             }
@@ -133,11 +129,11 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
             let level = if global { "global" } else { "merged" };
             match app.config_service.load(global).await {
                 Ok(config) => {
-                    let response = ConfigShowResponse {
+                    let response = ConfigShowOutput {
                         level,
                         config: config_to_json(&config),
                     };
-                    ctx.print_success_flat(response);
+                    ctx.print_success(response);
                 }
                 Err(e) => ctx.print_error(&e.to_string()),
             }
@@ -146,7 +142,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
         ConfigCommand::Path { global } => {
             let level = if global { "global" } else { "project" };
             let path = app.config_service.config_path(global);
-            let response = ConfigPathResponse {
+            let response = ConfigPathOutput {
                 level,
                 path: if global {
                     path.display().to_string()
@@ -155,12 +151,12 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                 },
                 exists: path.exists(),
             };
-            ctx.print_success_flat(response);
+            ctx.print_success(response);
         }
 
         ConfigCommand::Edit { global } => match app.config_service.edit(global).await {
             Ok(path) => {
-                let response = ConfigEditResponse {
+                let response = ConfigEditOutput {
                     status: "opened".to_string(),
                     path: if global {
                         path.display().to_string()
@@ -168,7 +164,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                         ctx.relative_path(&path)
                     },
                 };
-                ctx.print_success_flat(response);
+                ctx.print_success(response);
             }
             Err(e) => ctx.print_error(&e.to_string()),
         },

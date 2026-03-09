@@ -1,12 +1,8 @@
-//! Response types for CLI output
-
 use std::path::Path;
 
 use serde::Serialize;
 
 use crate::models::symbol::Symbol;
-
-/// Generic section for list responses
 #[derive(Debug, Clone, Serialize)]
 pub struct Section<T> {
     pub count: usize,
@@ -60,15 +56,6 @@ pub struct LocationOutput {
 }
 
 impl LocationOutput {
-    pub fn new(file: impl Into<String>, line: u32, column: u32) -> Self {
-        Self {
-            file: file.into(),
-            line,
-            column,
-            snippet: None,
-        }
-    }
-
     /// Create from absolute path, converting to relative if within root
     pub fn from_path(path: &Path, line: u32, column: u32, root: &Path) -> Self {
         let file = path
@@ -82,11 +69,6 @@ impl LocationOutput {
             column,
             snippet: None,
         }
-    }
-
-    pub fn with_snippet(mut self, snippet: String) -> Self {
-        self.snippet = Some(snippet);
-        self
     }
 }
 
@@ -159,11 +141,16 @@ impl SymbolOutput {
         self.body = None;
         self
     }
+
+    pub fn without_children(mut self) -> Self {
+        self.children = None;
+        self
+    }
 }
 
 /// Response for find def command
 #[derive(Debug, Serialize)]
-pub struct DefinitionResponse {
+pub struct DefinitionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub definition: Option<LocationOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,7 +159,7 @@ pub struct DefinitionResponse {
 
 /// Response for hover command
 #[derive(Debug, Serialize)]
-pub struct HoverResponse {
+pub struct HoverOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,14 +183,6 @@ pub struct DiagnosticOutput {
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-}
-
-/// Response for diagnostics command
-#[derive(Debug, Serialize)]
-pub struct DiagnosticsResponse {
-    pub file: String,
-    pub count: usize,
-    pub diagnostics: Vec<DiagnosticOutput>,
 }
 
 /// Call hierarchy item output
@@ -236,7 +215,7 @@ impl CallHierarchyOutput {
 
 /// Target symbol info (unified for impact/context commands)
 #[derive(Debug, Serialize)]
-pub struct TargetInfo {
+pub struct TargetOutput {
     pub name: String,
     pub kind: String,
     pub file: String,
@@ -247,7 +226,7 @@ pub struct TargetInfo {
     pub body: Option<String>,
 }
 
-impl TargetInfo {
+impl TargetOutput {
     pub fn new(name: String, kind: String, file: String, line: u32) -> Self {
         Self {
             name,
@@ -286,22 +265,35 @@ impl TargetInfo {
         self.body = body;
         self
     }
+
+    pub fn from_symbol_or_fallback(
+        symbol: Option<&Symbol>,
+        file: &Path,
+        line: u32,
+        column: u32,
+        root: &Path,
+    ) -> Self {
+        match symbol {
+            Some(sym) => Self::from_symbol(sym, root),
+            None => {
+                let file_str = file
+                    .strip_prefix(root)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| file.display().to_string());
+                Self::new(
+                    format!("symbol@{}:{}", line, column),
+                    "unknown".to_string(),
+                    file_str,
+                    line,
+                )
+            }
+        }
+    }
 }
 
-/// Reference summary (minimal pure fact data)
+/// Reference statistics (pure fact data for analysis)
 #[derive(Debug, Serialize)]
-pub struct RefsSummary {
-    /// Total references
-    pub total: usize,
-    /// Test code references
-    pub test: usize,
-    /// Production code references
-    pub prod: usize,
-}
-
-/// Extended reference statistics (full pure fact data for impact analysis)
-#[derive(Debug, Serialize)]
-pub struct RefStats {
+pub struct RefOutput {
     /// Total reference count
     pub total: usize,
     /// Test code references
@@ -309,58 +301,37 @@ pub struct RefStats {
     /// Production code references
     pub prod: usize,
     /// Affected file count
-    pub files: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<usize>,
     /// Affected module count
-    pub modules: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modules: Option<usize>,
     /// Whether the symbol is exported (public API)
-    pub is_exported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_exported: Option<bool>,
 }
 
-impl From<&RefStats> for RefsSummary {
-    fn from(stats: &RefStats) -> Self {
-        Self {
-            total: stats.total,
-            test: stats.test,
-            prod: stats.prod,
-        }
-    }
-}
-
-/// Type definition information
-#[derive(Debug, Serialize)]
-pub struct TypeInfo {
+/// Type information output (for type definitions, supertypes, subtypes)
+#[derive(Debug, Clone, Serialize)]
+pub struct TypeInfoOutput {
     pub name: String,
     pub kind: String,
     pub location: LocationOutput,
-}
-
-/// Type hierarchy item output (for supertypes/subtypes commands)
-#[derive(Debug, Clone, Serialize)]
-pub struct TypeHierarchyOutput {
-    pub name: String,
-    pub kind: String,
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
-impl TypeHierarchyOutput {
+impl TypeInfoOutput {
     pub fn from_item(item: &crate::models::lsp::TypeHierarchyItem, root: &std::path::Path) -> Self {
-        let file = item
-            .location
-            .file
-            .strip_prefix(root)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| item.location.file.display().to_string());
-
         Self {
             name: item.name.clone(),
             kind: item.kind.to_string(),
-            file,
-            line: item.location.line,
-            column: item.location.column,
+            location: LocationOutput::from_path(
+                &item.location.file,
+                item.location.line,
+                item.location.column,
+                root,
+            ),
             detail: item.detail.clone(),
         }
     }
@@ -368,14 +339,14 @@ impl TypeHierarchyOutput {
 
 /// Test information
 #[derive(Debug, Serialize)]
-pub struct TestInfo {
+pub struct TestOutput {
     pub name: String,
     pub location: LocationOutput,
 }
 
 /// Test coverage information (pure fact data)
 #[derive(Debug, Serialize)]
-pub struct TestCoverage {
+pub struct TestCoverageOutput {
     /// Test reference count
     pub count: usize,
     /// Test files referencing this symbol
@@ -385,7 +356,7 @@ pub struct TestCoverage {
 
 /// Affected file info for impact analysis
 #[derive(Debug, Serialize)]
-pub struct AffectedFile {
+pub struct AffectedFileOutput {
     pub file: String,
     pub is_test: bool,
     pub refs: usize,
@@ -393,28 +364,16 @@ pub struct AffectedFile {
 
 /// Response for impact command (pure fact data - no heuristic judgments)
 #[derive(Debug, Serialize)]
-pub struct ImpactResponse {
+pub struct ImpactOutput {
     /// Target symbol info
-    pub target: TargetInfo,
+    pub target: TargetOutput,
     /// Reference statistics
-    pub refs: RefStats,
+    pub refs: RefOutput,
     /// Test coverage information
-    pub coverage: TestCoverage,
+    pub coverage: TestCoverageOutput,
     /// Affected files
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<AffectedFile>,
-}
-
-/// Project status output
-#[derive(Debug, Serialize)]
-pub struct ProjectStatusOutput {
-    pub initialized: bool,
-    pub root: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub languages: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub servers: Option<Vec<ServerStatusOutput>>,
+    pub files: Vec<AffectedFileOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -422,24 +381,70 @@ pub struct ServerStatusOutput {
     pub language: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
 }
 
-/// Response for status command
+/// File change output for rename/code actions
 #[derive(Debug, Serialize)]
-pub struct StatusResponse {
-    pub project: ProjectStatusOutput,
+pub struct FileChangeOutput {
+    pub file: String,
+    pub edit_count: usize,
 }
 
-/// Config output
+/// Response for signature help command
 #[derive(Debug, Serialize)]
-pub struct ConfigResponse {
+pub struct SignatureHelpOutput {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<SignatureItemOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+    pub active_signature: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<serde_json::Value>,
+    pub active_parameter: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Individual signature information
+#[derive(Debug, Serialize)]
+pub struct SignatureItemOutput {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<ParameterOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_parameter: Option<u32>,
+}
+
+/// Parameter information for signature help
+#[derive(Debug, Serialize)]
+pub struct ParameterOutput {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+}
+
+/// Code action output
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionOutput {
+    pub title: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_preferred: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+/// Response for applying a code action
+#[derive(Debug, Serialize)]
+pub struct ApplyActionOutput {
+    pub title: String,
+    pub kind: String,
+    pub applied: bool,
+    pub files_changed: usize,
+    pub changes: Vec<FileChangeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

@@ -1,13 +1,10 @@
-//! Global Configuration Singleton
+//! LSP Runtime Configuration
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::models::config::SymoraConfig;
 use crate::models::symbol::Language;
-
-static CONFIG: OnceLock<RuntimeConfig> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 pub struct LanguageProfile {
@@ -93,7 +90,7 @@ impl OperationType {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeConfig {
+pub struct LspRuntimeConfig {
     base_timeout: Duration,
     pub max_file_size_bytes: u64,
     pub auto_restart: bool,
@@ -101,7 +98,7 @@ pub struct RuntimeConfig {
     pub entry_files: HashMap<String, Vec<String>>,
 }
 
-impl Default for RuntimeConfig {
+impl Default for LspRuntimeConfig {
     fn default() -> Self {
         Self {
             base_timeout: Duration::from_secs(60),
@@ -112,7 +109,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-impl From<&SymoraConfig> for RuntimeConfig {
+impl From<&SymoraConfig> for LspRuntimeConfig {
     fn from(config: &SymoraConfig) -> Self {
         Self {
             base_timeout: Duration::from_secs(config.lsp.timeout_secs),
@@ -123,7 +120,7 @@ impl From<&SymoraConfig> for RuntimeConfig {
     }
 }
 
-impl RuntimeConfig {
+impl LspRuntimeConfig {
     pub fn timeout_for(&self, language: Language, method: &str) -> Duration {
         let profile = LanguageProfile::for_language(language);
         let op_type = OperationType::from_method(method);
@@ -138,50 +135,10 @@ impl RuntimeConfig {
     pub fn cross_file_wait(&self, language: Language) -> Duration {
         Duration::from_millis(LanguageProfile::for_language(language).cross_file_wait_ms)
     }
-}
 
-pub fn init(config: &SymoraConfig) {
-    let _ = CONFIG.set(RuntimeConfig::from(config));
-}
-
-pub fn timeout_for(language: Language, method: &str) -> Duration {
-    config().timeout_for(language, method)
-}
-
-pub fn indexing_wait(language: Language) -> Duration {
-    config().indexing_wait(language)
-}
-
-pub fn cross_file_wait(language: Language) -> Duration {
-    config().cross_file_wait(language)
-}
-
-pub fn language_profile(language: Language) -> LanguageProfile {
-    LanguageProfile::for_language(language)
-}
-
-pub fn max_file_size_bytes() -> u64 {
-    config().max_file_size_bytes
-}
-
-pub fn auto_restart() -> bool {
-    config().auto_restart
-}
-
-/// Get custom entry files for a language from config
-/// Returns None if no custom entries are configured
-pub fn entry_files_for(language: Language) -> Option<Vec<String>> {
-    let config = config();
-    let lang_key = language.lsp_id();
-    config.entry_files.get(lang_key).cloned()
-}
-
-pub fn is_initialized() -> bool {
-    CONFIG.get().is_some()
-}
-
-fn config() -> RuntimeConfig {
-    CONFIG.get().cloned().unwrap_or_default()
+    pub fn entry_files_for(&self, language: Language) -> Option<&Vec<String>> {
+        self.entry_files.get(language.lsp_id())
+    }
 }
 
 #[cfg(test)]
@@ -198,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_cross_file_wait() {
-        let config = RuntimeConfig::default();
+        let config = LspRuntimeConfig::default();
 
         // TypeScript: 1000ms
         assert_eq!(
@@ -221,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_timeout_calculation() {
-        let config = RuntimeConfig::default();
+        let config = LspRuntimeConfig::default();
 
         // Rust normal request: 60s * 1.5 * 1.0 = 90s
         let rust_timeout = config.timeout_for(Language::Rust, "textDocument/hover");

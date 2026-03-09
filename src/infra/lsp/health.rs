@@ -1,5 +1,3 @@
-//! LSP Server Health Monitoring
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,7 +55,7 @@ impl HealthMonitor {
             let count = failure_counts.entry(lang).or_insert(0);
             *count += 1;
 
-            if *count >= self.failure_threshold && crate::config::auto_restart() {
+            if *count >= self.failure_threshold && self.manager.runtime_config().auto_restart {
                 tracing::warn!(
                     "{:?} server unhealthy ({} failures), restarting",
                     lang,

@@ -1,16 +1,15 @@
-//! Supertypes command - Find parent types (superclasses, interfaces)
-
 use anyhow::Result;
 use clap::Args;
 
 use crate::app::App;
-use crate::cli::ParsedLocation;
-use crate::cli::response::{Section, TypeHierarchyOutput};
+use crate::cli::LocationArg;
+use crate::cli::commands::common::execute_list;
+use crate::cli::response::TypeInfoOutput;
 
 #[derive(Args, Debug)]
 pub struct SupertypesArgs {
-    /// File path with position (file:line:column)
-    pub location: String,
+    #[command(flatten)]
+    pub loc: LocationArg,
 
     /// Maximum results
     #[arg(long)]
@@ -18,24 +17,14 @@ pub struct SupertypesArgs {
 }
 
 pub async fn execute(args: SupertypesArgs, app: &App) -> Result<()> {
-    let ctx = &app.output;
-    let cfg = app.config();
-    let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let limit = args.limit.unwrap_or(app.config().lsp.type_hierarchy_limit);
 
-    match app.lsp.supertypes(&loc.file, loc.line, loc.column).await {
-        Ok(items) => {
-            let total = items.len();
-            let output: Vec<TypeHierarchyOutput> = items
-                .into_iter()
-                .take(limit)
-                .map(|t| TypeHierarchyOutput::from_item(&t, ctx.root()))
-                .collect();
-
-            ctx.print_success_flat(Section::with_limit(output, total));
-        }
-        Err(e) => ctx.print_error(&e.to_string()),
-    }
-
-    Ok(())
+    execute_list(
+        app,
+        args.loc,
+        limit,
+        |file, line, col| async move { app.lsp.supertypes(&file, line, col).await },
+        |t, root| TypeInfoOutput::from_item(&t, root),
+    )
+    .await
 }

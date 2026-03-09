@@ -1,10 +1,8 @@
-//! Application container for Symora
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::{OutputContext, OutputOptions};
-use crate::config;
+use crate::config::LspRuntimeConfig;
 use crate::models::config::SymoraConfig;
 use crate::services::ast_query::{AstQueryService, DefaultAstQueryService};
 use crate::services::config::{ConfigService, DefaultConfigService};
@@ -21,7 +19,7 @@ pub struct App {
     pub(crate) project: Arc<dyn ProjectService>,
     pub(crate) config_service: Arc<dyn ConfigService>,
     pub(crate) config: SymoraConfig,
-    daemon_mode: bool,
+    test_matcher: crate::cli::utils::TestMatcher,
 }
 
 impl App {
@@ -34,28 +32,32 @@ impl App {
         let config_service = Arc::new(DefaultConfigService::new(&root));
         let config = config_service.load(false).await.unwrap_or_default();
 
-        config::init(&config);
+        let runtime_config = Arc::new(LspRuntimeConfig::from(&config));
 
         let project = Arc::new(DefaultProjectService::new(&root));
-        let ast = Arc::new(DefaultAstQueryService::new()?);
+        let ast = Arc::new(DefaultAstQueryService::new(
+            runtime_config.max_file_size_bytes,
+        )?);
 
         #[cfg(unix)]
         let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
             Arc::new(DaemonLspService::new(&root))
         } else {
-            Arc::new(DefaultLspService::new(&root))
+            Arc::new(DefaultLspService::new(&root, Arc::clone(&runtime_config)))
         };
 
         #[cfg(not(unix))]
         let lsp: Arc<dyn LspService + Send + Sync> = {
             let _ = use_daemon;
-            Arc::new(DefaultLspService::new(&root))
+            Arc::new(DefaultLspService::new(&root, Arc::clone(&runtime_config)))
         };
 
         tracing::info!(
             "Symora initialized (daemon: {})",
             if use_daemon { "enabled" } else { "disabled" }
         );
+
+        let test_matcher = crate::cli::utils::TestMatcher::from_config(&config.test);
 
         Ok(Self {
             root,
@@ -65,7 +67,7 @@ impl App {
             project,
             config_service,
             config,
-            daemon_mode: use_daemon,
+            test_matcher,
         })
     }
 
@@ -77,15 +79,7 @@ impl App {
         &self.config
     }
 
-    pub fn test_matcher(&self) -> crate::cli::utils::TestMatcher {
-        crate::cli::utils::TestMatcher::from_config(&self.config.test)
-    }
-
-    pub fn is_daemon_mode(&self) -> bool {
-        self.daemon_mode
-    }
-
-    pub fn is_initialized(&self) -> bool {
-        self.root.join(".symora").exists()
+    pub fn test_matcher(&self) -> &crate::cli::utils::TestMatcher {
+        &self.test_matcher
     }
 }

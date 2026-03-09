@@ -1,8 +1,3 @@
-//! File filtering with .gitignore integration
-//!
-//! Uses the `ignore` crate (from ripgrep) for gitignore-style pattern matching.
-//! Supports multiple .gitignore files with proper directory scoping.
-
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
