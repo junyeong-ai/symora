@@ -1,9 +1,4 @@
-//! Diff-impact command - analyze impact of git diff changes
-//!
-//! Parses git diff output to identify changed functions/methods,
-//! then uses LSP to find all references and callers for each change.
-
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,7 +8,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
-use crate::cli::utils::{TestMatcher, find_symbol_at_line};
+use crate::cli::utils::{TestMatcher, classify_refs, find_symbol_at_position};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::services::lsp::LspService;
 
@@ -37,7 +32,7 @@ pub struct DiffImpactArgs {
 }
 
 #[derive(Debug, Serialize)]
-pub struct DiffImpactResponse {
+pub struct DiffImpactOutput {
     pub revision: String,
     pub changed_files_count: usize,
     pub changed_symbols_count: usize,
@@ -94,7 +89,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let hunks = parse_git_diff(root, &args.revision, args.staged)?;
 
     if hunks.is_empty() {
-        ctx.print_success_flat(DiffImpactResponse {
+        ctx.print_success(DiffImpactOutput {
             revision: args.revision,
             changed_files_count: 0,
             changed_symbols_count: 0,
@@ -109,13 +104,16 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         return Ok(());
     }
 
+    let calls_limit = app.config().lsp.calls_limit;
+
     let changes = analyze_hunks(
         app.lsp.as_ref(),
         &hunks,
         root,
-        &test_matcher,
+        test_matcher,
         args.callers,
         args.max_symbols,
+        calls_limit,
     )
     .await;
 
@@ -129,7 +127,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         with_tests as f32 / changes.len() as f32
     };
 
-    let response = DiffImpactResponse {
+    let response = DiffImpactOutput {
         revision: args.revision,
         changed_files_count: changed_files.len(),
         changed_symbols_count: changes.len(),
@@ -142,7 +140,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         changes,
     };
 
-    ctx.print_success_flat(response);
+    ctx.print_success(response);
     Ok(())
 }
 
@@ -165,10 +163,10 @@ fn parse_git_diff(root: &Path, revision: &str, staged: bool) -> Result<Vec<DiffH
     }
 
     let diff_output = String::from_utf8_lossy(&output.stdout);
-    parse_diff_output(&diff_output, root)
+    Ok(parse_diff_output(&diff_output, root))
 }
 
-fn parse_diff_output(diff: &str, root: &Path) -> Result<Vec<DiffHunk>> {
+fn parse_diff_output(diff: &str, root: &Path) -> Vec<DiffHunk> {
     let mut hunks = Vec::new();
     let mut current_file: Option<PathBuf> = None;
 
@@ -183,7 +181,7 @@ fn parse_diff_output(diff: &str, root: &Path) -> Result<Vec<DiffHunk>> {
         }
     }
 
-    Ok(hunks)
+    hunks
 }
 
 fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
@@ -196,7 +194,7 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
     let old_range = parts[1].trim_start_matches('-');
     let new_range = parts[2].trim_start_matches('+');
 
-    let (old_start, old_count) = parse_range(old_range);
+    let (_old_start, old_count) = parse_range(old_range);
     let (new_start, new_count) = parse_range(new_range);
 
     let change_type = if old_count == 0 {
@@ -207,8 +205,10 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
         ChangeType::Modified
     };
 
+    // Always use new file coordinates. For deletions, new_start is the
+    // adjacent line in the current file; use count=1 to anchor the lookup.
     let (start_line, line_count) = if matches!(change_type, ChangeType::Deleted) {
-        (old_start, old_count)
+        (new_start.max(1), 1)
     } else {
         (new_start, new_count)
     };
@@ -239,9 +239,10 @@ async fn analyze_hunks(
     test_matcher: &TestMatcher,
     include_callers: bool,
     max_symbols: usize,
+    calls_limit: usize,
 ) -> Vec<ChangedSymbolImpact> {
     // Group hunks by file
-    let mut file_hunks: HashMap<&PathBuf, Vec<&DiffHunk>> = HashMap::new();
+    let mut file_hunks: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
         file_hunks.entry(&hunk.file).or_default().push(hunk);
     }
@@ -271,7 +272,7 @@ async fn analyze_hunks(
             // Find symbols affected by this hunk
             let affected_symbols: Vec<_> = (hunk.start_line
                 ..hunk.start_line + hunk.line_count.max(1))
-                .filter_map(|line| find_symbol_at_line(&symbols, line))
+                .filter_map(|line| find_symbol_at_position(&symbols, line, None))
                 .collect();
 
             // Deduplicate by symbol name
@@ -293,6 +294,7 @@ async fn analyze_hunks(
                     root,
                     test_matcher,
                     include_callers,
+                    calls_limit,
                 )
                 .await;
 
@@ -313,6 +315,7 @@ async fn analyze_symbol_impact(
     root: &Path,
     test_matcher: &TestMatcher,
     include_callers: bool,
+    calls_limit: usize,
 ) -> ChangedSymbolImpact {
     let line = sym.location.line;
     let column = sym.location.column;
@@ -322,19 +325,7 @@ async fn analyze_symbol_impact(
         .await
         .unwrap_or_default();
 
-    let mut test_count = 0;
-    let mut prod_count = 0;
-
-    for r in &refs {
-        if r.file == file && r.line == line {
-            continue;
-        }
-        if test_matcher.is_test_file(&r.file) {
-            test_count += 1;
-        } else {
-            prod_count += 1;
-        }
-    }
+    let classified = classify_refs(&refs, root, Some(file), Some(line), test_matcher);
 
     let callers = if include_callers {
         lsp.incoming_calls(file, line, column)
@@ -342,7 +333,7 @@ async fn analyze_symbol_impact(
             .map(|calls| {
                 calls
                     .iter()
-                    .take(10)
+                    .take(calls_limit)
                     .map(|c| CallHierarchyOutput::from_item(c, root))
                     .collect()
             })
@@ -356,9 +347,254 @@ async fn analyze_symbol_impact(
         kind: sym.kind.to_string(),
         location: LocationOutput::from_path(file, line, column, root),
         change_type,
-        refs: test_count + prod_count,
-        test_refs: test_count,
-        prod_refs: prod_count,
+        refs: classified.total,
+        test_refs: classified.test,
+        prod_refs: classified.prod,
         callers,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ---------------------------------------------------------------
+    // parse_range tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_range_with_start_and_count() {
+        assert_eq!(parse_range("10,5"), (10, 5));
+    }
+
+    #[test]
+    fn parse_range_single_value_defaults_count_to_one() {
+        assert_eq!(parse_range("42"), (42, 1));
+    }
+
+    #[test]
+    fn parse_range_zero_count() {
+        assert_eq!(parse_range("7,0"), (7, 0));
+    }
+
+    #[test]
+    fn parse_range_large_numbers() {
+        assert_eq!(parse_range("99999,500"), (99999, 500));
+    }
+
+    #[test]
+    fn parse_range_invalid_start_defaults_to_one() {
+        assert_eq!(parse_range("abc,3"), (1, 3));
+    }
+
+    #[test]
+    fn parse_range_invalid_count_defaults_to_one() {
+        assert_eq!(parse_range("5,abc"), (5, 1));
+    }
+
+    #[test]
+    fn parse_range_completely_invalid_defaults_both() {
+        assert_eq!(parse_range("xyz"), (1, 1));
+    }
+
+    // ---------------------------------------------------------------
+    // parse_hunk_header tests
+    // ---------------------------------------------------------------
+
+    fn dummy_file() -> PathBuf {
+        PathBuf::from("/tmp/test.rs")
+    }
+
+    #[test]
+    fn parse_hunk_header_standard() {
+        let hunk = parse_hunk_header("@@ -10,5 +12,7 @@ fn example()", dummy_file());
+        let hunk = hunk.expect("should parse valid hunk header");
+        assert_eq!(hunk.start_line, 12);
+        assert_eq!(hunk.line_count, 7);
+        assert!(matches!(hunk.change_type, ChangeType::Modified));
+        assert_eq!(hunk.file, dummy_file());
+    }
+
+    #[test]
+    fn parse_hunk_header_single_line() {
+        let hunk = parse_hunk_header("@@ -1 +1 @@", dummy_file());
+        let hunk = hunk.expect("should parse single-line hunk");
+        assert_eq!(hunk.start_line, 1);
+        assert_eq!(hunk.line_count, 1);
+        assert!(matches!(hunk.change_type, ChangeType::Modified));
+    }
+
+    #[test]
+    fn parse_hunk_header_with_context_text() {
+        let hunk = parse_hunk_header("@@ -100,20 +150,30 @@ impl Foo {", dummy_file());
+        let hunk = hunk.expect("should parse hunk with trailing context");
+        assert_eq!(hunk.start_line, 150);
+        assert_eq!(hunk.line_count, 30);
+        assert!(matches!(hunk.change_type, ChangeType::Modified));
+    }
+
+    #[test]
+    fn parse_hunk_header_added_lines() {
+        // old_count=0 means pure addition
+        let hunk = parse_hunk_header("@@ -5,0 +6,3 @@", dummy_file());
+        let hunk = hunk.expect("should parse addition hunk");
+        assert_eq!(hunk.start_line, 6);
+        assert_eq!(hunk.line_count, 3);
+        assert!(matches!(hunk.change_type, ChangeType::Added));
+    }
+
+    #[test]
+    fn parse_hunk_header_deleted_lines() {
+        // new_count=0 means pure deletion; function adjusts to (new_start.max(1), 1)
+        let hunk = parse_hunk_header("@@ -10,4 +9,0 @@", dummy_file());
+        let hunk = hunk.expect("should parse deletion hunk");
+        assert_eq!(hunk.start_line, 9);
+        assert_eq!(hunk.line_count, 1);
+        assert!(matches!(hunk.change_type, ChangeType::Deleted));
+    }
+
+    #[test]
+    fn parse_hunk_header_deleted_at_line_zero_clamps_to_one() {
+        let hunk = parse_hunk_header("@@ -1,2 +0,0 @@", dummy_file());
+        let hunk = hunk.expect("should parse deletion at line 0");
+        assert_eq!(hunk.start_line, 1); // max(0, 1) = 1
+        assert_eq!(hunk.line_count, 1);
+        assert!(matches!(hunk.change_type, ChangeType::Deleted));
+    }
+
+    #[test]
+    fn parse_hunk_header_invalid_format_returns_none() {
+        // Fewer than 3 whitespace-separated parts → None
+        assert!(parse_hunk_header("@@", dummy_file()).is_none());
+        assert!(parse_hunk_header("@@ -1", dummy_file()).is_none());
+        assert!(parse_hunk_header("", dummy_file()).is_none());
+    }
+
+    #[test]
+    fn parse_hunk_header_too_few_parts_returns_none() {
+        assert!(parse_hunk_header("@@ -1", dummy_file()).is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // parse_diff_output tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_diff_output_empty_input() {
+        let root = Path::new("/project");
+        let hunks = parse_diff_output("", root);
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn parse_diff_output_single_file_one_hunk() {
+        let root = Path::new("/project");
+        let diff = "\
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,3 +10,5 @@ fn main() {";
+
+        let hunks = parse_diff_output(diff, root);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, root.join("src/main.rs"));
+        assert_eq!(hunks[0].start_line, 10);
+        assert_eq!(hunks[0].line_count, 5);
+        assert!(matches!(hunks[0].change_type, ChangeType::Modified));
+    }
+
+    #[test]
+    fn parse_diff_output_single_file_multiple_hunks() {
+        let root = Path::new("/project");
+        let diff = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,2 +5,4 @@ fn foo() {
++    added_line();
++    another_line();
+@@ -20,3 +22,1 @@ fn bar() {
+-    removed_line_1();
+-    removed_line_2();";
+
+        let hunks = parse_diff_output(diff, root);
+        assert_eq!(hunks.len(), 2);
+
+        assert_eq!(hunks[0].file, root.join("src/lib.rs"));
+        assert_eq!(hunks[0].start_line, 5);
+        assert_eq!(hunks[0].line_count, 4);
+
+        assert_eq!(hunks[1].file, root.join("src/lib.rs"));
+        assert_eq!(hunks[1].start_line, 22);
+        assert_eq!(hunks[1].line_count, 1);
+    }
+
+    #[test]
+    fn parse_diff_output_multiple_files() {
+        let root = Path::new("/repo");
+        let diff = "\
+diff --git a/src/foo.rs b/src/foo.rs
+--- a/src/foo.rs
++++ b/src/foo.rs
+@@ -1,0 +1,5 @@
+diff --git a/src/bar.rs b/src/bar.rs
+--- a/src/bar.rs
++++ b/src/bar.rs
+@@ -10,2 +10,3 @@ fn bar() {
+@@ -30,5 +31,0 @@ fn baz() {";
+
+        let hunks = parse_diff_output(diff, root);
+        assert_eq!(hunks.len(), 3);
+
+        // First file: pure addition
+        assert_eq!(hunks[0].file, root.join("src/foo.rs"));
+        assert_eq!(hunks[0].start_line, 1);
+        assert_eq!(hunks[0].line_count, 5);
+        assert!(matches!(hunks[0].change_type, ChangeType::Added));
+
+        // Second file, first hunk: modification
+        assert_eq!(hunks[1].file, root.join("src/bar.rs"));
+        assert_eq!(hunks[1].start_line, 10);
+        assert_eq!(hunks[1].line_count, 3);
+        assert!(matches!(hunks[1].change_type, ChangeType::Modified));
+
+        // Second file, second hunk: deletion (new_count=0 → adjusted)
+        assert_eq!(hunks[2].file, root.join("src/bar.rs"));
+        assert_eq!(hunks[2].start_line, 31);
+        assert_eq!(hunks[2].line_count, 1);
+        assert!(matches!(hunks[2].change_type, ChangeType::Deleted));
+    }
+
+    #[test]
+    fn parse_diff_output_ignores_lines_before_file_header() {
+        let root = Path::new("/project");
+        // Hunk line before any +++ line should be ignored
+        let diff = "\
+@@ -1,1 +1,1 @@
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -5,1 +5,2 @@ fn main() {";
+
+        let hunks = parse_diff_output(diff, root);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, root.join("src/main.rs"));
+        assert_eq!(hunks[0].start_line, 5);
+    }
+
+    #[test]
+    fn parse_diff_output_dev_null_prefix_not_matched() {
+        let root = Path::new("/project");
+        // +++ /dev/null appears for deleted files; it doesn't start with "+++ b/"
+        // so current_file stays None and no hunks are produced for that section
+        let diff = "\
+diff --git a/src/old.rs b/src/old.rs
+--- a/src/old.rs
++++ /dev/null
+@@ -1,10 +0,0 @@";
+
+        let hunks = parse_diff_output(diff, root);
+        assert!(hunks.is_empty());
     }
 }

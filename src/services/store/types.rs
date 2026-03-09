@@ -7,10 +7,12 @@ use crate::models::symbol::{Language, SymbolKind};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolSearchResult {
     pub name: String,
+    pub name_path: Option<String>,
     pub kind: SymbolKind,
     pub file: PathBuf,
     pub line: u32,
     pub column: u32,
+    pub container: Option<String>,
     pub score: f64,
 }
 

@@ -1,47 +1,42 @@
-//! Impact command implementation
-//!
-//! Analyze the impact of changing a symbol using LSP references.
-//! Provides pure fact data for LLM to make contextual judgments.
-
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-
 use anyhow::Result;
 use clap::Args;
 
 use crate::app::App;
-use crate::cli::ParsedLocation;
-use crate::cli::response::{AffectedFile, ImpactResponse, RefStats, TargetInfo, TestCoverage};
-use crate::cli::utils::find_symbol_at_line;
+use crate::cli::LocationArg;
+use crate::cli::response::{
+    AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput,
+};
+use crate::cli::utils::{classify_refs, find_symbol_at_position};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
 
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
-    /// File path with position (file:line:column)
-    pub location: String,
+    #[command(flatten)]
+    pub loc: LocationArg,
 
     /// Maximum files to show
-    #[arg(long, default_value = "50")]
-    pub limit: usize,
+    #[arg(long)]
+    pub limit: Option<usize>,
 }
 
 pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let loc = args.loc.parse()?.to_absolute()?;
     let test_matcher = app.test_matcher();
     let root = ctx.root();
+    let limit = args.limit.unwrap_or(50);
 
     // Get symbol at position for target info
     let symbols = app
         .lsp
-        .find_symbols(&loc.file, FindSymbolsOptions::default())
+        .find_symbols(&loc.file, FindSymbolsOptions::default().with_body())
         .await
         .ok();
 
     let target_symbol = symbols
         .as_ref()
-        .and_then(|s| find_symbol_at_line(s, loc.line));
+        .and_then(|s| find_symbol_at_position(s, loc.line, Some(loc.column)));
 
     match app
         .lsp
@@ -49,90 +44,62 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
         .await
     {
         Ok(references) => {
-            let project_refs: Vec<_> = references
-                .iter()
-                .filter(|r| ctx.is_project_path(&r.file))
-                .collect();
+            let classified = classify_refs(&references, root, None, None, test_matcher);
 
-            let mut files: HashMap<String, (bool, usize)> = HashMap::new();
-            let mut modules: HashSet<String> = HashSet::new();
-            let mut test_refs = 0;
-            let mut prod_refs = 0;
-            let mut test_files: Vec<String> = Vec::new();
-
-            for r in &project_refs {
-                let file_str = ctx.relative_path(&r.file);
-                let is_test = test_matcher.is_test_file(&r.file);
-                let module = extract_module(&r.file);
-
-                modules.insert(module);
-
-                if is_test {
-                    test_refs += 1;
-                    if !test_files.contains(&file_str) {
-                        test_files.push(file_str.clone());
-                    }
-                } else {
-                    prod_refs += 1;
-                }
-
-                files.entry(file_str).or_insert((is_test, 0)).1 += 1;
-            }
-
-            // Detect if symbol is exported
-            let is_exported = target_symbol
-                .as_ref()
-                .map(|s| {
+            let is_exported = target_symbol.as_ref().and_then(|s| {
+                s.body.as_deref().map(|body| {
                     let lang = Language::from_path(&loc.file);
-                    detect_exported(s.body.as_deref(), lang)
+                    detect_exported(Some(body), lang)
                 })
-                .unwrap_or(false);
+            });
 
-            // Build affected files list
-            let mut affected_files: Vec<AffectedFile> = files
+            let mut affected_files: Vec<AffectedFileOutput> = classified
+                .file_counts
                 .into_iter()
-                .map(|(file, (is_test, refs))| AffectedFile {
-                    file,
+                .map(|(path, (is_test, refs))| AffectedFileOutput {
+                    file: ctx.relative_path(&path),
                     is_test,
                     refs,
                 })
                 .collect();
-
-            // Sort by refs descending
             affected_files.sort_by(|a, b| b.refs.cmp(&a.refs));
-
             let total_files = affected_files.len();
-            affected_files.truncate(args.limit);
+            affected_files.truncate(limit);
 
-            // Build target info
-            let target = match target_symbol {
-                Some(sym) => TargetInfo::from_symbol(sym, root),
-                None => TargetInfo::new(
-                    format!("symbol@{}:{}", loc.line, loc.column),
-                    "unknown".to_string(),
-                    ctx.relative_path(&loc.file),
-                    loc.line,
-                ),
-            };
+            let test_files: Vec<String> = classified
+                .test_refs
+                .iter()
+                .map(|r| ctx.relative_path(&r.file))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
 
-            let response = ImpactResponse {
+            let target = TargetOutput::from_symbol_or_fallback(
+                target_symbol,
+                &loc.file,
+                loc.line,
+                loc.column,
+                root,
+            );
+
+            let response = ImpactOutput {
                 target,
-                refs: RefStats {
-                    total: project_refs.len(),
-                    test: test_refs,
-                    prod: prod_refs,
-                    files: total_files,
-                    modules: modules.len(),
+                refs: RefOutput {
+                    total: classified.total,
+                    test: classified.test,
+                    prod: classified.prod,
+                    files: Some(total_files),
+                    modules: Some(classified.unique_modules),
                     is_exported,
                 },
-                coverage: TestCoverage {
-                    count: test_refs,
+                coverage: TestCoverageOutput {
+                    count: classified.test,
                     files: test_files,
                 },
                 files: affected_files,
             };
 
-            ctx.print_success_flat(response);
+            ctx.print_success(response);
         }
         Err(e) => ctx.print_error(&e.to_string()),
     }
@@ -174,21 +141,32 @@ fn detect_exported(body: Option<&str>, lang: Language) -> bool {
         Language::Java | Language::Kotlin => first_line.contains("public "),
         Language::TypeScript | Language::JavaScript => first_line.contains("export "),
         Language::Go => {
-            // Go: Find the function/type name after "func " or "type " keyword
-            // The name starts after the keyword and is exported if uppercase
-            let name_start = first_line
-                .find("func ")
-                .map(|i| i + 5)
-                .or_else(|| first_line.find("type ").map(|i| i + 5));
-
-            if let Some(start) = name_start {
-                first_line[start..]
+            // Go: exported if the function/type name starts with uppercase
+            // Must handle method receivers: "func (h *Handler) Process()" → check "Process"
+            if let Some(func_pos) = first_line.find("func ") {
+                let after_func = &first_line[func_pos + 5..];
+                // Skip method receiver: "(receiver) Name"
+                let name_part = if after_func.starts_with('(') {
+                    after_func
+                        .find(") ")
+                        .map(|i| &after_func[i + 2..])
+                        .unwrap_or(after_func)
+                } else {
+                    after_func
+                };
+                name_part
+                    .chars()
+                    .find(|c| c.is_alphabetic())
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false)
+            } else if let Some(type_pos) = first_line.find("type ") {
+                first_line[type_pos + 5..]
                     .chars()
                     .find(|c| c.is_alphabetic())
                     .map(|c| c.is_uppercase())
                     .unwrap_or(false)
             } else {
-                // For variables/constants: first alphabetic char
+                // Variables/constants: first alphabetic char
                 first_line
                     .chars()
                     .find(|c| c.is_alphabetic())
@@ -219,52 +197,9 @@ fn detect_exported(body: Option<&str>, lang: Language) -> bool {
     }
 }
 
-/// Extract module path from file path.
-/// Returns the directory path between src/lib and the filename.
-fn extract_module(path: &Path) -> String {
-    let components: Vec<_> = path
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
-
-    // Find start point (after src/ or lib/)
-    let start = components
-        .iter()
-        .position(|&c| c == "src" || c == "lib" || c == "main" || c == "test" || c == "tests")
-        .map(|i| i + 1)
-        .unwrap_or(0);
-
-    // End before the filename
-    let end = components.len().saturating_sub(1);
-
-    if start < end {
-        components[start..end].join("/")
-    } else {
-        "root".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_extract_module() {
-        assert_eq!(
-            extract_module(&PathBuf::from("src/services/lsp.rs")),
-            "services"
-        );
-        assert_eq!(
-            extract_module(&PathBuf::from("src/cli/commands/impact.rs")),
-            "cli/commands"
-        );
-        assert_eq!(extract_module(&PathBuf::from("src/main.rs")), "root");
-        assert_eq!(
-            extract_module(&PathBuf::from("lib/utils/helpers.py")),
-            "utils"
-        );
-    }
 
     #[test]
     fn test_detect_exported_rust() {
@@ -300,6 +235,20 @@ mod tests {
         assert!(detect_exported(Some("type Handler struct"), Language::Go));
         assert!(!detect_exported(Some("func process()"), Language::Go));
         assert!(!detect_exported(Some("type handler struct"), Language::Go));
+
+        // Method receivers
+        assert!(detect_exported(
+            Some("func (h *Handler) Process()"),
+            Language::Go
+        ));
+        assert!(!detect_exported(
+            Some("func (h *Handler) process()"),
+            Language::Go
+        ));
+        assert!(detect_exported(
+            Some("func (s Service) Export()"),
+            Language::Go
+        ));
     }
 
     #[test]

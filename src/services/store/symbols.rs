@@ -1,5 +1,3 @@
-//! Symbol extraction using tree-sitter
-
 use std::sync::Mutex;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -8,6 +6,8 @@ use crate::models::symbol::{Language, SymbolKind};
 
 pub struct ExtractedSymbol {
     pub name: String,
+    pub container: Option<String>,
+    pub name_path: Option<String>,
     pub kind: SymbolKind,
     pub line: u32,
     pub column: u32,
@@ -135,15 +135,47 @@ impl SymbolExtractor {
         let node = capture.node;
 
         let (name, kind) = self.extract_name_and_kind(node, content, language)?;
+        let container = self.extract_container_path(node, content, language);
+        let name_path = Some(match &container {
+            Some(container) => format!("{container}/{name}"),
+            None => name.clone(),
+        });
 
         let start = node.start_position();
 
         Some(ExtractedSymbol {
             name,
+            container,
+            name_path,
             kind,
             line: start.row as u32 + 1,
             column: start.column as u32 + 1,
         })
+    }
+
+    fn extract_container_path(
+        &self,
+        mut node: tree_sitter::Node,
+        content: &str,
+        language: Language,
+    ) -> Option<String> {
+        let mut parts = Vec::new();
+
+        while let Some(parent) = node.parent() {
+            node = parent;
+            if let Some((name, _)) = self.extract_name_and_kind(node, content, language)
+                && !name.is_empty()
+            {
+                parts.push(name);
+            }
+        }
+
+        parts.reverse();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("/"))
+        }
     }
 
     fn extract_name_and_kind(

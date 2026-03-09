@@ -1,13 +1,8 @@
-//! Common CLI utilities
-//!
-//! Shared helper functions for CLI commands.
-
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::models::config::TestConfig;
-use crate::models::symbol::Symbol;
-
-/// Test file matcher with support for custom patterns
+use crate::models::symbol::{Location, Symbol};
 #[derive(Debug, Clone)]
 pub struct TestMatcher {
     custom_file_patterns: Vec<String>,
@@ -73,11 +68,6 @@ impl TestMatcher {
 
         false
     }
-}
-
-/// Check if a path represents a test file (convenience function using defaults only)
-pub fn is_test_file(path: &Path) -> bool {
-    is_test_file_default(path)
 }
 
 /// Check if a path represents a test file based on built-in patterns
@@ -273,15 +263,69 @@ pub fn read_line_at(path: &Path, line: u32) -> std::io::Result<String> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Line not found"))
 }
 
-/// Find symbol at a specific line number (recursive search)
-pub fn find_symbol_at_line(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
-    fn search(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
-        for symbol in symbols {
-            let start = symbol.location.line;
-            let end = symbol.location.end_line.unwrap_or(start);
+/// Read lines around a target line with context (N lines before and after).
+/// Returns a string with line numbers prefixed, e.g. "10: fn foo() {\n11:   bar()\n12: }".
+pub fn read_lines_around(path: &Path, target_line: u32, context: usize) -> std::io::Result<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
 
-            if line >= start && line <= end {
-                if let Some(child) = search(&symbol.children, line) {
+    let target = target_line.saturating_sub(1) as usize;
+    let start = target.saturating_sub(context);
+    let end = target + context;
+
+    let lines: Vec<String> = reader
+        .lines()
+        .enumerate()
+        .skip(start)
+        .take(end - start + 1)
+        .filter_map(|(i, line)| line.ok().map(|l| format!("{}: {}", i + 1, l)))
+        .collect();
+
+    if lines.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Lines not found",
+        ));
+    }
+
+    Ok(lines.join("\n"))
+}
+
+/// Find the innermost symbol at a position (recursive search).
+///
+/// - `column = None`: line-only matching (finds deepest symbol containing that line)
+/// - `column = Some(col)`: line+column range matching (finds deepest symbol containing that position)
+pub fn find_symbol_at_position(
+    symbols: &[Symbol],
+    line: u32,
+    column: Option<u32>,
+) -> Option<&Symbol> {
+    fn search(symbols: &[Symbol], line: u32, column: Option<u32>) -> Option<&Symbol> {
+        for symbol in symbols {
+            let loc = &symbol.location;
+            let start = loc.line;
+            let end = loc.end_line.unwrap_or(start);
+
+            let in_range = match column {
+                None => line >= start && line <= end,
+                Some(col) => {
+                    if start == end {
+                        // Single-line symbol
+                        loc.line == line
+                            && col >= loc.column
+                            && loc.end_column.is_none_or(|ec| col <= ec)
+                    } else {
+                        // Multi-line symbol
+                        (line > start && line < end)
+                            || (line == start && col >= loc.column)
+                            || (line == end && loc.end_column.is_none_or(|ec| col <= ec))
+                    }
+                }
+            };
+
+            if in_range {
+                if let Some(child) = search(&symbol.children, line, column) {
                     return Some(child);
                 }
                 return Some(symbol);
@@ -289,7 +333,96 @@ pub fn find_symbol_at_line(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
         }
         None
     }
-    search(symbols, line)
+    search(symbols, line, column)
+}
+
+pub fn resolve_symbol_anchor(
+    symbols: &[Symbol],
+    line: u32,
+    column: u32,
+) -> Option<(u32, u32, &Symbol)> {
+    find_symbol_at_position(symbols, line, Some(column))
+        .or_else(|| find_symbol_at_position(symbols, line, None))
+        .map(|symbol| (symbol.location.line, symbol.location.column, symbol))
+}
+
+pub struct RefsClassification<'a> {
+    pub total: usize,
+    pub test: usize,
+    pub prod: usize,
+    pub unique_files: usize,
+    pub unique_modules: usize,
+    pub test_refs: Vec<&'a Location>,
+    pub file_counts: HashMap<PathBuf, (bool, usize)>,
+}
+
+pub fn classify_refs<'a>(
+    refs: &'a [Location],
+    root: &Path,
+    self_file: Option<&Path>,
+    self_line: Option<u32>,
+    test_matcher: &TestMatcher,
+) -> RefsClassification<'a> {
+    let mut test_count = 0usize;
+    let mut prod_count = 0usize;
+    let mut test_refs = Vec::new();
+    let mut unique_files = HashSet::new();
+    let mut unique_modules = HashSet::new();
+    let mut file_counts: HashMap<PathBuf, (bool, usize)> = HashMap::new();
+
+    for r in refs {
+        if self_file.is_some_and(|f| r.file == f) && self_line.is_some_and(|l| r.line == l) {
+            continue;
+        }
+        if !r.file.starts_with(root) {
+            continue;
+        }
+
+        unique_files.insert(&r.file);
+        let module = extract_module(&r.file);
+        unique_modules.insert(module);
+        let is_test = test_matcher.is_test_file(&r.file);
+
+        if is_test {
+            test_count += 1;
+            test_refs.push(r);
+        } else {
+            prod_count += 1;
+        }
+
+        file_counts.entry(r.file.clone()).or_insert((is_test, 0)).1 += 1;
+    }
+
+    RefsClassification {
+        total: test_count + prod_count,
+        test: test_count,
+        prod: prod_count,
+        unique_files: unique_files.len(),
+        unique_modules: unique_modules.len(),
+        test_refs,
+        file_counts,
+    }
+}
+
+pub fn extract_module(path: &Path) -> String {
+    let components: Vec<_> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+
+    let start = components
+        .iter()
+        .position(|&c| c == "src" || c == "lib" || c == "main" || c == "test" || c == "tests")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    let end = components.len().saturating_sub(1);
+
+    if start < end {
+        components[start..end].join("/")
+    } else {
+        "root".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -357,5 +490,22 @@ mod tests {
 
         // Prefix pattern should match
         assert!(matcher.is_test_file(Path::new("src/check_something.rs")));
+    }
+
+    #[test]
+    fn test_extract_module() {
+        assert_eq!(
+            extract_module(&PathBuf::from("src/services/lsp.rs")),
+            "services"
+        );
+        assert_eq!(
+            extract_module(&PathBuf::from("src/cli/commands/impact.rs")),
+            "cli/commands"
+        );
+        assert_eq!(extract_module(&PathBuf::from("src/main.rs")), "root");
+        assert_eq!(
+            extract_module(&PathBuf::from("lib/utils/helpers.py")),
+            "utils"
+        );
     }
 }

@@ -1,5 +1,3 @@
-//! Rename command - LSP-powered symbol renaming
-
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -7,8 +5,11 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::commands::edit::apply_workspace_edits;
+#[cfg(unix)]
+use crate::cli::commands::edit::invalidate_store_files;
+use crate::cli::response::FileChangeOutput;
+use crate::cli::utils::find_symbol_at_position;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::Symbol;
 
 #[derive(Args, Debug)]
 pub struct RenameArgs {
@@ -24,7 +25,7 @@ pub struct RenameArgs {
 }
 
 #[derive(Serialize)]
-struct RenameResponse {
+struct RenameOutput {
     old_name: Option<String>,
     new_name: String,
     dry_run: bool,
@@ -34,15 +35,9 @@ struct RenameResponse {
     message: Option<String>,
 }
 
-#[derive(Serialize)]
-struct FileChangeOutput {
-    file: String,
-    edit_count: usize,
-}
-
 pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
+    let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
 
     if let Err(e) = loc.validate_position_async().await {
         ctx.print_error(&e.to_string());
@@ -55,7 +50,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
     if let Some(ref current) = old_name
         && current == &args.new_name
     {
-        let response = RenameResponse {
+        let response = RenameOutput {
             old_name: old_name.clone(),
             new_name: args.new_name,
             dry_run: true,
@@ -63,7 +58,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
             changes: vec![],
             message: Some("Symbol is already named the same. No changes needed.".to_string()),
         };
-        ctx.print_success_flat(response);
+        ctx.print_success(response);
         return Ok(());
     }
 
@@ -76,6 +71,13 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
             // Apply workspace edits to files
             match apply_workspace_edits(&result.changes, args.dry_run) {
                 Ok(applied_changes) => {
+                    #[cfg(unix)]
+                    if !args.dry_run {
+                        let changed_files: Vec<_> =
+                            applied_changes.iter().map(|c| c.file.clone()).collect();
+                        invalidate_store_files(app, &changed_files).await;
+                    }
+
                     let changes: Vec<FileChangeOutput> = applied_changes
                         .iter()
                         .map(|fc| FileChangeOutput {
@@ -84,7 +86,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                         })
                         .collect();
 
-                    let response = RenameResponse {
+                    let response = RenameOutput {
                         old_name,
                         new_name: args.new_name,
                         dry_run: args.dry_run,
@@ -98,7 +100,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                             None
                         },
                     };
-                    ctx.print_success_flat(response);
+                    ctx.print_success(response);
                 }
                 Err(e) => ctx.print_error(&format!("Failed to apply rename: {}", e)),
             }
@@ -120,15 +122,13 @@ async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<
     }
 
     // 2. Try find_symbols and match by position
-    if let Ok(mut symbols) = app
+    if let Ok(symbols) = app
         .lsp
-        .find_symbols(&loc.file, FindSymbolsOptions::new().with_depth(10))
+        .find_symbols(&loc.file, FindSymbolsOptions::default().with_depth(10))
         .await
+        && let Some(sym) = find_symbol_at_position(&symbols, loc.line, Some(loc.column))
     {
-        Symbol::compute_paths_for_all(&mut symbols);
-        if let Some(name) = find_symbol_at_position(&symbols, loc.line, loc.column) {
-            return Some(name);
-        }
+        return Some(sym.name.clone());
     }
 
     // 3. Fall back to hover (least reliable)
@@ -139,31 +139,4 @@ async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<
         .flatten()
         .and_then(|h| h.extract_symbol_name())
         .filter(|s| !s.is_empty())
-}
-
-fn find_symbol_at_position(symbols: &[Symbol], line: u32, column: u32) -> Option<String> {
-    for symbol in symbols {
-        let loc = &symbol.location;
-        let end_line = loc.end_line.unwrap_or(loc.line);
-
-        // Check if position is within symbol's full range
-        let in_range = if loc.line == end_line {
-            // Single-line symbol
-            loc.line == line && column >= loc.column && loc.end_column.is_none_or(|ec| column <= ec)
-        } else {
-            // Multi-line symbol
-            (line > loc.line && line < end_line)
-                || (line == loc.line && column >= loc.column)
-                || (line == end_line && loc.end_column.is_none_or(|ec| column <= ec))
-        };
-
-        if in_range {
-            // Check children first for more specific match
-            if let Some(name) = find_symbol_at_position(&symbol.children, line, column) {
-                return Some(name);
-            }
-            return Some(symbol.name.clone());
-        }
-    }
-    None
 }

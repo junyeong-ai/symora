@@ -1,8 +1,3 @@
-//! Daemon Client Implementation
-//!
-//! Connects to the daemon server over Unix socket.
-//! Implements auto-start with proper race condition handling via file locking.
-
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,18 +8,18 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::config;
+use crate::config::LspRuntimeConfig;
 use crate::daemon::protocol::{Request, Response, methods};
-use crate::daemon::server::DaemonConfig;
+use crate::daemon::server::DaemonRuntimeConfig;
 use crate::error::LspError;
 use crate::models::symbol::Language;
 
-/// Calculate timeout using the centralized config system.
-/// Integrates language-specific multipliers with operation-type multipliers.
-fn calculate_timeout(file: Option<&Path>, method: &str) -> Duration {
+fn calculate_timeout(config: &LspRuntimeConfig, file: Option<&Path>, method: &str) -> Duration {
     // Daemon-only operations with fixed timeouts
     match method {
-        methods::PING | methods::STATUS | methods::SHUTDOWN => return Duration::from_secs(30),
+        methods::PING | methods::STATUS | methods::SHUTDOWN | methods::INVALIDATE_FILE => {
+            return Duration::from_secs(30);
+        }
         methods::INDEX_BUILD => return Duration::from_secs(600),
         methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
         methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
@@ -37,18 +32,23 @@ fn calculate_timeout(file: Option<&Path>, method: &str) -> Duration {
     // Map daemon method to LSP method for config lookup
     let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
 
-    config::timeout_for(language, lsp_method)
+    config.timeout_for(language, lsp_method)
 }
 
 /// Calculate timeout for operations where language is known but file path is not.
-fn calculate_timeout_for_language(language: Language, method: &str) -> Duration {
+fn calculate_timeout_for_language(
+    config: &LspRuntimeConfig,
+    language: Language,
+    method: &str,
+) -> Duration {
     let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
-    config::timeout_for(language, lsp_method)
+    config.timeout_for(language, lsp_method)
 }
 
 /// Daemon client for CLI commands
 pub struct DaemonClient {
-    config: DaemonConfig,
+    config: DaemonRuntimeConfig,
+    lsp_config: std::sync::Arc<LspRuntimeConfig>,
     project_root: PathBuf,
     next_request_id: AtomicU64,
 }
@@ -100,7 +100,8 @@ impl DaemonClient {
     /// Create a new daemon client
     pub fn new(project_root: &Path) -> Self {
         Self {
-            config: DaemonConfig::default(),
+            config: DaemonRuntimeConfig::load(project_root),
+            lsp_config: DaemonRuntimeConfig::load_lsp_config(project_root),
             project_root: project_root.to_path_buf(),
             next_request_id: AtomicU64::new(1),
         }
@@ -151,6 +152,7 @@ impl DaemonClient {
     #[cfg(unix)]
     fn try_lock_exclusive(file: &std::fs::File) -> bool {
         use std::os::unix::io::AsRawFd;
+        // SAFETY: flock with a valid fd is safe; LOCK_NB makes it non-blocking
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
     }
 
@@ -268,7 +270,7 @@ impl DaemonClient {
         file: Option<&Path>,
     ) -> Result<Response, LspError> {
         self.inject_project(&mut params);
-        let timeout = calculate_timeout(file, method);
+        let timeout = calculate_timeout(&self.lsp_config, file, method);
         self.send_request(method, Some(params), timeout).await
     }
 
@@ -294,14 +296,14 @@ impl DaemonClient {
     // Position-based LSP Operations (file, line, column)
 
     rpc_position! {
-        find_references => methods::FIND_REFS,
-        goto_definition => methods::FIND_DEF,
-        goto_type_definition => methods::FIND_TYPEDEF,
-        find_implementations => methods::FIND_IMPL,
+        find_references => methods::FIND_REFERENCES,
+        goto_definition => methods::GOTO_DEFINITION,
+        goto_type_definition => methods::GOTO_TYPE_DEFINITION,
+        find_implementations => methods::FIND_IMPLEMENTATIONS,
         hover => methods::HOVER,
         signature_help => methods::SIGNATURE_HELP,
-        incoming_calls => methods::CALLS_INCOMING,
-        outgoing_calls => methods::CALLS_OUTGOING,
+        incoming_calls => methods::INCOMING_CALLS,
+        outgoing_calls => methods::OUTGOING_CALLS,
         supertypes => methods::SUPERTYPES,
         subtypes => methods::SUBTYPES,
         prepare_rename => methods::PREPARE_RENAME,
@@ -313,12 +315,13 @@ impl DaemonClient {
     rpc_file! {
         diagnostics => methods::DIAGNOSTICS,
         folding_ranges => methods::FOLDING_RANGES,
-        code_lens => methods::CODE_LENS,
+        code_lenses => methods::CODE_LENSES,
+        format => methods::FORMAT,
     }
 
     // Custom Parameter Operations
 
-    pub async fn find_symbols_with_options(
+    pub async fn find_symbols(
         &self,
         file: &Path,
         include_body: bool,
@@ -330,7 +333,7 @@ impl DaemonClient {
             "body": include_body,
             "depth": depth
         });
-        self.request_with_project(methods::FIND_SYMBOL, params, Some(file))
+        self.request_with_project(methods::FIND_SYMBOLS, params, Some(file))
             .await
             .and_then(Self::extract_result)
     }
@@ -398,13 +401,17 @@ impl DaemonClient {
         language: &str,
     ) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        let lang = Language::from_str_loose(language);
+        let language_enum = Language::parse_or_default(language);
         let params = serde_json::json!({
             "query": query,
             "language": language
         });
-        let timeout = calculate_timeout_for_language(lang, methods::WORKSPACE_SYMBOL);
-        self.request_with_project_timeout(methods::WORKSPACE_SYMBOL, params, timeout)
+        let timeout = calculate_timeout_for_language(
+            &self.lsp_config,
+            language_enum,
+            methods::WORKSPACE_SYMBOLS,
+        );
+        self.request_with_project_timeout(methods::WORKSPACE_SYMBOLS, params, timeout)
             .await
             .and_then(Self::extract_result)
     }
@@ -420,6 +427,16 @@ impl DaemonClient {
             "action": action
         });
         self.request_with_project(methods::APPLY_CODE_ACTION, params, Some(file))
+            .await
+            .and_then(Self::extract_result)
+    }
+
+    pub async fn language_status(&self, language: &str) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "language": language
+        });
+        self.request_with_project(methods::LANGUAGE_STATUS, params, None)
             .await
             .and_then(Self::extract_result)
     }
@@ -477,22 +494,41 @@ impl DaemonClient {
 
     pub async fn index_status(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        let params = serde_json::json!({
-            "file": "",
-        });
-        self.request_with_project(methods::INDEX_STATUS, params, None)
+        self.request_with_project(methods::INDEX_STATUS, serde_json::json!({}), None)
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn index_clear(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        let params = serde_json::json!({
-            "file": "",
-        });
-        self.request_with_project(methods::INDEX_CLEAR, params, None)
+        self.request_with_project(methods::INDEX_CLEAR, serde_json::json!({}), None)
             .await
             .and_then(Self::extract_result)
+    }
+
+    // Store Operations
+
+    /// Best-effort file invalidation in the store index.
+    /// Does not start the daemon if not running.
+    /// Uses a short 2-second ping timeout to avoid blocking edit workflows.
+    pub async fn invalidate_file(&self, file: &Path) -> Result<(), LspError> {
+        let is_running = timeout(Duration::from_secs(2), self.ping())
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+        if !is_running {
+            return Ok(()); // Daemon not running or slow, nothing to invalidate
+        }
+        let params = serde_json::json!({
+            "file": file.display().to_string()
+        });
+        if let Err(e) = self
+            .request_with_project(methods::INVALIDATE_FILE, params, Some(file))
+            .await
+        {
+            tracing::warn!("Failed to invalidate file {}: {}", file.display(), e);
+        }
+        Ok(())
     }
 
     // Daemon Control Operations
@@ -504,9 +540,12 @@ impl DaemonClient {
     }
 
     pub async fn shutdown(&self) -> Result<(), LspError> {
-        let _ = self
+        if let Err(e) = self
             .send_request(methods::SHUTDOWN, None, Duration::from_secs(30))
-            .await;
+            .await
+        {
+            tracing::warn!("Shutdown request failed (may already be stopped): {}", e);
+        }
         self.wait_for_shutdown().await
     }
 
