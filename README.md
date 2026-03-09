@@ -139,7 +139,7 @@ Symora는 기본적으로 JSON을 출력합니다.
 주요 특징:
 
 - 가능하면 프로젝트 상대 경로 사용
-- `count`, `showing`, `truncated`, `hints` 같은 안정적인 리스트 필드 사용
+- `count`, `showing`, `items`, `truncated`, `hints` 같은 안정적인 리스트 필드 사용
 - 토큰 절약을 위한 compact mode 제공
 
 전역 옵션:
@@ -199,7 +199,7 @@ symora config init --global
 - macOS: 지원
 - Windows: daemon 기반 워크플로우는 지원하지 않음 (Unix domain socket 사용)
 
-Unix 환경에서는 대부분의 명령이 기본적으로 daemon을 사용하고, 필요 시 direct LSP 실행으로 이어집니다.
+Unix 환경에서는 대부분의 명령이 기본적으로 daemon을 사용하고, 필요 시 direct LSP 실행으로 이어집니다. `daemon start`와 `daemon restart`는 백그라운드에서 daemon을 띄우고 바로 반환합니다.
 
 Daemon 관련 명령:
 

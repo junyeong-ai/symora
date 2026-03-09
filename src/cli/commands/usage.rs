@@ -214,7 +214,7 @@ pub struct UsageOutput {
     pub filters_applied: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
-    pub results: Vec<UsageResult>,
+    pub items: Vec<UsageResult>,
     /// Total number of matching symbols (before limit applied)
     pub count: usize,
     /// Number of results actually returned (after limit)
@@ -273,7 +273,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
                 resolved.language_override.is_none(),
                 resolved_from.as_deref(),
             ),
-            results: vec![],
+            items: vec![],
             count: 0,
             showing: 0,
             analyzed: None,
@@ -394,7 +394,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             showing,
             analyzed.is_some(),
         ),
-        results: items,
+        items,
         count,
         showing,
         analyzed,
@@ -636,4 +636,43 @@ async fn fetch_single_symbol_refs(
         metrics,
         snippet,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_output_uses_items_and_showing() {
+        let output = UsageOutput {
+            query: "AuthUser".to_string(),
+            resolved_from: Some("src/main.rs:10:5".to_string()),
+            filters_applied: vec![],
+            hints: vec!["Add --lang".to_string()],
+            items: vec![UsageResult {
+                name: "AuthUser".to_string(),
+                file: "src/main.rs".to_string(),
+                line: 10,
+                kind: "struct".to_string(),
+                signature: None,
+                metrics: None,
+                snippet: None,
+            }],
+            count: 5,
+            showing: 1,
+            analyzed: Some(10),
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+        assert!(value.get("items").is_some());
+        assert!(value.get("results").is_none());
+        assert_eq!(value["count"], 5);
+        assert_eq!(value["showing"], 1);
+    }
+
+    #[test]
+    fn usage_empty_hints_include_file_level_followup_for_resolved_locations() {
+        let hints = usage_hints_for_empty("root", true, Some("src/main.py:54:11"));
+        assert!(hints.iter().any(|h| h.contains("file-level follow-up")));
+    }
 }

@@ -121,7 +121,8 @@ struct SymbolSearchOutput {
     count: usize,
     #[serde(default)]
     showing: usize,
-    results: Vec<SymbolResultOutput>,
+    #[serde(alias = "results")]
+    items: Vec<SymbolResultOutput>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -130,7 +131,7 @@ struct SymbolSearchOutput {
     next_commands: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SymbolResultOutput {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +152,8 @@ struct ContentSearchOutput {
     count: usize,
     #[serde(default)]
     showing: usize,
-    results: Vec<ContentResultOutput>,
+    #[serde(alias = "results")]
+    items: Vec<ContentResultOutput>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -160,7 +162,7 @@ struct ContentSearchOutput {
     next_commands: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ContentResultOutput {
     file: String,
     line: u32,
@@ -315,35 +317,33 @@ async fn execute_symbol_search(
                 let mut parsed: SymbolSearchOutput = serde_json::from_value(response)
                     .map_err(|e| anyhow::anyhow!("Invalid daemon response: {}", e))?;
 
-                for r in &mut parsed.results {
+                for r in &mut parsed.items {
                     r.file = ctx.relative_path(&PathBuf::from(&r.file));
                     r.backend = Some("index".to_string());
                 }
 
-                if !search_languages.is_empty() && parsed.results.len() < limit {
+                if !search_languages.is_empty() && parsed.items.len() < limit {
                     let semantic_results =
                         collect_semantic_symbol_results(app, query, kind, limit, &search_languages)
                             .await;
-                    parsed.results =
-                        merge_symbol_results(parsed.results, semantic_results, limit, query);
-                    parsed.count = parsed.results.len();
+                    parsed.items =
+                        merge_symbol_results(parsed.items, semantic_results, limit, query);
                 }
 
-                parsed.showing = parsed.results.len();
+                parsed.showing = parsed.items.len();
                 if parsed.count < parsed.showing {
                     parsed.count = parsed.showing;
                 }
 
-                parsed.truncated = parsed.results.len() > 1 && parsed.results.len() >= limit;
+                parsed.truncated = parsed.items.len() > 1 && parsed.items.len() >= limit;
                 parsed.hints = symbol_search_hints(
                     query,
                     language,
                     kind,
                     parsed.truncated,
-                    parsed.results.len(),
+                    parsed.items.len(),
                 );
-                parsed.next_commands =
-                    symbol_search_next_commands(&parsed.results, query, language);
+                parsed.next_commands = symbol_search_next_commands(&parsed.items, query, language);
 
                 ctx.print_success(parsed);
             }
@@ -399,17 +399,18 @@ async fn execute_semantic_symbol_search(
         if let Ok(response) = client.search_symbols(query, Some(limit), kind).await
             && let Ok(mut parsed) = serde_json::from_value::<SymbolSearchOutput>(response)
         {
-            for result in &mut parsed.results {
+            for result in &mut parsed.items {
                 result.file = ctx.relative_path(&PathBuf::from(&result.file));
                 result.backend = Some("index".to_string());
             }
-            results = merge_symbol_results(results, parsed.results, limit, query);
+            results = merge_symbol_results(results, parsed.items, limit, query);
         }
     }
 
     let response = SymbolSearchOutput {
         count: results.len(),
         showing: results.len(),
+        items: results.clone(),
         truncated: results.len() > 1 && results.len() >= limit,
         hints: symbol_search_hints(
             query,
@@ -419,7 +420,6 @@ async fn execute_semantic_symbol_search(
             results.len(),
         ),
         next_commands: symbol_search_next_commands(&results, query, None),
-        results,
     };
     ctx.print_success(response);
     Ok(())
@@ -870,20 +870,20 @@ async fn execute_content_search(
                 let mut parsed: ContentSearchOutput = serde_json::from_value(response)
                     .map_err(|e| anyhow::anyhow!("Invalid daemon response: {}", e))?;
 
-                for r in &mut parsed.results {
+                for r in &mut parsed.items {
                     r.file = ctx.relative_path(&PathBuf::from(&r.file));
                     r.backend = Some("index".to_string());
                 }
 
-                parsed.results = prioritize_code_content_results(parsed.results, language, limit);
-                parsed.showing = parsed.results.len();
+                parsed.items = prioritize_code_content_results(parsed.items, language, limit);
+                parsed.showing = parsed.items.len();
                 if parsed.count < parsed.showing {
                     parsed.count = parsed.showing;
                 }
 
-                parsed.truncated = parsed.results.len() > 1 && parsed.results.len() >= limit;
+                parsed.truncated = parsed.items.len() > 1 && parsed.items.len() >= limit;
                 parsed.hints = content_search_hints(query, language, parsed.truncated);
-                parsed.next_commands = content_search_next_commands(&parsed.results, language);
+                parsed.next_commands = content_search_next_commands(&parsed.items, language);
 
                 ctx.print_success(parsed);
             }
@@ -973,10 +973,10 @@ async fn fallback_content_search(
     Ok(ContentSearchOutput {
         count: total,
         showing: results.len(),
+        items: results.clone(),
         truncated: results.len() > 1 && results.len() >= limit,
         hints: content_search_hints(query, language, results.len() > 1 && results.len() >= limit),
         next_commands: content_search_next_commands(&results, language),
-        results,
     })
 }
 
@@ -1356,4 +1356,68 @@ fn parse_language(lang: &str) -> Result<Language> {
             supported.join(", ")
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_hints_are_empty_for_exact_single_result() {
+        let hints = symbol_search_hints("SearchCommand/Content", None, None, false, 1);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn symbol_search_output_uses_items_field() {
+        let output = SymbolSearchOutput {
+            count: 3,
+            showing: 1,
+            items: vec![SymbolResultOutput {
+                name: "SearchCommand".to_string(),
+                name_path: Some("SearchCommand".to_string()),
+                kind: "enum".to_string(),
+                file: "src/cli/commands/search.rs".to_string(),
+                line: 30,
+                column: 1,
+                container: None,
+                backend: Some("index".to_string()),
+                score: 1.0,
+            }],
+            truncated: true,
+            hints: vec!["narrow it".to_string()],
+            next_commands: vec!["symora symbols src/cli/commands/search.rs --depth 1".to_string()],
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["showing"], 1);
+        assert!(value.get("items").is_some());
+        assert!(value.get("results").is_none());
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
+    fn content_search_output_uses_items_field() {
+        let output = ContentSearchOutput {
+            count: 10,
+            showing: 2,
+            items: vec![ContentResultOutput {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                content: "async fn run() {}".to_string(),
+                backend: Some("scan".to_string()),
+                score: 1.0,
+            }],
+            truncated: true,
+            hints: vec![],
+            next_commands: vec![],
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+        assert!(value.get("items").is_some());
+        assert!(value.get("results").is_none());
+        assert_eq!(value["count"], 10);
+        assert_eq!(value["showing"], 2);
+    }
 }

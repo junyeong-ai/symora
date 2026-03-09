@@ -131,3 +131,42 @@ fn refs_hints(items: &[LocationOutput], total: usize, limit: usize) -> Vec<Strin
     hints.truncate(2);
     hints
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refs_output_uses_items_and_showing() {
+        let output = RefsOutput {
+            count: 4,
+            showing: 2,
+            items: vec![LocationOutput {
+                file: "src/main.rs".to_string(),
+                line: 10,
+                column: 5,
+                snippet: None,
+            }],
+            truncated: true,
+            hints: vec!["Increase --limit".to_string()],
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["count"], 4);
+        assert_eq!(value["showing"], 2);
+        assert!(value.get("items").is_some());
+        assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
+    fn refs_hints_include_self_only_guidance() {
+        let items = vec![LocationOutput {
+            file: "src/main.rs".to_string(),
+            line: 10,
+            column: 5,
+            snippet: None,
+        }];
+        let hints = refs_hints(&items, 1, 20);
+        assert!(hints.iter().any(|h| h.contains("declaration reference")));
+    }
+}

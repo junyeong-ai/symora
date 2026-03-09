@@ -140,7 +140,7 @@ Symora emits JSON and commonly uses fields such as:
 
 - `count`
 - `showing`
-- `items` or `results`
+- `items`
 - `truncated`
 - `hints`
 
