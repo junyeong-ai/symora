@@ -233,6 +233,7 @@ symora doctor
 - `context`, `refs`, `usage` 는 `file:line:column` 형식 위치를 직접 받을 수 있습니다
 - `usage` 는 위치를 주면 해당 심볼 이름을 자동으로 해석합니다
 - `context` 는 active LSP 서버가 call hierarchy나 type definition을 잘 지원하지 않을 때 fallback guidance를 제공합니다
+- semantic file/location 명령은 해당 언어의 language server가 설치되어 있어야 하며, 설치 여부는 `symora doctor <lang>`로 확인할 수 있습니다
 - `map related` 는 인접 파일을 찾는 heuristic helper이며, 완전한 dependency graph는 아닙니다
 
 ---

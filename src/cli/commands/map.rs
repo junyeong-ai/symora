@@ -277,6 +277,37 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         return Ok(());
     };
 
+    let language_status = app.lsp.server_status(target.language).await;
+    if matches!(
+        language_status,
+        crate::models::lsp::ServerStatus::NotInstalled { .. }
+    ) {
+        let file = target.rel_path.clone();
+        ctx.print_success(MapFileOutput {
+            file,
+            language: target.language.lsp_id().to_string(),
+            test_file: target.is_test,
+            focus_symbols: Vec::new(),
+            siblings: records
+                .iter()
+                .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
+                .map(|r| r.rel_path.clone())
+                .take(8)
+                .collect(),
+            counterpart_files: detect_counterparts(&target, &records)
+                .into_iter()
+                .map(|r| r.rel_path.clone())
+                .collect(),
+            symbols: Section::error(format!(
+                "Language server is not installed for {}. Run `symora doctor {}` for installation help.",
+                target.language.lsp_id(),
+                target.language.lsp_id()
+            )),
+            related_files: collect_related_files(app, &target, &records, related_limit).await,
+        });
+        return Ok(());
+    }
+
     let (focus_symbols, symbols) = match app
         .lsp
         .find_symbols(
