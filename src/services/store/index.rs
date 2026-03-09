@@ -83,8 +83,11 @@ impl Store {
     async fn try_open_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
         let db = SqliteDb::open(db_path).await?;
         db.execute(INIT_SCHEMA).await?;
+        for migration in SYMBOL_MIGRATIONS {
+            let _ = db.execute(migration).await;
+        }
         db.call(|conn| {
-            conn.execute("SELECT 1 FROM files LIMIT 1", [])?;
+            conn.query_row("SELECT 1", [], |_r| Ok(()))?;
             Ok(())
         })
         .await?;
@@ -94,7 +97,9 @@ impl Store {
     async fn recover_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
         if db_path.exists() {
             let backup_path = db_path.with_extension("db.bak");
-            let _ = tokio::fs::rename(db_path, &backup_path).await;
+            if let Err(e) = tokio::fs::rename(db_path, &backup_path).await {
+                tracing::debug!("Failed to backup corrupt DB: {e}");
+            }
         }
         let db = SqliteDb::open(db_path).await?;
         db.execute(INIT_SCHEMA).await?;
@@ -121,12 +126,8 @@ impl Store {
 
         self.db
             .call(move |conn| {
-                let sql = if kind_str.is_some() {
-                    SEARCH_SYMBOLS_WITH_KIND_QUERY
-                } else {
-                    SEARCH_SYMBOLS_QUERY
-                };
-                let mut stmt = conn.prepare(sql)?;
+                let sql = build_symbol_search_query(kind_str.is_some());
+                let mut stmt = conn.prepare(&sql)?;
                 let rows = match &kind_str {
                     Some(k) => stmt.query(rusqlite::params![query, limit, k])?,
                     None => stmt.query(rusqlite::params![query, limit])?,
@@ -136,14 +137,22 @@ impl Store {
                     .mapped(|r| {
                         Ok(SymbolSearchResult {
                             name: r.get(0)?,
-                            kind: SymbolKind::from_str_loose(&r.get::<_, String>(1)?),
-                            line: r.get::<_, i32>(2)? as u32,
-                            column: r.get::<_, i32>(3)? as u32,
-                            file: PathBuf::from(r.get::<_, String>(4)?),
-                            score: r.get(5)?,
+                            name_path: r.get(1)?,
+                            kind: SymbolKind::parse_or_default(&r.get::<_, String>(2)?),
+                            line: r.get::<_, i32>(3)? as u32,
+                            column: r.get::<_, i32>(4)? as u32,
+                            file: PathBuf::from(r.get::<_, String>(5)?),
+                            container: r.get(6)?,
+                            score: r.get(7)?,
                         })
                     })
-                    .filter_map(|r| r.ok())
+                    .filter_map(|r| match r {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::debug!("Error parsing symbol search row: {}", e);
+                            None
+                        }
+                    })
                     .collect())
             })
             .await
@@ -165,12 +174,8 @@ impl Store {
 
         self.db
             .call(move |conn| {
-                let sql = if lang_str.is_some() {
-                    SEARCH_CONTENT_WITH_LANG_QUERY
-                } else {
-                    SEARCH_CONTENT_QUERY
-                };
-                let mut stmt = conn.prepare(sql)?;
+                let sql = build_content_search_query(lang_str.is_some());
+                let mut stmt = conn.prepare(&sql)?;
                 let rows = match &lang_str {
                     Some(l) => stmt.query(rusqlite::params![query, limit, l])?,
                     None => stmt.query(rusqlite::params![query, limit])?,
@@ -185,7 +190,13 @@ impl Store {
                             score: r.get(4)?,
                         })
                     })
-                    .filter_map(|r| r.ok())
+                    .filter_map(|r| match r {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            tracing::debug!("Error parsing content search row: {}", e);
+                            None
+                        }
+                    })
                     .collect())
             })
             .await
@@ -193,7 +204,7 @@ impl Store {
 
     pub async fn invalidate_file(&self, path: &Path) {
         let path_str = path.display().to_string();
-        let _ = self
+        if let Err(e) = self
             .db
             .call(move |conn| {
                 let file_id: Option<i64> = conn
@@ -205,11 +216,14 @@ impl Store {
                     .ok();
 
                 if let Some(fid) = file_id {
-                    delete_file_cascade(conn, fid)?;
+                    delete_file_and_data(conn, fid)?;
                 }
                 Ok(())
             })
-            .await;
+            .await
+        {
+            tracing::debug!("Failed to invalidate file {}: {e}", path.display());
+        }
     }
 
     pub async fn cleanup_expired(&self) -> usize {
@@ -250,6 +264,10 @@ impl Store {
         self.next_content_id.store(1, Ordering::SeqCst);
         self.index_ready.store(false, Ordering::SeqCst);
         Ok(())
+    }
+
+    pub async fn checkpoint(&self) -> Result<(), StoreError> {
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE);").await
     }
 
     pub async fn stats(&self) -> Result<IndexStats, StoreError> {
@@ -314,18 +332,29 @@ impl Store {
             self.clear().await?;
         }
 
-        for file in &files {
-            self.index_file(file).await?;
+        const INDEX_BATCH_SIZE: usize = 8;
+        for chunk in files.chunks(INDEX_BATCH_SIZE) {
+            let futs: Vec<_> = chunk.iter().map(|f| self.index_file(f)).collect();
+            let results = futures::future::join_all(futs).await;
+            for result in results {
+                if let Err(e) = result {
+                    tracing::warn!("Failed to index file: {}", e);
+                }
+            }
         }
 
         self.index_ready.store(true, Ordering::SeqCst);
+        let _ = self.checkpoint().await;
         self.stats().await
     }
 
     async fn index_file(&self, path: &Path) -> Result<(), StoreError> {
         let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
-            Err(_) => return Ok(()),
+            Err(e) => {
+                tracing::debug!("Skipping file {}: {}", path.display(), e);
+                return Ok(());
+            }
         };
 
         let mtime = tokio::fs::metadata(path)
@@ -355,7 +384,7 @@ impl Store {
                 match existing_id {
                     Some(id) => {
                         conn.execute("UPDATE files SET mtime = ?1, language = ?2, indexed_at = ?3 WHERE id = ?4", rusqlite::params![mtime, lang_str, now, id])?;
-                        delete_file_data(conn, id)?;
+                        delete_file_related_data(conn, id)?;
                         Ok(id)
                     }
                     None => {
@@ -389,14 +418,25 @@ impl Store {
             return Ok(());
         }
 
-        let symbols: Vec<(i64, i64, String, String, i32, i32)> = extracted
+        let symbols: Vec<(
+            i64,
+            i64,
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            i32,
+            i32,
+        )> = extracted
             .into_iter()
             .map(|s| {
                 (
                     self.next_symbol_id.fetch_add(1, Ordering::SeqCst),
                     file_id,
                     s.name,
+                    s.name_path,
                     s.kind.to_string(),
+                    s.container,
                     s.line as i32,
                     s.column as i32,
                 )
@@ -407,9 +447,9 @@ impl Store {
             .call(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 {
-                    let mut stmt = tx.prepare("INSERT INTO symbols (id, file_id, name, kind, line, col) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
-                    for (id, file_id, name, kind, line, col) in &symbols {
-                        stmt.execute(rusqlite::params![id, file_id, name, kind, line, col])?;
+                    let mut stmt = tx.prepare("INSERT INTO symbols (id, file_id, name, name_path, kind, container, line, col) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?;
+                    for (id, file_id, name, name_path, kind, container, line, col) in &symbols {
+                        stmt.execute(rusqlite::params![id, file_id, name, name_path, kind, container, line, col])?;
                     }
                 }
                 tx.commit()
@@ -453,7 +493,10 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn delete_file_data(conn: &rusqlite::Connection, file_id: i64) -> Result<(), rusqlite::Error> {
+fn delete_file_related_data(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "DELETE FROM symbols WHERE file_id = ?1",
         rusqlite::params![file_id],
@@ -465,8 +508,8 @@ fn delete_file_data(conn: &rusqlite::Connection, file_id: i64) -> Result<(), rus
     Ok(())
 }
 
-fn delete_file_cascade(conn: &rusqlite::Connection, file_id: i64) -> Result<(), rusqlite::Error> {
-    delete_file_data(conn, file_id)?;
+fn delete_file_and_data(conn: &rusqlite::Connection, file_id: i64) -> Result<(), rusqlite::Error> {
+    delete_file_related_data(conn, file_id)?;
     conn.execute(
         "DELETE FROM files WHERE id = ?1",
         rusqlite::params![file_id],

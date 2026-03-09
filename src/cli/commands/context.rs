@@ -1,7 +1,3 @@
-//! Context command - gather all related code context in a single call
-//!
-//! Provides comprehensive context for AI coding agents with pure fact data.
-
 use std::path::Path;
 
 use anyhow::Result;
@@ -9,19 +5,21 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::ParsedLocation;
+use crate::cli::LocationArg;
 use crate::cli::response::{
-    CallHierarchyOutput, LocationOutput, RefsSummary, Section, TargetInfo, TestInfo, TypeInfo,
+    CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput, TestOutput,
+    TypeInfoOutput,
 };
-use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_line};
-use crate::models::config::LspConfig;
+use crate::cli::utils::{
+    TestMatcher, classify_refs, extract_signature, find_symbol_at_position, resolve_symbol_anchor,
+};
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::services::lsp::LspService;
 
 #[derive(Args, Debug)]
 pub struct ContextArgs {
-    /// Location (file:line:column)
-    pub location: String,
+    #[command(flatten)]
+    pub loc: LocationArg,
 
     /// Include all context (callers, callees, types, tests)
     #[arg(short, long)]
@@ -50,11 +48,11 @@ pub struct ContextArgs {
 
 /// Context response with pure fact data
 #[derive(Debug, Serialize)]
-pub struct ContextResponse {
+pub struct ContextOutput {
     /// Target symbol information
-    pub target: TargetInfo,
+    pub target: TargetOutput,
     /// Reference summary (pure fact)
-    pub refs: RefsSummary,
+    pub refs: RefOutput,
     /// Callers (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callers: Option<Section<CallHierarchyOutput>>,
@@ -63,54 +61,51 @@ pub struct ContextResponse {
     pub callees: Option<Section<CallHierarchyOutput>>,
     /// Type definitions (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub types: Option<Section<TypeInfo>>,
+    pub types: Option<Section<TypeInfoOutput>>,
     /// Related tests (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tests: Option<Section<TestInfo>>,
+    pub tests: Option<Section<TestOutput>>,
 }
 
-struct ContextLimits {
-    calls: usize,
+struct ContextParams<'a> {
     refs: usize,
+    calls: usize,
     tests: usize,
-}
-
-impl From<&LspConfig> for ContextLimits {
-    fn from(cfg: &LspConfig) -> Self {
-        Self {
-            calls: cfg.calls_limit,
-            refs: cfg.refs_limit,
-            tests: cfg.tests_limit,
-        }
-    }
+    custom_markers: &'a [String],
 }
 
 pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let loc = ParsedLocation::parse(&args.location)?.to_absolute()?;
-    let limits = ContextLimits::from(&app.config().lsp);
+    let loc = args.loc.parse()?.to_absolute()?;
+    let config = app.config();
+    let params = ContextParams {
+        refs: config.lsp.refs_limit,
+        calls: config.lsp.calls_limit,
+        tests: config.lsp.tests_limit,
+        custom_markers: &config.test.markers,
+    };
 
-    let response = gather_context(
+    let response = fetch_context(
         app.lsp.as_ref(),
         &loc.file,
         loc.line,
         loc.column,
         &args,
         ctx.root(),
-        &app.test_matcher(),
-        &limits,
+        app.test_matcher(),
+        &params,
     )
     .await;
 
     match response {
-        Ok(context) => ctx.print_success_flat(context),
+        Ok(context) => ctx.print_success(context),
         Err(e) => ctx.print_error(&e.to_string()),
     }
 
     Ok(())
 }
 
-async fn gather_context(
+async fn fetch_context(
     lsp: &dyn LspService,
     file: &Path,
     line: u32,
@@ -118,97 +113,127 @@ async fn gather_context(
     args: &ContextArgs,
     root: &Path,
     test_matcher: &TestMatcher,
-    limits: &ContextLimits,
-) -> Result<ContextResponse> {
+    params: &ContextParams<'_>,
+) -> Result<ContextOutput> {
     let (refs_result, symbols_result) = tokio::join!(
         lsp.find_references(file, line, column),
-        lsp.find_symbols(file, FindSymbolsOptions::new().with_body().with_depth(10))
+        lsp.find_symbols(
+            file,
+            FindSymbolsOptions::default().with_body().with_depth(10)
+        )
     );
 
     let symbols = symbols_result.unwrap_or_default();
-    let target_symbol = find_symbol_at_line(&symbols, line);
+    let resolved = resolve_symbol_anchor(&symbols, line, column);
+    let resolved_line = resolved.map(|(line, _, _)| line).unwrap_or(line);
+    let resolved_column = resolved.map(|(_, column, _)| column).unwrap_or(column);
+    let target_symbol = resolved.map(|(_, _, symbol)| symbol);
 
-    // Build target info using unified TargetInfo
-    let target = match target_symbol {
-        Some(sym) => {
-            let signature = extract_signature(sym.body.as_deref());
-            let body = if args.body || args.all {
-                sym.body.clone()
+    let target = {
+        let mut t = TargetOutput::from_symbol_or_fallback(
+            target_symbol,
+            file,
+            resolved_line,
+            resolved_column,
+            root,
+        );
+        if let Some(sym) = target_symbol {
+            t = t.with_signature(extract_signature(sym.body.as_deref()));
+            if args.body || args.all {
+                t = t.with_body(sym.body.clone());
+            }
+        }
+        t
+    };
+
+    let refs_result = if target_symbol.is_none() && refs_result.is_err() {
+        lsp.find_references(file, resolved_line, resolved_column)
+            .await
+    } else {
+        refs_result
+    };
+
+    let mut refs = refs_result.unwrap_or_default();
+    refs.truncate(params.refs);
+    let classified = classify_refs(&refs, root, Some(file), Some(line), test_matcher);
+
+    let refs_summary = RefOutput {
+        total: classified.total,
+        test: classified.test,
+        prod: classified.prod,
+        files: Some(classified.unique_files),
+        modules: Some(classified.unique_modules),
+        is_exported: None,
+    };
+
+    // Fetch optional sections in parallel
+    let want_callers = args.callers || args.all;
+    let want_callees = args.callees || args.all;
+    let want_types = args.types || args.all;
+    let want_tests = args.tests || args.all;
+
+    let (callers, callees, types, tests) = tokio::join!(
+        async {
+            if want_callers {
+                Some(
+                    fetch_calls(
+                        lsp,
+                        file,
+                        resolved_line,
+                        resolved_column,
+                        root,
+                        params.calls,
+                        true,
+                    )
+                    .await,
+                )
             } else {
                 None
-            };
-            TargetInfo::from_symbol(sym, root)
-                .with_signature(signature)
-                .with_body(body)
-        }
-        None => {
-            let file_str = file
-                .strip_prefix(root)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| file.display().to_string());
-            TargetInfo::new(
-                format!("symbol@{}:{}", line, column),
-                "unknown".to_string(),
-                file_str,
-                line,
-            )
-        }
-    };
+            }
+        },
+        async {
+            if want_callees {
+                Some(
+                    fetch_calls(
+                        lsp,
+                        file,
+                        resolved_line,
+                        resolved_column,
+                        root,
+                        params.calls,
+                        false,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        },
+        async {
+            if want_types {
+                Some(fetch_types(lsp, file, resolved_line, resolved_column, root).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if want_tests {
+                Some(
+                    fetch_tests(
+                        &classified.test_refs,
+                        root,
+                        params.tests,
+                        params.custom_markers,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        },
+    );
 
-    // Process references
-    let refs = refs_result.unwrap_or_default();
-
-    let refs_with_test_flag: Vec<_> = refs
-        .iter()
-        .filter(|r| r.file != file || r.line != line)
-        .take(limits.refs)
-        .map(|r| (r, test_matcher.is_test_file(&r.file)))
-        .collect();
-
-    let test_refs: Vec<_> = refs_with_test_flag
-        .iter()
-        .filter(|(_, is_test)| *is_test)
-        .map(|(r, _)| *r)
-        .collect();
-
-    let prod_count = refs_with_test_flag
-        .iter()
-        .filter(|(_, is_test)| !*is_test)
-        .count();
-
-    // Build refs summary (pure fact)
-    let refs_summary = RefsSummary {
-        total: refs_with_test_flag.len(),
-        test: test_refs.len(),
-        prod: prod_count,
-    };
-
-    // Fetch optional sections
-    let callers = if args.callers || args.all {
-        Some(fetch_calls(lsp, file, line, column, root, limits.calls, true).await)
-    } else {
-        None
-    };
-
-    let callees = if args.callees || args.all {
-        Some(fetch_calls(lsp, file, line, column, root, limits.calls, false).await)
-    } else {
-        None
-    };
-
-    let types = if args.types || args.all {
-        Some(fetch_types(lsp, file, line, column, root).await)
-    } else {
-        None
-    };
-
-    let tests = if args.tests || args.all {
-        Some(fetch_tests(&test_refs, root, limits.tests).await)
-    } else {
-        None
-    };
-
-    Ok(ContextResponse {
+    Ok(ContextOutput {
         target,
         refs: refs_summary,
         callers,
@@ -243,7 +268,12 @@ async fn fetch_calls(
                 .collect();
             Section::with_limit(items, total)
         }
-        Err(e) => Section::error(e.to_string()),
+        Err(e) => Section::error(format_call_hierarchy_error(
+            &e.to_string(),
+            file,
+            line,
+            column,
+        )),
     }
 }
 
@@ -253,7 +283,7 @@ async fn fetch_types(
     line: u32,
     column: u32,
     root: &Path,
-) -> Section<TypeInfo> {
+) -> Section<TypeInfoOutput> {
     match lsp.goto_type_definition(file, line, column).await {
         Ok(Some(type_loc)) => {
             let type_symbols = lsp
@@ -261,8 +291,8 @@ async fn fetch_types(
                 .await
                 .unwrap_or_default();
 
-            let type_sym = find_symbol_at_line(&type_symbols, type_loc.line);
-            let items = vec![TypeInfo {
+            let type_sym = find_symbol_at_position(&type_symbols, type_loc.line, None);
+            let items = vec![TypeInfoOutput {
                 name: type_sym
                     .map(|s| s.name.clone())
                     .unwrap_or_else(|| "unknown".to_string()),
@@ -275,26 +305,61 @@ async fn fetch_types(
                     type_loc.column,
                     root,
                 ),
+                detail: None,
             }];
             Section::new(items)
         }
         Ok(None) => Section::new(vec![]),
-        Err(e) => Section::error(e.to_string()),
+        Err(e) => Section::error(format_type_error(&e.to_string(), file, line, column)),
     }
+}
+
+fn format_call_hierarchy_error(error: &str, file: &Path, line: u32, column: u32) -> String {
+    if is_unsupported_lsp_feature(error) {
+        format!(
+            "Call hierarchy is not supported here. Use `symora refs {}:{}:{}` for usages or `symora usage {}:{}:{}` for broader symbol analysis.",
+            file.display(),
+            line,
+            column,
+            file.display(),
+            line,
+            column
+        )
+    } else {
+        error.to_string()
+    }
+}
+
+fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> String {
+    if is_unsupported_lsp_feature(error) {
+        format!(
+            "Type definition lookup is not supported here. Use `symora hover {}:{}:{}` or inspect the target body in this context output instead.",
+            file.display(),
+            line,
+            column
+        )
+    } else {
+        error.to_string()
+    }
+}
+
+fn is_unsupported_lsp_feature(error: &str) -> bool {
+    error.contains("does not support") || error.contains("no handler for request")
 }
 
 async fn fetch_tests(
     test_refs: &[&crate::models::symbol::Location],
     root: &Path,
     limit: usize,
-) -> Section<TestInfo> {
+    custom_markers: &[String],
+) -> Section<TestOutput> {
     let mut items = Vec::with_capacity(limit);
 
     for r in test_refs.iter().take(limit) {
         if let Ok(content) = tokio::fs::read_to_string(&r.file).await
-            && let Some(test_name) = extract_test_name(&content, r.line)
+            && let Some(test_name) = extract_test_name(&content, r.line, custom_markers)
         {
-            items.push(TestInfo {
+            items.push(TestOutput {
                 name: test_name,
                 location: LocationOutput::from_path(&r.file, r.line, r.column, root),
             });
@@ -304,7 +369,10 @@ async fn fetch_tests(
     Section::new(items)
 }
 
-fn extract_test_name(content: &str, line: u32) -> Option<String> {
+/// Max lines to search backwards for a test marker annotation
+const TEST_MARKER_SEARCH_WINDOW: usize = 10;
+
+fn extract_test_name(content: &str, line: u32, custom_markers: &[String]) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let line_idx = (line.saturating_sub(1)) as usize;
 
@@ -312,11 +380,11 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
         return None;
     }
 
-    for i in (0..=line_idx.min(10)).rev() {
+    for i in (0..=line_idx.min(TEST_MARKER_SEARCH_WINDOW)).rev() {
         let idx = line_idx.saturating_sub(i);
         let line_content = lines.get(idx)?;
 
-        if is_test_marker(line_content) {
+        if is_test_marker(line_content, custom_markers) {
             if let Some(fn_line) = lines.get(idx + 1)
                 && let Some(name) = extract_fn_name(fn_line)
             {
@@ -331,7 +399,7 @@ fn extract_test_name(content: &str, line: u32) -> Option<String> {
     None
 }
 
-fn is_test_marker(line: &str) -> bool {
+fn is_test_marker(line: &str, custom_markers: &[String]) -> bool {
     const MARKERS: &[&str] = &[
         "#[test]",
         "#[tokio::test]",
@@ -363,23 +431,24 @@ fn is_test_marker(line: &str) -> bool {
     ];
 
     MARKERS.iter().any(|m| line.contains(m))
+        || custom_markers.iter().any(|m| line.contains(m.as_str()))
 }
 
 fn extract_fn_name(line: &str) -> Option<String> {
-    const FN_PATTERNS: &[(&str, usize)] = &[
-        ("fn ", 3),
-        ("func ", 5),
-        ("def ", 4),
-        ("fun ", 4),
-        ("function ", 9),
-        ("void ", 5),
-        ("public void ", 12),
-        ("async ", 6),
+    const FN_PREFIXES: &[&str] = &[
+        "fn ",
+        "func ",
+        "def ",
+        "fun ",
+        "function ",
+        "void ",
+        "public void ",
+        "async ",
     ];
 
-    for &(prefix, offset) in FN_PATTERNS {
+    for prefix in FN_PREFIXES {
         if let Some(pos) = line.find(prefix) {
-            let rest = &line[pos + offset..];
+            let rest = &line[pos + prefix.len()..];
             let name = rest.split(['(', '<', ' ', ':', '{']).next()?;
             let name = name.trim();
             if !name.is_empty() {
