@@ -134,6 +134,7 @@ Use these when:
 - search results are unexpectedly empty
 - the language server becomes unresponsive
 - you need to confirm daemon or index state
+- repeated `search index build` is usually enough for refresh; reserve `--force` for a full rebuild
 
 ## Output expectations
 

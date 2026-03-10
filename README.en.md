@@ -167,6 +167,8 @@ The index is stored under `.symora/store.db` in the current project.
 
 Search commands also include fallback behavior when indexed or semantic features are unavailable, but the index is the most reliable path for repeated local use.
 
+A normal `search index build` refreshes changed files and prunes files that no longer exist. Use `--force` only when you want a full rebuild.
+
 ---
 
 ## Configuration

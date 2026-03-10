@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::db::SqliteDb;
 use super::db::rusqlite;
+use super::db::rusqlite::OptionalExtension;
 use super::schema::*;
 use super::symbols::SymbolExtractor;
 use super::types::*;
@@ -327,9 +328,15 @@ impl Store {
             });
 
         let files = filter.discover_files(&extensions);
+        let discovered_paths: std::collections::HashSet<String> = files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
 
         if options.force {
             self.clear().await?;
+        } else {
+            self.prune_deleted_files(&discovered_paths).await?;
         }
 
         const INDEX_BATCH_SIZE: usize = 8;
@@ -375,13 +382,37 @@ impl Store {
         let new_file_id = self.next_file_id.fetch_add(1, Ordering::SeqCst);
         let now = now_unix() as i64;
 
+        let existing = self
+            .db
+            .call({
+                let file_path = file_path.clone();
+                move |conn| {
+                    conn.query_row(
+                        "SELECT id, mtime, language FROM files WHERE path = ?1",
+                        rusqlite::params![file_path],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                }
+            })
+            .await?;
+
+        if let Some((_id, existing_mtime, existing_lang)) = &existing
+            && *existing_mtime == mtime
+            && *existing_lang == lang_str
+        {
+            return Ok(());
+        }
+
         let file_id = self.db
             .call(move |conn| {
-                let existing_id: Option<i64> = conn
-                    .query_row("SELECT id FROM files WHERE path = ?1", rusqlite::params![file_path.clone()], |r| r.get(0))
-                    .ok();
-
-                match existing_id {
+                match existing.map(|(id, _, _)| id) {
                     Some(id) => {
                         conn.execute("UPDATE files SET mtime = ?1, language = ?2, indexed_at = ?3 WHERE id = ?4", rusqlite::params![mtime, lang_str, now, id])?;
                         delete_file_related_data(conn, id)?;
@@ -483,6 +514,31 @@ impl Store {
                 tx.commit()
             })
             .await
+    }
+
+    async fn prune_deleted_files(
+        &self,
+        discovered_paths: &std::collections::HashSet<String>,
+    ) -> Result<(), StoreError> {
+        let known_files: Vec<(i64, String)> = self
+            .db
+            .call(|conn| {
+                let mut stmt = conn.prepare("SELECT id, path FROM files")?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+                Ok(rows.filter_map(Result::ok).collect::<Vec<_>>())
+            })
+            .await?;
+
+        for (file_id, path) in known_files {
+            if !discovered_paths.contains(&path) || !Path::new(&path).exists() {
+                self.db
+                    .call(move |conn| delete_file_and_data(conn, file_id))
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 }
 
