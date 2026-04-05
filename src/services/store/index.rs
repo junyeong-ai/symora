@@ -449,7 +449,7 @@ impl Store {
             return Ok(());
         }
 
-        let symbols: Vec<(
+        type SymbolRow = (
             i64,
             i64,
             String,
@@ -458,7 +458,8 @@ impl Store {
             Option<String>,
             i32,
             i32,
-        )> = extracted
+        );
+        let symbols: Vec<SymbolRow> = extracted
             .into_iter()
             .map(|s| {
                 (
