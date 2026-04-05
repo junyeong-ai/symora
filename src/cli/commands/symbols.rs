@@ -89,14 +89,16 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
 
     if args.name.is_some() || (args.file.is_none() && args.symbol.is_some()) {
         return execute_workspace(
-            args.name.as_deref(),
-            args.symbol.as_deref(),
-            args.lang.as_deref(),
-            include_kinds,
-            exclude_kinds,
-            args.substring,
-            args.structural,
-            limit,
+            WorkspaceParams {
+                name_query: args.name.as_deref(),
+                symbol_query: args.symbol.as_deref(),
+                lang: args.lang.as_deref(),
+                include_kinds,
+                exclude_kinds,
+                substring: args.substring,
+                structural: args.structural,
+                limit,
+            },
             app,
         )
         .await;
@@ -167,17 +169,28 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
-async fn execute_workspace(
-    name_query: Option<&str>,
-    symbol_query: Option<&str>,
-    lang: Option<&str>,
+struct WorkspaceParams<'a> {
+    name_query: Option<&'a str>,
+    symbol_query: Option<&'a str>,
+    lang: Option<&'a str>,
     include_kinds: Option<Vec<SymbolKind>>,
     exclude_kinds: Option<Vec<SymbolKind>>,
     substring: bool,
     structural: bool,
     limit: usize,
-    app: &App,
-) -> Result<()> {
+}
+
+async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()> {
+    let WorkspaceParams {
+        name_query,
+        symbol_query,
+        lang,
+        include_kinds,
+        exclude_kinds,
+        substring,
+        structural,
+        limit,
+    } = params;
     let ctx = &app.output;
 
     let languages = resolve_workspace_languages(app, lang);
@@ -407,9 +420,7 @@ fn synthesized_symbol_path(symbol: &Symbol) -> Option<String> {
         .as_deref()
         .unwrap_or_default()
         .replace("::", "/")
-        .replace('.', "/")
-        .replace('#', "/")
-        .replace('\\', "/");
+        .replace(['.', '#', '\\'], "/");
     let container = container.trim_matches('/');
 
     if container.is_empty() {

@@ -795,9 +795,7 @@ fn synthesized_symbol_path(symbol: &crate::models::symbol::Symbol) -> Option<Str
         .as_deref()
         .unwrap_or_default()
         .replace("::", "/")
-        .replace('.', "/")
-        .replace('#', "/")
-        .replace('\\', "/");
+        .replace(['.', '#', '\\'], "/");
     let container = container.trim_matches('/');
     if container.is_empty() {
         Some(name.to_string())
