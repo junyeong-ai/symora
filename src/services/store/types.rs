@@ -45,6 +45,10 @@ pub struct IndexOptions {
 pub struct StoreConfig {
     pub ttl_secs: u64,
     pub index_content: bool,
+    /// How many files to extract concurrently during a `index` run. Higher
+    /// gives better wall-clock time on cores but raises peak file-descriptor
+    /// and SQLite write contention. 16 is a reasonable default.
+    pub index_concurrency: usize,
 }
 
 impl Default for StoreConfig {
@@ -52,6 +56,7 @@ impl Default for StoreConfig {
         Self {
             ttl_secs: 3600,
             index_content: true,
+            index_concurrency: crate::constants::defaults::STORE_INDEX_CONCURRENCY,
         }
     }
 }

@@ -1,7 +1,14 @@
+pub const SCHEMA_VERSION: i32 = 1;
+
 pub const INIT_SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
+PRAGMA cache_size = -16384;
+PRAGMA temp_store = MEMORY;
+PRAGMA mmap_size = 134217728;
+PRAGMA busy_timeout = 5000;
+PRAGMA user_version = 1;
 
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
@@ -37,12 +44,6 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCAS
 CREATE INDEX IF NOT EXISTS idx_symbols_name_path_nocase ON symbols(name_path COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_content_file ON content_lines(file_id);
 "#;
-
-pub const SYMBOL_MIGRATIONS: &[&str] = &[
-    "ALTER TABLE symbols ADD COLUMN name_path TEXT",
-    "ALTER TABLE symbols ADD COLUMN container TEXT",
-    "CREATE INDEX IF NOT EXISTS idx_symbols_name_path_nocase ON symbols(name_path COLLATE NOCASE)",
-];
 
 pub fn build_symbol_search_query(with_kind: bool) -> String {
     let kind_filter = if with_kind { " AND s.kind = ?3" } else { "" };
