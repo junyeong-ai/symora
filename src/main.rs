@@ -6,6 +6,14 @@ use symora::app::App;
 use symora::cli::commands::daemon::{DaemonArgs, DaemonCommand};
 use symora::cli::{Cli, Commands, OutputOptions};
 
+// jemalloc keeps fragmentation flat under the SQLite batch + LSP fan-out
+// workload that dominates Symora. The cfg gate matches the optional
+// dependency in Cargo.toml so Windows / msvc builds fall back to the
+// system allocator without losing functionality.
+#[cfg(all(not(target_env = "msvc"), not(target_os = "windows")))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
@@ -36,7 +44,9 @@ fn main() {
     };
 
     if let Err(e) = runtime.block_on(async_main()) {
-        eprintln!(r#"{{"error":"{}"}}"#, e);
+        let err: symora::cli::OutputError = e.into();
+        let envelope = serde_json::json!({ "error": err });
+        eprintln!("{}", envelope);
         std::process::exit(2);
     }
 }
@@ -44,13 +54,28 @@ fn main() {
 async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let format =
+        if std::env::var(symora::constants::env::FORMAT_OVERRIDE).as_deref() == Ok("compact") {
+            symora::cli::OutputFormat::Compact
+        } else {
+            cli.format
+        };
+
     let output_options = OutputOptions {
-        compact: cli.compact,
+        format,
         quiet: cli.quiet,
+        token_estimate: cli.token_estimate,
     };
 
+    if let Some(name) = cli.workspace.as_deref() {
+        return run_workspace_dispatch(name, output_options).await;
+    }
+
     #[cfg(unix)]
-    let use_daemon = std::env::var("SYMORA_NO_DAEMON").ok().as_deref() != Some("1")
+    let use_daemon = std::env::var(symora::constants::env::NO_DAEMON)
+        .ok()
+        .as_deref()
+        != Some("1")
         && !matches!(
             &cli.command,
             Commands::Daemon(DaemonArgs {
@@ -72,6 +97,35 @@ async fn async_main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+async fn run_workspace_dispatch(name: &str, output_options: OutputOptions) -> anyhow::Result<()> {
+    use symora::cli::OutputContext;
+    use symora::cli::workspace::{WorkspaceConfig, run_workspace, strip_workspace_flag};
+
+    let ws = WorkspaceConfig::load(name)
+        .map_err(|e| anyhow::anyhow!("Failed to load workspace '{name}': {e}"))?;
+    let exe = std::env::current_exe()?;
+    let argv: Vec<String> = std::env::args().collect();
+    let forwarded = strip_workspace_flag(argv).into_iter().skip(1).collect();
+
+    let envelope = run_workspace(ws, &exe, forwarded).await;
+    let any_failed = envelope
+        .get("results")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().any(|entry| entry.get("error").is_some()))
+        .unwrap_or(false);
+
+    let cwd = std::env::current_dir()?;
+    OutputContext::new(cwd, output_options).print_success(envelope);
+
+    if any_failed {
+        // CI / `set -e` users need a non-zero exit when at least one root
+        // failed, even though the JSON envelope reports both successes and
+        // failures together.
+        std::process::exit(2);
+    }
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -126,8 +180,11 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         // Search
         Commands::Search(args) => commands::search::execute(args, app).await,
         Commands::Map(args) => commands::map::execute(args, app).await,
+        Commands::Pack(args) => commands::pack::execute(args, app).await,
+        Commands::Bench(args) => commands::bench::execute(args, app).await,
 
         // Edit
+        Commands::Write(args) => commands::write::execute(args, app).await,
         Commands::Edit(args) => commands::edit::execute(args, app).await,
         Commands::Rename(args) => commands::rename::execute(args, app).await,
         Commands::Actions(args) => commands::actions::execute(args, app).await,
@@ -142,5 +199,8 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         // Daemon
         #[cfg(unix)]
         Commands::Daemon(args) => commands::daemon::execute(args, app).await,
+
+        // MCP
+        Commands::Mcp(args) => commands::mcp::execute(args, app).await,
     }
 }

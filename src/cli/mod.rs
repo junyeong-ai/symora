@@ -1,26 +1,37 @@
+pub mod analysis;
+pub mod blast_radius;
 pub mod commands;
+pub mod errors;
+pub mod input_error;
 pub mod location;
 pub mod output;
 pub mod response;
 pub mod symbol_discovery;
 pub mod utils;
+pub mod workspace;
 
+pub use analysis::{LocationAnalysis, detect_exported};
+pub use blast_radius::{BlastRadius, BlastRadiusConfig, RiskLevel};
+pub use errors::{ErrorCode, OutputError};
+pub use input_error::CliInputError;
 pub use location::{LocationArg, ParsedLocation};
-pub use output::{OutputContext, OutputOptions};
+pub use output::{OutputContext, OutputFormat, OutputOptions};
+pub use workspace::WorkspaceConfig;
 
 use clap::{Parser, Subcommand};
 
 #[cfg(unix)]
 use commands::daemon::DaemonArgs;
 use commands::{
-    actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, code_lens::CodeLensArgs,
-    config::ConfigArgs, context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs,
-    diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs, folding::FoldingArgs,
-    format::FormatArgs, hover::HoverArgs, impact::ImpactArgs, implementations::ImplArgs,
-    init::InitArgs, inlay_hints::InlayHintsArgs, map::MapArgs, refs::RefsArgs, rename::RenameArgs,
-    search::SearchArgs, selection::SelectionArgs, signature::SignatureArgs, status::StatusArgs,
-    subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs,
-    usage::UsageArgs,
+    actions::ActionsArgs, bench::BenchArgs, callees::CalleesArgs, callers::CallersArgs,
+    code_lens::CodeLensArgs, config::ConfigArgs, context::ContextArgs, def::DefArgs,
+    diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs,
+    folding::FoldingArgs, format::FormatArgs, hover::HoverArgs, impact::ImpactArgs,
+    implementations::ImplArgs, init::InitArgs, inlay_hints::InlayHintsArgs, map::MapArgs,
+    mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
+    selection::SelectionArgs, signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
+    supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
+    write::WriteArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -59,9 +70,19 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Compact output for AI tools (minimal tokens)
-    #[arg(short, long, global = true)]
-    pub compact: bool,
+    /// Output format: pretty (default), compact (single-line JSON), or jsonl (newline-delimited).
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Pretty)]
+    pub format: OutputFormat,
+
+    /// Run the command across every root in the named workspace
+    /// (~/.config/symora/workspaces/&lt;name&gt;.toml). Each root gets its own
+    /// child invocation; results are bundled into a single JSON envelope.
+    #[arg(long, global = true)]
+    pub workspace: Option<String>,
+
+    /// Print an estimated token count for the response to stderr (does not alter stdout).
+    #[arg(long, global = true)]
+    pub token_estimate: bool,
 
     /// Quiet mode (errors only)
     #[arg(short, long, global = true)]
@@ -127,9 +148,15 @@ pub enum Commands {
     Search(SearchArgs),
     /// Explore project structure, file overviews, and related files
     Map(MapArgs),
+    /// Build a token-budgeted context pack ranked by an import-graph PageRank
+    Pack(PackArgs),
+    /// Measure end-to-end latency of LSP-less hot paths on this repository
+    Bench(BenchArgs),
 
     // Edit
-    /// Code editing operations
+    /// Symbol-aware writes (replace-body, insert-before, insert-after)
+    Write(WriteArgs),
+    /// Code editing operations (LSP textEdits, format)
     Edit(EditArgs),
     /// Rename symbol
     Rename(RenameArgs),
@@ -152,4 +179,7 @@ pub enum Commands {
     #[cfg(unix)]
     /// Daemon server management
     Daemon(DaemonArgs),
+
+    /// Run as a Model Context Protocol server (exposes Symora tools to AI agents)
+    Mcp(McpArgs),
 }

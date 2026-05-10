@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::app::App;
+use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
 use crate::cli::commands::edit::apply_workspace_edits;
 #[cfg(unix)]
@@ -84,7 +85,7 @@ async fn execute_list(args: ListArgs, app: &App) -> Result<()> {
 
             ctx.print_success(Section::new(output));
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())
@@ -105,10 +106,10 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
                 Some(a) => a,
                 None => {
                     let available: Vec<_> = actions.iter().map(|a| a.title.as_str()).collect();
-                    ctx.print_error(&format!(
+                    ctx.print_error(OutputError::not_found(format!(
                         "No action matching '{}' found. Available: {:?}",
                         args.title, available
-                    ));
+                    )));
                     return Ok(());
                 }
             };
@@ -143,12 +144,12 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
                         };
                         ctx.print_success(response);
                     }
-                    Err(e) => ctx.print_error(&format!("Failed to apply action: {}", e)),
+                    Err(e) => ctx.print_error(e),
                 },
-                Err(e) => ctx.print_error(&e.to_string()),
+                Err(e) => ctx.print_error(e),
             }
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())

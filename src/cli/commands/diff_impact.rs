@@ -7,8 +7,9 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
-use crate::cli::utils::{TestMatcher, classify_refs, find_symbol_at_position};
+use crate::cli::utils::{TestMatcher, find_symbol_at_position};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::services::lsp::LspService;
 
@@ -289,7 +290,7 @@ async fn analyze_hunks(
                 let impact = analyze_symbol_impact(
                     lsp,
                     file,
-                    sym,
+                    sym.clone(),
                     hunk.change_type.clone(),
                     root,
                     test_matcher,
@@ -310,22 +311,35 @@ async fn analyze_hunks(
 async fn analyze_symbol_impact(
     lsp: &dyn LspService,
     file: &Path,
-    sym: &crate::models::symbol::Symbol,
+    sym: crate::models::symbol::Symbol,
     change_type: ChangeType,
     root: &Path,
     test_matcher: &TestMatcher,
     include_callers: bool,
     calls_limit: usize,
 ) -> ChangedSymbolImpact {
+    let name = sym.name.clone();
+    let kind = sym.kind.to_string();
     let line = sym.location.line;
     let column = sym.location.column;
 
-    let refs = lsp
-        .find_references(file, line, column)
-        .await
-        .unwrap_or_default();
+    let analysis = match LocationAnalysis::for_symbol(lsp, file, sym).await {
+        Ok(a) => a,
+        Err(_) => {
+            return ChangedSymbolImpact {
+                name,
+                kind,
+                location: LocationOutput::from_path(file, line, column, root),
+                change_type,
+                refs: 0,
+                test_refs: 0,
+                prod_refs: 0,
+                callers: vec![],
+            };
+        }
+    };
 
-    let classified = classify_refs(&refs, root, Some(file), Some(line), test_matcher);
+    let classified = analysis.classify(root, test_matcher, true);
 
     let callers = if include_callers {
         lsp.incoming_calls(file, line, column)
@@ -343,8 +357,8 @@ async fn analyze_symbol_impact(
     };
 
     ChangedSymbolImpact {
-        name: sym.name.clone(),
-        kind: sym.kind.to_string(),
+        name,
+        kind,
         location: LocationOutput::from_path(file, line, column, root),
         change_type,
         refs: classified.total,

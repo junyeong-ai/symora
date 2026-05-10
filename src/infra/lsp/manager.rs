@@ -96,18 +96,49 @@ impl LspManager {
                 continue;
             }
 
-            // Phase 4: Start new client
+            // Phase 4: Start new client (with LRU eviction if pool full)
             let notify = Arc::new(Notify::new());
-            {
+            let evict = {
                 let mut clients = self.clients.write().await;
                 if clients.contains_key(&language) {
                     continue; // Race: another thread started, retry
                 }
+                let evict = self.pick_eviction_target(&clients);
                 clients.insert(language, ClientState::Initializing(Arc::clone(&notify)));
+                evict
+            };
+
+            if let Some(victim) = evict
+                && let Err(e) = self.shutdown_client(victim).await
+            {
+                tracing::warn!(
+                    "Failed to evict {:?} before starting {:?}: {}",
+                    victim,
+                    language,
+                    e
+                );
             }
 
             return self.start_client_internal(language, notify).await;
         }
+    }
+
+    /// Pick the least-recently-used Ready client when the pool is full.
+    /// Returns `None` when there's still headroom under
+    /// `max_concurrent_servers`.
+    fn pick_eviction_target(&self, clients: &HashMap<Language, ClientState>) -> Option<Language> {
+        let cap = self.runtime_config.max_concurrent_servers.max(1);
+        if clients.len() < cap {
+            return None;
+        }
+        clients
+            .iter()
+            .filter_map(|(lang, state)| match state {
+                ClientState::Ready { last_used, .. } => Some((*lang, *last_used)),
+                _ => None,
+            })
+            .min_by_key(|(_, last_used)| *last_used)
+            .map(|(lang, _)| lang)
     }
 
     async fn start_client_internal(

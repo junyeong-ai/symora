@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::app::App;
+use crate::cli::OutputError;
 use crate::cli::response::{Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
     broad_symbol_kind_bonus, generic_exact_identifier_penalty, is_probably_test_path,
@@ -107,7 +108,9 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
     let file = match args.file {
         Some(f) => f,
         None => {
-            ctx.print_error("File path required when --name not provided");
+            ctx.print_error(OutputError::invalid(
+                "File path required when --name not provided",
+            ));
             return Ok(());
         }
     };
@@ -163,7 +166,7 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
 
             ctx.print_success(Section::with_limit(items, total));
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())
@@ -200,16 +203,18 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
             .map(|l| l.lsp_id())
             .collect::<Vec<_>>()
             .join(", ");
-        ctx.print_error(&format!(
+        ctx.print_error(OutputError::invalid(format!(
             "No valid workspace languages available. Valid languages: {}",
             valid
-        ));
+        )));
         return Ok(());
     }
 
     let query = effective_workspace_query(name_query, symbol_query);
     if query.is_empty() {
-        ctx.print_error("Workspace symbol query cannot be empty");
+        ctx.print_error(OutputError::invalid(
+            "Workspace symbol query cannot be empty",
+        ));
         return Ok(());
     }
 

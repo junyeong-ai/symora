@@ -5,14 +5,13 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::LocationArg;
+use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{
     CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput, TestOutput,
     TypeInfoOutput,
 };
-use crate::cli::utils::{
-    TestMatcher, classify_refs, extract_signature, find_symbol_at_position, resolve_symbol_anchor,
-};
+use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_position};
+use crate::cli::{LocationArg, OutputError};
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::services::lsp::LspService;
 
@@ -85,64 +84,61 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         custom_markers: &config.test.markers,
     };
 
+    let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone()).await {
+        Ok(a) => a,
+        Err(e) => {
+            ctx.print_error(format_analysis_transport_error(
+                &e.to_string(),
+                &loc.file,
+                loc.line,
+                loc.column,
+            ));
+            return Ok(());
+        }
+    };
+
     let response = fetch_context(
         app.lsp.as_ref(),
-        &loc.file,
-        loc.line,
-        loc.column,
         &args,
         ctx.root(),
         app.test_matcher(),
         &params,
+        analysis,
     )
     .await;
 
-    match response {
-        Ok(context) => ctx.print_success(context),
-        Err(e) => ctx.print_error(&format_analysis_transport_error(
-            &e.to_string(),
-            &loc.file,
-            loc.line,
-            loc.column,
-        )),
-    }
-
+    ctx.print_success(response);
     Ok(())
 }
 
 async fn fetch_context(
     lsp: &dyn LspService,
-    file: &Path,
-    line: u32,
-    column: u32,
     args: &ContextArgs,
     root: &Path,
     test_matcher: &TestMatcher,
     params: &ContextParams<'_>,
-) -> Result<ContextOutput> {
-    let (refs_result, symbols_result) = tokio::join!(
-        lsp.find_references(file, line, column),
-        lsp.find_symbols(
-            file,
-            FindSymbolsOptions::default().with_body().with_depth(10)
-        )
-    );
-
-    let symbols = symbols_result.unwrap_or_default();
-    let resolved = resolve_symbol_anchor(&symbols, line, column);
-    let resolved_line = resolved.map(|(line, _, _)| line).unwrap_or(line);
-    let resolved_column = resolved.map(|(_, column, _)| column).unwrap_or(column);
-    let target_symbol = resolved.map(|(_, _, symbol)| symbol);
+    analysis: LocationAnalysis,
+) -> ContextOutput {
+    let resolved_line = analysis
+        .target
+        .as_ref()
+        .map(|s| s.location.line)
+        .unwrap_or(analysis.anchor.line);
+    let resolved_column = analysis
+        .target
+        .as_ref()
+        .map(|s| s.location.column)
+        .unwrap_or(analysis.anchor.column);
 
     let target = {
         let mut t = TargetOutput::from_symbol_or_fallback(
-            target_symbol,
-            file,
+            analysis.target.as_ref(),
+            &analysis.anchor.file,
             resolved_line,
             resolved_column,
             root,
         );
-        if let Some(sym) = target_symbol {
+        if let Some(sym) = analysis.target.as_ref() {
             t = t.with_signature(extract_signature(sym.body.as_deref()));
             if args.body || args.all {
                 t = t.with_body(sym.body.clone());
@@ -151,16 +147,22 @@ async fn fetch_context(
         t
     };
 
-    let refs_result = if target_symbol.is_none() && refs_result.is_err() {
-        lsp.find_references(file, resolved_line, resolved_column)
-            .await
+    // Honour the per-call references limit by classifying a truncated slice
+    // of the analysis output. Keeps the heavy LSP round-trip in
+    // `LocationAnalysis::at` while letting commands cap their response size.
+    let limit = params.refs;
+    let refs_slice: &[crate::models::symbol::Location] = if analysis.references.len() > limit {
+        &analysis.references[..limit]
     } else {
-        refs_result
+        &analysis.references
     };
-
-    let mut refs = refs_result.unwrap_or_default();
-    refs.truncate(params.refs);
-    let classified = classify_refs(&refs, root, Some(file), Some(line), test_matcher);
+    let classified = crate::cli::utils::classify_refs(
+        refs_slice,
+        root,
+        Some(&analysis.anchor.file),
+        Some(analysis.anchor.line),
+        test_matcher,
+    );
 
     let refs_summary = RefOutput {
         total: classified.total,
@@ -168,8 +170,10 @@ async fn fetch_context(
         prod: classified.prod,
         files: Some(classified.unique_files),
         modules: Some(classified.unique_modules),
-        is_exported: None,
+        is_exported: analysis.is_exported(),
     };
+
+    let file = analysis.anchor.file.as_path();
 
     // Fetch optional sections in parallel
     let want_callers = args.callers || args.all;
@@ -238,14 +242,14 @@ async fn fetch_context(
         },
     );
 
-    Ok(ContextOutput {
+    ContextOutput {
         target,
         refs: refs_summary,
         callers,
         callees,
         types,
         tests,
-    })
+    }
 }
 
 async fn fetch_calls(
@@ -319,32 +323,35 @@ async fn fetch_types(
     }
 }
 
-fn format_call_hierarchy_error(error: &str, file: &Path, line: u32, column: u32) -> String {
+fn format_call_hierarchy_error(error: &str, file: &Path, line: u32, column: u32) -> OutputError {
     if is_unsupported_lsp_feature(error) {
-        format!(
-            "Call hierarchy is not supported here. Use `symora refs {}:{}:{}` for usages or `symora usage {}:{}:{}` for broader symbol analysis.",
-            file.display(),
-            line,
-            column,
-            file.display(),
-            line,
-            column
+        OutputError::unsupported("Call hierarchy is not supported at this position").with_hint(
+            format!(
+                "Use `symora refs {}:{}:{}` for usages or `symora usage {}:{}:{}` for broader symbol analysis.",
+                file.display(),
+                line,
+                column,
+                file.display(),
+                line,
+                column,
+            ),
         )
     } else {
-        error.to_string()
+        OutputError::internal(error.to_string())
     }
 }
 
-fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> String {
+fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> OutputError {
     if is_unsupported_lsp_feature(error) {
-        format!(
-            "Type definition lookup is not supported here. Use `symora hover {}:{}:{}` or inspect the target body in this context output instead.",
-            file.display(),
-            line,
-            column
-        )
+        OutputError::unsupported("Type definition lookup is not supported at this position")
+            .with_hint(format!(
+                "Use `symora hover {}:{}:{}` or inspect the target body in this context output instead.",
+                file.display(),
+                line,
+                column,
+            ))
     } else {
-        error.to_string()
+        OutputError::internal(error.to_string())
     }
 }
 
@@ -356,17 +363,24 @@ fn is_transport_lsp_failure(error: &str) -> bool {
     error.contains("Broken pipe") || error.contains("timed out") || error.contains("timeout")
 }
 
-fn format_analysis_transport_error(error: &str, file: &Path, line: u32, column: u32) -> String {
+fn format_analysis_transport_error(
+    error: &str,
+    file: &Path,
+    line: u32,
+    column: u32,
+) -> OutputError {
     if is_transport_lsp_failure(error) {
-        format!(
-            "The language server did not respond cleanly here. Retry after `symora daemon restart`, or continue with `symora symbols {}` and `symora usage {}:{}:{}`.",
-            file.display(),
-            file.display(),
-            line,
-            column
+        OutputError::lsp_unavailable("The language server did not respond cleanly").with_hint(
+            format!(
+                "Retry after `symora daemon restart`, or continue with `symora symbols {}` and `symora usage {}:{}:{}`.",
+                file.display(),
+                file.display(),
+                line,
+                column,
+            ),
         )
     } else {
-        error.to_string()
+        OutputError::internal(error.to_string())
     }
 }
 
