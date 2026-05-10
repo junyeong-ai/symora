@@ -37,6 +37,11 @@ pub fn get_node_types(language: Language) -> &'static [NodeType] {
         Language::Ruby => RUBY,
         Language::Lua => LUA,
         Language::PHP => PHP,
+        Language::Swift => SWIFT,
+        Language::Scala => SCALA,
+        Language::Elixir => ELIXIR,
+        Language::Dart => DART,
+        Language::Terraform => HCL,
         _ => &[],
     }
 }
@@ -62,6 +67,11 @@ pub fn supported_languages() -> &'static [Language] {
         Language::Ruby,
         Language::Lua,
         Language::PHP,
+        Language::Swift,
+        Language::Scala,
+        Language::Elixir,
+        Language::Dart,
+        Language::Terraform,
     ]
 }
 
@@ -307,6 +317,82 @@ const PHP: &[NodeType] = &[
     NodeType::new("const", "const_declaration", "const X = ...;"),
     NodeType::new("if", "if_statement", "if ($cond) {}"),
     NodeType::new("foreach", "foreach_statement", "foreach ($x as $y)"),
+];
+
+// Swift - tree-sitter-swift/src/node-types.json
+const SWIFT: &[NodeType] = &[
+    NodeType::new("class", "class_declaration", "class MyClass {}"),
+    NodeType::new("function", "function_declaration", "func f() {}"),
+    NodeType::new("protocol", "protocol_declaration", "protocol P {}"),
+    NodeType::new("enum", "enum_declaration", "enum E {}"),
+    NodeType::new("struct", "struct_declaration", "struct S {}"),
+    NodeType::new("extension", "extension_declaration", "extension T {}"),
+    NodeType::new("import", "import_declaration", "import Foundation"),
+    NodeType::new("property", "property_declaration", "var x: Int = 0"),
+    NodeType::new("typealias", "typealias_declaration", "typealias T = ..."),
+    NodeType::new("if", "if_statement", "if cond {}"),
+    NodeType::new("for", "for_statement", "for x in xs {}"),
+    NodeType::new("guard", "guard_statement", "guard let x = ... else {}"),
+];
+
+// Scala - tree-sitter-scala/src/node-types.json
+const SCALA: &[NodeType] = &[
+    NodeType::new("class", "class_definition", "class MyClass {}"),
+    NodeType::new("trait", "trait_definition", "trait T {}"),
+    NodeType::new("object", "object_definition", "object Singleton"),
+    NodeType::new("function", "function_definition", "def f(): T = ..."),
+    NodeType::new("function", "function_declaration", "def f(): T"),
+    NodeType::new("val", "val_definition", "val x = ..."),
+    NodeType::new("var", "var_definition", "var x = ..."),
+    NodeType::new("type", "type_definition", "type T = ..."),
+    NodeType::new("import", "import_declaration", "import pkg.Class"),
+    NodeType::new("package", "package_clause", "package pkg"),
+    NodeType::new("if", "if_expression", "if cond then ... else ..."),
+    NodeType::new("match", "match_expression", "x match { case _ => ... }"),
+];
+
+// Elixir - tree-sitter-elixir/src/node-types.json
+const ELIXIR: &[NodeType] = &[
+    NodeType::new("module", "call", "defmodule / def / defp / defprotocol"),
+    NodeType::new("function", "anonymous_function", "fn x -> x end"),
+    NodeType::new("pattern", "binary_operator", "|> / = / pattern matching"),
+    NodeType::new("atom", "atom", ":atom"),
+    NodeType::new("alias", "alias", "Module.Path"),
+    NodeType::new("string", "string", "\"text\""),
+    NodeType::new("list", "list", "[1, 2, 3]"),
+    NodeType::new("tuple", "tuple", "{:ok, value}"),
+    NodeType::new("map", "map", "%{key: val}"),
+    NodeType::new("sigil", "sigil", "~r/regex/ ~s/string/"),
+];
+
+// Dart - tree-sitter-dart/src/node-types.json
+const DART: &[NodeType] = &[
+    NodeType::new("class", "class_definition", "class MyClass {}"),
+    NodeType::new("mixin", "mixin_declaration", "mixin M {}"),
+    NodeType::new("extension", "extension_declaration", "extension on T {}"),
+    NodeType::new("function", "function_signature", "void f() {}"),
+    NodeType::new("method", "method_signature", "T method() {}"),
+    NodeType::new("constructor", "constructor_signature", "MyClass()"),
+    NodeType::new("getter", "getter_signature", "T get name => ..."),
+    NodeType::new("setter", "setter_signature", "set name(T v) { ... }"),
+    NodeType::new("import", "import_or_export", "import 'pkg.dart'"),
+    NodeType::new("variable", "initialized_variable_definition", "var x = ..."),
+    NodeType::new("if", "if_statement", "if (cond) {}"),
+    NodeType::new("for", "for_statement", "for (final x in xs) {}"),
+];
+
+// HCL / Terraform - tree-sitter-hcl/src/node-types.json
+const HCL: &[NodeType] = &[
+    NodeType::new("block", "block", "resource \"aws_s3_bucket\" \"x\" { ... }"),
+    NodeType::new("body", "body", "{ key = value }"),
+    NodeType::new("attribute", "attribute", "key = value"),
+    NodeType::new("expression", "expression", "any expression"),
+    NodeType::new("function", "function_call", "lookup(map, key)"),
+    NodeType::new("variable", "variable_expr", "var.name"),
+    NodeType::new("for", "for_tuple_expr", "[for x in xs : ...]"),
+    NodeType::new("for", "for_object_expr", "{for k,v in m : ...}"),
+    NodeType::new("conditional", "conditional", "cond ? a : b"),
+    NodeType::new("template", "template_expr", "\"${var.x}\""),
 ];
 
 #[cfg(test)]
