@@ -7,6 +7,7 @@ REPO="junyeong-ai/symora"
 SKILL_NAME="symora"
 PROJECT_SKILL_DIR=".claude/skills/$SKILL_NAME"
 USER_SKILL_DIR="$HOME/.claude/skills/$SKILL_NAME"
+DAEMON_DIR="$HOME/.symora"
 
 # ============================================================================
 # Color Output
@@ -102,8 +103,17 @@ build_from_source() {
     echo "target/release/$BINARY_NAME"
 }
 
+stop_running_daemon() {
+    if [ -x "$INSTALL_DIR/$BINARY_NAME" ] && [ -f "$DAEMON_DIR/daemon.pid" ]; then
+        info "Stopping running daemon before binary replacement..."
+        "$INSTALL_DIR/$BINARY_NAME" daemon stop >/dev/null 2>&1 || true
+    fi
+}
+
 install_binary() {
     local binary_path="$1"
+
+    stop_running_daemon
 
     mkdir -p "$INSTALL_DIR"
     cp "$binary_path" "$INSTALL_DIR/$BINARY_NAME"
@@ -120,30 +130,12 @@ install_binary() {
 # Skill Installation
 # ============================================================================
 
-get_skill_version() {
-    local skill_md="$1"
-    [ -f "$skill_md" ] && grep "^version:" "$skill_md" 2>/dev/null | sed 's/version: *//' || echo "unknown"
-}
-
 check_skill_exists() {
     [ -d "$USER_SKILL_DIR" ] && [ -f "$USER_SKILL_DIR/SKILL.md" ]
 }
 
-compare_versions() {
-    local ver1="$1"
-    local ver2="$2"
-
-    if [ "$ver1" = "$ver2" ]; then
-        echo "equal"
-    elif [ "$ver1" = "unknown" ] || [ "$ver2" = "unknown" ]; then
-        echo "unknown"
-    else
-        if [ "$(printf '%s\n' "$ver1" "$ver2" | sort -V | head -n1)" = "$ver1" ]; then
-            [ "$ver1" != "$ver2" ] && echo "older" || echo "equal"
-        else
-            echo "newer"
-        fi
-    fi
+skill_content_matches() {
+    diff -rq "$PROJECT_SKILL_DIR" "$USER_SKILL_DIR" >/dev/null 2>&1
 }
 
 backup_skill() {
@@ -165,49 +157,26 @@ install_skill() {
 prompt_skill_installation() {
     [ ! -d "$PROJECT_SKILL_DIR" ] && return 0
 
-    local project_version=$(get_skill_version "$PROJECT_SKILL_DIR/SKILL.md")
-
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "Claude Code Skill Installation"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Skill: $SKILL_NAME (v$project_version)"
+    echo "Skill: $SKILL_NAME"
     echo ""
 
     if check_skill_exists; then
-        local existing_version=$(get_skill_version "$USER_SKILL_DIR/SKILL.md")
-        local comparison=$(compare_versions "$existing_version" "$project_version")
-
-        echo "Status: Already installed (v$existing_version)"
-        echo ""
-
-        case "$comparison" in
-            equal)
-                success "Latest version installed"
-                echo ""
-                read -p "Reinstall? [y/N]: " choice
-                [[ "$choice" =~ ^[yY]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; } || echo "Skipped"
-                ;;
-            older)
-                warn "New version available: v$project_version"
-                echo ""
-                read -p "Update? [Y/n]: " choice
-                [[ ! "$choice" =~ ^[nN]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; success "Updated to v$project_version"; } || echo "Keeping current version"
-                ;;
-            newer)
-                warn "Installed version (v$existing_version) > project version (v$project_version)"
-                echo ""
-                read -p "Downgrade? [y/N]: " choice
-                [[ "$choice" =~ ^[yY]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; } || echo "Keeping current version"
-                ;;
-            *)
-                warn "Version comparison failed"
-                echo ""
-                read -p "Reinstall? [y/N]: " choice
-                [[ "$choice" =~ ^[yY]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; } || echo "Skipped"
-                ;;
-        esac
+        if skill_content_matches; then
+            success "Already installed and up to date."
+            echo ""
+            read -p "Reinstall anyway? [y/N]: " choice
+            [[ "$choice" =~ ^[yY]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; } || echo "Skipped"
+        else
+            warn "Installed skill differs from project skill — refresh recommended."
+            echo ""
+            read -p "Update? [Y/n]: " choice
+            [[ ! "$choice" =~ ^[nN]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; success "Updated"; } || echo "Keeping current version"
+        fi
     else
         echo "Installation options:"
         echo ""
@@ -554,8 +523,9 @@ main() {
     echo ""
     echo "1. Initialize project:     symora init"
     echo "2. Check dependencies:     symora doctor"
-    echo "3. Find symbols:           symora find symbol src/main.rs"
-    echo "4. Get hover info:         symora hover src/main.rs:10:5"
+    echo "3. Build search index:     symora search index build"
+    echo "4. Project overview:       symora map summary"
+    echo "5. List file symbols:      symora symbols src/main.rs"
     echo ""
 }
 

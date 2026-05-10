@@ -6,30 +6,63 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 SKILL_NAME="symora"
 USER_SKILL_DIR="$HOME/.claude/skills/$SKILL_NAME"
 CONFIG_DIR="$HOME/.config/symora"
-
-# ============================================================================
-# Color Output
-# ============================================================================
+DAEMON_DIR="$HOME/.symora"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 info() { echo -e "${BLUE}$1${NC}"; }
 success() { echo -e "${GREEN}$1${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
 error() { echo -e "${RED}$1${NC}"; }
 
-# ============================================================================
-# Main
-# ============================================================================
-
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "          Symora Uninstaller"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ============================================================================
+# Daemon Shutdown — must run before binary removal so `symora daemon stop` works
+# ============================================================================
+
+echo "Daemon Shutdown"
+echo "──────────────────────────────────────────────────────"
+
+stop_daemon() {
+    if [ -x "$INSTALL_DIR/$BINARY_NAME" ]; then
+        info "Sending graceful stop via 'symora daemon stop'..."
+        "$INSTALL_DIR/$BINARY_NAME" daemon stop >/dev/null 2>&1 || true
+    fi
+
+    if [ -f "$DAEMON_DIR/daemon.pid" ]; then
+        local pid
+        pid=$(cat "$DAEMON_DIR/daemon.pid" 2>/dev/null || echo "")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            info "Daemon (PID $pid) still running — sending SIGTERM..."
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
+
+    rm -f "$DAEMON_DIR/daemon.sock" "$DAEMON_DIR/daemon.pid" "$DAEMON_DIR/daemon.lock"
+
+    if [ -d "$DAEMON_DIR" ] && [ -z "$(ls -A "$DAEMON_DIR" 2>/dev/null)" ]; then
+        rmdir "$DAEMON_DIR" 2>/dev/null || true
+    fi
+}
+
+if [ -d "$DAEMON_DIR" ] || [ -f "$DAEMON_DIR/daemon.pid" ]; then
+    stop_daemon
+    success "Daemon stopped and runtime files cleaned"
+else
+    info "No running daemon"
+fi
+
 echo ""
 
 # ============================================================================
@@ -39,7 +72,7 @@ echo ""
 echo "Binary Removal"
 echo "──────────────────────────────────────────────────────"
 
-if [ -f "$INSTALL_DIR/$BINARY_NAME" ]; then
+if [ -f "$INSTALL_DIR/$BINARY_NAME" ] || [ -L "$INSTALL_DIR/$BINARY_NAME" ]; then
     rm "$INSTALL_DIR/$BINARY_NAME"
     success "Removed $INSTALL_DIR/$BINARY_NAME"
 else
@@ -63,7 +96,6 @@ if [ -d "$USER_SKILL_DIR" ]; then
 
     case "$choice" in
         y|Y)
-            # Check for backups
             backup_count=$(ls -d "${USER_SKILL_DIR}.backup_"* 2>/dev/null | wc -l || echo "0")
 
             if [ "$backup_count" -gt 0 ]; then
@@ -125,48 +157,6 @@ case "$choice" in
         info "Kept global configuration"
         ;;
 esac
-
-echo ""
-
-# ============================================================================
-# Daemon Cleanup
-# ============================================================================
-
-echo "Daemon Cleanup"
-echo "──────────────────────────────────────────────────────"
-
-# Check if daemon is running
-SOCKET_PATH="/tmp/symora-daemon.sock"
-PID_FILE="/tmp/symora-daemon.pid"
-
-if [ -S "$SOCKET_PATH" ] || [ -f "$PID_FILE" ]; then
-    echo "Daemon files found."
-    read -p "Stop daemon and clean up? [Y/n]: " choice
-    echo
-
-    case "$choice" in
-        n|N)
-            info "Kept daemon files"
-            ;;
-        *)
-            # Try to stop daemon gracefully
-            if [ -f "$PID_FILE" ]; then
-                PID=$(cat "$PID_FILE" 2>/dev/null)
-                if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-                    info "Stopping daemon (PID: $PID)..."
-                    kill "$PID" 2>/dev/null || true
-                    sleep 1
-                fi
-            fi
-
-            # Clean up files
-            rm -f "$SOCKET_PATH" "$PID_FILE" 2>/dev/null || true
-            success "Daemon cleaned up"
-            ;;
-    esac
-else
-    info "No daemon files found"
-fi
 
 echo ""
 
