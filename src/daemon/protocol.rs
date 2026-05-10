@@ -94,7 +94,12 @@ impl RpcError {
 
 impl From<&crate::error::LspError> for RpcError {
     fn from(error: &crate::error::LspError) -> Self {
-        Self::new(error.error_code(), error.to_string())
+        let wire = super::wire_error::WireLspError::from(error);
+        Self {
+            code: error.error_code(),
+            message: error.to_string(),
+            data: serde_json::to_value(&wire).ok(),
+        }
     }
 }
 
