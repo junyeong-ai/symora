@@ -8,7 +8,7 @@
 
 **Symbol-centric code intelligence CLI for AI coding agents**
 
-[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 
 **English** | [한국어](README.md)
@@ -227,6 +227,19 @@ Check environment and language servers:
 ```bash
 symora doctor
 ```
+
+---
+
+## MCP Server
+
+Symora also runs as a Model Context Protocol server. The same command set is exposed as 21 MCP tools that share the in-process command layer, so both surfaces produce identical results.
+
+```bash
+symora mcp serve                          # stdio (Claude Code, Cursor, etc. use this by default)
+symora mcp serve --transport http --port 8765
+```
+
+The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`) carry `Mutates` in their descriptions and all support a `dry_run` option.
 
 ---
 
