@@ -2,10 +2,14 @@
 name = "symora"
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 description = "Symbol-centric code intelligence CLI for AI coding agents"
 license = "MIT"
 repository = "https://github.com/junyeong-ai/symora"
+homepage = "https://github.com/junyeong-ai/symora"
+documentation = "https://docs.rs/symora"
+readme = "README.md"
+authors = ["junyeong-ai"]
 keywords = ["cli", "lsp", "symbol", "code-intelligence", "ai"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -13,62 +17,101 @@ categories = ["command-line-utilities", "development-tools"]
 name = "symora"
 path = "src/main.rs"
 
+[features]
+default = []
+# Optional local embeddings backend (ONNX via fastembed-rs).
+# Off by default: the dependency tree is large (ort + tokenizers) and most
+# users will be happy with the BM25/FTS5 backend.
+# Enable with: `cargo install symora --features embeddings`.
+embeddings = ["dep:fastembed"]
+
 [dependencies]
-# Async Runtime
-tokio = { version = "1.50", features = ["full", "process", "sync"] }
-futures = "0.3"
+# Async Runtime (1.51.x is the latest LTS line, supported through 2027/03)
+tokio = { version = "~1.51", features = ["full", "process", "sync"] }
+futures = "0.3.32"
 
 # CLI
-clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_repr = "0.1"
-toml = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_repr = "0.1.20"
+toml = "1.1"
 
 # Error Handling
-thiserror = "2.0"
-anyhow = "1.0"
+thiserror = "2.0.18"
+anyhow = "1.0.102"
 
-# AST Parsing (13 languages + C via cpp)
-tree-sitter = "0.26"
+# AST Parsing
+tree-sitter = "0.26.8"
 tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-go = "0.25"
-tree-sitter-bash = "0.25"
-tree-sitter-rust = "0.23"
-tree-sitter-php = "0.24"
-tree-sitter-typescript = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-cpp = "0.23"
-tree-sitter-ruby = "0.23"
-tree-sitter-c-sharp = "0.23"
+tree-sitter-bash = "0.25.1"
+tree-sitter-rust = "0.24.2"
+tree-sitter-php = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-c-sharp = "0.23.5"
 tree-sitter-lua = "0.5"
-tree-sitter-kotlin-sg = "0.4"
-streaming-iterator = "0.1"
+tree-sitter-kotlin-sg = "0.4.1"
+tree-sitter-swift = "0.7.2"
+tree-sitter-scala = "0.26.0"
+tree-sitter-elixir = "0.3.5"
+tree-sitter-dart = "0.2.0"
+tree-sitter-hcl = "1.1.0"
+streaming-iterator = "0.1.9"
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 # Utilities
 dirs = "6.0"
 walkdir = "2.5"
-async-trait = "0.1"
-ignore = "0.4"
+async-trait = "0.1.89"
+ignore = "0.4.25"
+
+# HTTP transport for the MCP server (`symora mcp serve --transport http`).
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 
 # SQLite (symbol/content indexing)
 tokio-rusqlite = "0.7"
 rusqlite = { version = "0.37", features = ["bundled"] }
 
+# Optional local embeddings (gated behind the `embeddings` feature).
+fastembed = { version = "5.13", optional = true }
+
 # Unix file locking (for daemon)
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.186"
+
+# jemalloc on Linux/macOS: cuts fragmentation across SQLite batches and the
+# LSP fan-out arena. cfg-gated because the upstream crate doesn't build on
+# Windows or wasm.
+[target.'cfg(all(not(target_env = "msvc"), not(target_os = "windows")))'.dependencies]
+tikv-jemallocator = "0.6.1"
 
 [dev-dependencies]
-tempfile = "3.26"
-tokio-test = "0.4"
+tempfile = "3.27"
+tokio-test = "0.4.5"
+insta = { version = "1.47", features = ["json", "redactions"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "pack"
+harness = false
+
+[[bench]]
+name = "errors"
+harness = false
+
+[[bench]]
+name = "blast_radius"
+harness = false
 
 [profile.release]
 lto = true
