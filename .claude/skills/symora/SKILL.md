@@ -1,39 +1,32 @@
 ---
-name: symora
-version: 0.6.0
-description: Use Symora for symbol-centric code navigation and analysis in this repository. Best for rough symbol discovery, exact symbol inspection, file overviews, references, context gathering, usage analysis, and impact analysis through the `symora` CLI.
+description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
+when_to_use: User asks "where is this defined", "who calls this", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
 ---
 
 # Symora
 
-Use `symora` when semantic code navigation is more useful than plain text search.
+Use `symora` when semantic code navigation is more useful than text search. Output is JSON — treat it as structured data.
 
-Prefer this skill for:
+## Two backends, different requirements
 
-- rough workspace symbol discovery
-- exact symbol inspection from a file or symbol path
-- compact file overviews before reading full source
-- references, context, and usage analysis from a location
-- impact analysis, code actions, and diagnostics
+- **Index-backed** (always works once `search index build` has run): `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. Backed by SQLite + tree-sitter.
+- **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `impl`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
 
-Symora is a CLI-first tool and returns JSON. Treat its output as structured data.
+If a command returns `{"error": ..., "server_not_installed"}`, the language server is missing — fall back to index-backed commands.
 
-## Core workflow
+## Workflow
 
-Use commands in this order when possible:
-
-1. `symora map summary` for project entrypoints and major areas
-2. `symora search symbols <query>` for rough workspace discovery
-3. `symora map file <path>` for a compact file overview
-4. `symora symbols <file>` or `symora symbols --symbol <path>` for exact inspection
-5. `symora context`, `symora refs`, or `symora usage` for exact follow-up
+1. `symora search index status` — confirm the index is built. If `symbol_count: 0`, run `symora search index build` once.
+2. `symora map summary` — project entrypoints and major areas.
+3. `symora search symbols <query>` — rough workspace discovery (index-backed).
+4. `symora map file <path>` — compact file overview. Outer fields (`siblings`, `related_files`, `counterpart_files`, `language`) are always valid; the embedded `symbols` field carries `{"error": {"code": "server_not_installed", ...}}` when the LSP is absent — parse the outer shape and ignore `symbols` in that case.
+5. `symora symbols <file>` or `symora symbols --symbol <path>` — full semantic tree (LSP-backed).
+6. `symora context | refs | usage` — exact follow-up from a location (LSP-backed).
 
 ## Command selection
 
-### Rough discovery
-
-Use these when the file or exact symbol is not known yet.
+### Rough discovery (file/symbol unknown)
 
 ```bash
 symora search symbols AuthUser
@@ -42,15 +35,9 @@ symora search content "async fn"
 symora map summary
 ```
 
-Notes:
+Narrow noisy results with `--kind`, `--lang`, or a more specific name.
 
-- `search symbols` is the primary rough discovery command.
-- Broad generic queries can be noisy. Prefer a more specific symbol name or add `--kind` / `--lang`.
-- `search content` is useful when you know a phrase but not the symbol.
-
-### Exact inspection
-
-Use these when the file or symbol path is already known.
+### Exact inspection (file/symbol known)
 
 ```bash
 symora symbols src/cli/commands/search.rs --depth 2
@@ -59,15 +46,9 @@ symora hover src/cli/commands/search.rs:30:10
 symora def src/cli/commands/search.rs:30:10
 ```
 
-Notes:
-
-- `symbols <file>` is for semantic file inspection.
-- `symbols --symbol <path>` is for exact symbol-path inspection.
-- `symbols --name` is still available, but prefer `search symbols` for broad lookup.
+`symbols <file>` returns the full LSP tree. `symbols --symbol <path>` resolves an exact symbol path. Use `search symbols` for broad lookup, not `--name`.
 
 ### File and project overview
-
-Use these before deeper inspection.
 
 ```bash
 symora map summary
@@ -76,15 +57,9 @@ symora map dir src/cli/commands
 symora map related src/cli/commands/search.rs --limit 5
 ```
 
-Notes:
-
-- `map file` is intentionally compact.
-- Use `symbols <file>` if you need the full semantic tree.
-- `map related` is heuristic. Treat it as a next-file hint, not a dependency graph.
+`map file` is compact by design — use `symbols <file>` for the full tree. `map related` is a heuristic next-file hint, not a dependency graph.
 
 ### Exact follow-up from a location
-
-These are the most useful commands once you know the target location.
 
 ```bash
 symora context src/cli/commands/search.rs:30 --all
@@ -92,11 +67,7 @@ symora refs src/cli/commands/search.rs:30
 symora usage src/cli/commands/search.rs:30:10 --max-symbols 10 --limit 5
 ```
 
-Notes:
-
-- `context` gathers nearby semantic information and provides fallback guidance when the active LSP server lacks call hierarchy or type-definition support.
-- `refs` now resolves line-only inputs to the nearest symbol anchor when possible.
-- `usage` accepts either a symbol query or a location and resolves the symbol automatically.
+`context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition. `refs` accepts line-only inputs and resolves to the nearest symbol anchor. `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location — both forms require an installed LSP for non-empty results. **Pattern-form `usage` returns `count: 0` silently (no `server_not_installed` error) when the LSP is missing**; if you get an empty count, confirm with `symora doctor <lang>` before assuming the symbol has zero references.
 
 ### Refactor and health checks
 
@@ -109,56 +80,47 @@ symora impact src/main.rs:42
 symora diff-impact
 ```
 
-## Practical guidance
+Mutating commands (`actions apply`, `rename`, `edit`) accept `--dry-run` for previews.
 
-- Prefer exact locations in `file:line:column` form for follow-up commands.
-- If semantic file or location commands fail unexpectedly, check `symora doctor <lang>` before assuming the workflow is broken.
-- If `context` or `refs` reports unsupported features, continue with the suggested fallback command instead of retrying the same command blindly.
-- If `usage` resolves a location but returns no workspace results, continue with `symora symbols <file>` or `symora refs <location>`.
-- If search results are truncated, narrow the query or increase `--limit`.
-- If indexed search behaves unexpectedly, check or rebuild the index.
+## Output and global flags
 
-## Index and daemon operations
+JSON responses commonly include `count`, `showing`, `items`, `truncated`, `hints`. Global flags go **before** the subcommand:
+
+```bash
+symora --format compact search symbols AuthUser    # single-line JSON
+symora --format jsonl refs src/main.rs:10:5        # newline-delimited
+symora -q rename src/main.rs:10:5 new_name         # error-only
+symora -v status                                   # verbose
+```
+
+Format values: `pretty` (default), `compact`, `jsonl`. There is no `-c` shortcut.
+
+## Index and daemon
 
 ```bash
 symora search index status
-symora search index build
+symora search index build              # incremental: only changed files, prunes deleted
 symora search index build --force --lang rust
 symora daemon status
 symora daemon restart
-symora doctor
+symora doctor                          # check environment; pass <language> to check one
 ```
 
-Use these when:
+Use these when search results are unexpectedly empty, a language server is unresponsive, or daemon/index state needs confirmation. Reserve `--force` for full rebuilds.
 
-- search results are unexpectedly empty
-- the language server becomes unresponsive
-- you need to confirm daemon or index state
-- repeated `search index build` is usually enough for refresh; reserve `--force` for a full rebuild
+## When commands fail
 
-## Output expectations
-
-Symora emits JSON and commonly uses fields such as:
-
-- `count`
-- `showing`
-- `items`
-- `truncated`
-- `hints`
-
-Use `-c` for compact JSON when token efficiency matters.
-
-```bash
-symora -c search symbols AuthUser
-symora -c refs src/main.rs:10:5
-```
+- `count: 0` from `search …`: run `symora search index status` — if `symbol_count: 0` the index has never been built, run `symora search index build`.
+- `server_not_installed` error: run `symora doctor <lang>` and install per its `install` field. While the LSP is missing, fall back to `search symbols`, `search content`, `map file`, `map dir`.
+- `context` or `refs` reports an unsupported feature: follow the suggested fallback rather than retrying.
+- `usage` returns empty: confirm the LSP is installed (`symora doctor <lang>`); pattern-form `usage` also relies on LSP-resolved references.
+- Search results truncated: narrow the query or raise `--limit`.
 
 ## Anti-patterns
 
-Avoid these mistakes:
-
-- using `map file` when you actually need the full semantic tree (`symbols <file>`)
-- using `symbols --name` for very broad discovery instead of `search symbols`
-- treating `map related` as a precise dependency graph
-- assuming all LSP servers support call hierarchy or type definition equally well
-- retrying weak-LSP commands repeatedly instead of switching to file-level fallback flow
+- Using `-c` (does not exist) — use `--format compact` placed before the subcommand.
+- `map file` when you actually need the full semantic tree → use `symbols <file>`.
+- `symbols --name` for very broad discovery → use `search symbols`.
+- Treating `map related` as a precise dependency graph.
+- Retrying LSP-backed commands when the language server is missing → switch to index-backed commands.
+- Assuming all language servers support call hierarchy and type definition equally.
