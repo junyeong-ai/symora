@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use super::input_error::CliInputError;
+
 #[derive(clap::Args, Debug)]
 pub struct LocationArg {
     /// File path with position (file:line:column)
@@ -58,7 +60,7 @@ impl ParsedLocation {
     pub fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
-            bail!("Location cannot be empty");
+            bail!(CliInputError::LocationEmpty);
         }
 
         let (file_part, rest) = Self::split_path_and_position(input)?;
@@ -91,16 +93,12 @@ impl ParsedLocation {
         }
 
         if potential_splits.is_empty() {
-            bail!(
-                "Invalid location format. Expected: file:line[:column]\nExample: src/main.rs:10:5"
-            )
+            bail!(CliInputError::LocationMalformed);
         }
 
         let (split_pos, is_negative) = potential_splits[0];
         if is_negative {
-            bail!(
-                "Invalid line number: negative values not allowed. Line numbers are 1-indexed positive integers.\nExample: src/main.rs:10:5"
-            )
+            bail!(CliInputError::InvalidLine("negative".to_string()));
         }
 
         Ok((&input[..split_pos], &input[split_pos + 1..]))
@@ -110,29 +108,23 @@ impl ParsedLocation {
         let parts: Vec<&str> = rest.splitn(2, ':').collect();
 
         let line_str = parts.first().unwrap_or(&"");
-        let line: u32 = line_str.parse().map_err(|_| {
-            anyhow::anyhow!(
-                "Invalid line number '{}': must be a positive integer (1-indexed)",
-                line_str
-            )
-        })?;
+        let line: u32 = line_str
+            .parse()
+            .map_err(|_| CliInputError::InvalidLine((*line_str).to_string()))?;
 
         let column: u32 = if let Some(col_str) = parts.get(1) {
-            col_str.parse().map_err(|_| {
-                anyhow::anyhow!(
-                    "Invalid column number '{}': must be a positive integer (1-indexed)",
-                    col_str
-                )
-            })?
+            col_str
+                .parse()
+                .map_err(|_| CliInputError::InvalidColumn((*col_str).to_string()))?
         } else {
             1
         };
 
         if line == 0 {
-            bail!("Line number must be >= 1 (got 0). Line numbers are 1-indexed.");
+            bail!(CliInputError::LineMustBePositive);
         }
         if column == 0 {
-            bail!("Column number must be >= 1 (got 0). Column numbers are 1-indexed.");
+            bail!(CliInputError::ColumnMustBePositive);
         }
 
         Ok((line, column))
@@ -153,33 +145,26 @@ impl ParsedLocation {
                 .join(&self.file)
         };
 
-        // Canonicalize to resolve symlinks and .. components
+        // Canonicalize to resolve symlinks and .. components.
         let canonical = file.canonicalize().map_err(|_| {
-            // Check if the path looks like a malformed location (e.g., "file:abc" from "file:abc:1")
             let path_str = self.file.to_string_lossy();
-            if path_str.contains(':') && !path_str.starts_with('/') && path_str.chars().nth(1).is_none_or(|c| c != ':') {
-                // Likely a malformed location like "file:abc" from input "file:abc:1"
-                anyhow::anyhow!(
-                    "Invalid location format: '{}'. Expected 'file:line[:column]' with numeric line/column values.\n\
-                     Example: src/main.rs:10:5",
-                    path_str
-                )
+            if path_str.contains(':')
+                && !path_str.starts_with('/')
+                && path_str.chars().nth(1).is_none_or(|c| c != ':')
+            {
+                CliInputError::LocationMalformed
             } else {
-                anyhow::anyhow!("File not found: {}", file.display())
+                CliInputError::FileNotFound(file.clone())
             }
         })?;
 
-        // Validate against project boundary if provided
         if let Some(root) = project_root {
             let canonical_root = root
                 .canonicalize()
                 .context("Failed to resolve project root")?;
 
             if !canonical.starts_with(&canonical_root) {
-                bail!(
-                    "Access denied: {} is outside project boundary",
-                    self.file.display()
-                );
+                bail!(CliInputError::PathOutsideProject(self.file.clone()));
             }
         }
 
@@ -207,23 +192,21 @@ impl ParsedLocation {
             if line_num == self.line {
                 let char_count = line.chars().count();
                 if self.column as usize > char_count + 1 {
-                    bail!(
-                        "Column {} exceeds line length ({} chars) at line {}",
-                        self.column,
-                        char_count,
-                        self.line
-                    );
+                    bail!(CliInputError::ColumnOutOfRange {
+                        column: self.column,
+                        chars: char_count,
+                        line: self.line,
+                    });
                 }
                 return Ok(());
             }
         }
 
-        let line_count = line_num.max(1);
-        bail!(
-            "Line {} exceeds file length ({} lines)",
-            self.line,
-            line_count
-        )
+        let line_count = line_num.max(1) as usize;
+        bail!(CliInputError::LineOutOfRange {
+            line: self.line,
+            total: line_count,
+        })
     }
 
     pub fn validate_position_with_content(&self, content: &str) -> Result<()> {
@@ -231,22 +214,20 @@ impl ParsedLocation {
         let line_count = lines.len().max(1);
 
         if self.line as usize > line_count {
-            bail!(
-                "Line {} exceeds file length ({} lines)",
-                self.line,
-                line_count
-            );
+            bail!(CliInputError::LineOutOfRange {
+                line: self.line,
+                total: line_count,
+            });
         }
 
         if let Some(line_content) = lines.get((self.line - 1) as usize) {
             let char_count = line_content.chars().count();
             if self.column as usize > char_count + 1 {
-                bail!(
-                    "Column {} exceeds line length ({} chars) at line {}",
-                    self.column,
-                    char_count,
-                    self.line
-                );
+                bail!(CliInputError::ColumnOutOfRange {
+                    column: self.column,
+                    chars: char_count,
+                    line: self.line,
+                });
             }
         }
 
