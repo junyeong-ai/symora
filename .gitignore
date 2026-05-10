@@ -2,6 +2,8 @@
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+!.claude/rules/
+!.claude/rules/**
 .serena/
 .specify/
 specs/
