@@ -83,10 +83,18 @@ impl Store {
 
     async fn try_open_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
         let db = SqliteDb::open(db_path).await?;
-        db.execute(INIT_SCHEMA).await?;
-        for migration in SYMBOL_MIGRATIONS {
-            let _ = db.execute(migration).await;
+
+        let version: i32 = db
+            .call(|conn| conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)))
+            .await?;
+
+        if version != 0 && version != SCHEMA_VERSION {
+            return Err(StoreError::Database(format!(
+                "schema version mismatch: db={version}, expected={SCHEMA_VERSION}"
+            )));
         }
+
+        db.execute(INIT_SCHEMA).await?;
         db.call(|conn| {
             conn.query_row("SELECT 1", [], |_r| Ok(()))?;
             Ok(())
@@ -339,14 +347,27 @@ impl Store {
             self.prune_deleted_files(&discovered_paths).await?;
         }
 
-        const INDEX_BATCH_SIZE: usize = 8;
-        for chunk in files.chunks(INDEX_BATCH_SIZE) {
-            let futs: Vec<_> = chunk.iter().map(|f| self.index_file(f)).collect();
-            let results = futures::future::join_all(futs).await;
-            for result in results {
-                if let Err(e) = result {
-                    tracing::warn!("Failed to index file: {}", e);
+        // The previous design called `Semaphore::acquire_owned().await`
+        // inside the for-loop *before* pushing the future, which grabbed
+        // every permit up-front and deadlocked once `files.len()` crossed
+        // the concurrency cap. Push the acquire into each future so the
+        // semaphore actually gates the fan-out: futures created up-front,
+        // permits taken/released as `join_all` polls them.
+        let concurrency = self.config.index_concurrency.max(1);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let tasks: Vec<_> = files
+            .iter()
+            .map(|file| {
+                let sem = std::sync::Arc::clone(&semaphore);
+                async move {
+                    let _permit = sem.acquire().await.expect("semaphore closed");
+                    self.index_file(file).await
                 }
+            })
+            .collect();
+        for result in futures::future::join_all(tasks).await {
+            if let Err(e) = result {
+                tracing::warn!("Failed to index file: {}", e);
             }
         }
 
@@ -531,13 +552,26 @@ impl Store {
             })
             .await?;
 
-        for (file_id, path) in known_files {
-            if !discovered_paths.contains(&path) || !Path::new(&path).exists() {
-                self.db
-                    .call(move |conn| delete_file_and_data(conn, file_id))
-                    .await?;
-            }
+        let stale: Vec<i64> = known_files
+            .into_iter()
+            .filter(|(_, path)| !discovered_paths.contains(path) || !Path::new(path).exists())
+            .map(|(id, _)| id)
+            .collect();
+
+        if stale.is_empty() {
+            return Ok(());
         }
+
+        self.db
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                for id in stale {
+                    delete_file_and_data(&tx, id)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
 
         Ok(())
     }
