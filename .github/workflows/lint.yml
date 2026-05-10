@@ -6,15 +6,18 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  RUSTFLAGS: -D warnings
+permissions: read-all
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fmt:
-    name: Format Check
+    name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -25,17 +28,19 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy Lint
+    name: clippy
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
-      - name: Cache dependencies
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy

@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # paste 1.0.15 — unmaintained since 2024-10-07.
+    # Reaches us only as a transitive of `fastembed` (optional embeddings
+    # feature) via tokenizers, and image/ravif/rav1e. Not directly fixable
+    # from this repository; will fall out when those upstreams migrate.
+    # Tracking: https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
+]
