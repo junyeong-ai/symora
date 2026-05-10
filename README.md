@@ -216,16 +216,59 @@ symora daemon status
 
 ## 설치
 
-소스에서 설치:
+한 줄 설치 (최신 릴리스):
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
+```
+
+설치 스크립트는 바이너리만 배치합니다. 그 다음 한 번에 셋업:
+
+```bash
+symora setup            # Claude Code 스킬 + 언어 서버 (대화형)
+symora setup skill      # 스킬만
+symora setup deps --group core   # 의존성만 (core / core-jvm / core-web / core-systems / all)
+```
+
+플래그/옵션 (curl-pipe와 함께 쓸 때):
+
+```bash
+# 특정 버전 핀
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
+  | bash -s -- --version 0.7.0
+
+# GitHub build provenance 검증 (gh CLI 필요)
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
+  | bash -s -- --verify-attestations
+
+# 설치 위치 변경
+SYMORA_INSTALL_DIR=/usr/local/bin curl -fsSL ... | bash
+```
+
+지원 타깃: macOS Apple Silicon, Linux x86_64 (gnu), Linux aarch64 (gnu). Intel Mac은 source build로 진행:
+
+```bash
+git clone https://github.com/junyeong-ai/symora.git
+cd symora
+./scripts/install.sh --source
+# 또는
 cargo install --path .
 ```
 
-환경 및 language server 확인:
+업그레이드 / 제거 (스크립트 재실행 불필요 — 바이너리가 자기 lifecycle을 소유):
 
 ```bash
-symora doctor
+symora self update                    # 최신 릴리스로 in-place 교체
+symora self update --version 0.7.0    # 특정 버전 핀
+symora self update --verify-attestations
+symora self uninstall                 # 바이너리 + 스킬 + config + daemon 흔적 전부 제거
+symora self uninstall --keep-skill --keep-config
+```
+
+환경 진단:
+
+```bash
+symora doctor          # 설치된 LSP / 누락된 LSP, 플랫폼별 설치 명령
 ```
 
 ---

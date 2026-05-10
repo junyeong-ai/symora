@@ -11,6 +11,7 @@ mod refs;
 mod signature;
 mod symbol_nav;
 mod test_matcher;
+pub mod ui;
 
 pub use io::{read_line_at, read_lines_around};
 pub use refs::{RefsClassification, classify_refs, extract_module};

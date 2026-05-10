@@ -23,3 +23,7 @@ Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde
 ## Output discipline
 
 Handlers run the underlying command against a `BufferedSink` and return whatever JSON the command emitted. Don't post-process — the CLI's output contract is the MCP contract. If a tool needs different output shape, add it to the CLI command first.
+
+## Lifecycle commands are CLI-only
+
+`setup`, `setup skill`, `setup deps`, `self update`, `self uninstall` are deliberately not exposed as MCP tools. They mutate the user's machine outside the project boundary — installing skills under `~/.claude`, running package managers, replacing the running binary, removing config — and an AI agent should never drive those flows. The 1:1 CLI↔MCP mapping rule above does not apply to commands under `cli::commands::setup` or `cli::commands::selfcmd`. Keep them out of the catalog.
