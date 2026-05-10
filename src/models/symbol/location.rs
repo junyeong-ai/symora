@@ -1,0 +1,96 @@
+use std::fmt;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// Source code location (1-indexed).
+///
+/// For symbols: `line`/`column` = name position, `range_start_*`/`end_*` =
+/// full declaration range.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Location {
+    pub file: PathBuf,
+    pub line: u32,
+    pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_start_column: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<u32>,
+}
+
+impl Location {
+    /// Single position (no range).
+    pub fn point(file: PathBuf, line: u32, column: u32) -> Self {
+        Self {
+            file,
+            line,
+            column,
+            range_start_line: None,
+            range_start_column: None,
+            end_line: None,
+            end_column: None,
+        }
+    }
+
+    /// Full symbol location with name position and declaration range.
+    pub fn full(
+        file: PathBuf,
+        line: u32,
+        column: u32,
+        range_start_line: u32,
+        range_start_column: u32,
+        end_line: u32,
+        end_column: u32,
+    ) -> Self {
+        Self {
+            file,
+            line,
+            column,
+            range_start_line: Some(range_start_line),
+            range_start_column: Some(range_start_column),
+            end_line: Some(end_line),
+            end_column: Some(end_column),
+        }
+    }
+
+    /// Effective start position (range_start if available, else name position).
+    pub fn effective_start(&self) -> (u32, u32) {
+        (
+            self.range_start_line.unwrap_or(self.line),
+            self.range_start_column.unwrap_or(self.column),
+        )
+    }
+}
+
+impl fmt::Display for Location {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.file.display(), self.line, self.column)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_display_uses_file_line_column() {
+        let loc = Location::point(PathBuf::from("/test/file.rs"), 10, 5);
+        assert_eq!(loc.to_string(), "/test/file.rs:10:5");
+    }
+
+    #[test]
+    fn effective_start_falls_back_to_name_position() {
+        let loc = Location::point(PathBuf::from("a.rs"), 5, 8);
+        assert_eq!(loc.effective_start(), (5, 8));
+    }
+
+    #[test]
+    fn effective_start_prefers_range_start_when_set() {
+        let loc = Location::full(PathBuf::from("a.rs"), 10, 4, 8, 1, 12, 1);
+        assert_eq!(loc.effective_start(), (8, 1));
+    }
+}
