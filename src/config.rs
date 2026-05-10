@@ -96,6 +96,10 @@ pub struct LspRuntimeConfig {
     pub auto_restart: bool,
     /// Custom project entry files per language (overrides defaults in find_project_entry)
     pub entry_files: HashMap<String, Vec<String>>,
+    /// Hard cap on simultaneously running language servers. Prevents
+    /// memory-bound monorepos from spawning a server per language and
+    /// running out of file descriptors / RAM.
+    pub max_concurrent_servers: usize,
 }
 
 impl Default for LspRuntimeConfig {
@@ -105,6 +109,7 @@ impl Default for LspRuntimeConfig {
             max_file_size_bytes: 10 * 1024 * 1024,
             auto_restart: true,
             entry_files: HashMap::new(),
+            max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }
     }
 }
@@ -116,6 +121,7 @@ impl From<&SymoraConfig> for LspRuntimeConfig {
             max_file_size_bytes: u64::from(config.search.max_file_size_mb) * 1024 * 1024,
             auto_restart: config.lsp.auto_restart,
             entry_files: config.project.entry_files.clone(),
+            max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }
     }
 }
