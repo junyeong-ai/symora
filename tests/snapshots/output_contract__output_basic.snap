@@ -1,0 +1,12 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "name": "test_process",
+  "location": {
+    "file": "src/main.rs",
+    "line": 80,
+    "column": 4
+  }
+}

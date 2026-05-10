@@ -1,0 +1,12 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "content": "fn process(&self)",
+  "range": {
+    "file": "src/main.rs",
+    "line": 12,
+    "column": 4
+  }
+}

@@ -1,0 +1,24 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "signatures": [
+    {
+      "label": "fn process(&self, name: &str) -> Result<()>",
+      "documentation": "Process the request.",
+      "parameters": [
+        {
+          "label": "&self"
+        },
+        {
+          "label": "name: &str",
+          "documentation": "the name"
+        }
+      ],
+      "active_parameter": 1
+    }
+  ],
+  "active_signature": 0,
+  "active_parameter": 1
+}

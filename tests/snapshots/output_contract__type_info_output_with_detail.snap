@@ -1,0 +1,14 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "name": "Iterator",
+  "kind": "interface",
+  "location": {
+    "file": "src/iter.rs",
+    "line": 5,
+    "column": 11
+  },
+  "detail": "trait"
+}

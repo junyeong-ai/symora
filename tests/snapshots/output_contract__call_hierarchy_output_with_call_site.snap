@@ -1,0 +1,17 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "name": "process",
+  "location": {
+    "file": "src/main.rs",
+    "line": 12,
+    "column": 4
+  },
+  "call_site": {
+    "file": "src/api.rs",
+    "line": 50,
+    "column": 12
+  }
+}

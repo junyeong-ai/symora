@@ -1,0 +1,20 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "name": "process",
+  "name_path": "Handler/process",
+  "kind": "function",
+  "location": {
+    "file": "src/main.rs",
+    "line": 12,
+    "column": 4
+  },
+  "end_location": {
+    "file": "src/main.rs",
+    "line": 20,
+    "column": 1
+  },
+  "container": "Handler"
+}

@@ -1,0 +1,17 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "severity": "error",
+  "message": "type mismatch",
+  "line": 30,
+  "column": 8,
+  "end_line": 30,
+  "end_column": 16,
+  "code": "E0308",
+  "source": "rust-analyzer",
+  "tags": [
+    "unnecessary"
+  ]
+}
