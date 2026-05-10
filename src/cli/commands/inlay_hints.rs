@@ -73,7 +73,7 @@ pub async fn execute(args: InlayHintsArgs, app: &App) -> Result<()> {
                 .collect();
             ctx.print_success(Section::new(items));
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())

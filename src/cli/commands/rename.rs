@@ -40,7 +40,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
     let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
 
     if let Err(e) = loc.validate_position_async().await {
-        ctx.print_error(&e.to_string());
+        ctx.print_error(e);
         return Ok(());
     }
 
@@ -102,10 +102,10 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                     };
                     ctx.print_success(response);
                 }
-                Err(e) => ctx.print_error(&format!("Failed to apply rename: {}", e)),
+                Err(e) => ctx.print_error(e),
             }
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())

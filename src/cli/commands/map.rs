@@ -7,6 +7,7 @@ use futures::future::join_all;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::OutputError;
 use crate::cli::response::{Section, SymbolOutput};
 use crate::cli::utils::extract_signature;
 use crate::infra::file_filter::FileFilter;
@@ -273,7 +274,10 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
     let ctx = &app.output;
     let records = scan_project_files(app);
     let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(&format!("File not found in project: {}", path));
+        ctx.print_error(OutputError::not_found(format!(
+            "File not found in project: {}",
+            path
+        )));
         return Ok(());
     };
 
@@ -298,11 +302,19 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                 .into_iter()
                 .map(|r| r.rel_path.clone())
                 .collect(),
-            symbols: Section::error(format!(
-                "Language server is not installed for {}. Run `symora doctor {}` for installation help.",
-                target.language.lsp_id(),
-                target.language.lsp_id()
-            )),
+            symbols: Section::error(
+                OutputError::new(
+                    crate::cli::ErrorCode::ServerNotInstalled,
+                    format!(
+                        "Language server is not installed for {}",
+                        target.language.lsp_id()
+                    ),
+                )
+                .with_hint(format!(
+                    "Run `symora doctor {}` for installation help",
+                    target.language.lsp_id()
+                )),
+            ),
             related_files: collect_related_files(app, &target, &records, related_limit).await,
         });
         return Ok(());
@@ -332,7 +344,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                 .collect();
             (focus_symbols, Section::with_limit(items, total))
         }
-        Err(e) => (Vec::new(), Section::error(e.to_string())),
+        Err(e) => (Vec::new(), Section::error(e)),
     };
 
     let related_files = collect_related_files(app, &target, &records, related_limit).await;
@@ -372,7 +384,10 @@ async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
         .collect();
 
     if records_in_dir.is_empty() {
-        ctx.print_error(&format!("Directory has no indexed source files: {}", path));
+        ctx.print_error(OutputError::not_found(format!(
+            "Directory has no indexed source files: {}",
+            path
+        )));
         return Ok(());
     }
 
@@ -448,7 +463,10 @@ async fn execute_related(app: &App, path: &str, limit: usize) -> Result<()> {
     let ctx = &app.output;
     let records = scan_project_files(app);
     let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(&format!("File not found in project: {}", path));
+        ctx.print_error(OutputError::not_found(format!(
+            "File not found in project: {}",
+            path
+        )));
         return Ok(());
     };
 
@@ -676,11 +694,7 @@ async fn collect_related_files(
         .collect();
     let profiles = join_all(top_files.iter().map(|path| load_symbol_profile(app, path))).await;
 
-    for (item, profile) in results
-        .iter_mut()
-        .take(probe_limit)
-        .zip(profiles.into_iter())
-    {
+    for (item, profile) in results.iter_mut().take(probe_limit).zip(profiles) {
         let exact_shared = target_profile.names.intersection(&profile.names).count() as i32;
         if exact_shared > 0 {
             item.score += exact_shared.min(4) * 3;

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::cli::output::OutputSink;
 use crate::cli::{OutputContext, OutputOptions};
 use crate::config::LspRuntimeConfig;
 use crate::models::config::SymoraConfig;
@@ -81,5 +82,23 @@ impl App {
 
     pub fn test_matcher(&self) -> &crate::cli::utils::TestMatcher {
         &self.test_matcher
+    }
+
+    /// Return a clone of `self` with the output sink replaced.
+    ///
+    /// Used by the MCP adapter to capture command output into a buffer
+    /// instead of stdout, without spawning a subprocess.
+    pub fn with_output_sink(&self, sink: Arc<dyn OutputSink>, options: OutputOptions) -> Self {
+        let output = OutputContext::with_sink(self.root.clone(), options, sink);
+        Self {
+            root: self.root.clone(),
+            output,
+            lsp: Arc::clone(&self.lsp),
+            ast: Arc::clone(&self.ast),
+            project: Arc::clone(&self.project),
+            config_service: Arc::clone(&self.config_service),
+            config: self.config.clone(),
+            test_matcher: self.test_matcher.clone(),
+        }
     }
 }

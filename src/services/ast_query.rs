@@ -46,6 +46,11 @@ pub struct DefaultAstQueryService {
     ruby: Mutex<Parser>,
     lua: Mutex<Parser>,
     php: Mutex<Parser>,
+    swift: Mutex<Parser>,
+    scala: Mutex<Parser>,
+    elixir: Mutex<Parser>,
+    dart: Mutex<Parser>,
+    hcl: Mutex<Parser>,
     max_file_size_bytes: u64,
 }
 
@@ -69,6 +74,11 @@ impl DefaultAstQueryService {
             ruby: Mutex::new(Self::create_parser(tree_sitter_ruby::LANGUAGE.into())?),
             lua: Mutex::new(Self::create_parser(tree_sitter_lua::LANGUAGE.into())?),
             php: Mutex::new(Self::create_parser(tree_sitter_php::LANGUAGE_PHP.into())?),
+            swift: Mutex::new(Self::create_parser(tree_sitter_swift::LANGUAGE.into())?),
+            scala: Mutex::new(Self::create_parser(tree_sitter_scala::LANGUAGE.into())?),
+            elixir: Mutex::new(Self::create_parser(tree_sitter_elixir::LANGUAGE.into())?),
+            dart: Mutex::new(Self::create_parser(tree_sitter_dart::LANGUAGE.into())?),
+            hcl: Mutex::new(Self::create_parser(tree_sitter_hcl::LANGUAGE.into())?),
             max_file_size_bytes,
         })
     }
@@ -104,6 +114,11 @@ impl DefaultAstQueryService {
             SymbolLanguage::Ruby => Some((&self.ruby, tree_sitter_ruby::LANGUAGE.into())),
             SymbolLanguage::Lua => Some((&self.lua, tree_sitter_lua::LANGUAGE.into())),
             SymbolLanguage::PHP => Some((&self.php, tree_sitter_php::LANGUAGE_PHP.into())),
+            SymbolLanguage::Swift => Some((&self.swift, tree_sitter_swift::LANGUAGE.into())),
+            SymbolLanguage::Scala => Some((&self.scala, tree_sitter_scala::LANGUAGE.into())),
+            SymbolLanguage::Elixir => Some((&self.elixir, tree_sitter_elixir::LANGUAGE.into())),
+            SymbolLanguage::Dart => Some((&self.dart, tree_sitter_dart::LANGUAGE.into())),
+            SymbolLanguage::Terraform => Some((&self.hcl, tree_sitter_hcl::LANGUAGE.into())),
             _ => None,
         }
     }

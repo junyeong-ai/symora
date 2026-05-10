@@ -7,6 +7,7 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 
 use crate::app::App;
+use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
 use crate::cli::output::OutputContext;
 use crate::cli::symbol_discovery::{
@@ -255,7 +256,10 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
 
     let languages = resolve_usage_languages(app, resolved.language_override.as_deref());
     if languages.is_empty() {
-        ctx.print_error("Unknown language. Run 'symora doctor' to see supported languages.");
+        ctx.print_error(
+            OutputError::invalid("Unknown language")
+                .with_hint("Run 'symora doctor' to see supported languages."),
+        );
         return Ok(());
     }
 
@@ -362,7 +366,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             .collect();
 
         match args.sort {
-            SortMetric::References => with_refs.sort_by(|a, b| b.1.cmp(&a.1)),
+            SortMetric::References => with_refs.sort_by_key(|item| std::cmp::Reverse(item.1)),
             SortMetric::Name => with_refs.sort_by(|a, b| a.0.name.cmp(&b.0.name)),
         }
 

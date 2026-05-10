@@ -121,7 +121,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                     };
                     ctx.print_success(response);
                 }
-                Err(e) => ctx.print_error(&e.to_string()),
+                Err(e) => ctx.print_error(e),
             }
         }
 
@@ -135,7 +135,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                     };
                     ctx.print_success(response);
                 }
-                Err(e) => ctx.print_error(&e.to_string()),
+                Err(e) => ctx.print_error(e),
             }
         }
 
@@ -166,7 +166,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                 };
                 ctx.print_success(response);
             }
-            Err(e) => ctx.print_error(&e.to_string()),
+            Err(e) => ctx.print_error(e),
         },
     }
 

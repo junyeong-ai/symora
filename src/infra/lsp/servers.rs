@@ -771,8 +771,7 @@ pub fn check_all_servers() -> Vec<ServerHealth> {
         });
     }
 
-    // Sort by language name for consistent output
-    results.sort_by(|a, b| a.language.to_string().cmp(&b.language.to_string()));
+    results.sort_by_key(|a| a.language.to_string());
 
     results
 }

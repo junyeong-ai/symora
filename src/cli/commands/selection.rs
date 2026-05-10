@@ -43,7 +43,7 @@ pub async fn execute(args: SelectionArgs, app: &App) -> Result<()> {
             let items: Vec<SelectionRangeOutput> = ranges.iter().map(to_output).collect();
             ctx.print_success(Section::new(items));
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())

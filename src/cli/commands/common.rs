@@ -31,7 +31,7 @@ where
     match lsp_call(loc.file, loc.line, loc.column).await {
         Ok(Some(result)) => ctx.print_success(on_found(result, ctx)),
         Ok(None) => ctx.print_success(on_not_found()),
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())
@@ -65,7 +65,7 @@ where
                 .collect();
             ctx.print_success(Section::with_limit(output, total));
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())

@@ -57,10 +57,10 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
                     ctx.print_success(Section::with_limit(items, total_refs));
                 }
-                Err(e) => ctx.print_error(&e.to_string()),
+                Err(e) => ctx.print_error(e),
             }
         }
-        Err(e) => ctx.print_error(&e.to_string()),
+        Err(e) => ctx.print_error(e),
     }
 
     Ok(())
