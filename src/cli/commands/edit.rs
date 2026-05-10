@@ -16,26 +16,23 @@ const MAX_EDIT_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 /// Validate file is suitable for editing (exists, readable, writable, size limit)
 fn validate_file_for_edit(path: &Path) -> Result<()> {
+    use crate::cli::CliInputError;
+
     if !path.exists() {
-        anyhow::bail!("File not found: {}", path.display());
+        anyhow::bail!(CliInputError::FileNotFound(path.to_path_buf()));
     }
 
     let metadata = fs::metadata(path).context("Failed to read file metadata")?;
 
     if metadata.len() > MAX_EDIT_FILE_SIZE {
-        anyhow::bail!(
-            "File too large for editing ({} MB). Maximum: {} MB",
-            metadata.len() / (1024 * 1024),
-            MAX_EDIT_FILE_SIZE / (1024 * 1024)
-        );
+        anyhow::bail!(CliInputError::FileTooLarge {
+            size_mb: metadata.len() / (1024 * 1024),
+            limit_mb: MAX_EDIT_FILE_SIZE / (1024 * 1024),
+        });
     }
 
-    // Check if file is writable by attempting to open for writing
     if fs::OpenOptions::new().write(true).open(path).is_err() {
-        anyhow::bail!(
-            "File is not writable: {}. Check permissions.",
-            path.display()
-        );
+        anyhow::bail!(CliInputError::FileNotWritable(path.to_path_buf()));
     }
 
     Ok(())
@@ -193,7 +190,7 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
         .canonicalize()
         .unwrap_or_else(|_| app.root().to_path_buf());
     if !canonical.starts_with(&root) {
-        anyhow::bail!("Path {} is outside the project root", canonical.display());
+        anyhow::bail!(crate::cli::CliInputError::PathOutsideProject(canonical));
     }
     Ok(canonical)
 }
@@ -471,9 +468,6 @@ pub(crate) async fn invalidate_store_files(app: &App, files: &[PathBuf]) {
 
 /// Resolve position for insert operations with mode-aware positioning.
 /// Auto-detects location format (`file:line[:col]`) vs file path (requires --symbol).
-///
-/// BUG FIX: InsertBefore now correctly uses the symbol's start position,
-/// not end position (which was the previous buggy behavior).
 async fn resolve_insert_position(
     app: &App,
     target: &str,
