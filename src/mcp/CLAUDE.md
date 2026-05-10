@@ -1,0 +1,25 @@
+# src/mcp — MCP Server Rules
+
+`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. Each tool maps 1:1 to a CLI command shape.
+
+## Catalog and handlers must stay in lockstep
+
+Three things are co-versioned for every tool:
+
+1. An entry in `tools/catalog.rs` (the `tools/list` schema)
+2. An input struct in `tools/handlers.rs`
+3. A branch in the `dispatch` match
+
+A test in `tools/mod.rs` enumerates the required tool names. Adding a tool means touching all three; removing one means removing all three. The test will fail if they drift.
+
+## Mutating tools advertise themselves
+
+Any tool that writes source files must contain the literal word `Mutates` in its description. A second test enforces this so a reviewer can spot mutation from the catalog without reading handler code.
+
+## Location input convention
+
+Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the three fields. New location-taking tools follow the same pattern.
+
+## Output discipline
+
+Handlers run the underlying command against a `BufferedSink` and return whatever JSON the command emitted. Don't post-process — the CLI's output contract is the MCP contract. If a tool needs different output shape, add it to the CLI command first.
