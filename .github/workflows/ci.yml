@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+permissions: read-all
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -13,42 +19,41 @@ env:
 
 jobs:
   test:
-    name: Test Suite (${{ matrix.os }})
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        rust: [stable]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache dependencies
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
-      - name: Run tests with nextest
-        run: cargo nextest run --all-features --workspace --verbose
+      - name: Run tests
+        run: cargo nextest run --all-features --workspace
 
   coverage:
-    name: Code Coverage
+    name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
 
-      - name: Cache dependencies
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Install coverage tools
@@ -56,9 +61,9 @@ jobs:
         with:
           tool: cargo-llvm-cov,nextest
 
-      - name: Generate coverage with nextest
-        continue-on-error: true
+      - name: Generate lcov
         run: |
+          set -euo pipefail
           cargo llvm-cov nextest \
             --all-features \
             --workspace \
@@ -67,7 +72,7 @@ jobs:
             --fail-under-lines 0
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         continue-on-error: true
         with:
           files: lcov.info
@@ -77,40 +82,41 @@ jobs:
           name: codecov-symora
           verbose: true
 
-      - name: Generate HTML coverage report
+      - name: Generate HTML report
         if: always()
         run: cargo llvm-cov report --html
 
-      - name: Upload HTML report as artifact
+      - name: Upload HTML report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: target/llvm-cov/html/
           retention-days: 7
 
   build:
-    name: Build Release
+    name: Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache dependencies
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary
-        run: cargo build --release --verbose
+      - name: Build release
+        run: cargo build --release
 
-      - name: Check binary size
+      - name: Inspect binary
         run: |
+          set -euo pipefail
           ls -lh target/release/symora
           du -h target/release/symora
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
         with:
           name: release-binary
           path: target/release/symora
@@ -121,12 +127,15 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run cargo-audit
-        uses: rustsec/audit-check@v2
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
