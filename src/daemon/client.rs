@@ -287,8 +287,7 @@ impl DaemonClient {
     fn extract_result(response: Response) -> Result<serde_json::Value, LspError> {
         if let Some(error) = response.error {
             if let Some(data) = error.data
-                && let Ok(wire) =
-                    serde_json::from_value::<super::wire_error::WireLspError>(data)
+                && let Ok(wire) = serde_json::from_value::<super::wire_error::WireLspError>(data)
             {
                 return Err(wire.into());
             }
