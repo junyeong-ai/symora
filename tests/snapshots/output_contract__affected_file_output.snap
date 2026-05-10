@@ -1,0 +1,9 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "file": "src/handler.rs",
+  "is_test": false,
+  "refs": 7
+}

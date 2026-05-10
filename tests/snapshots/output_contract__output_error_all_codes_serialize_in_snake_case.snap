@@ -1,0 +1,62 @@
+---
+source: tests/output_contract.rs
+expression: payload
+---
+[
+  {
+    "code": "not_found",
+    "message": "x"
+  },
+  {
+    "code": "unsupported",
+    "message": "x"
+  },
+  {
+    "code": "timeout",
+    "message": "x"
+  },
+  {
+    "code": "invalid_argument",
+    "message": "x"
+  },
+  {
+    "code": "internal",
+    "message": "x"
+  },
+  {
+    "code": "lsp_unavailable",
+    "message": "x"
+  },
+  {
+    "code": "language_not_configured",
+    "message": "x"
+  },
+  {
+    "code": "server_not_installed",
+    "message": "x"
+  },
+  {
+    "code": "cancelled",
+    "message": "x"
+  },
+  {
+    "code": "parse_error",
+    "message": "x"
+  },
+  {
+    "code": "store_not_initialized",
+    "message": "x"
+  },
+  {
+    "code": "already_exists",
+    "message": "x"
+  },
+  {
+    "code": "file_too_large",
+    "message": "x"
+  },
+  {
+    "code": "io",
+    "message": "x"
+  }
+]

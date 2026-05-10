@@ -1,0 +1,11 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "name": "process",
+  "kind": "function",
+  "file": "src/main.rs",
+  "line": 12,
+  "signature": "fn process(&self)"
+}

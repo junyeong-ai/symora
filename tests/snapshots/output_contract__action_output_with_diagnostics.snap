@@ -1,0 +1,12 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "title": "Import Foo",
+  "kind": "quickfix",
+  "is_preferred": true,
+  "diagnostics": [
+    "E0432"
+  ]
+}

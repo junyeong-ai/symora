@@ -1,0 +1,7 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "message": "no definition found"
+}

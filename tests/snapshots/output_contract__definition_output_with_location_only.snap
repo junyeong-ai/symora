@@ -1,0 +1,11 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "definition": {
+    "file": "src/main.rs",
+    "line": 20,
+    "column": 8
+  }
+}

@@ -1,0 +1,12 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "total": 42,
+  "test": 12,
+  "prod": 30,
+  "files": 8,
+  "modules": 3,
+  "is_exported": true
+}

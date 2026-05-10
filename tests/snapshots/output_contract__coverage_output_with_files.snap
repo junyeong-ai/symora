@@ -1,0 +1,11 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "count": 3,
+  "files": [
+    "tests/integration.rs",
+    "tests/api.rs"
+  ]
+}

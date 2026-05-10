@@ -1,0 +1,537 @@
+//! Snapshot tests for the public JSON output contract.
+//!
+//! These tests pin the wire format of every response type the CLI emits.
+//! They run without any LSP, daemon, or filesystem state, so a snapshot
+//! diff means the contract changed — not that the environment shifted.
+//!
+//! Workflow:
+//!   - Make the change.
+//!   - `cargo test --test output_contract` — failures show before/after.
+//!   - If the new output is intentional, `cargo insta review` to accept.
+//!
+//! Add a new snapshot by writing another `assert_json_snapshot!` block.
+
+use std::path::PathBuf;
+
+use insta::assert_json_snapshot;
+use serde_json::json;
+use symora::cli::blast_radius::{BlastRadius, DepthBucket, RiskLevel};
+use symora::cli::errors::{ErrorCode, OutputError};
+use symora::cli::response::{
+    ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, DefinitionOutput,
+    DiagnosticOutput, FileChangeOutput, HoverOutput, ImpactOutput, LocationOutput, ParameterOutput,
+    RefOutput, Section, ServerStatusOutput, SignatureHelpOutput, SignatureItemOutput, SymbolOutput,
+    TargetOutput, TestCoverageOutput, TestOutput, TypeInfoOutput,
+};
+use symora::models::lsp::{CallHierarchyItem, TypeHierarchyItem};
+use symora::models::symbol::{Language, Location, Symbol, SymbolKind};
+
+fn root() -> PathBuf {
+    PathBuf::from("/repo")
+}
+
+fn sample_location(line: u32, column: u32) -> LocationOutput {
+    LocationOutput {
+        file: "src/main.rs".to_string(),
+        line,
+        column,
+        snippet: None,
+    }
+}
+
+fn sample_symbol() -> Symbol {
+    let mut sym = Symbol::new(
+        "process".to_string(),
+        SymbolKind::Function,
+        Location::full(root().join("src/main.rs"), 12, 4, 12, 4, 20, 1),
+    )
+    .with_container("Handler".to_string())
+    .with_body("fn process(&self) {}".to_string());
+    sym.compute_paths(Some("Handler"));
+    sym
+}
+
+#[test]
+fn section_empty() {
+    let section: Section<i32> = Section::new(vec![]);
+    assert_json_snapshot!(section, @r###"
+    {
+      "count": 0,
+      "items": []
+    }
+    "###);
+}
+
+#[test]
+fn section_with_items_and_truncation() {
+    let section = Section::with_limit(vec![1u32, 2, 3], 10);
+    assert_json_snapshot!(section, @r###"
+    {
+      "count": 3,
+      "items": [
+        1,
+        2,
+        3
+      ],
+      "truncated": true
+    }
+    "###);
+}
+
+#[test]
+fn section_with_structured_error() {
+    let section: Section<i32> =
+        Section::error(OutputError::not_found("symbol not found").with_hint("try a broader query"));
+    assert_json_snapshot!(section, @r###"
+    {
+      "count": 0,
+      "items": [],
+      "error": {
+        "code": "not_found",
+        "message": "symbol not found",
+        "hint": "try a broader query"
+      }
+    }
+    "###);
+}
+
+#[test]
+fn output_error_all_codes_serialize_in_snake_case() {
+    let codes = [
+        ErrorCode::NotFound,
+        ErrorCode::Unsupported,
+        ErrorCode::Timeout,
+        ErrorCode::InvalidArgument,
+        ErrorCode::Internal,
+        ErrorCode::LspUnavailable,
+        ErrorCode::LanguageNotConfigured,
+        ErrorCode::ServerNotInstalled,
+        ErrorCode::Cancelled,
+        ErrorCode::ParseError,
+        ErrorCode::StoreNotInitialized,
+        ErrorCode::AlreadyExists,
+        ErrorCode::FileTooLarge,
+        ErrorCode::Io,
+    ];
+    let payload: Vec<_> = codes
+        .iter()
+        .copied()
+        .map(|c| OutputError::new(c, "x"))
+        .collect();
+    assert_json_snapshot!(payload);
+}
+
+#[test]
+fn location_output_skips_none_snippet() {
+    assert_json_snapshot!(sample_location(10, 5), @r###"
+    {
+      "file": "src/main.rs",
+      "line": 10,
+      "column": 5
+    }
+    "###);
+}
+
+#[test]
+fn location_output_includes_snippet_when_present() {
+    let loc = LocationOutput {
+        snippet: Some("let x = 1;".to_string()),
+        ..sample_location(10, 5)
+    };
+    assert_json_snapshot!(loc, @r###"
+    {
+      "file": "src/main.rs",
+      "line": 10,
+      "column": 5,
+      "snippet": "let x = 1;"
+    }
+    "###);
+}
+
+#[test]
+fn symbol_output_full() {
+    let sym = sample_symbol();
+    let out = SymbolOutput::from_symbol(&sym, &root())
+        .with_signature(Some("fn process(&self) -> ()".to_string()));
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn symbol_output_without_body_or_children() {
+    let sym = sample_symbol();
+    let out = SymbolOutput::from_symbol(&sym, &root())
+        .without_body()
+        .without_children();
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn definition_output_with_location_only() {
+    let out = DefinitionOutput {
+        definition: Some(sample_location(20, 8)),
+        message: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn definition_output_with_message_only() {
+    let out = DefinitionOutput {
+        definition: None,
+        message: Some("no definition found".to_string()),
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn hover_output_full() {
+    let out = HoverOutput {
+        content: Some("fn process(&self)".to_string()),
+        range: Some(sample_location(12, 4)),
+        message: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn diagnostic_output_full() {
+    let out = DiagnosticOutput {
+        severity: "error".to_string(),
+        message: "type mismatch".to_string(),
+        line: 30,
+        column: 8,
+        end_line: 30,
+        end_column: 16,
+        code: Some("E0308".to_string()),
+        source: Some("rust-analyzer".to_string()),
+        tags: vec!["unnecessary".to_string()],
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn call_hierarchy_output_with_call_site() {
+    let item = CallHierarchyItem {
+        name: "process".to_string(),
+        kind: SymbolKind::Function,
+        location: Location::point(root().join("src/main.rs"), 12, 4),
+        call_site: Some(Location::point(root().join("src/api.rs"), 50, 12)),
+    };
+    let out = CallHierarchyOutput::from_item(&item, &root());
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn target_output_from_symbol() {
+    let sym = sample_symbol();
+    let out = TargetOutput::from_symbol(&sym, &root())
+        .with_signature(Some("fn process(&self)".to_string()));
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn target_output_fallback_for_unknown_symbol() {
+    let out =
+        TargetOutput::from_symbol_or_fallback(None, &root().join("src/main.rs"), 50, 4, &root());
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn ref_output_full_metadata() {
+    let out = RefOutput {
+        total: 42,
+        test: 12,
+        prod: 30,
+        files: Some(8),
+        modules: Some(3),
+        is_exported: Some(true),
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn ref_output_minimal() {
+    let out = RefOutput {
+        total: 0,
+        test: 0,
+        prod: 0,
+        files: None,
+        modules: None,
+        is_exported: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn type_info_output_with_detail() {
+    let item = TypeHierarchyItem {
+        name: "Iterator".to_string(),
+        kind: SymbolKind::Interface,
+        location: Location::point(root().join("src/iter.rs"), 5, 11),
+        detail: Some("trait".to_string()),
+    };
+    let out = TypeInfoOutput::from_item(&item, &root());
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn test_output_basic() {
+    let out = TestOutput {
+        name: "test_process".to_string(),
+        location: sample_location(80, 4),
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn test_coverage_output_with_files() {
+    let out = TestCoverageOutput {
+        count: 3,
+        files: vec![
+            "tests/integration.rs".to_string(),
+            "tests/api.rs".to_string(),
+        ],
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn affected_file_output() {
+    let out = AffectedFileOutput {
+        file: "src/handler.rs".to_string(),
+        is_test: false,
+        refs: 7,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn impact_output_full() {
+    let target = TargetOutput::new(
+        "process".to_string(),
+        "function".to_string(),
+        "src/main.rs".to_string(),
+        12,
+    );
+    let out = ImpactOutput {
+        target,
+        refs: RefOutput {
+            total: 10,
+            test: 3,
+            prod: 7,
+            files: Some(4),
+            modules: Some(2),
+            is_exported: Some(true),
+        },
+        coverage: TestCoverageOutput {
+            count: 3,
+            files: vec!["tests/api.rs".to_string()],
+        },
+        files: vec![AffectedFileOutput {
+            file: "src/handler.rs".to_string(),
+            is_test: false,
+            refs: 5,
+        }],
+        blast_radius: Some(BlastRadius {
+            direct_callers: 4,
+            transitive_callers: 9,
+            depth: 2,
+            max_depth_reached: false,
+            callers_by_depth: vec![
+                DepthBucket {
+                    depth: 1,
+                    count: 4,
+                    test: 1,
+                    prod: 3,
+                },
+                DepthBucket {
+                    depth: 2,
+                    count: 5,
+                    test: 2,
+                    prod: 3,
+                },
+            ],
+            test_coverage_ratio: 0.33,
+            risk: RiskLevel::Medium,
+            confidence: 0.9,
+        }),
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn impact_output_without_blast_radius() {
+    let out = ImpactOutput {
+        target: TargetOutput::new(
+            "process".to_string(),
+            "function".to_string(),
+            "src/main.rs".to_string(),
+            12,
+        ),
+        refs: RefOutput {
+            total: 0,
+            test: 0,
+            prod: 0,
+            files: None,
+            modules: None,
+            is_exported: None,
+        },
+        coverage: TestCoverageOutput {
+            count: 0,
+            files: vec![],
+        },
+        files: vec![],
+        blast_radius: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn blast_radius_max_depth_reached_serializes() {
+    let radius = BlastRadius {
+        direct_callers: 2,
+        transitive_callers: 7,
+        depth: 3,
+        max_depth_reached: true,
+        callers_by_depth: vec![
+            DepthBucket {
+                depth: 1,
+                count: 2,
+                test: 0,
+                prod: 2,
+            },
+            DepthBucket {
+                depth: 2,
+                count: 3,
+                test: 1,
+                prod: 2,
+            },
+            DepthBucket {
+                depth: 3,
+                count: 2,
+                test: 0,
+                prod: 2,
+            },
+        ],
+        test_coverage_ratio: 0.14,
+        risk: RiskLevel::High,
+        confidence: 1.0,
+    };
+    assert_json_snapshot!(radius);
+}
+
+#[test]
+fn risk_level_serializes_lowercase() {
+    let levels = [
+        RiskLevel::Low,
+        RiskLevel::Medium,
+        RiskLevel::High,
+        RiskLevel::Critical,
+    ];
+    assert_json_snapshot!(levels, @r###"
+    [
+      "low",
+      "medium",
+      "high",
+      "critical"
+    ]
+    "###);
+}
+
+#[test]
+fn server_status_output_with_install_hint() {
+    let out = ServerStatusOutput {
+        language: "rust".to_string(),
+        status: "missing".to_string(),
+        error: Some("not installed".to_string()),
+        install_hint: Some("rustup component add rust-analyzer".to_string()),
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn file_change_output() {
+    let out = FileChangeOutput {
+        file: "src/api.rs".to_string(),
+        edit_count: 4,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn signature_help_output_full() {
+    let out = SignatureHelpOutput {
+        signatures: vec![SignatureItemOutput {
+            label: "fn process(&self, name: &str) -> Result<()>".to_string(),
+            documentation: Some("Process the request.".to_string()),
+            parameters: vec![
+                ParameterOutput {
+                    label: "&self".to_string(),
+                    documentation: None,
+                },
+                ParameterOutput {
+                    label: "name: &str".to_string(),
+                    documentation: Some("the name".to_string()),
+                },
+            ],
+            active_parameter: Some(1),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(1),
+        message: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn action_output_with_diagnostics() {
+    let out = ActionOutput {
+        title: "Import Foo".to_string(),
+        kind: "quickfix".to_string(),
+        is_preferred: true,
+        diagnostics: vec!["E0432".to_string()],
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn apply_action_output_success() {
+    let out = ApplyActionOutput {
+        title: "Import Foo".to_string(),
+        kind: "quickfix".to_string(),
+        applied: true,
+        files_changed: 1,
+        changes: vec![FileChangeOutput {
+            file: "src/main.rs".to_string(),
+            edit_count: 1,
+        }],
+        message: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn error_envelope_shape_matches_runtime() {
+    // Mirrors what OutputContext::print_error emits to stdout.
+    // Note: json!() round-trips through serde_json::Value (BTreeMap), so keys
+    // come out alphabetically — that matches what the runtime actually prints.
+    let err = OutputError::not_found("symbol foo").with_hint("did you mean 'fool'?");
+    let envelope = json!({ "error": err });
+    assert_json_snapshot!(envelope, @r###"
+    {
+      "error": {
+        "code": "not_found",
+        "hint": "did you mean 'fool'?",
+        "message": "symbol foo"
+      }
+    }
+    "###);
+}
+
+#[test]
+fn language_serializes_as_lowercase_id() {
+    // Internal model used by some response wrappers — pin its id form.
+    assert_eq!(Language::Rust.lsp_id(), "rust");
+    assert_eq!(Language::TypeScript.lsp_id(), "typescript");
+    assert_eq!(Language::CSharp.lsp_id(), "csharp");
+}

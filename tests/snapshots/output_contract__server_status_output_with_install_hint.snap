@@ -1,0 +1,10 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "language": "rust",
+  "status": "missing",
+  "error": "not installed",
+  "install_hint": "rustup component add rust-analyzer"
+}

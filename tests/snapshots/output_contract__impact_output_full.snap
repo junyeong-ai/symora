@@ -1,0 +1,55 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "target": {
+    "name": "process",
+    "kind": "function",
+    "file": "src/main.rs",
+    "line": 12
+  },
+  "refs": {
+    "total": 10,
+    "test": 3,
+    "prod": 7,
+    "files": 4,
+    "modules": 2,
+    "is_exported": true
+  },
+  "coverage": {
+    "count": 3,
+    "files": [
+      "tests/api.rs"
+    ]
+  },
+  "files": [
+    {
+      "file": "src/handler.rs",
+      "is_test": false,
+      "refs": 5
+    }
+  ],
+  "blast_radius": {
+    "direct_callers": 4,
+    "transitive_callers": 9,
+    "depth": 2,
+    "callers_by_depth": [
+      {
+        "depth": 1,
+        "count": 4,
+        "test": 1,
+        "prod": 3
+      },
+      {
+        "depth": 2,
+        "count": 5,
+        "test": 2,
+        "prod": 3
+      }
+    ],
+    "test_coverage_ratio": 0.33,
+    "risk": "medium",
+    "confidence": 0.9
+  }
+}

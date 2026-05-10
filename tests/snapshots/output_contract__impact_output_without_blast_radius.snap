@@ -1,0 +1,20 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "target": {
+    "name": "process",
+    "kind": "function",
+    "file": "src/main.rs",
+    "line": 12
+  },
+  "refs": {
+    "total": 0,
+    "test": 0,
+    "prod": 0
+  },
+  "coverage": {
+    "count": 0
+  }
+}

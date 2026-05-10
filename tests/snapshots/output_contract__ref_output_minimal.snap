@@ -1,0 +1,9 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "total": 0,
+  "test": 0,
+  "prod": 0
+}
