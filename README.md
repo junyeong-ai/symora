@@ -235,7 +235,7 @@ symora setup deps --group core   # 의존성만 (core / core-jvm / core-web / co
 ```bash
 # 특정 버전 핀
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
-  | bash -s -- --version 0.7.0
+  | bash -s -- --version 0.8.0
 
 # GitHub build provenance 검증 (gh CLI 필요)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
@@ -259,7 +259,7 @@ cargo install --path .
 
 ```bash
 symora self update                    # 최신 릴리스로 in-place 교체
-symora self update --version 0.7.0    # 특정 버전 핀
+symora self update --version 0.8.0    # 특정 버전 핀
 symora self update --verify-attestations
 symora self uninstall                 # 바이너리 + 스킬 + config + daemon 흔적 전부 제거
 symora self uninstall --keep-skill --keep-config
