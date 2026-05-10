@@ -3,9 +3,9 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::LocationArg;
 use crate::cli::response::LocationOutput;
 use crate::cli::utils::{read_line_at, read_lines_around, resolve_symbol_anchor};
+use crate::cli::{LocationArg, OutputError};
 use crate::models::lsp::FindSymbolsOptions;
 
 #[derive(Args, Debug)]
@@ -90,24 +90,36 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 items,
             });
         }
-        Err(e) => ctx.print_error(&format_refs_error(&e.to_string(), &loc.file, line, column)),
+        Err(e) => ctx.print_error(refs_error(e, &loc.file, line, column)),
     }
 
     Ok(())
 }
 
-fn format_refs_error(error: &str, file: &std::path::Path, line: u32, column: u32) -> String {
-    if error.contains("Broken pipe") || error.contains("timed out") || error.contains("timeout") {
-        format!(
-            "The language server did not respond cleanly for references here. Retry after `symora daemon restart`, or use `symora symbols {}` and `symora usage {}:{}:{}` to continue from file-level analysis.",
-            file.display(),
+/// Enrich the central `LspError → OutputError` mapping with a refs-specific
+/// recovery hint when the underlying failure is transport-level
+/// (timeout / broken pipe). All other error shapes — including
+/// `ServerNotInstalled`, `Unsupported`, parse errors — keep the structured
+/// code the central classifier produced.
+fn refs_error(
+    err: crate::error::LspError,
+    file: &std::path::Path,
+    line: u32,
+    column: u32,
+) -> OutputError {
+    use crate::cli::ErrorCode;
+
+    let mapped: OutputError = err.into();
+    if matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
+        return mapped.with_hint(format!(
+            "Retry after `symora daemon restart`, or use `symora symbols {0}` and \
+             `symora usage {0}:{1}:{2}` to continue from file-level analysis.",
             file.display(),
             line,
-            column
-        )
-    } else {
-        error.to_string()
+            column,
+        ));
     }
+    mapped
 }
 
 fn refs_hints(items: &[LocationOutput], total: usize, limit: usize) -> Vec<String> {
