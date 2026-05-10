@@ -202,5 +202,9 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
 
         // MCP
         Commands::Mcp(args) => commands::mcp::execute(args, app).await,
+
+        // Lifecycle
+        Commands::Setup(args) => commands::setup::execute(args, app).await,
+        Commands::Selfcmd(args) => commands::selfcmd::execute(args, app).await,
     }
 }

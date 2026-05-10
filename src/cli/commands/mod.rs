@@ -27,6 +27,8 @@ pub mod refs;
 pub mod rename;
 pub mod search;
 pub mod selection;
+pub mod selfcmd;
+pub mod setup;
 pub mod signature;
 pub mod status;
 pub mod subtypes;

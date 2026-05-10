@@ -29,9 +29,9 @@ use commands::{
     folding::FoldingArgs, format::FormatArgs, hover::HoverArgs, impact::ImpactArgs,
     implementations::ImplArgs, init::InitArgs, inlay_hints::InlayHintsArgs, map::MapArgs,
     mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
-    selection::SelectionArgs, signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
-    supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
-    write::WriteArgs,
+    selection::SelectionArgs, selfcmd::SelfcmdArgs, setup::SetupArgs, signature::SignatureArgs,
+    status::StatusArgs, subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs,
+    typedef::TypedefArgs, usage::UsageArgs, write::WriteArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -182,4 +182,11 @@ pub enum Commands {
 
     /// Run as a Model Context Protocol server (exposes Symora tools to AI agents)
     Mcp(McpArgs),
+
+    // Lifecycle (CLI-only — not surfaced over MCP)
+    /// Configure the Claude Code skill and language-server dependencies
+    Setup(SetupArgs),
+    /// Manage this binary itself (update, uninstall)
+    #[command(name = "self")]
+    Selfcmd(SelfcmdArgs),
 }

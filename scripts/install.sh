@@ -1,532 +1,430 @@
 #!/usr/bin/env bash
-set -e
+# Symora bootstrap installer.
+#
+# Downloads the official prebuilt binary, verifies the SHA-256, and places
+# it on disk. Everything else (skill install, language-server deps,
+# updates, removal) is owned by the binary itself:
+#
+#   symora setup            # interactive: skill + dependencies
+#   symora setup skill      # skill only
+#   symora setup deps ...   # dependencies only
+#   symora self update      # in-place upgrade
+#   symora self uninstall   # remove every trace
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
+#     | bash -s -- --version 0.7.0 --verify-attestations
+#
+# Run with --help for the full flag inventory.
 
-BINARY_NAME="symora"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-REPO="junyeong-ai/symora"
-SKILL_NAME="symora"
-PROJECT_SKILL_DIR=".claude/skills/$SKILL_NAME"
-USER_SKILL_DIR="$HOME/.claude/skills/$SKILL_NAME"
+set -Eeuo pipefail
+
+readonly REPO="junyeong-ai/symora"
+readonly BINARY_NAME="symora"
+readonly RELEASES_URL="https://github.com/${REPO}/releases"
+readonly API_LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
+
+INSTALL_DIR="${SYMORA_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
+VERSION="${SYMORA_VERSION:-}"
+INSTALL_METHOD=""
+VERIFY_ATTESTATIONS=false
+NO_COLOR="${NO_COLOR:-}"
+
 DAEMON_DIR="$HOME/.symora"
 
-# ============================================================================
-# Color Output
-# ============================================================================
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+ORIGINAL_DIR="$(pwd)"
+SCRIPT_DIR=""
+PROJECT_ROOT=""
+TMP_ROOT=""
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# ─── logging ────────────────────────────────────────────────────────────────
 
-info() { echo -e "${BLUE}$1${NC}" >&2; }
-success() { echo -e "${GREEN}$1${NC}" >&2; }
-warn() { echo -e "${YELLOW}$1${NC}" >&2; }
-error() { echo -e "${RED}$1${NC}" >&2; }
+if [ -t 2 ] && [ -z "${NO_COLOR}" ]; then
+    readonly C_RED=$'\033[0;31m'
+    readonly C_GREEN=$'\033[0;32m'
+    readonly C_YELLOW=$'\033[1;33m'
+    readonly C_BLUE=$'\033[0;34m'
+    readonly C_BOLD=$'\033[1m'
+    readonly C_DIM=$'\033[2m'
+    readonly C_OFF=$'\033[0m'
+else
+    readonly C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_BOLD="" C_DIM="" C_OFF=""
+fi
 
-# ============================================================================
-# Platform Detection
-# ============================================================================
+log()       { printf '%s\n' "$*" >&2; }
+log_info()  { printf '%s%s%s\n' "$C_BLUE" "$*" "$C_OFF" >&2; }
+log_ok()    { printf '%s%s%s\n' "$C_GREEN" "$*" "$C_OFF" >&2; }
+log_warn()  { printf '%s%s%s\n' "$C_YELLOW" "$*" "$C_OFF" >&2; }
+log_err()   { printf '%s%s%s\n' "$C_RED" "$*" "$C_OFF" >&2; }
+log_dim()   { printf '%s%s%s\n' "$C_DIM" "$*" "$C_OFF" >&2; }
+log_die()   { log_err "$*"; exit 1; }
 
-detect_platform() {
-    local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-    local arch=$(uname -m)
+log_section() {
+    local title="$1"
+    local bar="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf '\n%s%s%s\n' "$C_BOLD" "$bar" "$C_OFF" >&2
+    printf '%s  %s%s\n' "$C_BOLD" "$title" "$C_OFF" >&2
+    printf '%s%s%s\n\n' "$C_BOLD" "$bar" "$C_OFF" >&2
+}
 
-    case "$os" in
-        linux) os="unknown-linux-gnu" ;;
-        darwin) os="apple-darwin" ;;
-        *) error "Unsupported OS: $os"; exit 1 ;;
-    esac
+# ─── traps ──────────────────────────────────────────────────────────────────
+
+cleanup() {
+    local code=$?
+    if [ -n "$TMP_ROOT" ] && [ -d "$TMP_ROOT" ]; then
+        rm -rf "$TMP_ROOT"
+    fi
+    exit "$code"
+}
+
+on_error() {
+    log_err "✗ install.sh failed at line $2 (exit $1)"
+}
+
+trap cleanup EXIT
+trap 'on_error $? $LINENO' ERR
+
+# ─── help ───────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+Symora bootstrap installer
+
+Usage:
+  install.sh [OPTIONS]
+
+Options:
+      --version <ver>          Install a specific release (e.g. 0.7.0). Default: latest.
+      --install-dir <path>     Where to place the binary. Default: \$HOME/.local/bin.
+      --prebuilt               Force download of a prebuilt binary.
+      --source                 Force a build from source (requires a checkout + Rust).
+      --verify-attestations    Verify GitHub build provenance with 'gh' (must be installed).
+      --no-color               Disable ANSI color in output.
+  -h, --help                   Show this help.
+
+After install, run:
+  symora setup                 Interactive: install Claude Code skill and language servers
+  symora self update           Upgrade in place
+  symora self uninstall        Remove the binary, skill, config, and daemon data
+
+Environment overrides (flags win):
+  SYMORA_VERSION         Same as --version.
+  SYMORA_INSTALL_DIR     Same as --install-dir.
+  NO_COLOR               Disable ANSI color.
+
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh \\
+      | bash -s -- --version 0.7.0 --verify-attestations
+EOF
+}
+
+# ─── argument parsing ───────────────────────────────────────────────────────
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version)              VERSION="${2:?--version requires a value}"; VERSION="${VERSION#v}"; shift 2 ;;
+            --version=*)            VERSION="${1#*=}"; VERSION="${VERSION#v}"; shift ;;
+            --install-dir)          INSTALL_DIR="${2:?--install-dir requires a value}"; shift 2 ;;
+            --install-dir=*)        INSTALL_DIR="${1#*=}"; shift ;;
+            --prebuilt)             INSTALL_METHOD="prebuilt"; shift ;;
+            --source)               INSTALL_METHOD="source"; shift ;;
+            --verify-attestations)  VERIFY_ATTESTATIONS=true; shift ;;
+            --no-color)             NO_COLOR=1; shift ;;
+            -h|--help)              usage; exit 0 ;;
+            *)                      log_die "Unknown argument: $1 (use --help)" ;;
+        esac
+    done
+
+    if [ "$VERSION" = "latest" ]; then
+        VERSION=""
+    fi
+}
+
+# ─── path resolution ────────────────────────────────────────────────────────
+
+resolve_paths() {
+    if SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd -P)"; then
+        :
+    else
+        SCRIPT_DIR="$ORIGINAL_DIR"
+    fi
+    if [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
+        PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+    fi
+}
+
+setup_tmp() {
+    TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/symora-install.XXXXXX")"
+}
+
+# ─── helpers ────────────────────────────────────────────────────────────────
+
+display_path() {
+    local path="$1"
+    if [ "$path" = "$HOME" ]; then
+        printf '%s\n' "\$HOME"
+    elif [[ "$path" == "$HOME/"* ]]; then
+        printf '%s\n' "\$HOME/${path#"$HOME"/}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# ─── platform detection ─────────────────────────────────────────────────────
+
+detect_target() {
+    local os arch
+    os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    arch="$(uname -m)"
 
     case "$arch" in
-        x86_64) arch="x86_64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *) error "Unsupported architecture: $arch"; exit 1 ;;
+        x86_64|amd64)         arch="x86_64" ;;
+        arm64|aarch64)        arch="aarch64" ;;
+        *) log_die "Unsupported CPU architecture: $arch" ;;
     esac
 
-    echo "${arch}-${os}"
-}
-
-get_os() {
-    case "$(uname -s)" in
-        Darwin) echo "macos" ;;
-        Linux) echo "linux" ;;
-        *) echo "unknown" ;;
+    case "$os" in
+        darwin)
+            if [ "$arch" != "aarch64" ]; then
+                log_die "Prebuilt binaries are published for Apple Silicon only.
+Intel Macs: rerun with --source inside a symora checkout, or build with 'cargo install --path .'"
+            fi
+            printf '%s\n' "aarch64-apple-darwin"
+            ;;
+        linux)
+            printf '%s-unknown-linux-gnu\n' "$arch"
+            ;;
+        *) log_die "Unsupported OS: $os" ;;
     esac
 }
 
-# ============================================================================
-# Binary Installation
-# ============================================================================
+# ─── network ────────────────────────────────────────────────────────────────
 
-get_latest_version() {
-    curl -sf "https://api.github.com/repos/$REPO/releases/latest" \
-        | grep '"tag_name"' \
-        | sed -E 's/.*"v([^"]+)".*/\1/' \
-        || echo ""
+http_get() {
+    curl --fail --silent --show-error --location \
+         --retry 3 --retry-delay 2 --retry-connrefused \
+         "$@"
 }
 
-download_binary() {
-    local version="$1"
-    local target="$2"
-    local archive="symora-v${version}-${target}.tar.gz"
-    local url="https://github.com/$REPO/releases/download/v${version}/${archive}"
-    local checksum_url="${url}.sha256"
+is_valid_version() {
+    [[ "$1" =~ ^[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.+-]*)?$ ]]
+}
 
-    info "Downloading $archive..."
-    if ! curl -fLO "$url" 2>/dev/null; then
-        error "Download failed"
-        return 1
+resolve_latest_version() {
+    local effective tag
+
+    effective="$(curl --fail --silent --location --head \
+                      --output /dev/null \
+                      --write-out '%{url_effective}' \
+                      "${RELEASES_URL}/latest" 2>/dev/null || true)"
+    case "$effective" in
+        */releases/tag/v*)
+            tag="${effective##*/releases/tag/v}"
+            tag="${tag%%[/?#]*}"
+            if [ -n "$tag" ]; then
+                printf '%s\n' "$tag"
+                return 0
+            fi
+            ;;
+    esac
+
+    http_get "${API_LATEST_URL}" 2>/dev/null \
+        | sed -nE 's/.*"tag_name": *"v([^"]+)".*/\1/p' \
+        | head -n 1
+}
+
+# ─── binary install ─────────────────────────────────────────────────────────
+
+download_archive() {
+    local version="$1" target="$2"
+    local archive url out
+
+    archive="${BINARY_NAME}-v${version}-${target}.tar.gz"
+    url="${RELEASES_URL}/download/v${version}/${archive}"
+    out="$TMP_ROOT/$archive"
+
+    log_info "↓ downloading ${archive}"
+    http_get -o "$out" "$url" || log_die "Download failed: $url"
+
+    log_info "↓ downloading ${archive}.sha256"
+    http_get -o "${out}.sha256" "${url}.sha256" \
+        || log_die "Checksum download failed (refusing to install without verification)"
+
+    printf '%s\n' "$out"
+}
+
+verify_checksum() {
+    local archive="$1"
+    local dir base
+
+    dir="$(dirname "$archive")"
+    base="$(basename "$archive")"
+
+    log_info "🔐 verifying SHA-256"
+    if have_cmd sha256sum; then
+        ( cd "$dir" && sha256sum -c "${base}.sha256" >/dev/null ) \
+            || log_die "Checksum verification failed for $base"
+    elif have_cmd shasum; then
+        ( cd "$dir" && shasum -a 256 -c "${base}.sha256" >/dev/null ) \
+            || log_die "Checksum verification failed for $base"
+    else
+        log_die "Neither sha256sum nor shasum available — cannot verify download"
     fi
+    log_ok "  checksum OK"
+}
 
-    info "Verifying checksum..."
-    if curl -fLO "$checksum_url" 2>/dev/null; then
-        if command -v sha256sum >/dev/null; then
-            sha256sum -c "${archive}.sha256" 2>/dev/null || return 1
-        elif command -v shasum >/dev/null; then
-            shasum -a 256 -c "${archive}.sha256" 2>/dev/null || return 1
-        else
-            warn "No checksum tool found, skipping verification"
-        fi
+verify_attestation() {
+    local archive="$1"
+    if ! have_cmd gh; then
+        log_die "--verify-attestations requires the 'gh' CLI (https://cli.github.com)"
     fi
+    log_info "🔐 verifying GitHub build provenance"
+    gh attestation verify "$archive" --repo "$REPO" >&2 \
+        || log_die "Attestation verification failed for $(basename "$archive")"
+    log_ok "  attestation OK"
+}
 
-    info "Extracting..."
-    tar -xzf "$archive" 2>/dev/null
-    rm -f "$archive" "${archive}.sha256"
-
-    echo "$BINARY_NAME"
+extract_archive() {
+    local archive="$1"
+    local extract_dir="$TMP_ROOT/extract"
+    mkdir -p "$extract_dir"
+    log_info "📦 extracting"
+    tar -xzf "$archive" -C "$extract_dir"
+    local bin="$extract_dir/$BINARY_NAME"
+    [ -x "$bin" ] || log_die "Archive did not contain executable $BINARY_NAME"
+    printf '%s\n' "$bin"
 }
 
 build_from_source() {
-    info "Building from source..."
-    cargo build --release >&2
-    echo "target/release/$BINARY_NAME"
+    if [ -z "$PROJECT_ROOT" ] || [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
+        log_die "Source build requires running this script from inside a symora checkout."
+    fi
+    have_cmd cargo || log_die "Source build requires Rust + cargo (https://rustup.rs)"
+
+    log_info "🔨 building from source ($PROJECT_ROOT)"
+    ( cd "$PROJECT_ROOT" && cargo build --release ) >&2
+    printf '%s\n' "$PROJECT_ROOT/target/release/$BINARY_NAME"
 }
 
 stop_running_daemon() {
-    if [ -x "$INSTALL_DIR/$BINARY_NAME" ] && [ -f "$DAEMON_DIR/daemon.pid" ]; then
-        info "Stopping running daemon before binary replacement..."
-        "$INSTALL_DIR/$BINARY_NAME" daemon stop >/dev/null 2>&1 || true
+    local existing="$INSTALL_DIR/$BINARY_NAME"
+    if [ -x "$existing" ] && [ -f "$DAEMON_DIR/daemon.pid" ]; then
+        log_info "↺ stopping running daemon before binary swap"
+        "$existing" daemon stop >/dev/null 2>&1 || true
     fi
 }
 
 install_binary() {
-    local binary_path="$1"
-
+    local src="$1"
     stop_running_daemon
-
     mkdir -p "$INSTALL_DIR"
-    cp "$binary_path" "$INSTALL_DIR/$BINARY_NAME"
-    chmod +x "$INSTALL_DIR/$BINARY_NAME"
+    install -m 0755 "$src" "$INSTALL_DIR/$BINARY_NAME"
 
-    if [[ "$OSTYPE" == "darwin"* ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
         codesign --force --deep --sign - "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
     fi
 
-    success "Installed to $INSTALL_DIR/$BINARY_NAME"
+    log_ok "✓ installed $(display_path "$INSTALL_DIR")/$BINARY_NAME"
 }
 
-# ============================================================================
-# Skill Installation
-# ============================================================================
-
-check_skill_exists() {
-    [ -d "$USER_SKILL_DIR" ] && [ -f "$USER_SKILL_DIR/SKILL.md" ]
-}
-
-skill_content_matches() {
-    diff -rq "$PROJECT_SKILL_DIR" "$USER_SKILL_DIR" >/dev/null 2>&1
-}
-
-backup_skill() {
-    local timestamp=$(date +%Y%m%d_%H%M%S)
-    local backup_dir="$USER_SKILL_DIR.backup_$timestamp"
-
-    info "Creating backup: $backup_dir"
-    cp -r "$USER_SKILL_DIR" "$backup_dir"
-    success "Backup created"
-}
-
-install_skill() {
-    info "Installing skill to $USER_SKILL_DIR"
-    mkdir -p "$(dirname "$USER_SKILL_DIR")"
-    cp -r "$PROJECT_SKILL_DIR" "$USER_SKILL_DIR"
-    success "Skill installed"
-}
-
-prompt_skill_installation() {
-    [ ! -d "$PROJECT_SKILL_DIR" ] && return 0
-
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "Claude Code Skill Installation"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "Skill: $SKILL_NAME"
-    echo ""
-
-    if check_skill_exists; then
-        if skill_content_matches; then
-            success "Already installed and up to date."
-            echo ""
-            read -p "Reinstall anyway? [y/N]: " choice
-            [[ "$choice" =~ ^[yY]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; } || echo "Skipped"
-        else
-            warn "Installed skill differs from project skill — refresh recommended."
-            echo ""
-            read -p "Update? [Y/n]: " choice
-            [[ ! "$choice" =~ ^[nN]$ ]] && { backup_skill; rm -rf "$USER_SKILL_DIR"; install_skill; success "Updated"; } || echo "Keeping current version"
-        fi
-    else
-        echo "Installation options:"
-        echo ""
-        echo "  [1] User-level install (RECOMMENDED)"
-        echo "      → ~/.claude/skills/ (available in all projects)"
-        echo ""
-        echo "  [2] Project-level only"
-        echo "      → Works only in this project directory"
-        echo ""
-        echo "  [3] Skip"
-        echo ""
-
-        read -p "Choose [1-3] (default: 1): " choice
-        case "$choice" in
-            2)
-                echo ""
-                success "Using project-level skill"
-                echo "   Location: $(pwd)/$PROJECT_SKILL_DIR"
-                ;;
-            3)
-                echo ""
-                echo "Skipped"
-                ;;
-            1|"")
-                echo ""
-                install_skill
-                echo ""
-                success "Skill installed successfully!"
-                echo ""
-                echo "Claude Code can now use symora for:"
-                echo "  • Finding symbol definitions and references"
-                echo "  • Analyzing call hierarchies (who calls what)"
-                echo "  • Refactoring code (rename, edit symbols)"
-                echo "  • Searching code with AST patterns"
-                ;;
-            *)
-                echo ""
-                error "Invalid choice. Skipped."
-                ;;
-        esac
-    fi
-
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-}
-
-# ============================================================================
-# Dependency Installation
-# ============================================================================
-
-check_command() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-install_ripgrep() {
-    local os=$(get_os)
-
-    if check_command rg; then
-        success "ripgrep already installed: $(rg --version | head -1)"
+select_install_method() {
+    local method="$INSTALL_METHOD"
+    if [ -n "$method" ]; then
+        printf '%s\n' "$method"
         return 0
     fi
 
-    info "Installing ripgrep..."
-    case "$os" in
-        macos) brew install ripgrep ;;
-        linux)
-            if check_command apt; then
-                sudo apt install -y ripgrep
-            elif check_command dnf; then
-                sudo dnf install -y ripgrep
-            else
-                cargo install ripgrep
-            fi
-            ;;
-    esac
-    success "ripgrep installed"
+    if ! have_cmd curl; then
+        if [ -n "$PROJECT_ROOT" ]; then
+            log_warn "curl unavailable — falling back to source build"
+            printf 'source\n'
+        else
+            log_die "curl is required for prebuilt downloads (or run from a checkout with --source)"
+        fi
+        return 0
+    fi
+
+    printf 'prebuilt\n'
 }
 
-install_lsp_core() {
-    local os=$(get_os)
+# ─── post-install summary ───────────────────────────────────────────────────
 
-    echo ""
-    info "Installing Core LSP servers (Rust, TypeScript, Python, Go)..."
-    echo ""
+print_post_install() {
+    log_section "Installation Complete"
 
-    # Rust
-    if ! check_command rust-analyzer; then
-        info "Installing rust-analyzer..."
-        rustup component add rust-analyzer 2>/dev/null || warn "rust-analyzer: rustup not found"
-    else
-        success "rust-analyzer: $(rust-analyzer --version 2>/dev/null | head -1 || echo 'installed')"
-    fi
-
-    # TypeScript/JavaScript
-    if ! check_command typescript-language-server; then
-        info "Installing typescript-language-server..."
-        npm install -g typescript typescript-language-server 2>/dev/null || warn "typescript-language-server: npm not found"
-    else
-        success "typescript-language-server: $(typescript-language-server --version 2>/dev/null || echo 'installed')"
-    fi
-
-    # Python
-    if ! check_command pyright; then
-        info "Installing pyright..."
-        npm install -g pyright 2>/dev/null || warn "pyright: npm not found"
-    else
-        success "pyright: $(pyright --version 2>/dev/null || echo 'installed')"
-    fi
-
-    # Go
-    if ! check_command gopls; then
-        info "Installing gopls..."
-        go install golang.org/x/tools/gopls@latest 2>/dev/null || warn "gopls: go not found"
-    else
-        success "gopls: $(gopls version 2>/dev/null | head -1 || echo 'installed')"
-    fi
-}
-
-install_lsp_jvm() {
-    local os=$(get_os)
-
-    echo ""
-    info "Installing JVM LSP servers (Java, Kotlin)..."
-    echo ""
-
-    # Java
-    if ! check_command jdtls; then
-        info "Installing jdtls..."
-        case "$os" in
-            macos) brew install jdtls 2>/dev/null || warn "jdtls: brew install failed" ;;
-            *) warn "jdtls: Manual install required from https://download.eclipse.org/jdtls/snapshots/" ;;
-        esac
-    else
-        success "jdtls: installed"
-    fi
-
-    # Kotlin
-    if ! check_command kotlin-lsp; then
-        info "Installing kotlin-lsp (JetBrains)..."
-        case "$os" in
-            macos) brew install JetBrains/utils/kotlin-lsp 2>/dev/null || warn "kotlin-lsp: brew install failed" ;;
-            *) warn "kotlin-lsp: Manual install required from https://github.com/JetBrains/kotlin-lsp" ;;
-        esac
-    else
-        success "kotlin-lsp: installed"
-    fi
-}
-
-install_lsp_web() {
-    echo ""
-    info "Installing Web LSP servers (Vue, PHP, YAML)..."
-    echo ""
-
-    # Vue
-    if ! check_command vue-language-server; then
-        info "Installing vue-language-server..."
-        npm install -g @vue/language-server 2>/dev/null || warn "vue-language-server: npm not found"
-    else
-        success "vue-language-server: installed"
-    fi
-
-    # PHP
-    if ! check_command intelephense; then
-        info "Installing intelephense..."
-        npm install -g intelephense 2>/dev/null || warn "intelephense: npm not found"
-    else
-        success "intelephense: installed"
-    fi
-
-    # YAML
-    if ! check_command yaml-language-server; then
-        info "Installing yaml-language-server..."
-        npm install -g yaml-language-server 2>/dev/null || warn "yaml-language-server: npm not found"
-    else
-        success "yaml-language-server: installed"
-    fi
-}
-
-install_lsp_systems() {
-    local os=$(get_os)
-
-    echo ""
-    info "Installing Systems LSP servers (C/C++, Zig)..."
-    echo ""
-
-    # C/C++
-    if ! check_command clangd; then
-        info "Installing clangd..."
-        case "$os" in
-            macos) brew install llvm 2>/dev/null || warn "clangd: brew install failed" ;;
-            linux) sudo apt install -y clangd 2>/dev/null || warn "clangd: apt install failed" ;;
-        esac
-    else
-        success "clangd: $(clangd --version 2>/dev/null | head -1 || echo 'installed')"
-    fi
-
-    # Zig
-    if ! check_command zls; then
-        info "Installing zls..."
-        case "$os" in
-            macos) brew install zls 2>/dev/null || warn "zls: brew install failed" ;;
-            *) warn "zls: Manual install required from https://github.com/zigtools/zls/releases" ;;
-        esac
-    else
-        success "zls: installed"
-    fi
-}
-
-prompt_dependency_installation() {
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "Optional: Install Dependencies"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "Symora works best with ripgrep and language servers."
-    echo "You can install them now or later with 'symora doctor'."
-    echo ""
-    echo "Available packages:"
-    echo ""
-    echo "  [1] Core only (ripgrep + Rust/TS/Python/Go LSP)"
-    echo "  [2] Core + JVM (adds Java, Kotlin)"
-    echo "  [3] Core + Web (adds Vue, PHP, YAML)"
-    echo "  [4] Core + Systems (adds C/C++, Zig)"
-    echo "  [5] All of the above"
-    echo "  [6] Skip (install later)"
-    echo ""
-
-    read -p "Choose [1-6] (default: 6): " choice
-
-    case "$choice" in
-        1)
-            install_ripgrep
-            install_lsp_core
-            ;;
-        2)
-            install_ripgrep
-            install_lsp_core
-            install_lsp_jvm
-            ;;
-        3)
-            install_ripgrep
-            install_lsp_core
-            install_lsp_web
-            ;;
-        4)
-            install_ripgrep
-            install_lsp_core
-            install_lsp_systems
-            ;;
-        5)
-            install_ripgrep
-            install_lsp_core
-            install_lsp_jvm
-            install_lsp_web
-            install_lsp_systems
-            ;;
-        6|"")
-            echo ""
-            echo "Skipped. Run 'symora doctor' later to see install instructions."
-            ;;
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*)
+            log_ok "✓ $(display_path "$INSTALL_DIR") is on \$PATH" ;;
         *)
-            warn "Invalid choice. Skipped."
+            log_warn "$(display_path "$INSTALL_DIR") is not on \$PATH"
+            log ""
+            log "  Append this line to your shell profile (~/.zshrc, ~/.bashrc):"
+            log_dim "    export PATH=\"$(display_path "$INSTALL_DIR"):\$PATH\""
             ;;
     esac
 
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log ""
+    log "Installed version:"
+    "$INSTALL_DIR/$BINARY_NAME" --version >&2 || true
+
+    log ""
+    log "Next:"
+    log "  ${BINARY_NAME} setup            # install Claude Code skill + LSP servers"
+    log "  ${BINARY_NAME} init             # initialize this project"
+    log "  ${BINARY_NAME} self update      # upgrade in place"
+    log "  ${BINARY_NAME} self uninstall   # remove every trace"
+    log ""
 }
 
-# ============================================================================
-# Main
-# ============================================================================
+# ─── main ───────────────────────────────────────────────────────────────────
 
 main() {
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "          Symora - LSP-based Code Intelligence"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
+    parse_args "$@"
+    resolve_paths
+    setup_tmp
 
-    local binary_path=""
-    local target=$(detect_platform)
-    local version=$(get_latest_version)
+    local target
+    target="$(detect_target)"
+    INSTALL_METHOD="$(select_install_method)"
 
-    if [ -n "$version" ] && command -v curl >/dev/null; then
-        echo "Latest version: v$version"
-        echo ""
-        echo "Installation method:"
-        echo "  [1] Download prebuilt binary (RECOMMENDED - fast)"
-        echo "  [2] Build from source (requires Rust toolchain)"
-        echo ""
-        read -p "Choose [1-2] (default: 1): " method
+    case "$INSTALL_METHOD" in
+        prebuilt)
+            if [ -z "$VERSION" ]; then
+                VERSION="$(resolve_latest_version || true)"
+            fi
+            [ -n "$VERSION" ] || log_die "Could not resolve latest version. Pass --version vX.Y.Z."
+            is_valid_version "$VERSION" || log_die "Invalid version: $VERSION"
 
-        case "$method" in
-            2)
-                binary_path=$(build_from_source)
-                ;;
-            1|"")
-                binary_path=$(download_binary "$version" "$target") || {
-                    warn "Download failed, falling back to source build"
-                    binary_path=$(build_from_source)
-                }
-                ;;
-            *)
-                error "Invalid choice"
-                exit 1
-                ;;
-        esac
-    else
-        [ -z "$version" ] && warn "Cannot fetch latest version, building from source"
-        binary_path=$(build_from_source)
-    fi
+            log_section "Symora · v$VERSION · $target"
+            log "  prefix: $(display_path "$INSTALL_DIR")"
+            log ""
 
-    install_binary "$binary_path"
+            local archive bin
+            archive="$(download_archive "$VERSION" "$target")"
+            verify_checksum "$archive"
+            if [ "$VERIFY_ATTESTATIONS" = true ]; then
+                verify_attestation "$archive"
+            fi
+            bin="$(extract_archive "$archive")"
+            install_binary "$bin"
+            ;;
+        source)
+            log_section "Symora · source build"
+            log "  prefix: $(display_path "$INSTALL_DIR")"
+            log ""
+            local bin
+            bin="$(build_from_source)"
+            install_binary "$bin"
+            ;;
+    esac
 
-    echo ""
-    if echo "$PATH" | grep -q "$INSTALL_DIR"; then
-        success "$INSTALL_DIR is in PATH"
-    else
-        warn "$INSTALL_DIR not in PATH"
-        echo ""
-        echo "Add to shell profile (~/.bashrc, ~/.zshrc):"
-        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    fi
-    echo ""
-
-    if command -v "$BINARY_NAME" &>/dev/null; then
-        echo "Installed version:"
-        "$BINARY_NAME" --version
-        echo ""
-    fi
-
-    # Skill installation
-    prompt_skill_installation
-
-    # Dependency installation
-    prompt_dependency_installation
-
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    success "Installation Complete!"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "Next steps:"
-    echo ""
-    echo "1. Initialize project:     symora init"
-    echo "2. Check dependencies:     symora doctor"
-    echo "3. Build search index:     symora search index build"
-    echo "4. Project overview:       symora map summary"
-    echo "5. List file symbols:      symora symbols src/main.rs"
-    echo ""
+    print_post_install
 }
 
 main "$@"

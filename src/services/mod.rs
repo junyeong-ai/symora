@@ -4,6 +4,7 @@ pub mod ast_query;
 pub mod config;
 #[cfg(unix)]
 pub mod daemon_lsp;
+pub mod dist;
 pub mod embeddings;
 pub mod lsp;
 pub mod pack;
