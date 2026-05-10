@@ -1,0 +1,107 @@
+use std::fmt;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use crate::cli::LocationArg;
+
+pub fn schema_object(fields: &[(&str, &str, &str)], required: &[&str]) -> Value {
+    let mut props = serde_json::Map::new();
+    for (name, ty, desc) in fields {
+        props.insert(
+            (*name).to_string(),
+            json!({ "type": ty, "description": desc }),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": props,
+        "required": required,
+        "additionalProperties": false,
+    })
+}
+
+pub fn location_schema() -> Value {
+    schema_object(
+        &[
+            ("file", "string", "Project-relative file path"),
+            ("line", "integer", "1-indexed line number"),
+            ("column", "integer", "1-indexed column number (default 1)"),
+        ],
+        &["file", "line"],
+    )
+}
+
+pub fn with_extra(mut base: Value, extras: &[(&str, &str, &str)]) -> Value {
+    let props = base
+        .get_mut("properties")
+        .and_then(|v| v.as_object_mut())
+        .expect("base schema has properties");
+    for (name, ty, desc) in extras {
+        props.insert(
+            (*name).to_string(),
+            json!({ "type": ty, "description": desc }),
+        );
+    }
+    base
+}
+
+#[derive(Deserialize)]
+pub struct LocationInput {
+    pub file: String,
+    pub line: u32,
+    #[serde(default = "default_column")]
+    pub column: u32,
+}
+
+fn default_column() -> u32 {
+    1
+}
+
+impl LocationInput {
+    pub fn into_arg(self) -> LocationArg {
+        LocationArg {
+            location: self.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for LocationInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn location_schema_requires_file_and_line() {
+        let schema = location_schema();
+        let required = schema["required"].as_array().unwrap();
+        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(names.contains(&"file"));
+        assert!(names.contains(&"line"));
+        assert!(!names.contains(&"column"));
+    }
+
+    #[test]
+    fn with_extra_appends_to_properties() {
+        let extended = with_extra(
+            location_schema(),
+            &[("limit", "integer", "Maximum results")],
+        );
+        let props = extended["properties"].as_object().unwrap();
+        assert!(props.contains_key("file"));
+        assert!(props.contains_key("limit"));
+    }
+
+    #[test]
+    fn location_input_defaults_column_to_one() {
+        let input: LocationInput =
+            serde_json::from_value(json!({"file": "src/main.rs", "line": 10})).unwrap();
+        assert_eq!(input.column, 1);
+        assert_eq!(input.into_arg().location, "src/main.rs:10:1");
+    }
+}
