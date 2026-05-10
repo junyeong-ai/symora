@@ -249,7 +249,7 @@ mod tests {
         assert!(err.hint.unwrap().contains("rustup"));
     }
 
-#[test]
+    #[test]
     fn store_not_initialized_carries_hint() {
         let err: OutputError = StoreError::NotInitialized.into();
         assert!(matches!(err.code, ErrorCode::StoreNotInitialized));
@@ -291,8 +291,7 @@ mod tests {
         // Wire: RpcError now carries the structured payload in `data`.
         let rpc: RpcError = (&origin).into();
         let data = rpc.data.expect("structured payload must be attached");
-        let wire: WireLspError =
-            serde_json::from_value(data).expect("wire payload deserializes");
+        let wire: WireLspError = serde_json::from_value(data).expect("wire payload deserializes");
 
         // Client side reconstructs the typed variant verbatim.
         let recovered: LspError = wire.into();
