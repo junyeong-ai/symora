@@ -35,7 +35,7 @@ clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serde_repr = "0.1.20"
 toml = "1.1"
 
@@ -44,7 +44,7 @@ thiserror = "2.0.18"
 anyhow = "1.0.102"
 
 # AST Parsing
-tree-sitter = "0.26.8"
+tree-sitter = "0.26.9"
 tree-sitter-python = "0.25"
 tree-sitter-javascript = "0.25"
 tree-sitter-go = "0.25"
