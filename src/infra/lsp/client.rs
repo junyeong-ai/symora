@@ -10,7 +10,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
 use tokio::time::timeout;
 
-use super::init_options::get_initialization_options;
+use super::init_options::init_options;
 use super::protocol::{
     ClientCapabilities, ClientInfo, GeneralClientCapabilities, InitializeParams, InitializeResult,
     LspDiagnostic, Message, Notification, Position, RegularExpressionsCapability, Request,
@@ -161,6 +161,22 @@ pub struct LspClient {
     indexing_notify: Notify,
     terminated: AtomicBool,
     cross_file_waited: AtomicBool,
+    /// The initializationOptions payload, kept as the single source of
+    /// truth for settings: servers that pull configuration at runtime
+    /// (`workspace/configuration` — pyright reads `python.pythonPath`
+    /// this way, not from initializationOptions) are answered from the
+    /// same payload instead of empty objects that wipe their settings.
+    settings: RwLock<Option<serde_json::Value>>,
+}
+
+/// Walk a dotted configuration section path ("python.analysis") through
+/// the settings payload.
+fn lookup_section(settings: &Value, section: &str) -> Option<Value> {
+    let mut node = settings;
+    for part in section.split('.') {
+        node = node.get(part)?;
+    }
+    Some(node.clone())
 }
 
 impl LspClient {
@@ -186,6 +202,7 @@ impl LspClient {
             indexing_notify: Notify::new(),
             terminated: AtomicBool::new(false),
             cross_file_waited: AtomicBool::new(false),
+            settings: RwLock::new(None),
         })
     }
 
@@ -222,6 +239,10 @@ impl LspClient {
             .stdout
             .take()
             .ok_or_else(|| LspError::ServerStart("Failed to get stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| LspError::ServerStart("Failed to get stderr".to_string()))?;
 
         // Store process and stdin
         *self.process.lock().await = Some(child);
@@ -231,6 +252,18 @@ impl LspClient {
         let client = Arc::clone(self);
         tokio::spawn(async move {
             client.read_responses(Transport::new(stdout)).await;
+        });
+
+        // Drain the server's stderr continuously: an undrained pipe
+        // eventually fills and deadlocks the server, and a crashing
+        // server's last words are the only diagnostic there is.
+        let language = self.language;
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!("LSP {language} stderr: {line}");
+            }
         });
 
         // Register notification handlers before initialization
@@ -278,11 +311,20 @@ impl LspClient {
 
     /// Initialize the language server
     async fn initialize(&self) -> Result<(), LspError> {
-        let init_options = get_initialization_options(self.language, &self.root);
+        let init_options = init_options(self.language, &self.root);
+        *self.settings.write().await = init_options.clone();
 
         let params = InitializeParams {
             process_id: Some(std::process::id()),
             root_uri: Some(path_to_uri(&self.root)),
+            workspace_folders: Some(vec![crate::infra::lsp::protocol::WorkspaceFolder {
+                uri: path_to_uri(&self.root),
+                name: self
+                    .root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "workspace".to_string()),
+            }]),
             capabilities: Self::client_capabilities(self.language),
             client_info: Some(ClientInfo {
                 name: "symora".to_string(),
@@ -919,8 +961,11 @@ impl LspClient {
                 }
                 None
             } else {
+                // Opening a file the server already indexed from disk adds
+                // no new information — only a content *change* invalidates
+                // the workspace index. Invalidating here put every warm
+                // session through a pointless re-wait per first-open.
                 let state = DocumentState::new(content);
-                self.invalidate_index();
                 self.notify(
                     "textDocument/didOpen",
                     Some(serde_json::json!({
@@ -952,7 +997,7 @@ impl LspClient {
         IndexingState::from_u8(self.indexing_state.load(Ordering::Acquire))
     }
 
-    pub async fn ensure_cross_file_ready(&self) {
+    pub async fn sleep_for_cross_file_settle(&self) {
         if self
             .cross_file_waited
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -982,13 +1027,21 @@ impl LspClient {
         if matches!(current, IndexingState::Ready | IndexingState::TimedOut) {
             self.indexing_state
                 .store(IndexingState::Stale.to_u8(), Ordering::Release);
+            // The next cross-file query after an edit deserves a fresh
+            // settle window, not a latched skip.
+            self.cross_file_waited.store(false, Ordering::Release);
         }
     }
 
-    pub async fn wait_for_indexing(&self) -> IndexingState {
+    pub async fn await_indexing_signal(&self) -> IndexingState {
         let current = self.indexing_state();
-        if current == IndexingState::Ready {
-            return IndexingState::Ready;
+        // `TimedOut` is terminal-usable: re-waiting the full budget on
+        // every request would make a slow server cost the timeout per
+        // query forever. Recovery runs through `invalidate_index` (file
+        // edits -> `Stale`) or a session restart, and degraded answers
+        // stay marked via `indexing_degradation`.
+        if current.is_usable() {
+            return current;
         }
 
         self.set_indexing_state(IndexingState::InProgress);
@@ -1056,15 +1109,47 @@ impl LspClient {
         .await;
 
         let client_progress = Arc::clone(self);
+        // `WorkDoneProgressBegin` carries the `title`; `End` carries only
+        // the token. Remember which tokens began an indexing-shaped task
+        // so the matching `end` can flip readiness — reading `title` off
+        // `end` never fires on spec-compliant servers.
+        let indexing_tokens: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         self.on_notification("$/progress", move |params| {
-            if let Some(value) = params.get("value")
-                && value.get("kind").and_then(|k| k.as_str()) == Some("end")
-                && let Some(title) = value.get("title").and_then(|t| t.as_str())
-            {
-                let t = title.to_lowercase();
-                if t.contains("index") || t.contains("load") || t.contains("analyz") {
+            let Some(token) = params.get("token").map(|t| t.to_string()) else {
+                return;
+            };
+            let Some(value) = params.get("value") else {
+                return;
+            };
+            match value.get("kind").and_then(|k| k.as_str()) {
+                Some("begin") => {
+                    if let Some(title) = value.get("title").and_then(|t| t.as_str()) {
+                        let t = title.to_lowercase();
+                        if t.contains("index") || t.contains("load") || t.contains("analyz") {
+                            indexing_tokens
+                                .lock()
+                                .expect("indexing token set poisoned")
+                                .insert(token);
+                        }
+                    }
+                }
+                Some("end")
+                    if indexing_tokens
+                        .lock()
+                        .expect("indexing token set poisoned")
+                        .remove(&token) =>
+                {
+                    // Readiness makes any other pending begin-tokens moot;
+                    // clearing bounds the set against servers that never
+                    // end a token.
+                    indexing_tokens
+                        .lock()
+                        .expect("indexing token set poisoned")
+                        .clear();
                     client_progress.set_indexing_state(IndexingState::Ready);
                 }
+                _ => {}
             }
         })
         .await;
@@ -1140,10 +1225,27 @@ impl LspClient {
 
     async fn handle_server_request(&self, request: Request) {
         let response_result = match request.method.as_str() {
-            "workspace/configuration" => self.handle_workspace_configuration(&request.params),
+            "workspace/configuration" => self.handle_workspace_configuration(&request.params).await,
             "client/registerCapability" => Ok(serde_json::Value::Null),
             "client/unregisterCapability" => Ok(serde_json::Value::Null),
             "window/workDoneProgress/create" => Ok(serde_json::Value::Null),
+            // Null = "no action item chosen" — spec-valid and the only
+            // honest answer a headless client can give.
+            "window/showMessageRequest" => Ok(serde_json::Value::Null),
+            // Refresh requests only mean "please re-pull when convenient";
+            // null is the truthful acknowledgement. Rejecting them with
+            // METHOD_NOT_FOUND crashes vscode-languageserver-based servers
+            // (pyright exits 1 on the error response) — verified by
+            // byte-replay against pyright 1.1.410.
+            "workspace/semanticTokens/refresh"
+            | "workspace/codeLens/refresh"
+            | "workspace/inlayHint/refresh"
+            | "workspace/inlineValue/refresh"
+            | "workspace/diagnostic/refresh"
+            | "workspace/foldingRange/refresh" => Ok(serde_json::Value::Null),
+            // Anything else stays an honest METHOD_NOT_FOUND — blanket-OK
+            // would fake side effects (e.g. workspace/applyEdit claiming
+            // an edit was applied).
             _ => {
                 tracing::debug!("Unhandled server request: {}", request.method);
                 Err(ResponseError {
@@ -1169,28 +1271,48 @@ impl LspClient {
             },
         };
 
-        if let Ok(mut stdin_guard) = self.stdin.try_lock()
-            && let Some(stdin) = stdin_guard.as_mut()
+        // A dropped response wedges the server's pending-request map;
+        // wait for the writer instead of silently giving up on contention.
+        let mut stdin_guard = self.stdin.lock().await;
+        if let Some(stdin) = stdin_guard.as_mut()
+            && let Err(e) = write_response(stdin, &response).await
         {
-            let _ = write_response(stdin, &response).await;
+            tracing::warn!("Failed to answer {} from server: {e}", request.method);
         }
     }
 
-    fn handle_workspace_configuration(
+    /// Answer `workspace/configuration` from the initializationOptions
+    /// payload. Servers like pyright read their effective settings from
+    /// this pull, not from initializationOptions — answering with empty
+    /// objects silently wipes every injected setting (pythonPath first
+    /// among them). Unknown sections still answer `{}`.
+    async fn handle_workspace_configuration(
         &self,
         params: &Option<Value>,
     ) -> Result<Value, ResponseError> {
-        let items = params
+        let settings = self.settings.read().await;
+        let items: Vec<Value> = params
             .as_ref()
             .and_then(|p| p.get("items"))
             .and_then(|i| i.as_array())
-            .map(|arr| arr.len())
-            .unwrap_or(0);
+            .map(|arr| {
+                arr.iter()
+                    .map(|item| {
+                        match item.get("section").and_then(|s| s.as_str()) {
+                            // An item without a section asks for the whole
+                            // settings object (LSP spec).
+                            None => settings.clone().unwrap_or_default(),
+                            Some(section) => settings
+                                .as_ref()
+                                .and_then(|s| lookup_section(s, section))
+                                .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        Ok(Value::Array(vec![
-            Value::Object(serde_json::Map::new());
-            items
-        ]))
+        Ok(Value::Array(items))
     }
 
     pub fn position_params(uri: &str, line: u32, column: u32) -> TextDocumentPositionParams {

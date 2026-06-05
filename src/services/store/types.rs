@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::symbol::{Language, SymbolKind};
 
+/// One page of search rows plus the exact total match count, so list
+/// output can report `count`/`truncated` precisely instead of guessing
+/// from limit saturation.
+#[derive(Debug, Clone)]
+pub struct SearchPage<T> {
+    pub total: usize,
+    pub rows: Vec<T>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolSearchResult {
     pub name: String,

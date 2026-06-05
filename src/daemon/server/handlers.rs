@@ -301,3 +301,18 @@ pub(super) async fn handle_language_status(
         "install_hint": install_hint,
     }))
 }
+
+pub(super) async fn handle_indexing_degradation(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+    lsp_config: &Arc<LspRuntimeConfig>,
+) -> Result<serde_json::Value, RpcError> {
+    let p: LanguageStatusParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    ctx.touch();
+
+    let language = Language::parse_or_default(&p.language);
+    let degradation = ctx.lsp.indexing_degradation(language).await;
+
+    Ok(serde_json::json!({ "degradation": degradation }))
+}

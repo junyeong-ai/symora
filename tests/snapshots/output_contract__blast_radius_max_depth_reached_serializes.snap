@@ -7,6 +7,8 @@ expression: radius
   "transitive_callers": 7,
   "depth": 3,
   "max_depth_reached": true,
+  "callers_truncated": true,
+  "indexing": "timed_out",
   "callers_by_depth": [
     {
       "depth": 1,

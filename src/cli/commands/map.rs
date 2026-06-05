@@ -331,7 +331,12 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         Ok(mut symbols) => {
             Symbol::compute_paths_for_all(&mut symbols);
             let focus_symbols = build_focus_symbols(&symbols, ctx.root());
-            let total = symbols.len();
+            // `count` must describe the same domain as `items`: focus
+            // candidates, not every symbol in the file.
+            let total = symbols
+                .iter()
+                .filter(|symbol| is_focus_symbol_candidate(symbol))
+                .count();
             let items = symbols
                 .iter()
                 .filter(|symbol| is_focus_symbol_candidate(symbol))
@@ -342,7 +347,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                     out.without_children()
                 })
                 .collect();
-            (focus_symbols, Section::with_limit(items, total))
+            (focus_symbols, Section::with_total(items, total))
         }
         Err(e) => (Vec::new(), Section::error(e)),
     };

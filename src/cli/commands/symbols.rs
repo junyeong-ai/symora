@@ -164,7 +164,7 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 })
                 .collect();
 
-            ctx.print_success(Section::with_limit(items, total));
+            ctx.print_success(Section::with_total(items, total));
         }
         Err(e) => ctx.print_error(e),
     }

@@ -16,8 +16,8 @@ use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, InlayHint, Position, PrepareRenameResult, Range, RenameResult, SelectionRange,
-    ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    HoverInfo, IndexingDegradation, InlayHint, Position, PrepareRenameResult, Range, RenameResult,
+    SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
@@ -402,5 +402,14 @@ impl LspService for DaemonLspService {
             }
             Err(_) => ServerStatus::Stopped,
         }
+    }
+
+    async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation> {
+        let response = self
+            .client
+            .indexing_degradation(&language.to_string())
+            .await
+            .ok()?;
+        serde_json::from_value(response.get("degradation")?.clone()).ok()?
     }
 }

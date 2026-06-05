@@ -155,7 +155,7 @@ pub async fn run_workspace(
     serde_json::json!({
         "workspace": ws.name,
         "roots": ws.roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-        "results": results,
+        "items": results,
     })
 }
 

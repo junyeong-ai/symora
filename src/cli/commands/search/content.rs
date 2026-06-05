@@ -5,27 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::response::Section;
 #[cfg(unix)]
 use crate::daemon::DaemonClient;
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
 use super::common::is_code_language;
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct ContentSearchOutput {
-    pub count: usize,
-    #[serde(default)]
-    pub showing: usize,
-    #[serde(alias = "results")]
-    pub items: Vec<ContentResultOutput>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hints: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_commands: Vec<String>,
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct ContentResultOutput {
@@ -56,7 +42,7 @@ pub async fn execute_content_search(
         let client = DaemonClient::new(app.root());
         match client.search_content(query, Some(limit), language).await {
             Ok(response) => {
-                let mut parsed: ContentSearchOutput = serde_json::from_value(response)
+                let mut parsed: Section<ContentResultOutput> = serde_json::from_value(response)
                     .map_err(|e| anyhow::anyhow!("Invalid daemon response: {}", e))?;
 
                 for r in &mut parsed.items {
@@ -64,17 +50,13 @@ pub async fn execute_content_search(
                     r.backend = Some("index".to_string());
                 }
 
-                parsed.items = prioritize_code_content_results(parsed.items, language, limit);
-                parsed.showing = parsed.items.len();
-                if parsed.count < parsed.showing {
-                    parsed.count = parsed.showing;
-                }
-
-                parsed.truncated = parsed.items.len() > 1 && parsed.items.len() >= limit;
-                parsed.hints = content_search_hints(query, language, parsed.truncated);
-                parsed.next_commands = content_search_next_commands(&parsed.items, language);
-
-                ctx.print_success(parsed);
+                ctx.print_success(finish_content_search(
+                    parsed.items,
+                    parsed.count,
+                    query,
+                    language,
+                    limit,
+                ));
             }
             Err(e) => {
                 if should_fallback_content_search(&e.to_string()) {
@@ -100,12 +82,33 @@ fn should_fallback_content_search(error: &str) -> bool {
     error.contains("Store not initialized")
 }
 
+/// Final shaping shared by the index and scan paths: prioritize code-file
+/// matches, cap emission at `limit`, and derive `truncated`/hints from the
+/// exact match count — never from limit saturation.
+fn finish_content_search(
+    candidates: Vec<ContentResultOutput>,
+    count: usize,
+    query: &str,
+    language: Option<&str>,
+    limit: usize,
+) -> Section<ContentResultOutput> {
+    let count = count.max(candidates.len());
+    let items = prioritize_code_content_results(candidates, language, limit);
+
+    let truncated = items.len() < count;
+    let hints = content_search_hints(query, language, truncated);
+    let next_commands = content_search_next_commands(&items, language);
+    Section::with_total(items, count)
+        .with_hints(hints)
+        .with_next_commands(next_commands)
+}
+
 async fn fallback_content_search(
     app: &App,
     query: &str,
     language: Option<&str>,
     limit: usize,
-) -> Result<ContentSearchOutput> {
+) -> Result<Section<ContentResultOutput>> {
     let language_filter = language.map(Language::parse_or_default);
     let extensions: Vec<&str> = match language_filter {
         Some(Language::Unknown) => Vec::new(),
@@ -122,13 +125,13 @@ async fn fallback_content_search(
     files.sort();
 
     let q = query.to_ascii_lowercase();
+    // Storage is capped to bound memory; the scan itself runs to the end
+    // so `count` stays an exact total, never a silent lower bound.
+    let storage_cap = limit * 8;
+    let mut total = 0usize;
     let mut results = Vec::new();
 
     for file in files {
-        if results.len() >= limit * 8 {
-            break;
-        }
-
         let Ok(metadata) = tokio::fs::metadata(&file).await else {
             continue;
         };
@@ -146,27 +149,22 @@ async fn fallback_content_search(
                 continue;
             }
 
-            results.push(ContentResultOutput {
-                file: app.output.relative_path(&file),
-                line: idx as u32 + 1,
-                content: line.to_string(),
-                backend: Some("scan".to_string()),
-                score,
-            });
+            total += 1;
+            if results.len() < storage_cap {
+                results.push(ContentResultOutput {
+                    file: app.output.relative_path(&file),
+                    line: idx as u32 + 1,
+                    content: line.to_string(),
+                    backend: Some("scan".to_string()),
+                    score,
+                });
+            }
         }
     }
 
-    let total = results.len();
-    results = prioritize_code_content_results(results, language, limit);
-
-    Ok(ContentSearchOutput {
-        count: total,
-        showing: results.len(),
-        items: results.clone(),
-        truncated: results.len() > 1 && results.len() >= limit,
-        hints: content_search_hints(query, language, results.len() > 1 && results.len() >= limit),
-        next_commands: content_search_next_commands(&results, language),
-    })
+    Ok(finish_content_search(
+        results, total, query, language, limit,
+    ))
 }
 
 fn content_search_hints(query: &str, language: Option<&str>, truncated: bool) -> Vec<String> {
@@ -288,27 +286,33 @@ fn score_content_line(query: &str, line: &str) -> f64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn content_search_output_uses_items_field() {
-        let output = ContentSearchOutput {
-            count: 10,
-            showing: 2,
-            items: vec![ContentResultOutput {
-                file: "src/main.rs".to_string(),
-                line: 10,
-                content: "async fn run() {}".to_string(),
-                backend: Some("scan".to_string()),
-                score: 1.0,
-            }],
-            truncated: true,
-            hints: vec![],
-            next_commands: vec![],
-        };
+    fn result(file: &str, line: u32) -> ContentResultOutput {
+        ContentResultOutput {
+            file: file.to_string(),
+            line,
+            content: "async fn run() {}".to_string(),
+            backend: Some("scan".to_string()),
+            score: 1.0,
+        }
+    }
 
-        let value = serde_json::to_value(output).unwrap();
-        assert!(value.get("items").is_some());
-        assert!(value.get("results").is_none());
-        assert_eq!(value["count"], 10);
-        assert_eq!(value["showing"], 2);
+    #[test]
+    fn finish_content_search_derives_truncation_from_exact_count() {
+        let candidates = vec![result("src/a.rs", 1), result("src/b.rs", 2)];
+        let section = finish_content_search(candidates, 10, "run", None, 2);
+
+        assert_eq!(section.count, 10);
+        assert_eq!(section.showing, 2);
+        assert!(section.truncated);
+    }
+
+    #[test]
+    fn finish_content_search_complete_results_are_not_truncated() {
+        let candidates = vec![result("src/a.rs", 1)];
+        let section = finish_content_search(candidates, 1, "run", None, 10);
+
+        assert_eq!(section.count, 1);
+        assert_eq!(section.showing, 1);
+        assert!(!section.truncated);
     }
 }

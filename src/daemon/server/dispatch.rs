@@ -28,7 +28,13 @@ pub(super) async fn dispatch(
 
     match request.method.as_str() {
         // System
-        methods::PING => Ok(serde_json::json!({"pong": true})),
+        // `version` lets the client detect a daemon left over from a
+        // different binary and restart it before any wire exchange, so the
+        // wire format never needs cross-version compatibility.
+        methods::PING => Ok(serde_json::json!({
+            "pong": true,
+            "version": env!("CARGO_PKG_VERSION"),
+        })),
         methods::STATUS => handlers::handle_status(projects, config, start_time).await,
         methods::SHUTDOWN => Ok(serde_json::json!({"shutting_down": true})),
 
@@ -197,6 +203,9 @@ pub(super) async fn dispatch(
         // Language status
         methods::LANGUAGE_STATUS => {
             handlers::handle_language_status(&params, projects, lsp_config).await
+        }
+        methods::INDEXING_DEGRADATION => {
+            handlers::handle_indexing_degradation(&params, projects, lsp_config).await
         }
 
         // Store operations

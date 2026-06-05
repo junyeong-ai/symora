@@ -117,7 +117,7 @@ pub(super) async fn workspace_symbols(
                     let content = read_file_validated(&file, max_file_size).await?;
                     let uri = path_to_uri(&file);
                     client.sync_document(&uri, &content).await?;
-                    client.wait_for_indexing().await;
+                    client.await_indexing_signal().await;
                 } else {
                     tracing::warn!("No {} files found in workspace for indexing", language);
                 }

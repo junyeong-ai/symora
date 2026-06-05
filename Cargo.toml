@@ -1,6 +1,6 @@
 [package]
 name = "symora"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Symbol-centric code intelligence CLI for AI coding agents"
@@ -78,9 +78,10 @@ ignore = "0.4.25"
 # HTTP transport for the MCP server (`symora mcp serve --transport http`).
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
 
-# SQLite (symbol/content indexing)
-tokio-rusqlite = "0.7"
-rusqlite = { version = "0.37", features = ["bundled"] }
+# SQLite (symbol/content indexing). The async adapter is in-house
+# (services/store/db.rs: one owner thread + channel), so the driver is a
+# direct dependency and tracks upstream on our schedule.
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Optional local embeddings (gated behind the `embeddings` feature).
 fastembed = { version = "5.13", optional = true }

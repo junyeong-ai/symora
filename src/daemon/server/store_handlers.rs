@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::cli::response::Section;
 use crate::config::LspRuntimeConfig;
 use crate::daemon::params::{
     IndexBuildParams, InvalidateFileParams, ProjectParams, SearchContentParams, SearchSymbolsParams,
@@ -36,25 +37,30 @@ pub(super) async fn handle_search_symbols(
 
     let kind_filter = p.kind.as_ref().map(|k| SymbolKind::parse_or_default(k));
 
-    let results = ctx
+    let page = ctx
         .store
         .search_symbols(&p.query, p.limit.unwrap_or(100), kind_filter)
         .await
         .map_err(RpcError::from)?;
 
-    Ok(serde_json::json!({
-        "count": results.len(),
-        "results": results.iter().map(|r| serde_json::json!({
-            "name": r.name,
-            "name_path": r.name_path,
-            "kind": r.kind.to_string(),
-            "file": r.file.display().to_string(),
-            "line": r.line,
-            "column": r.column,
-            "container": r.container,
-            "score": r.score,
-        })).collect::<Vec<_>>()
-    }))
+    let items = page
+        .rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name,
+                "name_path": r.name_path,
+                "kind": r.kind.to_string(),
+                "file": r.file.display().to_string(),
+                "line": r.line,
+                "column": r.column,
+                "container": r.container,
+                "score": r.score,
+            })
+        })
+        .collect();
+
+    serde_json::to_value(Section::with_total(items, page.total)).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_search_content(
@@ -68,21 +74,26 @@ pub(super) async fn handle_search_content(
 
     let language = p.language.as_ref().map(|l| Language::parse_or_default(l));
 
-    let results = ctx
+    let page = ctx
         .store
         .search_content(&p.query, p.limit.unwrap_or(100), language)
         .await
         .map_err(RpcError::from)?;
 
-    Ok(serde_json::json!({
-        "count": results.len(),
-        "results": results.iter().map(|r| serde_json::json!({
-            "file": r.file.display().to_string(),
-            "line": r.line,
-            "content": r.content,
-            "score": r.score,
-        })).collect::<Vec<_>>()
-    }))
+    let items = page
+        .rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "file": r.file.display().to_string(),
+                "line": r.line,
+                "content": r.content,
+                "score": r.score,
+            })
+        })
+        .collect();
+
+    serde_json::to_value(Section::with_total(items, page.total)).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_index_build(

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::response::Section;
 use crate::cli::symbol_discovery::{
     broad_symbol_kind_bonus, generic_exact_identifier_penalty, is_probably_test_path,
     noisy_suffix_penalty, symbol_lookup_hints, symbol_match_priority,
@@ -16,21 +17,6 @@ use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
 
 use super::common::{looks_like_symbol_path, resolve_search_languages};
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct SymbolSearchOutput {
-    pub count: usize,
-    #[serde(default)]
-    pub showing: usize,
-    #[serde(alias = "results")]
-    pub items: Vec<SymbolResultOutput>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hints: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_commands: Vec<String>,
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SymbolResultOutput {
@@ -76,7 +62,7 @@ pub async fn execute_symbol_search(
         let client = DaemonClient::new(app.root());
         match client.search_symbols(query, Some(limit), kind).await {
             Ok(response) => {
-                let mut parsed: SymbolSearchOutput = serde_json::from_value(response)
+                let mut parsed: Section<SymbolResultOutput> = serde_json::from_value(response)
                     .map_err(|e| anyhow::anyhow!("Invalid daemon response: {}", e))?;
 
                 for r in &mut parsed.items {
@@ -84,30 +70,19 @@ pub async fn execute_symbol_search(
                     r.backend = Some("index".to_string());
                 }
 
-                if !search_languages.is_empty() && parsed.items.len() < limit {
+                let mut count = parsed.count;
+                let mut candidates = parsed.items;
+                if !search_languages.is_empty() && candidates.len() < limit {
                     let semantic_results =
                         collect_semantic_symbol_results(app, query, kind, limit, &search_languages)
                             .await;
-                    parsed.items =
-                        merge_symbol_results(parsed.items, semantic_results, limit, query);
+                    candidates = merge_symbol_results(candidates, semantic_results, query);
+                    count = count.max(candidates.len());
                 }
 
-                parsed.showing = parsed.items.len();
-                if parsed.count < parsed.showing {
-                    parsed.count = parsed.showing;
-                }
-
-                parsed.truncated = parsed.items.len() > 1 && parsed.items.len() >= limit;
-                parsed.hints = symbol_search_hints(
-                    query,
-                    language,
-                    kind,
-                    parsed.truncated,
-                    parsed.items.len(),
-                );
-                parsed.next_commands = symbol_search_next_commands(&parsed.items, query, language);
-
-                ctx.print_success(parsed);
+                ctx.print_success(finish_symbol_search(
+                    candidates, count, query, language, kind, limit,
+                ));
             }
             Err(e) => {
                 if should_fallback_to_semantic(&e.to_string(), &search_languages) {
@@ -151,44 +126,57 @@ async fn execute_semantic_symbol_search(
         return Ok(());
     }
 
-    let mut results = collect_semantic_symbol_results(app, query, kind, limit, languages).await;
+    let mut candidates = collect_semantic_symbol_results(app, query, kind, limit, languages).await;
+    let mut count = candidates.len();
 
-    if looks_like_symbol_path(query) && results.len() < limit {
+    if looks_like_symbol_path(query) && candidates.len() < limit {
         let expanded =
-            collect_document_path_results(app, query, kind, limit, languages, &results).await;
-        results = merge_symbol_results(results, expanded, limit, query);
+            collect_document_path_results(app, query, kind, limit, languages, &candidates).await;
+        candidates = merge_symbol_results(candidates, expanded, query);
     }
 
     #[cfg(unix)]
     if looks_like_symbol_path(query) {
         let client = DaemonClient::new(app.root());
         if let Ok(response) = client.search_symbols(query, Some(limit), kind).await
-            && let Ok(mut parsed) = serde_json::from_value::<SymbolSearchOutput>(response)
+            && let Ok(mut parsed) = serde_json::from_value::<Section<SymbolResultOutput>>(response)
         {
             for result in &mut parsed.items {
                 result.file = ctx.relative_path(&PathBuf::from(&result.file));
                 result.backend = Some("index".to_string());
             }
-            results = merge_symbol_results(results, parsed.items, limit, query);
+            count = count.max(parsed.count);
+            candidates = merge_symbol_results(candidates, parsed.items, query);
         }
     }
 
-    let response = SymbolSearchOutput {
-        count: results.len(),
-        showing: results.len(),
-        items: results.clone(),
-        truncated: results.len() > 1 && results.len() >= limit,
-        hints: symbol_search_hints(
-            query,
-            None,
-            kind,
-            results.len() > 1 && results.len() >= limit,
-            results.len(),
-        ),
-        next_commands: symbol_search_next_commands(&results, query, None),
-    };
-    ctx.print_success(response);
+    count = count.max(candidates.len());
+    ctx.print_success(finish_symbol_search(
+        candidates, count, query, None, kind, limit,
+    ));
     Ok(())
+}
+
+/// Final shaping shared by both search paths: suppress low-value noise,
+/// cap emission at `limit`, and derive `truncated`/hints from the exact
+/// candidate count — never from limit saturation.
+fn finish_symbol_search(
+    mut candidates: Vec<SymbolResultOutput>,
+    count: usize,
+    query: &str,
+    language: Option<&str>,
+    kind: Option<&str>,
+    limit: usize,
+) -> Section<SymbolResultOutput> {
+    prune_low_value_symbol_results(&mut candidates, query, limit);
+    candidates.truncate(limit);
+
+    let truncated = candidates.len() < count;
+    let hints = symbol_search_hints(query, language, kind, truncated, candidates.len());
+    let next_commands = symbol_search_next_commands(&candidates, query, language);
+    Section::with_total(candidates, count)
+        .with_hints(hints)
+        .with_next_commands(next_commands)
 }
 
 async fn collect_semantic_symbol_results(
@@ -294,10 +282,12 @@ async fn collect_semantic_symbol_results(
     outputs
 }
 
+/// Dedup + rank the union of two result sets. Emission capping and noise
+/// suppression happen once, in `finish_symbol_search`, so the candidate
+/// count stays exact.
 fn merge_symbol_results(
     primary: Vec<SymbolResultOutput>,
     secondary: Vec<SymbolResultOutput>,
-    limit: usize,
     query: &str,
 ) -> Vec<SymbolResultOutput> {
     let mut seen = HashSet::new();
@@ -312,8 +302,6 @@ fn merge_symbol_results(
     }
 
     sort_symbol_results(&mut merged, query);
-    prune_low_value_symbol_results(&mut merged, query, limit);
-    merged.truncate(limit);
     merged
 }
 
@@ -651,34 +639,41 @@ mod tests {
         assert!(hints.is_empty());
     }
 
-    #[test]
-    fn symbol_search_output_uses_items_field() {
-        let output = SymbolSearchOutput {
-            count: 3,
-            showing: 1,
-            items: vec![SymbolResultOutput {
-                name: "SearchCommand".to_string(),
-                name_path: Some("SearchCommand".to_string()),
-                kind: "enum".to_string(),
-                file: "src/cli/commands/search/mod.rs".to_string(),
-                line: 30,
-                column: 1,
-                container: None,
-                backend: Some("index".to_string()),
-                score: 1.0,
-            }],
-            truncated: true,
-            hints: vec!["narrow it".to_string()],
-            next_commands: vec![
-                "symora symbols src/cli/commands/search/mod.rs --depth 1".to_string(),
-            ],
-        };
+    fn result(name: &str, file: &str) -> SymbolResultOutput {
+        SymbolResultOutput {
+            name: name.to_string(),
+            name_path: Some(name.to_string()),
+            kind: "function".to_string(),
+            file: file.to_string(),
+            line: 1,
+            column: 1,
+            container: None,
+            backend: Some("index".to_string()),
+            score: 1.0,
+        }
+    }
 
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(value["count"], 3);
-        assert_eq!(value["showing"], 1);
-        assert!(value.get("items").is_some());
-        assert!(value.get("results").is_none());
-        assert_eq!(value["truncated"], true);
+    #[test]
+    fn finish_symbol_search_derives_truncation_from_exact_count() {
+        let candidates = vec![
+            result("alpha", "src/a.rs"),
+            result("beta", "src/b.rs"),
+            result("gamma", "src/c.rs"),
+        ];
+        let section = finish_symbol_search(candidates, 3, "alpha", None, None, 2);
+
+        assert_eq!(section.count, 3);
+        assert_eq!(section.showing, 2);
+        assert!(section.truncated);
+    }
+
+    #[test]
+    fn finish_symbol_search_complete_results_are_not_truncated() {
+        let candidates = vec![result("alpha", "src/a.rs")];
+        let section = finish_symbol_search(candidates, 1, "alpha", None, None, 10);
+
+        assert_eq!(section.count, 1);
+        assert_eq!(section.showing, 1);
+        assert!(!section.truncated);
     }
 }

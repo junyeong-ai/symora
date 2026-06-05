@@ -5,14 +5,9 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::response::Section;
 use crate::infra::ast::{format_query_error, get_node_types, supported_languages};
 use crate::models::symbol::Language;
-
-#[derive(Serialize)]
-struct AstSearchOutput {
-    count: usize,
-    matches: Vec<AstMatchOutput>,
-}
 
 #[derive(Serialize)]
 struct AstMatchOutput {
@@ -28,8 +23,8 @@ struct AstMatchOutput {
 #[derive(Serialize)]
 struct NodesOutput {
     language: String,
-    count: usize,
-    node_types: Vec<NodeTypeOutput>,
+    #[serde(flatten)]
+    section: Section<NodeTypeOutput>,
 }
 
 #[derive(Serialize)]
@@ -89,27 +84,25 @@ pub async fn execute_ast_search(
 
     match app.ast.query(pattern, lang, &paths).await {
         Ok(matches) => {
+            let total = matches.len();
             let limited: Vec<_> = if limit == 0 {
                 matches
             } else {
                 matches.into_iter().take(limit).collect()
             };
-            let response = AstSearchOutput {
-                count: limited.len(),
-                matches: limited
-                    .iter()
-                    .map(|m| AstMatchOutput {
-                        file: ctx.relative_path(&m.file),
-                        start_line: m.start_line,
-                        end_line: m.end_line,
-                        start_column: m.start_column,
-                        end_column: m.end_column,
-                        text: m.text.clone(),
-                        captures: m.captures.clone(),
-                    })
-                    .collect(),
-            };
-            ctx.print_success(response);
+            let items = limited
+                .iter()
+                .map(|m| AstMatchOutput {
+                    file: ctx.relative_path(&m.file),
+                    start_line: m.start_line,
+                    end_line: m.end_line,
+                    start_column: m.start_column,
+                    end_column: m.end_column,
+                    text: m.text.clone(),
+                    captures: m.captures.clone(),
+                })
+                .collect();
+            ctx.print_success(Section::with_total(items, total));
         }
         Err(crate::error::SearchError::InvalidPattern(e)) => {
             ctx.print_error(OutputError::invalid(format_query_error(lang, &e)));
@@ -144,16 +137,17 @@ pub fn execute_list_nodes(app: &App, language: &str) -> Result<()> {
 
     let response = NodesOutput {
         language: lang.lsp_id().to_string(),
-        count: nodes.len(),
-        node_types: nodes
-            .iter()
-            .map(|n| NodeTypeOutput {
-                category: n.category,
-                node_type: n.node_type,
-                example: n.example,
-                query: format!("({})", n.node_type),
-            })
-            .collect(),
+        section: Section::new(
+            nodes
+                .iter()
+                .map(|n| NodeTypeOutput {
+                    category: n.category,
+                    node_type: n.node_type,
+                    example: n.example,
+                    query: format!("({})", n.node_type),
+                })
+                .collect(),
+        ),
     };
 
     ctx.print_success(response);

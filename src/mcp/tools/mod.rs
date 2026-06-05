@@ -1,9 +1,9 @@
 use std::sync::LazyLock;
 
-use anyhow::Result;
 use serde_json::Value;
 
 use crate::app::App;
+use crate::cli::OutputError;
 
 use super::protocol::{Content, ToolDefinition};
 
@@ -17,9 +17,29 @@ pub fn catalog() -> &'static [ToolDefinition] {
     &CATALOG
 }
 
-pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Vec<Content>> {
-    let captured = handlers::dispatch(name, arguments, app).await?;
-    Ok(vec![Content::text(captured)])
+/// Tool result for the MCP `tools/call` response: the captured command
+/// output, the parsed JSON for `structuredContent`, and the truthful
+/// `isError` flag.
+pub struct ToolOutput {
+    pub content: Vec<Content>,
+    pub structured: Option<Value>,
+    pub is_error: bool,
+}
+
+pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<ToolOutput, OutputError> {
+    let captured = handlers::dispatch(name, arguments, app)
+        .await
+        .map_err(OutputError::from)?;
+    // Single JSON object bodies double as `structuredContent`; text shapes
+    // (e.g. pack --shape markdown) stay text-only.
+    let structured = serde_json::from_str::<Value>(&captured.body)
+        .ok()
+        .filter(Value::is_object);
+    Ok(ToolOutput {
+        content: vec![Content::text(captured.body)],
+        structured,
+        is_error: captured.errored,
+    })
 }
 
 #[cfg(test)]

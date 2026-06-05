@@ -1,6 +1,6 @@
 ---
 name: symora
-version: 0.8.0
+version: 0.9.0
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
 when_to_use: User asks "where is this defined", "who calls this", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
@@ -13,9 +13,9 @@ Use `symora` when semantic code navigation is more useful than text search. Outp
 ## Two backends, different requirements
 
 - **Index-backed** (always works once `search index build` has run): `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. Backed by SQLite + tree-sitter.
-- **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `impl`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
+- **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
 
-If a command returns `{"error": ..., "server_not_installed"}`, the language server is missing — fall back to index-backed commands.
+Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
 
 ## Workflow
 
@@ -82,11 +82,11 @@ symora impact src/main.rs:42
 symora diff-impact
 ```
 
-Mutating commands (`actions apply`, `rename`, `edit`) accept `--dry-run` for previews.
+Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run` for previews.
 
 ## Output and global flags
 
-JSON responses commonly include `count`, `showing`, `items`, `truncated`, `hints`. Global flags go **before** the subcommand:
+List responses carry `count` (total found), `showing` (emitted), `items`, and—only when relevant—`truncated`, `hints`, `next_commands` (ready-to-run follow-ups), and `indexing`. `indexing: "timed_out"` means the language server hadn't finished indexing: `count`/`items` are a lower bound, not complete — retry once the server is warm for the full set. Global flags go **before** the subcommand:
 
 ```bash
 symora --format compact search symbols AuthUser    # single-line JSON

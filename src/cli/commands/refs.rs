@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::response::LocationOutput;
+use crate::cli::response::{LocationOutput, Section};
 use crate::cli::utils::{read_line_at, read_lines_around, resolve_symbol_anchor};
 use crate::cli::{LocationArg, OutputError};
 use crate::models::lsp::FindSymbolsOptions;
@@ -24,17 +23,6 @@ pub struct RefsArgs {
     /// Maximum results
     #[arg(long)]
     pub limit: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct RefsOutput {
-    count: usize,
-    showing: usize,
-    items: Vec<LocationOutput>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    truncated: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    hints: Vec<String>,
 }
 
 pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
@@ -82,13 +70,16 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 })
                 .collect();
 
-            ctx.print_success(RefsOutput {
-                count: total,
-                showing: items.len(),
-                truncated: total > limit,
-                hints: refs_hints(&items, total, limit),
-                items,
-            });
+            let hints = refs_hints(&items, total, limit);
+            let indexing = app
+                .lsp
+                .indexing_degradation(crate::models::symbol::Language::from_path(&loc.file))
+                .await;
+            ctx.print_success(
+                Section::with_total(items, total)
+                    .with_hints(hints)
+                    .with_indexing(indexing),
+            );
         }
         Err(e) => ctx.print_error(refs_error(e, &loc.file, line, column)),
     }
@@ -147,28 +138,6 @@ fn refs_hints(items: &[LocationOutput], total: usize, limit: usize) -> Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn refs_output_uses_items_and_showing() {
-        let output = RefsOutput {
-            count: 4,
-            showing: 2,
-            items: vec![LocationOutput {
-                file: "src/main.rs".to_string(),
-                line: 10,
-                column: 5,
-                snippet: None,
-            }],
-            truncated: true,
-            hints: vec!["Increase --limit".to_string()],
-        };
-
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(value["count"], 4);
-        assert_eq!(value["showing"], 2);
-        assert!(value.get("items").is_some());
-        assert_eq!(value["truncated"], true);
-    }
 
     #[test]
     fn refs_hints_include_self_only_guidance() {

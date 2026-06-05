@@ -275,7 +275,7 @@ async fn fetch_calls(
                 .take(limit)
                 .map(|c| CallHierarchyOutput::from_item(c, root))
                 .collect();
-            Section::with_limit(items, total)
+            Section::with_total(items, total)
         }
         Err(e) => Section::error(format_call_hierarchy_error(
             &e.to_string(),

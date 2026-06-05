@@ -1,0 +1,41 @@
+version = 1
+revision = 3
+requires-python = ">=3.10"
+
+[manifest]
+members = [
+    "fixture-app",
+    "fixture-core",
+    "fixture-monorepo",
+]
+
+[[package]]
+name = "fixture-app"
+version = "0.1.0"
+source = { editable = "packages/app" }
+dependencies = [
+    { name = "fixture-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "fixture-core", editable = "packages/core" }]
+
+[[package]]
+name = "fixture-core"
+version = "0.1.0"
+source = { editable = "packages/core" }
+
+[[package]]
+name = "fixture-monorepo"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "fixture-app" },
+    { name = "fixture-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fixture-app", editable = "packages/app" },
+    { name = "fixture-core", editable = "packages/core" },
+]

@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use super::LspService;
 use super::cache::{SymbolCache, WorkspaceSymbolCache};
 use crate::error::LspError;
-use crate::infra::lsp::{HealthMonitor, LspClient, LspManager};
+use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
 use crate::models::diagnostic::Diagnostic;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus,
-    SignatureHelp, TextEdit, TypeHierarchyItem, path_to_uri,
+    HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
+    SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem, path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -280,6 +280,14 @@ impl LspService for DefaultLspService {
     async fn server_status(&self, language: Language) -> ServerStatus {
         lifecycle::server_status(self, language).await
     }
+
+    async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation> {
+        let client = self.manager.peek_client(language).await?;
+        match client.indexing_state() {
+            IndexingState::TimedOut => Some(IndexingDegradation::TimedOut),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for DefaultLspService {
@@ -294,7 +302,7 @@ pub(super) async fn ensure_indexed(client: &LspClient, file: &Path, root: &Path)
     use crate::infra::lsp::client::IndexingState;
 
     let state = client.indexing_state();
-    if state == IndexingState::Ready {
+    if state.is_usable() {
         return;
     }
 
@@ -310,5 +318,5 @@ pub(super) async fn ensure_indexed(client: &LspClient, file: &Path, root: &Path)
         }
     }
 
-    client.wait_for_indexing().await;
+    client.await_indexing_signal().await;
 }

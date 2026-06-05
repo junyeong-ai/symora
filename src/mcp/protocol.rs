@@ -8,7 +8,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Protocol revisions this server implements, newest first. Initialize
+/// echoes the client's requested revision when it is one of these;
+/// otherwise it advertises the newest. The wire surface Symora uses
+/// (initialize / ping / tools) is identical across all three.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+pub const MCP_PROTOCOL_VERSION: &str = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+/// The revision to respond with for a client-requested version: the same
+/// version when supported, the newest supported one otherwise.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    requested
+        .and_then(|r| SUPPORTED_PROTOCOL_VERSIONS.iter().find(|v| **v == r))
+        .copied()
+        .unwrap_or(MCP_PROTOCOL_VERSION)
+}
 
 /// Either a request (id present + method) or a notification (no id).
 #[derive(Debug, Deserialize)]
@@ -131,6 +147,24 @@ pub struct ToolDefinition {
     pub description: &'static str,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+}
+
+impl ToolDefinition {
+    pub fn new(name: &'static str, description: &'static str, input_schema: Value) -> Self {
+        Self {
+            name,
+            description,
+            input_schema,
+            output_schema: None,
+        }
+    }
+
+    pub fn with_output_schema(mut self, schema: Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]

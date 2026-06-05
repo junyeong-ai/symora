@@ -182,11 +182,22 @@ pub struct ClientInfo {
 pub struct InitializeParams {
     pub process_id: Option<u32>,
     pub root_uri: Option<String>,
+    /// Always populated alongside `root_uri`: clients that advertise
+    /// `workspace.workspaceFolders` and then send `null` here push
+    /// multi-root-aware servers (pyright) onto a nonexistent
+    /// "<default workspace root>", disabling workspace-wide analysis.
+    pub workspace_folders: Option<Vec<WorkspaceFolder>>,
     pub capabilities: ClientCapabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_info: Option<ClientInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initialization_options: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceFolder {
+    pub uri: String,
+    pub name: String,
 }
 
 /// Client capabilities

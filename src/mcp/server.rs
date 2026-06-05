@@ -13,8 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
 use crate::app::App;
 
 use super::protocol::{
-    CallToolParams, Content, IncomingMessage, InitializeResult, ListToolsResult,
-    MCP_PROTOCOL_VERSION, Response, RpcError, ServerCapabilities, ServerInfo, ToolsCapability,
+    CallToolParams, Content, IncomingMessage, InitializeResult, ListToolsResult, Response,
+    RpcError, ServerCapabilities, ServerInfo, ToolsCapability, negotiate_protocol_version,
 };
 use super::tools;
 
@@ -60,7 +60,7 @@ pub(super) async fn handle_line(line: &str, app: &App) -> Option<Value> {
     let id = message.id.clone();
 
     match message.method.as_str() {
-        "initialize" => respond(id, handle_initialize()),
+        "initialize" => respond(id, handle_initialize(message.params.as_ref())),
         "initialized" | "notifications/initialized" => None, // notification
         "ping" => respond(id, Ok(json!({}))),
         "shutdown" => respond(id, Ok(json!({}))),
@@ -79,9 +79,12 @@ fn respond(id: Option<Value>, result: Result<Value, RpcError>) -> Option<Value> 
     serde_json::to_value(response).ok()
 }
 
-fn handle_initialize() -> Result<Value, RpcError> {
+fn handle_initialize(params: Option<&Value>) -> Result<Value, RpcError> {
+    let requested = params
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(|v| v.as_str());
     let result = InitializeResult {
-        protocol_version: MCP_PROTOCOL_VERSION,
+        protocol_version: negotiate_protocol_version(requested),
         capabilities: ServerCapabilities {
             tools: ToolsCapability {
                 list_changed: false,
@@ -108,11 +111,23 @@ async fn handle_tools_call(params: Option<Value>, app: &App) -> Result<Value, Rp
     };
 
     match tools::dispatch(&params.name, params.arguments, app).await {
-        Ok(content) => Ok(json!({ "content": content, "isError": false })),
-        Err(e) => Ok(json!({
-            "content": [Content::text(format!("Error: {e}"))],
-            "isError": true,
-        })),
+        Ok(output) => {
+            let mut result = json!({ "content": output.content, "isError": output.is_error });
+            if let Some(structured) = output.structured {
+                result["structuredContent"] = structured;
+            }
+            Ok(result)
+        }
+        // Same `{"error": {code, message, hint}}` body the CLI emits —
+        // one error vocabulary across both surfaces.
+        Err(e) => {
+            let body = json!({ "error": e });
+            Ok(json!({
+                "content": [Content::text(body.to_string())],
+                "structuredContent": body,
+                "isError": true,
+            }))
+        }
     }
 }
 
@@ -149,8 +164,70 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(response["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            super::super::protocol::MCP_PROTOCOL_VERSION
+        );
         assert_eq!(response["result"]["serverInfo"]["name"], "symora");
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_a_supported_client_version() {
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
+    }
+
+    #[tokio::test]
+    async fn initialize_answers_unknown_version_with_newest_supported() {
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            super::super::protocol::MCP_PROTOCOL_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tools_advertise_output_schema_for_list_shapes() {
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let search = tools
+            .iter()
+            .find(|t| t["name"] == "search_symbols")
+            .unwrap();
+        let props = &search["outputSchema"]["properties"];
+        for key in ["count", "showing", "items", "truncated", "hints", "error"] {
+            assert!(props.get(key).is_some(), "outputSchema missing {key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tools_call_returns_structured_content_alongside_text() {
+        // Handled error path is hermetic and emits a single JSON object.
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_symbols","arguments":{"query":""}}}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        let text: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(response["result"]["structuredContent"], text);
     }
 
     #[tokio::test]
@@ -166,6 +243,61 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"get_project_overview"));
         assert!(names.contains(&"search_symbols"));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_returns_structured_not_found() {
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        let body: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_arguments_return_structured_invalid_argument() {
+        // `search_symbols` requires a string `query`.
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_symbols","arguments":{"query":42}}}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        let body: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid tool arguments")
+        );
+    }
+
+    #[tokio::test]
+    async fn handled_command_error_sets_is_error_with_structured_body() {
+        // Empty query is a handled failure: the command prints a structured
+        // error and returns Ok — `isError` must still be true.
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_symbols","arguments":{"query":""}}}"#,
+            &dummy_app().await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        let body: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        assert!(body["error"]["message"].as_str().unwrap().contains("empty"));
     }
 
     #[tokio::test]
