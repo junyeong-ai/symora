@@ -22,7 +22,7 @@ Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde
 
 ## Output discipline
 
-Handlers run the underlying command against a `BufferedSink` and return whatever JSON the command emitted. Don't post-process — the CLI's output contract is the MCP contract. If a tool needs different output shape, add it to the CLI command first.
+Handlers run the underlying command against a `BufferedSink` and return whatever JSON the command emitted. Don't post-process at the handler — the CLI's output contract is the MCP contract. If a tool needs a different output shape, add it to the CLI command first. The server layer re-emits that same JSON as `structuredContent` alongside the text block and sets `isError` from the captured error flag; that envelope is the only shaping, and it stays a faithful pass-through.
 
 ## Lifecycle commands are CLI-only
 

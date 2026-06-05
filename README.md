@@ -70,7 +70,7 @@ symora hover src/main.rs:10:5
 symora callers src/main.rs:10:5
 symora callees src/main.rs:10:5
 symora typedef src/main.rs:10:5
-symora impl src/main.rs:10:5
+symora implementations src/main.rs:10:5
 symora rename src/main.rs:10:5 new_name
 ```
 
@@ -145,7 +145,7 @@ Symora는 기본적으로 JSON을 출력합니다.
 전역 옵션:
 
 ```bash
-symora -c search symbols AuthUser   # compact JSON
+symora --format compact search symbols AuthUser   # compact JSON
 symora -q refs src/main.rs:10:5     # 에러만 출력
 symora -v status                    # 디버그 로그
 ```
@@ -222,7 +222,7 @@ symora daemon status
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 ```
 
-설치 스크립트는 바이너리만 배치합니다. 그 다음 한 번에 셋업:
+설치 스크립트는 검증된 바이너리를 배치하고(프롬프트에서 prebuilt/소스 빌드 선택), 원하면 Claude Code 스킬까지 설치합니다(`symora setup skill`에 위임). 나머지 셋업:
 
 ```bash
 symora setup            # Claude Code 스킬 + 언어 서버 (대화형)
@@ -235,31 +235,35 @@ symora setup deps --group core   # 의존성만 (core / core-jvm / core-web / co
 ```bash
 # 특정 버전 핀
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
-  | bash -s -- --version 0.8.0
+  | bash -s -- --version 0.9.0
 
 # GitHub build provenance 검증 (gh CLI 필요)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
   | bash -s -- --verify-attestations
 
 # 설치 위치 변경
-SYMORA_INSTALL_DIR=/usr/local/bin curl -fsSL ... | bash
+curl -fsSL ... | SYMORA_INSTALL_DIR=/usr/local/bin bash
+
+# 소스 빌드 + 스킬까지 무프롬프트 설치 (체크아웃 불필요 — 릴리스 태그를 git에서 직접 빌드)
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
+  | bash -s -- --source --skill
+
+# CI 등 비대화형: 프롬프트 없이 prebuilt + 스킬 스킵이 기본값
+curl -fsSL ... | bash -s -- --prebuilt --no-skill
 ```
 
-지원 타깃: macOS Apple Silicon, Linux x86_64 (gnu), Linux aarch64 (gnu). Intel Mac은 source build로 진행:
+지원 타깃: macOS Apple Silicon, Linux x86_64 (gnu), Linux aarch64 (gnu). prebuilt가 없는 플랫폼(Intel Mac 등)은 같은 원샷 커맨드가 자동으로 소스 빌드로 진행합니다(Rust 필요, 체크아웃 불필요):
 
 ```bash
-git clone https://github.com/junyeong-ai/symora.git
-cd symora
-./scripts/install.sh --source
-# 또는
-cargo install --path .
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
+# 체크아웃 안에서는 ./scripts/install.sh --source 가 작업 트리를 빌드
 ```
 
 업그레이드 / 제거 (스크립트 재실행 불필요 — 바이너리가 자기 lifecycle을 소유):
 
 ```bash
 symora self update                    # 최신 릴리스로 in-place 교체
-symora self update --version 0.8.0    # 특정 버전 핀
+symora self update --version 0.9.0    # 특정 버전 핀
 symora self update --verify-attestations
 symora self uninstall                 # 바이너리 + 스킬 + config + daemon 흔적 전부 제거
 symora self uninstall --keep-skill --keep-config

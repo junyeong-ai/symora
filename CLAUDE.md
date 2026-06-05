@@ -10,7 +10,7 @@ This file contains repo-wide invariants. Module-specific rules live in nested `C
 CLI inputs and JSON outputs use 1-indexed line and column. LSP wire values are 0-indexed. Every conversion site must be deliberate — a wrong direction silently misplaces every reference, anchor, and edit.
 
 **2. JSON output is the public API.**
-Field names, presence rules, and list-response shape (`count`, `showing`, `items`, `truncated`, `hints`) are stable contracts. Treat renames the same way you'd treat a breaking signature change. Don't add decorative fields; an agent has to parse every key you emit.
+Field names, presence rules, and the shared list-response shape are stable contracts (the canonical field set lives in `.claude/rules/json-output-stability.md`). Treat renames the same way you'd treat a breaking signature change. Don't add decorative fields; an agent has to parse every key you emit.
 
 **3. Daemon and direct execution must agree.**
 The same command in the same repo must produce the same meaning whether it ran through `daemon serve` or in-process. Config loading, timeouts, fallback paths, and error mapping all live above the mode boundary — never embed a mode-specific default below it.
