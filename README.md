@@ -108,7 +108,10 @@ symora diff-impact
 ```bash
 symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
+symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
+symora edit delete src/main.rs:42:4 --dry-run          # dangling 참조를 함께 보고
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
+symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
 symora format src/main.rs
 ```
 
@@ -279,14 +282,14 @@ symora doctor          # 설치된 LSP / 누락된 LSP, 플랫폼별 설치 명�
 
 ## MCP 서버
 
-Symora는 Model Context Protocol 서버로도 동작합니다. CLI와 동일한 명령군이 21개의 MCP 도구로 노출되며, 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
+Symora는 Model Context Protocol 서버로도 동작합니다. CLI와 동일한 명령군이 22개의 MCP 도구로 노출되며, 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
 
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor 등이 기본 사용)
 symora mcp serve --transport http --port 8765
 ```
 
-도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`)는 description에 `Mutates` 표시가 있고 모두 `dry_run` 옵션을 지원합니다.
+도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다.
 
 ---
 

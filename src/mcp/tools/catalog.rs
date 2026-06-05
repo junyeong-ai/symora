@@ -4,13 +4,13 @@ use super::schema::{location_schema, schema_object, section_output_schema, with_
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
     vec![
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "get_project_overview",
             "High-level project map: language breakdown, top directories, and \
                           probable entrypoints. Cheap orientation step before deeper queries.",
             schema_object(&[], &[]),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "get_file_overview",
             "Compact map for one file: focus symbols, sibling/counterpart files, \
                           shallow symbol tree, and related-file ranking.",
@@ -19,7 +19,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 &["path"],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "search_symbols",
             "Fast rough symbol discovery by name or path-like pattern across the \
                           workspace. Use this when you don't yet know the exact file.",
@@ -44,7 +44,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema(
             "Symbol matches: name, name_path, kind, file, line, column, score",
         )),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "search_content",
             "Fast keyword/phrase search across indexed file contents.",
             schema_object(
@@ -59,7 +59,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema(
             "Content-line matches: file, line, content, score",
         )),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "list_file_symbols",
             "List symbols defined in one file (precise, not heuristic). Use after \
                           file_overview when you need the full symbol tree.",
@@ -74,7 +74,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ),
         )
         .with_output_schema(section_output_schema("Symbols defined in the file")),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "inspect_symbol",
             "Resolve an exact symbol path (e.g., 'Handler/process') and return its \
                           definition info. Use after search_symbols to follow up precisely.",
@@ -87,12 +87,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 &["symbol_path"],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "find_definition",
             "LSP go-to-definition for the symbol at a precise file:line:column.",
             location_schema(),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "find_references",
             "All references to the symbol at a precise file:line:column.",
             with_extra(
@@ -106,7 +106,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema(
             "Reference locations: file, line, column",
         )),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "find_callers",
             "Incoming-call hierarchy for a function at a precise file:line:column.",
             with_extra(
@@ -117,7 +117,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema(
             "Incoming calls with caller locations",
         )),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "find_callees",
             "Outgoing-call hierarchy for a function at a precise file:line:column.",
             with_extra(
@@ -128,7 +128,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema(
             "Outgoing calls with callee locations",
         )),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "find_implementations",
             "All concrete implementations of a trait/interface at a precise \
                           file:line:column.",
@@ -140,12 +140,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema(
             "Implementation locations: file, line, column",
         )),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "get_hover",
             "Hover documentation/type for the symbol at a precise file:line:column.",
             location_schema(),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "get_context",
             "Aggregated context for a symbol at file:line:column — by default \
                           callers, callees, related types, and tests in one response.",
@@ -172,7 +172,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "get_impact",
             "Change-impact analysis at file:line:column: reference counts split by \
                           test vs prod, affected files, exported-API signal, and a transitive \
@@ -190,7 +190,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "build_context_pack",
             "Build a token-budgeted context pack: PageRank-ranked files with \
                           top-level signatures fitted to a token budget. Strong first call \
@@ -222,7 +222,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 &[],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::mutating(
             "rename_symbol",
             "LSP rename for the symbol at file:line:column. Returns the affected \
                           file list and per-file edit count. Set dry_run=true to preview \
@@ -239,7 +239,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::read_only(
             "list_code_actions",
             "List LSP code actions available at file:line:column \
                           (refactor/quickfix/source). Filter with `kind` or `preferred=true`.",
@@ -252,7 +252,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ),
         )
         .with_output_schema(section_output_schema("Available code actions")),
-        ToolDefinition::new(
+        ToolDefinition::mutating(
             "apply_code_action",
             "Apply a code action by exact title at file:line:column. Use \
                           `list_code_actions` first to discover titles. Set dry_run=true to \
@@ -269,7 +269,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::mutating(
             "replace_symbol_body",
             "Replace the resolved symbol's full body with new source code at \
                           file:line:column. Splices by the LSP's symbol range so braces / \
@@ -283,10 +283,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "boolean",
                         "Preview the change without writing (default false)",
                     ),
+                    (
+                        "with_diagnostics",
+                        "boolean",
+                        "Attach post-edit LSP diagnostics (default false)",
+                    ),
                 ],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::mutating(
             "insert_before_symbol",
             "Insert source code immediately before the symbol at \
                           file:line:column. ⚠ Mutates source files when dry_run is false.",
@@ -299,10 +304,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "boolean",
                         "Preview without writing (default false)",
                     ),
+                    (
+                        "with_diagnostics",
+                        "boolean",
+                        "Attach post-edit LSP diagnostics (default false)",
+                    ),
                 ],
             ),
         ),
-        ToolDefinition::new(
+        ToolDefinition::mutating(
             "insert_after_symbol",
             "Insert source code immediately after the symbol at \
                           file:line:column. ⚠ Mutates source files when dry_run is false.",
@@ -314,6 +324,33 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "dry_run",
                         "boolean",
                         "Preview without writing (default false)",
+                    ),
+                    (
+                        "with_diagnostics",
+                        "boolean",
+                        "Attach post-edit LSP diagnostics (default false)",
+                    ),
+                ],
+            ),
+        ),
+        ToolDefinition::mutating(
+            "delete_symbol",
+            "Delete the symbol's full definition at file:line:column. \
+                          Always reports references outside the deleted span that would \
+                          dangle (report-only). Set dry_run=true to preview. \
+                          ⚠ Mutates source files when dry_run is false.",
+            with_extra(
+                location_schema(),
+                &[
+                    (
+                        "dry_run",
+                        "boolean",
+                        "Preview the deletion without writing (default false)",
+                    ),
+                    (
+                        "with_diagnostics",
+                        "boolean",
+                        "Attach post-edit LSP diagnostics (default false)",
                     ),
                 ],
             ),

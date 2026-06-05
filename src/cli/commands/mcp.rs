@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
 use crate::app::App;
-use crate::mcp;
+use crate::mcp::{self, McpProfile};
 
 #[derive(Args, Debug)]
 pub struct McpArgs {
@@ -29,6 +29,11 @@ pub enum McpCommand {
         /// Port for `--transport http`.
         #[arg(long, default_value_t = crate::constants::defaults::MCP_HTTP_DEFAULT_PORT)]
         port: u16,
+
+        /// Tool-surface profile. `read-only` hides mutating tools from
+        /// tools/list and refuses them at tools/call.
+        #[arg(long, value_enum, default_value_t = McpProfile::Full)]
+        profile: McpProfile,
     },
 }
 
@@ -47,11 +52,12 @@ pub async fn execute(args: McpArgs, app: &App) -> Result<()> {
             transport,
             host,
             port,
+            profile,
         } => match transport {
-            McpTransport::Stdio => mcp::serve_stdio(clone_app(app)).await,
+            McpTransport::Stdio => mcp::serve_stdio(clone_app(app), profile).await,
             McpTransport::Http => {
                 let addr = SocketAddr::new(host, port);
-                mcp::serve_http(clone_app(app), addr).await
+                mcp::serve_http(clone_app(app), addr, profile).await
             }
         },
     }

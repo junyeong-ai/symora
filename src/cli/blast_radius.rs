@@ -228,7 +228,6 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
 
-    use crate::models::diagnostic::Diagnostic;
     use crate::models::lsp::{
         ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions,
         FoldingRange, HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range,
@@ -333,7 +332,10 @@ mod tests {
         ) -> Result<Option<SignatureHelp>, LspError> {
             unreachable!()
         }
-        async fn diagnostics(&self, _file: &Path) -> Result<Vec<Diagnostic>, LspError> {
+        async fn diagnostics(
+            &self,
+            _file: &Path,
+        ) -> Result<crate::models::diagnostic::DiagnosticsReport, LspError> {
             unreachable!()
         }
         async fn prepare_rename(

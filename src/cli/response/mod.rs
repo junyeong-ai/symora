@@ -18,7 +18,9 @@ mod symbol;
 pub use analysis::{
     AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput, TestOutput,
 };
-pub use editing::{ActionOutput, ApplyActionOutput, FileChangeOutput};
+pub use editing::{
+    ActionOutput, ApplyActionOutput, EditDiagnostics, EditOutput, FileChangeOutput, LineRange,
+};
 pub use lsp::{
     CallHierarchyOutput, DefinitionOutput, DiagnosticOutput, HoverOutput, ParameterOutput,
     SignatureHelpOutput, SignatureItemOutput, TypeInfoOutput,

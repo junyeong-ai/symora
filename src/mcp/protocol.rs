@@ -122,6 +122,10 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     pub server_info: ServerInfo,
+    /// Server-level usage playbook. Hosts inject this into the model's
+    /// context, which makes it the canonical place to teach tool
+    /// selection. Valid in every supported protocol revision.
+    pub instructions: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,10 +145,20 @@ pub struct ServerInfo {
     pub version: &'static str,
 }
 
+/// Spec-standard tool behaviour hints. Always emitted: a stable presence
+/// rule beats clients guessing what an absent hint means (the spec default
+/// for `readOnlyHint` is `false`, i.e. "may modify").
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ToolAnnotations {
+    #[serde(rename = "readOnlyHint")]
+    pub read_only_hint: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     pub name: &'static str,
     pub description: &'static str,
+    pub annotations: ToolAnnotations,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
     #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
@@ -152,10 +166,28 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
-    pub fn new(name: &'static str, description: &'static str, input_schema: Value) -> Self {
+    /// A tool that never writes source files.
+    pub fn read_only(name: &'static str, description: &'static str, input_schema: Value) -> Self {
+        Self::build(name, description, input_schema, true)
+    }
+
+    /// A tool that writes source files. Its description must carry the
+    /// literal word `Mutates` — a catalog test enforces the pairing, so
+    /// the human-readable warning and the typed hint can't drift.
+    pub fn mutating(name: &'static str, description: &'static str, input_schema: Value) -> Self {
+        Self::build(name, description, input_schema, false)
+    }
+
+    fn build(
+        name: &'static str,
+        description: &'static str,
+        input_schema: Value,
+        read_only_hint: bool,
+    ) -> Self {
         Self {
             name,
             description,
+            annotations: ToolAnnotations { read_only_hint },
             input_schema,
             output_schema: None,
         }

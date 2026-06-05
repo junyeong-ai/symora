@@ -41,6 +41,22 @@ pub struct DiagnosticOutput {
     pub tags: Vec<String>,
 }
 
+impl From<&crate::models::diagnostic::Diagnostic> for DiagnosticOutput {
+    fn from(d: &crate::models::diagnostic::Diagnostic) -> Self {
+        Self {
+            severity: d.severity.to_string(),
+            message: d.message.clone(),
+            line: d.display_line(),
+            column: d.display_column(),
+            end_line: d.display_end_line(),
+            end_column: d.display_end_column(),
+            code: d.code.clone(),
+            source: d.source.clone(),
+            tags: d.tags.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CallHierarchyOutput {
     pub name: String,

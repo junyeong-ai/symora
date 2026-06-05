@@ -355,40 +355,31 @@ pub(super) async fn apply_code_action(
                 if edit.is_none() {
                     tracing::debug!("Code action has no edit, attempting resolve");
 
-                    match client
-                        .request::<Option<serde_json::Value>>(
-                            "codeAction/resolve",
-                            Some(raw_action.clone()),
-                        )
-                        .await
-                    {
-                        Ok(Some(resolved)) => {
-                            edit = resolved.get("edit").cloned();
-                            if edit.is_none()
-                                && let Some(command) = resolved.get("command")
-                            {
-                                tracing::debug!(
-                                    "Resolved action has command instead of edit: {:?}",
-                                    command.get("command")
-                                );
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::debug!("codeAction/resolve returned null");
-                        }
-                        Err(e) => {
-                            tracing::debug!("codeAction/resolve failed: {}", e);
-                        }
-                    }
+                    // A resolve failure propagates: swallowing it would
+                    // report "applied, zero changes" for an action that
+                    // was never materialized. Erring also routes the
+                    // retryable codes through `execute_with_retry`.
+                    let resolved: Option<serde_json::Value> = client
+                        .request("codeAction/resolve", Some(raw_action.clone()))
+                        .await?;
+                    edit = resolved.as_ref().and_then(|r| r.get("edit").cloned());
                 }
 
-                let changes = if let Some(edit) = edit {
-                    parse_workspace_edit(&edit)
-                } else {
-                    Vec::new()
+                // No edit anywhere means the action is command-only (the
+                // server executes it itself) — symora doesn't run server
+                // commands, and an empty success would misreport that.
+                let Some(edit) = edit else {
+                    return Err(LspError::Protocol(
+                        "Code action provided no workspace edit (command-only \
+                         actions are not supported). Pick a different action \
+                         from `actions list`."
+                            .to_string(),
+                    ));
                 };
 
-                Ok(ApplyActionResult { changes })
+                Ok(ApplyActionResult {
+                    changes: parse_workspace_edit(&edit),
+                })
             }
         })
         .await

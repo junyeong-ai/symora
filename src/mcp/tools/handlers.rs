@@ -5,13 +5,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::app::App;
-use crate::cli::LocationArg;
 use crate::cli::commands::{
     actions::{ActionsArgs, ActionsCommand, ApplyArgs, ListArgs},
     callees::CalleesArgs,
     callers::CallersArgs,
     context::ContextArgs,
     def::DefArgs,
+    edit::{EditArgs, EditCommand},
     hover::HoverArgs,
     impact::ImpactArgs,
     implementations::ImplementationsArgs,
@@ -21,7 +21,6 @@ use crate::cli::commands::{
     rename::RenameArgs,
     search::{SearchArgs, SearchCommand},
     symbols::SymbolsArgs,
-    write::{InsertArgs, ReplaceBodyArgs, WriteArgs, WriteCommand},
 };
 use crate::cli::output::{BufferedSink, OutputFormat, OutputOptions};
 use crate::constants::defaults;
@@ -69,6 +68,7 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "replace_symbol_body" => run_replace_body(arguments, app).await,
         "insert_before_symbol" => run_insert_before(arguments, app).await,
         "insert_after_symbol" => run_insert_after(arguments, app).await,
+        "delete_symbol" => run_delete_symbol(arguments, app).await,
         other => Err(anyhow::Error::new(crate::cli::OutputError::not_found(
             format!("Unknown tool: {other}"),
         ))),
@@ -577,24 +577,18 @@ struct ReplaceBodyInput {
     body: String,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    with_diagnostics: bool,
 }
 
 async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: ReplaceBodyInput = parse_args(args)?;
-    capture(app, move |a| async move {
-        crate::cli::commands::write::execute(
-            WriteArgs {
-                command: WriteCommand::ReplaceBody(ReplaceBodyArgs {
-                    loc: LocationArg {
-                        location: input.loc.to_string(),
-                    },
-                    body: input.body,
-                    dry_run: input.dry_run,
-                }),
-            },
-            &a,
-        )
-        .await
+    run_edit(app, move || EditCommand::ReplaceBody {
+        target: input.loc.to_string(),
+        symbol: None,
+        body: input.body,
+        dry_run: input.dry_run,
+        with_diagnostics: input.with_diagnostics,
     })
     .await
 }
@@ -606,37 +600,61 @@ struct InsertInput {
     code: String,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    with_diagnostics: bool,
 }
 
 async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
-    run_insert(args, app, WriteCommand::InsertBefore).await
+    let input: InsertInput = parse_args(args)?;
+    run_edit(app, move || EditCommand::InsertBefore {
+        target: input.loc.to_string(),
+        symbol: None,
+        code: input.code,
+        dry_run: input.dry_run,
+        with_diagnostics: input.with_diagnostics,
+    })
+    .await
 }
 
 async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
-    run_insert(args, app, WriteCommand::InsertAfter).await
+    let input: InsertInput = parse_args(args)?;
+    run_edit(app, move || EditCommand::InsertAfter {
+        target: input.loc.to_string(),
+        symbol: None,
+        code: input.code,
+        dry_run: input.dry_run,
+        with_diagnostics: input.with_diagnostics,
+    })
+    .await
 }
 
-async fn run_insert(
-    args: Value,
+#[derive(Deserialize)]
+struct DeleteSymbolInput {
+    #[serde(flatten)]
+    loc: LocationInput,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    with_diagnostics: bool,
+}
+
+async fn run_delete_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: DeleteSymbolInput = parse_args(args)?;
+    run_edit(app, move || EditCommand::Delete {
+        target: input.loc.to_string(),
+        symbol: None,
+        dry_run: input.dry_run,
+        with_diagnostics: input.with_diagnostics,
+    })
+    .await
+}
+
+async fn run_edit(
     app: &App,
-    wrap: fn(InsertArgs) -> WriteCommand,
+    command: impl FnOnce() -> EditCommand + Send + 'static,
 ) -> Result<CapturedOutput> {
-    let input: InsertInput = parse_args(args)?;
     capture(app, move |a| async move {
-        let insert_args = InsertArgs {
-            loc: LocationArg {
-                location: input.loc.to_string(),
-            },
-            code: input.code,
-            dry_run: input.dry_run,
-        };
-        crate::cli::commands::write::execute(
-            WriteArgs {
-                command: wrap(insert_args),
-            },
-            &a,
-        )
-        .await
+        crate::cli::commands::edit::execute(EditArgs { command: command() }, &a).await
     })
     .await
 }

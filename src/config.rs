@@ -94,6 +94,10 @@ pub struct LspRuntimeConfig {
     base_timeout: Duration,
     pub max_file_size_bytes: u64,
     pub auto_restart: bool,
+    /// Wait window for `publishDiagnostics` after a document sync.
+    /// Confirmation short-circuits; the window only runs out when the
+    /// server stays silent.
+    pub diagnostics_wait: Duration,
     /// Custom project entry files per language (overrides defaults in find_project_entry)
     pub entry_files: HashMap<String, Vec<String>>,
     /// Hard cap on simultaneously running language servers. Prevents
@@ -108,6 +112,9 @@ impl Default for LspRuntimeConfig {
             base_timeout: Duration::from_secs(60),
             max_file_size_bytes: 10 * 1024 * 1024,
             auto_restart: true,
+            diagnostics_wait: Duration::from_millis(
+                crate::models::config::defaults::diagnostics_wait_ms(),
+            ),
             entry_files: HashMap::new(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }
@@ -120,6 +127,7 @@ impl From<&SymoraConfig> for LspRuntimeConfig {
             base_timeout: Duration::from_secs(config.lsp.timeout_secs),
             max_file_size_bytes: u64::from(config.search.max_file_size_mb) * 1024 * 1024,
             auto_restart: config.lsp.auto_restart,
+            diagnostics_wait: Duration::from_millis(config.lsp.diagnostics_wait_ms),
             entry_files: config.project.entry_files.clone(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }

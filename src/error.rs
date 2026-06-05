@@ -55,6 +55,10 @@ pub enum LspError {
 
 impl LspError {
     const CANCELLED_ERROR_CODE: i32 = -32800;
+    /// LSP `ContentModified`: the server's view of the document changed
+    /// mid-request and the result would be stale. The spec's contract is
+    /// "re-issue the request" — the canonical retryable error.
+    const CONTENT_MODIFIED_ERROR_CODE: i32 = -32801;
 
     pub fn error_code(&self) -> i32 {
         match self {
@@ -79,7 +83,13 @@ impl LspError {
                 | Self::NotConnected
                 | Self::Timeout(_)
                 | Self::RequestCancelled
-        ) || matches!(self, Self::ServerError { code, .. } if *code == Self::CANCELLED_ERROR_CODE)
+        ) || matches!(
+            self,
+            Self::ServerError { code, .. } if matches!(
+                *code,
+                Self::CANCELLED_ERROR_CODE | Self::CONTENT_MODIFIED_ERROR_CODE
+            )
+        )
     }
 
     pub fn needs_restart(&self) -> bool {
@@ -252,6 +262,15 @@ mod tests {
         assert!(err.is_recoverable());
         assert_eq!(err.affected_language(), Some(Language::Rust));
         assert_eq!(err.error_code(), -32099);
+    }
+
+    #[test]
+    fn content_modified_is_recoverable() {
+        // LSP -32801: the spec's contract is "re-issue the request" —
+        // surfacing it to the agent as a terminal error would push a
+        // mechanical retry onto every caller.
+        let err = LspError::server_error_friendly(-32801, "content modified".to_string());
+        assert!(err.is_recoverable());
     }
 
     #[test]

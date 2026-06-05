@@ -108,7 +108,10 @@ symora diff-impact
 ```bash
 symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
+symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
+symora edit delete src/main.rs:42:4 --dry-run          # reports dangling references
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
+symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
 symora format src/main.rs
 ```
 
@@ -268,14 +271,14 @@ symora doctor
 
 ## MCP Server
 
-Symora also runs as a Model Context Protocol server. The same command set is exposed as 21 MCP tools that share the in-process command layer, so both surfaces produce identical results.
+Symora also runs as a Model Context Protocol server. The same command set is exposed as 22 MCP tools that share the in-process command layer, so both surfaces produce identical results.
 
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor, etc. use this by default)
 symora mcp serve --transport http --port 8765
 ```
 
-The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`) carry `Mutates` in their descriptions and all support a `dry_run` option.
+The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option.
 
 ---
 

@@ -1,4 +1,17 @@
+//! The single mutation surface. Every command that splices source text
+//! lives here, sharing one resolution path (root-validated), one
+//! validation gate, one splice core, one preview format, and one typed
+//! output (`EditOutput`).
+//!
+//! Symbol-targeted subcommands (`replace-body`, `insert-before`,
+//! `insert-after`) operate on whole lines of the symbol's full
+//! declaration span — the body the agent supplies is taken verbatim,
+//! indentation included. `replace` and `pattern` are character-precise;
+//! all columns at this boundary are 1-indexed *character* counts (the
+//! AST layer's byte columns are converted before they reach the core).
+
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -6,16 +19,780 @@ use clap::{Args, Subcommand};
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
+use crate::cli::response::{EditOutput, LineRange, Section};
 #[cfg(unix)]
 use crate::daemon::DaemonClient;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
+use crate::utils::char_to_byte_index;
 
 /// Maximum file size for editing (100MB)
 const MAX_EDIT_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
-/// Validate file is suitable for editing (exists, readable, writable, size limit)
-fn validate_file_for_edit(path: &Path) -> Result<()> {
+#[derive(Args, Debug)]
+pub struct EditArgs {
+    #[command(subcommand)]
+    pub command: EditCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum EditCommand {
+    /// Replace a symbol's full definition (whole lines, declaration
+    /// through closing brace). For a raw character range use `replace`.
+    ReplaceBody {
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
+        target: String,
+
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
+        symbol: Option<String>,
+
+        /// New source for the symbol, indentation included. Pass `-` to
+        /// read from stdin.
+        #[arg(long)]
+        body: String,
+
+        /// Preview the change without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// After an applied edit, pull LSP diagnostics for the file and
+        /// attach them to the output. Ignored on dry runs.
+        #[arg(long)]
+        with_diagnostics: bool,
+    },
+
+    /// Insert source lines immediately before a symbol.
+    InsertBefore {
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
+        target: String,
+
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
+        symbol: Option<String>,
+
+        /// Source code to insert. Pass `-` to read from stdin.
+        #[arg(long)]
+        code: String,
+
+        /// Preview the change without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// After an applied edit, pull LSP diagnostics for the file and
+        /// attach them to the output. Ignored on dry runs.
+        #[arg(long)]
+        with_diagnostics: bool,
+    },
+
+    /// Insert source lines immediately after a symbol.
+    InsertAfter {
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
+        target: String,
+
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
+        symbol: Option<String>,
+
+        /// Source code to insert. Pass `-` to read from stdin.
+        #[arg(long)]
+        code: String,
+
+        /// Preview the change without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// After an applied edit, pull LSP diagnostics for the file and
+        /// attach them to the output. Ignored on dry runs.
+        #[arg(long)]
+        with_diagnostics: bool,
+    },
+
+    /// Delete a symbol's full definition. Always reports references
+    /// outside the deleted span that would dangle — report-only, never
+    /// auto-edited.
+    Delete {
+        /// Target: `file:line[:col]` (location) or file path (with --symbol)
+        target: String,
+
+        /// Symbol path when target is a file (e.g., "Class/method")
+        #[arg(short = 's', long)]
+        symbol: Option<String>,
+
+        /// Preview the deletion without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// After an applied edit, pull LSP diagnostics for the file and
+        /// attach them to the output. Ignored on dry runs.
+        #[arg(long)]
+        with_diagnostics: bool,
+    },
+
+    /// Replace a raw character range (no symbol resolution). For whole
+    /// symbols use `replace-body`.
+    Replace {
+        /// Start location (file:line:column)
+        start: String,
+
+        /// End location (file:line:column), exclusive. Defaults to the
+        /// end of the start line.
+        #[arg(short, long)]
+        end: Option<String>,
+
+        /// New text. Pass `-` to read from stdin.
+        #[arg(short, long)]
+        text: String,
+
+        /// Preview the change without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// After an applied edit, pull LSP diagnostics for the file and
+        /// attach them to the output. Ignored on dry runs.
+        #[arg(long)]
+        with_diagnostics: bool,
+    },
+
+    /// Replace code matching a tree-sitter AST pattern. For post-edit
+    /// health checks run `symora diagnostics <file>` — pattern output is
+    /// per-match, so file-level diagnostics are not attached inline.
+    Pattern {
+        /// File path to edit
+        file: String,
+
+        /// Tree-sitter pattern (e.g., "(function_item name: (identifier) @name)")
+        #[arg(short, long)]
+        pattern: String,
+
+        /// Language for tree-sitter grammar
+        #[arg(short, long)]
+        lang: String,
+
+        /// New text to replace matched code. Pass `-` to read from stdin.
+        #[arg(short, long)]
+        text: String,
+
+        /// Match index to replace (0-indexed); use "all" to replace all matches
+        #[arg(short, long, default_value = "0")]
+        index: String,
+
+        /// Preview the matches without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
+    if let Err(e) = run(args.command, app).await {
+        app.output.print_error(e);
+    }
+    Ok(())
+}
+
+async fn run(command: EditCommand, app: &App) -> Result<()> {
+    match command {
+        EditCommand::ReplaceBody {
+            target,
+            symbol,
+            body,
+            dry_run,
+            with_diagnostics,
+        } => {
+            let body = read_payload(&body)?;
+            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            symbol_edit(
+                app,
+                "replace_body",
+                &file,
+                &sym,
+                dry_run,
+                with_diagnostics,
+                |span| LineSplice {
+                    at: span.start as usize - 1,
+                    removed: (span.end - span.start + 1) as usize,
+                    new_lines: to_lines(&body),
+                },
+            )
+            .await
+        }
+        EditCommand::InsertBefore {
+            target,
+            symbol,
+            code,
+            dry_run,
+            with_diagnostics,
+        } => {
+            let code = read_payload(&code)?;
+            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            symbol_edit(
+                app,
+                "insert_before",
+                &file,
+                &sym,
+                dry_run,
+                with_diagnostics,
+                |span| LineSplice {
+                    at: span.start as usize - 1,
+                    removed: 0,
+                    new_lines: to_lines(&code),
+                },
+            )
+            .await
+        }
+        EditCommand::InsertAfter {
+            target,
+            symbol,
+            code,
+            dry_run,
+            with_diagnostics,
+        } => {
+            let code = read_payload(&code)?;
+            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            symbol_edit(
+                app,
+                "insert_after",
+                &file,
+                &sym,
+                dry_run,
+                with_diagnostics,
+                |span| LineSplice {
+                    at: span.end as usize,
+                    removed: 0,
+                    new_lines: to_lines(&code),
+                },
+            )
+            .await
+        }
+        EditCommand::Delete {
+            target,
+            symbol,
+            dry_run,
+            with_diagnostics,
+        } => {
+            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            delete_symbol(app, &file, &sym, dry_run, with_diagnostics).await
+        }
+        EditCommand::Replace {
+            start,
+            end,
+            text,
+            dry_run,
+            with_diagnostics,
+        } => {
+            let text = read_payload(&text)?;
+            let start_loc =
+                ParsedLocation::parse(&start)?.to_absolute_with_root(Some(app.root()))?;
+            let (end_line, end_col) = match end {
+                Some(e) => {
+                    let loc = ParsedLocation::parse(&e)?.to_absolute_with_root(Some(app.root()))?;
+                    if loc.file != start_loc.file {
+                        anyhow::bail!(invalid_range(format!(
+                            "End location is in a different file ({}) than start ({})",
+                            loc.file.display(),
+                            start_loc.file.display(),
+                        )));
+                    }
+                    (loc.line, Some(loc.column))
+                }
+                None => (start_loc.line, None),
+            };
+
+            let doc = FileDocument::load(&start_loc.file, dry_run)?;
+            let splice = char_splice(
+                &doc.lines,
+                start_loc.line,
+                start_loc.column,
+                end_line,
+                end_col,
+                &text,
+            )?;
+            let span = LineRange {
+                start: start_loc.line,
+                end: end_line,
+            };
+            let mut output = doc.commit(app, "replace", splice, span, None, dry_run)?;
+            output.diagnostics =
+                pull_diagnostics(app, &start_loc.file, dry_run, with_diagnostics).await;
+            app.output.print_success(output);
+            finish(app, &start_loc.file, dry_run).await;
+            Ok(())
+        }
+        EditCommand::Pattern {
+            file,
+            pattern,
+            lang,
+            text,
+            index,
+            dry_run,
+        } => {
+            let text = read_payload(&text)?;
+            pattern_edit(app, &file, &pattern, &lang, &text, &index, dry_run).await
+        }
+    }
+}
+
+/// Shared tail for symbol-targeted line edits: resolve the span with the
+/// stale-range guard, splice, emit one `EditOutput`, invalidate.
+async fn symbol_edit(
+    app: &App,
+    operation: &'static str,
+    file: &Path,
+    symbol: &Symbol,
+    dry_run: bool,
+    with_diagnostics: bool,
+    make_splice: impl FnOnce(&LineRange) -> LineSplice,
+) -> Result<()> {
+    let doc = FileDocument::load(file, dry_run)?;
+    let span = symbol_line_span(symbol, doc.lines.len())?;
+    let splice = make_splice(&span);
+    if splice.removed > 0 {
+        ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
+    }
+    let target = Some((symbol.path().to_string(), symbol.kind.to_string()));
+    let mut output = doc.commit(app, operation, splice, span, target, dry_run)?;
+    output.diagnostics = pull_diagnostics(app, file, dry_run, with_diagnostics).await;
+    app.output.print_success(output);
+    finish(app, file, dry_run).await;
+    Ok(())
+}
+
+/// Whole-line operations (replace-body, delete) must not take neighbour
+/// code with them. This is an exact check, not a heuristic: if the
+/// symbol's first line has non-whitespace before its declaration start,
+/// or its last line has non-whitespace after its declared end column,
+/// the operation is refused with a character-precise alternative —
+/// never a silent over-splice.
+fn ensure_exclusive_line_ownership(
+    lines: &[String],
+    symbol: &Symbol,
+    span: &LineRange,
+) -> Result<()> {
+    let shared = |what: &str| {
+        anyhow::Error::new(
+            crate::cli::OutputError::unsupported(format!(
+                "Symbol '{}' shares its {what} line with other code; \
+                 whole-line edits would remove it",
+                symbol.name,
+            ))
+            .with_hint("Use `edit replace` for character-precise control"),
+        )
+    };
+
+    let (_, start_col) = symbol.location.effective_start();
+    let first = &lines[span.start as usize - 1];
+    let prefix = &first[..char_to_byte_index(first, (start_col.saturating_sub(1)) as usize)];
+    if !prefix.trim().is_empty() {
+        return Err(shared("first"));
+    }
+
+    // `end_column` is the exclusive end (1-indexed); without it the LSP
+    // gave no end position and there is nothing to check against.
+    if let Some(end_col) = symbol.location.end_column {
+        let last = &lines[span.end as usize - 1];
+        let suffix = &last[char_to_byte_index(last, (end_col.saturating_sub(1)) as usize)..];
+        if !suffix.trim().is_empty() {
+            return Err(shared("last"));
+        }
+    }
+    Ok(())
+}
+
+/// Delete = splice to zero lines, plus the safety check that always
+/// runs — dry-run included. The destructive path never skips it.
+async fn delete_symbol(
+    app: &App,
+    file: &Path,
+    symbol: &Symbol,
+    dry_run: bool,
+    with_diagnostics: bool,
+) -> Result<()> {
+    let doc = FileDocument::load(file, dry_run)?;
+    let span = symbol_line_span(symbol, doc.lines.len())?;
+    ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
+
+    let (dangling_references, references_status) =
+        check_dangling_references(app, file, symbol, &span).await;
+
+    let splice = LineSplice {
+        at: span.start as usize - 1,
+        removed: (span.end - span.start + 1) as usize,
+        new_lines: Vec::new(),
+    };
+    let target = Some((symbol.path().to_string(), symbol.kind.to_string()));
+    let mut output = doc.commit(app, "delete", splice, span, target, dry_run)?;
+    output.dangling_references = dangling_references;
+    output.references_status = references_status;
+    output.diagnostics = pull_diagnostics(app, file, dry_run, with_diagnostics).await;
+    app.output.print_success(output);
+    finish(app, file, dry_run).await;
+    Ok(())
+}
+
+/// Cap on inline dangling-reference listings; the full set stays one
+/// `find_references` call away and the section says it was truncated.
+const DELETE_REFS_DISPLAY_LIMIT: usize = 50;
+
+/// References at the symbol's *name* position (not the declaration
+/// start the splice uses — nothing references the `pub` keyword) that
+/// live outside the deleted span. Honest per invariant 4: when the
+/// language can't answer, return a status instead of implying "none".
+async fn check_dangling_references(
+    app: &App,
+    file: &Path,
+    symbol: &Symbol,
+    span: &LineRange,
+) -> (
+    Option<Section<crate::cli::response::LocationOutput>>,
+    Option<&'static str>,
+) {
+    use crate::cli::response::LocationOutput;
+    use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
+
+    if get_support_level(Language::from_path(file), LspFeature::FindReferences)
+        == SupportLevel::None
+    {
+        return (None, Some("unsupported"));
+    }
+
+    let refs = match app
+        .lsp
+        .find_references(file, symbol.location.line, symbol.location.column)
+        .await
+    {
+        Ok(refs) => refs,
+        Err(e) => {
+            tracing::warn!("Reference check for delete failed: {e}");
+            return (None, Some("unavailable"));
+        }
+    };
+
+    let dangling: Vec<LocationOutput> = refs
+        .iter()
+        .filter(|r| r.file != file || r.line < span.start || r.line > span.end)
+        .map(|r| LocationOutput::from_path(&r.file, r.line, r.column, app.output.root()))
+        .collect();
+    let total = dangling.len();
+    // A server still indexing returns a *lower bound*, not the truth —
+    // the canonical `indexing` marker keeps a cold-start zero from
+    // reading as "confirmed no references".
+    let indexing = app
+        .lsp
+        .indexing_degradation(Language::from_path(file))
+        .await;
+    let mut section = Section::with_total(
+        dangling
+            .into_iter()
+            .take(DELETE_REFS_DISPLAY_LIMIT)
+            .collect(),
+        total,
+    )
+    .with_indexing(indexing);
+    if total > DELETE_REFS_DISPLAY_LIMIT {
+        section = section.with_next_commands(vec![format!(
+            "symora refs {}:{}:{}",
+            app.output.relative_path(file),
+            symbol.location.line,
+            symbol.location.column,
+        )]);
+    }
+    (Some(section), None)
+}
+
+/// Post-edit diagnostics pull, gated on the flag and on the edit having
+/// actually hit disk. The tri-state from the service layer is passed
+/// through verbatim — an empty list under `unconfirmed` stays labelled
+/// as unknown, never implied clean.
+async fn pull_diagnostics(
+    app: &App,
+    file: &Path,
+    dry_run: bool,
+    with_diagnostics: bool,
+) -> Option<crate::cli::response::EditDiagnostics> {
+    use crate::cli::response::{DiagnosticOutput, EditDiagnostics};
+    use crate::models::diagnostic::DiagnosticsStatus;
+
+    if !with_diagnostics || dry_run {
+        return None;
+    }
+    match app.lsp.diagnostics(file).await {
+        Ok(report) => Some(EditDiagnostics {
+            status: match report.status {
+                DiagnosticsStatus::Ok => "ok",
+                DiagnosticsStatus::Unconfirmed => "unconfirmed",
+                DiagnosticsStatus::Unsupported => "unsupported",
+            },
+            count: report.items.len(),
+            items: report.items.iter().map(DiagnosticOutput::from).collect(),
+        }),
+        Err(e) => {
+            tracing::warn!("Post-edit diagnostics pull failed: {e}");
+            Some(EditDiagnostics {
+                status: "unavailable",
+                count: 0,
+                items: Vec::new(),
+            })
+        }
+    }
+}
+
+async fn finish(app: &App, file: &Path, dry_run: bool) {
+    if !dry_run {
+        #[cfg(unix)]
+        invalidate_store_files(app, std::slice::from_ref(&file.to_path_buf())).await;
+        #[cfg(not(unix))]
+        let _ = (app, file);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Splice core
+// ---------------------------------------------------------------------------
+
+/// One planned, contiguous content change in line units: `removed`
+/// original lines starting at `at` are replaced by `new_lines`. Inserts
+/// are the `removed == 0` case. Every subcommand reduces to this, which
+/// is what keeps validation, preview, and output uniform.
+#[derive(Debug)]
+struct LineSplice {
+    /// 0-indexed first affected line.
+    at: usize,
+    /// Number of original lines replaced.
+    removed: usize,
+    new_lines: Vec<String>,
+}
+
+impl LineSplice {
+    fn apply(&self, lines: &[String]) -> Vec<String> {
+        let mut out = Vec::with_capacity(lines.len() - self.removed + self.new_lines.len());
+        out.extend_from_slice(&lines[..self.at]);
+        out.extend(self.new_lines.iter().cloned());
+        out.extend_from_slice(&lines[self.at + self.removed..]);
+        out
+    }
+
+    /// Exact unified hunk derived from the splice itself — no diff walk,
+    /// so an insert can never smear change markers over untouched lines.
+    fn unified_hunk(&self, lines: &[String]) -> String {
+        let mut out = format!(
+            "@@ -{},{} +{},{} @@\n",
+            self.at + 1,
+            self.removed,
+            self.at + 1,
+            self.new_lines.len(),
+        );
+        for line in &lines[self.at..self.at + self.removed] {
+            out.push('-');
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in &self.new_lines {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// A file loaded for editing: validated up front, split into lines once,
+/// rendered back with its original line-ending style and trailing-newline
+/// behaviour preserved.
+struct FileDocument {
+    file: PathBuf,
+    content: String,
+    lines: Vec<String>,
+    eol: &'static str,
+}
+
+impl FileDocument {
+    /// Existence and the size cap are always enforced; writability only
+    /// when the edit will actually hit disk.
+    fn load(file: &Path, dry_run: bool) -> Result<Self> {
+        validate_file_for_edit(file, !dry_run)?;
+        let content = fs::read_to_string(file)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?;
+        let lines: Vec<String> = content.lines().map(String::from).collect();
+        let eol = detect_line_ending(&content);
+        Ok(Self {
+            file: file.to_path_buf(),
+            content,
+            lines,
+            eol,
+        })
+    }
+
+    fn render(&self, lines: &[String]) -> String {
+        let mut out = lines.join(self.eol);
+        if self.content.ends_with('\n') && !out.is_empty() {
+            out.push_str(self.eol);
+        }
+        out
+    }
+
+    /// Apply one splice: write (or preview) and build the typed output.
+    fn commit(
+        &self,
+        app: &App,
+        operation: &'static str,
+        splice: LineSplice,
+        span: LineRange,
+        target: Option<(String, String)>,
+        dry_run: bool,
+    ) -> Result<EditOutput> {
+        if splice.at + splice.removed > self.lines.len() {
+            anyhow::bail!(crate::cli::CliInputError::LineOutOfRange {
+                line: (splice.at + splice.removed) as u32,
+                total: self.lines.len(),
+            });
+        }
+
+        let new_content = self.render(&splice.apply(&self.lines));
+        let bytes_changed = new_content.len() as i64 - self.content.len() as i64;
+
+        let preview = if dry_run {
+            Some(splice.unified_hunk(&self.lines))
+        } else {
+            fs::write(&self.file, &new_content)
+                .with_context(|| format!("Failed to write file: {}", self.file.display()))?;
+            None
+        };
+
+        let (target_symbol, target_kind) = match target {
+            Some((s, k)) => (Some(s), Some(k)),
+            None => (None, None),
+        };
+
+        Ok(EditOutput {
+            operation,
+            file: app.output.relative_path(&self.file),
+            target_symbol,
+            target_kind,
+            lines: span,
+            bytes_changed,
+            dry_run,
+            preview,
+            dangling_references: None,
+            references_status: None,
+            diagnostics: None,
+        })
+    }
+}
+
+/// Reduce a 1-indexed character range to a `LineSplice`. `end_col` is
+/// exclusive; `None` means "through the end of `end_line`".
+///
+/// Positions are validated, never clamped: a column past the line end is
+/// the caller addressing content that isn't there, and silently snapping
+/// it to EOL would splice somewhere the caller didn't ask for.
+fn char_splice(
+    lines: &[String],
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: Option<u32>,
+    text: &str,
+) -> Result<LineSplice> {
+    // An empty file has exactly one addressable position: 1:1.
+    if lines.is_empty() {
+        if start_line == 1 && end_line == 1 && start_col == 1 && end_col.unwrap_or(1) == 1 {
+            return Ok(LineSplice {
+                at: 0,
+                removed: 0,
+                new_lines: split_merged_lines(text),
+            });
+        }
+        anyhow::bail!(crate::cli::CliInputError::LineOutOfRange {
+            line: start_line,
+            total: 0,
+        });
+    }
+
+    let start_idx = (start_line.saturating_sub(1)) as usize;
+    let end_idx = (end_line.saturating_sub(1)) as usize;
+    for (label, idx) in [(start_line, start_idx), (end_line, end_idx)] {
+        if idx >= lines.len() {
+            anyhow::bail!(crate::cli::CliInputError::LineOutOfRange {
+                line: label,
+                total: lines.len(),
+            });
+        }
+    }
+    if end_idx < start_idx {
+        anyhow::bail!(invalid_range(format!(
+            "End line {end_line} precedes start line {start_line}"
+        )));
+    }
+
+    let start_line_str = &lines[start_idx];
+    ensure_column_in_line(start_col, start_line_str, start_line)?;
+    let prefix = &start_line_str
+        [..char_to_byte_index(start_line_str, (start_col.saturating_sub(1)) as usize)];
+
+    let end_line_str = &lines[end_idx];
+    let end_chars = match end_col {
+        Some(col) => {
+            ensure_column_in_line(col, end_line_str, end_line)?;
+            if start_idx == end_idx && col < start_col {
+                anyhow::bail!(invalid_range(format!(
+                    "End column {col} precedes start column {start_col} on line {start_line}"
+                )));
+            }
+            (col.saturating_sub(1)) as usize
+        }
+        None => end_line_str.chars().count(),
+    };
+    let suffix = &end_line_str[char_to_byte_index(end_line_str, end_chars)..];
+
+    Ok(LineSplice {
+        at: start_idx,
+        removed: end_idx - start_idx + 1,
+        new_lines: split_merged_lines(&format!("{prefix}{text}{suffix}")),
+    })
+}
+
+fn invalid_range(message: String) -> anyhow::Error {
+    anyhow::Error::new(crate::cli::OutputError::invalid(message))
+}
+
+/// Valid columns run 1..=chars+1 — one past the last character is the
+/// zero-width position at EOL.
+fn ensure_column_in_line(col: u32, line: &str, line_no: u32) -> Result<()> {
+    let chars = line.chars().count();
+    if (col as usize) > chars + 1 {
+        anyhow::bail!(invalid_range(format!(
+            "Column {col} exceeds line {line_no} length ({chars} characters)"
+        )));
+    }
+    Ok(())
+}
+
+/// Split merged splice content into lines, normalizing CRLF in the
+/// replacement text — `render` re-joins with the file's own line
+/// ending, so a carried `\r` would corrupt CRLF files into `\r\r\n`.
+fn split_merged_lines(text: &str) -> Vec<String> {
+    text.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect()
+}
+
+fn to_lines(text: &str) -> Vec<String> {
+    text.lines().map(String::from).collect()
+}
+
+fn read_payload(value: &str) -> Result<String> {
+    if value == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        Ok(buf)
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+/// Validate a file for editing. Existence and the size cap always apply;
+/// `for_write` adds the writability probe.
+fn validate_file_for_edit(path: &Path, for_write: bool) -> Result<()> {
     use crate::cli::CliInputError;
 
     if !path.exists() {
@@ -31,16 +808,304 @@ fn validate_file_for_edit(path: &Path) -> Result<()> {
         });
     }
 
-    if fs::OpenOptions::new().write(true).open(path).is_err() {
+    if for_write && fs::OpenOptions::new().write(true).open(path).is_err() {
         anyhow::bail!(CliInputError::FileNotWritable(path.to_path_buf()));
     }
 
     Ok(())
 }
 
-use crate::utils::char_to_byte_index;
+/// Detect the line ending style used in content
+fn detect_line_ending(content: &str) -> &'static str {
+    if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
 
-// Workspace Edit Applier
+// ---------------------------------------------------------------------------
+// Target resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve file path from target string, handling relative paths.
+/// Canonicalizes the result and validates it is within the project root.
+fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
+    let path = Path::new(target);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        app.root().join(path)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve path: {}", resolved.display()))?;
+    let root = app
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| app.root().to_path_buf());
+    if !canonical.starts_with(&root) {
+        anyhow::bail!(crate::cli::CliInputError::PathOutsideProject(canonical));
+    }
+    Ok(canonical)
+}
+
+/// Find symbol by path pattern in a file
+async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
+    let mut symbols = app
+        .lsp
+        .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
+        .await?;
+    Symbol::compute_paths_for_all(&mut symbols);
+    Symbol::find_by_path(&symbols, pattern)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", pattern))
+}
+
+/// Find the symbol at a position: column-precise first, so same-line
+/// siblings resolve to the one actually addressed, with a line-only
+/// fallback so a default column of 1 still anchors indented symbols.
+async fn find_symbol_at_location(app: &App, file: &Path, line: u32, column: u32) -> Result<Symbol> {
+    let symbols = app
+        .lsp
+        .find_symbols(file, FindSymbolsOptions::default())
+        .await?;
+    crate::cli::utils::resolve_symbol_anchor(&symbols, line, column)
+        .map(|(_, _, symbol)| symbol.clone())
+        .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line))
+}
+
+/// Resolve full symbol from target. Auto-detects location format
+/// (`file:line[:col]`) vs file path (requires --symbol).
+async fn resolve_symbol(
+    app: &App,
+    target: &str,
+    symbol_path: Option<String>,
+) -> Result<(PathBuf, Symbol)> {
+    // Location mode: find symbol at position
+    if ParsedLocation::is_location_format(target) {
+        let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
+        let symbol = find_symbol_at_location(app, &loc.file, loc.line, loc.column).await?;
+        return Ok((loc.file, symbol));
+    }
+
+    // Symbol mode: --symbol is required
+    let pattern = symbol_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "--symbol is required when target is a file path. \
+             Use file:line:col format for position-based editing."
+        )
+    })?;
+
+    let file = resolve_file_path(app, target)?;
+    let symbol = find_symbol_by_path(app, &file, &pattern).await?;
+    Ok((file, symbol))
+}
+
+/// The symbol's full declaration span (1-indexed, inclusive), with the
+/// stale-range guard: an LSP range past EOF means the server analyzed an
+/// older revision, and splicing by it would corrupt the file.
+fn symbol_line_span(symbol: &Symbol, total_lines: usize) -> Result<LineRange> {
+    let (start, _) = symbol.location.effective_start();
+    let start = start.max(1);
+    let end = symbol
+        .location
+        .end_line
+        .unwrap_or(symbol.location.line)
+        .max(start);
+    if (end as usize) > total_lines.max(1) {
+        anyhow::bail!(
+            "Symbol end line {end} exceeds file length {total_lines}; LSP range is stale, retry"
+        );
+    }
+    Ok(LineRange { start, end })
+}
+
+// ---------------------------------------------------------------------------
+// Pattern edit (tree-sitter)
+// ---------------------------------------------------------------------------
+
+/// AST pattern edit: a list operation, one `EditOutput` per affected
+/// match, wrapped in the shared `Section` list shape.
+async fn pattern_edit(
+    app: &App,
+    file: &str,
+    pattern: &str,
+    lang: &str,
+    text: &str,
+    index: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let language = Language::parse_or_default(lang);
+    if language == Language::Unknown {
+        anyhow::bail!(
+            "Unsupported language: {}. Run 'symora search nodes --list' for supported languages.",
+            lang
+        );
+    }
+
+    let abs_path = resolve_file_path(app, file)?;
+    let doc = FileDocument::load(&abs_path, dry_run)?;
+
+    let matches = app
+        .ast
+        .query(pattern, language, std::slice::from_ref(&abs_path))
+        .await
+        .map_err(|e| anyhow::anyhow!("AST query failed: {}", e))?;
+
+    let replace_all = index.eq_ignore_ascii_case("all");
+    let target_index: Option<usize> = if replace_all {
+        None
+    } else {
+        Some(
+            index
+                .parse()
+                .context("Invalid index: must be a number or 'all'")?,
+        )
+    };
+    if let Some(idx) = target_index
+        && !matches.is_empty()
+        && idx >= matches.len()
+    {
+        anyhow::bail!(
+            "Index {} out of range. Found {} matches.",
+            idx,
+            matches.len()
+        );
+    }
+
+    let selected: Vec<_> = matches
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| replace_all || target_index == Some(*i))
+        .collect();
+
+    if selected.is_empty() {
+        let section: Section<EditOutput> =
+            Section::new(vec![]).with_hints(vec![format!("No matches for pattern in {file}")]);
+        app.output.print_success(section);
+        return Ok(());
+    }
+
+    // Each match reduces to a char splice against the file state it is
+    // applied to. Bottom-up order keeps earlier (higher) coordinates
+    // valid while later (lower) matches are spliced first.
+    let mut ordered = selected.clone();
+    ordered.sort_by(|a, b| {
+        (b.1.start_line, b.1.start_column).cmp(&(a.1.start_line, a.1.start_column))
+    });
+
+    let mut outputs = Vec::with_capacity(ordered.len());
+    let mut working = doc.lines.clone();
+    for (_, m) in &ordered {
+        let start_idx = (m.start_line.saturating_sub(1)) as usize;
+        let end_idx = (m.end_line.saturating_sub(1)) as usize;
+        if start_idx >= working.len() || end_idx >= working.len() {
+            anyhow::bail!(
+                "Match span {}..{} exceeds file length {}; the AST index is stale, retry",
+                m.start_line,
+                m.end_line,
+                working.len()
+            );
+        }
+        // Tree-sitter columns are 0-indexed bytes; the splice core speaks
+        // 1-indexed characters.
+        let start_col = byte_to_char_col(&working[start_idx], m.start_column as usize);
+        let end_col = byte_to_char_col(&working[end_idx], m.end_column as usize);
+        let splice = char_splice(
+            &working,
+            m.start_line,
+            start_col,
+            m.end_line,
+            Some(end_col),
+            text,
+        )?;
+
+        let old_len: usize = region_len(&working, &splice, doc.eol);
+        let new_len: usize = splice.new_lines.join(doc.eol).len();
+        outputs.push(EditOutput {
+            operation: "pattern",
+            file: app.output.relative_path(&abs_path),
+            target_symbol: None,
+            target_kind: None,
+            lines: LineRange {
+                start: m.start_line,
+                end: m.end_line,
+            },
+            bytes_changed: new_len as i64 - old_len as i64,
+            dry_run,
+            preview: dry_run.then(|| splice.unified_hunk(&working)),
+            dangling_references: None,
+            references_status: None,
+            diagnostics: None,
+        });
+
+        if !dry_run {
+            working = splice.apply(&working);
+        }
+    }
+    // Emit in original (top-down) match order.
+    outputs.reverse();
+
+    if !dry_run {
+        let new_content = doc.render(&working);
+        fs::write(&abs_path, &new_content)
+            .with_context(|| format!("Failed to write file: {}", abs_path.display()))?;
+    }
+
+    let mut section = Section::with_total(outputs, matches.len());
+    if replace_all || matches.len() > 1 {
+        section = section.with_hints(vec![format!(
+            "{} of {} matches {}",
+            selected.len(),
+            matches.len(),
+            if dry_run {
+                "would be replaced"
+            } else {
+                "replaced"
+            },
+        )]);
+    }
+    app.output.print_success(section);
+    finish(app, &abs_path, dry_run).await;
+    Ok(())
+}
+
+/// 0-indexed byte offset → 1-indexed character column, clamped to the
+/// line and never splitting a UTF-8 sequence.
+fn byte_to_char_col(line: &str, byte: usize) -> u32 {
+    let clamped = byte.min(line.len());
+    let chars = line
+        .char_indices()
+        .take_while(|(i, _)| *i < clamped)
+        .count();
+    chars as u32 + 1
+}
+
+fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
+    let region = &lines[splice.at..splice.at + splice.removed];
+    let newline_bytes = eol.len() * region.len().saturating_sub(1);
+    region.iter().map(String::len).sum::<usize>() + newline_bytes
+}
+
+// ---------------------------------------------------------------------------
+// Store invalidation
+// ---------------------------------------------------------------------------
+
+/// Best-effort invalidation of files in the daemon's store index.
+#[cfg(unix)]
+pub(crate) async fn invalidate_store_files(app: &App, files: &[PathBuf]) {
+    let client = DaemonClient::new(app.root());
+    for file in files {
+        if let Err(e) = client.invalidate_file(file).await {
+            tracing::warn!("Store invalidation failed for {}: {}", file.display(), e);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace edit applier (LSP-computed edits; used by rename and actions)
+// ---------------------------------------------------------------------------
 
 use crate::models::lsp::{FileChangeWithEdits, TextEdit};
 
@@ -51,15 +1116,24 @@ use crate::models::lsp::{FileChangeWithEdits, TextEdit};
 pub fn apply_workspace_edits(
     changes: &[FileChangeWithEdits],
     dry_run: bool,
+    root: &Path,
 ) -> Result<Vec<AppliedFileChange>> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut results = Vec::new();
 
     for change in changes {
         let file = &change.file;
 
-        if !dry_run {
-            validate_file_for_edit(file)?;
+        // The paths come from the language server, not the user — they
+        // still don't get to write outside the project.
+        let canonical = file
+            .canonicalize()
+            .with_context(|| format!("Cannot resolve path: {}", file.display()))?;
+        if !canonical.starts_with(&root) {
+            anyhow::bail!(crate::cli::CliInputError::PathOutsideProject(canonical));
         }
+
+        validate_file_for_edit(file, !dry_run)?;
 
         let content = fs::read_to_string(file)
             .with_context(|| format!("Failed to read file: {}", file.display()))?;
@@ -153,792 +1227,218 @@ fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> usi
     content.len()
 }
 
-/// Detect the line ending style used in content
-fn detect_line_ending(content: &str) -> &'static str {
-    if content.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::symbol::{Location, SymbolKind};
 
-// Target Resolution Helpers
-
-/// Specifies position relative to symbol for insert operations
-#[derive(Clone, Copy)]
-enum InsertMode {
-    /// Insert after symbol (at end position)
-    After,
-    /// Insert before symbol (at start position)
-    Before,
-}
-
-/// Resolve file path from target string, handling relative paths.
-/// Canonicalizes the result and validates it is within the project root.
-fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
-    let path = Path::new(target);
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        app.root().join(path)
-    };
-    let canonical = resolved
-        .canonicalize()
-        .with_context(|| format!("Cannot resolve path: {}", resolved.display()))?;
-    let root = app
-        .root()
-        .canonicalize()
-        .unwrap_or_else(|_| app.root().to_path_buf());
-    if !canonical.starts_with(&root) {
-        anyhow::bail!(crate::cli::CliInputError::PathOutsideProject(canonical));
-    }
-    Ok(canonical)
-}
-
-/// Find symbol by path pattern in a file
-async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
-    let mut symbols = app
-        .lsp
-        .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
-        .await?;
-    Symbol::compute_paths_for_all(&mut symbols);
-    Symbol::find_by_path(&symbols, pattern)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", pattern))
-}
-
-/// Find the symbol containing a specific line position
-async fn find_symbol_at_line(app: &App, file: &Path, line: u32) -> Result<Symbol> {
-    let symbols = app
-        .lsp
-        .find_symbols(file, FindSymbolsOptions::default())
-        .await?;
-    crate::cli::utils::find_symbol_at_position(&symbols, line, None)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line))
-}
-
-#[derive(Args, Debug)]
-pub struct EditArgs {
-    #[command(subcommand)]
-    pub command: EditCommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum EditCommand {
-    /// Replace text at a range
-    Replace {
-        /// Start location (file:line:column)
-        start: String,
-
-        /// End location (file:line:column) - if not provided, replaces to end of line
-        #[arg(short, long)]
-        end: Option<String>,
-
-        /// New text to insert
-        #[arg(short, long)]
-        text: String,
-
-        /// Dry run (show diff without applying)
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Insert text after a symbol or position
-    InsertAfter {
-        /// Target: `file:line[:col]` (location) or file path (with --symbol)
-        target: String,
-
-        /// Symbol path when target is a file (e.g., "Class/method")
-        #[arg(short = 's', long)]
-        symbol: Option<String>,
-
-        /// Text to insert
-        #[arg(short, long)]
-        text: String,
-
-        /// Dry run (show diff without applying)
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Insert text before a symbol or position
-    InsertBefore {
-        /// Target: `file:line[:col]` (location) or file path (with --symbol)
-        target: String,
-
-        /// Symbol path when target is a file (e.g., "Class/method")
-        #[arg(short = 's', long)]
-        symbol: Option<String>,
-
-        /// Text to insert
-        #[arg(short, long)]
-        text: String,
-
-        /// Dry run (show diff without applying)
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Replace a symbol's body (by location or symbol path)
-    Symbol {
-        /// Target: `file:line[:col]` (location) or file path (with --symbol)
-        target: String,
-
-        /// Symbol path when target is a file (e.g., "Class/method")
-        #[arg(short = 's', long)]
-        symbol: Option<String>,
-
-        /// New text for the symbol
-        #[arg(short, long)]
-        text: String,
-
-        /// Dry run (show diff without applying)
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Replace code matching an AST pattern (tree-sitter)
-    Pattern {
-        /// File path to edit
-        file: String,
-
-        /// Tree-sitter pattern (e.g., "(function_item name: (identifier) @name)")
-        #[arg(short, long)]
-        pattern: String,
-
-        /// Language for tree-sitter grammar
-        #[arg(short, long)]
-        lang: String,
-
-        /// New text to replace matched code
-        #[arg(short, long)]
-        text: String,
-
-        /// Match index to replace (0-indexed); use "all" to replace all matches
-        #[arg(short, long, default_value = "0")]
-        index: String,
-
-        /// Dry run (show matches without applying)
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
-    let ctx = &app.output;
-
-    // Track edited file for store invalidation (unix only)
-    #[cfg(unix)]
-    let mut edited_file: Option<PathBuf> = None;
-
-    match args.command {
-        EditCommand::Replace {
-            start,
-            end,
-            text,
-            dry_run,
-        } => {
-            let start_loc =
-                ParsedLocation::parse(&start)?.to_absolute_with_root(Some(app.root()))?;
-            let end_loc = if let Some(end_str) = end {
-                ParsedLocation::parse(&end_str)?.to_absolute_with_root(Some(app.root()))?
-            } else {
-                start_loc.clone()
-            };
-
-            let result = apply_replace(
-                &start_loc.file,
-                start_loc.line,
-                start_loc.column,
-                end_loc.line,
-                end_loc.column,
-                &text,
-                dry_run,
-            )?;
-
-            #[cfg(unix)]
-            if !dry_run {
-                edited_file = Some(start_loc.file.clone());
-            }
-            ctx.print_success(result);
-        }
-
-        EditCommand::InsertAfter {
-            target,
-            symbol,
-            text,
-            dry_run,
-        } => {
-            let (file_path, line, col) =
-                resolve_insert_position(app, &target, symbol, InsertMode::After).await?;
-            let result = apply_insert(&file_path, line, col, &text, false, dry_run)?;
-            #[cfg(unix)]
-            if !dry_run {
-                edited_file = Some(file_path);
-            }
-            ctx.print_success(result);
-        }
-
-        EditCommand::InsertBefore {
-            target,
-            symbol,
-            text,
-            dry_run,
-        } => {
-            let (file_path, line, col) =
-                resolve_insert_position(app, &target, symbol, InsertMode::Before).await?;
-            let result = apply_insert(&file_path, line, col, &text, true, dry_run)?;
-            #[cfg(unix)]
-            if !dry_run {
-                edited_file = Some(file_path);
-            }
-            ctx.print_success(result);
-        }
-
-        EditCommand::Symbol {
-            target,
-            symbol,
-            text,
-            dry_run,
-        } => {
-            let (file_path, target_symbol) = resolve_symbol(app, &target, symbol).await?;
-
-            // Use effective_start() to get the full declaration start position
-            // This includes modifiers like "pub fn", not just the symbol name
-            let (start_line, start_col) = target_symbol.location.effective_start();
-            let end_line = target_symbol.location.end_line.unwrap_or(start_line);
-            let end_col = target_symbol.location.end_column.unwrap_or(0);
-
-            let result = apply_replace(
-                &file_path, start_line, start_col, end_line, end_col, &text, dry_run,
-            )?;
-
-            #[cfg(unix)]
-            if !dry_run {
-                edited_file = Some(file_path);
-            }
-            ctx.print_success(serde_json::json!({
-                "symbol": target_symbol.name,
-                "name_path": target_symbol.name_path,
-                "kind": target_symbol.kind.to_string(),
-                "edit": result
-            }));
-        }
-
-        EditCommand::Pattern {
-            file,
-            pattern,
-            lang,
-            text,
-            index,
-            dry_run,
-        } => {
-            let abs_path = resolve_file_path(app, &file)?;
-            let result =
-                execute_pattern_edit(app, &abs_path, &pattern, &lang, &text, &index, dry_run)
-                    .await?;
-            #[cfg(unix)]
-            if !dry_run {
-                edited_file = Some(abs_path);
-            }
-            ctx.print_success(result);
-        }
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
     }
 
-    // Best-effort store invalidation after successful edits
-    #[cfg(unix)]
-    if let Some(file) = edited_file {
-        invalidate_store_files(app, &[file]).await;
-    }
-
-    Ok(())
-}
-
-/// Best-effort invalidation of files in the daemon's store index.
-#[cfg(unix)]
-pub(crate) async fn invalidate_store_files(app: &App, files: &[PathBuf]) {
-    let client = DaemonClient::new(app.root());
-    for file in files {
-        if let Err(e) = client.invalidate_file(file).await {
-            tracing::warn!("Store invalidation failed for {}: {}", file.display(), e);
-        }
-    }
-}
-
-/// Resolve position for insert operations with mode-aware positioning.
-/// Auto-detects location format (`file:line[:col]`) vs file path (requires --symbol).
-async fn resolve_insert_position(
-    app: &App,
-    target: &str,
-    symbol_path: Option<String>,
-    mode: InsertMode,
-) -> Result<(PathBuf, u32, u32)> {
-    // Location mode: use specified position directly
-    if ParsedLocation::is_location_format(target) {
-        let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
-        return Ok((loc.file, loc.line, loc.column));
-    }
-
-    // Symbol mode: --symbol is required
-    let pattern = symbol_path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "--symbol is required when target is a file path. \
-             Use file:line:col format for position-based editing."
+    fn sample_symbol(start: u32, end: u32) -> Symbol {
+        Symbol::new(
+            "process".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/foo.rs"), start, 1, start, 1, end, 1),
         )
-    })?;
-
-    let file = resolve_file_path(app, target)?;
-    let symbol = find_symbol_by_path(app, &file, &pattern).await?;
-
-    // Mode-aware position selection (fixes InsertBefore bug)
-    let (line, column) = match mode {
-        InsertMode::After => (
-            symbol.location.end_line.unwrap_or(symbol.location.line),
-            symbol.location.end_column.unwrap_or(1),
-        ),
-        InsertMode::Before => (symbol.location.line, symbol.location.column),
-    };
-
-    Ok((file, line, column))
-}
-
-/// Resolve full symbol from target for operations needing complete symbol info.
-/// Auto-detects location format (`file:line[:col]`) vs file path (requires --symbol).
-async fn resolve_symbol(
-    app: &App,
-    target: &str,
-    symbol_path: Option<String>,
-) -> Result<(PathBuf, Symbol)> {
-    // Location mode: find symbol at position
-    if ParsedLocation::is_location_format(target) {
-        let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
-        let symbol = find_symbol_at_line(app, &loc.file, loc.line).await?;
-        return Ok((loc.file, symbol));
     }
 
-    // Symbol mode: --symbol is required
-    let pattern = symbol_path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "--symbol is required when target is a file path. \
-             Use file:line:col format for position-based editing."
-        )
-    })?;
-
-    let file = resolve_file_path(app, target)?;
-    let symbol = find_symbol_by_path(app, &file, &pattern).await?;
-    Ok((file, symbol))
-}
-
-/// Apply a replace edit to a file
-fn apply_replace(
-    file: &Path,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-    new_text: &str,
-    dry_run: bool,
-) -> Result<serde_json::Value> {
-    // Validate file before editing (includes size and write permission check)
-    if !dry_run {
-        validate_file_for_edit(file)?;
-    }
-
-    let content = fs::read_to_string(file).context("Failed to read file")?;
-    let lines: Vec<&str> = content.lines().collect();
-
-    // Convert 1-indexed to 0-indexed (character-based, not byte-based)
-    let start_line_idx = (start_line.saturating_sub(1)) as usize;
-    let end_line_idx = (end_line.saturating_sub(1)) as usize;
-    let start_char_idx = (start_col.saturating_sub(1)) as usize;
-    let end_char_idx = if end_col == 0 {
-        // If end_col is 0, replace to end of line (use char count)
-        lines
-            .get(end_line_idx)
-            .map(|l| l.chars().count())
-            .unwrap_or(0)
-    } else {
-        (end_col.saturating_sub(1)) as usize
-    };
-
-    // Validate ranges
-    if start_line_idx >= lines.len() {
-        anyhow::bail!("Start line {} is out of range", start_line);
-    }
-    if end_line_idx >= lines.len() {
-        anyhow::bail!("End line {} is out of range", end_line);
-    }
-
-    // Build the new content, preserving original line ending style
-    let eol = detect_line_ending(&content);
-    let mut result = String::new();
-
-    // Add lines before the edit
-    for (i, line) in lines.iter().enumerate() {
-        if i < start_line_idx {
-            result.push_str(line);
-            result.push_str(eol);
-        } else if i == start_line_idx {
-            // Add content before the edit on the start line (UTF-8 safe)
-            let safe_start_byte = char_to_byte_index(line, start_char_idx);
-            result.push_str(&line[..safe_start_byte]);
-
-            // Add the new text
-            result.push_str(new_text);
-
-            // If single line edit, add content after the edit
-            if start_line_idx == end_line_idx {
-                let safe_end_byte = char_to_byte_index(line, end_char_idx);
-                result.push_str(&line[safe_end_byte..]);
-                result.push_str(eol);
-            }
-        } else if i > start_line_idx && i < end_line_idx {
-            // Skip lines within the edit range
-            continue;
-        } else if i == end_line_idx && start_line_idx != end_line_idx {
-            // Add content after the edit on the end line (UTF-8 safe)
-            let safe_end_byte = char_to_byte_index(line, end_char_idx);
-            result.push_str(&line[safe_end_byte..]);
-            result.push_str(eol);
-        } else if i > end_line_idx {
-            result.push_str(line);
-            result.push_str(eol);
-        }
-    }
-
-    // Remove trailing line ending if original didn't have one
-    if !content.ends_with('\n') && result.ends_with('\n') {
-        if result.ends_with("\r\n") {
-            result.truncate(result.len() - 2);
-        } else {
-            result.pop();
-        }
-    }
-
-    // Calculate what was replaced (UTF-8 safe)
-    let old_text = if start_line_idx == end_line_idx {
-        let line = lines[start_line_idx];
-        let safe_start_byte = char_to_byte_index(line, start_char_idx);
-        let safe_end_byte = char_to_byte_index(line, end_char_idx);
-        line[safe_start_byte..safe_end_byte].to_string()
-    } else {
-        let mut old = String::new();
-        for (idx, line) in lines
-            .iter()
-            .enumerate()
-            .take(end_line_idx + 1)
-            .skip(start_line_idx)
-        {
-            if idx == start_line_idx {
-                let safe_start_byte = char_to_byte_index(line, start_char_idx);
-                old.push_str(&line[safe_start_byte..]);
-                old.push('\n');
-            } else if idx == end_line_idx {
-                let safe_end_byte = char_to_byte_index(line, end_char_idx);
-                old.push_str(&line[..safe_end_byte]);
-            } else {
-                old.push_str(line);
-                old.push('\n');
-            }
-        }
-        old
-    };
-
-    if dry_run {
-        Ok(serde_json::json!({
-            "dry_run": true,
-            "file": file.display().to_string(),
-            "old_text": old_text,
-            "new_text": new_text,
-            "range": {
-                "start": {"line": start_line, "column": start_col},
-                "end": {"line": end_line, "column": end_col}
-            }
-        }))
-    } else {
-        fs::write(file, &result).context("Failed to write file")?;
-
-        Ok(serde_json::json!({
-            "applied": true,
-            "file": file.display().to_string(),
-            "old_text": old_text,
-            "new_text": new_text,
-            "range": {
-                "start": {"line": start_line, "column": start_col},
-                "end": {"line": end_line, "column": end_col}
-            }
-        }))
-    }
-}
-
-/// Apply an insert edit to a file
-///
-/// Behavior depends on whether a specific column is provided:
-/// - Line-based (column=1): Insert as a new line before/after the target line
-/// - Position-based (column>1): Insert at the specific position within the line
-fn apply_insert(
-    file: &Path,
-    line: u32,
-    column: u32,
-    text: &str,
-    before: bool,
-    dry_run: bool,
-) -> Result<serde_json::Value> {
-    if !dry_run {
-        validate_file_for_edit(file)?;
-    }
-
-    let content = fs::read_to_string(file).context("Failed to read file")?;
-    let lines: Vec<&str> = content.lines().collect();
-    let line_idx = (line.saturating_sub(1)) as usize;
-
-    if line_idx >= lines.len() {
-        anyhow::bail!("Line {} is out of range", line);
-    }
-
-    // Determine if this is a line-based or position-based insert
-    // Line-based: column=1 means "insert as a new line"
-    // Position-based: column>1 means "insert at this character position"
-    let is_line_based = column == 1;
-
-    let eol = detect_line_ending(&content);
-    let mut result = String::new();
-
-    if is_line_based {
-        // Line-based insertion: add text as a new line
-        for (i, line_content) in lines.iter().enumerate() {
-            if before && i == line_idx {
-                result.push_str(text);
-                result.push_str(eol);
-            }
-
-            result.push_str(line_content);
-            result.push_str(eol);
-
-            if !before && i == line_idx {
-                result.push_str(text);
-                result.push_str(eol);
-            }
-        }
-    } else {
-        // Position-based insertion: insert at specific character position
-        let char_idx = (column.saturating_sub(1)) as usize;
-
-        for (i, line_content) in lines.iter().enumerate() {
-            if i == line_idx {
-                let safe_col_byte = char_to_byte_index(line_content, char_idx);
-                result.push_str(&line_content[..safe_col_byte]);
-                result.push_str(text);
-                result.push_str(&line_content[safe_col_byte..]);
-                result.push_str(eol);
-            } else {
-                result.push_str(line_content);
-                result.push_str(eol);
-            }
-        }
-    }
-
-    // Preserve original trailing line ending behavior
-    if !content.ends_with('\n') && result.ends_with('\n') {
-        if result.ends_with("\r\n") {
-            result.truncate(result.len() - 2);
-        } else {
-            result.pop();
-        }
-    }
-
-    let mode = if before {
-        "insert_before"
-    } else {
-        "insert_after"
-    };
-
-    if dry_run {
-        Ok(serde_json::json!({
-            "dry_run": true,
-            "mode": mode,
-            "file": file.display().to_string(),
-            "text": text,
-            "position": {"line": line, "column": column},
-            "line_based": is_line_based
-        }))
-    } else {
-        fs::write(file, &result).context("Failed to write file")?;
-
-        Ok(serde_json::json!({
-            "applied": true,
-            "mode": mode,
-            "file": file.display().to_string(),
-            "text": text,
-            "position": {"line": line, "column": column},
-            "line_based": is_line_based
-        }))
-    }
-}
-
-/// Execute a pattern-based edit using tree-sitter AST matching
-async fn execute_pattern_edit(
-    app: &App,
-    file: &Path,
-    pattern: &str,
-    lang: &str,
-    new_text: &str,
-    index: &str,
-    dry_run: bool,
-) -> Result<serde_json::Value> {
-    let language = Language::parse_or_default(lang);
-    if language == Language::Unknown {
-        anyhow::bail!(
-            "Unsupported language: {}. Run 'symora search nodes --list' for supported languages.",
-            lang
+    #[test]
+    fn replace_body_splice_replaces_inclusive_span() {
+        let original = lines(&["line1", "fn process() {", "    body", "}", "line5"]);
+        let splice = LineSplice {
+            at: 1,
+            removed: 3,
+            new_lines: lines(&["fn process() { new() }"]),
+        };
+        assert_eq!(
+            splice.apply(&original),
+            lines(&["line1", "fn process() { new() }", "line5"])
         );
     }
 
-    // Validate file before editing (skips write check for dry_run)
-    if !dry_run {
-        validate_file_for_edit(file)?;
-    } else if !file.exists() {
-        anyhow::bail!("File not found: {}", file.display());
-    }
-
-    let file_buf = file.to_path_buf();
-    let matches = app
-        .ast
-        .query(pattern, language, std::slice::from_ref(&file_buf))
-        .await
-        .map_err(|e| anyhow::anyhow!("AST query failed: {}", e))?;
-
-    if matches.is_empty() {
-        return Ok(serde_json::json!({
-            "matched": false,
-            "pattern": pattern,
-            "file": file.display().to_string(),
-            "message": "No matches found for the pattern"
-        }));
-    }
-
-    let replace_all = index.eq_ignore_ascii_case("all");
-    let target_index: Option<usize> = if replace_all {
-        None
-    } else {
-        Some(
-            index
-                .parse()
-                .context("Invalid index: must be a number or 'all'")?,
-        )
-    };
-
-    if let Some(idx) = target_index
-        && idx >= matches.len()
-    {
-        anyhow::bail!(
-            "Index {} out of range. Found {} matches.",
-            idx,
-            matches.len()
+    #[test]
+    fn insert_splices_do_not_remove_lines() {
+        let original = lines(&["line1", "fn process() {", "}", "line4"]);
+        let before = LineSplice {
+            at: 1,
+            removed: 0,
+            new_lines: lines(&["// hello"]),
+        };
+        assert_eq!(
+            before.apply(&original),
+            lines(&["line1", "// hello", "fn process() {", "}", "line4"])
+        );
+        let after = LineSplice {
+            at: 3,
+            removed: 0,
+            new_lines: lines(&["// trailer"]),
+        };
+        assert_eq!(
+            after.apply(&original),
+            lines(&["line1", "fn process() {", "}", "// trailer", "line4"])
         );
     }
 
-    let content = fs::read_to_string(file).context("Failed to read file")?;
-
-    if dry_run {
-        let match_info: Vec<_> = matches
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                serde_json::json!({
-                    "index": i,
-                    "line": m.start_line,
-                    "end_line": m.end_line,
-                    "column": m.start_column,
-                    "end_column": m.end_column,
-                    "text": m.text,
-                    "will_replace": replace_all || target_index == Some(i)
-                })
-            })
-            .collect();
-
-        return Ok(serde_json::json!({
-            "dry_run": true,
-            "file": file.display().to_string(),
-            "pattern": pattern,
-            "language": lang,
-            "matches": match_info,
-            "replacement": new_text
-        }));
+    /// The hunk is derived from the splice, so an insert shows exactly
+    /// the inserted lines — the positional-diff failure mode (every line
+    /// after the insert marked changed) cannot occur.
+    #[test]
+    fn insert_hunk_contains_only_the_inserted_lines() {
+        let original = lines(&["a", "b", "c", "d", "e"]);
+        let splice = LineSplice {
+            at: 2,
+            removed: 0,
+            new_lines: lines(&["x"]),
+        };
+        assert_eq!(splice.unified_hunk(&original), "@@ -3,0 +3,1 @@\n+x\n");
     }
 
-    // Apply edits in reverse order to preserve positions
-    let mut edits_to_apply: Vec<_> = matches
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| replace_all || target_index == Some(*i))
-        .collect();
-    edits_to_apply.sort_by(|a, b| {
-        (b.1.start_line, b.1.start_column).cmp(&(a.1.start_line, a.1.start_column))
-    });
-
-    let mut result_lines: Vec<String> = content.lines().map(String::from).collect();
-
-    let mut applied_edits = Vec::new();
-
-    for (idx, ast_match) in &edits_to_apply {
-        let start_line_idx = (ast_match.start_line.saturating_sub(1)) as usize;
-        let end_line_idx = (ast_match.end_line.saturating_sub(1)) as usize;
-
-        if start_line_idx >= result_lines.len() || end_line_idx >= result_lines.len() {
-            continue;
-        }
-
-        let start_col = ast_match.start_column as usize;
-        let end_col = ast_match.end_column as usize;
-
-        if start_line_idx == end_line_idx {
-            let line = &result_lines[start_line_idx];
-            let safe_start = start_col.min(line.len());
-            let safe_end = end_col.min(line.len());
-            let new_line = format!("{}{}{}", &line[..safe_start], new_text, &line[safe_end..]);
-            result_lines[start_line_idx] = new_line;
-        } else {
-            let first_line = &result_lines[start_line_idx];
-            let last_line = &result_lines[end_line_idx];
-            let safe_start = start_col.min(first_line.len());
-            let safe_end = end_col.min(last_line.len());
-
-            let new_line = format!(
-                "{}{}{}",
-                &first_line[..safe_start],
-                new_text,
-                &last_line[safe_end..]
-            );
-            result_lines[start_line_idx] = new_line;
-
-            // Use drain for O(n) removal instead of O(n²) individual removes
-            result_lines.drain((start_line_idx + 1)..=end_line_idx);
-        }
-
-        applied_edits.push(serde_json::json!({
-            "index": idx,
-            "original": ast_match.text,
-            "line": ast_match.start_line,
-            "end_line": ast_match.end_line
-        }));
+    #[test]
+    fn replace_hunk_lists_removed_then_added() {
+        let original = lines(&["a", "old1", "old2", "d"]);
+        let splice = LineSplice {
+            at: 1,
+            removed: 2,
+            new_lines: lines(&["new"]),
+        };
+        assert_eq!(
+            splice.unified_hunk(&original),
+            "@@ -2,2 +2,1 @@\n-old1\n-old2\n+new\n"
+        );
     }
 
-    let mut result = result_lines.join("\n");
-    if content.ends_with('\n') && !result.ends_with('\n') {
-        result.push('\n');
+    #[test]
+    fn char_splice_is_character_indexed_not_byte_indexed() {
+        // '한' and '글' are 3 bytes each; column 3 must mean the third
+        // *character*.
+        let original = lines(&["한글ab"]);
+        let splice = char_splice(&original, 1, 3, 1, Some(4), "X").unwrap();
+        assert_eq!(splice.new_lines, lines(&["한글Xb"]));
     }
 
-    fs::write(file, &result).context("Failed to write file")?;
+    #[test]
+    fn char_splice_without_end_col_replaces_through_eol() {
+        let original = lines(&["keep: drop", "next"]);
+        let splice = char_splice(&original, 1, 7, 1, None, "kept").unwrap();
+        assert_eq!(splice.new_lines, lines(&["keep: kept"]));
+        assert_eq!(splice.removed, 1);
+    }
 
-    Ok(serde_json::json!({
-        "applied": true,
-        "file": file.display().to_string(),
-        "pattern": pattern,
-        "language": lang,
-        "edits_applied": applied_edits.len(),
-        "edits": applied_edits,
-        "replacement": new_text
-    }))
+    #[test]
+    fn char_splice_spanning_lines_merges_prefix_and_suffix() {
+        let original = lines(&["start AAA", "BBB end"]);
+        let splice = char_splice(&original, 1, 7, 2, Some(4), "X").unwrap();
+        assert_eq!(splice.new_lines, lines(&["start X end"]));
+        assert_eq!(splice.removed, 2);
+    }
+
+    /// Positions are validated, never clamped — a column past EOL is the
+    /// caller addressing content that isn't there.
+    #[test]
+    fn char_splice_rejects_out_of_range_columns() {
+        let original = lines(&["short"]);
+        // chars+1 (= 6) is the valid zero-width EOL position; 7 is not.
+        assert!(char_splice(&original, 1, 6, 1, None, "x").is_ok());
+        let err = char_splice(&original, 1, 7, 1, None, "x").unwrap_err();
+        assert!(err.to_string().contains("exceeds line 1 length"));
+        let err = char_splice(&original, 1, 1, 1, Some(7), "x").unwrap_err();
+        assert!(err.to_string().contains("exceeds line 1 length"));
+    }
+
+    /// An inverted same-line range would slice overlapping prefix and
+    /// suffix and duplicate the text between them.
+    #[test]
+    fn char_splice_rejects_inverted_same_line_range() {
+        let original = lines(&["abcdef"]);
+        let err = char_splice(&original, 1, 4, 1, Some(2), "x").unwrap_err();
+        assert!(err.to_string().contains("precedes start column"));
+        // Equal start/end is a valid zero-width insert.
+        assert!(char_splice(&original, 1, 4, 1, Some(4), "x").is_ok());
+    }
+
+    /// CRLF replacement text must not leak `\r` into the line array —
+    /// `render` re-joins with the file's own ending.
+    #[test]
+    fn char_splice_normalizes_crlf_replacement_text() {
+        let original = lines(&["old"]);
+        let splice = char_splice(&original, 1, 1, 1, None, "a\r\nb").unwrap();
+        assert_eq!(splice.new_lines, lines(&["a", "b"]));
+    }
+
+    /// An empty file has exactly one addressable position: 1:1.
+    #[test]
+    fn char_splice_accepts_insert_into_empty_file_at_origin() {
+        let empty: Vec<String> = vec![];
+        let splice = char_splice(&empty, 1, 1, 1, None, "hello\nworld").unwrap();
+        assert_eq!(splice.at, 0);
+        assert_eq!(splice.removed, 0);
+        assert_eq!(splice.new_lines, lines(&["hello", "world"]));
+        assert!(char_splice(&empty, 2, 1, 2, None, "x").is_err());
+    }
+
+    #[test]
+    fn byte_to_char_col_clamps_and_counts_characters() {
+        assert_eq!(byte_to_char_col("한글ab", 0), 1);
+        assert_eq!(byte_to_char_col("한글ab", 3), 2); // after 한
+        assert_eq!(byte_to_char_col("한글ab", 6), 3); // after 글
+        assert_eq!(byte_to_char_col("ab", 99), 3); // clamped to EOL
+    }
+
+    /// A symbol sharing its first or last line with other code must be
+    /// refused by whole-line operations — silently removing a neighbour
+    /// is the plausible-but-wrong failure invariant 4 forbids.
+    #[test]
+    fn line_ownership_guard_refuses_shared_lines() {
+        // `fn main() { .. } fn helper() { .. }` on one line: helper's
+        // declaration starts at char column 25.
+        let content = lines(&[r#"fn main() { helper(); } fn helper() { x(); }"#]);
+        let shared = Symbol::new(
+            "helper".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/a.rs"), 1, 28, 1, 25, 1, 46),
+        );
+        let span = LineRange { start: 1, end: 1 };
+        let err = ensure_exclusive_line_ownership(&content, &shared, &span).unwrap_err();
+        assert!(err.to_string().contains("shares its first line"));
+
+        // Sole occupant of its lines passes (ends at exclusive column 24,
+        // one past the 23-char line).
+        let solo = lines(&["fn process() { body() }"]);
+        let alone = Symbol::new(
+            "process".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/a.rs"), 1, 4, 1, 1, 1, 24),
+        );
+        assert!(ensure_exclusive_line_ownership(&solo, &alone, &span).is_ok());
+    }
+
+    #[test]
+    fn line_ownership_guard_refuses_trailing_neighbour() {
+        let content = lines(&["fn a() {", "} fn b() {}"]);
+        let sym = Symbol::new(
+            "a".to_string(),
+            SymbolKind::Function,
+            // ends at exclusive char column 2 on line 2; `fn b() {}` follows
+            Location::full(PathBuf::from("/tmp/a.rs"), 1, 4, 1, 1, 2, 2),
+        );
+        let span = LineRange { start: 1, end: 2 };
+        let err = ensure_exclusive_line_ownership(&content, &sym, &span).unwrap_err();
+        assert!(err.to_string().contains("shares its last line"));
+    }
+
+    #[test]
+    fn symbol_line_span_rejects_stale_lsp_data() {
+        let sym = sample_symbol(1, 100);
+        let err = symbol_line_span(&sym, 5).unwrap_err();
+        assert!(err.to_string().contains("exceeds file length"));
+    }
+
+    #[test]
+    fn symbol_line_span_includes_full_declaration() {
+        let sym = sample_symbol(2, 4);
+        let span = symbol_line_span(&sym, 10).unwrap();
+        assert_eq!((span.start, span.end), (2, 4));
+    }
 }

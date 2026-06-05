@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::error::LspError;
 use crate::infra::lsp::LspClient;
 use crate::infra::lsp::protocol::{Hover, TextDocumentIdentifier, TextDocumentPositionParams};
-use crate::models::diagnostic::Diagnostic;
+use crate::models::diagnostic::{Diagnostic, DiagnosticsReport, DiagnosticsStatus};
 use crate::models::lsp::{HoverInfo, SignatureHelp, path_to_uri};
 
 use super::converters::*;
@@ -93,13 +93,24 @@ pub(super) async fn signature_help(
 pub(super) async fn diagnostics(
     service: &DefaultLspService,
     file: &Path,
-) -> Result<Vec<Diagnostic>, LspError> {
+) -> Result<DiagnosticsReport, LspError> {
+    use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
     use crate::infra::lsp::protocol::LspDiagnosticSeverity;
     use crate::infra::lsp::protocol::LspDiagnosticTag;
     use crate::models::diagnostic::{DiagnosticSeverity, DiagnosticTag};
     use crate::models::lsp::{Position as LspPosition, Range as LspRange};
+    use crate::models::symbol::Language;
+
+    // A language whose server doesn't publish diagnostics is an answer,
+    // not a failure — callers attach the status inline instead of
+    // branching on an error.
+    let lang = Language::from_path(file);
+    if get_support_level(lang, LspFeature::Diagnostics) == SupportLevel::None {
+        return Ok(DiagnosticsReport::unsupported());
+    }
 
     let max_file_size = service.max_file_size_bytes();
+    let wait_budget = service.manager.runtime_config().diagnostics_wait;
     let file = file.to_path_buf();
 
     service
@@ -108,11 +119,23 @@ pub(super) async fn diagnostics(
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
-                client.sync_document(&uri, &content).await?;
+                let version = client.sync_document(&uri, &content).await?;
+                // Snapshot AFTER the sync: for servers that omit publish
+                // versions, only arrivals strictly after the didChange went
+                // out can count as fresh. An in-flight publish for the old
+                // content must err toward Unconfirmed, never false-fresh.
+                let seq_before = client.publish_seq_snapshot();
 
-                let lsp_diagnostics = wait_for_diagnostics(&client, &uri).await;
+                let Some(lsp_diagnostics) =
+                    wait_for_publish(&client, &uri, version, seq_before, wait_budget).await
+                else {
+                    return Ok(DiagnosticsReport {
+                        status: DiagnosticsStatus::Unconfirmed,
+                        items: Vec::new(),
+                    });
+                };
 
-                let diagnostics = lsp_diagnostics
+                let items = lsp_diagnostics
                     .into_iter()
                     .map(|d| {
                         let severity = match d.severity {
@@ -167,26 +190,46 @@ pub(super) async fn diagnostics(
                     })
                     .collect();
 
-                Ok(diagnostics)
+                Ok(DiagnosticsReport {
+                    status: DiagnosticsStatus::Ok,
+                    items,
+                })
             }
         })
         .await
 }
 
-async fn wait_for_diagnostics(
+/// Wait for a `publishDiagnostics` that reflects the synced content.
+///
+/// A publish is fresh when the server stamps it with a document version
+/// at or past the one we synced (LSP 3.15+), or — for servers that omit
+/// versions — when it arrived after the sync began. A fresh publish
+/// returns immediately, so clean files don't burn the window. `None`
+/// means nothing fresh landed: the honest answer is "unconfirmed",
+/// never a synthesized "clean".
+async fn wait_for_publish(
     client: &LspClient,
     uri: &str,
-) -> Vec<crate::infra::lsp::protocol::LspDiagnostic> {
+    synced_version: u32,
+    seq_before: u64,
+    budget: std::time::Duration,
+) -> Option<Vec<crate::infra::lsp::protocol::LspDiagnostic>> {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
-    const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
     let start = std::time::Instant::now();
-    while start.elapsed() < MAX_WAIT {
-        let diags = client.get_diagnostics(uri).await;
-        if !diags.is_empty() {
-            return diags;
+    loop {
+        if let Some(published) = client.published_diagnostics(uri).await {
+            let fresh = match published.doc_version {
+                Some(v) => v >= synced_version,
+                None => published.seq > seq_before,
+            };
+            if fresh {
+                return Some(published.items);
+            }
+        }
+        if start.elapsed() >= budget {
+            return None;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
-    client.get_diagnostics(uri).await
 }

@@ -18,7 +18,7 @@ use async_trait::async_trait;
 
 use crate::error::LspError;
 use crate::infra::lsp::ServerStatusDetail;
-use crate::models::diagnostic::Diagnostic;
+use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
     HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
@@ -84,7 +84,7 @@ pub trait LspService: Send + Sync {
         column: u32,
     ) -> Result<Option<SignatureHelp>, LspError>;
 
-    async fn diagnostics(&self, file: &Path) -> Result<Vec<Diagnostic>, LspError>;
+    async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError>;
 
     async fn prepare_rename(
         &self,

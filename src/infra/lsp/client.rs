@@ -38,6 +38,17 @@ enum LogLevel {
     Ignore,
 }
 
+/// One `textDocument/publishDiagnostics` notification, kept with the
+/// metadata needed to judge freshness: the document version the server
+/// analyzed (when it reports one, LSP 3.15+) and a monotonic arrival
+/// sequence for servers that don't.
+#[derive(Debug, Clone)]
+pub struct PublishedDiagnostics {
+    pub doc_version: Option<u32>,
+    pub seq: u64,
+    pub items: Vec<LspDiagnostic>,
+}
+
 #[derive(Debug)]
 struct DocumentState {
     version: u32,
@@ -150,7 +161,8 @@ pub struct LspClient {
     stdin: Mutex<Option<ChildStdin>>,
     next_id: AtomicU64,
     pending: RwLock<HashMap<RequestId, PendingRequest>>,
-    diagnostics: RwLock<HashMap<String, Vec<LspDiagnostic>>>,
+    diagnostics: RwLock<HashMap<String, PublishedDiagnostics>>,
+    publish_seq: AtomicU64,
     document_cache: RwLock<DocumentCache>,
     notification_handlers: RwLock<HashMap<String, NotificationHandler>>,
     root: PathBuf,
@@ -192,6 +204,7 @@ impl LspClient {
             next_id: AtomicU64::new(1),
             pending: RwLock::new(HashMap::new()),
             diagnostics: RwLock::new(HashMap::new()),
+            publish_seq: AtomicU64::new(0),
             document_cache: RwLock::new(DocumentCache::new()),
             notification_handlers: RwLock::new(HashMap::new()),
             root,
@@ -847,13 +860,17 @@ impl LspClient {
                 match method {
                     "textDocument/publishDiagnostics" => {
                         let uri = params.get("uri").and_then(|u| u.as_str());
+                        let doc_version = params
+                            .get("version")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32);
                         let diags = params.get("diagnostics").cloned();
                         if let (Some(uri), Some(diags)) = (uri, diags)
-                            && let Ok(diagnostics) =
-                                serde_json::from_value::<Vec<LspDiagnostic>>(diags)
+                            && let Ok(items) = serde_json::from_value::<Vec<LspDiagnostic>>(diags)
                         {
+                            let seq = self.publish_seq.fetch_add(1, Ordering::AcqRel) + 1;
                             let mut cache = self.diagnostics.write().await;
-                            let count = diagnostics.len();
+                            let count = items.len();
 
                             // Evict oldest entry if at capacity (simple FIFO)
                             if cache.len() >= MAX_DIAGNOSTICS_CACHE
@@ -864,7 +881,14 @@ impl LspClient {
                                 tracing::trace!("Evicted diagnostics for {}", oldest_key);
                             }
 
-                            cache.insert(uri.to_string(), diagnostics);
+                            cache.insert(
+                                uri.to_string(),
+                                PublishedDiagnostics {
+                                    doc_version,
+                                    seq,
+                                    items,
+                                },
+                            );
                             tracing::debug!("Cached {} diagnostics for {}", count, uri);
                         }
                     }
@@ -937,12 +961,14 @@ impl LspClient {
         Ok(())
     }
 
-    pub async fn sync_document(&self, uri: &str, content: &str) -> Result<(), LspError> {
+    /// Sync the document and return the version the server now knows it
+    /// at — the key for judging `publishDiagnostics` freshness.
+    pub async fn sync_document(&self, uri: &str, content: &str) -> Result<u32, LspError> {
         self.sync_document_inner(uri, content).await
     }
 
-    async fn sync_document_inner(&self, uri: &str, content: &str) -> Result<(), LspError> {
-        let evicted = {
+    async fn sync_document_inner(&self, uri: &str, content: &str) -> Result<u32, LspError> {
+        let (version, evicted) = {
             let mut cache = self.document_cache.write().await;
             let language_id = self.language.to_string().to_lowercase();
 
@@ -959,13 +985,14 @@ impl LspClient {
                     )
                     .await?;
                 }
-                None
+                (state.version, None)
             } else {
                 // Opening a file the server already indexed from disk adds
                 // no new information — only a content *change* invalidates
                 // the workspace index. Invalidating here put every warm
                 // session through a pointless re-wait per first-open.
                 let state = DocumentState::new(content);
+                let version = state.version;
                 self.notify(
                     "textDocument/didOpen",
                     Some(serde_json::json!({
@@ -978,7 +1005,7 @@ impl LspClient {
                     })),
                 )
                 .await?;
-                cache.insert(uri.to_string(), state)
+                (version, cache.insert(uri.to_string(), state))
             }
         };
 
@@ -990,7 +1017,7 @@ impl LspClient {
                 )
                 .await;
         }
-        Ok(())
+        Ok(version)
     }
 
     pub fn indexing_state(&self) -> IndexingState {
@@ -1334,13 +1361,18 @@ impl LspClient {
         self.capabilities.read().await.clone()
     }
 
-    pub async fn get_diagnostics(&self, uri: &str) -> Vec<LspDiagnostic> {
-        self.diagnostics
-            .read()
-            .await
-            .get(uri)
-            .cloned()
-            .unwrap_or_default()
+    /// Latest `publishDiagnostics` for `uri`, or `None` when the server
+    /// has never published for it — callers judge freshness against the
+    /// version returned by `sync_document` (and `publish_seq_snapshot`
+    /// for servers that omit versions).
+    pub async fn published_diagnostics(&self, uri: &str) -> Option<PublishedDiagnostics> {
+        self.diagnostics.read().await.get(uri).cloned()
+    }
+
+    /// Current publish arrival counter. Snapshot it before a sync to
+    /// recognize publishes that arrived afterwards.
+    pub fn publish_seq_snapshot(&self) -> u64 {
+        self.publish_seq.load(Ordering::Acquire)
     }
 }
 
