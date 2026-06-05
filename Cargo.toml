@@ -2,7 +2,7 @@
 name = "symora"
 version = "0.9.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.96"
 description = "Symbol-centric code intelligence CLI for AI coding agents"
 license = "MIT"
 repository = "https://github.com/junyeong-ai/symora"
@@ -84,7 +84,7 @@ axum = { version = "0.8", default-features = false, features = ["json", "tokio",
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Optional local embeddings (gated behind the `embeddings` feature).
-fastembed = { version = "5.13", optional = true }
+fastembed = { version = "5.16", optional = true }
 
 # Unix file locking (for daemon)
 [target.'cfg(unix)'.dependencies]
@@ -94,7 +94,7 @@ libc = "0.2.186"
 # LSP fan-out arena. cfg-gated because the upstream crate doesn't build on
 # Windows or wasm.
 [target.'cfg(all(not(target_env = "msvc"), not(target_os = "windows")))'.dependencies]
-tikv-jemallocator = "0.6.1"
+tikv-jemallocator = "0.7.0"
 
 [dev-dependencies]
 tempfile = "3.27"
