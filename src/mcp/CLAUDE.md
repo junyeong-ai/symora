@@ -12,9 +12,13 @@ Three things are co-versioned for every tool:
 
 A test in `tools/mod.rs` enumerates the required tool names. Adding a tool means touching all three; removing one means removing all three. The test will fail if they drift.
 
-## Mutating tools advertise themselves
+## Mutating tools advertise themselves — twice, in lockstep
 
-Any tool that writes source files must contain the literal word `Mutates` in its description. A second test enforces this so a reviewer can spot mutation from the catalog without reading handler code.
+Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (constructed via `ToolDefinition::read_only` / `ToolDefinition::mutating` — there is no neutral constructor, so the decision can't be skipped) and the literal word `Mutates` in the description for human reviewers. A biconditional test over the whole catalog enforces that they agree in both directions. The read-only profile (`mcp serve --profile read-only`) filters on the typed hint, never on description text, and gates `tools/call` as well as `tools/list` — a hidden tool that still dispatched would make the boundary cosmetic.
+
+## The instructions playbook stays honest by test
+
+`initialize` returns a usage playbook (`instructions.rs`) that hosts inject into the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
 
 ## Location input convention
 

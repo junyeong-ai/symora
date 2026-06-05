@@ -32,7 +32,6 @@ use commands::{
     search::SearchArgs, selection::SelectionArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
     signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
     supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
-    write::WriteArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -60,7 +59,7 @@ EXAMPLES:
   symora context src/main.rs:50 --all       Get full context
   symora impact src/api.rs:30:5             Analyze change impact
 
-For more: https://github.com/anthropics/symora
+For more: https://github.com/junyeong-ai/symora
 "#;
 
 #[derive(Parser, Debug)]
@@ -155,9 +154,7 @@ pub enum Commands {
     Bench(BenchArgs),
 
     // Edit
-    /// Symbol-aware writes (replace-body, insert-before, insert-after)
-    Write(WriteArgs),
-    /// Code editing operations (LSP textEdits, format)
+    /// Source mutations: replace-body, insert-before/after, delete, replace, pattern
     Edit(EditArgs),
     /// Rename symbol
     Rename(RenameArgs),

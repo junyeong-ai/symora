@@ -19,9 +19,10 @@ use symora::cli::blast_radius::{BlastRadius, DepthBucket, RiskLevel};
 use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, DefinitionOutput,
-    DiagnosticOutput, FileChangeOutput, HoverOutput, ImpactOutput, LocationOutput, ParameterOutput,
-    RefOutput, Section, ServerStatusOutput, SignatureHelpOutput, SignatureItemOutput, SymbolOutput,
-    TargetOutput, TestCoverageOutput, TestOutput, TypeInfoOutput,
+    DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput, LineRange,
+    LocationOutput, ParameterOutput, RefOutput, Section, ServerStatusOutput, SignatureHelpOutput,
+    SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput,
+    TypeInfoOutput,
 };
 use symora::models::lsp::{CallHierarchyItem, TypeHierarchyItem};
 use symora::models::symbol::{Language, Location, Symbol, SymbolKind};
@@ -553,6 +554,114 @@ fn error_envelope_shape_matches_runtime() {
         "code": "not_found",
         "hint": "did you mean 'fool'?",
         "message": "symbol foo"
+      }
+    }
+    "###);
+}
+
+/// Symbol-targeted edit: target fields present, applied run omits
+/// `dry_run` and `preview` entirely.
+#[test]
+fn edit_output_symbol_applied() {
+    let out = EditOutput {
+        operation: "replace_body",
+        file: "src/main.rs".to_string(),
+        target_symbol: Some("Handler/process".to_string()),
+        target_kind: Some("function".to_string()),
+        lines: LineRange { start: 12, end: 20 },
+        bytes_changed: -34,
+        dry_run: false,
+        preview: None,
+        dangling_references: None,
+        references_status: None,
+        diagnostics: None,
+    };
+    assert_json_snapshot!(out, @r###"
+    {
+      "operation": "replace_body",
+      "file": "src/main.rs",
+      "target_symbol": "Handler/process",
+      "target_kind": "function",
+      "lines": {
+        "start": 12,
+        "end": 20
+      },
+      "bytes_changed": -34
+    }
+    "###);
+}
+
+/// Raw range edit: no symbol fields; dry runs carry `dry_run` and the
+/// exact preview hunk.
+#[test]
+fn edit_output_range_dry_run() {
+    let out = EditOutput {
+        operation: "replace",
+        file: "src/main.rs".to_string(),
+        target_symbol: None,
+        target_kind: None,
+        lines: LineRange { start: 3, end: 3 },
+        bytes_changed: 2,
+        dry_run: true,
+        preview: Some("@@ -3,1 +3,1 @@\n-old\n+older\n".to_string()),
+        dangling_references: None,
+        references_status: None,
+        diagnostics: None,
+    };
+    assert_json_snapshot!(out, @r###"
+    {
+      "operation": "replace",
+      "file": "src/main.rs",
+      "lines": {
+        "start": 3,
+        "end": 3
+      },
+      "bytes_changed": 2,
+      "dry_run": true,
+      "preview": "@@ -3,1 +3,1 @@\n-old\n+older\n"
+    }
+    "###);
+}
+
+/// Delete: the reference check is explicit even when it finds nothing —
+/// `count: 0` is a real answer, absence would be ambiguous with
+/// "couldn't check".
+#[test]
+fn edit_output_delete_with_clean_reference_check() {
+    let out = EditOutput {
+        operation: "delete",
+        file: "src/main.rs".to_string(),
+        target_symbol: Some("helper".to_string()),
+        target_kind: Some("function".to_string()),
+        lines: LineRange { start: 5, end: 7 },
+        bytes_changed: -42,
+        dry_run: false,
+        preview: None,
+        dangling_references: Some(Section::new(vec![sample_location(50, 12)])),
+        references_status: None,
+        diagnostics: None,
+    };
+    assert_json_snapshot!(out, @r###"
+    {
+      "operation": "delete",
+      "file": "src/main.rs",
+      "target_symbol": "helper",
+      "target_kind": "function",
+      "lines": {
+        "start": 5,
+        "end": 7
+      },
+      "bytes_changed": -42,
+      "dangling_references": {
+        "count": 1,
+        "showing": 1,
+        "items": [
+          {
+            "file": "src/main.rs",
+            "line": 50,
+            "column": 12
+          }
+        ]
       }
     }
     "###);

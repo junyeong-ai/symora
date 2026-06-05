@@ -13,7 +13,7 @@ use crate::daemon::wire::{
     TypeHierarchyResponse,
 };
 use crate::error::LspError;
-use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
+use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
     HoverInfo, IndexingDegradation, InlayHint, Position, PrepareRenameResult, Range, RenameResult,
@@ -166,12 +166,12 @@ impl LspService for DaemonLspService {
         }))
     }
 
-    async fn diagnostics(&self, file: &Path) -> Result<Vec<Diagnostic>, LspError> {
+    async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError> {
         let result = self.client.diagnostics(file).await?;
 
         let response: DiagnosticsResponse = parse(result)?;
 
-        Ok(response
+        let items = response
             .diagnostics
             .into_iter()
             .map(|d| {
@@ -212,7 +212,12 @@ impl LspService for DaemonLspService {
                         .collect(),
                 }
             })
-            .collect())
+            .collect();
+
+        Ok(DiagnosticsReport {
+            status: response.status,
+            items,
+        })
     }
 
     async fn prepare_rename(

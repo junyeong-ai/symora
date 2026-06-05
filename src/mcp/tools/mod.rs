@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::app::App;
 use crate::cli::OutputError;
 
+use super::McpProfile;
 use super::protocol::{Content, ToolDefinition};
 
 mod catalog;
@@ -17,6 +18,16 @@ pub fn catalog() -> &'static [ToolDefinition] {
     &CATALOG
 }
 
+/// The catalog filtered to what `profile` exposes. `catalog()` stays the
+/// single unfiltered source; this is a pure view over it.
+pub fn visible_catalog(profile: McpProfile) -> Vec<ToolDefinition> {
+    catalog()
+        .iter()
+        .filter(|tool| profile.allows(tool))
+        .cloned()
+        .collect()
+}
+
 /// Tool result for the MCP `tools/call` response: the captured command
 /// output, the parsed JSON for `structuredContent`, and the truthful
 /// `isError` flag.
@@ -26,7 +37,22 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
-pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<ToolOutput, OutputError> {
+pub async fn dispatch(
+    name: &str,
+    arguments: Value,
+    app: &App,
+    profile: McpProfile,
+) -> Result<ToolOutput, OutputError> {
+    // The profile gates calls, not just the advertised list — a hidden
+    // tool that still dispatches would make the boundary cosmetic.
+    if let Some(tool) = catalog().iter().find(|t| t.name == name)
+        && !profile.allows(tool)
+    {
+        return Err(OutputError::unsupported(format!(
+            "Tool '{name}' is excluded by the read-only profile"
+        )));
+    }
+
     let captured = handlers::dispatch(name, arguments, app)
         .await
         .map_err(OutputError::from)?;
@@ -74,29 +100,38 @@ mod tests {
             "replace_symbol_body",
             "insert_before_symbol",
             "insert_after_symbol",
+            "delete_symbol",
         ] {
             assert!(names.contains(&required), "tool catalog missing {required}");
         }
     }
 
+    /// The human-readable mutation warning and the typed annotation are
+    /// one fact stated twice; this biconditional keeps them from
+    /// drifting in either direction across the whole catalog.
     #[test]
-    fn mutating_tools_advertise_themselves_in_descriptions() {
-        let mutating = [
-            "rename_symbol",
-            "apply_code_action",
-            "replace_symbol_body",
-            "insert_before_symbol",
-            "insert_after_symbol",
-        ];
-        for name in mutating {
-            let tool = catalog()
-                .iter()
-                .find(|t| t.name == name)
-                .unwrap_or_else(|| panic!("missing tool {name}"));
-            assert!(
-                tool.description.contains("Mutates"),
-                "{name} description should warn about mutation",
+    fn mutation_warnings_and_annotations_agree() {
+        for tool in catalog() {
+            let advertised = tool.description.contains("Mutates");
+            let mutating = !tool.annotations.read_only_hint;
+            assert_eq!(
+                advertised, mutating,
+                "{}: description 'Mutates' marker and readOnlyHint disagree",
+                tool.name,
             );
         }
+    }
+
+    #[test]
+    fn read_only_profile_filters_exactly_the_mutating_tools() {
+        let visible = visible_catalog(McpProfile::ReadOnly);
+        assert!(visible.iter().all(|t| t.annotations.read_only_hint));
+        let hidden = catalog().len() - visible.len();
+        let mutating = catalog()
+            .iter()
+            .filter(|t| !t.annotations.read_only_hint)
+            .count();
+        assert_eq!(hidden, mutating);
+        assert!(mutating >= 5, "expected the editing tools to be mutating");
     }
 }

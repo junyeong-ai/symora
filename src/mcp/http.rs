@@ -16,15 +16,20 @@ use tokio::net::TcpListener;
 
 use crate::app::App;
 
+use super::McpProfile;
 use super::server;
 
 #[derive(Clone)]
 struct HttpState {
     app: Arc<App>,
+    profile: McpProfile,
 }
 
-pub async fn serve_http(app: App, addr: SocketAddr) -> Result<()> {
-    let state = HttpState { app: Arc::new(app) };
+pub async fn serve_http(app: App, addr: SocketAddr, profile: McpProfile) -> Result<()> {
+    let state = HttpState {
+        app: Arc::new(app),
+        profile,
+    };
     let router = Router::new()
         .route("/", post(handle_message))
         .with_state(state);
@@ -68,11 +73,11 @@ async fn handle_message(
     State(state): State<HttpState>,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
-    let (status, body) = process_message(&state.app, payload).await;
+    let (status, body) = process_message(&state.app, state.profile, payload).await;
     (status, Json(body))
 }
 
-async fn process_message(app: &App, payload: Value) -> (StatusCode, Value) {
+async fn process_message(app: &App, profile: McpProfile, payload: Value) -> (StatusCode, Value) {
     let line = match serde_json::to_string(&payload) {
         Ok(s) => s,
         Err(e) => {
@@ -87,7 +92,7 @@ async fn process_message(app: &App, payload: Value) -> (StatusCode, Value) {
         }
     };
 
-    match server::handle_line(&line, app).await {
+    match server::handle_line(&line, app, profile).await {
         Some(response) => (StatusCode::OK, response),
         // Notification: JSON-RPC says reply 202/empty, but 200 + `{}` is
         // friendlier to clients that don't special-case 202.
@@ -114,7 +119,7 @@ mod tests {
             "method": "initialize",
             "params": {}
         });
-        let (status, body) = process_message(&app, payload).await;
+        let (status, body) = process_message(&app, McpProfile::Full, payload).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body["result"]["protocolVersion"],
@@ -127,7 +132,7 @@ mod tests {
         let app = dummy_app().await;
         let payload =
             serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        let (status, body) = process_message(&app, payload).await;
+        let (status, body) = process_message(&app, McpProfile::Full, payload).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.as_object().unwrap().is_empty());
     }

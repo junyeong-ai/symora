@@ -15,8 +15,9 @@
 //!   `diff-impact`, `usage`, `diagnostics`
 //! - **Discovery** — `search symbols`, `search content`, `search ast`,
 //!   `search semantic` (opt-in embeddings), `map`, `pack`
-//! - **Editing** — `write replace-body`, `write insert-before`,
-//!   `write insert-after`, `rename`, `actions`
+//! - **Editing** — `edit replace-body`, `edit insert-before`,
+//!   `edit insert-after`, `edit delete`, `edit replace`, `edit pattern`,
+//!   `rename`, `actions`
 //! - **Operations** — `bench`, `daemon`, `mcp serve` (stdio + HTTP),
 //!   workspace fan-out across multiple repos
 //!

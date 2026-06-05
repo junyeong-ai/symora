@@ -359,6 +359,7 @@ pub struct CallsResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiagnosticsResponse {
+    pub status: diagnostic::DiagnosticsStatus,
     pub count: usize,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -749,11 +750,13 @@ impl SignatureResponse {
     }
 }
 
-impl From<Vec<diagnostic::Diagnostic>> for DiagnosticsResponse {
-    fn from(diags: Vec<diagnostic::Diagnostic>) -> Self {
+impl From<diagnostic::DiagnosticsReport> for DiagnosticsResponse {
+    fn from(report: diagnostic::DiagnosticsReport) -> Self {
         Self {
-            count: diags.len(),
-            diagnostics: diags
+            status: report.status,
+            count: report.items.len(),
+            diagnostics: report
+                .items
                 .iter()
                 .map(|d| Diagnostic {
                     message: d.message.clone(),

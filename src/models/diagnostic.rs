@@ -3,6 +3,44 @@ use serde::{Deserialize, Serialize};
 use super::lsp::Range;
 use super::symbol::Location;
 
+/// Outcome of one diagnostics pull. `items` is authoritative only when
+/// `status` is `Ok`; an empty list under `Unconfirmed` means "unknown",
+/// never "clean".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsReport {
+    pub status: DiagnosticsStatus,
+    pub items: Vec<Diagnostic>,
+}
+
+impl DiagnosticsReport {
+    pub fn unsupported() -> Self {
+        Self {
+            status: DiagnosticsStatus::Unsupported,
+            items: Vec::new(),
+        }
+    }
+}
+
+/// Whether the diagnostics in a report can be trusted.
+///
+/// - `Ok` — the server confirmed an analysis of the current content.
+/// - `Unconfirmed` — no publish arrived for the synced content within the
+///   wait window; the server may still be analyzing.
+/// - `Unsupported` — the language's server does not publish diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsStatus {
+    Ok,
+    Unconfirmed,
+    Unsupported,
+}
+
+impl DiagnosticsStatus {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub file_path: String,

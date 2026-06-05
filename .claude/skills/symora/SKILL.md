@@ -77,12 +77,14 @@ symora usage src/cli/commands/search.rs:30:10 --max-symbols 10 --limit 5
 symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
 symora rename src/main.rs:10:5 new_name --dry-run
+symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
+symora edit delete src/main.rs:42:4 --dry-run
 symora diagnostics src/main.rs --with-context
 symora impact src/main.rs:42
 symora diff-impact
 ```
 
-Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run` for previews.
+Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run` for previews — the preview is an exact diff hunk. `edit delete` always reports references outside the deleted span that would dangle (`dangling_references` with the standard list shape; `references_status: "unsupported"|"unavailable"` when the check couldn't run). Add `--with-diagnostics` to any applied edit to attach post-edit LSP diagnostics: `{"status": "ok"|"unconfirmed"|"unsupported"|"unavailable", "count", "items"}` — an empty list under `unconfirmed` means *unknown*, not clean. The standalone `diagnostics` command carries the same `status` key only when the result is not authoritative.
 
 ## Output and global flags
 

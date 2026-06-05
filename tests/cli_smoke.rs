@@ -36,7 +36,6 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "map",
     "pack",
     "bench",
-    "write",
     "edit",
     "rename",
     "actions",

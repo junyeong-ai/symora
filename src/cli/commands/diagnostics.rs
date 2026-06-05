@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::response::DiagnosticOutput;
-use crate::models::diagnostic::DiagnosticSeverity;
+use crate::models::diagnostic::{DiagnosticSeverity, DiagnosticsStatus};
 
 #[derive(Args, Debug)]
 pub struct DiagnosticsArgs {
@@ -33,6 +33,12 @@ pub struct DiagnosticsArgs {
 #[derive(Debug, Serialize)]
 pub struct DiagnosticsOutput {
     pub file: String,
+    /// Present only when the result is *not* authoritative:
+    /// `unconfirmed` (server never confirmed analyzing this content) or
+    /// `unsupported` (the language's server doesn't publish diagnostics).
+    /// Absent means the server confirmed the listed diagnostics.
+    #[serde(skip_serializing_if = "DiagnosticsStatus::is_ok")]
+    pub status: DiagnosticsStatus,
     pub count: usize,
     pub diagnostics: Vec<EnhancedDiagnostic>,
 }
@@ -79,8 +85,10 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
     });
 
     match app.lsp.diagnostics(&abs_file).await {
-        Ok(diagnostics) => {
-            let filtered: Vec<_> = diagnostics
+        Ok(report) => {
+            let status = report.status;
+            let filtered: Vec<_> = report
+                .items
                 .into_iter()
                 .filter(|d| {
                     if let Some(ref filter) = severity_filter
@@ -100,17 +108,7 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
             let mut enhanced_diagnostics = Vec::with_capacity(filtered.len());
 
             for d in &filtered {
-                let base = DiagnosticOutput {
-                    severity: d.severity.to_string(),
-                    message: d.message.clone(),
-                    line: d.display_line(),
-                    column: d.display_column(),
-                    end_line: d.display_end_line(),
-                    end_column: d.display_end_column(),
-                    code: d.code.clone(),
-                    source: d.source.clone(),
-                    tags: d.tags.iter().map(|t| t.to_string()).collect(),
-                };
+                let base = DiagnosticOutput::from(d);
 
                 let (context, suggestions) = tokio::join!(
                     async {
@@ -146,6 +144,7 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
 
             let response = DiagnosticsOutput {
                 file: ctx.relative_path(&abs_file),
+                status,
                 count: enhanced_diagnostics.len(),
                 diagnostics: enhanced_diagnostics,
             };
@@ -244,4 +243,34 @@ fn extract_snippet(content: &str, line: u32) -> String {
         .nth(idx)
         .map(|l| l.trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output(status: DiagnosticsStatus) -> serde_json::Value {
+        serde_json::to_value(DiagnosticsOutput {
+            file: "src/lib.rs".into(),
+            status,
+            count: 0,
+            diagnostics: vec![],
+        })
+        .unwrap()
+    }
+
+    /// `status` appears exactly when the result is not authoritative —
+    /// an agent that sees no `status` key may trust the list as-is.
+    #[test]
+    fn status_is_omitted_only_when_confirmed() {
+        assert!(output(DiagnosticsStatus::Ok).get("status").is_none());
+        assert_eq!(
+            output(DiagnosticsStatus::Unconfirmed)["status"],
+            "unconfirmed"
+        );
+        assert_eq!(
+            output(DiagnosticsStatus::Unsupported)["status"],
+            "unsupported"
+        );
+    }
 }

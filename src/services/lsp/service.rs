@@ -8,7 +8,7 @@ use super::LspService;
 use super::cache::{SymbolCache, WorkspaceSymbolCache};
 use crate::error::LspError;
 use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
-use crate::models::diagnostic::Diagnostic;
+use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
     HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
@@ -173,7 +173,7 @@ impl LspService for DefaultLspService {
         info::signature_help(self, file, line, column).await
     }
 
-    async fn diagnostics(&self, file: &Path) -> Result<Vec<Diagnostic>, LspError> {
+    async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError> {
         info::diagnostics(self, file).await
     }
 

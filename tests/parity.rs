@@ -125,7 +125,10 @@ fn cli_and_mcp_emit_identical_payloads() {
 fn daemon_and_direct_emit_identical_payloads() {
     let cases: &[&[&str]] = &[
         &["symbols", "src/main.rs", "--depth", "1"],
-        &["refs", "src/cli/response/mod.rs:43:12", "--limit", "5"],
+        &["refs", "src/cli/response/mod.rs:45:12", "--limit", "5"],
+        // Tri-state diagnostics: the `status` presence rule must not
+        // depend on which side of the socket the wait ran on.
+        &["diagnostics", "src/main.rs"],
     ];
 
     for args in cases {

@@ -115,37 +115,39 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
             };
 
             match app.lsp.apply_code_action(&loc.file, action).await {
-                Ok(result) => match apply_workspace_edits(&result.changes, args.dry_run) {
-                    Ok(applied_changes) => {
-                        #[cfg(unix)]
-                        if !args.dry_run {
-                            let changed_files: Vec<_> =
-                                applied_changes.iter().map(|c| c.file.clone()).collect();
-                            invalidate_store_files(app, &changed_files).await;
-                        }
+                Ok(result) => {
+                    match apply_workspace_edits(&result.changes, args.dry_run, app.root()) {
+                        Ok(applied_changes) => {
+                            #[cfg(unix)]
+                            if !args.dry_run {
+                                let changed_files: Vec<_> =
+                                    applied_changes.iter().map(|c| c.file.clone()).collect();
+                                invalidate_store_files(app, &changed_files).await;
+                            }
 
-                        let response = ApplyActionOutput {
-                            title: action.title.clone(),
-                            kind: action.kind.to_string(),
-                            applied: !args.dry_run,
-                            files_changed: applied_changes.len(),
-                            changes: applied_changes
-                                .iter()
-                                .map(|c| FileChangeOutput {
-                                    file: ctx.relative_path(&c.file),
-                                    edit_count: c.edit_count,
-                                })
-                                .collect(),
-                            message: if args.dry_run {
-                                Some("Dry run - no changes applied".to_string())
-                            } else {
-                                None
-                            },
-                        };
-                        ctx.print_success(response);
+                            let response = ApplyActionOutput {
+                                title: action.title.clone(),
+                                kind: action.kind.to_string(),
+                                applied: !args.dry_run,
+                                files_changed: applied_changes.len(),
+                                changes: applied_changes
+                                    .iter()
+                                    .map(|c| FileChangeOutput {
+                                        file: ctx.relative_path(&c.file),
+                                        edit_count: c.edit_count,
+                                    })
+                                    .collect(),
+                                message: if args.dry_run {
+                                    Some("Dry run - no changes applied".to_string())
+                                } else {
+                                    None
+                                },
+                            };
+                            ctx.print_success(response);
+                        }
+                        Err(e) => ctx.print_error(e),
                     }
-                    Err(e) => ctx.print_error(e),
-                },
+                }
                 Err(e) => ctx.print_error(e),
             }
         }

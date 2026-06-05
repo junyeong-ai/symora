@@ -26,11 +26,15 @@ fn main() {
             .unwrap_or_else(|_| "symora=warn".into())
     };
 
+    // Logs go to stderr, always: stdout is the machine-readable JSON
+    // surface, and a single warning line interleaved there corrupts the
+    // stream every agent parses.
     tracing_subscriber::registry()
         .with(env_filter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_target(verbose)
+                .with_writer(std::io::stderr)
                 .compact(),
         )
         .init();
@@ -184,7 +188,6 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Bench(args) => commands::bench::execute(args, app).await,
 
         // Edit
-        Commands::Write(args) => commands::write::execute(args, app).await,
         Commands::Edit(args) => commands::edit::execute(args, app).await,
         Commands::Rename(args) => commands::rename::execute(args, app).await,
         Commands::Actions(args) => commands::actions::execute(args, app).await,

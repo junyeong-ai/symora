@@ -69,7 +69,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
     {
         Ok(result) => {
             // Apply workspace edits to files
-            match apply_workspace_edits(&result.changes, args.dry_run) {
+            match apply_workspace_edits(&result.changes, args.dry_run, app.root()) {
                 Ok(applied_changes) => {
                     #[cfg(unix)]
                     if !args.dry_run {

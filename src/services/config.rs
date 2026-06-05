@@ -200,6 +200,7 @@ struct RawLspConfig {
     calls_limit: Option<usize>,
     type_hierarchy_limit: Option<usize>,
     tests_limit: Option<usize>,
+    diagnostics_wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -258,6 +259,7 @@ fn merge_raw_lsp(base: RawLspConfig, overlay: RawLspConfig) -> RawLspConfig {
         calls_limit: overlay.calls_limit.or(base.calls_limit),
         type_hierarchy_limit: overlay.type_hierarchy_limit.or(base.type_hierarchy_limit),
         tests_limit: overlay.tests_limit.or(base.tests_limit),
+        diagnostics_wait_ms: overlay.diagnostics_wait_ms.or(base.diagnostics_wait_ms),
     }
 }
 
@@ -308,6 +310,10 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
                 .type_hierarchy_limit
                 .unwrap_or_else(defaults::type_hierarchy_limit),
             tests_limit: raw.lsp.tests_limit.unwrap_or_else(defaults::tests_limit),
+            diagnostics_wait_ms: raw
+                .lsp
+                .diagnostics_wait_ms
+                .unwrap_or_else(defaults::diagnostics_wait_ms),
         },
         search: SearchConfig {
             limit: raw.search.limit.unwrap_or_else(defaults::search_limit),

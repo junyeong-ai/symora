@@ -16,6 +16,10 @@ Broad-query handling, test/noise suppression, and ranking hints are centralized 
 
 `Symbol::compute_paths_for_all` (in `src/models/symbol/`) is the single source of truth for path strings like `Class/method`. Path matching (substring, suffix, exact) is what makes `--symbol` flows reliable — keep its semantics stable.
 
+## One mutation surface
+
+Every command that splices source text lives in `commands/edit.rs`, sharing one root-validated resolution path, one validation gate, one splice core (`LineSplice`), one preview format (an exact hunk derived from the splice — never a re-diff), and one typed output (`EditOutput`). Don't add a second file-writing command; add a subcommand that reduces to the splice core. Previews and safety checks (dangling references on `delete`, optional `--with-diagnostics`) run on the same path for every operation — the destructive path never gets to skip them.
+
 ## Fallback messaging on weak LSP servers
 
 Some servers don't implement call hierarchy or `textDocument/typeDefinition`. The right behavior is a structured response that names the missing capability and points to a working alternative — not a silent empty result and not a synthesized one. The `context` command is the canonical example.
