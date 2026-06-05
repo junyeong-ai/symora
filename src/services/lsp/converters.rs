@@ -219,6 +219,20 @@ pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWi
     changes
 }
 
+/// The first file create/rename/delete resource operation in a
+/// workspace edit, if any. Symora applies text edits only — a caller
+/// that ignored these would apply half an edit (references rewritten,
+/// file never renamed) and still report success, so they must refuse.
+pub(super) fn find_resource_operation(edit: &serde_json::Value) -> Option<&str> {
+    edit.get("documentChanges")
+        .and_then(|c| c.as_array())?
+        .iter()
+        .find_map(|change| match change.get("kind").and_then(|k| k.as_str()) {
+            Some(kind @ ("create" | "rename" | "delete")) => Some(kind),
+            _ => None,
+        })
+}
+
 pub(super) fn parse_text_edits(edits: &serde_json::Value) -> Vec<crate::models::lsp::TextEdit> {
     use crate::models::lsp::TextEdit as LspTextEdit;
 
@@ -329,4 +343,32 @@ pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<Signatur
             .and_then(|a| a.as_u64())
             .map(|a| a as u32),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_resource_operation;
+
+    /// Text-only edits pass; any create/rename/delete resource operation
+    /// is detected so callers refuse instead of applying half an edit.
+    #[test]
+    fn resource_operations_are_detected() {
+        let text_only = serde_json::json!({
+            "documentChanges": [
+                { "textDocument": { "uri": "file:///a.rs" }, "edits": [] }
+            ]
+        });
+        assert_eq!(find_resource_operation(&text_only), None);
+
+        let with_rename = serde_json::json!({
+            "documentChanges": [
+                { "textDocument": { "uri": "file:///a.rs" }, "edits": [] },
+                { "kind": "rename", "oldUri": "file:///a.rs", "newUri": "file:///b.rs" }
+            ]
+        });
+        assert_eq!(find_resource_operation(&with_rename), Some("rename"));
+
+        let changes_only = serde_json::json!({ "changes": { "file:///a.rs": [] } });
+        assert_eq!(find_resource_operation(&changes_only), None);
+    }
 }

@@ -863,16 +863,53 @@ async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Sy
 }
 
 /// Find the symbol at a position: column-precise first, so same-line
-/// siblings resolve to the one actually addressed, with a line-only
-/// fallback so a default column of 1 still anchors indented symbols.
+/// siblings resolve to the one actually addressed. When the column
+/// misses, falling back to line matching is allowed only while it is
+/// unambiguous — with several symbols declared on the line, guessing
+/// would edit a sibling the caller didn't address.
 async fn find_symbol_at_location(app: &App, file: &Path, line: u32, column: u32) -> Result<Symbol> {
     let symbols = app
         .lsp
         .find_symbols(file, FindSymbolsOptions::default())
         .await?;
-    crate::cli::utils::resolve_symbol_anchor(&symbols, line, column)
-        .map(|(_, _, symbol)| symbol.clone())
-        .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line))
+
+    if let Some(symbol) = crate::cli::utils::find_symbol_at_position(&symbols, line, Some(column)) {
+        return Ok(symbol.clone());
+    }
+
+    let declared = symbols_declared_on_line(&symbols, line);
+    match declared.len() {
+        // Nothing declared here: a containing multi-line symbol (a body
+        // line) is still an unambiguous target.
+        0 => crate::cli::utils::find_symbol_at_position(&symbols, line, None)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line)),
+        1 => Ok(declared[0].clone()),
+        _ => {
+            let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
+            Err(anyhow::Error::new(
+                crate::cli::OutputError::invalid(format!(
+                    "Line {line} declares multiple symbols ({}); column {column} \
+                     matches none of them",
+                    names.join(", "),
+                ))
+                .with_hint("Pass the exact column of the symbol to edit"),
+            ))
+        }
+    }
+}
+
+/// Symbols whose declaration (name position) sits on `line`, innermost
+/// scope included.
+fn symbols_declared_on_line(symbols: &[Symbol], line: u32) -> Vec<&Symbol> {
+    let mut found = Vec::new();
+    for symbol in symbols {
+        if symbol.location.line == line {
+            found.push(symbol);
+        }
+        found.extend(symbols_declared_on_line(&symbol.children, line));
+    }
+    found
 }
 
 /// Resolve full symbol from target. Auto-detects location format
@@ -1119,7 +1156,12 @@ pub fn apply_workspace_edits(
     root: &Path,
 ) -> Result<Vec<AppliedFileChange>> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut results = Vec::new();
+
+    // Two phases: validate and stage every file in memory first, write
+    // only after the whole edit checked out. A stale range in file N
+    // must not leave files 1..N-1 already rewritten while the command
+    // reports failure.
+    let mut staged = Vec::with_capacity(changes.len());
 
     for change in changes {
         let file = &change.file;
@@ -1138,16 +1180,21 @@ pub fn apply_workspace_edits(
         let content = fs::read_to_string(file)
             .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-        let new_content = apply_text_edits(&content, &change.edits);
+        let new_content = apply_text_edits(&content, &change.edits)
+            .with_context(|| format!("Invalid edit for {}", file.display()))?;
 
+        staged.push((file.clone(), new_content, change.edits.len()));
+    }
+
+    let mut results = Vec::with_capacity(staged.len());
+    for (file, new_content, edit_count) in staged {
         if !dry_run {
-            fs::write(file, &new_content)
+            fs::write(&file, &new_content)
                 .with_context(|| format!("Failed to write file: {}", file.display()))?;
         }
-
         results.push(AppliedFileChange {
-            file: file.clone(),
-            edit_count: change.edits.len(),
+            file,
+            edit_count,
             applied: !dry_run,
         });
     }
@@ -1163,15 +1210,16 @@ pub struct AppliedFileChange {
     pub applied: bool,
 }
 
-/// Apply multiple text edits to content.
-/// Edits are sorted by position (reverse order) to maintain correct offsets.
-fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
+/// Apply multiple text edits to content, sorted bottom-up so earlier
+/// edits don't shift later offsets. Every range is validated as it is
+/// resolved — a stale or inverted range aborts the whole application
+/// instead of skipping the edit and letting a partial result report
+/// success.
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
     if edits.is_empty() {
-        return content.to_string();
+        return Ok(content.to_string());
     }
 
-    // Sort edits by position in reverse order (bottom to top, right to left)
-    // This ensures earlier edits don't affect the positions of later edits
     let mut sorted_edits: Vec<_> = edits.iter().collect();
     sorted_edits.sort_by(|a, b| {
         let a_start = (a.range.start.line, a.range.start.character);
@@ -1182,37 +1230,44 @@ fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
     let mut result = content.to_string();
 
     for edit in sorted_edits {
-        let start_line = edit.range.start.line as usize;
-        let end_line = edit.range.end.line as usize;
-        let start_char = edit.range.start.character as usize;
-        let end_char = edit.range.end.character as usize;
-
-        // Calculate byte offsets
-        let start_offset = line_char_to_byte_offset(&result, start_line, start_char);
-        let end_offset = line_char_to_byte_offset(&result, end_line, end_char);
-
-        if start_offset <= end_offset && end_offset <= result.len() {
-            result.replace_range(start_offset..end_offset, &edit.new_text);
-        } else {
-            // If offsets are invalid, skip this edit with a warning
-            tracing::warn!(
-                "Invalid edit range: {:?} -> {:?} in content of {} bytes",
+        let start_offset = line_char_to_byte_offset(
+            &result,
+            edit.range.start.line as usize,
+            edit.range.start.character as usize,
+        )?;
+        let end_offset = line_char_to_byte_offset(
+            &result,
+            edit.range.end.line as usize,
+            edit.range.end.character as usize,
+        )?;
+        if start_offset > end_offset {
+            anyhow::bail!(
+                "LSP edit range {:?} is inverted; the edit was computed \
+                 against a different revision — retry",
                 edit.range,
-                (start_offset, end_offset),
-                result.len()
             );
         }
+        result.replace_range(start_offset..end_offset, &edit.new_text);
     }
 
-    result
+    Ok(result)
 }
 
-fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> usize {
+/// Byte offset for an LSP (0-indexed) line/character position.
+///
+/// A character past the end of its line clamps to the line end — that is
+/// the LSP-specified meaning of such positions, not a guess. A line past
+/// the end of the document has no specified meaning: it means the server
+/// computed the edit against a newer revision than the one on disk, and
+/// silently clamping it to EOF would apply the edit somewhere the server
+/// never asked for.
+fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> Result<usize> {
     let mut byte_offset = 0;
+    let mut lines_seen = 0;
 
-    for (current_line, line_content) in content.lines().enumerate() {
-        if current_line == line {
-            return byte_offset + char_to_byte_index(line_content, character);
+    for line_content in content.lines() {
+        if lines_seen == line {
+            return Ok(byte_offset + char_to_byte_index(line_content, character));
         }
         byte_offset += line_content.len();
         // Account for actual line ending bytes (\r\n = 2, \n = 1)
@@ -1222,9 +1277,22 @@ fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> usi
         } else if remaining.starts_with(b"\n") {
             byte_offset += 1;
         }
+        lines_seen += 1;
     }
 
-    content.len()
+    // The position just past the final newline (or the start of an empty
+    // document) is the canonical LSP end-of-document position used for
+    // appends.
+    if line == lines_seen && (content.is_empty() || content.ends_with('\n')) {
+        return Ok(content.len());
+    }
+
+    anyhow::bail!(
+        "LSP edit range line {} exceeds the document's {} lines; the edit \
+         was computed against a different revision — retry",
+        line + 1,
+        lines_seen,
+    )
 }
 
 #[cfg(test)]
@@ -1426,6 +1494,59 @@ mod tests {
         let span = LineRange { start: 1, end: 2 };
         let err = ensure_exclusive_line_ownership(&content, &sym, &span).unwrap_err();
         assert!(err.to_string().contains("shares its last line"));
+    }
+
+    /// A symbol on a multi-symbol line resolves only with a matching
+    /// column; nothing is guessed on a precise miss.
+    #[test]
+    fn declared_on_line_finds_same_line_siblings() {
+        let a = Symbol::new(
+            "alpha".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/a.rs"), 1, 4, 1, 1, 1, 20),
+        );
+        let b = Symbol::new(
+            "beta".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/a.rs"), 1, 28, 1, 25, 1, 44),
+        );
+        let symbols = vec![a, b];
+        let found = symbols_declared_on_line(&symbols, 1);
+        assert_eq!(found.len(), 2);
+        assert!(symbols_declared_on_line(&symbols, 2).is_empty());
+    }
+
+    /// Workspace-edit ranges are validated, never clamped: the canonical
+    /// end-of-document append position works, anything past it is stale.
+    #[test]
+    fn lsp_offsets_validate_instead_of_clamping() {
+        // Char past line end clamps per the LSP spec.
+        assert_eq!(line_char_to_byte_offset("ab\ncd\n", 0, 99).unwrap(), 2);
+        // Canonical end-of-document position (after the final newline).
+        assert_eq!(line_char_to_byte_offset("ab\ncd\n", 2, 0).unwrap(), 6);
+        assert_eq!(line_char_to_byte_offset("", 0, 0).unwrap(), 0);
+        // A line past EOF is a stale revision, not an append.
+        assert!(line_char_to_byte_offset("ab\ncd\n", 3, 0).is_err());
+        assert!(line_char_to_byte_offset("ab\ncd", 2, 0).is_err());
+    }
+
+    #[test]
+    fn stale_text_edit_aborts_instead_of_partially_applying() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        let good = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 2)),
+            new_text: "xy".to_string(),
+        };
+        let stale = TextEdit {
+            range: LspRange::new(Position::new(9, 0), Position::new(9, 1)),
+            new_text: "z".to_string(),
+        };
+        assert_eq!(
+            apply_text_edits("ab\ncd\n", std::slice::from_ref(&good)).unwrap(),
+            "xy\ncd\n"
+        );
+        let err = apply_text_edits("ab\ncd\n", &[good, stale]).unwrap_err();
+        assert!(err.to_string().contains("different revision"));
     }
 
     #[test]

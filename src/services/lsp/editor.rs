@@ -377,6 +377,14 @@ pub(super) async fn apply_code_action(
                     ));
                 };
 
+                if let Some(kind) = find_resource_operation(&edit) {
+                    return Err(LspError::Protocol(format!(
+                        "Code action requires a file {kind} operation, which \
+                         symora does not apply. Pick a different action from \
+                         `actions list`.",
+                    )));
+                }
+
                 Ok(ApplyActionResult {
                     changes: parse_workspace_edit(&edit),
                 })
