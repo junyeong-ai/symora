@@ -1,6 +1,6 @@
 ---
 name: symora
-version: 0.9.0
+version: 0.10.0
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
 when_to_use: User asks "where is this defined", "who calls this", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
