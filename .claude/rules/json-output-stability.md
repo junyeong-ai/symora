@@ -2,7 +2,7 @@
 paths:
   - "src/cli/response/**/*.rs"
   - "src/cli/output*.rs"
-  - "src/daemon/wire.rs"
+  - "src/daemon/wire*.rs"
   - "src/mcp/tools/**/*.rs"
 ---
 
@@ -17,6 +17,8 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 - `items` — the result array
 - `truncated` — boolean indicating `showing < count`
 - `hints` — optional next-step suggestions for the agent
+- `next_commands` — optional ready-to-run follow-up commands (omitted when empty)
+- `indexing` — degradation marker, present only when the answer was computed under degraded workspace indexing (e.g. `"timed_out"`)
 
 If a new list response needs a different shape, that's a strong signal the underlying command should be reshaped instead.
 
@@ -24,11 +26,10 @@ If a new list response needs a different shape, that's a strong signal the under
 
 Omit optional fields with `#[serde(skip_serializing_if = "Option::is_none")]`. Empty strings, zero values, or empty arrays for absent data force agents to write defensive parsing — don't make them.
 
-## Wire vs response types
-
-Two surfaces emit JSON:
+## Surfaces that emit JSON
 
 - `src/cli/response/` — final user-facing output. Stability bar: API.
-- `src/daemon/wire.rs` — daemon RPC envelope. Stability bar: API for the same reason.
+- `src/daemon/wire.rs` / `wire_error.rs` — daemon RPC envelope. Stability bar: API for the same reason.
+- `src/mcp/tools/handlers.rs` — captures the shared command-layer JSON verbatim, so the MCP surface aligns structurally rather than by a parallel definition.
 
-These two layers must not drift from each other. If a CLI command grows a new output field, the wire type and the MCP handler that captures it stay aligned.
+The first two must not drift from each other: if a CLI command grows a new output field, the wire type stays aligned. The MCP surface inherits the shape for free by capturing — don't reshape it there.

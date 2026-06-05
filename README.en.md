@@ -70,7 +70,7 @@ symora hover src/main.rs:10:5
 symora callers src/main.rs:10:5
 symora callees src/main.rs:10:5
 symora typedef src/main.rs:10:5
-symora impl src/main.rs:10:5
+symora implementations src/main.rs:10:5
 symora rename src/main.rs:10:5 new_name
 ```
 
@@ -145,7 +145,7 @@ Important characteristics:
 Global flags:
 
 ```bash
-symora -c search symbols AuthUser   # compact JSON
+symora --format compact search symbols AuthUser   # compact JSON
 symora -q refs src/main.rs:10:5     # errors only
 symora -v status                    # debug logging
 ```
@@ -216,10 +216,46 @@ symora daemon status
 
 ## Installation
 
-Build from source:
+One-shot install (prebuilt binary, SHA-256 verified; prompts let you pick a source build and install the Claude Code skill — defaults apply without a TTY):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
+```
+
+Useful variants:
+
+```bash
+# Pin a release / verify GitHub build provenance (needs gh CLI)
+curl -fsSL .../install.sh | bash -s -- --version 0.9.0 --verify-attestations
+
+# Source build + skill, no prompts (no checkout needed — builds the release tag from git)
+curl -fsSL .../install.sh | bash -s -- --source --skill
+
+# Non-interactive (CI): defaults to prebuilt, skill skipped
+curl -fsSL .../install.sh | bash -s -- --prebuilt --no-skill
+```
+
+Platforms without a prebuilt (Intel Macs, etc.) fall back to a source build automatically (requires Rust). Inside a checkout, `./scripts/install.sh --source` builds the working tree, or:
 
 ```bash
 cargo install --path .
+```
+
+```bash
+# Change install location
+curl -fsSL .../install.sh | SYMORA_INSTALL_DIR=/usr/local/bin bash
+```
+
+The binary owns the rest of its lifecycle:
+
+```bash
+symora setup                          # interactive: skill + language servers
+symora setup skill                    # skill only
+symora setup deps --group core       # dependencies only (core / core-jvm / core-web / core-systems / all)
+symora self update                    # in-place upgrade to the latest release
+symora self update --version 0.9.0   # pin a version
+symora self uninstall                 # remove binary + skill + config + daemon data
+symora self uninstall --keep-skill --keep-config
 ```
 
 Check environment and language servers:

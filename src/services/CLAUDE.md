@@ -22,7 +22,7 @@ Both must produce identical results for the same inputs. Anything that diverges 
 
 ## Symbol cache invalidation
 
-`SymbolCache` keys on `(path, content_hash)`. Editing a file changes the hash and invalidates the entry — don't add path-only invalidation paths that break this. Eviction is LRU with a configurable cap; size limits are enforced, not advisory.
+`SymbolCache` keys on `(path, content_hash)`. Editing a file changes the hash and invalidates the entry — don't add path-only invalidation paths that break this. Eviction is oldest-first by insertion time (`created_at`, not touched on read) with a configurable `max_entries` cap; size limits are enforced, not advisory.
 
 ## Fallback strategy
 

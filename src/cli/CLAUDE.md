@@ -6,15 +6,7 @@ This layer turns parsed args into JSON output. The contract with downstream agen
 
 All command output goes through `OutputContext` (`src/cli/output.rs`) and the `Section<T>` / `*Output` types in `src/cli/response/`. Build structured values, hand them to the output context — don't `println!` JSON yourself. Project-relative paths, compact mode, and quiet mode all branch inside the context.
 
-List-style responses must keep these field names:
-
-- `count` — total matches the command found
-- `showing` — number actually emitted (may be `< count`)
-- `items` — the array
-- `truncated` — boolean
-- `hints` — optional agent-facing next-step suggestions
-
-If you add a new list response, follow the same shape. Renaming any of these is a breaking change.
+List responses wrap items in `Section<T>`; its fields and stability rules are the single source of truth in `.claude/rules/json-output-stability.md` and the `Section<T>` doc-comment. Reuse `Section<T>` for any new list response rather than hand-rolling one.
 
 ## Discovery heuristics
 

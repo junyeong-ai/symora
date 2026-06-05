@@ -28,8 +28,7 @@ A single missed conversion shifts every reference, anchor, and edit by one line 
 
 ## Where conversions live
 
-- `src/cli/location.rs` — parses `file:line:column` strings.
-- LSP request builders in `src/services/lsp/` and `src/infra/lsp/` — convert outgoing positions.
-- LSP response handlers — convert incoming positions back.
+- `src/cli/location.rs` — parses `file:line:column` input strings (1-indexed).
+- `src/services/lsp/converters.rs` — the canonical CLI↔LSP boundary: `+1` on the way out of LSP, `saturating_sub(1)` on the way in.
 
-If you find a conversion in any other file, that's a layering bug.
+Keep conversions on this boundary. A `+1`/`-1` on a line or column anywhere else is a layering bug.
