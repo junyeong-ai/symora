@@ -2,6 +2,7 @@
 paths:
   - "src/cli/response/**/*.rs"
   - "src/cli/output*.rs"
+  - "src/cli/commands/**/*.rs"
   - "src/daemon/wire*.rs"
   - "src/mcp/tools/**/*.rs"
 ---
@@ -19,6 +20,7 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 - `hints` — optional next-step suggestions for the agent
 - `next_commands` — optional ready-to-run follow-up commands (omitted when empty)
 - `indexing` — degradation marker, present only when the answer was computed under degraded workspace indexing (e.g. `"timed_out"`)
+- `error` — structured `{code, message, hint}` failure, omitted on success
 
 If a new list response needs a different shape, that's a strong signal the underlying command should be reshaped instead.
 

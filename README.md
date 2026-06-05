@@ -282,7 +282,7 @@ symora doctor          # 설치된 LSP / 누락된 LSP, 플랫폼별 설치 명�
 
 ## MCP 서버
 
-Symora는 Model Context Protocol 서버로도 동작합니다. CLI와 동일한 명령군이 22개의 MCP 도구로 노출되며, 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
+Symora는 Model Context Protocol 서버로도 동작합니다. CLI와 동일한 명령군이 MCP 도구로 노출되며, 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
 
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor 등이 기본 사용)

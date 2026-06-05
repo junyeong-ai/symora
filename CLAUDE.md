@@ -2,7 +2,7 @@
 
 Symora is a code-intelligence backend that an AI agent drives over two surfaces: a JSON-emitting CLI (`symora …`) and an MCP server (`symora mcp serve`). Both surfaces share one in-process command layer, so anything that holds for the CLI also holds for the MCP tool of the same shape.
 
-This file contains repo-wide invariants. Module-specific rules live in nested `CLAUDE.md` files (`src/cli/CLAUDE.md`, `src/services/CLAUDE.md`, `src/mcp/CLAUDE.md`) and load on demand when you read files in those directories.
+This file contains repo-wide invariants. Module-specific rules live in nested `CLAUDE.md` files under `src/` and load on demand when you read files in those directories.
 
 ## Invariants
 

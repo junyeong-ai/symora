@@ -30,5 +30,6 @@ A single missed conversion shifts every reference, anchor, and edit by one line 
 
 - `src/cli/location.rs` — parses `file:line:column` input strings (1-indexed).
 - `src/services/lsp/converters.rs` — the canonical CLI↔LSP boundary: `+1` on the way out of LSP, `saturating_sub(1)` on the way in.
+- `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the daemon wire carries 1-indexed display values; the client side converts back to 0-indexed model ranges.
 
-Keep conversions on this boundary. A `+1`/`-1` on a line or column anywhere else is a layering bug.
+Keep conversions on these boundaries. A `+1`/`-1` on a line or column anywhere else is a layering bug. (Converting a 1-indexed line to a 0-based array index inside a command is not a boundary conversion and is fine.)
