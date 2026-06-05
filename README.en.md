@@ -271,7 +271,7 @@ symora doctor
 
 ## MCP Server
 
-Symora also runs as a Model Context Protocol server. The same command set is exposed as 22 MCP tools that share the in-process command layer, so both surfaces produce identical results.
+Symora also runs as a Model Context Protocol server. The same command set is exposed as MCP tools that share the in-process command layer, so both surfaces produce identical results.
 
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor, etc. use this by default)
