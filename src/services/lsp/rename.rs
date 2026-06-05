@@ -153,6 +153,14 @@ pub(super) async fn rename(
         ));
     }
 
+    if let Some(kind) = find_resource_operation(&result) {
+        return Err(LspError::Protocol(format!(
+            "Rename requires a file {kind} operation, which symora does not \
+             apply. Perform the file operation manually, then rename the \
+             remaining references.",
+        )));
+    }
+
     let changes = parse_workspace_edit(&result);
     Ok(RenameResult { changes })
 }
