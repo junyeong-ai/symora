@@ -27,7 +27,7 @@ embeddings = ["dep:fastembed"]
 
 [dependencies]
 # Async Runtime (1.51.x is the latest LTS line, supported through 2027/03)
-tokio = { version = "~1.51", features = ["full", "process", "sync"] }
+tokio = { version = "~1.52", features = ["full", "process", "sync"] }
 futures = "0.3.32"
 
 # CLI
