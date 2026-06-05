@@ -32,6 +32,42 @@ pub fn location_schema() -> Value {
     )
 }
 
+/// Output envelope for list-shaped tools — the `Section<T>` contract.
+/// `items` stays loosely typed on purpose: overclaiming the item shape
+/// here would drift from the real output types, and a wrong schema is
+/// worse than a loose one. Nothing is `required` because a failed call
+/// emits `{ "error": ... }` instead of the list fields.
+pub fn section_output_schema(items_description: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "count": { "type": "integer", "description": "Total matches found" },
+            "showing": { "type": "integer", "description": "Number emitted in items" },
+            "items": {
+                "type": "array",
+                "items": { "type": "object" },
+                "description": items_description,
+            },
+            "truncated": {
+                "type": "boolean",
+                "description": "Present (and true) only when showing < count",
+            },
+            "hints": { "type": "array", "items": { "type": "string" } },
+            "next_commands": { "type": "array", "items": { "type": "string" } },
+            "indexing": {
+                "type": "string",
+                "enum": ["timed_out"],
+                "description": "Present only when computed under degraded \
+                                workspace indexing — results are a lower bound",
+            },
+            "error": {
+                "type": "object",
+                "description": "Structured failure: { code, message, hint? }",
+            },
+        },
+    })
+}
+
 pub fn with_extra(mut base: Value, extras: &[(&str, &str, &str)]) -> Value {
     let props = base
         .get_mut("properties")

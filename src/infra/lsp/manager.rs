@@ -13,36 +13,36 @@ use crate::models::symbol::Language;
 
 enum ClientState {
     Initializing(Arc<Notify>),
-    Ready {
+    Live {
         client: Arc<LspClient>,
         last_used: Instant,
     },
 }
 
 impl ClientState {
-    fn ready(client: Arc<LspClient>) -> Self {
-        Self::Ready {
+    fn live(client: Arc<LspClient>) -> Self {
+        Self::Live {
             client,
             last_used: Instant::now(),
         }
     }
 
     fn touch(&mut self) {
-        if let Self::Ready { last_used, .. } = self {
+        if let Self::Live { last_used, .. } = self {
             *last_used = Instant::now();
         }
     }
 
     fn idle_duration(&self) -> Duration {
         match self {
-            Self::Ready { last_used, .. } => last_used.elapsed(),
+            Self::Live { last_used, .. } => last_used.elapsed(),
             Self::Initializing(_) => Duration::ZERO,
         }
     }
 
     fn client(&self) -> Option<Arc<LspClient>> {
         match self {
-            Self::Ready { client, .. } => Some(Arc::clone(client)),
+            Self::Live { client, .. } => Some(Arc::clone(client)),
             Self::Initializing(_) => None,
         }
     }
@@ -72,7 +72,7 @@ impl LspManager {
             let (client_opt, notify_opt) = {
                 let clients = self.clients.read().await;
                 match clients.get(&language) {
-                    Some(ClientState::Ready { client, .. }) => (Some(Arc::clone(client)), None),
+                    Some(ClientState::Live { client, .. }) => (Some(Arc::clone(client)), None),
                     Some(ClientState::Initializing(notify)) => (None, Some(Arc::clone(notify))),
                     None => (None, None),
                 }
@@ -103,7 +103,26 @@ impl LspManager {
                 if clients.contains_key(&language) {
                     continue; // Race: another thread started, retry
                 }
+                let cap = self.runtime_config.max_concurrent_servers.max(1);
                 let evict = self.pick_eviction_target(&clients);
+                if clients.len() >= cap && evict.is_none() {
+                    // At capacity with nothing evictable: every occupant
+                    // is mid-startup. Wait for one to settle instead of
+                    // exceeding the cap with another Initializing entry.
+                    let waiter = clients.values().find_map(|state| match state {
+                        ClientState::Initializing(n) => Some(Arc::clone(n)),
+                        _ => None,
+                    });
+                    drop(clients);
+                    if let Some(waiter) = waiter {
+                        // Timeout guards the registration race between
+                        // releasing the lock and polling the Notified
+                        // future; the loop re-checks either way.
+                        let _ = tokio::time::timeout(Duration::from_millis(250), waiter.notified())
+                            .await;
+                    }
+                    continue;
+                }
                 clients.insert(language, ClientState::Initializing(Arc::clone(&notify)));
                 evict
             };
@@ -126,6 +145,15 @@ impl LspManager {
     /// Pick the least-recently-used Ready client when the pool is full.
     /// Returns `None` when there's still headroom under
     /// `max_concurrent_servers`.
+    ///
+    /// Deliberately NOT keyed on `IndexingState`: `Initializing` is
+    /// already immune (the `_ => None` arm below), and `InProgress` is
+    /// self-bounding — `await_indexing_signal` races an unconditional sleep,
+    /// so a hung server transitions to `TimedOut` and becomes evictable
+    /// on its own. Adding an `InProgress` immunity would make a full pool
+    /// of indexing clients unevictable. When the pool is at capacity and
+    /// every occupant is `Initializing` (this returns `None`), `get_client`
+    /// waits for one to settle rather than exceeding the cap.
     fn pick_eviction_target(&self, clients: &HashMap<Language, ClientState>) -> Option<Language> {
         let cap = self.runtime_config.max_concurrent_servers.max(1);
         if clients.len() < cap {
@@ -134,7 +162,7 @@ impl LspManager {
         clients
             .iter()
             .filter_map(|(lang, state)| match state {
-                ClientState::Ready { last_used, .. } => Some((*lang, *last_used)),
+                ClientState::Live { last_used, .. } => Some((*lang, *last_used)),
                 _ => None,
             })
             .min_by_key(|(_, last_used)| *last_used)
@@ -151,7 +179,7 @@ impl LspManager {
         let mut clients = self.clients.write().await;
         match &result {
             Ok(client) => {
-                clients.insert(language, ClientState::ready(Arc::clone(client)));
+                clients.insert(language, ClientState::live(Arc::clone(client)));
             }
             Err(_) => {
                 clients.remove(&language);
@@ -168,19 +196,18 @@ impl LspManager {
             .get(&language)
             .ok_or_else(|| LspError::UnsupportedLanguage(format!("{:?}", language)))?;
 
-        if !config.is_installed() {
-            return Err(LspError::ServerNotInstalled {
-                name: config.name.to_string(),
-                install_hint: config.install.current().to_string(),
-            });
-        }
+        // Resolution is the only install gate: an executable we can
+        // resolve is "installed", and spawning it is the truth test.
+        let command = config.resolve()?;
 
         let client = LspClient::new(
             language,
             self.root.clone(),
             Arc::clone(&self.runtime_config),
         );
-        client.start(config.command, config.args).await?;
+        client
+            .start(&command.to_string_lossy(), config.args)
+            .await?;
 
         tracing::info!("{:?} language server started", language);
         Ok(client)
@@ -254,6 +281,13 @@ impl LspManager {
             .unwrap_or(false)
     }
 
+    /// Read-only peek at a pooled client — never starts one. Status
+    /// queries must not have the side effect of booting a server.
+    pub async fn peek_client(&self, language: Language) -> Option<Arc<LspClient>> {
+        let clients = self.clients.read().await;
+        clients.get(&language).and_then(|state| state.client())
+    }
+
     pub async fn is_running(&self, language: Language) -> bool {
         let client = {
             let clients = self.clients.read().await;
@@ -273,23 +307,20 @@ impl LspManager {
             None => return ServerStatusDetail::NotSupported,
         };
 
-        if !config.is_installed() {
-            return ServerStatusDetail::NotInstalled {
-                name: config.name.to_string(),
-                install_hint: config.install.current().to_string(),
-            };
+        if let Err(LspError::ServerNotInstalled { name, install_hint }) = config.resolve() {
+            return ServerStatusDetail::NotInstalled { name, install_hint };
         }
 
         if self.is_running(language).await {
             return ServerStatusDetail::Running {
-                name: config.name.to_string(),
-                version: config.version(),
+                name: config.display_name.to_string(),
+                version: config.probe_version(),
             };
         }
 
         ServerStatusDetail::Stopped {
-            name: config.name.to_string(),
-            version: config.version(),
+            name: config.display_name.to_string(),
+            version: config.probe_version(),
         }
     }
 
@@ -416,6 +447,36 @@ impl std::fmt::Display for ServerStatusDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manager_with_cap(cap: usize) -> LspManager {
+        let mut config = crate::config::LspRuntimeConfig::default();
+        config.max_concurrent_servers = cap;
+        LspManager::new(PathBuf::from("/test"), Arc::new(config))
+    }
+
+    #[test]
+    fn eviction_returns_none_under_capacity() {
+        let manager = manager_with_cap(4);
+        let mut clients = HashMap::new();
+        clients.insert(
+            Language::Rust,
+            ClientState::Initializing(Arc::new(Notify::new())),
+        );
+        assert_eq!(manager.pick_eviction_target(&clients), None);
+    }
+
+    #[test]
+    fn eviction_never_selects_initializing_clients() {
+        let manager = manager_with_cap(1);
+        let mut clients = HashMap::new();
+        clients.insert(
+            Language::Rust,
+            ClientState::Initializing(Arc::new(Notify::new())),
+        );
+        // Pool is at capacity but the only occupant is mid-startup:
+        // nothing is evictable.
+        assert_eq!(manager.pick_eviction_target(&clients), None);
+    }
 
     #[test]
     fn test_server_status_display() {

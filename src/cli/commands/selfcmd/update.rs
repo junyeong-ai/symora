@@ -14,7 +14,7 @@ use crate::services::dist::{
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
-    /// Specific version to install (e.g. `0.7.0`). Defaults to the latest release.
+    /// Specific version to install (e.g. `0.9.0`). Defaults to the latest release.
     #[arg(long, value_name = "VER")]
     pub version: Option<String>,
 

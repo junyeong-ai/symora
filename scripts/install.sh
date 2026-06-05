@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Symora bootstrap installer.
 #
-# Downloads the official prebuilt binary, verifies the SHA-256, and places
-# it on disk. Everything else (skill install, language-server deps,
-# updates, removal) is owned by the binary itself:
+# Gets a verified binary onto disk — prebuilt download (SHA-256 checked,
+# optionally provenance-verified) or a source build — then optionally
+# installs the Claude Code skill by delegating to the binary itself.
+# Everything past bootstrap is owned by the binary:
 #
 #   symora setup            # interactive: skill + dependencies
-#   symora setup skill      # skill only
+#   symora setup skill      # skill only (version-aware, backed up)
 #   symora setup deps ...   # dependencies only
 #   symora self update      # in-place upgrade
 #   symora self uninstall   # remove every trace
@@ -14,20 +15,31 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
-#     | bash -s -- --version 0.7.0 --verify-attestations
+#     | bash -s -- --source --skill
+#
+# Piped through curl the prompts still work: input is read from /dev/tty,
+# so one terminal command covers the interactive path; without a TTY (CI)
+# every prompt takes its safe default.
 #
 # Run with --help for the full flag inventory.
 
 set -Eeuo pipefail
+# errexit does not propagate into $(...) on bash < 4.4 — enable where
+# possible, and keep every failure point below explicitly guarded so the
+# capture-context functions are safe on macOS bash 3.2 regardless.
+shopt -s inherit_errexit 2>/dev/null || true
 
 readonly REPO="junyeong-ai/symora"
+readonly REPO_URL="https://github.com/junyeong-ai/symora"
 readonly BINARY_NAME="symora"
 readonly RELEASES_URL="https://github.com/${REPO}/releases"
 readonly API_LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
 
 INSTALL_DIR="${SYMORA_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
 VERSION="${SYMORA_VERSION:-}"
+VERSION_REQUESTED="$VERSION"
 INSTALL_METHOD=""
+SKILL_MODE="ask" # ask | yes | no
 VERIFY_ATTESTATIONS=false
 NO_COLOR="${NO_COLOR:-}"
 
@@ -96,15 +108,24 @@ Usage:
   install.sh [OPTIONS]
 
 Options:
-      --version <ver>          Install a specific release (e.g. 0.7.0). Default: latest.
+      --version <ver>          Install a specific release (e.g. 0.9.0). Default: latest.
       --install-dir <path>     Where to place the binary. Default: \$HOME/.local/bin.
-      --prebuilt               Force download of a prebuilt binary.
-      --source                 Force a build from source (requires a checkout + Rust).
+      --prebuilt               Download the prebuilt binary (no prompt).
+      --source                 Build from source (no prompt). Works inside a checkout
+                               or anywhere with Rust — outside a checkout the pinned
+                               release is built straight from the git tag.
+      --skill                  Install the Claude Code skill without asking.
+      --no-skill               Skip the skill step entirely.
       --verify-attestations    Verify GitHub build provenance with 'gh' (must be installed).
       --no-color               Disable ANSI color in output.
   -h, --help                   Show this help.
 
-After install, run:
+Without --prebuilt/--source the method is chosen interactively on a TTY
+(prompts read /dev/tty, so 'curl | bash' stays interactive) and defaults
+to prebuilt otherwise. The skill step delegates to 'symora setup skill',
+which owns version comparison, backups, and updates.
+
+After install, the binary owns its lifecycle:
   symora setup                 Interactive: install Claude Code skill and language servers
   symora self update           Upgrade in place
   symora self uninstall        Remove the binary, skill, config, and daemon data
@@ -117,7 +138,9 @@ Environment overrides (flags win):
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | bash
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh \\
-      | bash -s -- --version 0.7.0 --verify-attestations
+      | bash -s -- --version 0.9.0 --verify-attestations
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh \\
+      | bash -s -- --source --skill
 EOF
 }
 
@@ -126,12 +149,14 @@ EOF
 parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --version)              VERSION="${2:?--version requires a value}"; VERSION="${VERSION#v}"; shift 2 ;;
-            --version=*)            VERSION="${1#*=}"; VERSION="${VERSION#v}"; shift ;;
+            --version)              VERSION="${2:?--version requires a value}"; VERSION="${VERSION#v}"; VERSION_REQUESTED="$VERSION"; shift 2 ;;
+            --version=*)            VERSION="${1#*=}"; VERSION="${VERSION#v}"; VERSION_REQUESTED="$VERSION"; shift ;;
             --install-dir)          INSTALL_DIR="${2:?--install-dir requires a value}"; shift 2 ;;
             --install-dir=*)        INSTALL_DIR="${1#*=}"; shift ;;
             --prebuilt)             INSTALL_METHOD="prebuilt"; shift ;;
             --source)               INSTALL_METHOD="source"; shift ;;
+            --skill)                SKILL_MODE="yes"; shift ;;
+            --no-skill)             SKILL_MODE="no"; shift ;;
             --verify-attestations)  VERIFY_ATTESTATIONS=true; shift ;;
             --no-color)             NO_COLOR=1; shift ;;
             -h|--help)              usage; exit 0 ;;
@@ -141,7 +166,12 @@ parse_args() {
 
     if [ "$VERSION" = "latest" ]; then
         VERSION=""
+        VERSION_REQUESTED=""
     fi
+
+    case "$INSTALL_DIR" in
+        -*) log_die "Invalid --install-dir: $INSTALL_DIR (must not start with '-')" ;;
+    esac
 }
 
 # ─── path resolution ────────────────────────────────────────────────────────
@@ -176,32 +206,55 @@ display_path() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# A controlling terminal we can prompt on — independent of stdin, which
+# is the script stream itself under `curl | bash`.
+have_tty() { [ -e /dev/tty ] && ( : >/dev/tty ) 2>/dev/null; }
+
+# Prompt on /dev/tty. An explicit empty Enter takes `enter_default`;
+# EOF / a closed tty takes `eof_default` — they are different intents
+# (a vanished terminal must never be read as consent).
+prompt_choice() {
+    local prompt="$1" enter_default="$2" eof_default="${3:-$2}" choice=""
+    if ! have_tty; then
+        printf '%s\n' "$eof_default"
+        return 0
+    fi
+    printf '%s' "$prompt" >/dev/tty
+    if IFS= read -r choice </dev/tty; then
+        printf '%s\n' "${choice:-$enter_default}"
+    else
+        printf '\n' >/dev/tty
+        printf '%s\n' "$eof_default"
+    fi
+}
+
 # ─── platform detection ─────────────────────────────────────────────────────
 
-detect_target() {
+# Target triple for the prebuilt archive; empty when no prebuilt is
+# published for this machine (the source path covers it instead).
+prebuilt_target() {
     local os arch
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
     arch="$(uname -m)"
 
     case "$arch" in
-        x86_64|amd64)         arch="x86_64" ;;
-        arm64|aarch64)        arch="aarch64" ;;
-        *) log_die "Unsupported CPU architecture: $arch" ;;
+        x86_64|amd64)  arch="x86_64" ;;
+        arm64|aarch64) arch="aarch64" ;;
+        *) return 0 ;;
     esac
 
     case "$os" in
         darwin)
-            if [ "$arch" != "aarch64" ]; then
-                log_die "Prebuilt binaries are published for Apple Silicon only.
-Intel Macs: rerun with --source inside a symora checkout, or build with 'cargo install --path .'"
+            if [ "$arch" = "aarch64" ]; then
+                printf '%s\n' "aarch64-apple-darwin"
             fi
-            printf '%s\n' "aarch64-apple-darwin"
             ;;
-        linux)
-            printf '%s-unknown-linux-gnu\n' "$arch"
-            ;;
-        *) log_die "Unsupported OS: $os" ;;
+        linux) printf '%s-unknown-linux-gnu\n' "$arch" ;;
     esac
+    # Empty output = no prebuilt for this platform; that is an answer,
+    # not an error — a non-zero status here would abort the installer
+    # under `set -e` on exactly the platforms the source fallback serves.
+    return 0
 }
 
 # ─── network ────────────────────────────────────────────────────────────────
@@ -267,15 +320,23 @@ verify_checksum() {
     base="$(basename "$archive")"
 
     log_info "🔐 verifying SHA-256"
+    # Compare digests directly: `-c` would verify whatever filename the
+    # downloaded .sha256 happens to name, not necessarily this archive.
+    local expected actual
+    expected="$(awk 'NR==1 { print tolower($1) }' "$dir/${base}.sha256")"
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] \
+        || log_die "Malformed checksum file for $base"
+
     if have_cmd sha256sum; then
-        ( cd "$dir" && sha256sum -c "${base}.sha256" >/dev/null ) \
-            || log_die "Checksum verification failed for $base"
+        actual="$(sha256sum "$archive" | awk '{ print tolower($1) }')"
     elif have_cmd shasum; then
-        ( cd "$dir" && shasum -a 256 -c "${base}.sha256" >/dev/null ) \
-            || log_die "Checksum verification failed for $base"
+        actual="$(shasum -a 256 "$archive" | awk '{ print tolower($1) }')"
     else
         log_die "Neither sha256sum nor shasum available — cannot verify download"
     fi
+
+    [ "$actual" = "$expected" ] \
+        || log_die "Checksum verification failed for $base (expected $expected, got $actual)"
     log_ok "  checksum OK"
 }
 
@@ -295,21 +356,40 @@ extract_archive() {
     local extract_dir="$TMP_ROOT/extract"
     mkdir -p "$extract_dir"
     log_info "📦 extracting"
-    tar -xzf "$archive" -C "$extract_dir"
+    tar -xzf "$archive" -C "$extract_dir" || log_die "Archive extraction failed"
     local bin="$extract_dir/$BINARY_NAME"
     [ -x "$bin" ] || log_die "Archive did not contain executable $BINARY_NAME"
     printf '%s\n' "$bin"
 }
 
+# Source build. Inside a checkout it builds the working tree; anywhere
+# else it builds the pinned release tag straight from git, so the curl
+# one-shot covers machines without a prebuilt (e.g. Intel macs).
 build_from_source() {
-    if [ -z "$PROJECT_ROOT" ] || [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
-        log_die "Source build requires running this script from inside a symora checkout."
-    fi
     have_cmd cargo || log_die "Source build requires Rust + cargo (https://rustup.rs)"
 
-    log_info "🔨 building from source ($PROJECT_ROOT)"
-    ( cd "$PROJECT_ROOT" && cargo build --release ) >&2
-    printf '%s\n' "$PROJECT_ROOT/target/release/$BINARY_NAME"
+    if [ -n "$PROJECT_ROOT" ] && [ -f "$PROJECT_ROOT/Cargo.toml" ]; then
+        if [ -n "$VERSION_REQUESTED" ]; then
+            log_warn "--version $VERSION_REQUESTED is ignored inside a checkout — building the working tree"
+        fi
+        log_info "🔨 building the working tree ($PROJECT_ROOT)"
+        ( cd "$PROJECT_ROOT" && cargo build --release ) >&2 \
+            || log_die "cargo build failed"
+        local built="$PROJECT_ROOT/target/release/$BINARY_NAME"
+        [ -x "$built" ] || log_die "Build produced no executable at $built"
+        printf '%s\n' "$built"
+        return 0
+    fi
+
+    [ -n "$VERSION" ] || log_die "Could not resolve a release to build.
+Pass --version vX.Y.Z — refusing to build an arbitrary branch."
+
+    local cargo_root="$TMP_ROOT/cargo-root"
+    log_info "🔨 building v$VERSION from $REPO_URL (this compiles the release — takes a few minutes)"
+    cargo install --locked --git "$REPO_URL" --tag "v$VERSION" \
+        --root "$cargo_root" "$BINARY_NAME" >&2 \
+        || log_die "cargo install from git failed"
+    printf '%s\n' "$cargo_root/bin/$BINARY_NAME"
 }
 
 stop_running_daemon() {
@@ -330,27 +410,92 @@ install_binary() {
         codesign --force --deep --sign - "$INSTALL_DIR/$BINARY_NAME" 2>/dev/null || true
     fi
 
+    # An installed binary that cannot run is a failed install, not a
+    # warning — fail here, before the skill step would mask it.
+    "$INSTALL_DIR/$BINARY_NAME" --version >/dev/null 2>&1 \
+        || log_die "Installed binary failed to run: $INSTALL_DIR/$BINARY_NAME"
+
     log_ok "✓ installed $(display_path "$INSTALL_DIR")/$BINARY_NAME"
 }
 
 select_install_method() {
-    local method="$INSTALL_METHOD"
-    if [ -n "$method" ]; then
-        printf '%s\n' "$method"
+    local target="$1"
+
+    if [ -n "$INSTALL_METHOD" ]; then
+        printf '%s\n' "$INSTALL_METHOD"
         return 0
     fi
 
     if ! have_cmd curl; then
-        if [ -n "$PROJECT_ROOT" ]; then
-            log_warn "curl unavailable — falling back to source build"
-            printf 'source\n'
-        else
-            log_die "curl is required for prebuilt downloads (or run from a checkout with --source)"
-        fi
+        log_warn "curl unavailable — falling back to source build"
+        printf 'source\n'
+        return 0
+    fi
+
+    if [ -z "$target" ]; then
+        log_warn "No prebuilt binary is published for this platform — building from source"
+        printf 'source\n'
+        return 0
+    fi
+
+    if have_tty; then
+        {
+            log ""
+            log "Installation method:"
+            log "  [1] Prebuilt binary  (recommended — fast, SHA-256 verified)"
+            log "  [2] Build from source (requires Rust; compiles the release tag)"
+            log ""
+        }
+        local choice
+        choice="$(prompt_choice "Choose [1-2] (default: 1): " "1")"
+        case "$choice" in
+            2)    printf 'source\n' ;;
+            1|"") printf 'prebuilt\n' ;;
+            *)    log_die "Invalid choice: $choice" ;;
+        esac
         return 0
     fi
 
     printf 'prebuilt\n'
+}
+
+# ─── skill ──────────────────────────────────────────────────────────────────
+
+# The binary owns skill installation (version comparison, backups,
+# updates) — this step only decides whether to invoke it. `-y` keeps the
+# delegated run prompt-free; stdin under `curl | bash` is the script
+# stream and must not be consumed by the child.
+offer_skill_install() {
+    local bin="$INSTALL_DIR/$BINARY_NAME"
+
+    case "$SKILL_MODE" in
+        no)
+            return 0
+            ;;
+        ask)
+            if ! have_tty; then
+                log_dim "Skipping Claude Code skill (no TTY) — run '${BINARY_NAME} setup skill' anytime"
+                return 0
+            fi
+            local choice
+            choice="$(prompt_choice "Install the Claude Code skill (~/.claude/skills/symora)? [Y/n]: " "y" "n")"
+            case "$choice" in
+                [yY]) ;;
+                [nN])
+                    log_dim "Skipped — run '${BINARY_NAME} setup skill' anytime"
+                    return 0
+                    ;;
+                *) log_die "Invalid choice: $choice" ;;
+            esac
+            ;;
+    esac
+
+    log_info "📋 installing Claude Code skill"
+    if "$bin" setup skill -y </dev/null >&2; then
+        log_ok "✓ skill installed"
+    else
+        log_warn "Skill installation failed — run '${BINARY_NAME} setup skill' manually"
+    fi
 }
 
 # ─── post-install summary ───────────────────────────────────────────────────
@@ -390,16 +535,34 @@ main() {
     setup_tmp
 
     local target
-    target="$(detect_target)"
-    INSTALL_METHOD="$(select_install_method)"
+    target="$(prebuilt_target)"
+
+    INSTALL_METHOD="$(select_install_method "$target")"
+
+    # Resolve the version only for the paths that consume it: the
+    # prebuilt archive URL and the remote source build's git tag. A
+    # checkout build compiles the working tree and needs no network.
+    if [ -z "$VERSION" ] && have_cmd curl; then
+        case "$INSTALL_METHOD" in
+            prebuilt) VERSION="$(resolve_latest_version || true)" ;;
+            source)
+                if [ -z "$PROJECT_ROOT" ]; then
+                    VERSION="$(resolve_latest_version || true)"
+                fi
+                ;;
+        esac
+    fi
+    if [ -n "$VERSION" ]; then
+        is_valid_version "$VERSION" || log_die "Invalid version: $VERSION"
+    fi
 
     case "$INSTALL_METHOD" in
         prebuilt)
-            if [ -z "$VERSION" ]; then
-                VERSION="$(resolve_latest_version || true)"
-            fi
+            have_cmd curl || log_die "curl is required for prebuilt downloads.
+Rerun with --source (requires Rust): builds the release straight from the git tag."
+            [ -n "$target" ] || log_die "No prebuilt binary is published for this platform.
+Rerun with --source (requires Rust): builds the release straight from the git tag."
             [ -n "$VERSION" ] || log_die "Could not resolve latest version. Pass --version vX.Y.Z."
-            is_valid_version "$VERSION" || log_die "Invalid version: $VERSION"
 
             log_section "Symora · v$VERSION · $target"
             log "  prefix: $(display_path "$INSTALL_DIR")"
@@ -415,6 +578,9 @@ main() {
             install_binary "$bin"
             ;;
         source)
+            if [ "$VERIFY_ATTESTATIONS" = true ]; then
+                log_warn "--verify-attestations applies to prebuilt downloads only — ignored for source builds"
+            fi
             log_section "Symora · source build"
             log "  prefix: $(display_path "$INSTALL_DIR")"
             log ""
@@ -422,8 +588,12 @@ main() {
             bin="$(build_from_source)"
             install_binary "$bin"
             ;;
+        *)
+            log_die "Unknown install method: $INSTALL_METHOD"
+            ;;
     esac
 
+    offer_skill_install
     print_post_install
 }
 

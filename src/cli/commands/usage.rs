@@ -10,6 +10,7 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
 use crate::cli::output::OutputContext;
+use crate::cli::response::Section;
 use crate::cli::symbol_discovery::{
     broad_symbol_kind_bonus, detect_languages_by_file_count, generic_exact_identifier_penalty,
     is_probably_test_path, noisy_suffix_penalty, symbol_match_priority,
@@ -213,16 +214,11 @@ pub struct UsageOutput {
     pub resolved_from: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub filters_applied: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub hints: Vec<String>,
-    pub items: Vec<UsageResult>,
-    /// Total number of matching symbols (before limit applied)
-    pub count: usize,
-    /// Number of results actually returned (after limit)
-    pub showing: usize,
     /// If set, indicates analysis was truncated at this many symbols
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analyzed: Option<usize>,
+    #[serde(flatten)]
+    pub section: Section<UsageResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,15 +268,12 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             query: resolved.query.clone(),
             resolved_from: resolved_from.clone(),
             filters_applied: vec![],
-            hints: usage_hints_for_empty(
+            analyzed: None,
+            section: Section::new(vec![]).with_hints(usage_hints_for_empty(
                 &resolved.query,
                 resolved.language_override.is_none(),
                 resolved_from.as_deref(),
-            ),
-            items: vec![],
-            count: 0,
-            showing: 0,
-            analyzed: None,
+            )),
         });
         return Ok(());
     }
@@ -386,22 +379,19 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     };
 
     let showing = items.len();
-    let query = resolved.query.clone();
+    let hints = usage_hints(
+        &resolved.query,
+        resolved.language_override.is_none(),
+        showing,
+        analyzed.is_some(),
+    );
 
     let response = UsageOutput {
-        query,
+        query: resolved.query,
         resolved_from: resolved.resolved_from,
         filters_applied: filter_names,
-        hints: usage_hints(
-            &resolved.query,
-            resolved.language_override.is_none(),
-            showing,
-            analyzed.is_some(),
-        ),
-        items,
-        count,
-        showing,
         analyzed,
+        section: Section::with_total(items, count).with_hints(hints),
     };
 
     ctx.print_success(response);
@@ -647,24 +637,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_output_uses_items_and_showing() {
+    fn usage_output_flattens_the_section_contract() {
         let output = UsageOutput {
             query: "AuthUser".to_string(),
             resolved_from: Some("src/main.rs:10:5".to_string()),
             filters_applied: vec![],
-            hints: vec!["Add --lang".to_string()],
-            items: vec![UsageResult {
-                name: "AuthUser".to_string(),
-                file: "src/main.rs".to_string(),
-                line: 10,
-                kind: "struct".to_string(),
-                signature: None,
-                metrics: None,
-                snippet: None,
-            }],
-            count: 5,
-            showing: 1,
             analyzed: Some(10),
+            section: Section::with_total(
+                vec![UsageResult {
+                    name: "AuthUser".to_string(),
+                    file: "src/main.rs".to_string(),
+                    line: 10,
+                    kind: "struct".to_string(),
+                    signature: None,
+                    metrics: None,
+                    snippet: None,
+                }],
+                5,
+            )
+            .with_hints(vec!["Add --lang".to_string()]),
         };
 
         let value = serde_json::to_value(output).unwrap();
@@ -672,6 +663,8 @@ mod tests {
         assert!(value.get("results").is_none());
         assert_eq!(value["count"], 5);
         assert_eq!(value["showing"], 1);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["query"], "AuthUser");
     }
 
     #[test]

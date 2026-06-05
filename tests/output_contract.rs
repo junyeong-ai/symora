@@ -57,6 +57,7 @@ fn section_empty() {
     assert_json_snapshot!(section, @r###"
     {
       "count": 0,
+      "showing": 0,
       "items": []
     }
     "###);
@@ -64,10 +65,11 @@ fn section_empty() {
 
 #[test]
 fn section_with_items_and_truncation() {
-    let section = Section::with_limit(vec![1u32, 2, 3], 10);
+    let section = Section::with_total(vec![1u32, 2, 3], 10);
     assert_json_snapshot!(section, @r###"
     {
-      "count": 3,
+      "count": 10,
+      "showing": 3,
       "items": [
         1,
         2,
@@ -79,12 +81,36 @@ fn section_with_items_and_truncation() {
 }
 
 #[test]
+fn section_with_hints_and_next_commands() {
+    let section = Section::with_total(vec![1u32], 4)
+        .with_hints(vec!["narrow the query".to_string()])
+        .with_next_commands(vec!["symora map file src/a.rs".to_string()]);
+    assert_json_snapshot!(section, @r###"
+    {
+      "count": 4,
+      "showing": 1,
+      "items": [
+        1
+      ],
+      "truncated": true,
+      "hints": [
+        "narrow the query"
+      ],
+      "next_commands": [
+        "symora map file src/a.rs"
+      ]
+    }
+    "###);
+}
+
+#[test]
 fn section_with_structured_error() {
     let section: Section<i32> =
         Section::error(OutputError::not_found("symbol not found").with_hint("try a broader query"));
     assert_json_snapshot!(section, @r###"
     {
       "count": 0,
+      "showing": 0,
       "items": [],
       "error": {
         "code": "not_found",
@@ -337,6 +363,8 @@ fn impact_output_full() {
             transitive_callers: 9,
             depth: 2,
             max_depth_reached: false,
+            callers_truncated: false,
+            indexing: None,
             callers_by_depth: vec![
                 DepthBucket {
                     depth: 1,
@@ -393,6 +421,8 @@ fn blast_radius_max_depth_reached_serializes() {
         transitive_callers: 7,
         depth: 3,
         max_depth_reached: true,
+        callers_truncated: true,
+        indexing: Some(symora::models::lsp::IndexingDegradation::TimedOut),
         callers_by_depth: vec![
             DepthBucket {
                 depth: 1,

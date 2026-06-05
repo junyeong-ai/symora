@@ -27,11 +27,12 @@ use commands::{
     code_lens::CodeLensArgs, config::ConfigArgs, context::ContextArgs, def::DefArgs,
     diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs,
     folding::FoldingArgs, format::FormatArgs, hover::HoverArgs, impact::ImpactArgs,
-    implementations::ImplArgs, init::InitArgs, inlay_hints::InlayHintsArgs, map::MapArgs,
-    mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
-    selection::SelectionArgs, selfcmd::SelfcmdArgs, setup::SetupArgs, signature::SignatureArgs,
-    status::StatusArgs, subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs,
-    typedef::TypedefArgs, usage::UsageArgs, write::WriteArgs,
+    implementations::ImplementationsArgs, init::InitArgs, inlay_hints::InlayHintsArgs,
+    map::MapArgs, mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs,
+    search::SearchArgs, selection::SelectionArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
+    signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
+    supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
+    write::WriteArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -115,7 +116,7 @@ pub enum Commands {
     /// Go to type definition
     Typedef(TypedefArgs),
     /// Find implementations
-    Impl(ImplArgs),
+    Implementations(ImplementationsArgs),
     /// Find callers (incoming calls)
     Callers(CallersArgs),
     /// Find callees (outgoing calls)

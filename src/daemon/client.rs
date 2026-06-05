@@ -109,9 +109,12 @@ impl DaemonClient {
 
     // Connection Management
 
-    /// Ensure daemon is running, starting it if necessary
+    /// Ensure a daemon of *this* binary's version is running, starting or
+    /// replacing one as necessary. A daemon left over from a different
+    /// binary is replaced — the wire format is only guaranteed within a
+    /// single version.
     pub async fn ensure_running(&self) -> Result<(), LspError> {
-        if self.ping().await.is_ok() {
+        if matches!(self.ping().await, Ok(true)) {
             return Ok(());
         }
         self.start_daemon_with_lock().await
@@ -134,9 +137,24 @@ impl DaemonClient {
             .map_err(|e| LspError::ServerStart(format!("Failed to open lock file: {}", e)))?;
 
         if Self::try_lock_exclusive(&lock_file) {
-            if self.ping().await.is_ok() {
-                Self::unlock(&lock_file);
-                return Ok(());
+            // Re-check under the lock: another process may have already
+            // replaced the daemon while we waited.
+            match self.ping().await {
+                Ok(true) => {
+                    Self::unlock(&lock_file);
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // A daemon from a different binary answers the socket.
+                    // Replace it *under the lock* so concurrent CLIs can't
+                    // shoot down each other's freshly started daemon.
+                    tracing::info!("Daemon version differs from CLI; replacing daemon");
+                    if let Err(e) = self.shutdown().await {
+                        Self::unlock(&lock_file);
+                        return Err(e);
+                    }
+                }
+                Err(_) => {}
             }
 
             let result = self.spawn_daemon();
@@ -195,7 +213,7 @@ impl DaemonClient {
         let poll_interval = Duration::from_millis(100);
 
         while start.elapsed() < max_wait {
-            if self.ping().await.is_ok() {
+            if matches!(self.ping().await, Ok(true)) {
                 tracing::debug!("Daemon is ready after {:?}", start.elapsed());
                 return Ok(());
             }
@@ -207,14 +225,23 @@ impl DaemonClient {
         ))
     }
 
-    async fn ping(&self) -> Result<(), LspError> {
+    /// Ping the daemon. `Ok(true)` means it is alive *and* built from the
+    /// same version as this client; `Ok(false)` means alive but from a
+    /// different binary.
+    async fn ping(&self) -> Result<bool, LspError> {
         let response = self
             .send_request(methods::PING, None, Duration::from_secs(30))
             .await?;
         if response.error.is_some() {
             return Err(LspError::Protocol("Ping failed".to_string()));
         }
-        Ok(())
+        let same_version = response
+            .result
+            .as_ref()
+            .and_then(|r| r.get("version"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v == env!("CARGO_PKG_VERSION"));
+        Ok(same_version)
     }
 
     // Request Infrastructure
@@ -446,6 +473,19 @@ impl DaemonClient {
             .and_then(Self::extract_result)
     }
 
+    pub async fn indexing_degradation(
+        &self,
+        language: &str,
+    ) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        let params = serde_json::json!({
+            "language": language
+        });
+        self.request_with_project(methods::INDEXING_DEGRADATION, params, None)
+            .await
+            .and_then(Self::extract_result)
+    }
+
     // Search Operations
 
     pub async fn search_symbols(
@@ -517,12 +557,15 @@ impl DaemonClient {
     /// Does not start the daemon if not running.
     /// Uses a short 2-second ping timeout to avoid blocking edit workflows.
     pub async fn invalidate_file(&self, file: &Path) -> Result<(), LspError> {
-        let is_running = timeout(Duration::from_secs(2), self.ping())
-            .await
-            .map(|r| r.is_ok())
-            .unwrap_or(false);
-        if !is_running {
-            return Ok(()); // Daemon not running or slow, nothing to invalidate
+        // Only a same-version daemon gets requests — the wire format is
+        // guaranteed within one version, and best-effort invalidation is
+        // not worth replacing a stale daemon over.
+        let same_version_daemon = matches!(
+            timeout(Duration::from_secs(2), self.ping()).await,
+            Ok(Ok(true))
+        );
+        if !same_version_daemon {
+            return Ok(()); // Not running, slow, or a different binary.
         }
         let params = serde_json::json!({
             "file": file.display().to_string()

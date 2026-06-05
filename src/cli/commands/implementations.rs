@@ -7,7 +7,7 @@ use crate::cli::commands::common::execute_list;
 use crate::cli::response::LocationOutput;
 
 #[derive(Args, Debug)]
-pub struct ImplArgs {
+pub struct ImplementationsArgs {
     #[command(flatten)]
     pub loc: LocationArg,
 
@@ -16,7 +16,7 @@ pub struct ImplArgs {
     pub limit: Option<usize>,
 }
 
-pub async fn execute(args: ImplArgs, app: &App) -> Result<()> {
+pub async fn execute(args: ImplementationsArgs, app: &App) -> Result<()> {
     let limit = args.limit.unwrap_or(app.config().lsp.impl_limit);
 
     execute_list(

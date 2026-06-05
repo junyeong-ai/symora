@@ -47,8 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_content_file ON content_lines(file_id);
 
 pub fn build_symbol_search_query(with_kind: bool) -> String {
     let kind_filter = if with_kind { " AND s.kind = ?3" } else { "" };
+    // `COUNT(*) OVER ()` yields the total match count in the same scan the
+    // ORDER BY already pays for, so `count` in list output is exact rather
+    // than a limit-saturation guess.
     format!(
         r#"SELECT s.name, s.name_path, s.kind, s.line, s.col, f.path, s.container,
+    COUNT(*) OVER () AS total,
     CASE
         WHEN s.name_path IS NOT NULL AND LOWER(s.name_path) = LOWER(?1) THEN 1.0
         WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || ?1 COLLATE NOCASE THEN 0.96
@@ -77,6 +81,7 @@ pub fn build_content_search_query(with_lang: bool) -> String {
     };
     format!(
         r#"SELECT c.content, c.line_num, f.path, f.language,
+    COUNT(*) OVER () AS total,
     CASE
         WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) = 1 THEN 1.0
         WHEN LENGTH(c.content) < 80 THEN 0.85

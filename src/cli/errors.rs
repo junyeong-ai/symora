@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, LspError, ProjectError, SearchError, StoreError};
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     NotFound,
@@ -21,13 +21,21 @@ pub enum ErrorCode {
     Io,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputError {
     pub code: ErrorCode,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
+
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OutputError {}
 
 impl OutputError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
@@ -219,11 +227,43 @@ impl From<std::io::Error> for OutputError {
     }
 }
 
+/// `?`-propagated errors keep their structured code at every output
+/// boundary: each typed error a command can raise is unwrapped back to
+/// its dedicated mapping instead of collapsing to `internal`.
 impl From<anyhow::Error> for OutputError {
     fn from(err: anyhow::Error) -> Self {
-        if let Some(input_err) = err.downcast_ref::<crate::cli::CliInputError>() {
-            return input_err.clone().into();
-        }
+        let err = match err.downcast::<OutputError>() {
+            Ok(e) => return e,
+            Err(e) => e,
+        };
+        let err = match err.downcast::<crate::cli::CliInputError>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
+        let err = match err.downcast::<LspError>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
+        let err = match err.downcast::<StoreError>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
+        let err = match err.downcast::<SearchError>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
+        let err = match err.downcast::<ConfigError>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
+        let err = match err.downcast::<serde_json::Error>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
+        let err = match err.downcast::<std::io::Error>() {
+            Ok(e) => return e.into(),
+            Err(e) => e,
+        };
         Self::new(ErrorCode::Internal, err.to_string())
     }
 }

@@ -116,7 +116,10 @@ mod tests {
         });
         let (status, body) = process_message(&app, payload).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(
+            body["result"]["protocolVersion"],
+            super::super::protocol::MCP_PROTOCOL_VERSION
+        );
     }
 
     #[tokio::test]

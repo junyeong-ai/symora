@@ -14,7 +14,7 @@ use crate::cli::commands::{
     def::DefArgs,
     hover::HoverArgs,
     impact::ImpactArgs,
-    implementations::ImplArgs,
+    implementations::ImplementationsArgs,
     map::{MapArgs, MapCommand},
     pack::{PackArgs, PackShape},
     refs::RefsArgs,
@@ -28,7 +28,25 @@ use crate::constants::defaults;
 
 use super::schema::LocationInput;
 
-pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<String> {
+/// Captured command output plus whether the command reported a handled
+/// failure (`print_error`), so the MCP layer can set `isError` truthfully.
+pub struct CapturedOutput {
+    pub body: String,
+    pub errored: bool,
+}
+
+/// Deserialize tool arguments, surfacing shape errors as
+/// `invalid_argument` — the agent can fix its arguments; this is not an
+/// internal parse failure.
+fn parse_args<T: serde::de::DeserializeOwned>(args: Value) -> Result<T> {
+    serde_json::from_value(args).map_err(|e| {
+        anyhow::Error::new(crate::cli::OutputError::invalid(format!(
+            "Invalid tool arguments: {e}"
+        )))
+    })
+}
+
+pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<CapturedOutput> {
     match name {
         "get_project_overview" => run_project_overview(arguments, app).await,
         "get_file_overview" => run_file_overview(arguments, app).await,
@@ -51,11 +69,13 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<String>
         "replace_symbol_body" => run_replace_body(arguments, app).await,
         "insert_before_symbol" => run_insert_before(arguments, app).await,
         "insert_after_symbol" => run_insert_after(arguments, app).await,
-        other => anyhow::bail!("Unknown tool: {other}"),
+        other => Err(anyhow::Error::new(crate::cli::OutputError::not_found(
+            format!("Unknown tool: {other}"),
+        ))),
     }
 }
 
-async fn capture<F, Fut>(app: &App, run: F) -> Result<String>
+async fn capture<F, Fut>(app: &App, run: F) -> Result<CapturedOutput>
 where
     F: FnOnce(App) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
@@ -70,12 +90,15 @@ where
         },
     );
     run(scoped).await?;
-    Ok(buf.take().join("\n"))
+    Ok(CapturedOutput {
+        body: buf.take().join("\n"),
+        errored: buf.errored(),
+    })
 }
 
 // --- discovery ------------------------------------------------------------
 
-async fn run_project_overview(_args: Value, app: &App) -> Result<String> {
+async fn run_project_overview(_args: Value, app: &App) -> Result<CapturedOutput> {
     capture(app, |a| async move {
         crate::cli::commands::map::execute(
             MapArgs {
@@ -105,8 +128,8 @@ fn default_related_limit() -> usize {
     8
 }
 
-async fn run_file_overview(args: Value, app: &App) -> Result<String> {
-    let input: FileOverviewInput = serde_json::from_value(args)?;
+async fn run_file_overview(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: FileOverviewInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::map::execute(
             MapArgs {
@@ -131,8 +154,8 @@ struct SearchSymbolsInput {
     limit: Option<usize>,
 }
 
-async fn run_search_symbols(args: Value, app: &App) -> Result<String> {
-    let input: SearchSymbolsInput = serde_json::from_value(args)?;
+async fn run_search_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: SearchSymbolsInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::search::execute(
             SearchArgs {
@@ -158,8 +181,8 @@ struct SearchContentInput {
     limit: Option<usize>,
 }
 
-async fn run_search_content(args: Value, app: &App) -> Result<String> {
-    let input: SearchContentInput = serde_json::from_value(args)?;
+async fn run_search_content(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: SearchContentInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::search::execute(
             SearchArgs {
@@ -187,8 +210,8 @@ struct ListFileSymbolsInput {
     signature: bool,
 }
 
-async fn run_list_file_symbols(args: Value, app: &App) -> Result<String> {
-    let input: ListFileSymbolsInput = serde_json::from_value(args)?;
+async fn run_list_file_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: ListFileSymbolsInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::symbols::execute(
             SymbolsArgs {
@@ -220,8 +243,8 @@ struct InspectSymbolInput {
     body: bool,
 }
 
-async fn run_inspect_symbol(args: Value, app: &App) -> Result<String> {
-    let input: InspectSymbolInput = serde_json::from_value(args)?;
+async fn run_inspect_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: InspectSymbolInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::symbols::execute(
             SymbolsArgs {
@@ -247,8 +270,8 @@ async fn run_inspect_symbol(args: Value, app: &App) -> Result<String> {
 
 // --- navigation -----------------------------------------------------------
 
-async fn run_find_definition(args: Value, app: &App) -> Result<String> {
-    let loc: LocationInput = serde_json::from_value(args)?;
+async fn run_find_definition(args: Value, app: &App) -> Result<CapturedOutput> {
+    let loc: LocationInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::def::execute(
             DefArgs {
@@ -270,8 +293,8 @@ struct FindReferencesInput {
     limit: Option<usize>,
 }
 
-async fn run_find_references(args: Value, app: &App) -> Result<String> {
-    let input: FindReferencesInput = serde_json::from_value(args)?;
+async fn run_find_references(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: FindReferencesInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::refs::execute(
             RefsArgs {
@@ -294,8 +317,8 @@ struct CallHierarchyInput {
     limit: Option<usize>,
 }
 
-async fn run_find_callers(args: Value, app: &App) -> Result<String> {
-    let input: CallHierarchyInput = serde_json::from_value(args)?;
+async fn run_find_callers(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: CallHierarchyInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::callers::execute(
             CallersArgs {
@@ -310,8 +333,8 @@ async fn run_find_callers(args: Value, app: &App) -> Result<String> {
     .await
 }
 
-async fn run_find_callees(args: Value, app: &App) -> Result<String> {
-    let input: CallHierarchyInput = serde_json::from_value(args)?;
+async fn run_find_callees(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: CallHierarchyInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::callees::execute(
             CalleesArgs {
@@ -325,11 +348,11 @@ async fn run_find_callees(args: Value, app: &App) -> Result<String> {
     .await
 }
 
-async fn run_find_implementations(args: Value, app: &App) -> Result<String> {
-    let input: CallHierarchyInput = serde_json::from_value(args)?;
+async fn run_find_implementations(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: CallHierarchyInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::implementations::execute(
-            ImplArgs {
+            ImplementationsArgs {
                 loc: input.loc.into_arg(),
                 limit: input.limit,
             },
@@ -340,8 +363,8 @@ async fn run_find_implementations(args: Value, app: &App) -> Result<String> {
     .await
 }
 
-async fn run_hover(args: Value, app: &App) -> Result<String> {
-    let loc: LocationInput = serde_json::from_value(args)?;
+async fn run_hover(args: Value, app: &App) -> Result<CapturedOutput> {
+    let loc: LocationInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::hover::execute(
             HoverArgs {
@@ -376,8 +399,8 @@ fn default_context_all() -> bool {
     true
 }
 
-async fn run_get_context(args: Value, app: &App) -> Result<String> {
-    let input: GetContextInput = serde_json::from_value(args)?;
+async fn run_get_context(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: GetContextInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::context::execute(
             ContextArgs {
@@ -414,8 +437,8 @@ fn default_impact_depth() -> u32 {
     defaults::IMPACT_DEFAULT_DEPTH
 }
 
-async fn run_get_impact(args: Value, app: &App) -> Result<String> {
-    let input: GetImpactInput = serde_json::from_value(args)?;
+async fn run_get_impact(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: GetImpactInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::impact::execute(
             ImpactArgs {
@@ -449,8 +472,8 @@ fn default_pack_per_file() -> usize {
     defaults::PACK_SYMBOLS_PER_FILE
 }
 
-async fn run_context_pack(args: Value, app: &App) -> Result<String> {
-    let input: ContextPackInput = serde_json::from_value(args)?;
+async fn run_context_pack(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: ContextPackInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::pack::execute(
             PackArgs {
@@ -477,8 +500,8 @@ struct RenameSymbolInput {
     dry_run: bool,
 }
 
-async fn run_rename_symbol(args: Value, app: &App) -> Result<String> {
-    let input: RenameSymbolInput = serde_json::from_value(args)?;
+async fn run_rename_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: RenameSymbolInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::rename::execute(
             RenameArgs {
@@ -502,8 +525,8 @@ struct ListCodeActionsInput {
     preferred: bool,
 }
 
-async fn run_list_code_actions(args: Value, app: &App) -> Result<String> {
-    let input: ListCodeActionsInput = serde_json::from_value(args)?;
+async fn run_list_code_actions(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: ListCodeActionsInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::actions::execute(
             ActionsArgs {
@@ -529,8 +552,8 @@ struct ApplyCodeActionInput {
     dry_run: bool,
 }
 
-async fn run_apply_code_action(args: Value, app: &App) -> Result<String> {
-    let input: ApplyCodeActionInput = serde_json::from_value(args)?;
+async fn run_apply_code_action(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: ApplyCodeActionInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::actions::execute(
             ActionsArgs {
@@ -556,8 +579,8 @@ struct ReplaceBodyInput {
     dry_run: bool,
 }
 
-async fn run_replace_body(args: Value, app: &App) -> Result<String> {
-    let input: ReplaceBodyInput = serde_json::from_value(args)?;
+async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: ReplaceBodyInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::write::execute(
             WriteArgs {
@@ -585,11 +608,11 @@ struct InsertInput {
     dry_run: bool,
 }
 
-async fn run_insert_before(args: Value, app: &App) -> Result<String> {
+async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
     run_insert(args, app, WriteCommand::InsertBefore).await
 }
 
-async fn run_insert_after(args: Value, app: &App) -> Result<String> {
+async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
     run_insert(args, app, WriteCommand::InsertAfter).await
 }
 
@@ -597,8 +620,8 @@ async fn run_insert(
     args: Value,
     app: &App,
     wrap: fn(InsertArgs) -> WriteCommand,
-) -> Result<String> {
-    let input: InsertInput = serde_json::from_value(args)?;
+) -> Result<CapturedOutput> {
+    let input: InsertInput = parse_args(args)?;
     capture(app, move |a| async move {
         let insert_args = InsertArgs {
             loc: LocationArg {

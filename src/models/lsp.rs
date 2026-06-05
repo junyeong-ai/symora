@@ -11,6 +11,19 @@ pub struct Position {
     pub character: u32,
 }
 
+/// Why a workspace-indexing-dependent answer may be incomplete.
+///
+/// Surfaced on `refs` / `callers` / `callees` / `impact` output so an
+/// agent can distinguish "few results" from "the server hadn't finished
+/// indexing when this was computed". Absent = not degraded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexingDegradation {
+    /// The workspace-indexing wait hit its budget; results are a lower
+    /// bound. Retrying after the server warms up may return more.
+    TimedOut,
+}
+
 impl Position {
     pub fn new(line: u32, character: u32) -> Self {
         Self { line, character }

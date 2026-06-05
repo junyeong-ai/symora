@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::OptionalExtension;
+
 use super::db::SqliteDb;
-use super::db::rusqlite;
-use super::db::rusqlite::OptionalExtension;
 use super::schema::*;
 use super::symbols::SymbolExtractor;
 use super::types::*;
@@ -124,7 +124,7 @@ impl Store {
         query: &str,
         limit: usize,
         kind_filter: Option<SymbolKind>,
-    ) -> Result<Vec<SymbolSearchResult>, StoreError> {
+    ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
         if !self.index_ready.load(Ordering::SeqCst) {
             return Err(StoreError::NotInitialized);
         }
@@ -142,27 +142,36 @@ impl Store {
                     None => stmt.query(rusqlite::params![query, limit])?,
                 };
 
-                Ok(rows
+                let mut total = 0usize;
+                let rows = rows
                     .mapped(|r| {
-                        Ok(SymbolSearchResult {
-                            name: r.get(0)?,
-                            name_path: r.get(1)?,
-                            kind: SymbolKind::parse_or_default(&r.get::<_, String>(2)?),
-                            line: r.get::<_, i32>(3)? as u32,
-                            column: r.get::<_, i32>(4)? as u32,
-                            file: PathBuf::from(r.get::<_, String>(5)?),
-                            container: r.get(6)?,
-                            score: r.get(7)?,
-                        })
+                        Ok((
+                            r.get::<_, i64>(7)? as usize,
+                            SymbolSearchResult {
+                                name: r.get(0)?,
+                                name_path: r.get(1)?,
+                                kind: SymbolKind::parse_or_default(&r.get::<_, String>(2)?),
+                                line: r.get::<_, i32>(3)? as u32,
+                                column: r.get::<_, i32>(4)? as u32,
+                                file: PathBuf::from(r.get::<_, String>(5)?),
+                                container: r.get(6)?,
+                                score: r.get(8)?,
+                            },
+                        ))
                     })
                     .filter_map(|r| match r {
-                        Ok(v) => Some(v),
+                        Ok((row_total, v)) => {
+                            total = row_total;
+                            Some(v)
+                        }
                         Err(e) => {
                             tracing::debug!("Error parsing symbol search row: {}", e);
                             None
                         }
                     })
-                    .collect())
+                    .collect();
+
+                Ok(SearchPage { total, rows })
             })
             .await
     }
@@ -172,7 +181,7 @@ impl Store {
         query: &str,
         limit: usize,
         language: Option<Language>,
-    ) -> Result<Vec<ContentSearchResult>, StoreError> {
+    ) -> Result<SearchPage<ContentSearchResult>, StoreError> {
         if !self.index_ready.load(Ordering::SeqCst) {
             return Err(StoreError::NotInitialized);
         }
@@ -190,23 +199,32 @@ impl Store {
                     None => stmt.query(rusqlite::params![query, limit])?,
                 };
 
-                Ok(rows
+                let mut total = 0usize;
+                let rows = rows
                     .mapped(|r| {
-                        Ok(ContentSearchResult {
-                            content: r.get(0)?,
-                            line: r.get::<_, i32>(1)? as u32,
-                            file: PathBuf::from(r.get::<_, String>(2)?),
-                            score: r.get(4)?,
-                        })
+                        Ok((
+                            r.get::<_, i64>(4)? as usize,
+                            ContentSearchResult {
+                                content: r.get(0)?,
+                                line: r.get::<_, i32>(1)? as u32,
+                                file: PathBuf::from(r.get::<_, String>(2)?),
+                                score: r.get(5)?,
+                            },
+                        ))
                     })
                     .filter_map(|r| match r {
-                        Ok(v) => Some(v),
+                        Ok((row_total, v)) => {
+                            total = row_total;
+                            Some(v)
+                        }
                         Err(e) => {
                             tracing::debug!("Error parsing content search row: {}", e);
                             None
                         }
                     })
-                    .collect())
+                    .collect();
+
+                Ok(SearchPage { total, rows })
             })
             .await
     }
@@ -240,11 +258,11 @@ impl Store {
         self.db
             .call(move |conn| {
                 let tx = conn.unchecked_transaction()?;
-                let count: usize = tx.query_row(
+                let count = tx.query_row(
                     "SELECT COUNT(*) FROM files WHERE indexed_at < ?1",
                     rusqlite::params![cutoff],
-                    |r| r.get(0),
-                )?;
+                    |r| r.get::<_, i64>(0),
+                )? as usize;
 
                 if count > 0 {
                     tx.execute(
@@ -289,22 +307,22 @@ impl Store {
 
         self.db
             .call(move |conn| {
+                let count_of = |table: &str| {
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap_or(0) as usize
+                };
                 Ok(IndexStats {
-                    file_count: conn
-                        .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-                        .unwrap_or(0),
-                    symbol_count: conn
-                        .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
-                        .unwrap_or(0),
-                    content_line_count: conn
-                        .query_row("SELECT COUNT(*) FROM content_lines", [], |r| r.get(0))
-                        .unwrap_or(0),
+                    file_count: count_of("files"),
+                    symbol_count: count_of("symbols"),
+                    content_line_count: count_of("content_lines"),
                     index_size_bytes,
                     last_indexed: conn
                         .query_row("SELECT COALESCE(MAX(indexed_at), 0) FROM files", [], |r| {
-                            r.get(0)
+                            r.get::<_, i64>(0)
                         })
-                        .unwrap_or(0),
+                        .unwrap_or(0) as u64,
                     is_indexing,
                     progress: None,
                 })

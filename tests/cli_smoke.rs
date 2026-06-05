@@ -20,7 +20,7 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "def",
     "refs",
     "typedef",
-    "impl",
+    "implementations",
     "callers",
     "callees",
     "supertypes",
@@ -164,7 +164,10 @@ fn mcp_initialize_returns_protocol_version() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let line = stdout.lines().next().expect("at least one response line");
     let json: serde_json::Value = serde_json::from_str(line).expect("valid JSON-RPC response");
-    assert_eq!(json["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(
+        json["result"]["protocolVersion"],
+        symora::mcp::MCP_PROTOCOL_VERSION
+    );
     assert_eq!(json["result"]["serverInfo"]["name"], "symora");
 }
 

@@ -38,7 +38,9 @@ where
 }
 
 /// Execute a command that returns `Vec<T>` from an LSP call, wrapping in `Section`.
-/// Used by implementations, callees, supertypes, subtypes.
+/// Used by implementations, callees, supertypes, subtypes — all cross-file
+/// graph queries, so each carries the workspace-indexing degradation
+/// marker when the answer was computed on a cold server.
 pub async fn execute_list<T, O, F, Fut, M>(
     app: &App,
     loc: LocationArg,
@@ -54,6 +56,7 @@ where
 {
     let ctx = &app.output;
     let loc = loc.parse()?.to_absolute()?;
+    let language = crate::models::symbol::Language::from_path(&loc.file);
 
     match lsp_call(loc.file, loc.line, loc.column).await {
         Ok(items) => {
@@ -63,7 +66,8 @@ where
                 .take(limit)
                 .map(|item| mapper(item, ctx.root()))
                 .collect();
-            ctx.print_success(Section::with_limit(output, total));
+            let indexing = app.lsp.indexing_degradation(language).await;
+            ctx.print_success(Section::with_total(output, total).with_indexing(indexing));
         }
         Err(e) => ctx.print_error(e),
     }

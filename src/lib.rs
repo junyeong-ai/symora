@@ -9,7 +9,7 @@
 //!
 //! ## Capabilities
 //!
-//! - **Navigation** — `def`, `refs`, `callers`, `callees`, `impl`,
+//! - **Navigation** — `def`, `refs`, `callers`, `callees`, `implementations`,
 //!   `supertypes`, `subtypes`, `typedef`, `hover`, `signature`
 //! - **Analysis** — `context`, `impact` (with N-hop blast radius),
 //!   `diff-impact`, `usage`, `diagnostics`

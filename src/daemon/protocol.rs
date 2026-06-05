@@ -115,6 +115,12 @@ impl From<crate::error::StoreError> for RpcError {
     }
 }
 
+impl From<serde_json::Error> for RpcError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::internal_error(&error.to_string())
+    }
+}
+
 pub mod methods {
     pub const FIND_SYMBOLS: &str = "find_symbols";
     pub const FIND_REFERENCES: &str = "find_references";
@@ -143,6 +149,7 @@ pub mod methods {
 
     pub const INVALIDATE_FILE: &str = "invalidate_file";
     pub const LANGUAGE_STATUS: &str = "language_status";
+    pub const INDEXING_DEGRADATION: &str = "indexing_degradation";
 
     pub const FORMAT: &str = "format";
 

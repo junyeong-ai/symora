@@ -36,6 +36,12 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         .incoming_calls(&loc.file, loc.line, loc.column)
         .await;
 
+    let indexing = || async {
+        app.lsp
+            .indexing_degradation(crate::models::symbol::Language::from_path(&loc.file))
+            .await
+    };
+
     match result {
         Ok(calls) => {
             let total = calls.len();
@@ -45,7 +51,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                 .map(|c| CallHierarchyOutput::from_item(&c, ctx.root()))
                 .collect();
 
-            ctx.print_success(Section::with_limit(items, total));
+            ctx.print_success(Section::with_total(items, total).with_indexing(indexing().await));
         }
         Err(ref e) if !args.no_fallback && is_not_supported(e) => {
             match fallback_from_refs(app, &loc.file, loc.line, loc.column, limit).await {
@@ -55,7 +61,9 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
                         .collect();
 
-                    ctx.print_success(Section::with_limit(items, total_refs));
+                    ctx.print_success(
+                        Section::with_total(items, total_refs).with_indexing(indexing().await),
+                    );
                 }
                 Err(e) => ctx.print_error(e),
             }
@@ -70,6 +78,10 @@ fn is_not_supported(err: &LspError) -> bool {
     matches!(err, LspError::FeatureNotSupported { .. })
 }
 
+/// Derive callers from plain references when the server lacks call
+/// hierarchy. Returns up to `limit` caller items plus the exact count of
+/// *unique callers* found — the same domain as the items, never the raw
+/// reference count (several references inside one caller are one caller).
 async fn fallback_from_refs(
     app: &App,
     file: &Path,
@@ -78,7 +90,6 @@ async fn fallback_from_refs(
     limit: usize,
 ) -> Result<(Vec<CallHierarchyItem>, usize), LspError> {
     let refs = app.lsp.find_references(file, line, column).await?;
-    let total_refs = refs.len();
 
     let mut seen = HashSet::new();
     let mut callers = Vec::new();
@@ -107,20 +118,18 @@ async fn fallback_from_refs(
                 caller.location.line,
             );
 
-            if seen.insert(key) {
+            // Keep counting unique callers past the emission cap so the
+            // reported total stays exact; only storage is capped.
+            if seen.insert(key) && callers.len() < limit {
                 callers.push(CallHierarchyItem {
                     name: caller.name.clone(),
                     kind: caller.kind,
                     location: caller.location.clone(),
                     call_site: Some(ref_loc),
                 });
-
-                if callers.len() >= limit {
-                    break;
-                }
             }
         }
     }
 
-    Ok((callers, total_refs))
+    Ok((callers, seen.len()))
 }

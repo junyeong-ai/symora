@@ -54,7 +54,7 @@ async fn call_hierarchy(
             let manager = Arc::clone(&manager);
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.ensure_cross_file_ready().await;
+                client.sleep_for_cross_file_settle().await;
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);

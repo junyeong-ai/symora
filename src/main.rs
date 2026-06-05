@@ -111,7 +111,7 @@ async fn run_workspace_dispatch(name: &str, output_options: OutputOptions) -> an
 
     let envelope = run_workspace(ws, &exe, forwarded).await;
     let any_failed = envelope
-        .get("results")
+        .get("items")
         .and_then(|r| r.as_array())
         .map(|arr| arr.iter().any(|entry| entry.get("error").is_some()))
         .unwrap_or(false);
@@ -160,7 +160,7 @@ async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Def(args) => commands::def::execute(args, app).await,
         Commands::Refs(args) => commands::refs::execute(args, app).await,
         Commands::Typedef(args) => commands::typedef::execute(args, app).await,
-        Commands::Impl(args) => commands::implementations::execute(args, app).await,
+        Commands::Implementations(args) => commands::implementations::execute(args, app).await,
         Commands::Callers(args) => commands::callers::execute(args, app).await,
         Commands::Callees(args) => commands::callees::execute(args, app).await,
         Commands::Supertypes(args) => commands::supertypes::execute(args, app).await,

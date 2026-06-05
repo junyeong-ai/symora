@@ -21,8 +21,8 @@ use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::Diagnostic;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus,
-    SignatureHelp, TextEdit, TypeHierarchyItem,
+    HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
+    SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -159,6 +159,13 @@ pub trait LspService: Send + Sync {
     async fn is_available(&self, language: Language) -> bool;
 
     async fn server_status(&self, language: Language) -> ServerStatus;
+
+    /// Whether the language's workspace indexing is in a degraded state
+    /// (latched on the running session by `await_indexing_signal`). Commands
+    /// whose answers depend on workspace indexing query this after their
+    /// data call and mark the response, so an agent never mistakes a
+    /// cold-server lower bound for a complete answer.
+    async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation>;
 }
 
 impl From<ServerStatusDetail> for ServerStatus {

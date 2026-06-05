@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::models::symbol::Language;
 
 mod csharp;
+mod discovery;
 mod fsharp;
 mod go;
 mod java;
@@ -25,11 +26,11 @@ mod scala;
 mod small;
 mod typescript;
 
-pub fn get_initialization_options(language: Language, root_path: &Path) -> Option<Value> {
+pub fn init_options(language: Language, root_path: &Path) -> Option<Value> {
     match language {
         Language::Kotlin => Some(kotlin::kotlin_init_options(root_path)),
         Language::TypeScript | Language::JavaScript => Some(typescript::typescript_init_options()),
-        Language::Python => Some(python::python_init_options()),
+        Language::Python => Some(python::python_init_options(root_path)),
         Language::Rust => Some(rust::rust_init_options()),
         Language::Java => Some(java::java_init_options(root_path)),
         Language::Go => Some(go::go_init_options()),
@@ -185,12 +186,12 @@ mod tests {
         ];
         for lang in supported {
             assert!(
-                get_initialization_options(lang, &root).is_some(),
+                init_options(lang, &root).is_some(),
                 "expected init options for {lang:?}",
             );
         }
-        assert!(get_initialization_options(Language::Unknown, &root).is_none());
+        assert!(init_options(Language::Unknown, &root).is_none());
         // clangd is configured via CLI, not initializationOptions.
-        assert!(get_initialization_options(Language::Cpp, &root).is_none());
+        assert!(init_options(Language::Cpp, &root).is_none());
     }
 }

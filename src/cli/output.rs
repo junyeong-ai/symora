@@ -32,6 +32,11 @@ pub struct OutputOptions {
 /// subprocess.
 pub trait OutputSink: Send + Sync {
     fn write_line(&self, line: &str);
+
+    /// Called once per handled command failure (`print_error`), so an
+    /// adapter capturing output can report success/failure truthfully
+    /// without re-parsing the emitted JSON.
+    fn record_error(&self) {}
 }
 
 pub struct StdoutSink;
@@ -45,6 +50,7 @@ impl OutputSink for StdoutSink {
 #[derive(Default, Clone)]
 pub struct BufferedSink {
     lines: Arc<Mutex<Vec<String>>>,
+    errored: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BufferedSink {
@@ -55,6 +61,11 @@ impl BufferedSink {
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.lines.lock().expect("buffered sink poisoned"))
     }
+
+    /// True when the captured command reported a handled failure.
+    pub fn errored(&self) -> bool {
+        self.errored.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl OutputSink for BufferedSink {
@@ -63,6 +74,11 @@ impl OutputSink for BufferedSink {
             .lock()
             .expect("buffered sink poisoned")
             .push(line.to_string());
+    }
+
+    fn record_error(&self) {
+        self.errored
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -136,6 +152,7 @@ impl OutputContext {
 
     pub fn print_error<E: Into<OutputError>>(&self, error: E) {
         let err: OutputError = error.into();
+        self.sink.record_error();
         let response = serde_json::json!({ "error": err });
         self.emit(&response);
     }

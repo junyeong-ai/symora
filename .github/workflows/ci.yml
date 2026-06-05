@@ -42,6 +42,36 @@ jobs:
       - name: Run tests
         run: cargo nextest run --all-features --workspace
 
+  lang-fixtures:
+    name: Language fixtures (real LSP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install pyright
+        run: npm install -g pyright
+
+      - name: Build fixture venv
+        run: uv sync --frozen
+        working-directory: tests/fixtures/python/monorepo
+
+      - name: Run language-fixture tests
+        run: cargo nextest run --test lang_fixtures --run-ignored ignored-only
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

@@ -1,29 +1,29 @@
 use crate::mcp::protocol::ToolDefinition;
 
-use super::schema::{location_schema, schema_object, with_extra};
+use super::schema::{location_schema, schema_object, section_output_schema, with_extra};
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
     vec![
-        ToolDefinition {
-            name: "get_project_overview",
-            description: "High-level project map: language breakdown, top directories, and \
+        ToolDefinition::new(
+            "get_project_overview",
+            "High-level project map: language breakdown, top directories, and \
                           probable entrypoints. Cheap orientation step before deeper queries.",
-            input_schema: schema_object(&[], &[]),
-        },
-        ToolDefinition {
-            name: "get_file_overview",
-            description: "Compact map for one file: focus symbols, sibling/counterpart files, \
+            schema_object(&[], &[]),
+        ),
+        ToolDefinition::new(
+            "get_file_overview",
+            "Compact map for one file: focus symbols, sibling/counterpart files, \
                           shallow symbol tree, and related-file ranking.",
-            input_schema: schema_object(
+            schema_object(
                 &[("path", "string", "Project-relative file path")],
                 &["path"],
             ),
-        },
-        ToolDefinition {
-            name: "search_symbols",
-            description: "Fast rough symbol discovery by name or path-like pattern across the \
+        ),
+        ToolDefinition::new(
+            "search_symbols",
+            "Fast rough symbol discovery by name or path-like pattern across the \
                           workspace. Use this when you don't yet know the exact file.",
-            input_schema: schema_object(
+            schema_object(
                 &[
                     ("query", "string", "Partial symbol name or path pattern"),
                     (
@@ -40,11 +40,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
                 &["query"],
             ),
-        },
-        ToolDefinition {
-            name: "search_content",
-            description: "Fast keyword/phrase search across indexed file contents.",
-            input_schema: schema_object(
+        )
+        .with_output_schema(section_output_schema(
+            "Symbol matches: name, name_path, kind, file, line, column, score",
+        )),
+        ToolDefinition::new(
+            "search_content",
+            "Fast keyword/phrase search across indexed file contents.",
+            schema_object(
                 &[
                     ("query", "string", "Keyword or phrase"),
                     ("language", "string", "Optional language filter"),
@@ -52,12 +55,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
                 &["query"],
             ),
-        },
-        ToolDefinition {
-            name: "list_file_symbols",
-            description: "List symbols defined in one file (precise, not heuristic). Use after \
+        )
+        .with_output_schema(section_output_schema(
+            "Content-line matches: file, line, content, score",
+        )),
+        ToolDefinition::new(
+            "list_file_symbols",
+            "List symbols defined in one file (precise, not heuristic). Use after \
                           file_overview when you need the full symbol tree.",
-            input_schema: schema_object(
+            schema_object(
                 &[
                     ("file", "string", "Project-relative file path"),
                     ("depth", "integer", "Nested-symbol depth (0 = top level)"),
@@ -66,12 +72,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
                 &["file"],
             ),
-        },
-        ToolDefinition {
-            name: "inspect_symbol",
-            description: "Resolve an exact symbol path (e.g., 'Handler/process') and return its \
+        )
+        .with_output_schema(section_output_schema("Symbols defined in the file")),
+        ToolDefinition::new(
+            "inspect_symbol",
+            "Resolve an exact symbol path (e.g., 'Handler/process') and return its \
                           definition info. Use after search_symbols to follow up precisely.",
-            input_schema: schema_object(
+            schema_object(
                 &[
                     ("symbol_path", "string", "Symbol path like 'Class/method'"),
                     ("language", "string", "Optional language filter"),
@@ -79,58 +86,70 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
                 &["symbol_path"],
             ),
-        },
-        ToolDefinition {
-            name: "find_definition",
-            description: "LSP go-to-definition for the symbol at a precise file:line:column.",
-            input_schema: location_schema(),
-        },
-        ToolDefinition {
-            name: "find_references",
-            description: "All references to the symbol at a precise file:line:column.",
-            input_schema: with_extra(
+        ),
+        ToolDefinition::new(
+            "find_definition",
+            "LSP go-to-definition for the symbol at a precise file:line:column.",
+            location_schema(),
+        ),
+        ToolDefinition::new(
+            "find_references",
+            "All references to the symbol at a precise file:line:column.",
+            with_extra(
                 location_schema(),
                 &[
                     ("snippet", "boolean", "Include source snippets"),
                     ("limit", "integer", "Maximum results"),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "find_callers",
-            description: "Incoming-call hierarchy for a function at a precise file:line:column.",
-            input_schema: with_extra(
+        )
+        .with_output_schema(section_output_schema(
+            "Reference locations: file, line, column",
+        )),
+        ToolDefinition::new(
+            "find_callers",
+            "Incoming-call hierarchy for a function at a precise file:line:column.",
+            with_extra(
                 location_schema(),
                 &[("limit", "integer", "Maximum results")],
             ),
-        },
-        ToolDefinition {
-            name: "find_callees",
-            description: "Outgoing-call hierarchy for a function at a precise file:line:column.",
-            input_schema: with_extra(
+        )
+        .with_output_schema(section_output_schema(
+            "Incoming calls with caller locations",
+        )),
+        ToolDefinition::new(
+            "find_callees",
+            "Outgoing-call hierarchy for a function at a precise file:line:column.",
+            with_extra(
                 location_schema(),
                 &[("limit", "integer", "Maximum results")],
             ),
-        },
-        ToolDefinition {
-            name: "find_implementations",
-            description: "All concrete implementations of a trait/interface at a precise \
+        )
+        .with_output_schema(section_output_schema(
+            "Outgoing calls with callee locations",
+        )),
+        ToolDefinition::new(
+            "find_implementations",
+            "All concrete implementations of a trait/interface at a precise \
                           file:line:column.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[("limit", "integer", "Maximum results")],
             ),
-        },
-        ToolDefinition {
-            name: "get_hover",
-            description: "Hover documentation/type for the symbol at a precise file:line:column.",
-            input_schema: location_schema(),
-        },
-        ToolDefinition {
-            name: "get_context",
-            description: "Aggregated context for a symbol at file:line:column — by default \
+        )
+        .with_output_schema(section_output_schema(
+            "Implementation locations: file, line, column",
+        )),
+        ToolDefinition::new(
+            "get_hover",
+            "Hover documentation/type for the symbol at a precise file:line:column.",
+            location_schema(),
+        ),
+        ToolDefinition::new(
+            "get_context",
+            "Aggregated context for a symbol at file:line:column — by default \
                           callers, callees, related types, and tests in one response.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     (
@@ -152,14 +171,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "get_impact",
-            description: "Change-impact analysis at file:line:column: reference counts split by \
+        ),
+        ToolDefinition::new(
+            "get_impact",
+            "Change-impact analysis at file:line:column: reference counts split by \
                           test vs prod, affected files, exported-API signal, and a transitive \
                           caller graph with risk + confidence (`blast_radius`). Use depth=1 for \
                           quick surveys, depth=2-3 when ranking blast radius matters.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("limit", "integer", "Maximum affected files to list"),
@@ -170,14 +189,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "build_context_pack",
-            description: "Build a token-budgeted context pack: PageRank-ranked files with \
+        ),
+        ToolDefinition::new(
+            "build_context_pack",
+            "Build a token-budgeted context pack: PageRank-ranked files with \
                           top-level signatures fitted to a token budget. Strong first call \
                           when starting a new task in this repo. Set shape=\"markdown\" for a \
                           plain-text view ready to paste into an LLM context window.",
-            input_schema: schema_object(
+            schema_object(
                 &[
                     (
                         "tokens",
@@ -202,13 +221,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
                 &[],
             ),
-        },
-        ToolDefinition {
-            name: "rename_symbol",
-            description: "LSP rename for the symbol at file:line:column. Returns the affected \
+        ),
+        ToolDefinition::new(
+            "rename_symbol",
+            "LSP rename for the symbol at file:line:column. Returns the affected \
                           file list and per-file edit count. Set dry_run=true to preview \
                           without writing. ⚠ Mutates source files when dry_run is false.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("new_name", "string", "Replacement identifier"),
@@ -219,25 +238,26 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "list_code_actions",
-            description: "List LSP code actions available at file:line:column \
+        ),
+        ToolDefinition::new(
+            "list_code_actions",
+            "List LSP code actions available at file:line:column \
                           (refactor/quickfix/source). Filter with `kind` or `preferred=true`.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("kind", "string", "Filter by action kind"),
                     ("preferred", "boolean", "Only preferred actions"),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "apply_code_action",
-            description: "Apply a code action by exact title at file:line:column. Use \
+        )
+        .with_output_schema(section_output_schema("Available code actions")),
+        ToolDefinition::new(
+            "apply_code_action",
+            "Apply a code action by exact title at file:line:column. Use \
                           `list_code_actions` first to discover titles. Set dry_run=true to \
                           preview. ⚠ Mutates source files when dry_run is false.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("title", "string", "Exact action title to apply"),
@@ -248,13 +268,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "replace_symbol_body",
-            description: "Replace the resolved symbol's full body with new source code at \
+        ),
+        ToolDefinition::new(
+            "replace_symbol_body",
+            "Replace the resolved symbol's full body with new source code at \
                           file:line:column. Splices by the LSP's symbol range so braces / \
                           decorators stay intact. ⚠ Mutates source files when dry_run is false.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("body", "string", "New source for the symbol"),
@@ -265,12 +285,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "insert_before_symbol",
-            description: "Insert source code immediately before the symbol at \
+        ),
+        ToolDefinition::new(
+            "insert_before_symbol",
+            "Insert source code immediately before the symbol at \
                           file:line:column. ⚠ Mutates source files when dry_run is false.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("code", "string", "Source code to insert"),
@@ -281,12 +301,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
-        ToolDefinition {
-            name: "insert_after_symbol",
-            description: "Insert source code immediately after the symbol at \
+        ),
+        ToolDefinition::new(
+            "insert_after_symbol",
+            "Insert source code immediately after the symbol at \
                           file:line:column. ⚠ Mutates source files when dry_run is false.",
-            input_schema: with_extra(
+            with_extra(
                 location_schema(),
                 &[
                     ("code", "string", "Source code to insert"),
@@ -297,6 +317,6 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
-        },
+        ),
     ]
 }
