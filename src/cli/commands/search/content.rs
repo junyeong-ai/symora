@@ -1,13 +1,10 @@
-use std::path::PathBuf;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
-#[cfg(unix)]
-use crate::daemon::DaemonClient;
+use crate::error::StoreError;
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
@@ -37,49 +34,38 @@ pub async fn execute_content_search(
         return Ok(());
     }
 
-    #[cfg(unix)]
+    let language_filter = language.map(Language::parse_or_default);
+    match app
+        .store
+        .search_content(query, limit, language_filter)
+        .await
     {
-        let client = DaemonClient::new(app.root());
-        match client.search_content(query, Some(limit), language).await {
-            Ok(response) => {
-                let mut parsed: Section<ContentResultOutput> = serde_json::from_value(response)
-                    .map_err(|e| anyhow::anyhow!("Invalid daemon response: {}", e))?;
-
-                for r in &mut parsed.items {
-                    r.file = ctx.relative_path(&PathBuf::from(&r.file));
-                    r.backend = Some("index".to_string());
-                }
-
-                ctx.print_success(finish_content_search(
-                    parsed.items,
-                    parsed.count,
-                    query,
-                    language,
-                    limit,
-                ));
-            }
-            Err(e) => {
-                if should_fallback_content_search(&e.to_string()) {
-                    let parsed = fallback_content_search(app, query, language, limit).await?;
-                    ctx.print_success(parsed);
-                } else {
-                    ctx.print_error(e);
-                }
-            }
+        Ok(page) => {
+            let items = page
+                .rows
+                .into_iter()
+                .map(|r| ContentResultOutput {
+                    file: ctx.relative_path(&r.file),
+                    line: r.line,
+                    content: r.content,
+                    backend: Some("index".to_string()),
+                    score: r.score,
+                })
+                .collect();
+            ctx.print_success(finish_content_search(
+                items, page.total, query, language, limit,
+            ));
         }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let parsed = fallback_content_search(app, query, language, limit).await?;
-        ctx.print_success(parsed);
+        // No index yet: a one-shot filesystem scan keeps content search
+        // working with zero setup. Any other error is real and surfaced.
+        Err(StoreError::NotInitialized) => {
+            let parsed = fallback_content_search(app, query, language, limit).await?;
+            ctx.print_success(parsed);
+        }
+        Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
     }
 
     Ok(())
-}
-
-fn should_fallback_content_search(error: &str) -> bool {
-    error.contains("Store not initialized")
 }
 
 /// Final shaping shared by the index and scan paths: prioritize code-file
@@ -258,27 +244,20 @@ fn content_result_priority(result: &ContentResultOutput, language: Option<&str>)
     priority
 }
 
+/// Score by the match's character position within the trimmed line,
+/// mirroring the SQL ladder in `build_content_search_query` (whose `INSTR`
+/// is character-based) so the scan and index paths rank identically even
+/// with multibyte text. `query` is already lowercased by the caller.
 fn score_content_line(query: &str, line: &str) -> f64 {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
+    let trimmed = line.trim().to_ascii_lowercase();
+    let Some(byte_pos) = trimmed.find(query) else {
         return 0.0;
-    }
-
-    let lower = line.to_ascii_lowercase();
-    if !lower.contains(query) {
-        return 0.0;
-    }
-
-    if trimmed.to_ascii_lowercase().starts_with(query) {
-        1.0
-    } else if line.len() < 80 {
-        0.85
-    } else if lower.find(query).is_some_and(|idx| idx <= 20) {
-        0.7
-    } else if line.len() < 150 {
-        0.5
-    } else {
-        0.3
+    };
+    match trimmed[..byte_pos].chars().count() {
+        0 => 1.0,
+        pos if pos < 8 => 0.8,
+        pos if pos < 32 => 0.6,
+        _ => 0.4,
     }
 }
 

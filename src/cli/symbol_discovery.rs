@@ -75,12 +75,15 @@ pub fn is_probably_test_path(path: &str) -> bool {
         || lower.ends_with("spec.tsx")
 }
 
+/// Demote a prefix match whose only extra is a test-noise suffix (e.g.
+/// `userTest` for query `user`). Error/exception types are deliberately
+/// NOT noise — `StoreError` is exactly what a search for `Store` wants.
 pub fn noisy_suffix_penalty(name: &str, query: &str) -> i32 {
     if name == query || !name.starts_with(query) {
         return 0;
     }
 
-    let suffixes = ["test", "tests", "spec", "exception", "error", "errors"];
+    let suffixes = ["test", "tests", "spec"];
     if suffixes.iter().any(|suffix| name.ends_with(suffix)) {
         6
     } else {

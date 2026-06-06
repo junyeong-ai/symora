@@ -1,74 +1,94 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+/// Defines [`SymbolKind`] together with every projection that must agree on
+/// the wire spelling of a variant: serde, [`Display`], [`FromStr`], the
+/// `ALL` slice, and the canonical-name lookup. Listing a variant once here
+/// makes the four projections impossible to drift apart — adding a variant
+/// is a single edit the compiler then forces to completion (the
+/// `canonical_name` match is exhaustive).
+macro_rules! symbol_kinds {
+    (
+        kinds { $( $variant:ident => $name:literal ),+ $(,)? }
+        aliases { $( $alias:literal => $target:ident ),* $(,)? }
+    ) => {
+        /// Closely mirrors LSP `SymbolKind` so the model layer can pass
+        /// through LSP responses with no lossy translation.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+        pub enum SymbolKind {
+            $( #[serde(rename = $name)] $variant ),+
+        }
 
-/// Closely mirrors LSP `SymbolKind` so the model layer can pass through
-/// LSP responses with no lossy translation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SymbolKind {
-    File,
-    Module,
-    Namespace,
-    Package,
-    Class,
-    Method,
-    Property,
-    Field,
-    Constructor,
-    Enum,
-    Interface,
-    Function,
-    Variable,
-    Constant,
-    String,
-    Number,
-    Boolean,
-    Array,
-    Object,
-    Key,
-    Null,
-    EnumMember,
-    Struct,
-    Event,
-    Operator,
-    TypeParameter,
+        impl SymbolKind {
+            /// Every variant, in declaration order — the basis for round-trip
+            /// tests and the CLI name list.
+            pub const ALL: &'static [SymbolKind] = &[ $( SymbolKind::$variant ),+ ];
+
+            /// The single wire spelling of this kind, shared by serde,
+            /// `Display`, and `FromStr`.
+            const fn canonical_name(self) -> &'static str {
+                match self { $( SymbolKind::$variant => $name ),+ }
+            }
+        }
+
+        impl fmt::Display for SymbolKind {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.canonical_name())
+            }
+        }
+
+        impl FromStr for SymbolKind {
+            type Err = String;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s.to_lowercase().as_str() {
+                    $( $name => Ok(SymbolKind::$variant), )+
+                    $( $alias => Ok(SymbolKind::$target), )*
+                    _ => Err(format!("Unknown symbol kind: {s}")),
+                }
+            }
+        }
+    };
+}
+
+symbol_kinds! {
+    kinds {
+        File => "file",
+        Module => "module",
+        Namespace => "namespace",
+        Package => "package",
+        Class => "class",
+        Method => "method",
+        Property => "property",
+        Field => "field",
+        Constructor => "constructor",
+        Enum => "enum",
+        Interface => "interface",
+        Function => "function",
+        Variable => "variable",
+        Constant => "constant",
+        String => "string",
+        Number => "number",
+        Boolean => "boolean",
+        Array => "array",
+        Object => "object",
+        Key => "key",
+        Null => "null",
+        EnumMember => "enum_member",
+        Struct => "struct",
+        Event => "event",
+        Operator => "operator",
+        TypeParameter => "type_parameter",
+    }
+    aliases {
+        // rust-analyzer reports traits as Interface.
+        "trait" => Interface,
+        "enummember" => EnumMember,
+        "typeparameter" => TypeParameter,
+    }
 }
 
 impl SymbolKind {
-    pub fn from_lsp(kind: u32) -> Self {
-        match kind {
-            1 => Self::File,
-            2 => Self::Module,
-            3 => Self::Namespace,
-            4 => Self::Package,
-            5 => Self::Class,
-            6 => Self::Method,
-            7 => Self::Property,
-            8 => Self::Field,
-            9 => Self::Constructor,
-            10 => Self::Enum,
-            11 => Self::Interface,
-            12 => Self::Function,
-            13 => Self::Variable,
-            14 => Self::Constant,
-            15 => Self::String,
-            16 => Self::Number,
-            17 => Self::Boolean,
-            18 => Self::Array,
-            19 => Self::Object,
-            20 => Self::Key,
-            21 => Self::Null,
-            22 => Self::EnumMember,
-            23 => Self::Struct,
-            24 => Self::Event,
-            25 => Self::Operator,
-            26 => Self::TypeParameter,
-            _ => Self::Variable,
-        }
-    }
-
     pub fn is_callable(&self) -> bool {
         matches!(self, Self::Function | Self::Method | Self::Constructor)
     }
@@ -92,87 +112,11 @@ impl SymbolKind {
         s.parse().unwrap_or(Self::Variable)
     }
 
-    /// All valid kind names (used for error messages and CLI help).
-    pub fn all_kind_names() -> &'static [&'static str] {
-        &[
-            "function",
-            "class",
-            "method",
-            "field",
-            "variable",
-            "constant",
-            "interface",
-            "trait",
-            "enum",
-            "struct",
-            "module",
-            "property",
-            "constructor",
-            "enum_member",
-            "type_parameter",
-        ]
-    }
-}
-
-impl fmt::Display for SymbolKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::File => "file",
-            Self::Module => "module",
-            Self::Namespace => "namespace",
-            Self::Package => "package",
-            Self::Class => "class",
-            Self::Method => "method",
-            Self::Property => "property",
-            Self::Field => "field",
-            Self::Constructor => "constructor",
-            Self::Enum => "enum",
-            Self::Interface => "interface",
-            Self::Function => "function",
-            Self::Variable => "variable",
-            Self::Constant => "constant",
-            Self::String => "string",
-            Self::Number => "number",
-            Self::Boolean => "boolean",
-            Self::Array => "array",
-            Self::Object => "object",
-            Self::Key => "key",
-            Self::Null => "null",
-            Self::EnumMember => "enum_member",
-            Self::Struct => "struct",
-            Self::Event => "event",
-            Self::Operator => "operator",
-            Self::TypeParameter => "type_parameter",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl FromStr for SymbolKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "file" => Ok(Self::File),
-            "module" => Ok(Self::Module),
-            "namespace" => Ok(Self::Namespace),
-            "package" => Ok(Self::Package),
-            "class" => Ok(Self::Class),
-            "method" => Ok(Self::Method),
-            "property" => Ok(Self::Property),
-            "field" => Ok(Self::Field),
-            "constructor" => Ok(Self::Constructor),
-            "enum" => Ok(Self::Enum),
-            // `trait` is aliased to Interface (rust-analyzer reports traits as Interface).
-            "interface" | "trait" => Ok(Self::Interface),
-            "function" => Ok(Self::Function),
-            "variable" => Ok(Self::Variable),
-            "constant" => Ok(Self::Constant),
-            "struct" => Ok(Self::Struct),
-            "enum_member" | "enummember" => Ok(Self::EnumMember),
-            "type_parameter" | "typeparameter" => Ok(Self::TypeParameter),
-            _ => Err(format!("Unknown symbol kind: {}", s)),
-        }
+    /// The canonical name of every kind, for CLI help and error messages.
+    /// These are the documented spellings; [`FromStr`] additionally accepts
+    /// the aliases declared alongside them.
+    pub fn all_kind_names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|k| k.canonical_name()).collect()
     }
 }
 
@@ -181,15 +125,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_lsp_maps_known_codes() {
-        assert_eq!(SymbolKind::from_lsp(5), SymbolKind::Class);
-        assert_eq!(SymbolKind::from_lsp(12), SymbolKind::Function);
-        assert_eq!(SymbolKind::from_lsp(6), SymbolKind::Method);
+    fn every_kind_round_trips_through_display_and_from_str() {
+        for &kind in SymbolKind::ALL {
+            let text = kind.to_string();
+            let parsed = text.parse::<SymbolKind>().unwrap_or_else(|e| {
+                panic!("Display emitted {text:?} but FromStr rejected it: {e}")
+            });
+            assert_eq!(parsed, kind, "round-trip mismatch for {text:?}");
+        }
     }
 
     #[test]
-    fn from_lsp_unknown_falls_back_to_variable() {
-        assert_eq!(SymbolKind::from_lsp(999), SymbolKind::Variable);
+    fn every_kind_round_trips_through_serde() {
+        for &kind in SymbolKind::ALL {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: SymbolKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind, "serde round-trip mismatch for {json}");
+        }
+    }
+
+    #[test]
+    fn serde_and_display_share_one_spelling() {
+        // The JSON spelling (serde) and the stored/CLI spelling (Display)
+        // must be identical, or the DB and the API would disagree.
+        for &kind in SymbolKind::ALL {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{kind}\""));
+        }
     }
 
     #[test]
@@ -222,5 +184,14 @@ mod tests {
             "interface".parse::<SymbolKind>().unwrap(),
             SymbolKind::Interface
         );
+    }
+
+    #[test]
+    fn parse_or_default_falls_back_to_variable() {
+        assert_eq!(
+            SymbolKind::parse_or_default("not_a_kind"),
+            SymbolKind::Variable
+        );
+        assert_eq!(SymbolKind::parse_or_default("struct"), SymbolKind::Struct);
     }
 }

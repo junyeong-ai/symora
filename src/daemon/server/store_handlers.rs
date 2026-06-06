@@ -118,16 +118,7 @@ pub(super) async fn handle_index_build(
     };
 
     let stats = ctx.store.index(options).await.map_err(RpcError::from)?;
-
-    Ok(serde_json::json!({
-        "status": "completed",
-        "stats": {
-            "file_count": stats.file_count,
-            "symbol_count": stats.symbol_count,
-            "content_line_count": stats.content_line_count,
-            "index_size_bytes": stats.index_size_bytes,
-        }
-    }))
+    serde_json::to_value(stats).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_index_status(
@@ -140,16 +131,7 @@ pub(super) async fn handle_index_status(
     ctx.touch();
 
     let stats = ctx.store.stats().await.map_err(RpcError::from)?;
-
-    Ok(serde_json::json!({
-        "file_count": stats.file_count,
-        "symbol_count": stats.symbol_count,
-        "content_line_count": stats.content_line_count,
-        "index_size_bytes": stats.index_size_bytes,
-        "last_indexed": stats.last_indexed,
-        "is_indexing": stats.is_indexing,
-        "progress": stats.progress,
-    }))
+    serde_json::to_value(stats).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_index_clear(

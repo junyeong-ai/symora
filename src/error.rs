@@ -226,6 +226,13 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 }
 
+impl StoreError {
+    /// Wire error codes for the semantic store-error variants, so the daemon
+    /// client recovers the typed variant instead of matching a message.
+    pub const NOT_INITIALIZED_CODE: i32 = -32010;
+    pub const ALREADY_INDEXING_CODE: i32 = -32011;
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("Config parse error: {0}")]

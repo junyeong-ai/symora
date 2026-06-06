@@ -36,6 +36,7 @@ logs/
 
 # Models cache (large files)
 /models/
+.fastembed_cache/
 *.onnx
 *.safetensors
 

@@ -186,6 +186,57 @@ mod tests {
         assert!(parsed.hints.is_empty());
     }
 
+    /// The full set of keys is the public list contract
+    /// (`.claude/rules/json-output-stability.md`). Pinning it here means a
+    /// new envelope field can't slip in silently — adding one is a
+    /// deliberate, breaking change that updates this assertion too.
+    #[test]
+    fn full_envelope_has_exactly_the_contract_keys() {
+        let mut section = Section::with_total(vec![1, 2], 9)
+            .with_hints(vec!["h".to_string()])
+            .with_next_commands(vec!["c".to_string()])
+            .with_indexing(Some(crate::models::lsp::IndexingDegradation::TimedOut));
+        section.error = Some(crate::cli::OutputError::not_found("e"));
+
+        let value = serde_json::to_value(section).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "count",
+                "error",
+                "hints",
+                "indexing",
+                "items",
+                "next_commands",
+                "showing",
+                "truncated",
+            ]
+        );
+    }
+
+    /// An undecorated, complete result carries only the three always-on
+    /// keys. If any optional field loses its `skip_serializing_if`, it
+    /// surfaces here — agents must never have to parse zero/empty filler.
+    #[test]
+    fn minimal_envelope_omits_every_optional_key() {
+        let value = serde_json::to_value(Section::new(vec![1, 2, 3])).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["count", "items", "showing"]);
+    }
+
     #[test]
     fn error_section_is_empty_and_structured() {
         let value = serde_json::to_value(Section::<i32>::error(

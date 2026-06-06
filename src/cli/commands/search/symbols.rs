@@ -1,20 +1,20 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::app::App;
+use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
 use crate::cli::symbol_discovery::{
     broad_symbol_kind_bonus, generic_exact_identifier_penalty, is_probably_test_path,
     noisy_suffix_penalty, symbol_lookup_hints, symbol_match_priority,
 };
-#[cfg(unix)]
-use crate::daemon::DaemonClient;
+use crate::error::StoreError;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::Language;
+use crate::models::symbol::{Language, SymbolKind};
+use crate::services::store::SymbolSearchResult;
 
 use super::common::{looks_like_symbol_path, resolve_search_languages};
 
@@ -57,58 +57,54 @@ pub async fn execute_symbol_search(
         return execute_semantic_symbol_search(app, query, kind, limit, &search_languages).await;
     }
 
-    #[cfg(unix)]
+    match app
+        .store
+        .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default))
+        .await
     {
-        let client = DaemonClient::new(app.root());
-        match client.search_symbols(query, Some(limit), kind).await {
-            Ok(response) => {
-                let mut parsed: Section<SymbolResultOutput> = serde_json::from_value(response)
-                    .map_err(|e| anyhow::anyhow!("Invalid daemon response: {}", e))?;
-
-                for r in &mut parsed.items {
-                    r.file = ctx.relative_path(&PathBuf::from(&r.file));
-                    r.backend = Some("index".to_string());
-                }
-
-                let mut count = parsed.count;
-                let mut candidates = parsed.items;
-                if !search_languages.is_empty() && candidates.len() < limit {
-                    let semantic_results =
-                        collect_semantic_symbol_results(app, query, kind, limit, &search_languages)
-                            .await;
-                    candidates = merge_symbol_results(candidates, semantic_results, query);
-                    count = count.max(candidates.len());
-                }
-
-                ctx.print_success(finish_symbol_search(
-                    candidates, count, query, language, kind, limit,
-                ));
+        Ok(page) => {
+            let mut count = page.total;
+            let mut candidates: Vec<SymbolResultOutput> = page
+                .rows
+                .into_iter()
+                .map(|r| index_result_output(r, ctx))
+                .collect();
+            if !search_languages.is_empty() && candidates.len() < limit {
+                let semantic_results =
+                    collect_semantic_symbol_results(app, query, kind, limit, &search_languages)
+                        .await;
+                candidates = merge_symbol_results(candidates, semantic_results, query);
+                count = count.max(candidates.len());
             }
-            Err(e) => {
-                if should_fallback_to_semantic(&e.to_string(), &search_languages) {
-                    return execute_semantic_symbol_search(
-                        app,
-                        query,
-                        kind,
-                        limit,
-                        &search_languages,
-                    )
-                    .await;
-                }
-                ctx.print_error(e);
-            }
+            ctx.print_success(finish_symbol_search(
+                candidates, count, query, language, kind, limit,
+            ));
         }
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = (kind, limit, language);
-        ctx.print_error(OutputError::unsupported(
-            "Search requires daemon mode (Unix only)",
-        ));
+        // No index yet: answer from live LSP workspace symbols instead.
+        Err(StoreError::NotInitialized) => {
+            return execute_semantic_symbol_search(app, query, kind, limit, &search_languages)
+                .await;
+        }
+        Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
     }
 
     Ok(())
+}
+
+/// Map a raw index row to the emitted output shape, relativizing the path
+/// and tagging the backend.
+fn index_result_output(row: SymbolSearchResult, ctx: &OutputContext) -> SymbolResultOutput {
+    SymbolResultOutput {
+        name: row.name,
+        name_path: row.name_path,
+        kind: row.kind.to_string(),
+        file: ctx.relative_path(&row.file),
+        line: row.line,
+        column: row.column,
+        container: row.container,
+        backend: Some("index".to_string()),
+        score: row.score,
+    }
 }
 
 async fn execute_semantic_symbol_search(
@@ -135,19 +131,19 @@ async fn execute_semantic_symbol_search(
         candidates = merge_symbol_results(candidates, expanded, query);
     }
 
-    #[cfg(unix)]
-    if looks_like_symbol_path(query) {
-        let client = DaemonClient::new(app.root());
-        if let Ok(response) = client.search_symbols(query, Some(limit), kind).await
-            && let Ok(mut parsed) = serde_json::from_value::<Section<SymbolResultOutput>>(response)
-        {
-            for result in &mut parsed.items {
-                result.file = ctx.relative_path(&PathBuf::from(&result.file));
-                result.backend = Some("index".to_string());
-            }
-            count = count.max(parsed.count);
-            candidates = merge_symbol_results(candidates, parsed.items, query);
-        }
+    if looks_like_symbol_path(query)
+        && let Ok(page) = app
+            .store
+            .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default))
+            .await
+    {
+        count = count.max(page.total);
+        let index_results: Vec<SymbolResultOutput> = page
+            .rows
+            .into_iter()
+            .map(|r| index_result_output(r, ctx))
+            .collect();
+        candidates = merge_symbol_results(candidates, index_results, query);
     }
 
     count = count.max(candidates.len());
@@ -441,28 +437,24 @@ fn symbol_result_priority(query: &str, result: &SymbolResultOutput) -> i32 {
         .to_ascii_lowercase();
     let match_priority = symbol_match_priority(query, &name, &path);
 
+    // Test code is demoted by file path only. A container-name substring
+    // check ("test") would mis-fire on Fastest/Latest/Contest, and the file
+    // path already catches the real test code.
     let test_penalty = if is_probably_test_path(&result.file) {
         8
     } else {
         0
     };
-    let container_penalty = result
-        .container
-        .as_deref()
-        .map(|container| {
-            if container.to_ascii_lowercase().contains("test") {
-                3
-            } else {
-                0
-            }
-        })
-        .unwrap_or(0);
     let kind_penalty = if is_low_signal_kind(&result.kind) {
         6
     } else {
         0
     };
     let suffix_penalty = noisy_suffix_penalty(&name, &q);
+    // For a broad single-word query, prefer a high-signal type/function
+    // whose name contains the term (+8) over a low-signal exact match such
+    // as a same-named variable or enum member (-24/-18), which is rarely
+    // what the agent is looking for.
     let generic_exact_penalty = generic_exact_identifier_penalty(
         query,
         &name,
@@ -474,7 +466,6 @@ fn symbol_result_priority(query: &str, result: &SymbolResultOutput) -> i32 {
 
     match_priority + kind_bonus
         - test_penalty
-        - container_penalty
         - kind_penalty
         - suffix_penalty
         - generic_exact_penalty
@@ -492,10 +483,6 @@ fn is_low_signal_kind(kind: &str) -> bool {
         kind,
         "variable" | "field" | "property" | "enum_member" | "constant"
     )
-}
-
-fn should_fallback_to_semantic(error: &str, languages: &[Language]) -> bool {
-    !languages.is_empty() && error.contains("Store not initialized")
 }
 
 fn workspace_query_from_pattern(pattern: &str) -> String {

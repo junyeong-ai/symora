@@ -4,12 +4,14 @@ use std::collections::HashSet;
 
 use crate::error::LspError;
 use crate::infra::file_filter::{FileFilter, FileFilterConfig};
-use crate::infra::lsp::protocol::{LspLocation, Position};
+use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position};
 use crate::infra::lsp::{
     LspFeature, SupportLevel, get_alternative_suggestion, get_support_level, language_server_name,
 };
 use crate::models::lsp::{TypeHierarchyItem, uri_to_path};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
+
+use super::converters::convert_symbol_kind;
 
 pub(super) async fn read_file_validated(
     file: &Path,
@@ -263,8 +265,12 @@ pub(super) fn parse_location_response(result: &serde_json::Value) -> Option<Vec<
 
 pub(super) fn parse_type_hierarchy_item(item: &serde_json::Value) -> Option<TypeHierarchyItem> {
     let name = item.get("name")?.as_str()?.to_string();
-    let kind_num = item.get("kind")?.as_u64()? as u32;
-    let kind = SymbolKind::from_lsp(kind_num);
+    // One LSP-taxonomy decoder for the whole crate: the numeric code becomes
+    // a typed `LspSymbolKind`, then `convert_symbol_kind` maps it like every
+    // other LSP path. An out-of-range code degrades to Variable.
+    let kind = serde_json::from_value::<LspSymbolKind>(item.get("kind")?.clone())
+        .map(convert_symbol_kind)
+        .unwrap_or(SymbolKind::Variable);
     let uri = item.get("uri")?.as_str()?;
     let range = item.get("selectionRange")?;
     let start = range.get("start")?;

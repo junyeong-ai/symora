@@ -20,8 +20,6 @@ use clap::{Args, Subcommand};
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::response::{EditOutput, LineRange, Section};
-#[cfg(unix)]
-use crate::daemon::DaemonClient;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
 use crate::utils::char_to_byte_index;
@@ -538,10 +536,7 @@ async fn pull_diagnostics(
 
 async fn finish(app: &App, file: &Path, dry_run: bool) {
     if !dry_run {
-        #[cfg(unix)]
         invalidate_store_files(app, std::slice::from_ref(&file.to_path_buf())).await;
-        #[cfg(not(unix))]
-        let _ = (app, file);
     }
 }
 
@@ -1129,12 +1124,12 @@ fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
 // Store invalidation
 // ---------------------------------------------------------------------------
 
-/// Best-effort invalidation of files in the daemon's store index.
-#[cfg(unix)]
+/// Best-effort invalidation of edited files in the store index, through the
+/// same `StoreService` the rest of the command layer uses — so it honors
+/// daemon/direct mode instead of reaching for the daemon directly.
 pub(crate) async fn invalidate_store_files(app: &App, files: &[PathBuf]) {
-    let client = DaemonClient::new(app.root());
     for file in files {
-        if let Err(e) = client.invalidate_file(file).await {
+        if let Err(e) = app.store.invalidate_file(file).await {
             tracing::warn!("Store invalidation failed for {}: {}", file.display(), e);
         }
     }
