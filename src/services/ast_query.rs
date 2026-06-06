@@ -1,5 +1,6 @@
 //! AST Query Service
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -32,94 +33,139 @@ pub trait AstQueryService: Send + Sync {
     ) -> Result<Vec<AstMatch>, SearchError>;
 }
 
+struct ParserEntry {
+    parser: Mutex<Parser>,
+    ts_language: Language,
+}
+
 pub struct DefaultAstQueryService {
-    python: Mutex<Parser>,
-    typescript: Mutex<Parser>, // Uses TSX grammar (superset) to handle both .ts and .tsx
-    javascript: Mutex<Parser>,
-    rust: Mutex<Parser>,
-    go: Mutex<Parser>,
-    java: Mutex<Parser>,
-    kotlin: Mutex<Parser>,
-    cpp: Mutex<Parser>,
-    csharp: Mutex<Parser>,
-    bash: Mutex<Parser>,
-    ruby: Mutex<Parser>,
-    lua: Mutex<Parser>,
-    php: Mutex<Parser>,
-    swift: Mutex<Parser>,
-    scala: Mutex<Parser>,
-    elixir: Mutex<Parser>,
-    dart: Mutex<Parser>,
-    hcl: Mutex<Parser>,
+    parsers: HashMap<SymbolLanguage, ParserEntry>,
     max_file_size_bytes: u64,
 }
 
+/// Adding a language is a single `register` call.
+fn register(
+    parsers: &mut HashMap<SymbolLanguage, ParserEntry>,
+    language: SymbolLanguage,
+    ts_language: Language,
+) {
+    // The grammar is compiled into the binary, so registration is
+    // deterministic for a given build. A failure means a defective grammar
+    // (an incompatible ABI) — skip that one language so an unrelated language
+    // never loses AST queries over it. The registration-completeness test
+    // turns such a regression into a loud, targeted CI failure before it can
+    // ship.
+    let mut parser = Parser::new();
+    if parser.set_language(&ts_language).is_err() {
+        return;
+    }
+    parsers.insert(
+        language,
+        ParserEntry {
+            parser: Mutex::new(parser),
+            ts_language,
+        },
+    );
+}
+
 impl DefaultAstQueryService {
-    pub fn new(max_file_size_bytes: u64) -> Result<Self, SearchError> {
-        Ok(Self {
-            python: Mutex::new(Self::create_parser(tree_sitter_python::LANGUAGE.into())?),
-            typescript: Mutex::new(Self::create_parser(
-                tree_sitter_typescript::LANGUAGE_TSX.into(), // TSX is a superset
-            )?),
-            javascript: Mutex::new(Self::create_parser(
-                tree_sitter_javascript::LANGUAGE.into(),
-            )?),
-            rust: Mutex::new(Self::create_parser(tree_sitter_rust::LANGUAGE.into())?),
-            go: Mutex::new(Self::create_parser(tree_sitter_go::LANGUAGE.into())?),
-            java: Mutex::new(Self::create_parser(tree_sitter_java::LANGUAGE.into())?),
-            kotlin: Mutex::new(Self::create_parser(tree_sitter_kotlin_sg::LANGUAGE.into())?),
-            cpp: Mutex::new(Self::create_parser(tree_sitter_cpp::LANGUAGE.into())?),
-            csharp: Mutex::new(Self::create_parser(tree_sitter_c_sharp::LANGUAGE.into())?),
-            bash: Mutex::new(Self::create_parser(tree_sitter_bash::LANGUAGE.into())?),
-            ruby: Mutex::new(Self::create_parser(tree_sitter_ruby::LANGUAGE.into())?),
-            lua: Mutex::new(Self::create_parser(tree_sitter_lua::LANGUAGE.into())?),
-            php: Mutex::new(Self::create_parser(tree_sitter_php::LANGUAGE_PHP.into())?),
-            swift: Mutex::new(Self::create_parser(tree_sitter_swift::LANGUAGE.into())?),
-            scala: Mutex::new(Self::create_parser(tree_sitter_scala::LANGUAGE.into())?),
-            elixir: Mutex::new(Self::create_parser(tree_sitter_elixir::LANGUAGE.into())?),
-            dart: Mutex::new(Self::create_parser(tree_sitter_dart::LANGUAGE.into())?),
-            hcl: Mutex::new(Self::create_parser(tree_sitter_hcl::LANGUAGE.into())?),
+    pub fn new(max_file_size_bytes: u64) -> Self {
+        let mut parsers = HashMap::new();
+        register(
+            &mut parsers,
+            SymbolLanguage::Python,
+            tree_sitter_python::LANGUAGE.into(),
+        );
+        // TSX is a superset grammar covering both .ts and .tsx — switching to
+        // LANGUAGE_TYPESCRIPT would silently drop .tsx coverage.
+        register(
+            &mut parsers,
+            SymbolLanguage::TypeScript,
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::JavaScript,
+            tree_sitter_javascript::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Rust,
+            tree_sitter_rust::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Go,
+            tree_sitter_go::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Java,
+            tree_sitter_java::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Kotlin,
+            tree_sitter_kotlin_sg::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Cpp,
+            tree_sitter_cpp::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::CSharp,
+            tree_sitter_c_sharp::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Bash,
+            tree_sitter_bash::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Ruby,
+            tree_sitter_ruby::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Lua,
+            tree_sitter_lua::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::PHP,
+            tree_sitter_php::LANGUAGE_PHP.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Swift,
+            tree_sitter_swift::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Scala,
+            tree_sitter_scala::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Elixir,
+            tree_sitter_elixir::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Dart,
+            tree_sitter_dart::LANGUAGE.into(),
+        );
+        register(
+            &mut parsers,
+            SymbolLanguage::Terraform,
+            tree_sitter_hcl::LANGUAGE.into(),
+        );
+        Self {
+            parsers,
             max_file_size_bytes,
-        })
-    }
-
-    fn create_parser(language: Language) -> Result<Parser, SearchError> {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&language)
-            .map_err(|e| SearchError::Failed(e.to_string()))?;
-        Ok(parser)
-    }
-
-    fn get_parser_and_language(
-        &self,
-        language: SymbolLanguage,
-    ) -> Option<(&Mutex<Parser>, Language)> {
-        match language {
-            SymbolLanguage::Python => Some((&self.python, tree_sitter_python::LANGUAGE.into())),
-            SymbolLanguage::TypeScript => Some((
-                &self.typescript,
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-            )),
-            SymbolLanguage::JavaScript => {
-                Some((&self.javascript, tree_sitter_javascript::LANGUAGE.into()))
-            }
-            SymbolLanguage::Rust => Some((&self.rust, tree_sitter_rust::LANGUAGE.into())),
-            SymbolLanguage::Go => Some((&self.go, tree_sitter_go::LANGUAGE.into())),
-            SymbolLanguage::Java => Some((&self.java, tree_sitter_java::LANGUAGE.into())),
-            SymbolLanguage::Kotlin => Some((&self.kotlin, tree_sitter_kotlin_sg::LANGUAGE.into())),
-            SymbolLanguage::Cpp => Some((&self.cpp, tree_sitter_cpp::LANGUAGE.into())),
-            SymbolLanguage::CSharp => Some((&self.csharp, tree_sitter_c_sharp::LANGUAGE.into())),
-            SymbolLanguage::Bash => Some((&self.bash, tree_sitter_bash::LANGUAGE.into())),
-            SymbolLanguage::Ruby => Some((&self.ruby, tree_sitter_ruby::LANGUAGE.into())),
-            SymbolLanguage::Lua => Some((&self.lua, tree_sitter_lua::LANGUAGE.into())),
-            SymbolLanguage::PHP => Some((&self.php, tree_sitter_php::LANGUAGE_PHP.into())),
-            SymbolLanguage::Swift => Some((&self.swift, tree_sitter_swift::LANGUAGE.into())),
-            SymbolLanguage::Scala => Some((&self.scala, tree_sitter_scala::LANGUAGE.into())),
-            SymbolLanguage::Elixir => Some((&self.elixir, tree_sitter_elixir::LANGUAGE.into())),
-            SymbolLanguage::Dart => Some((&self.dart, tree_sitter_dart::LANGUAGE.into())),
-            SymbolLanguage::Terraform => Some((&self.hcl, tree_sitter_hcl::LANGUAGE.into())),
-            _ => None,
         }
     }
 
@@ -130,11 +176,13 @@ impl DefaultAstQueryService {
         query: &Query,
         language: SymbolLanguage,
     ) -> Result<Vec<AstMatch>, SearchError> {
-        let (parser_mutex, _) = self
-            .get_parser_and_language(language)
+        let entry = self
+            .parsers
+            .get(&language)
             .ok_or(SearchError::UnsupportedLanguage(language))?;
 
-        let mut parser = parser_mutex
+        let mut parser = entry
+            .parser
             .lock()
             .map_err(|_| SearchError::Failed("Parser lock poisoned".to_string()))?;
 
@@ -205,7 +253,7 @@ fn char_column(content: &str, byte_offset: usize, byte_column: usize) -> u32 {
 
 impl Default for DefaultAstQueryService {
     fn default() -> Self {
-        Self::new(10 * 1024 * 1024).expect("Failed to create AST query service")
+        Self::new(10 * 1024 * 1024)
     }
 }
 
@@ -217,8 +265,9 @@ impl AstQueryService for DefaultAstQueryService {
         language: SymbolLanguage,
         paths: &[PathBuf],
     ) -> Result<Vec<AstMatch>, SearchError> {
-        let (_, ts_language) = self
-            .get_parser_and_language(language)
+        let entry = self
+            .parsers
+            .get(&language)
             .ok_or(SearchError::UnsupportedLanguage(language))?;
 
         let pattern_with_capture = if pattern.contains('@') {
@@ -227,7 +276,7 @@ impl AstQueryService for DefaultAstQueryService {
             format!("{} @match", pattern.trim())
         };
 
-        let query = Query::new(&ts_language, &pattern_with_capture)
+        let query = Query::new(&entry.ts_language, &pattern_with_capture)
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
 
         let mut all_results = Vec::new();
@@ -319,56 +368,42 @@ mod tests {
         assert_eq!(char_column(s, s.len(), s.len()), 9);
     }
 
-    #[test]
-    fn test_service_creation() {
-        let service = DefaultAstQueryService::new(10 * 1024 * 1024);
-        assert!(service.is_ok());
-    }
+    /// Every language with a compiled-in grammar. A grammar whose
+    /// registration silently fails (defective ABI) drops out of the parser
+    /// map; this list turns that into a loud, targeted failure.
+    const PARSER_LANGUAGES: [SymbolLanguage; 18] = [
+        SymbolLanguage::Python,
+        SymbolLanguage::TypeScript,
+        SymbolLanguage::JavaScript,
+        SymbolLanguage::Rust,
+        SymbolLanguage::Go,
+        SymbolLanguage::Java,
+        SymbolLanguage::Kotlin,
+        SymbolLanguage::Cpp,
+        SymbolLanguage::CSharp,
+        SymbolLanguage::Bash,
+        SymbolLanguage::Ruby,
+        SymbolLanguage::Lua,
+        SymbolLanguage::PHP,
+        SymbolLanguage::Swift,
+        SymbolLanguage::Scala,
+        SymbolLanguage::Elixir,
+        SymbolLanguage::Dart,
+        SymbolLanguage::Terraform,
+    ];
 
     #[test]
-    fn test_supported_languages() {
+    fn every_supported_language_registers_a_parser() {
         let service = DefaultAstQueryService::default();
 
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Python)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Rust)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Kotlin)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::PHP)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Bash)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Ruby)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Lua)
-                .is_some()
-        );
-        assert!(
-            service
-                .get_parser_and_language(SymbolLanguage::Unknown)
-                .is_none()
-        );
+        for language in PARSER_LANGUAGES {
+            assert!(
+                service.parsers.contains_key(&language),
+                "no parser registered for {language:?}"
+            );
+        }
+        assert_eq!(service.parsers.len(), PARSER_LANGUAGES.len());
+        assert!(!service.parsers.contains_key(&SymbolLanguage::Unknown));
     }
 
     #[test]
@@ -385,15 +420,47 @@ pub fn world() -> i32 {
 }
 "#;
 
-        let (_, ts_lang) = service
-            .get_parser_and_language(SymbolLanguage::Rust)
-            .unwrap();
-        let query = Query::new(&ts_lang, "(function_item) @match").unwrap();
+        let ts_lang = &service
+            .parsers
+            .get(&SymbolLanguage::Rust)
+            .unwrap()
+            .ts_language;
+        let query = Query::new(ts_lang, "(function_item) @match").unwrap();
 
         let matches = service.search_file(Path::new("test.rs"), code, &query, SymbolLanguage::Rust);
 
         assert!(matches.is_ok());
         let matches = matches.unwrap();
         assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn terraform_queries_resolve_through_the_hcl_grammar() {
+        // Terraform is the SymbolLanguage variant; the grammar crate is hcl.
+        // This guards the variant→grammar aliasing from silently breaking.
+        let service = DefaultAstQueryService::default();
+
+        let code = r#"
+resource "aws_s3_bucket" "logs" {
+  bucket = "my-logs"
+}
+"#;
+
+        let ts_lang = &service
+            .parsers
+            .get(&SymbolLanguage::Terraform)
+            .unwrap()
+            .ts_language;
+        let query = Query::new(ts_lang, "(block) @match").unwrap();
+
+        let matches = service
+            .search_file(
+                Path::new("main.tf"),
+                code,
+                &query,
+                SymbolLanguage::Terraform,
+            )
+            .unwrap();
+        assert!(!matches.is_empty());
     }
 }
