@@ -64,6 +64,7 @@ pub async fn execute_symbol_search(
     {
         Ok(page) => {
             let mut count = page.total;
+            let stale = page.stale;
             let mut candidates: Vec<SymbolResultOutput> = page
                 .rows
                 .into_iter()
@@ -76,9 +77,10 @@ pub async fn execute_symbol_search(
                 candidates = merge_symbol_results(candidates, workspace_results, query);
                 count = count.max(candidates.len());
             }
-            ctx.print_success(finish_symbol_search(
-                candidates, count, query, language, kind, limit,
-            ));
+            ctx.print_success(
+                finish_symbol_search(candidates, count, query, language, kind, limit)
+                    .with_stale(stale),
+            );
         }
         // No index yet: answer from live LSP workspace symbols instead.
         Err(StoreError::NotInitialized) => {
@@ -124,6 +126,7 @@ async fn execute_workspace_symbol_search(
 
     let mut candidates = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
     let mut count = candidates.len();
+    let mut stale = false;
 
     if looks_like_symbol_path(query) && candidates.len() < limit {
         let expanded =
@@ -138,6 +141,9 @@ async fn execute_workspace_symbol_search(
             .await
     {
         count = count.max(page.total);
+        // The merged output contains index rows, so the page's staleness
+        // applies to it; the live workspace results are current by nature.
+        stale = page.stale;
         let index_results: Vec<SymbolResultOutput> = page
             .rows
             .into_iter()
@@ -147,9 +153,9 @@ async fn execute_workspace_symbol_search(
     }
 
     count = count.max(candidates.len());
-    ctx.print_success(finish_symbol_search(
-        candidates, count, query, None, kind, limit,
-    ));
+    ctx.print_success(
+        finish_symbol_search(candidates, count, query, None, kind, limit).with_stale(stale),
+    );
     Ok(())
 }
 

@@ -60,7 +60,8 @@ pub(super) async fn handle_search_symbols(
         })
         .collect();
 
-    serde_json::to_value(Section::with_total(items, page.total)).map_err(RpcError::from)
+    serde_json::to_value(Section::with_total(items, page.total).with_stale(page.stale))
+        .map_err(RpcError::from)
 }
 
 pub(super) async fn handle_search_content(
@@ -93,7 +94,8 @@ pub(super) async fn handle_search_content(
         })
         .collect();
 
-    serde_json::to_value(Section::with_total(items, page.total)).map_err(RpcError::from)
+    serde_json::to_value(Section::with_total(items, page.total).with_stale(page.stale))
+        .map_err(RpcError::from)
 }
 
 pub(super) async fn handle_index_build(

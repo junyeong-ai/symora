@@ -119,7 +119,8 @@ impl Store {
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
 
-        self.db
+        let mut page = self
+            .db
             .call(move |conn| {
                 let sql = build_symbol_search_query(kind_str.is_some());
                 let mut stmt = conn.prepare(&sql)?;
@@ -157,9 +158,17 @@ impl Store {
                     })
                     .collect();
 
-                Ok(SearchPage { total, rows })
+                Ok(SearchPage {
+                    total,
+                    rows,
+                    stale: false,
+                })
             })
-            .await
+            .await?;
+
+        let files: Vec<PathBuf> = page.rows.iter().map(|r| r.file.clone()).collect();
+        page.stale = self.any_rows_stale(&files).await;
+        Ok(page)
     }
 
     pub async fn search_content(
@@ -176,7 +185,8 @@ impl Store {
         let limit = limit as i64;
         let lang_str = language.map(|l| l.lsp_id().to_string());
 
-        self.db
+        let mut page = self
+            .db
             .call(move |conn| {
                 let sql = build_content_search_query(lang_str.is_some());
                 let mut stmt = conn.prepare(&sql)?;
@@ -210,9 +220,60 @@ impl Store {
                     })
                     .collect();
 
-                Ok(SearchPage { total, rows })
+                Ok(SearchPage {
+                    total,
+                    rows,
+                    stale: false,
+                })
+            })
+            .await?;
+
+        let files: Vec<PathBuf> = page.rows.iter().map(|r| r.file.clone()).collect();
+        page.stale = self.any_rows_stale(&files).await;
+        Ok(page)
+    }
+
+    /// True when any of the given files no longer matches its indexed
+    /// content hash — rewritten, deleted, or unreadable since `index()` ran.
+    /// Biased toward false positives on purpose: a spurious stale banner is
+    /// harmless, stale rows presented as current are not. Cost is bounded by
+    /// the page size (callers pass the matched files of one page).
+    async fn any_rows_stale(&self, files: &[PathBuf]) -> bool {
+        let mut distinct: Vec<&PathBuf> = files.iter().collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+
+        let mut hashes = Vec::with_capacity(distinct.len());
+        for path in distinct {
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => hashes.push((
+                    path.display().to_string(),
+                    crate::infra::hash_content(&content) as i64,
+                )),
+                // Deleted or unreadable: the row is no longer backed by
+                // what's on disk.
+                Err(_) => return true,
+            }
+        }
+        if hashes.is_empty() {
+            return false;
+        }
+
+        self.db
+            .call(move |conn| {
+                let mut stmt = conn.prepare("SELECT content_hash FROM files WHERE path = ?1")?;
+                for (path, hash) in &hashes {
+                    let stored: Option<i64> = stmt
+                        .query_row(rusqlite::params![path], |r| r.get(0))
+                        .optional()?;
+                    if stored != Some(*hash) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             })
             .await
+            .unwrap_or(true)
     }
 
     pub async fn invalidate_file(&self, path: &Path) {
@@ -602,5 +663,71 @@ mod tests {
         let after = store.stats().await.unwrap().symbol_count;
         assert_eq!(before, after);
         assert_eq!(total_matches(&store, "beta").await, 1);
+    }
+
+    #[tokio::test]
+    async fn search_reports_stale_after_external_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+
+        // An edit the store never saw (external tool, git checkout): the old
+        // rows still match the query but must carry the stale marker…
+        tokio::fs::write(&file, "fn alpha() { changed() }\n")
+            .await
+            .unwrap();
+        let page = store.search_symbols("alpha", 50, None).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert!(page.stale);
+
+        // …until the next index pass clears it.
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+    }
+
+    #[tokio::test]
+    async fn search_reports_stale_when_matched_file_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        tokio::fs::remove_file(&file).await.unwrap();
+        assert!(store.search_symbols("alpha", 50, None).await.unwrap().stale);
+    }
+
+    #[tokio::test]
+    async fn stale_only_considers_files_matched_by_the_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("a.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("b.rs"), "fn beta() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        // Rewriting an unrelated file must not flag pages it doesn't back —
+        // and a byte-identical rewrite isn't stale at all (content hash, not
+        // mtime, is the currency key).
+        tokio::fs::write(root.join("b.rs"), "fn beta_v2() {}\n")
+            .await
+            .unwrap();
+        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+        tokio::fs::write(root.join("a.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
     }
 }

@@ -40,6 +40,8 @@ use super::errors::OutputError;
 /// - `showing` — number actually emitted in `items`
 /// - `items` — the result array
 /// - `truncated` — present (and `true`) only when `showing < count`
+/// - `stale` — present (and `true`) only when index-served rows came from
+///   files that changed on disk after indexing
 /// - `hints` / `next_commands` — omitted when empty
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section<T> {
@@ -48,6 +50,13 @@ pub struct Section<T> {
     pub items: Vec<T>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// Present only when a file backing one of `items` changed on disk
+    /// after it was indexed — the rows may no longer match the file.
+    /// Re-running `symora search index build` refreshes them. This is
+    /// index-vs-disk content drift, distinct from the edit-time stale-range
+    /// guard.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -79,6 +88,7 @@ impl<T> Section<T> {
             showing: 0,
             items: vec![],
             truncated: false,
+            stale: false,
             hints: vec![],
             next_commands: vec![],
             indexing: None,
@@ -104,6 +114,11 @@ impl<T> Section<T> {
         self
     }
 
+    pub fn with_stale(mut self, stale: bool) -> Self {
+        self.stale = stale;
+        self
+    }
+
     fn with_total_count(items: Vec<T>, count: Option<usize>) -> Self {
         let showing = items.len();
         let count = count.map_or(showing, |c| c.max(showing));
@@ -112,6 +127,7 @@ impl<T> Section<T> {
             showing,
             items,
             truncated: showing < count,
+            stale: false,
             hints: vec![],
             next_commands: vec![],
             indexing: None,
@@ -164,6 +180,15 @@ mod tests {
     }
 
     #[test]
+    fn stale_serializes_only_when_true() {
+        let stale = serde_json::to_value(Section::new(vec![1]).with_stale(true)).unwrap();
+        assert_eq!(stale["stale"], true);
+
+        let fresh = serde_json::to_value(Section::new(vec![1]).with_stale(false)).unwrap();
+        assert!(fresh.get("stale").is_none());
+    }
+
+    #[test]
     fn indexing_marker_serializes_only_when_degraded() {
         let degraded = serde_json::to_value(
             Section::new(vec![1])
@@ -195,7 +220,8 @@ mod tests {
         let mut section = Section::with_total(vec![1, 2], 9)
             .with_hints(vec!["h".to_string()])
             .with_next_commands(vec!["c".to_string()])
-            .with_indexing(Some(crate::models::lsp::IndexingDegradation::TimedOut));
+            .with_indexing(Some(crate::models::lsp::IndexingDegradation::TimedOut))
+            .with_stale(true);
         section.error = Some(crate::cli::OutputError::not_found("e"));
 
         let value = serde_json::to_value(section).unwrap();
@@ -216,6 +242,7 @@ mod tests {
                 "items",
                 "next_commands",
                 "showing",
+                "stale",
                 "truncated",
             ]
         );
