@@ -24,7 +24,7 @@ use crate::cli::response::Section;
 use crate::constants::defaults::{PACK_MAX_FILE_BYTES, SEMANTIC_CHUNK_LINES as CHUNK_LINES};
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
-use crate::services::embedding_cache::{CachedChunk, EmbeddingCache};
+use crate::services::embedding_cache::{CachedChunk, EmbeddingCache, RankedChunk, TopK};
 use crate::services::embeddings::{EmbeddingError, EmbeddingProvider, cosine, default_provider};
 
 #[derive(Debug, Serialize)]
@@ -88,38 +88,43 @@ fn semantic_search(
         return Ok(Section::new(vec![]));
     }
 
-    // The cache is shared across queries; `--lang` selects which language is
-    // embedded and ranked. The full filtered corpus is scored, so the best
-    // matches are never hidden — `--limit` alone bounds what's shown.
     let language = language.map(Language::parse_or_default);
-    let corpus = build_corpus(app, provider, &files, language)?;
-    if corpus.is_empty() {
-        return Ok(Section::new(vec![]));
-    }
-
     let query_vec = provider.embed_query(query)?;
-    let mut scored: Vec<(f32, &(String, CachedChunk))> = corpus
-        .iter()
-        .map(|entry| (cosine(&query_vec, &entry.1.vector), entry))
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let score = |vector: &[f32]| cosine(&query_vec, vector);
 
-    let count = scored.len();
-    let items: Vec<SemanticResultOutput> = scored
+    // The cache is shared across queries; `--lang` selects which language is
+    // embedded and ranked. Ranking streams every candidate through a bounded
+    // top-`limit` heap, so the best matches are found without ever holding the
+    // whole corpus in memory.
+    let (ranked, total) =
+        match EmbeddingCache::open(app.root(), provider.model_id(), provider.dimension()) {
+            Ok(cache) => {
+                let active: HashSet<String> = files.iter().map(|f| f.rel.clone()).collect();
+                cache.prune(&active)?;
+                refresh_cache(&cache, provider, &files, language)?;
+                let lang_id = language.map(|l| l.lsp_id());
+                cache.rank_top(lang_id, limit, score)?
+            }
+            Err(e) => {
+                tracing::warn!("Embedding cache unavailable, embedding in memory: {e}");
+                rank_in_memory(provider, &files, language, limit, score)?
+            }
+        };
+
+    let items: Vec<SemanticResultOutput> = ranked
         .into_iter()
-        .take(limit)
-        .map(|(score, (file, chunk))| SemanticResultOutput {
-            file: file.clone(),
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            score,
-            snippet: chunk.snippet.clone(),
+        .map(|r| SemanticResultOutput {
+            file: r.file,
+            start_line: r.start_line,
+            end_line: r.end_line,
+            score: r.score,
+            snippet: r.snippet,
         })
         .collect();
 
-    // `count` is the full ranked candidate set, so `truncated` honestly says
-    // the agent is seeing the top `--limit` of a larger relevance ranking.
-    Ok(Section::with_total(items, count))
+    // `total` is the full candidate count, so `truncated` honestly says the
+    // agent is seeing the top `--limit` of a larger relevance ranking.
+    Ok(Section::with_total(items, total))
 }
 
 /// A discovered, in-budget source file: absolute path (for reading),
@@ -176,37 +181,10 @@ fn language_matches(file: &DiscoveredFile, language: Option<Language>) -> bool {
     }
 }
 
-/// Assemble the ranking corpus for `language`. The cache is shared across
-/// queries — pruning is language-agnostic, so one language's vectors never
-/// evict another's — but a `--lang` query only embeds and ranks that
-/// language, so it never pays to embed code it won't rank. The full set is
-/// returned for scoring; when the cache can't open, embeds in memory instead.
-fn build_corpus(
-    app: &App,
-    provider: &dyn EmbeddingProvider,
-    files: &[DiscoveredFile],
-    language: Option<Language>,
-) -> Result<Vec<(String, CachedChunk)>> {
-    match EmbeddingCache::open(app.root(), provider.model_id(), provider.dimension()) {
-        Ok(cache) => {
-            // Prune every file that left disk, across all languages, so the
-            // cache never serves a deleted file regardless of this query.
-            let active: HashSet<String> = files.iter().map(|f| f.rel.clone()).collect();
-            cache.prune(&active)?;
-            refresh_cache(&cache, provider, files, language)?;
-            let lang_id = language.map(|l| l.lsp_id());
-            Ok(cache.load_corpus(lang_id)?)
-        }
-        Err(e) => {
-            tracing::warn!("Embedding cache unavailable, embedding in memory: {e}");
-            embed_in_memory(provider, files, language)
-        }
-    }
-}
-
 /// Re-embed every file of the requested `language` whose mtime moved, so the
-/// cache holds that language complete and current. With no filter, every
-/// code file is refreshed. Cost is incremental — only changed files run
+/// cache holds that language complete and current. With no filter, every code
+/// file is refreshed. Pruning is language-agnostic, so one language's vectors
+/// never evict another's. Cost is incremental — only changed files run
 /// through the model, and a `--lang` query never embeds another language.
 fn refresh_cache(
     cache: &EmbeddingCache,
@@ -231,14 +209,17 @@ fn refresh_cache(
     Ok(())
 }
 
-/// Fallback when the cache can't open: embed the requested language straight
-/// into memory. The full set is returned so ranking scores all of it.
-fn embed_in_memory(
+/// Fallback when the cache can't open: embed the requested language and rank
+/// it in memory, scoring each chunk as it's produced and dropping the vector,
+/// so peak memory stays O(limit) like the cached path.
+fn rank_in_memory<F: Fn(&[f32]) -> f32>(
     provider: &dyn EmbeddingProvider,
     files: &[DiscoveredFile],
     language: Option<Language>,
-) -> Result<Vec<(String, CachedChunk)>> {
-    let mut corpus = Vec::new();
+    limit: usize,
+    score: F,
+) -> Result<(Vec<RankedChunk>, usize)> {
+    let mut top = TopK::new(limit);
     for file in files {
         if !language_matches(file, language) {
             continue;
@@ -247,10 +228,17 @@ fn embed_in_memory(
             continue;
         };
         for chunk in embed_chunks(provider, &chunk_file(&content))? {
-            corpus.push((file.rel.clone(), chunk));
+            let score = score(&chunk.vector);
+            top.offer(RankedChunk {
+                file: file.rel.clone(),
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                snippet: chunk.snippet,
+                score,
+            });
         }
     }
-    Ok(corpus)
+    Ok(top.finish())
 }
 
 /// A ~`CHUNK_LINES`-line window of a file: 1-indexed line span and text.
@@ -375,7 +363,7 @@ mod tests {
 
         // First pass embeds both files.
         refresh_cache(&cache, &provider, &files, None).unwrap();
-        assert_eq!(cache.load_corpus(None).unwrap().len(), 2);
+        assert_eq!(cache.rank_top(None, 0, |_| 0.0).unwrap().1, 2);
         let after_first = embedded.load(Ordering::SeqCst);
         assert_eq!(after_first, 2);
 
@@ -394,7 +382,7 @@ mod tests {
         ];
         refresh_cache(&cache, &provider, &moved, None).unwrap();
         assert_eq!(embedded.load(Ordering::SeqCst), after_first + 1);
-        assert_eq!(cache.load_corpus(None).unwrap().len(), 2);
+        assert_eq!(cache.rank_top(None, 0, |_| 0.0).unwrap().1, 2);
     }
 
     #[test]

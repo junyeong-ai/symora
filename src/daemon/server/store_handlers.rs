@@ -7,7 +7,7 @@ use crate::daemon::params::{
 };
 use crate::daemon::protocol::RpcError;
 use crate::models::symbol::{Language, SymbolKind};
-use crate::services::store::IndexOptions;
+use crate::services::store::{IndexOptions, StoreService};
 
 use super::context::{ProjectsMap, get_context};
 use super::dispatch::parse_params;
@@ -21,7 +21,7 @@ pub(super) async fn handle_invalidate_file(
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
     let path = std::path::PathBuf::from(&p.file);
-    ctx.store.invalidate_file(&path).await;
+    let _ = ctx.store.invalidate_file(&path).await;
     ctx.lsp.invalidate_file_cache(&path).await;
     Ok(serde_json::json!({"invalidated": true}))
 }
@@ -130,7 +130,7 @@ pub(super) async fn handle_index_status(
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
 
-    let stats = ctx.store.stats().await.map_err(RpcError::from)?;
+    let stats = ctx.store.index_status().await.map_err(RpcError::from)?;
     serde_json::to_value(stats).map_err(RpcError::from)
 }
 
@@ -143,7 +143,7 @@ pub(super) async fn handle_index_clear(
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
 
-    ctx.store.clear().await.map_err(RpcError::from)?;
+    ctx.store.index_clear().await.map_err(RpcError::from)?;
 
     Ok(serde_json::json!({
         "cleared": true

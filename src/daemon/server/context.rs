@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use crate::config::LspRuntimeConfig;
 use crate::daemon::protocol::RpcError;
 use crate::services::lsp::DefaultLspService;
-use crate::services::store::{Store, StoreConfig};
+use crate::services::store::{DefaultStoreService, StoreConfig};
 
 pub(super) type ProjectsMap = Arc<RwLock<HashMap<PathBuf, Arc<ProjectContext>>>>;
 
@@ -22,23 +22,22 @@ pub(super) fn epoch_millis() -> u64 {
 
 pub(super) struct ProjectContext {
     pub(super) lsp: Arc<DefaultLspService>,
-    pub(super) store: Arc<Store>,
+    pub(super) store: DefaultStoreService,
     pub(super) last_used: AtomicU64,
     pub(super) request_count: AtomicU64,
 }
 
 impl ProjectContext {
-    pub(super) async fn new(
-        path: &std::path::Path,
-        lsp_config: Arc<LspRuntimeConfig>,
-    ) -> Result<Self, crate::error::StoreError> {
-        let store = Store::open(path, StoreConfig::default()).await?;
-        Ok(Self {
+    /// Construct a project's services without touching disk. The store opens
+    /// lazily on its first use, so an LSP-only request never creates a
+    /// `.symora` dir and a read-only project is served without error.
+    pub(super) fn new(path: &std::path::Path, lsp_config: Arc<LspRuntimeConfig>) -> Self {
+        Self {
             lsp: Arc::new(DefaultLspService::new(path, lsp_config)),
-            store: Arc::new(store),
+            store: DefaultStoreService::new(path, StoreConfig::default()),
             last_used: AtomicU64::new(epoch_millis()),
             request_count: AtomicU64::new(0),
-        })
+        }
     }
 
     pub(super) fn touch(&self) {
@@ -66,10 +65,7 @@ pub(super) async fn get_context(
         }
     }
 
-    let project_ctx = ProjectContext::new(&path, Arc::clone(lsp_config))
-        .await
-        .map_err(|e| RpcError::internal_error(&format!("Failed to open project store: {}", e)))?;
-    let ctx = Arc::new(project_ctx);
+    let ctx = Arc::new(ProjectContext::new(&path, Arc::clone(lsp_config)));
 
     let mut guard = projects.write().await;
     if let Some(existing) = guard.get(&path) {
