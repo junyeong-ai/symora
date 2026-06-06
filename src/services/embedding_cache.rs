@@ -12,7 +12,8 @@
 //! one model produced are meaningless to another. Embeddings are
 //! rebuildable, so a reset is always safe and beats decoding stale vectors.
 
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashSet};
 use std::path::Path;
 
 use rusqlite::{Connection, params};
@@ -31,6 +32,84 @@ pub struct CachedChunk {
     pub end_line: u32,
     pub snippet: String,
     pub vector: Vec<f32>,
+}
+
+/// A scored chunk ready for output — its file location, snippet, and the
+/// relevance score the caller assigned. Carries no vector: ranking drops it.
+#[derive(Debug, Clone)]
+pub struct RankedChunk {
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub snippet: String,
+    pub score: f32,
+}
+
+/// Bounded top-`limit` accumulator. Offering every candidate keeps only the
+/// highest-scoring `limit` of them, so ranking a large corpus never holds
+/// more than `limit` results in memory while still counting the full total.
+pub struct TopK {
+    limit: usize,
+    heap: BinaryHeap<MinScored>,
+    total: usize,
+}
+
+impl TopK {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            heap: BinaryHeap::new(),
+            total: 0,
+        }
+    }
+
+    /// Count this candidate and keep it only if it ranks among the best seen.
+    pub fn offer(&mut self, chunk: RankedChunk) {
+        self.total += 1;
+        if self.limit == 0 {
+            return;
+        }
+        if self.heap.len() < self.limit {
+            self.heap.push(MinScored(chunk));
+            return;
+        }
+        // The heap is full: replace its weakest entry only if this scores
+        // higher. Copy the weakest score out so the borrow ends before the pop.
+        let weakest = self.heap.peek().map(|m| m.0.score);
+        if weakest.is_some_and(|w| chunk.score > w) {
+            self.heap.pop();
+            self.heap.push(MinScored(chunk));
+        }
+    }
+
+    /// The kept chunks, highest score first, and the total number offered.
+    pub fn finish(self) -> (Vec<RankedChunk>, usize) {
+        let total = self.total;
+        let mut items: Vec<RankedChunk> = self.heap.into_iter().map(|m| m.0).collect();
+        items.sort_by(|a, b| b.score.total_cmp(&a.score));
+        (items, total)
+    }
+}
+
+/// Min-heap ordering by score: the *lowest*-scoring entry compares greatest,
+/// so [`BinaryHeap::peek`]/`pop` surface it for eviction once the heap fills.
+struct MinScored(RankedChunk);
+
+impl PartialEq for MinScored {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.score == other.0.score
+    }
+}
+impl Eq for MinScored {}
+impl Ord for MinScored {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.0.score.total_cmp(&self.0.score)
+    }
+}
+impl PartialOrd for MinScored {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 pub struct EmbeddingCache {
@@ -153,13 +232,16 @@ impl EmbeddingCache {
         Ok(())
     }
 
-    /// Every cached chunk for `language` (all languages when `None`), paired
-    /// with its file path. The full set is returned so the caller scores all
-    /// of it — the best semantic match is never hidden behind a row cap.
-    pub fn load_corpus(
+    /// Score every cached chunk for `language` (all languages when `None`)
+    /// with `score`, returning the top `limit` by descending score and the
+    /// total number scored. Vectors are streamed one row at a time and
+    /// dropped after scoring, so peak memory is O(limit), never the corpus.
+    pub fn rank_top<F: Fn(&[f32]) -> f32>(
         &self,
         language: Option<&str>,
-    ) -> Result<Vec<(String, CachedChunk)>, StoreError> {
+        limit: usize,
+        score: F,
+    ) -> Result<(Vec<RankedChunk>, usize), StoreError> {
         let db = |e: rusqlite::Error| StoreError::Database(e.to_string());
         let mut stmt = self
             .conn
@@ -169,20 +251,20 @@ impl EmbeddingCache {
                  ORDER BY path, chunk_index",
             )
             .map_err(db)?;
-        let rows = stmt
-            .query_map(params![language], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    CachedChunk {
-                        start_line: r.get::<_, i64>(1)? as u32,
-                        end_line: r.get::<_, i64>(2)? as u32,
-                        snippet: r.get::<_, String>(3)?,
-                        vector: decode_vector(&r.get::<_, Vec<u8>>(4)?),
-                    },
-                ))
-            })
-            .map_err(db)?;
-        Ok(rows.filter_map(Result::ok).collect())
+        let mut rows = stmt.query(params![language]).map_err(db)?;
+        let mut top = TopK::new(limit);
+        while let Some(r) = rows.next().map_err(db)? {
+            let vector = decode_vector(&r.get::<_, Vec<u8>>(4).map_err(db)?);
+            let score = score(&vector);
+            top.offer(RankedChunk {
+                file: r.get(0).map_err(db)?,
+                start_line: r.get::<_, i64>(1).map_err(db)? as u32,
+                end_line: r.get::<_, i64>(2).map_err(db)? as u32,
+                snippet: r.get(3).map_err(db)?,
+                score,
+            });
+        }
+        Ok(top.finish())
     }
 
     /// Drop files no longer present in `active`. Returns the count removed.
@@ -276,19 +358,34 @@ mod tests {
         }
     }
 
+    /// Count cached chunks for `language` — `rank_top` with limit 0 keeps no
+    /// items but still tallies the total.
+    fn count(cache: &EmbeddingCache, language: Option<&str>) -> usize {
+        cache.rank_top(language, 0, |_| 0.0).unwrap().1
+    }
+
     #[test]
-    fn put_then_load_round_trips_vectors() {
+    fn encode_decode_round_trips_a_vector() {
+        let v = vec![0.5, -0.5, 1.0, 0.0, 3.25];
+        assert_eq!(decode_vector(&encode_vector(&v)), v);
+    }
+
+    #[test]
+    fn put_then_rank_returns_the_chunk() {
         let dir = TempDir::new().unwrap();
         let cache = EmbeddingCache::open(dir.path(), "model-a", 3).unwrap();
         cache
             .put_file("src/a.rs", 100, "rust", &[chunk(1, vec![0.5, -0.5, 1.0])])
             .unwrap();
 
-        let corpus = cache.load_corpus(None).unwrap();
-        assert_eq!(corpus.len(), 1);
-        assert_eq!(corpus[0].0, "src/a.rs");
-        assert_eq!(corpus[0].1.vector, vec![0.5, -0.5, 1.0]);
-        assert_eq!(corpus[0].1.snippet, "chunk at 1");
+        // The scorer reads the decoded vector, so this also proves the BLOB
+        // round-tripped intact.
+        let (items, total) = cache.rank_top(None, 10, |v| v[2]).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].file, "src/a.rs");
+        assert_eq!(items[0].snippet, "chunk at 1");
+        assert_eq!(items[0].score, 1.0);
         assert_eq!(cache.cached_mtime("src/a.rs"), Some(100));
     }
 
@@ -308,7 +405,7 @@ mod tests {
             .put_file("src/a.rs", 2, "rust", &[chunk(1, vec![1.0, 1.0])])
             .unwrap();
 
-        assert_eq!(cache.load_corpus(None).unwrap().len(), 1);
+        assert_eq!(count(&cache, None), 1);
         assert_eq!(cache.cached_mtime("src/a.rs"), Some(2));
     }
 
@@ -320,11 +417,11 @@ mod tests {
             cache
                 .put_file("src/a.rs", 1, "rust", &[chunk(1, vec![1.0, 0.0])])
                 .unwrap();
-            assert_eq!(cache.load_corpus(None).unwrap().len(), 1);
+            assert_eq!(count(&cache, None), 1);
         }
         // Reopening with a different model id must drop the stale vectors.
         let cache = EmbeddingCache::open(dir.path(), "model-b", 2).unwrap();
-        assert_eq!(cache.load_corpus(None).unwrap().len(), 0);
+        assert_eq!(count(&cache, None), 0);
         assert_eq!(cache.cached_mtime("src/a.rs"), None);
     }
 
@@ -338,11 +435,11 @@ mod tests {
                 .unwrap();
         }
         let cache = EmbeddingCache::open(dir.path(), "model-a", 768).unwrap();
-        assert_eq!(cache.load_corpus(None).unwrap().len(), 0);
+        assert_eq!(count(&cache, None), 0);
     }
 
     #[test]
-    fn load_corpus_filters_by_language_returning_the_full_set() {
+    fn rank_top_filters_by_language_and_caps_items_not_total() {
         let dir = TempDir::new().unwrap();
         let cache = EmbeddingCache::open(dir.path(), "model-a", 1).unwrap();
         for i in 0..5 {
@@ -366,15 +463,43 @@ mod tests {
                 .unwrap();
         }
 
-        // No filter returns the whole corpus; a language filter returns that
-        // language complete — never a capped prefix.
-        assert_eq!(cache.load_corpus(None).unwrap().len(), 7);
-        let rust = cache.load_corpus(Some("rust")).unwrap();
-        assert_eq!(rust.len(), 5);
-        assert!(rust.iter().all(|(path, _)| path.ends_with(".rs")));
-        let python = cache.load_corpus(Some("python")).unwrap();
-        assert_eq!(python.len(), 2);
-        assert!(python.iter().all(|(path, _)| path.ends_with(".py")));
+        assert_eq!(count(&cache, None), 7);
+        let (rust, rust_total) = cache.rank_top(Some("rust"), 100, |_| 0.0).unwrap();
+        assert_eq!(rust_total, 5);
+        assert!(rust.iter().all(|r| r.file.ends_with(".rs")));
+        let (python, py_total) = cache.rank_top(Some("python"), 100, |_| 0.0).unwrap();
+        assert_eq!(py_total, 2);
+        assert!(python.iter().all(|r| r.file.ends_with(".py")));
+
+        // The limit caps the items returned; the total stays the full count.
+        let (top2, total) = cache.rank_top(None, 2, |_| 0.0).unwrap();
+        assert_eq!(total, 7);
+        assert_eq!(top2.len(), 2);
+    }
+
+    #[test]
+    fn rank_top_returns_the_highest_scores_first() {
+        let dir = TempDir::new().unwrap();
+        let cache = EmbeddingCache::open(dir.path(), "model-a", 1).unwrap();
+        for i in 0..5u32 {
+            cache
+                .put_file(
+                    &format!("src/f{i}.rs"),
+                    1,
+                    "rust",
+                    &[chunk(i, vec![i as f32])],
+                )
+                .unwrap();
+        }
+        // Score is the vector's single component; the top 3 must be the
+        // largest three in descending order — proving the heap, not path
+        // order, decides the result.
+        let (items, total) = cache.rank_top(None, 3, |v| v[0]).unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(
+            items.iter().map(|r| r.score).collect::<Vec<_>>(),
+            vec![4.0, 3.0, 2.0]
+        );
     }
 
     #[test]

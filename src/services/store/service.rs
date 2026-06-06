@@ -85,6 +85,25 @@ impl DefaultStoreService {
             Err(e) => Err(e),
         }
     }
+
+    /// Flush the write-ahead log — a daemon-idle maintenance step. A no-op
+    /// until the store is first opened, so it never materializes a DB just to
+    /// checkpoint nothing.
+    pub async fn checkpoint(&self) -> Result<(), StoreError> {
+        match self.store.get() {
+            Some(store) => store.checkpoint().await,
+            None => Ok(()),
+        }
+    }
+
+    /// Evict entries past their TTL — daemon-idle maintenance. A no-op until
+    /// the store is first opened.
+    pub async fn cleanup_expired(&self) -> usize {
+        match self.store.get() {
+            Some(store) => store.cleanup_expired().await,
+            None => 0,
+        }
+    }
 }
 
 #[async_trait]

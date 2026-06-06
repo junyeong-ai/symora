@@ -15,6 +15,7 @@ use crate::daemon::wire::{
 use crate::models::lsp::{FindSymbolsOptions, ServerStatus};
 use crate::models::symbol::Language;
 use crate::services::lsp::LspService;
+use crate::services::store::StoreService;
 
 use super::config::DaemonRuntimeConfig;
 use super::context::{ProjectContext, ProjectsMap, get_context};
@@ -44,7 +45,7 @@ pub(super) async fn handle_status(
 
     let mut active = Vec::with_capacity(contexts.len());
     for (path, ctx, request_count) in &contexts {
-        let stats = match ctx.store.stats().await {
+        let stats = match ctx.store.index_status().await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Failed to get store stats for {}: {}", path.display(), e);
@@ -140,7 +141,7 @@ async fn invalidate_changed_files(
     changes: &[crate::models::lsp::FileChangeWithEdits],
 ) {
     for change in changes {
-        ctx.store.invalidate_file(&change.file).await;
+        let _ = ctx.store.invalidate_file(&change.file).await;
         ctx.lsp.invalidate_file_cache(&change.file).await;
     }
 }
