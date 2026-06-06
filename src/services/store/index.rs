@@ -386,13 +386,7 @@ impl Store {
             }
         };
 
-        let mtime = tokio::fs::metadata(path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0) as i64;
+        let content_hash = crate::infra::hash_content(&content) as i64;
 
         let language = Language::from_path(path);
         let lang_str = match language {
@@ -401,8 +395,9 @@ impl Store {
         };
         let file_path = path.display().to_string();
 
-        // Skip untouched files before paying for extraction or a write.
-        if self.is_current(&file_path, mtime, &lang_str).await? {
+        // Skip files whose content and language already match the index,
+        // before paying for extraction or a write.
+        if self.is_current(&file_path, content_hash, &lang_str).await? {
             return Ok(());
         }
 
@@ -420,20 +415,20 @@ impl Store {
         let now = now_unix() as i64;
 
         // The file row and every row derived from it are written in one
-        // transaction. A failed insert rolls back the mtime stamp, so a file
-        // is never recorded as current with missing symbols — it is simply
-        // re-indexed on the next pass instead of silently disappearing.
+        // transaction. A failed insert rolls back the content-hash stamp, so
+        // a file is never recorded as current with missing symbols — it is
+        // simply re-indexed on the next pass instead of silently disappearing.
         self.db
             .call(move |conn| {
                 let tx = conn.transaction()?;
                 let file_id: i64 = tx.query_row(
-                    "INSERT INTO files (path, mtime, language, indexed_at) VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO files (path, content_hash, language, indexed_at) VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(path) DO UPDATE SET
-                         mtime = excluded.mtime,
+                         content_hash = excluded.content_hash,
                          language = excluded.language,
                          indexed_at = excluded.indexed_at
                      RETURNING id",
-                    rusqlite::params![file_path, mtime, lang_str, now],
+                    rusqlite::params![file_path, content_hash, lang_str, now],
                     |r| r.get(0),
                 )?;
                 delete_file_related_data(&tx, file_id)?;
@@ -471,12 +466,14 @@ impl Store {
             .await
     }
 
-    /// Whether the stored row for `path` already matches the file on disk —
-    /// same mtime and language means there is nothing to re-extract.
+    /// True when the file's content hash and language already match the
+    /// stored row, so identical content is never re-extracted and any change
+    /// to the bytes is always re-indexed. The content hash is the currency
+    /// key, which keeps even same-size, rapid edits from slipping through.
     async fn is_current(
         &self,
         file_path: &str,
-        mtime: i64,
+        content_hash: i64,
         lang_str: &Option<String>,
     ) -> Result<bool, StoreError> {
         let file_path = file_path.to_string();
@@ -485,14 +482,14 @@ impl Store {
             .call(move |conn| {
                 let existing = conn
                     .query_row(
-                        "SELECT mtime, language FROM files WHERE path = ?1",
+                        "SELECT content_hash, language FROM files WHERE path = ?1",
                         rusqlite::params![file_path],
                         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
                     )
                     .optional()?;
                 Ok(match existing {
-                    Some((existing_mtime, existing_lang)) => {
-                        existing_mtime == mtime && existing_lang == lang_str
+                    Some((existing_hash, existing_lang)) => {
+                        existing_hash == content_hash && existing_lang == lang_str
                     }
                     None => false,
                 })
@@ -568,4 +565,42 @@ fn delete_file_and_data(conn: &rusqlite::Connection, file_id: i64) -> Result<(),
         rusqlite::params![file_id],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn total_matches(store: &Store, query: &str) -> usize {
+        store.search_symbols(query, 50, None).await.unwrap().total
+    }
+
+    #[tokio::test]
+    async fn reindex_tracks_content_not_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(total_matches(&store, "alpha").await, 1);
+        assert_eq!(total_matches(&store, "beta").await, 0);
+
+        // Rewrite with different content. Even where the filesystem preserves
+        // the modification time, the content hash differs, so the stored
+        // symbol set is replaced rather than left stale.
+        tokio::fs::write(&file, "fn beta() {}\n").await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(total_matches(&store, "alpha").await, 0);
+        assert_eq!(total_matches(&store, "beta").await, 1);
+
+        // Re-indexing identical content is a no-op: the same hash skips
+        // extraction, so the symbol count stays put with no duplicate rows.
+        let before = store.stats().await.unwrap().symbol_count;
+        store.index(IndexOptions::default()).await.unwrap();
+        let after = store.stats().await.unwrap().symbol_count;
+        assert_eq!(before, after);
+        assert_eq!(total_matches(&store, "beta").await, 1);
+    }
 }

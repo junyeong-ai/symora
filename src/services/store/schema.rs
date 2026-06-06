@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 pub const INIT_SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -8,12 +8,12 @@ PRAGMA cache_size = -16384;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 134217728;
 PRAGMA busy_timeout = 5000;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
-    mtime INTEGER NOT NULL DEFAULT 0,
+    content_hash INTEGER NOT NULL,
     language TEXT,
     indexed_at INTEGER NOT NULL DEFAULT 0
 );
