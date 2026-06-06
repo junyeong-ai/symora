@@ -304,6 +304,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn char_column_is_one_indexed_and_char_based() {
+        // ASCII: in "abc.foo", `foo` starts at byte 4 → 1-indexed column 5.
+        assert_eq!(char_column("abc.foo", 4, 4), 5);
+        // Line start is column 1, never 0.
+        assert_eq!(char_column("xyz", 0, 0), 1);
+        // Multibyte: "café." is 5 chars but 6 bytes; `foo` at byte 6 must
+        // report char column 6, not the byte column (which would give 7).
+        let s = "café.foo";
+        let start = s.find("foo").unwrap();
+        assert_eq!(char_column(s, start, start), 6);
+        // Exclusive end: `foo` ends one past its last char — char column 9
+        // for the 8-character string, again char- not byte-based.
+        assert_eq!(char_column(s, s.len(), s.len()), 9);
+    }
+
+    #[test]
     fn test_service_creation() {
         let service = DefaultAstQueryService::new(10 * 1024 * 1024);
         assert!(service.is_ok());
