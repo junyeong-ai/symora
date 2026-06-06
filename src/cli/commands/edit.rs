@@ -1232,15 +1232,21 @@ pub fn apply_workspace_edits(
 ) -> Result<Vec<AppliedFileChange>> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
+    // Coalesce edits by the file they ultimately resolve to. A workspace
+    // edit's ranges are all expressed against the original document, so two
+    // edit groups naming the same file (distinct URI spellings, or a server
+    // that splits one document across entries) must apply together against
+    // one read — staging them independently would let the later write clobber
+    // the earlier one's changes.
+    let grouped = coalesce_changes_by_file(changes)?;
+
     // Two phases: validate and stage every file in memory first, write
     // only after the whole edit checked out. A stale range in file N
     // must not leave files 1..N-1 already rewritten while the command
     // reports failure.
-    let mut staged = Vec::with_capacity(changes.len());
+    let mut staged = Vec::with_capacity(grouped.len());
 
-    for change in changes {
-        let file = &change.file;
-
+    for (file, edits) in grouped {
         // The paths come from the language server, not the user — they
         // still don't get to write outside the project.
         let canonical = file
@@ -1250,15 +1256,15 @@ pub fn apply_workspace_edits(
             anyhow::bail!(crate::cli::CliInputError::PathOutsideProject(canonical));
         }
 
-        validate_file_for_edit(file, !dry_run)?;
+        validate_file_for_edit(&file, !dry_run)?;
 
-        let content = fs::read_to_string(file)
+        let content = fs::read_to_string(&file)
             .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-        let new_content = apply_text_edits(&content, &change.edits)
+        let new_content = apply_text_edits(&content, &edits)
             .with_context(|| format!("Invalid edit for {}", file.display()))?;
 
-        staged.push((file.clone(), new_content, change.edits.len()));
+        staged.push((file, new_content, edits.len()));
     }
 
     let mut results = Vec::with_capacity(staged.len());
@@ -1274,6 +1280,38 @@ pub fn apply_workspace_edits(
     }
 
     Ok(results)
+}
+
+/// Group workspace-edit entries by their canonicalized target file,
+/// concatenating the edits of any that resolve to the same file while
+/// preserving first-seen order. Files that don't yet exist (or can't be
+/// canonicalized) fall back to their literal path as the key, so a
+/// brand-new-file edit still groups with itself.
+fn coalesce_changes_by_file(
+    changes: &[FileChangeWithEdits],
+) -> Result<Vec<(PathBuf, Vec<TextEdit>)>> {
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut by_key: std::collections::HashMap<PathBuf, (PathBuf, Vec<TextEdit>)> =
+        std::collections::HashMap::new();
+
+    for change in changes {
+        let key = change
+            .file
+            .canonicalize()
+            .unwrap_or_else(|_| change.file.clone());
+        match by_key.get_mut(&key) {
+            Some((_, edits)) => edits.extend(change.edits.iter().cloned()),
+            None => {
+                order.push(key.clone());
+                by_key.insert(key, (change.file.clone(), change.edits.clone()));
+            }
+        }
+    }
+
+    Ok(order
+        .into_iter()
+        .filter_map(|key| by_key.remove(&key))
+        .collect())
 }
 
 /// Result of applying edits to a single file
@@ -1620,6 +1658,38 @@ mod tests {
         let sym = sample_symbol(1, 100);
         let err = symbol_line_span(&sym, 5).unwrap_err();
         assert!(err.to_string().contains("exceeds file length"));
+    }
+
+    #[test]
+    fn coalesce_merges_edits_for_the_same_file_in_order() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        let edit = |line: u32, text: &str| TextEdit {
+            range: LspRange::new(Position::new(line, 0), Position::new(line, 0)),
+            new_text: text.to_string(),
+        };
+        // Two entries naming the same file (as a workspace edit's
+        // documentChanges may) must collapse into one group carrying both
+        // edits, so a later write can't clobber the earlier one's changes.
+        let changes = vec![
+            FileChangeWithEdits {
+                file: PathBuf::from("a.rs"),
+                edits: vec![edit(0, "x")],
+            },
+            FileChangeWithEdits {
+                file: PathBuf::from("b.rs"),
+                edits: vec![edit(0, "y")],
+            },
+            FileChangeWithEdits {
+                file: PathBuf::from("a.rs"),
+                edits: vec![edit(1, "z")],
+            },
+        ];
+        let grouped = coalesce_changes_by_file(&changes).unwrap();
+        assert_eq!(grouped.len(), 2, "a.rs must appear once");
+        assert_eq!(grouped[0].0, PathBuf::from("a.rs"));
+        assert_eq!(grouped[0].1.len(), 2, "both a.rs edits retained");
+        assert_eq!(grouped[1].0, PathBuf::from("b.rs"));
+        assert_eq!(grouped[1].1.len(), 1);
     }
 
     #[test]
