@@ -16,12 +16,17 @@ use crate::cli::symbol_discovery::{
     is_probably_test_path, noisy_suffix_penalty, symbol_match_priority,
 };
 use crate::cli::utils::{TestMatcher, find_symbol_at_position, read_line_at};
+use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
 use crate::models::symbol::Symbol;
 
 /// Maximum concurrent LSP requests (higher = faster but more LSP server load)
 const MAX_CONCURRENT_LSP_REQUESTS: usize = 20;
+
+/// Cap on symbols collected across the language fan-out before ranking —
+/// bounds work on large polyglot workspaces.
+const MAX_USAGE_SYMBOLS: usize = 200;
 
 #[derive(Args, Debug)]
 #[command(
@@ -108,18 +113,105 @@ fn resolve_usage_languages(app: &App, lang: Option<&str>) -> Vec<Language> {
     }
 }
 
-async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language]) -> Vec<Symbol> {
-    let mut all = Vec::new();
-    for language in languages {
-        let Ok(batch) = app.lsp.workspace_symbols(pattern, *language).await else {
-            continue;
-        };
-        all.extend(batch);
-        if all.len() >= 200 {
+/// One language whose symbols are absent from a fan-out result, with the
+/// reason. `usage` auto-detects multiple languages, so disclosing every gap
+/// keeps a reported `count` from ever reading as exhaustive when it is in
+/// fact a lower bound.
+#[derive(Debug, Serialize)]
+pub struct CoverageGap {
+    pub language: String,
+    pub reason: &'static str,
+}
+
+/// Outcome of fanning a workspace-symbol query across the detected
+/// languages. `usage` auto-detects multiple languages by file count, so
+/// partial coverage is the normal case. `failures` pairs each failed
+/// language with its error, `skipped` lists languages left unqueried once
+/// enough candidates were collected, and `answered` records whether any
+/// server responded at all — together they let the output disclose every
+/// coverage gap instead of presenting one as a clean zero.
+struct UsageLookup {
+    symbols: Vec<Symbol>,
+    failures: Vec<(Language, LspError)>,
+    skipped: Vec<Language>,
+    answered: bool,
+}
+
+async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language]) -> UsageLookup {
+    let mut symbols = Vec::new();
+    let mut failures = Vec::new();
+    let mut skipped = Vec::new();
+    let mut answered = false;
+    for (i, language) in languages.iter().enumerate() {
+        // Stop fanning out (and booting more servers) once there are enough
+        // candidates to rank — but record the unsearched languages so the gap
+        // is disclosed rather than hidden behind the count.
+        if symbols.len() >= MAX_USAGE_SYMBOLS {
+            skipped.extend_from_slice(&languages[i..]);
             break;
         }
+        match app.lsp.workspace_symbols(pattern, *language).await {
+            Ok(batch) => {
+                answered = true;
+                symbols.extend(batch);
+            }
+            Err(e) => failures.push((*language, e)),
+        }
     }
-    dedupe_usage_symbols(all)
+    UsageLookup {
+        symbols: dedupe_usage_symbols(symbols),
+        failures,
+        skipped,
+        answered,
+    }
+}
+
+/// Pick the failure most worth surfacing when no server could answer. A
+/// missing server is the most actionable (the agent can install it), so it
+/// wins over transient transport errors.
+fn representative_failure(failures: Vec<(Language, LspError)>) -> Option<LspError> {
+    let mut errors: Vec<LspError> = failures.into_iter().map(|(_, err)| err).collect();
+    if let Some(pos) = errors
+        .iter()
+        .position(|e| matches!(e, LspError::ServerNotInstalled { .. }))
+    {
+        return Some(errors.swap_remove(pos));
+    }
+    errors.into_iter().next()
+}
+
+/// Why a language is missing from the result, as a stable marker an agent
+/// can branch on (install a server, retry a timeout, or narrow with --lang).
+/// A JSON-RPC method-not-found (-32601) means the server simply does not
+/// implement workspace symbols — permanent, not retryable — so it classifies
+/// as `unsupported`, matching the central error classifier.
+fn coverage_reason(err: &LspError) -> &'static str {
+    match err {
+        LspError::ServerNotInstalled { .. } => "server_not_installed",
+        LspError::Timeout(_) => "timed_out",
+        LspError::FeatureNotSupported { .. } | LspError::UnsupportedLanguage(_) => "unsupported",
+        LspError::ServerError { code, .. } if *code == -32601 => "unsupported",
+        _ => "unavailable",
+    }
+}
+
+/// Every language absent from the result — one whose server failed, or one
+/// left unsearched after enough candidates were found — with its reason,
+/// sorted by language for deterministic output.
+fn coverage_gaps(failures: &[(Language, LspError)], skipped: &[Language]) -> Vec<CoverageGap> {
+    let mut gaps: Vec<CoverageGap> = failures
+        .iter()
+        .map(|(language, err)| CoverageGap {
+            language: language.lsp_id().to_string(),
+            reason: coverage_reason(err),
+        })
+        .chain(skipped.iter().map(|language| CoverageGap {
+            language: language.lsp_id().to_string(),
+            reason: "not_searched",
+        }))
+        .collect();
+    gaps.sort_by(|a, b| a.language.cmp(&b.language));
+    gaps
 }
 
 fn dedupe_usage_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
@@ -217,6 +309,13 @@ pub struct UsageOutput {
     /// If set, indicates analysis was truncated at this many symbols
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analyzed: Option<usize>,
+    /// Languages absent from this result — a server that failed, or one left
+    /// unsearched after enough candidates were found. Present whenever
+    /// coverage is partial, so the reported `count` is never mistaken for an
+    /// exhaustive enumeration — the same lower-bound honesty the `indexing`
+    /// marker provides.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coverage_gaps: Vec<CoverageGap>,
     #[serde(flatten)]
     pub section: Section<UsageResult>,
 }
@@ -259,16 +358,36 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         return Ok(());
     }
 
-    let mut symbols = collect_usage_symbols(app, &resolved.query, &languages).await;
+    let UsageLookup {
+        mut symbols,
+        failures,
+        skipped,
+        answered,
+    } = collect_usage_symbols(app, &resolved.query, &languages).await;
+    // Coverage gaps — disclosed on every result, empty or not, so partial
+    // coverage is always visible rather than hidden behind a count.
+    let gaps = coverage_gaps(&failures, &skipped);
     rank_usage_symbols(&mut symbols, &resolved.query);
 
     if symbols.is_empty() {
+        // No server could answer at all: that failure is the result, not an
+        // empty list that would read as a definitive "no usages". An
+        // unanswered fan-out always carries at least one failure to surface.
+        if !answered {
+            if let Some(err) = representative_failure(failures) {
+                ctx.print_error(err);
+            }
+            return Ok(());
+        }
+        // Some languages were searched and genuinely found nothing; any that
+        // failed or were skipped ride along in `coverage_gaps`.
         let resolved_from = resolved.resolved_from.clone();
         ctx.print_success(UsageOutput {
             query: resolved.query.clone(),
             resolved_from: resolved_from.clone(),
             filters_applied: vec![],
             analyzed: None,
+            coverage_gaps: gaps,
             section: Section::new(vec![]).with_hints(usage_hints_for_empty(
                 &resolved.query,
                 resolved.language_override.is_none(),
@@ -391,6 +510,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         resolved_from: resolved.resolved_from,
         filters_applied: filter_names,
         analyzed,
+        coverage_gaps: gaps,
         section: Section::with_total(items, count).with_hints(hints),
     };
 
@@ -643,6 +763,7 @@ mod tests {
             resolved_from: Some("src/main.rs:10:5".to_string()),
             filters_applied: vec![],
             analyzed: Some(10),
+            coverage_gaps: vec![],
             section: Section::with_total(
                 vec![UsageResult {
                     name: "AuthUser".to_string(),
@@ -661,6 +782,8 @@ mod tests {
         let value = serde_json::to_value(output).unwrap();
         assert!(value.get("items").is_some());
         assert!(value.get("results").is_none());
+        // Empty coverage list stays absent — agents never parse a noise field.
+        assert!(value.get("coverage_gaps").is_none());
         assert_eq!(value["count"], 5);
         assert_eq!(value["showing"], 1);
         assert_eq!(value["truncated"], true);
@@ -668,8 +791,105 @@ mod tests {
     }
 
     #[test]
+    fn usage_output_discloses_coverage_gaps_when_coverage_is_partial() {
+        let output = UsageOutput {
+            query: "Foo".to_string(),
+            resolved_from: None,
+            filters_applied: vec![],
+            analyzed: None,
+            coverage_gaps: vec![CoverageGap {
+                language: "rust".to_string(),
+                reason: "server_not_installed",
+            }],
+            section: Section::new(Vec::<UsageResult>::new()),
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["coverage_gaps"][0]["language"], "rust");
+        assert_eq!(value["coverage_gaps"][0]["reason"], "server_not_installed");
+    }
+
+    #[test]
     fn usage_empty_hints_include_file_level_followup_for_resolved_locations() {
         let hints = usage_hints_for_empty("root", true, Some("src/main.py:54:11"));
         assert!(hints.iter().any(|h| h.contains("file-level follow-up")));
+    }
+
+    #[test]
+    fn representative_failure_prefers_missing_server_over_transport_error() {
+        let failures = vec![
+            (Language::Go, LspError::Timeout("slow".to_string())),
+            (
+                Language::Rust,
+                LspError::ServerNotInstalled {
+                    name: "rust-analyzer".to_string(),
+                    install_hint: "rustup component add rust-analyzer".to_string(),
+                },
+            ),
+        ];
+        let picked = representative_failure(failures).expect("a failure to surface");
+        assert!(matches!(picked, LspError::ServerNotInstalled { .. }));
+    }
+
+    #[test]
+    fn representative_failure_is_none_when_every_server_answered() {
+        assert!(representative_failure(vec![]).is_none());
+    }
+
+    #[test]
+    fn coverage_reason_classifies_method_not_found_as_unsupported() {
+        // A server that does not implement workspace/symbol returns -32601 —
+        // permanent, so it must read as unsupported, not a retryable failure.
+        assert_eq!(
+            coverage_reason(&LspError::ServerError {
+                code: -32601,
+                message: "method not found".to_string(),
+            }),
+            "unsupported"
+        );
+        assert_eq!(
+            coverage_reason(&LspError::Timeout("slow".to_string())),
+            "timed_out"
+        );
+        assert_eq!(
+            coverage_reason(&LspError::ServerNotInstalled {
+                name: "x".to_string(),
+                install_hint: "y".to_string(),
+            }),
+            "server_not_installed"
+        );
+        // Any other server error stays the generic catch-all.
+        assert_eq!(
+            coverage_reason(&LspError::ServerError {
+                code: -32603,
+                message: "internal".to_string(),
+            }),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn coverage_gaps_disclose_failures_and_skips_sorted_with_reasons() {
+        let failures = vec![
+            (
+                Language::Rust,
+                LspError::ServerNotInstalled {
+                    name: "rust-analyzer".to_string(),
+                    install_hint: "x".to_string(),
+                },
+            ),
+            (Language::Go, LspError::Timeout("slow".to_string())),
+        ];
+        let skipped = vec![Language::Python];
+        let gaps = coverage_gaps(&failures, &skipped);
+
+        let by_lang = |lang: &str| gaps.iter().find(|g| g.language == lang).map(|g| g.reason);
+        assert_eq!(by_lang("rust"), Some("server_not_installed"));
+        assert_eq!(by_lang("go"), Some("timed_out"));
+        assert_eq!(by_lang("python"), Some("not_searched"));
+        // Sorted by language for deterministic output.
+        let langs: Vec<&str> = gaps.iter().map(|g| g.language.as_str()).collect();
+        let mut sorted = langs.clone();
+        sorted.sort_unstable();
+        assert_eq!(langs, sorted);
     }
 }
