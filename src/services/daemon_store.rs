@@ -139,4 +139,32 @@ mod tests {
         ));
         assert!(matches!(from_code(-32603), StoreError::Database(_)));
     }
+
+    /// The `stale` marker must survive the daemon wire so the daemon path
+    /// reports the same staleness as the direct path (INV3). This pins both
+    /// ends: the daemon serializes `Section::with_stale`, the client
+    /// reconstructs `SearchPage { stale }` from it.
+    #[test]
+    fn stale_marker_survives_the_wire_round_trip() {
+        // Daemon end: a stale page is emitted exactly as store_handlers does.
+        let emitted = Section::with_total(Vec::<SymbolSearchResult>::new(), 3).with_stale(true);
+        let wire = serde_json::to_value(emitted).unwrap();
+
+        // Client end: reconstruct as DaemonStoreService::search_symbols does.
+        let section: Section<SymbolSearchResult> = serde_json::from_value(wire).unwrap();
+        let page = SearchPage {
+            total: section.count,
+            rows: section.items,
+            stale: section.stale,
+        };
+        assert!(page.stale);
+        assert_eq!(page.total, 3);
+
+        // A fresh page omits the field on the wire and reconstructs as false.
+        let fresh_wire =
+            serde_json::to_value(Section::with_total(Vec::<SymbolSearchResult>::new(), 0)).unwrap();
+        assert!(fresh_wire.get("stale").is_none());
+        let fresh: Section<SymbolSearchResult> = serde_json::from_value(fresh_wire).unwrap();
+        assert!(!fresh.stale);
+    }
 }

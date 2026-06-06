@@ -5,7 +5,8 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
 /// A query is a path-like pattern when it carries `/`, `*`, or `[`.
-/// Used by both symbol and content search to flip into semantic mode.
+/// Symbol search uses this to switch from the index to the LSP
+/// workspace-symbol path.
 pub fn looks_like_symbol_path(query: &str) -> bool {
     query.contains('/') || query.contains('*') || query.contains('[')
 }
