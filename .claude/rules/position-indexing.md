@@ -30,7 +30,7 @@ A single missed conversion shifts every reference, anchor, and edit by one line 
 ## Where conversions live
 
 - `src/cli/location.rs` — parses `file:line:column` input strings (1-indexed).
-- `src/services/lsp/converters.rs` — the canonical CLI↔LSP boundary: `+1` on the way out of LSP, `saturating_sub(1)` on the way in.
-- `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the daemon wire carries 1-indexed display values, copied through `wire.rs` unchanged. `Location`-shaped results stay 1-indexed (the model type is itself 1-indexed); the one client-side `saturating_sub(1)` is in `daemon_lsp.rs::diagnostics`, whose model `Range` uses LSP 0-indexed `Position`.
+- `src/services/lsp/converters.rs` — LSP → display: `+1` as model `Location`s are built from LSP ranges. The display → LSP direction is `to_lsp_position` in `src/services/lsp/helpers.rs` (`saturating_sub(1)`), applied where a CLI position is sent into an LSP request.
+- `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the wire adds no conversions: `wire.rs` copies each position through as-is, carrying whatever indexing its model type uses (`Location` is 1-indexed; raw LSP `Position`/`Range` payloads stay 0-indexed). The one client-side `saturating_sub(1)` is `daemon_lsp.rs::diagnostics`, which carries 1-indexed values on the wire and rebuilds a 0-indexed `Range`.
 
-Keep conversions on these boundaries. A `+1`/`-1` on a line or column anywhere else is a layering bug. (Converting a 1-indexed line to a 0-based array index inside a command is not a boundary conversion and is fine.)
+Keep conversions at these boundaries — the LSP request/response edge, or a command's own output edge when it emits LSP-native ranges (e.g. `folding`, `inlay-hints`, `format`). A `+1`/`-1` buried in computation logic, away from a boundary, is the layering bug to avoid. (Converting a 1-indexed line to a 0-based array index inside a command is not a boundary conversion and is fine.)

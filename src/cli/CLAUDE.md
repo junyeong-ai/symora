@@ -18,7 +18,9 @@ Broad-query handling, test/noise suppression, and ranking hints are centralized 
 
 ## One mutation surface
 
-Every command that splices source text lives in `commands/edit.rs`, sharing one root-validated resolution path, one validation gate, one splice core (`LineSplice`), one preview format (an exact hunk derived from the splice — never a re-diff), and one typed output (`EditOutput`). Don't add a second file-writing command; add a subcommand that reduces to the splice core. Previews and safety checks (dangling references on `delete`, optional `--with-diagnostics`) run on the same path for every operation — the destructive path never gets to skip them.
+Every command that splices source text by symbol or range lives in `commands/edit.rs`, sharing one root-validated resolution path, one validation gate, one splice core (`LineSplice`), one preview format (an exact hunk derived from the splice — never a re-diff), and one typed output (`EditOutput`). Don't add a second file-writing command; add a subcommand that reduces to the splice core. Previews and safety checks (dangling references on `delete`, optional `--with-diagnostics`) run on the same path for every operation — the destructive path never gets to skip them.
+
+Commands that apply *LSP-computed* edits — `rename`, `actions apply`, `format` — keep their own command files and output types, but must route the actual write through `edit.rs`: `apply_text_edits` (overlap-checked, CRLF- and multibyte-correct) for a single file, `apply_workspace_edits` for a multi-file edit, and `atomic_write` to land bytes. There is no second edit-application or file-writing implementation.
 
 ## Fallback messaging on weak LSP servers
 

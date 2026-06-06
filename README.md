@@ -289,7 +289,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor 등이 �
 symora mcp serve --transport http --port 8765
 ```
 
-도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다.
+도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다.
 
 ---
 
