@@ -1,6 +1,5 @@
 ---
 name: symora
-version: 0.11.0
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
 when_to_use: User asks "where is this defined", "who calls this", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
@@ -88,7 +87,7 @@ Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept
 
 ## Output and global flags
 
-List responses carry `count` (total found), `showing` (emitted), `items`, and—only when relevant—`truncated`, `hints`, `next_commands` (ready-to-run follow-ups), and `indexing`. `indexing: "timed_out"` means the language server hadn't finished indexing: `count`/`items` are a lower bound, not complete — retry once the server is warm for the full set. Global flags go **before** the subcommand:
+List responses carry `count` (total found), `showing` (emitted), `items`, and—only when relevant—`truncated`, `stale`, `hints`, `next_commands` (ready-to-run follow-ups), and `indexing`. `indexing: "timed_out"` means the language server hadn't finished indexing: `count`/`items` are a lower bound, not complete — retry once the server is warm for the full set. `stale: true` (on `search symbols`/`search content`) means index-backed rows came from files that changed on disk since indexing — they may be out of date; re-run `symora search index build`. Global flags go **before** the subcommand:
 
 ```bash
 symora --format compact search symbols AuthUser    # single-line JSON
