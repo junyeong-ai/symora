@@ -182,22 +182,13 @@ pub(super) fn parse_range(value: &serde_json::Value) -> Option<crate::models::ls
 }
 
 pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWithEdits> {
-    let mut changes = Vec::new();
-
-    if let Some(file_changes) = edit.get("changes").and_then(|c| c.as_object()) {
-        for (uri, edits) in file_changes {
-            let file = uri_to_path(uri);
-            let text_edits = parse_text_edits(edits);
-            if !text_edits.is_empty() {
-                changes.push(FileChangeWithEdits {
-                    file,
-                    edits: text_edits,
-                });
-            }
-        }
-    }
-
+    // `documentChanges` and `changes` are two representations of the same
+    // edit. A server that emits `documentChanges` (which Symora advertises
+    // support for) must be read from there with `changes` ignored — reading
+    // both would apply every edit twice. Fall back to `changes` only when
+    // `documentChanges` is absent.
     if let Some(doc_changes) = edit.get("documentChanges").and_then(|c| c.as_array()) {
+        let mut changes = Vec::new();
         for change in doc_changes {
             if let Some(text_doc) = change.get("textDocument") {
                 let uri = text_doc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
@@ -214,8 +205,22 @@ pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWi
                 }
             }
         }
+        return changes;
     }
 
+    let mut changes = Vec::new();
+    if let Some(file_changes) = edit.get("changes").and_then(|c| c.as_object()) {
+        for (uri, edits) in file_changes {
+            let file = uri_to_path(uri);
+            let text_edits = parse_text_edits(edits);
+            if !text_edits.is_empty() {
+                changes.push(FileChangeWithEdits {
+                    file,
+                    edits: text_edits,
+                });
+            }
+        }
+    }
     changes
 }
 
@@ -347,7 +352,48 @@ pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<Signatur
 
 #[cfg(test)]
 mod tests {
-    use super::find_resource_operation;
+    use super::{find_resource_operation, parse_workspace_edit};
+
+    /// When a server fills both representations, `documentChanges` wins and
+    /// `changes` is ignored — reading both would apply every edit twice.
+    #[test]
+    fn document_changes_take_precedence_over_changes() {
+        let both = serde_json::json!({
+            "changes": {
+                "file:///a.rs": [
+                    { "range": { "start": { "line": 0, "character": 0 },
+                                 "end": { "line": 0, "character": 1 } },
+                      "newText": "X" }
+                ]
+            },
+            "documentChanges": [
+                { "textDocument": { "uri": "file:///a.rs" },
+                  "edits": [
+                    { "range": { "start": { "line": 0, "character": 0 },
+                                 "end": { "line": 0, "character": 1 } },
+                      "newText": "X" }
+                  ] }
+            ]
+        });
+        let parsed = parse_workspace_edit(&both);
+        assert_eq!(parsed.len(), 1, "the file appears once, not duplicated");
+        assert_eq!(parsed[0].edits.len(), 1);
+    }
+
+    /// With no `documentChanges`, the legacy `changes` map is read.
+    #[test]
+    fn changes_map_is_read_when_document_changes_absent() {
+        let changes_only = serde_json::json!({
+            "changes": {
+                "file:///a.rs": [
+                    { "range": { "start": { "line": 0, "character": 0 },
+                                 "end": { "line": 0, "character": 1 } },
+                      "newText": "X" }
+                ]
+            }
+        });
+        assert_eq!(parse_workspace_edit(&changes_only).len(), 1);
+    }
 
     /// Text-only edits pass; any create/rename/delete resource operation
     /// is detected so callers refuse instead of applying half an edit.

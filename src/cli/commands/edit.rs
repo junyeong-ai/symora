@@ -1238,7 +1238,7 @@ pub fn apply_workspace_edits(
     // that splits one document across entries) must apply together against
     // one read — staging them independently would let the later write clobber
     // the earlier one's changes.
-    let grouped = coalesce_changes_by_file(changes)?;
+    let grouped = coalesce_changes_by_file(changes);
 
     // Two phases: validate and stage every file in memory first, write
     // only after the whole edit checked out. A stale range in file N
@@ -1282,14 +1282,13 @@ pub fn apply_workspace_edits(
     Ok(results)
 }
 
-/// Group workspace-edit entries by their canonicalized target file,
-/// concatenating the edits of any that resolve to the same file while
-/// preserving first-seen order. Files that don't yet exist (or can't be
-/// canonicalized) fall back to their literal path as the key, so a
-/// brand-new-file edit still groups with itself.
-fn coalesce_changes_by_file(
-    changes: &[FileChangeWithEdits],
-) -> Result<Vec<(PathBuf, Vec<TextEdit>)>> {
+/// Group workspace-edit entries by the file they resolve to, concatenating
+/// the edits of any that target the same file while preserving first-seen
+/// order. The key is the canonicalized path so distinct spellings of one
+/// existing file coalesce; a path that can't be canonicalized (it doesn't
+/// exist yet) falls back to its literal spelling, which still groups an
+/// entry with itself.
+fn coalesce_changes_by_file(changes: &[FileChangeWithEdits]) -> Vec<(PathBuf, Vec<TextEdit>)> {
     let mut order: Vec<PathBuf> = Vec::new();
     let mut by_key: std::collections::HashMap<PathBuf, (PathBuf, Vec<TextEdit>)> =
         std::collections::HashMap::new();
@@ -1308,10 +1307,10 @@ fn coalesce_changes_by_file(
         }
     }
 
-    Ok(order
+    order
         .into_iter()
         .filter_map(|key| by_key.remove(&key))
-        .collect())
+        .collect()
 }
 
 /// Result of applying edits to a single file
@@ -1322,44 +1321,69 @@ pub struct AppliedFileChange {
     pub applied: bool,
 }
 
-/// Apply multiple text edits to content, sorted bottom-up so earlier
-/// edits don't shift later offsets. Every range is validated as it is
-/// resolved — a stale or inverted range aborts the whole application
-/// instead of skipping the edit and letting a partial result report
-/// success.
+/// Apply text edits to `content`. Every range is resolved once against the
+/// original document — a stale (past-EOF) or inverted range aborts the whole
+/// application rather than letting a partial result report success — and the
+/// resolved ranges are checked for overlap, since edits computed against the
+/// same revision must not overlap; an overlap means a stale or malformed edit
+/// set and is rejected rather than silently misapplied.
+///
+/// Edits are then applied bottom-up against the original offsets, so an
+/// earlier (higher) edit never shifts a later (lower) one. Several inserts at
+/// the same position are applied in reverse so their text lands in the order
+/// the edits were given.
 fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
     if edits.is_empty() {
         return Ok(content.to_string());
     }
 
-    let mut sorted_edits: Vec<_> = edits.iter().collect();
-    sorted_edits.sort_by(|a, b| {
-        let a_start = (a.range.start.line, a.range.start.character);
-        let b_start = (b.range.start.line, b.range.start.character);
-        b_start.cmp(&a_start) // Reverse order
-    });
-
-    let mut result = content.to_string();
-
-    for edit in sorted_edits {
-        let start_offset = line_char_to_byte_offset(
-            &result,
+    // Resolve to original-document byte offsets up front. `idx` preserves the
+    // given order for same-position inserts.
+    let mut resolved: Vec<(usize, usize, usize, &str)> = Vec::with_capacity(edits.len());
+    for (idx, edit) in edits.iter().enumerate() {
+        let start = line_char_to_byte_offset(
+            content,
             edit.range.start.line as usize,
             edit.range.start.character as usize,
         )?;
-        let end_offset = line_char_to_byte_offset(
-            &result,
+        let end = line_char_to_byte_offset(
+            content,
             edit.range.end.line as usize,
             edit.range.end.character as usize,
         )?;
-        if start_offset > end_offset {
+        if start > end {
             anyhow::bail!(
                 "LSP edit range {:?} is inverted; the edit was computed \
                  against a different revision — retry",
                 edit.range,
             );
         }
-        result.replace_range(start_offset..end_offset, &edit.new_text);
+        resolved.push((start, end, idx, &edit.new_text));
+    }
+
+    // Bottom-up by start; for a shared start, the later-given edit applies
+    // first so same-position inserts keep their original order in the result.
+    resolved.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)));
+
+    let mut result = content.to_string();
+    let mut prev: Option<(usize, usize)> = None;
+    for (start, end, _, new_text) in resolved {
+        // Half-open ranges [start, end) overlap when each begins before the
+        // other ends. Zero-width inserts that merely touch a boundary don't
+        // overlap; a genuine interior overlap means a stale or malformed edit
+        // set and is rejected rather than misapplied.
+        if let Some((prev_start, prev_end)) = prev
+            && start < prev_end
+            && prev_start < end
+        {
+            anyhow::bail!(
+                "overlapping LSP edits at bytes {start}..{end} and \
+                 {prev_start}..{prev_end}; the edit set was computed against a \
+                 different revision — retry"
+            );
+        }
+        result.replace_range(start..end, new_text);
+        prev = Some((start, end));
     }
 
     Ok(result)
@@ -1654,6 +1678,56 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_edits_are_rejected_not_misapplied() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        // Two edits whose ranges intersect in the original document can't both
+        // be honored — applying one corrupts the other's coordinates.
+        let a = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 4)),
+            new_text: "X".to_string(),
+        };
+        let b = TextEdit {
+            range: LspRange::new(Position::new(0, 2), Position::new(0, 6)),
+            new_text: "Y".to_string(),
+        };
+        let err = apply_text_edits("abcdef\n", &[a, b]).unwrap_err();
+        assert!(err.to_string().contains("overlapping"));
+    }
+
+    #[test]
+    fn adjacent_edits_apply_without_shifting_each_other() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        let first = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 2)),
+            new_text: "XX".to_string(),
+        };
+        let second = TextEdit {
+            range: LspRange::new(Position::new(0, 2), Position::new(0, 4)),
+            new_text: "YY".to_string(),
+        };
+        // Given in document order, not sorted — the applier must order them.
+        assert_eq!(
+            apply_text_edits("abcd\n", &[first, second]).unwrap(),
+            "XXYY\n"
+        );
+    }
+
+    #[test]
+    fn same_position_inserts_keep_given_order() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        let insert = |text: &str| TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 0)),
+            new_text: text.to_string(),
+        };
+        // Two zero-width inserts at the same point must land in the order
+        // they were given (A before B), not reversed.
+        assert_eq!(
+            apply_text_edits("z\n", &[insert("A"), insert("B")]).unwrap(),
+            "ABz\n"
+        );
+    }
+
+    #[test]
     fn symbol_line_span_rejects_stale_lsp_data() {
         let sym = sample_symbol(1, 100);
         let err = symbol_line_span(&sym, 5).unwrap_err();
@@ -1684,7 +1758,7 @@ mod tests {
                 edits: vec![edit(1, "z")],
             },
         ];
-        let grouped = coalesce_changes_by_file(&changes).unwrap();
+        let grouped = coalesce_changes_by_file(&changes);
         assert_eq!(grouped.len(), 2, "a.rs must appear once");
         assert_eq!(grouped[0].0, PathBuf::from("a.rs"));
         assert_eq!(grouped[0].1.len(), 2, "both a.rs edits retained");
