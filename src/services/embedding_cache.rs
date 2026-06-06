@@ -74,22 +74,24 @@ impl EmbeddingCache {
             return Ok(());
         }
 
+        // Reset and rebind in one transaction so a concurrent open never
+        // observes emptied chunks alongside the old model binding.
         let db = |e: rusqlite::Error| StoreError::Database(e.to_string());
-        self.conn
-            .execute_batch("DELETE FROM embed_chunks; DELETE FROM embed_files;")
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        tx.execute_batch("DELETE FROM embed_chunks; DELETE FROM embed_files;")
             .map_err(db)?;
-        let set = |key: &str, value: String| -> Result<(), StoreError> {
-            self.conn
-                .execute(
-                    "INSERT OR REPLACE INTO embed_meta (key, value) VALUES (?1, ?2)",
-                    params![key, value],
-                )
-                .map(|_| ())
-                .map_err(db)
-        };
-        set("schema_version", SCHEMA_VERSION.to_string())?;
-        set("model_id", model_id.to_string())?;
-        set("dimension", dimension.to_string())?;
+        for (key, value) in [
+            ("schema_version", SCHEMA_VERSION.to_string()),
+            ("model_id", model_id.to_string()),
+            ("dimension", dimension.to_string()),
+        ] {
+            tx.execute(
+                "INSERT OR REPLACE INTO embed_meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .map_err(db)?;
+        }
+        tx.commit().map_err(db)?;
         Ok(())
     }
 
@@ -102,16 +104,6 @@ impl EmbeddingCache {
                 |r| r.get::<_, i64>(0),
             )
             .ok()
-    }
-
-    /// Total chunks across all files — the full corpus size.
-    pub fn total_chunks(&self) -> Result<usize, StoreError> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM embed_chunks", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .map(|n| n as usize)
-            .map_err(|e| StoreError::Database(e.to_string()))
     }
 
     /// Replace every chunk cached for `rel_path` with `chunks` at `mtime`,
@@ -161,35 +153,24 @@ impl EmbeddingCache {
         Ok(())
     }
 
-    /// The ranking corpus for `language` (all languages when `None`), paired
-    /// with each chunk's file path. Capped at `limit` rows so ranking memory
-    /// stays bounded; the second value reports whether the *filtered* corpus
-    /// held more — i.e. the cap, not the language filter, withheld results.
+    /// Every cached chunk for `language` (all languages when `None`), paired
+    /// with its file path. The full set is returned so the caller scores all
+    /// of it — the best semantic match is never hidden behind a row cap.
     pub fn load_corpus(
         &self,
         language: Option<&str>,
-        limit: usize,
-    ) -> Result<(Vec<(String, CachedChunk)>, bool), StoreError> {
+    ) -> Result<Vec<(String, CachedChunk)>, StoreError> {
         let db = |e: rusqlite::Error| StoreError::Database(e.to_string());
-        let total: usize = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM embed_chunks WHERE (?1 IS NULL OR language = ?1)",
-                params![language],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n as usize)
-            .map_err(db)?;
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT path, start_line, end_line, snippet, vector \
                  FROM embed_chunks WHERE (?1 IS NULL OR language = ?1) \
-                 ORDER BY path, chunk_index LIMIT ?2",
+                 ORDER BY path, chunk_index",
             )
             .map_err(db)?;
         let rows = stmt
-            .query_map(params![language, limit as i64], |r| {
+            .query_map(params![language], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     CachedChunk {
@@ -201,8 +182,7 @@ impl EmbeddingCache {
                 ))
             })
             .map_err(db)?;
-        let corpus: Vec<(String, CachedChunk)> = rows.filter_map(Result::ok).collect();
-        Ok((corpus, total > limit))
+        Ok(rows.filter_map(Result::ok).collect())
     }
 
     /// Drop files no longer present in `active`. Returns the count removed.
@@ -263,6 +243,10 @@ CREATE TABLE IF NOT EXISTS embed_files (
     mtime INTEGER NOT NULL
 );
 
+-- `language` is denormalized onto each chunk (it's file-level data) so the
+-- ranking query filters and scans one indexed table with no join on the hot
+-- path. `put_file` writes a file's rows in one transaction, so every chunk of
+-- a file always carries the same language.
 CREATE TABLE IF NOT EXISTS embed_chunks (
     path        TEXT NOT NULL,
     chunk_index INTEGER NOT NULL,
@@ -300,8 +284,7 @@ mod tests {
             .put_file("src/a.rs", 100, "rust", &[chunk(1, vec![0.5, -0.5, 1.0])])
             .unwrap();
 
-        let (corpus, more) = cache.load_corpus(None, 100).unwrap();
-        assert!(!more);
+        let corpus = cache.load_corpus(None).unwrap();
         assert_eq!(corpus.len(), 1);
         assert_eq!(corpus[0].0, "src/a.rs");
         assert_eq!(corpus[0].1.vector, vec![0.5, -0.5, 1.0]);
@@ -325,7 +308,7 @@ mod tests {
             .put_file("src/a.rs", 2, "rust", &[chunk(1, vec![1.0, 1.0])])
             .unwrap();
 
-        assert_eq!(cache.total_chunks().unwrap(), 1);
+        assert_eq!(cache.load_corpus(None).unwrap().len(), 1);
         assert_eq!(cache.cached_mtime("src/a.rs"), Some(2));
     }
 
@@ -337,11 +320,11 @@ mod tests {
             cache
                 .put_file("src/a.rs", 1, "rust", &[chunk(1, vec![1.0, 0.0])])
                 .unwrap();
-            assert_eq!(cache.total_chunks().unwrap(), 1);
+            assert_eq!(cache.load_corpus(None).unwrap().len(), 1);
         }
         // Reopening with a different model id must drop the stale vectors.
         let cache = EmbeddingCache::open(dir.path(), "model-b", 2).unwrap();
-        assert_eq!(cache.total_chunks().unwrap(), 0);
+        assert_eq!(cache.load_corpus(None).unwrap().len(), 0);
         assert_eq!(cache.cached_mtime("src/a.rs"), None);
     }
 
@@ -355,11 +338,11 @@ mod tests {
                 .unwrap();
         }
         let cache = EmbeddingCache::open(dir.path(), "model-a", 768).unwrap();
-        assert_eq!(cache.total_chunks().unwrap(), 0);
+        assert_eq!(cache.load_corpus(None).unwrap().len(), 0);
     }
 
     #[test]
-    fn load_corpus_caps_against_the_filtered_language() {
+    fn load_corpus_filters_by_language_returning_the_full_set() {
         let dir = TempDir::new().unwrap();
         let cache = EmbeddingCache::open(dir.path(), "model-a", 1).unwrap();
         for i in 0..5 {
@@ -383,19 +366,14 @@ mod tests {
                 .unwrap();
         }
 
-        // No filter caps against the whole corpus (7 chunks).
-        let (all, more) = cache.load_corpus(None, 3).unwrap();
-        assert_eq!(all.len(), 3);
-        assert!(more);
-
-        // A language filter caps against that language only: 5 rust chunks,
-        // so a limit of 3 overflows; 2 python chunks fit under it.
-        let (rust, rust_more) = cache.load_corpus(Some("rust"), 3).unwrap();
-        assert_eq!(rust.len(), 3);
-        assert!(rust_more);
-        let (python, python_more) = cache.load_corpus(Some("python"), 3).unwrap();
+        // No filter returns the whole corpus; a language filter returns that
+        // language complete — never a capped prefix.
+        assert_eq!(cache.load_corpus(None).unwrap().len(), 7);
+        let rust = cache.load_corpus(Some("rust")).unwrap();
+        assert_eq!(rust.len(), 5);
+        assert!(rust.iter().all(|(path, _)| path.ends_with(".rs")));
+        let python = cache.load_corpus(Some("python")).unwrap();
         assert_eq!(python.len(), 2);
-        assert!(!python_more);
         assert!(python.iter().all(|(path, _)| path.ends_with(".py")));
     }
 

@@ -74,13 +74,16 @@ impl DefaultStoreService {
             .await
     }
 
-    /// The store for a read query, or `NotInitialized` if it can't be opened
-    /// at all. A read-only or unwritable project (where the `.symora` dir
-    /// can't be created) is, for a read, indistinguishable from one that was
-    /// never indexed — so the caller falls back to a filesystem scan rather
-    /// than surfacing a store-open error. Writes keep the real error.
+    /// The store for a read query. A *missing* index — no DB file, e.g. a
+    /// read-only or never-built project — maps to `NotInitialized` so the
+    /// caller falls back to a filesystem scan. A DB that exists but won't
+    /// open is a real failure and is surfaced, never silently scanned over.
     async fn store_for_read(&self) -> Result<&Arc<Store>, StoreError> {
-        self.store().await.map_err(|_| StoreError::NotInitialized)
+        match self.store().await {
+            Ok(store) => Ok(store),
+            Err(_) if !Store::db_path(&self.root).exists() => Err(StoreError::NotInitialized),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -115,6 +118,11 @@ impl StoreService for DefaultStoreService {
     }
 
     async fn index_status(&self) -> Result<IndexStats, StoreError> {
+        // No DB means an empty index, not an error — report zeros so status
+        // works on a read-only or never-built project just like a read does.
+        if !Store::db_path(&self.root).exists() {
+            return Ok(IndexStats::default());
+        }
         self.store().await?.stats().await
     }
 

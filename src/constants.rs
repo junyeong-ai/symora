@@ -50,10 +50,6 @@ pub mod defaults {
     /// carry context.
     pub const SEMANTIC_CHUNK_LINES: usize = 30;
 
-    /// Hard cap on chunks embedded in a single `search semantic` call.
-    /// Prevents pathological repos from saturating the embedding queue.
-    pub const SEMANTIC_MAX_CHUNKS: usize = 5_000;
-
     /// MCP HTTP transport default port.
     pub const MCP_HTTP_DEFAULT_PORT: u16 = 7700;
 }
