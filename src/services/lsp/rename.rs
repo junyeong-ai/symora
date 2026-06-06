@@ -1,11 +1,12 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::LspError;
 use crate::models::lsp::{PrepareRenameResult, RenameResult, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
-use super::service::DefaultLspService;
+use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn prepare_rename(
     service: &DefaultLspService,
@@ -15,11 +16,20 @@ pub(super) async fn prepare_rename(
 ) -> Result<Option<PrepareRenameResult>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
+    let manager = Arc::clone(&service.manager);
 
     service
         .execute_with_retry(&file, |client| {
             let file = file.clone();
+            let manager = Arc::clone(&manager);
             async move {
+                // Renameability is decided from the cross-file reference set,
+                // so the same readiness gate every other LSP query uses must
+                // run first — otherwise a cold server answers "no references"
+                // for a symbol it simply has not indexed yet.
+                ensure_indexed(&client, &file, manager.root()).await;
+                client.sleep_for_cross_file_settle().await;
+
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
@@ -36,9 +46,6 @@ pub(super) async fn prepare_rename(
                 let value = match result {
                     Ok(Some(v)) if !v.is_null() => v,
                     Ok(_) => return Ok(None),
-                    Err(LspError::Protocol(msg)) if msg.contains("cannot be renamed") => {
-                        return Ok(None);
-                    }
                     Err(e) => return Err(e),
                 };
 
@@ -128,13 +135,23 @@ pub(super) async fn rename(
     let content = read_file_validated(file, max_file_size).await?;
     let uri = path_to_uri(file);
     let new_name = new_name.to_string();
+    let file = file.to_path_buf();
+    let manager = Arc::clone(&service.manager);
 
     let result: serde_json::Value = service
-        .execute_with_retry(file, |client| {
+        .execute_with_retry(&file, |client| {
             let uri = uri.clone();
             let content = content.clone();
             let new_name = new_name.clone();
+            let file = file.clone();
+            let manager = Arc::clone(&manager);
             async move {
+                // Rename rewrites references across the workspace, so wait for
+                // the index to settle before issuing it — the same gate the
+                // navigation queries use.
+                ensure_indexed(&client, &file, manager.root()).await;
+                client.sleep_for_cross_file_settle().await;
+
                 client.sync_document(&uri, &content).await?;
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
