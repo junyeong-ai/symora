@@ -21,11 +21,8 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
-use crate::constants::defaults::{
-    PACK_MAX_FILE_BYTES, SEMANTIC_CHUNK_LINES as CHUNK_LINES, SEMANTIC_MAX_CHUNKS as MAX_CHUNKS,
-};
+use crate::constants::defaults::{PACK_MAX_FILE_BYTES, SEMANTIC_CHUNK_LINES as CHUNK_LINES};
 use crate::infra::file_filter::FileFilter;
-use crate::models::lsp::IndexingDegradation;
 use crate::models::symbol::Language;
 use crate::services::embedding_cache::{CachedChunk, EmbeddingCache};
 use crate::services::embeddings::{EmbeddingError, EmbeddingProvider, cosine, default_provider};
@@ -91,11 +88,11 @@ fn semantic_search(
         return Ok(Section::new(vec![]));
     }
 
-    // The cache mirrors the whole code tree regardless of `--lang`; the flag
-    // selects which language is ranked, with the corpus cap applied to that
-    // language alone, so a large repo never starves one language's results.
+    // The cache is shared across queries; `--lang` selects which language is
+    // embedded and ranked. The full filtered corpus is scored, so the best
+    // matches are never hidden — `--limit` alone bounds what's shown.
     let language = language.map(Language::parse_or_default);
-    let (corpus, capped) = build_corpus(app, provider, &files, language)?;
+    let corpus = build_corpus(app, provider, &files, language)?;
     if corpus.is_empty() {
         return Ok(Section::new(vec![]));
     }
@@ -120,12 +117,9 @@ fn semantic_search(
         })
         .collect();
 
-    let section = Section::with_total(items, count);
-    Ok(if capped {
-        section.with_indexing(Some(IndexingDegradation::Capped))
-    } else {
-        section
-    })
+    // `count` is the full ranked candidate set, so `truncated` honestly says
+    // the agent is seeing the top `--limit` of a larger relevance ranking.
+    Ok(Section::with_total(items, count))
 }
 
 /// A discovered, in-budget source file: absolute path (for reading),
@@ -171,10 +165,6 @@ fn discover_files(app: &App) -> Vec<DiscoveredFile> {
         .collect()
 }
 
-/// `true` when the ranked corpus is a prefix — more chunks matched than the
-/// rank limit, so the score column reflects only the loaded window.
-type Capped = bool;
-
 /// Whether a file belongs to the requested language. No filter matches
 /// everything; an unrecognized language (`Unknown`) matches no code file —
 /// the same empty result content search returns, never a silent "rank
@@ -186,26 +176,26 @@ fn language_matches(file: &DiscoveredFile, language: Option<Language>) -> bool {
     }
 }
 
-/// Assemble the ranking corpus for `language`. The persistent cache mirrors
-/// the whole code tree and is refreshed incrementally; ranking then loads
-/// just the requested language, capped to [`MAX_CHUNKS`]. When the cache
-/// can't open, embeds that language in memory instead.
+/// Assemble the ranking corpus for `language`. The cache is shared across
+/// queries — pruning is language-agnostic, so one language's vectors never
+/// evict another's — but a `--lang` query only embeds and ranks that
+/// language, so it never pays to embed code it won't rank. The full set is
+/// returned for scoring; when the cache can't open, embeds in memory instead.
 fn build_corpus(
     app: &App,
     provider: &dyn EmbeddingProvider,
     files: &[DiscoveredFile],
     language: Option<Language>,
-) -> Result<(Vec<(String, CachedChunk)>, Capped)> {
+) -> Result<Vec<(String, CachedChunk)>> {
     match EmbeddingCache::open(app.root(), provider.model_id(), provider.dimension()) {
         Ok(cache) => {
-            // Prune files that left disk so the cache stays an exact mirror;
-            // it is language-agnostic, shared across every `--lang` query.
+            // Prune every file that left disk, across all languages, so the
+            // cache never serves a deleted file regardless of this query.
             let active: HashSet<String> = files.iter().map(|f| f.rel.clone()).collect();
             cache.prune(&active)?;
-            refresh_cache(&cache, provider, files)?;
+            refresh_cache(&cache, provider, files, language)?;
             let lang_id = language.map(|l| l.lsp_id());
-            let (corpus, overflowed) = cache.load_corpus(lang_id, MAX_CHUNKS)?;
-            Ok((corpus, overflowed))
+            Ok(cache.load_corpus(lang_id)?)
         }
         Err(e) => {
             tracing::warn!("Embedding cache unavailable, embedding in memory: {e}");
@@ -214,15 +204,20 @@ fn build_corpus(
     }
 }
 
-/// Re-embed every file whose mtime moved since it was last cached, keeping
-/// the cache a complete, current mirror of the code tree. Cost is
-/// incremental — only changed files run through the model.
+/// Re-embed every file of the requested `language` whose mtime moved, so the
+/// cache holds that language complete and current. With no filter, every
+/// code file is refreshed. Cost is incremental — only changed files run
+/// through the model, and a `--lang` query never embeds another language.
 fn refresh_cache(
     cache: &EmbeddingCache,
     provider: &dyn EmbeddingProvider,
     files: &[DiscoveredFile],
+    language: Option<Language>,
 ) -> Result<()> {
     for file in files {
+        if !language_matches(file, language) {
+            continue;
+        }
         if cache.cached_mtime(&file.rel) == Some(file.mtime) {
             continue;
         }
@@ -230,39 +225,32 @@ fn refresh_cache(
             continue;
         };
         let chunks = embed_chunks(provider, &chunk_file(&content))?;
-        let language = Language::from_path(&file.path).lsp_id();
-        cache.put_file(&file.rel, file.mtime, language, &chunks)?;
+        let lang_id = Language::from_path(&file.path).lsp_id();
+        cache.put_file(&file.rel, file.mtime, lang_id, &chunks)?;
     }
     Ok(())
 }
 
 /// Fallback when the cache can't open: embed the requested language straight
-/// into memory, capped at [`MAX_CHUNKS`] so a degraded run still bounds its
-/// work.
+/// into memory. The full set is returned so ranking scores all of it.
 fn embed_in_memory(
     provider: &dyn EmbeddingProvider,
     files: &[DiscoveredFile],
     language: Option<Language>,
-) -> Result<(Vec<(String, CachedChunk)>, Capped)> {
+) -> Result<Vec<(String, CachedChunk)>> {
     let mut corpus = Vec::new();
     for file in files {
         if !language_matches(file, language) {
             continue;
         }
-        if corpus.len() >= MAX_CHUNKS {
-            return Ok((corpus, true));
-        }
         let Ok(content) = std::fs::read_to_string(&file.path) else {
             continue;
         };
         for chunk in embed_chunks(provider, &chunk_file(&content))? {
-            if corpus.len() >= MAX_CHUNKS {
-                return Ok((corpus, true));
-            }
             corpus.push((file.rel.clone(), chunk));
         }
     }
-    Ok((corpus, false))
+    Ok(corpus)
 }
 
 /// A ~`CHUNK_LINES`-line window of a file: 1-indexed line span and text.
@@ -386,13 +374,13 @@ mod tests {
         ];
 
         // First pass embeds both files.
-        refresh_cache(&cache, &provider, &files).unwrap();
-        assert_eq!(cache.total_chunks().unwrap(), 2);
+        refresh_cache(&cache, &provider, &files, None).unwrap();
+        assert_eq!(cache.load_corpus(None).unwrap().len(), 2);
         let after_first = embedded.load(Ordering::SeqCst);
         assert_eq!(after_first, 2);
 
         // Same mtimes: nothing is re-embedded.
-        refresh_cache(&cache, &provider, &files).unwrap();
+        refresh_cache(&cache, &provider, &files, None).unwrap();
         assert_eq!(embedded.load(Ordering::SeqCst), after_first);
 
         // Bumping one file's mtime re-embeds only that file.
@@ -404,14 +392,14 @@ mod tests {
                 mtime: 1,
             },
         ];
-        refresh_cache(&cache, &provider, &moved).unwrap();
+        refresh_cache(&cache, &provider, &moved, None).unwrap();
         assert_eq!(embedded.load(Ordering::SeqCst), after_first + 1);
-        assert_eq!(cache.total_chunks().unwrap(), 2);
+        assert_eq!(cache.load_corpus(None).unwrap().len(), 2);
     }
 
     #[test]
     fn refresh_reembeds_a_changed_file_regardless_of_corpus_size() {
-        // A large cache must never block re-embedding a file whose mtime
+        // A populated cache must never block re-embedding a file whose mtime
         // moved, or semantic search serves stale vectors forever.
         let dir = tempfile::tempdir().unwrap();
         let embedded = Arc::new(AtomicUsize::new(0));
@@ -421,7 +409,7 @@ mod tests {
         let cache =
             EmbeddingCache::open(dir.path(), provider.model_id(), provider.dimension()).unwrap();
 
-        for i in 0..MAX_CHUNKS {
+        for i in 0..64 {
             cache
                 .put_file(
                     &format!("seed{i}.rs"),
@@ -438,7 +426,7 @@ mod tests {
         }
         // One seeded file exists on disk and has changed since it was cached.
         let changed = discovered(dir.path(), "seed0.rs", "fn changed() {}\n", 2);
-        refresh_cache(&cache, &provider, &[changed]).unwrap();
+        refresh_cache(&cache, &provider, &[changed], None).unwrap();
         assert!(
             embedded.load(Ordering::SeqCst) > 0,
             "a changed file must re-embed no matter how large the cache is"
