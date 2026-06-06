@@ -114,8 +114,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 &[("limit", "integer", "Maximum results")],
             ),
         )
-        .with_output_schema(section_output_schema(
-            "Incoming calls with caller locations",
+        .with_output_schema(with_extra(
+            section_output_schema("Incoming calls with caller locations"),
+            &[(
+                "callers_status",
+                "string",
+                "Present only when callers were derived from references because the \
+                 server lacks call hierarchy — reference-based, not verified call edges",
+            )],
         )),
         ToolDefinition::read_only(
             "find_callees",

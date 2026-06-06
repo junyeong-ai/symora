@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::LocationArg;
@@ -23,6 +24,20 @@ pub struct CallersArgs {
     /// Disable fallback to references when call hierarchy unsupported
     #[arg(long)]
     pub no_fallback: bool,
+}
+
+/// Callers output. `callers_status` is present only when the callers were
+/// derived from plain references because the language server lacks call
+/// hierarchy — those are reference-based callers, a broader approximation
+/// rather than verified call edges, and an agent should read them as such.
+/// On the exact call-hierarchy path the field is omitted, leaving the bare
+/// `Section` contract untouched.
+#[derive(Debug, Serialize)]
+struct CallersOutput {
+    #[serde(flatten)]
+    section: Section<CallHierarchyOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callers_status: Option<&'static str>,
 }
 
 pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
@@ -51,7 +66,10 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                 .map(|c| CallHierarchyOutput::from_item(&c, ctx.root()))
                 .collect();
 
-            ctx.print_success(Section::with_total(items, total).with_indexing(indexing().await));
+            ctx.print_success(CallersOutput {
+                section: Section::with_total(items, total).with_indexing(indexing().await),
+                callers_status: None,
+            });
         }
         Err(ref e) if !args.no_fallback && is_not_supported(e) => {
             match fallback_from_refs(app, &loc.file, loc.line, loc.column, limit).await {
@@ -61,9 +79,11 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
                         .collect();
 
-                    ctx.print_success(
-                        Section::with_total(items, total_refs).with_indexing(indexing().await),
-                    );
+                    ctx.print_success(CallersOutput {
+                        section: Section::with_total(items, total_refs)
+                            .with_indexing(indexing().await),
+                        callers_status: Some("references_derived"),
+                    });
                 }
                 Err(e) => ctx.print_error(e),
             }
@@ -132,4 +152,30 @@ async fn fallback_from_refs(
     }
 
     Ok((callers, seen.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_call_hierarchy_omits_callers_status() {
+        let output = CallersOutput {
+            section: Section::with_total(Vec::<CallHierarchyOutput>::new(), 0),
+            callers_status: None,
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert!(value.get("callers_status").is_none());
+        assert!(value.get("items").is_some());
+    }
+
+    #[test]
+    fn references_derived_fallback_marks_callers_status() {
+        let output = CallersOutput {
+            section: Section::with_total(Vec::<CallHierarchyOutput>::new(), 0),
+            callers_status: Some("references_derived"),
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["callers_status"], "references_derived");
+    }
 }
