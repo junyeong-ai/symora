@@ -18,6 +18,7 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 - `showing` — number actually emitted in `items`
 - `items` — the result array
 - `truncated` — boolean indicating `showing < count`
+- `stale` — present (true) only when index-served rows came from files that changed on disk after indexing; re-run `symora search index build` to refresh
 - `hints` — optional next-step suggestions for the agent
 - `next_commands` — optional ready-to-run follow-up commands (omitted when empty)
 - `indexing` — degradation marker, present only when the answer was computed under degraded workspace indexing (e.g. `"timed_out"`)

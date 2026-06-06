@@ -1,10 +1,12 @@
 ---
 source: tests/output_contract.rs
+assertion_line: 263
 expression: out
 ---
 {
   "name": "symbol@50:4",
   "kind": "unknown",
   "file": "src/main.rs",
-  "line": 50
+  "line": 50,
+  "resolved": false
 }

@@ -11,6 +11,10 @@ use crate::models::symbol::{Language, SymbolKind};
 pub struct SearchPage<T> {
     pub total: usize,
     pub rows: Vec<T>,
+    /// True when a file backing one of `rows` changed on disk after it was
+    /// indexed (or is gone) — the page is served from a stale index entry.
+    /// Cleared by the next `index()` pass over the file.
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

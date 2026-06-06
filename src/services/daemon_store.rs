@@ -50,6 +50,7 @@ impl StoreService for DaemonStoreService {
         Ok(SearchPage {
             total: section.count,
             rows: section.items,
+            stale: section.stale,
         })
     }
 
@@ -70,6 +71,7 @@ impl StoreService for DaemonStoreService {
         Ok(SearchPage {
             total: section.count,
             rows: section.items,
+            stale: section.stale,
         })
     }
 

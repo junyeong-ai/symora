@@ -52,9 +52,10 @@ pub async fn execute_content_search(
                     score: r.score,
                 })
                 .collect();
-            ctx.print_success(finish_content_search(
-                items, page.total, query, language, limit,
-            ));
+            ctx.print_success(
+                finish_content_search(items, page.total, query, language, limit)
+                    .with_stale(page.stale),
+            );
         }
         // No index yet: a one-shot filesystem scan keeps content search
         // working with zero setup. Any other error is real and surfaced.
