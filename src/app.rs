@@ -42,7 +42,7 @@ impl App {
         let project = Arc::new(DefaultProjectService::new(&root));
         let ast = Arc::new(DefaultAstQueryService::new(
             runtime_config.max_file_size_bytes,
-        )?);
+        ));
 
         #[cfg(unix)]
         let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
