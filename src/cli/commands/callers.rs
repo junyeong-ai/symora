@@ -45,11 +45,15 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
     let loc = args.loc.parse()?.to_absolute()?;
+    let (line, column) = crate::cli::commands::common::snap_to_symbol_anchor(
+        app.lsp.as_ref(),
+        &loc.file,
+        loc.line,
+        loc.column,
+    )
+    .await;
 
-    let result = app
-        .lsp
-        .incoming_calls(&loc.file, loc.line, loc.column)
-        .await;
+    let result = app.lsp.incoming_calls(&loc.file, line, column).await;
 
     let indexing = || async {
         app.lsp
@@ -72,7 +76,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
             });
         }
         Err(ref e) if !args.no_fallback && is_not_supported(e) => {
-            match fallback_from_refs(app, &loc.file, loc.line, loc.column, limit).await {
+            match fallback_from_refs(app, &loc.file, line, column, limit).await {
                 Ok((calls, total_refs)) => {
                     let items: Vec<CallHierarchyOutput> = calls
                         .iter()
