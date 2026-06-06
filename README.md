@@ -87,9 +87,9 @@ symora search nodes --lang rust
 
 ```bash
 symora map summary
-symora map file src/cli/commands/search.rs
+symora map file src/cli/commands/search/mod.rs
 symora map dir src/cli
-symora map related src/cli/commands/search.rs
+symora map related src/cli/commands/search/mod.rs
 ```
 
 ### 컨텍스트와 사용 분석
@@ -98,7 +98,7 @@ symora map related src/cli/commands/search.rs
 symora context src/main.rs:42 --all
 symora refs src/main.rs:42
 symora usage SearchCommand
-symora usage src/cli/commands/search.rs:30:10
+symora usage src/cli/commands/search/mod.rs:30:10
 symora impact src/main.rs:42
 symora diff-impact
 ```
@@ -204,7 +204,7 @@ symora config init --global
 - macOS: 지원
 - Windows: daemon 기반 워크플로우는 지원하지 않음 (Unix domain socket 사용)
 
-Unix 환경에서는 대부분의 명령이 기본적으로 daemon을 사용하고, 필요 시 direct LSP 실행으로 이어집니다. `daemon start`와 `daemon restart`는 백그라운드에서 daemon을 띄우고 바로 반환합니다.
+Unix에서는 기본적으로 daemon을 사용합니다(`SYMORA_NO_DAEMON=1`이면 in-process 직접 실행). 모드는 시작 시 한 번 결정되며 런타임 폴백은 없습니다. `daemon start`와 `daemon restart`는 백그라운드에서 daemon을 띄우고 바로 반환합니다.
 
 Daemon 관련 명령:
 
@@ -238,7 +238,7 @@ symora setup deps --group core   # 의존성만 (core / core-jvm / core-web / co
 ```bash
 # 특정 버전 핀
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
-  | bash -s -- --version 0.9.0
+  | bash -s -- --version 0.11.0
 
 # GitHub build provenance 검증 (gh CLI 필요)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
@@ -266,7 +266,7 @@ curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/ins
 
 ```bash
 symora self update                    # 최신 릴리스로 in-place 교체
-symora self update --version 0.9.0    # 특정 버전 핀
+symora self update --version 0.11.0    # 특정 버전 핀
 symora self update --verify-attestations
 symora self uninstall                 # 바이너리 + 스킬 + config + daemon 흔적 전부 제거
 symora self uninstall --keep-skill --keep-config
@@ -282,7 +282,7 @@ symora doctor          # 설치된 LSP / 누락된 LSP, 플랫폼별 설치 명�
 
 ## MCP 서버
 
-Symora는 Model Context Protocol 서버로도 동작합니다. CLI와 동일한 명령군이 MCP 도구로 노출되며, 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
+Symora는 Model Context Protocol 서버로도 동작합니다. 주요 탐색·분석·편집 명령이 MCP 도구로 노출되며(전체가 아닌 선별된 집합), CLI와 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
 
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor 등이 기본 사용)

@@ -12,7 +12,7 @@ Types in `wire.rs` (Symbol, Location, Diagnostic, …) are an external protocol.
 
 ## Server cleanup
 
-The socket file is removed explicitly on shutdown (`remove_file` in `server/mod.rs`), not via `Drop`. A process killed before that runs can leave a stale socket — `daemon start` defensively removes it after a liveness check before binding.
+The socket file is removed explicitly on shutdown (`remove_file` in `server/mod.rs`), not via `Drop`. A process killed before that runs can leave a stale socket — `daemon start` runs a liveness check before deciding to (re)spawn, and the server then removes any stale socket immediately before `UnixListener::bind`.
 
 ## Request timeouts
 

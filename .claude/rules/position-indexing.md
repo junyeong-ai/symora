@@ -3,6 +3,7 @@ paths:
   - "src/cli/location.rs"
   - "src/cli/commands/**/*.rs"
   - "src/services/lsp/**/*.rs"
+  - "src/services/ast_query.rs"
   - "src/services/daemon_lsp.rs"
   - "src/infra/lsp/**/*.rs"
   - "src/models/lsp.rs"

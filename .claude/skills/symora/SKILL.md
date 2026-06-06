@@ -12,7 +12,7 @@ Use `symora` when semantic code navigation is more useful than text search. Outp
 
 ## Two backends, different requirements
 
-- **No language server needed**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search symbols` / `search content` rank the SQLite index and fall back to a filesystem scan when it isn't built; `search ast` and `map …` use tree-sitter and the file tree directly, so they need no `search index build` at all.
+- **Index & structural search**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search ast` and `map …` use tree-sitter and the file tree directly — no index, no language server. `search content` ranks the SQLite index and scans the filesystem when it isn't built. `search symbols` ranks the index and falls back to **LSP workspace symbols** when it isn't built — the one case in this group that needs the language server.
 - **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
 
 Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
@@ -42,10 +42,10 @@ Narrow noisy results with `--kind`, `--lang`, or a more specific name.
 ### Exact inspection (file/symbol known)
 
 ```bash
-symora symbols src/cli/commands/search.rs --depth 2
-symora symbols src/cli/commands/search.rs --symbol 'SearchCommand/Content' --depth 2
-symora hover src/cli/commands/search.rs:30:10
-symora def src/cli/commands/search.rs:30:10
+symora symbols src/cli/commands/search/mod.rs --depth 2
+symora symbols src/cli/commands/search/mod.rs --symbol 'SearchCommand/Content' --depth 2
+symora hover src/cli/commands/search/mod.rs:30:10
+symora def src/cli/commands/search/mod.rs:30:10
 ```
 
 `symbols <file>` returns the full LSP tree. `symbols --symbol <path>` resolves an exact symbol path. Use `search symbols` for broad lookup, not `--name`.
@@ -54,9 +54,9 @@ symora def src/cli/commands/search.rs:30:10
 
 ```bash
 symora map summary
-symora map file src/cli/commands/search.rs --depth 1 --related-limit 5
+symora map file src/cli/commands/search/mod.rs --depth 1 --related-limit 5
 symora map dir src/cli/commands
-symora map related src/cli/commands/search.rs --limit 5
+symora map related src/cli/commands/search/mod.rs --limit 5
 ```
 
 `map file` is compact by design — use `symbols <file>` for the full tree. `map related` is a heuristic next-file hint, not a dependency graph.
@@ -64,9 +64,9 @@ symora map related src/cli/commands/search.rs --limit 5
 ### Exact follow-up from a location
 
 ```bash
-symora context src/cli/commands/search.rs:30 --all
-symora refs src/cli/commands/search.rs:30
-symora usage src/cli/commands/search.rs:30:10 --max-symbols 10 --limit 5
+symora context src/cli/commands/search/mod.rs:30 --all
+symora refs src/cli/commands/search/mod.rs:30
+symora usage src/cli/commands/search/mod.rs:30:10 --max-symbols 10 --limit 5
 ```
 
 `context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition. `refs` accepts line-only inputs and resolves to the nearest symbol anchor. `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location — both forms require an installed LSP for non-empty results. **Pattern-form `usage` returns `count: 0` silently (no `server_not_installed` error) when the LSP is missing**; if you get an empty count, confirm with `symora doctor <lang>` before assuming the symbol has zero references.
@@ -92,12 +92,11 @@ List responses carry `count` (total found), `showing` (emitted), `items`, and—
 
 ```bash
 symora --format compact search symbols AuthUser    # single-line JSON
-symora --format jsonl refs src/main.rs:10:5        # newline-delimited
-symora -q rename src/main.rs:10:5 new_name         # error-only
+symora -q rename src/main.rs:10:5 new_name --dry-run  # error-only
 symora -v status                                   # verbose
 ```
 
-Format values: `pretty` (default), `compact`, `jsonl`. There is no `-c` shortcut.
+Format values: `pretty` (default), `compact`. There is no `-c` shortcut.
 
 ## Index and daemon
 

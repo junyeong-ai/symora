@@ -9,7 +9,7 @@ The SQLite index at `.symora/store.db` is product reliability, not a cache. Rule
 - `INIT_SCHEMA` is the authoritative shape. Bump `SCHEMA_VERSION` (and `PRAGMA user_version` in the SQL) whenever the on-disk shape changes.
 - Schema mismatch triggers `recover_db` (rename to `.bak`, recreate). No hand-rolled `ALTER TABLE` migrations — they hide real failures behind expected duplicate-column errors.
 - Never clear the index during normal daemon idle or shutdown. The index is what makes warm starts fast.
-- Two rebuildable caches sit beside the store: `pack-cache.db` (`services/pack_cache.rs`) and `embeddings.db` (`services/embedding_cache.rs` — semantic-search vectors, bound to the active model id + dimension and reset on mismatch). Both rebuild from source, so an open/read failure logs at `warn!` and continues without the cache — never block a command on one.
+- Two rebuildable caches sit beside the store: `pack-cache.db` (`services/pack_cache.rs`) and `embeddings.db` (`services/embedding_cache.rs` — semantic-search vectors, bound to the active model id + dimension and reset on mismatch). Both rebuild from source, so a failure to *open* one degrades gracefully rather than failing the command: the embedding path logs at `warn!` and embeds in memory; the pack path treats it as a miss. An error that occurs once a cache is open is real and propagates — these caches don't swallow genuine failures.
 
 ## Service abstractions: LSP and Store
 
