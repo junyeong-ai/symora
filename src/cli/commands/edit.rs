@@ -1323,22 +1323,24 @@ pub struct AppliedFileChange {
 
 /// Apply text edits to `content`. Every range is resolved once against the
 /// original document — a stale (past-EOF) or inverted range aborts the whole
-/// application rather than letting a partial result report success — and the
-/// resolved ranges are checked for overlap, since edits computed against the
-/// same revision must not overlap; an overlap means a stale or malformed edit
-/// set and is rejected rather than silently misapplied.
+/// application rather than letting a partial result report success.
 ///
-/// Edits are then applied bottom-up against the original offsets, so an
-/// earlier (higher) edit never shifts a later (lower) one. Several inserts at
-/// the same position are applied in reverse so their text lands in the order
-/// the edits were given.
+/// The result is rebuilt left-to-right from the original content: edits are
+/// taken in ascending start order and each contributes `content[prev..start]`
+/// followed by its replacement text. Because nothing is ever applied against
+/// bytes an earlier edit already moved, the original offsets stay valid for
+/// every edit — including a zero-width insert that shares a boundary with an
+/// adjacent replace. An edit that starts before the previous one ended is a
+/// genuine overlap (edits from one revision don't overlap) and is refused
+/// rather than silently misapplied. Several inserts at one position keep the
+/// order they were given.
 pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
     if edits.is_empty() {
         return Ok(content.to_string());
     }
 
-    // Resolve to original-document byte offsets up front. `order` preserves
-    // the given order for same-position inserts.
+    // Resolve to original-document byte offsets up front. `order` keeps
+    // same-position inserts in the order they were given.
     let mut resolved: Vec<ResolvedEdit> = Vec::with_capacity(edits.len());
     for (order, edit) in edits.iter().enumerate() {
         let start = line_char_to_byte_offset(
@@ -1366,52 +1368,42 @@ pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<Stri
         });
     }
 
-    reject_overlaps(&resolved)?;
+    // Ascending by start, then end (a zero-width insert sorts before a
+    // same-start replace), then given order (same-position inserts keep
+    // their order). One ordering drives both overlap checking and assembly.
+    resolved.sort_by(|a, b| {
+        a.start
+            .cmp(&b.start)
+            .then(a.end.cmp(&b.end))
+            .then(a.order.cmp(&b.order))
+    });
 
-    // Apply bottom-up against the original offsets: a higher edit applied
-    // first never shifts a lower one. For a shared start the later-given edit
-    // applies first, so same-position inserts keep their original order.
-    resolved.sort_by(|a, b| b.start.cmp(&a.start).then(b.order.cmp(&a.order)));
-
-    let mut result = content.to_string();
-    for e in resolved {
-        result.replace_range(e.start..e.end, e.text);
-    }
-    Ok(result)
-}
-
-/// One LSP edit resolved to original-document byte offsets. `order` is the
-/// index in the given edit list, used only to break ties between
-/// same-position inserts.
-struct ResolvedEdit<'a> {
-    start: usize,
-    end: usize,
-    order: usize,
-    text: &'a str,
-}
-
-/// Reject any edit whose range overlaps the interior of another, scanning all
-/// ranges (not just adjacent ones) so an interleaved zero-width insert can't
-/// mask a genuine overlap. Edits computed against one document revision are
-/// non-overlapping by construction; an overlap means a stale or malformed set
-/// and is refused rather than silently misapplied. Adjacent ranges and
-/// inserts that merely touch a boundary are allowed.
-fn reject_overlaps(resolved: &[ResolvedEdit]) -> Result<()> {
-    let mut sorted: Vec<&ResolvedEdit> = resolved.iter().collect();
-    sorted.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
-
-    let mut covered_end = 0usize;
-    for e in sorted {
-        if e.start < covered_end {
+    let mut result = String::with_capacity(content.len());
+    let mut pos = 0usize;
+    for e in &resolved {
+        if e.start < pos {
             anyhow::bail!(
                 "overlapping LSP edits near byte {}; the edit set was computed \
                  against a different revision — retry",
                 e.start,
             );
         }
-        covered_end = covered_end.max(e.end);
+        result.push_str(&content[pos..e.start]);
+        result.push_str(e.text);
+        pos = e.end;
     }
-    Ok(())
+    result.push_str(&content[pos..]);
+    Ok(result)
+}
+
+/// One LSP edit resolved to original-document byte offsets. `order` is the
+/// index in the given edit list, used only to keep same-position inserts in
+/// the order they were given.
+struct ResolvedEdit<'a> {
+    start: usize,
+    end: usize,
+    order: usize,
+    text: &'a str,
 }
 
 /// Byte offset for an LSP (0-indexed) line/character position.
@@ -1441,10 +1433,11 @@ fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> Res
         lines_seen += 1;
     }
 
-    // The position just past the final newline (or the start of an empty
-    // document) is the canonical LSP end-of-document position used for
-    // appends.
-    if line == lines_seen && (content.is_empty() || content.ends_with('\n')) {
+    // Exactly one line past the last content line is the canonical LSP
+    // end-of-document position (an append point), whether or not the file
+    // ends in a newline. A line further past that is a different revision —
+    // clamping it would land the edit somewhere the server never asked for.
+    if line == lines_seen {
         return Ok(content.len());
     }
 
@@ -1678,9 +1671,12 @@ mod tests {
         // Canonical end-of-document position (after the final newline).
         assert_eq!(line_char_to_byte_offset("ab\ncd\n", 2, 0).unwrap(), 6);
         assert_eq!(line_char_to_byte_offset("", 0, 0).unwrap(), 0);
-        // A line past EOF is a stale revision, not an append.
+        // One line past the last content line is the EOF append point even
+        // when the file has no trailing newline.
+        assert_eq!(line_char_to_byte_offset("ab\ncd", 2, 0).unwrap(), 5);
+        // Two or more lines past EOF is a stale revision, not an append.
         assert!(line_char_to_byte_offset("ab\ncd\n", 3, 0).is_err());
-        assert!(line_char_to_byte_offset("ab\ncd", 2, 0).is_err());
+        assert!(line_char_to_byte_offset("ab\ncd", 3, 0).is_err());
     }
 
     #[test]
@@ -1739,6 +1735,38 @@ mod tests {
         };
         let err = apply_text_edits("0123456789abc\n", &[wide, insert, inner]).unwrap_err();
         assert!(err.to_string().contains("overlapping"));
+    }
+
+    #[test]
+    fn insert_sharing_a_start_with_a_replace_keeps_both() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        // A zero-width insert at the same position as a replace's start must
+        // land before the replacement, not be clobbered by it.
+        let replace = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 2)),
+            new_text: "X".to_string(),
+        };
+        let insert = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 0)),
+            new_text: "I".to_string(),
+        };
+        assert_eq!(
+            apply_text_edits("abcd\n", &[replace, insert]).unwrap(),
+            "IXcd\n"
+        );
+    }
+
+    #[test]
+    fn edit_at_eof_sentinel_applies_without_a_trailing_newline() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        // A formatter appending a trailing newline addresses the position one
+        // line past the last content line; that must apply, not error, on a
+        // file that doesn't already end in a newline.
+        let append = TextEdit {
+            range: LspRange::new(Position::new(1, 1), Position::new(2, 0)),
+            new_text: "\n".to_string(),
+        };
+        assert_eq!(apply_text_edits("a\nb", &[append]).unwrap(), "a\nb\n");
     }
 
     #[test]
