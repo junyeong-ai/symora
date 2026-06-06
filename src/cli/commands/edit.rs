@@ -1040,16 +1040,15 @@ async fn pattern_edit(
                 working.len()
             );
         }
-        // Tree-sitter columns are 0-indexed bytes; the splice core speaks
-        // 1-indexed characters.
-        let start_col = byte_to_char_col(&working[start_idx], m.start_column as usize);
-        let end_col = byte_to_char_col(&working[end_idx], m.end_column as usize);
+        // AstMatch columns are already 1-indexed character columns (the JSON
+        // contract), exactly what the splice core speaks — pass them straight
+        // through.
         let splice = char_splice(
             &working,
             m.start_line,
-            start_col,
+            m.start_column,
             m.end_line,
-            Some(end_col),
+            Some(m.end_column),
             text,
         )?;
 
@@ -1101,17 +1100,6 @@ async fn pattern_edit(
     app.output.print_success(section);
     finish(app, &abs_path, dry_run).await;
     Ok(())
-}
-
-/// 0-indexed byte offset → 1-indexed character column, clamped to the
-/// line and never splitting a UTF-8 sequence.
-fn byte_to_char_col(line: &str, byte: usize) -> u32 {
-    let clamped = byte.min(line.len());
-    let chars = line
-        .char_indices()
-        .take_while(|(i, _)| *i < clamped)
-        .count();
-    chars as u32 + 1
 }
 
 fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
@@ -1439,14 +1427,6 @@ mod tests {
         assert_eq!(splice.removed, 0);
         assert_eq!(splice.new_lines, lines(&["hello", "world"]));
         assert!(char_splice(&empty, 2, 1, 2, None, "x").is_err());
-    }
-
-    #[test]
-    fn byte_to_char_col_clamps_and_counts_characters() {
-        assert_eq!(byte_to_char_col("한글ab", 0), 1);
-        assert_eq!(byte_to_char_col("한글ab", 3), 2); // after 한
-        assert_eq!(byte_to_char_col("한글ab", 6), 3); // after 글
-        assert_eq!(byte_to_char_col("ab", 99), 3); // clamped to EOL
     }
 
     /// A symbol sharing its first or last line with other code must be
