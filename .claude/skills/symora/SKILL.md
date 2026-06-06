@@ -1,5 +1,6 @@
 ---
 name: symora
+version: 0.11.0
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
 when_to_use: User asks "where is this defined", "who calls this", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
@@ -11,7 +12,7 @@ Use `symora` when semantic code navigation is more useful than text search. Outp
 
 ## Two backends, different requirements
 
-- **Index & structural search**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search ast` and `map …` use tree-sitter and the file tree directly — no index, no language server. `search content` ranks the SQLite index and scans the filesystem when it isn't built. `search symbols` ranks the index and falls back to **LSP workspace symbols** when it isn't built — the one case in this group that needs the language server.
+- **Index & structural search**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search ast` uses tree-sitter directly, and the `map` family reads the file tree for structure (summary, siblings, related files, directory layout) — no index, no language server. `search content` ranks the SQLite index and scans the filesystem when it isn't built. Two cases in this group still reach the language server: `search symbols` falls back to **LSP workspace symbols** when the index isn't built, and `map file`'s embedded `symbols` field is LSP-backed (its outer shape is not — see step 4).
 - **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
 
 Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
@@ -83,7 +84,7 @@ symora impact src/main.rs:42
 symora diff-impact
 ```
 
-Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run` for previews — the preview is an exact diff hunk. `edit delete` always reports references outside the deleted span that would dangle (`dangling_references` with the standard list shape; `references_status: "unsupported"|"unavailable"` when the check couldn't run). Add `--with-diagnostics` to any applied edit to attach post-edit LSP diagnostics: `{"status": "ok"|"unconfirmed"|"unsupported"|"unavailable", "count", "items"}` — an empty list under `unconfirmed` means *unknown*, not clean. The standalone `diagnostics` command carries the same `status` key only when the result is not authoritative.
+Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run`. For `edit`, the preview is an exact diff hunk; `rename` and `actions apply` instead report the files they would touch (`affected_files`/`files_changed` and a `changes` list), not a hunk. `edit delete` always reports references outside the deleted span that would dangle (`dangling_references` with the standard list shape; `references_status: "unsupported"|"unavailable"` when the check couldn't run). Add `--with-diagnostics` to any applied edit to attach post-edit LSP diagnostics: `{"status": "ok"|"unconfirmed"|"unsupported"|"unavailable", "count", "items"}` — an empty list under `unconfirmed` means *unknown*, not clean. The standalone `diagnostics` command carries the same `status` key only when the result is not authoritative.
 
 ## Output and global flags
 
