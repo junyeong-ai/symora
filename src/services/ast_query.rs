@@ -406,6 +406,28 @@ mod tests {
         assert!(!service.parsers.contains_key(&SymbolLanguage::Unknown));
     }
 
+    /// The parser registry and the AST node-type catalogue
+    /// (`node_types::supported_languages`) are separate data, but a language
+    /// the engine can parse yet can't describe — or vice versa — would leave
+    /// `search ast`/`search nodes` advertising a language it can't serve.
+    /// Pin the two sets together so neither can drift.
+    #[test]
+    fn parser_registry_matches_the_ast_node_catalogue() {
+        use std::collections::HashSet;
+
+        let service = DefaultAstQueryService::default();
+        let registered: HashSet<SymbolLanguage> = service.parsers.keys().copied().collect();
+        let catalogued: HashSet<SymbolLanguage> =
+            crate::infra::ast::node_types::supported_languages()
+                .iter()
+                .copied()
+                .collect();
+        assert_eq!(
+            registered, catalogued,
+            "AST parser registry and node-type catalogue disagree on supported languages"
+        );
+    }
+
     #[test]
     fn test_rust_function_query() {
         let service = DefaultAstQueryService::default();

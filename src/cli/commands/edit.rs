@@ -1111,11 +1111,12 @@ fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Write `content` to `target` atomically: stage into a dotfile in the
-/// target's directory, fsync, carry the target's permissions over, then
-/// rename into place. A crash mid-write can never leave a truncated source
-/// file — the worst case is an orphaned staging file, which the drop guard
-/// removes on every failure path. Staging next to the target (not in a temp
-/// dir) keeps the rename on one filesystem, where it is atomic.
+/// target's directory, fsync, carry the target's permissions over, rename
+/// into place, then best-effort fsync the directory to make the rename
+/// durable. A crash at any point can never leave a truncated source file —
+/// the worst case is an orphaned staging file, which the drop guard removes
+/// on every in-process failure path. Staging next to the target (not in a
+/// temp dir) keeps the rename on one filesystem, where it is atomic.
 pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
     // Renaming over a symlink would replace the link itself, not the file it
     // points to — resolve first so the edit lands in the real file.
@@ -1136,7 +1137,14 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
 
     let mut guard = StagingFile::new(&staging);
     {
-        let mut file = fs::File::create(&staging)
+        // `create_new` (O_EXCL) won't follow or open an existing path at the
+        // staging name, so a symlink planted there can't redirect the write
+        // into another file. If a same-pid staging file is somehow already
+        // present, it fails loudly here instead of being silently reused.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
             .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
         file.write_all(content.as_bytes())
             .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
@@ -1153,6 +1161,14 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
     fs::rename(&staging, &target)
         .with_context(|| format!("Failed to write file: {}", target.display()))?;
     guard.disarm();
+
+    // Best-effort fsync of the directory so the rename — not just the staged
+    // bytes — has a chance to be durable across a power loss. The edit has
+    // already landed via the atomic rename, so a failure here doesn't fail
+    // the command.
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 

@@ -119,7 +119,7 @@ impl Store {
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
 
-        let mut page = self
+        let (mut page, snapshot) = self
             .db
             .call(move |conn| {
                 let sql = build_symbol_search_query(kind_str.is_some());
@@ -130,7 +130,7 @@ impl Store {
                 };
 
                 let mut total = 0usize;
-                let rows = rows
+                let rows: Vec<SymbolSearchResult> = rows
                     .mapped(|r| {
                         Ok((
                             r.get::<_, i64>(7)? as usize,
@@ -158,16 +158,21 @@ impl Store {
                     })
                     .collect();
 
-                Ok(SearchPage {
+                // Snapshot the indexed hash of each backing file in the SAME
+                // connection closure as the row query, so a concurrent
+                // reindex cannot land between reading the rows and reading
+                // the hashes they were derived from.
+                let snapshot = indexed_hashes(conn, rows.iter().map(|r| &r.file))?;
+                let page = SearchPage {
                     total,
                     rows,
                     stale: false,
-                })
+                };
+                Ok((page, snapshot))
             })
             .await?;
 
-        let files: Vec<PathBuf> = page.rows.iter().map(|r| r.file.clone()).collect();
-        page.stale = self.any_rows_stale(&files).await;
+        page.stale = any_backing_file_changed(snapshot).await;
         Ok(page)
     }
 
@@ -185,7 +190,7 @@ impl Store {
         let limit = limit as i64;
         let lang_str = language.map(|l| l.lsp_id().to_string());
 
-        let mut page = self
+        let (mut page, snapshot) = self
             .db
             .call(move |conn| {
                 let sql = build_content_search_query(lang_str.is_some());
@@ -196,7 +201,7 @@ impl Store {
                 };
 
                 let mut total = 0usize;
-                let rows = rows
+                let rows: Vec<ContentSearchResult> = rows
                     .mapped(|r| {
                         Ok((
                             r.get::<_, i64>(4)? as usize,
@@ -220,60 +225,18 @@ impl Store {
                     })
                     .collect();
 
-                Ok(SearchPage {
+                let snapshot = indexed_hashes(conn, rows.iter().map(|r| &r.file))?;
+                let page = SearchPage {
                     total,
                     rows,
                     stale: false,
-                })
+                };
+                Ok((page, snapshot))
             })
             .await?;
 
-        let files: Vec<PathBuf> = page.rows.iter().map(|r| r.file.clone()).collect();
-        page.stale = self.any_rows_stale(&files).await;
+        page.stale = any_backing_file_changed(snapshot).await;
         Ok(page)
-    }
-
-    /// True when any of the given files no longer matches its indexed
-    /// content hash — rewritten, deleted, or unreadable since `index()` ran.
-    /// Biased toward false positives on purpose: a spurious stale banner is
-    /// harmless, stale rows presented as current are not. Cost is bounded by
-    /// the page size (callers pass the matched files of one page).
-    async fn any_rows_stale(&self, files: &[PathBuf]) -> bool {
-        let mut distinct: Vec<&PathBuf> = files.iter().collect();
-        distinct.sort_unstable();
-        distinct.dedup();
-
-        let mut hashes = Vec::with_capacity(distinct.len());
-        for path in distinct {
-            match tokio::fs::read_to_string(path).await {
-                Ok(content) => hashes.push((
-                    path.display().to_string(),
-                    crate::infra::hash_content(&content) as i64,
-                )),
-                // Deleted or unreadable: the row is no longer backed by
-                // what's on disk.
-                Err(_) => return true,
-            }
-        }
-        if hashes.is_empty() {
-            return false;
-        }
-
-        self.db
-            .call(move |conn| {
-                let mut stmt = conn.prepare("SELECT content_hash FROM files WHERE path = ?1")?;
-                for (path, hash) in &hashes {
-                    let stored: Option<i64> = stmt
-                        .query_row(rusqlite::params![path], |r| r.get(0))
-                        .optional()?;
-                    if stored != Some(*hash) {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            })
-            .await
-            .unwrap_or(true)
     }
 
     pub async fn invalidate_file(&self, path: &Path) {
@@ -602,6 +565,50 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Snapshot the indexed `content_hash` of each distinct file backing a
+/// search page, read in the same connection closure as the rows themselves
+/// so the pair is atomic against a concurrent reindex. A file absent from
+/// the index maps to `None`.
+fn indexed_hashes<'a>(
+    conn: &rusqlite::Connection,
+    files: impl Iterator<Item = &'a PathBuf>,
+) -> Result<Vec<(String, Option<i64>)>, rusqlite::Error> {
+    let mut distinct: Vec<String> = files.map(|p| p.display().to_string()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+
+    let mut stmt = conn.prepare("SELECT content_hash FROM files WHERE path = ?1")?;
+    distinct
+        .into_iter()
+        .map(|path| {
+            let stored: Option<i64> = stmt
+                .query_row(rusqlite::params![path], |r| r.get(0))
+                .optional()?;
+            Ok((path, stored))
+        })
+        .collect()
+}
+
+/// True when any file in the snapshot no longer matches the indexed hash it
+/// was served under — rewritten, deleted, or unreadable since `index()` ran.
+/// Biased toward false positives on purpose: a spurious stale banner is
+/// harmless, stale rows presented as current are not. Cost is one disk read
+/// per distinct backing file, bounded by the page size.
+async fn any_backing_file_changed(snapshot: Vec<(String, Option<i64>)>) -> bool {
+    for (path, indexed_hash) in snapshot {
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                if indexed_hash != Some(crate::infra::hash_content(&content) as i64) {
+                    return true;
+                }
+            }
+            // Deleted or unreadable: the row is no longer backed by disk.
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 fn delete_file_related_data(
