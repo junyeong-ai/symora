@@ -163,7 +163,7 @@ async fn run_search_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
                     query: input.query,
                     language: input.language,
                     kind: input.kind,
-                    semantic: false,
+                    workspace_symbols: false,
                     limit: input.limit,
                 },
             },
