@@ -52,6 +52,12 @@ pub fn section_output_schema(items_description: &str) -> Value {
                 "type": "boolean",
                 "description": "Present (and true) only when showing < count",
             },
+            "stale": {
+                "type": "boolean",
+                "description": "Present (and true) only when index-served rows \
+                                came from files that changed on disk since \
+                                indexing — rebuild the index to refresh",
+            },
             "hints": { "type": "array", "items": { "type": "string" } },
             "next_commands": { "type": "array", "items": { "type": "string" } },
             "indexing": {

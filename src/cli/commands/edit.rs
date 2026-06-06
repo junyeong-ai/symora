@@ -1332,15 +1332,15 @@ pub struct AppliedFileChange {
 /// earlier (higher) edit never shifts a later (lower) one. Several inserts at
 /// the same position are applied in reverse so their text lands in the order
 /// the edits were given.
-fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
+pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
     if edits.is_empty() {
         return Ok(content.to_string());
     }
 
-    // Resolve to original-document byte offsets up front. `idx` preserves the
-    // given order for same-position inserts.
-    let mut resolved: Vec<(usize, usize, usize, &str)> = Vec::with_capacity(edits.len());
-    for (idx, edit) in edits.iter().enumerate() {
+    // Resolve to original-document byte offsets up front. `order` preserves
+    // the given order for same-position inserts.
+    let mut resolved: Vec<ResolvedEdit> = Vec::with_capacity(edits.len());
+    for (order, edit) in edits.iter().enumerate() {
         let start = line_char_to_byte_offset(
             content,
             edit.range.start.line as usize,
@@ -1358,35 +1358,60 @@ fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
                 edit.range,
             );
         }
-        resolved.push((start, end, idx, &edit.new_text));
+        resolved.push(ResolvedEdit {
+            start,
+            end,
+            order,
+            text: &edit.new_text,
+        });
     }
 
-    // Bottom-up by start; for a shared start, the later-given edit applies
-    // first so same-position inserts keep their original order in the result.
-    resolved.sort_by(|a, b| b.0.cmp(&a.0).then(b.2.cmp(&a.2)));
+    reject_overlaps(&resolved)?;
+
+    // Apply bottom-up against the original offsets: a higher edit applied
+    // first never shifts a lower one. For a shared start the later-given edit
+    // applies first, so same-position inserts keep their original order.
+    resolved.sort_by(|a, b| b.start.cmp(&a.start).then(b.order.cmp(&a.order)));
 
     let mut result = content.to_string();
-    let mut prev: Option<(usize, usize)> = None;
-    for (start, end, _, new_text) in resolved {
-        // Half-open ranges [start, end) overlap when each begins before the
-        // other ends. Zero-width inserts that merely touch a boundary don't
-        // overlap; a genuine interior overlap means a stale or malformed edit
-        // set and is rejected rather than misapplied.
-        if let Some((prev_start, prev_end)) = prev
-            && start < prev_end
-            && prev_start < end
-        {
+    for e in resolved {
+        result.replace_range(e.start..e.end, e.text);
+    }
+    Ok(result)
+}
+
+/// One LSP edit resolved to original-document byte offsets. `order` is the
+/// index in the given edit list, used only to break ties between
+/// same-position inserts.
+struct ResolvedEdit<'a> {
+    start: usize,
+    end: usize,
+    order: usize,
+    text: &'a str,
+}
+
+/// Reject any edit whose range overlaps the interior of another, scanning all
+/// ranges (not just adjacent ones) so an interleaved zero-width insert can't
+/// mask a genuine overlap. Edits computed against one document revision are
+/// non-overlapping by construction; an overlap means a stale or malformed set
+/// and is refused rather than silently misapplied. Adjacent ranges and
+/// inserts that merely touch a boundary are allowed.
+fn reject_overlaps(resolved: &[ResolvedEdit]) -> Result<()> {
+    let mut sorted: Vec<&ResolvedEdit> = resolved.iter().collect();
+    sorted.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+
+    let mut covered_end = 0usize;
+    for e in sorted {
+        if e.start < covered_end {
             anyhow::bail!(
-                "overlapping LSP edits at bytes {start}..{end} and \
-                 {prev_start}..{prev_end}; the edit set was computed against a \
-                 different revision — retry"
+                "overlapping LSP edits near byte {}; the edit set was computed \
+                 against a different revision — retry",
+                e.start,
             );
         }
-        result.replace_range(start..end, new_text);
-        prev = Some((start, end));
+        covered_end = covered_end.max(e.end);
     }
-
-    Ok(result)
+    Ok(())
 }
 
 /// Byte offset for an LSP (0-indexed) line/character position.
@@ -1691,6 +1716,28 @@ mod tests {
             new_text: "Y".to_string(),
         };
         let err = apply_text_edits("abcdef\n", &[a, b]).unwrap_err();
+        assert!(err.to_string().contains("overlapping"));
+    }
+
+    #[test]
+    fn overlap_hidden_behind_an_interleaved_insert_is_still_rejected() {
+        use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+        // A zero-width insert that sorts between two overlapping non-empty
+        // ranges must not mask the overlap: validation scans all ranges, not
+        // just adjacent ones.
+        let wide = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 10)),
+            new_text: "R".to_string(),
+        };
+        let insert = TextEdit {
+            range: LspRange::new(Position::new(0, 0), Position::new(0, 0)),
+            new_text: "I".to_string(),
+        };
+        let inner = TextEdit {
+            range: LspRange::new(Position::new(0, 5), Position::new(0, 6)),
+            new_text: "X".to_string(),
+        };
+        let err = apply_text_edits("0123456789abc\n", &[wide, insert, inner]).unwrap_err();
         assert!(err.to_string().contains("overlapping"));
     }
 

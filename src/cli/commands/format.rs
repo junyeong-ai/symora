@@ -38,7 +38,9 @@ pub async fn execute(args: FormatArgs, app: &App) -> Result<()> {
         Ok(edits) => {
             if args.apply && !edits.is_empty() {
                 let content = std::fs::read_to_string(&file)?;
-                let formatted = apply_edits(&content, &edits);
+                // Reuse the one text-edit applier (CRLF- and multibyte-correct,
+                // overlap-checked) rather than a second local implementation.
+                let formatted = super::edit::apply_text_edits(&content, &edits)?;
                 super::edit::atomic_write(&file, &formatted)?;
                 ctx.print_success(serde_json::json!({
                     "applied": true,
@@ -63,59 +65,4 @@ pub async fn execute(args: FormatArgs, app: &App) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn apply_edits(content: &str, edits: &[crate::models::lsp::TextEdit]) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut result = content.to_string();
-
-    // Apply edits in reverse order to preserve positions
-    let mut sorted_edits: Vec<_> = edits.iter().collect();
-    sorted_edits.sort_by(|a, b| {
-        b.range
-            .start
-            .line
-            .cmp(&a.range.start.line)
-            .then(b.range.start.character.cmp(&a.range.start.character))
-    });
-
-    for edit in sorted_edits {
-        let start_offset = line_col_to_offset(
-            &lines,
-            content,
-            edit.range.start.line,
-            edit.range.start.character,
-        );
-        let end_offset = line_col_to_offset(
-            &lines,
-            content,
-            edit.range.end.line,
-            edit.range.end.character,
-        );
-
-        if let (Some(start), Some(end)) = (start_offset, end_offset) {
-            result.replace_range(start..end, &edit.new_text);
-        }
-    }
-
-    result
-}
-
-fn line_col_to_offset(lines: &[&str], content: &str, line: u32, col: u32) -> Option<usize> {
-    let line = line as usize;
-    let col = col as usize;
-
-    if line >= lines.len() {
-        return Some(content.len());
-    }
-
-    let mut offset = 0;
-    for (i, l) in lines.iter().enumerate() {
-        if i == line {
-            return Some(offset + col.min(l.len()));
-        }
-        offset += l.len() + 1; // +1 for newline
-    }
-
-    Some(content.len())
 }
