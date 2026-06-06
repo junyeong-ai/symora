@@ -135,6 +135,12 @@ fn register(
     ts_language: tree_sitter::Language,
     query_src: &str,
 ) {
+    // The grammar and its query are compiled into the binary, so registration
+    // is deterministic for a given build. A failure means a defective grammar
+    // (an incompatible ABI or a query whose node types moved) — skip that one
+    // language so an unrelated language never loses indexing over it. The
+    // registration- and extraction-completeness tests turn such a regression
+    // into a loud, targeted CI failure before it can ship.
     let mut parser = Parser::new();
     if parser.set_language(&ts_language).is_err() {
         return;
@@ -403,6 +409,34 @@ const PHP_QUERY: &str = r#"
 mod tests {
     use super::*;
 
+    /// The set of languages with a symbol extractor. A grammar bump that
+    /// breaks one language's ABI or extraction query drops it here, failing
+    /// this test loudly instead of degrading to silent empty results.
+    const EXTRACTOR_LANGUAGES: [Language; 10] = [
+        Language::Rust,
+        Language::Go,
+        Language::Python,
+        Language::TypeScript,
+        Language::JavaScript,
+        Language::Java,
+        Language::Kotlin,
+        Language::Cpp,
+        Language::CSharp,
+        Language::PHP,
+    ];
+
+    #[test]
+    fn every_supported_language_registers_an_extractor() {
+        let extractor = SymbolExtractor::new();
+        for language in EXTRACTOR_LANGUAGES {
+            assert!(
+                extractor.languages.contains_key(&language),
+                "{language:?} failed to register — its grammar ABI or extraction query is broken"
+            );
+        }
+        assert_eq!(extractor.languages.len(), EXTRACTOR_LANGUAGES.len());
+    }
+
     #[test]
     fn rust_symbols_carry_correct_kinds() {
         let extractor = SymbolExtractor::new();
@@ -469,5 +503,97 @@ class MyClass:
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("hello"), Some(SymbolKind::Function));
         assert_eq!(kind("MyClass"), Some(SymbolKind::Class));
+    }
+
+    #[test]
+    fn typescript_symbol_extraction() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+function greet() {}
+class Service {}
+interface Shape {}
+enum Color { Red, Blue }
+"#;
+        let symbols = extractor.extract(content, Language::TypeScript);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("greet"), Some(SymbolKind::Function));
+        assert_eq!(kind("Service"), Some(SymbolKind::Class));
+        assert_eq!(kind("Shape"), Some(SymbolKind::Interface));
+        assert_eq!(kind("Color"), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn javascript_symbol_extraction() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+function greet() {}
+class Service {}
+"#;
+        let symbols = extractor.extract(content, Language::JavaScript);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("greet"), Some(SymbolKind::Function));
+        assert_eq!(kind("Service"), Some(SymbolKind::Class));
+    }
+
+    #[test]
+    fn java_symbol_extraction() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+class Service {}
+interface Shape {}
+enum Color { RED, BLUE }
+"#;
+        let symbols = extractor.extract(content, Language::Java);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("Service"), Some(SymbolKind::Class));
+        assert_eq!(kind("Shape"), Some(SymbolKind::Interface));
+        assert_eq!(kind("Color"), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn cpp_symbol_extraction() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+class Widget {};
+struct Point {};
+void run() {}
+"#;
+        let symbols = extractor.extract(content, Language::Cpp);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("Widget"), Some(SymbolKind::Class));
+        assert_eq!(kind("Point"), Some(SymbolKind::Struct));
+        assert_eq!(kind("run"), Some(SymbolKind::Function));
+    }
+
+    #[test]
+    fn csharp_symbol_extraction() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+class Service {}
+interface IShape {}
+struct Point {}
+enum Color { Red }
+"#;
+        let symbols = extractor.extract(content, Language::CSharp);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("Service"), Some(SymbolKind::Class));
+        assert_eq!(kind("IShape"), Some(SymbolKind::Interface));
+        assert_eq!(kind("Point"), Some(SymbolKind::Struct));
+        assert_eq!(kind("Color"), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn php_symbol_extraction() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"<?php
+function greet() {}
+class Service {}
+interface Shape {}
+"#;
+        let symbols = extractor.extract(content, Language::PHP);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("greet"), Some(SymbolKind::Function));
+        assert_eq!(kind("Service"), Some(SymbolKind::Class));
+        assert_eq!(kind("Shape"), Some(SymbolKind::Interface));
     }
 }
