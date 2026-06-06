@@ -2,10 +2,10 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::app::App;
+use crate::cli::commands::common::snap_to_symbol_anchor;
 use crate::cli::response::{LocationOutput, Section};
-use crate::cli::utils::{read_line_at, read_lines_around, resolve_symbol_anchor};
+use crate::cli::utils::{read_line_at, read_lines_around};
 use crate::cli::{LocationArg, OutputError};
-use crate::models::lsp::FindSymbolsOptions;
 
 #[derive(Args, Debug)]
 pub struct RefsArgs {
@@ -31,16 +31,8 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     let limit = args.limit.unwrap_or(cfg.lsp.refs_limit);
     let loc = args.loc.parse()?.to_absolute_with_root(Some(app.root()))?;
 
-    let (line, column) = match app
-        .lsp
-        .find_symbols(&loc.file, FindSymbolsOptions::default().with_depth(10))
-        .await
-    {
-        Ok(symbols) => resolve_symbol_anchor(&symbols, loc.line, loc.column)
-            .map(|(line, column, _)| (line, column))
-            .unwrap_or((loc.line, loc.column)),
-        Err(_) => (loc.line, loc.column),
-    };
+    let (line, column) =
+        snap_to_symbol_anchor(app.lsp.as_ref(), &loc.file, loc.line, loc.column).await;
 
     match app.lsp.find_references(&loc.file, line, column).await {
         Ok(locations) => {

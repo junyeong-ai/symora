@@ -46,19 +46,34 @@ impl LocationAnalysis {
     /// `find_references` because every caller needs the refs list.
     pub async fn at(lsp: &dyn LspService, anchor: ParsedLocation) -> Result<Self, LspError> {
         let language = Language::from_path(&anchor.file);
-        let (refs, syms) = tokio::join!(
-            lsp.find_references(&anchor.file, anchor.line, anchor.column),
-            lsp.find_symbols(
+        // Resolve the symbol first so the anchor can snap to its name
+        // position; references and blast radius are then taken from the same
+        // place, which keeps a line-only or declaration-start input from
+        // silently under-counting. Serialized on purpose — the snap must
+        // precede the reference lookup.
+        let symbols = lsp
+            .find_symbols(
                 &anchor.file,
                 FindSymbolsOptions::default().with_body().with_depth(10),
-            ),
-        );
-        let references = refs?;
-        let target = syms.ok().and_then(|symbols| {
-            find_symbol_at_position(&symbols, anchor.line, Some(anchor.column))
-                .or_else(|| find_symbol_at_position(&symbols, anchor.line, None))
+            )
+            .await
+            .ok();
+        let target = symbols.as_ref().and_then(|symbols| {
+            find_symbol_at_position(symbols, anchor.line, Some(anchor.column))
+                .or_else(|| find_symbol_at_position(symbols, anchor.line, None))
                 .cloned()
         });
+        let anchor = match &target {
+            Some(symbol) => ParsedLocation {
+                file: anchor.file,
+                line: symbol.location.line,
+                column: symbol.location.column,
+            },
+            None => anchor,
+        };
+        let references = lsp
+            .find_references(&anchor.file, anchor.line, anchor.column)
+            .await?;
         Ok(Self {
             anchor,
             language,
