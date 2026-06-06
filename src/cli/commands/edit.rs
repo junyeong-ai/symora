@@ -11,7 +11,7 @@
 //! AST layer's byte columns are converted before they reach the core).
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -648,8 +648,7 @@ impl FileDocument {
         let preview = if dry_run {
             Some(splice.unified_hunk(&self.lines))
         } else {
-            fs::write(&self.file, &new_content)
-                .with_context(|| format!("Failed to write file: {}", self.file.display()))?;
+            atomic_write(&self.file, &new_content)?;
             None
         };
 
@@ -1080,8 +1079,7 @@ async fn pattern_edit(
 
     if !dry_run {
         let new_content = doc.render(&working);
-        fs::write(&abs_path, &new_content)
-            .with_context(|| format!("Failed to write file: {}", abs_path.display()))?;
+        atomic_write(&abs_path, &new_content)?;
     }
 
     let mut section = Section::with_total(outputs, matches.len());
@@ -1106,6 +1104,84 @@ fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
     let region = &lines[splice.at..splice.at + splice.removed];
     let newline_bytes = eol.len() * region.len().saturating_sub(1);
     region.iter().map(String::len).sum::<usize>() + newline_bytes
+}
+
+// ---------------------------------------------------------------------------
+// Atomic write
+// ---------------------------------------------------------------------------
+
+/// Write `content` to `target` atomically: stage into a dotfile in the
+/// target's directory, fsync, carry the target's permissions over, then
+/// rename into place. A crash mid-write can never leave a truncated source
+/// file — the worst case is an orphaned staging file, which the drop guard
+/// removes on every failure path. Staging next to the target (not in a temp
+/// dir) keeps the rename on one filesystem, where it is atomic.
+pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
+    // Renaming over a symlink would replace the link itself, not the file it
+    // points to — resolve first so the edit lands in the real file.
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Target has no parent: {}", target.display()))?;
+    let staging = parent.join(format!(
+        ".{}.symora-edit.{}",
+        target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("edit"),
+        std::process::id()
+    ));
+
+    let mut guard = StagingFile::new(&staging);
+    {
+        let mut file = fs::File::create(&staging)
+            .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
+    }
+
+    // The staging file was created with default permissions; the target's
+    // mode (an executable script, say) must survive the rename.
+    if let Ok(meta) = fs::metadata(&target) {
+        let _ = fs::set_permissions(&staging, meta.permissions());
+    }
+
+    fs::rename(&staging, &target)
+        .with_context(|| format!("Failed to write file: {}", target.display()))?;
+    guard.disarm();
+    Ok(())
+}
+
+/// RAII cleanup for the staging file: removes it on drop unless the rename
+/// landed, so a failed write never leaves an orphan dotfile in the project.
+struct StagingFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingFile {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,8 +1248,7 @@ pub fn apply_workspace_edits(
     let mut results = Vec::with_capacity(staged.len());
     for (file, new_content, edit_count) in staged {
         if !dry_run {
-            fs::write(&file, &new_content)
-                .with_context(|| format!("Failed to write file: {}", file.display()))?;
+            atomic_write(&file, &new_content)?;
         }
         results.push(AppliedFileChange {
             file,
@@ -1536,5 +1611,62 @@ mod tests {
         let sym = sample_symbol(2, 4);
         let span = symbol_line_span(&sym, 10).unwrap();
         assert_eq!((span.start, span.end), (2, 4));
+    }
+
+    #[test]
+    fn atomic_write_round_trips_content_including_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("file.rs");
+        fs::write(&target, "old").unwrap();
+
+        let content = "fn main() {}\r\nfn aux() {}\r\n";
+        atomic_write(&target, content).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), content);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_staging_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("file.rs");
+        fs::write(&target, "old").unwrap();
+
+        atomic_write(&target, "new").unwrap();
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "staging file leaked: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_target_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("script.sh");
+        fs::write(&target, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+
+        atomic_write(&target, "#!/bin/sh\necho hi\n").unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_edits_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.rs");
+        let link = dir.path().join("link.rs");
+        fs::write(&real, "old").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        atomic_write(&link, "new").unwrap();
+        // The link must still be a symlink and the real file must hold the
+        // new content — a rename onto the link itself would sever it.
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
     }
 }
