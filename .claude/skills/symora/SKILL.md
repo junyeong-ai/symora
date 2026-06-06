@@ -32,12 +32,12 @@ Failures are structured: `{"error": {"code": "server_not_installed", "message": 
 
 ```bash
 symora search symbols AuthUser
-symora search symbols 'SearchCommand/Content' --workspace-symbols
+symora search symbols AuthUser --workspace-symbols   # force live LSP workspace symbols (skip the index)
 symora search content "async fn"
 symora map summary
 ```
 
-Narrow noisy results with `--kind`, `--lang`, or a more specific name.
+Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` matches flat names; a `Class/method` path resolves through `symbols --symbol` (below), not `search`.
 
 ### Exact inspection (file/symbol known)
 
@@ -69,7 +69,7 @@ symora refs src/cli/commands/search/mod.rs:30
 symora usage src/cli/commands/search/mod.rs:30:10 --max-symbols 10 --limit 5
 ```
 
-`context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition. `refs` accepts line-only inputs and resolves to the nearest symbol anchor. `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location, both LSP-backed, and auto-detects languages by file count when `--lang` is omitted. If no detected language has an installed server it returns a structured `server_not_installed` error — not a silent `count: 0`. When some languages were searched but others were missing, failed, or skipped once enough candidates were found, the result carries a `coverage_gaps` array of `{language, reason}` objects (`reason`: `server_not_installed | timed_out | unsupported | unavailable | not_searched`); a non-empty `coverage_gaps` means `count` is a lower bound — install the named server or narrow with `--lang`. An empty `usage` with neither an error nor `coverage_gaps` is a genuine zero.
+The location commands here and above — `refs`, `callers`, `callees`, `context`, `impact`, `usage` — accept a `file:line` (column optional) and resolve it to the enclosing symbol's name, so a `search symbols` result row can be passed straight through without pinning the exact name column. (`def`, `hover`, `typedef` stay position-exact, since you may target a specific token mid-line.) `context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition. `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location, both LSP-backed, and auto-detects languages by file count when `--lang` is omitted. If no detected language has an installed server it returns a structured `server_not_installed` error — not a silent `count: 0`. When some languages were searched but others were missing, failed, or skipped once enough candidates were found, the result carries a `coverage_gaps` array of `{language, reason}` objects (`reason`: `server_not_installed | timed_out | unsupported | unavailable | not_searched`); a non-empty `coverage_gaps` means `count` is a lower bound — install the named server or narrow with `--lang`. An empty `usage` with neither an error nor `coverage_gaps` is a genuine zero.
 
 ### Refactor and health checks
 
