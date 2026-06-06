@@ -39,7 +39,7 @@ pub async fn execute_symbol_search(
     query: &str,
     language: Option<&str>,
     kind: Option<&str>,
-    semantic: bool,
+    workspace_symbols: bool,
     limit: usize,
 ) -> Result<()> {
     let ctx = &app.output;
@@ -51,10 +51,10 @@ pub async fn execute_symbol_search(
     }
 
     let search_languages = resolve_search_languages(app, language);
-    let use_semantic = semantic || looks_like_symbol_path(query);
+    let use_workspace = workspace_symbols || looks_like_symbol_path(query);
 
-    if use_semantic {
-        return execute_semantic_symbol_search(app, query, kind, limit, &search_languages).await;
+    if use_workspace {
+        return execute_workspace_symbol_search(app, query, kind, limit, &search_languages).await;
     }
 
     match app
@@ -70,10 +70,10 @@ pub async fn execute_symbol_search(
                 .map(|r| index_result_output(r, ctx))
                 .collect();
             if !search_languages.is_empty() && candidates.len() < limit {
-                let semantic_results =
-                    collect_semantic_symbol_results(app, query, kind, limit, &search_languages)
+                let workspace_results =
+                    collect_workspace_symbol_results(app, query, kind, limit, &search_languages)
                         .await;
-                candidates = merge_symbol_results(candidates, semantic_results, query);
+                candidates = merge_symbol_results(candidates, workspace_results, query);
                 count = count.max(candidates.len());
             }
             ctx.print_success(finish_symbol_search(
@@ -82,7 +82,7 @@ pub async fn execute_symbol_search(
         }
         // No index yet: answer from live LSP workspace symbols instead.
         Err(StoreError::NotInitialized) => {
-            return execute_semantic_symbol_search(app, query, kind, limit, &search_languages)
+            return execute_workspace_symbol_search(app, query, kind, limit, &search_languages)
                 .await;
         }
         Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
@@ -107,7 +107,7 @@ fn index_result_output(row: SymbolSearchResult, ctx: &OutputContext) -> SymbolRe
     }
 }
 
-async fn execute_semantic_symbol_search(
+async fn execute_workspace_symbol_search(
     app: &App,
     query: &str,
     kind: Option<&str>,
@@ -117,12 +117,12 @@ async fn execute_semantic_symbol_search(
     let ctx = &app.output;
     if languages.is_empty() {
         ctx.print_error(OutputError::not_found(
-            "No project languages detected for semantic symbol search",
+            "No project languages detected for workspace symbol search",
         ));
         return Ok(());
     }
 
-    let mut candidates = collect_semantic_symbol_results(app, query, kind, limit, languages).await;
+    let mut candidates = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
     let mut count = candidates.len();
 
     if looks_like_symbol_path(query) && candidates.len() < limit {
@@ -175,7 +175,7 @@ fn finish_symbol_search(
         .with_next_commands(next_commands)
 }
 
-async fn collect_semantic_symbol_results(
+async fn collect_workspace_symbol_results(
     app: &App,
     query: &str,
     kind: Option<&str>,
@@ -188,7 +188,7 @@ async fn collect_semantic_symbol_results(
         return Vec::new();
     }
 
-    let semantic_query = workspace_query_from_pattern(query);
+    let workspace_query = workspace_query_from_pattern(query);
     let overfetch_limit = if looks_like_symbol_path(query) {
         limit
     } else {
@@ -198,7 +198,7 @@ async fn collect_semantic_symbol_results(
     let mut results = Vec::new();
 
     for language in languages {
-        let Ok(mut symbols) = app.lsp.workspace_symbols(&semantic_query, *language).await else {
+        let Ok(mut symbols) = app.lsp.workspace_symbols(&workspace_query, *language).await else {
             continue;
         };
 
@@ -249,8 +249,8 @@ async fn collect_semantic_symbol_results(
     }
 
     results.sort_by(|a, b| {
-        score_semantic_symbol(query, b)
-            .partial_cmp(&score_semantic_symbol(query, a))
+        score_workspace_symbol(query, b)
+            .partial_cmp(&score_workspace_symbol(query, a))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -259,7 +259,7 @@ async fn collect_semantic_symbol_results(
         .into_iter()
         .take(overfetch_limit)
         .map(|symbol| {
-            let score = score_semantic_symbol(query, &symbol);
+            let score = score_workspace_symbol(query, &symbol);
             SymbolResultOutput {
                 name: symbol.name,
                 name_path: symbol.name_path,
@@ -268,7 +268,7 @@ async fn collect_semantic_symbol_results(
                 line: symbol.location.line,
                 column: symbol.location.column,
                 container: symbol.container,
-                backend: Some("semantic".to_string()),
+                backend: Some("workspace".to_string()),
                 score,
             }
         })
@@ -327,9 +327,9 @@ async fn collect_document_path_results(
     }
 
     if candidate_files.len() < limit {
-        let semantic_seeds =
-            collect_semantic_symbol_results(app, &leaf, kind, limit * 2, languages).await;
-        for result in semantic_seeds {
+        let workspace_seeds =
+            collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages).await;
+        for result in workspace_seeds {
             let file = app.root().join(&result.file);
             if seen_files.insert(file.clone()) {
                 candidate_files.push(file);
@@ -372,7 +372,7 @@ async fn collect_document_path_results(
             );
             if seen_symbols.insert(key) {
                 expanded.push(SymbolResultOutput {
-                    score: score_semantic_symbol(query, &symbol),
+                    score: score_workspace_symbol(query, &symbol),
                     name: symbol.name,
                     name_path: symbol.name_path,
                     kind: symbol.kind.to_string(),
@@ -519,7 +519,7 @@ fn kind_matches(
     kind.is_none_or(|expected| &symbol.kind == expected)
 }
 
-fn score_semantic_symbol(query: &str, symbol: &crate::models::symbol::Symbol) -> f64 {
+fn score_workspace_symbol(query: &str, symbol: &crate::models::symbol::Symbol) -> f64 {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let name = symbol.name.to_ascii_lowercase();
     let path = symbol

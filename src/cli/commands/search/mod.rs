@@ -41,7 +41,7 @@ pub enum SearchCommand {
         /// Search query
         query: String,
 
-        /// Language for semantic workspace search
+        /// Language filter for LSP workspace search
         #[arg(short, long = "lang")]
         language: Option<String>,
 
@@ -49,9 +49,9 @@ pub enum SearchCommand {
         #[arg(short, long)]
         kind: Option<String>,
 
-        /// Force semantic workspace-symbol search
+        /// Force live LSP workspace-symbol search (bypass the index)
         #[arg(long)]
-        semantic: bool,
+        workspace_symbols: bool,
 
         /// Maximum results
         #[arg(long)]
@@ -146,7 +146,7 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
             query,
             language,
             kind,
-            semantic,
+            workspace_symbols,
             limit,
         } => {
             let limit = limit.unwrap_or(cfg.search.limit);
@@ -155,7 +155,7 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
                 &query,
                 language.as_deref(),
                 kind.as_deref(),
-                semantic,
+                workspace_symbols,
                 limit,
             )
             .await

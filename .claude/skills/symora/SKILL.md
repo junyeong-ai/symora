@@ -32,7 +32,7 @@ Failures are structured: `{"error": {"code": "server_not_installed", "message": 
 
 ```bash
 symora search symbols AuthUser
-symora search symbols 'SearchCommand/Content' --semantic
+symora search symbols 'SearchCommand/Content' --workspace-symbols
 symora search content "async fn"
 symora map summary
 ```
