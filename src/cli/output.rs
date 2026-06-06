@@ -14,8 +14,6 @@ pub enum OutputFormat {
     Pretty,
     /// Minified single-line JSON (token-efficient for AI agents).
     Compact,
-    /// Newline-delimited JSON; one record per line for streaming.
-    Jsonl,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -179,7 +177,7 @@ impl OutputContext {
     fn emit(&self, value: &serde_json::Value) {
         let serialized = match self.options.format {
             OutputFormat::Pretty => serde_json::to_string_pretty(value),
-            OutputFormat::Compact | OutputFormat::Jsonl => serde_json::to_string(value),
+            OutputFormat::Compact => serde_json::to_string(value),
         };
 
         match serialized {
