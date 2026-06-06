@@ -69,7 +69,7 @@ symora refs src/cli/commands/search/mod.rs:30
 symora usage src/cli/commands/search/mod.rs:30:10 --max-symbols 10 --limit 5
 ```
 
-`context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition. `refs` accepts line-only inputs and resolves to the nearest symbol anchor. `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location — both forms require an installed LSP for non-empty results. **Pattern-form `usage` returns `count: 0` silently (no `server_not_installed` error) when the LSP is missing**; if you get an empty count, confirm with `symora doctor <lang>` before assuming the symbol has zero references.
+`context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition. `refs` accepts line-only inputs and resolves to the nearest symbol anchor. `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location, both LSP-backed, and auto-detects languages by file count when `--lang` is omitted. If no detected language has an installed server it returns a structured `server_not_installed` error — not a silent `count: 0`. When some languages were searched but others were missing, failed, or skipped once enough candidates were found, the result carries a `coverage_gaps` array of `{language, reason}` objects (`reason`: `server_not_installed | timed_out | unsupported | unavailable | not_searched`); a non-empty `coverage_gaps` means `count` is a lower bound — install the named server or narrow with `--lang`. An empty `usage` with neither an error nor `coverage_gaps` is a genuine zero.
 
 ### Refactor and health checks
 
@@ -116,7 +116,8 @@ Use these when search results are unexpectedly empty, a language server is unres
 - `count: 0` from `search …`: run `symora search index status` — if `symbol_count: 0` the index has never been built, run `symora search index build`.
 - `server_not_installed` error: run `symora doctor <lang>` and install per its `install` field. While the LSP is missing, fall back to `search symbols`, `search content`, `map file`, `map dir`.
 - `context` or `refs` reports an unsupported feature: follow the suggested fallback rather than retrying.
-- `usage` returns empty: confirm the LSP is installed (`symora doctor <lang>`); pattern-form `usage` also relies on LSP-resolved references.
+- `usage` errors with `server_not_installed`: no detected language had a server — install per `symora doctor <lang>`, or pass `--lang` to target an installed one.
+- `usage` result carries `coverage_gaps`: coverage was partial, so `count` is a lower bound — install the named server, or ignore the gap if those languages are irrelevant.
 - Search results truncated: narrow the query or raise `--limit`.
 
 ## Anti-patterns
@@ -126,4 +127,4 @@ Use these when search results are unexpectedly empty, a language server is unres
 - `symbols --name` for very broad discovery → use `search symbols`.
 - Treating `map related` as a precise dependency graph.
 - Retrying LSP-backed commands when the language server is missing → switch to index-backed commands.
-- Assuming all language servers support call hierarchy and type definition equally.
+- Assuming all language servers support call hierarchy and type definition equally — when a server lacks call hierarchy, `callers` falls back to reference-derived callers marked `callers_status: "references_derived"` (a broader approximation, not verified call edges).
