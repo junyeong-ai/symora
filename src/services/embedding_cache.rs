@@ -64,19 +64,27 @@ impl TopK {
     }
 
     /// Count this candidate and keep it only if it ranks among the best seen.
-    pub fn offer(&mut self, chunk: RankedChunk) {
+    pub fn offer(&mut self, mut chunk: RankedChunk) {
         self.total += 1;
         if self.limit == 0 {
             return;
+        }
+        // cosine clamps degenerate cases to 0.0, so a score is normally
+        // finite; a non-finite one is pinned to the lowest rank so it can
+        // never outrank a real match and the heap's total order stays sane.
+        if !chunk.score.is_finite() {
+            chunk.score = f32::NEG_INFINITY;
         }
         if self.heap.len() < self.limit {
             self.heap.push(MinScored(chunk));
             return;
         }
         // The heap is full: replace its weakest entry only if this scores
-        // higher. Copy the weakest score out so the borrow ends before the pop.
+        // higher, using the same `total_cmp` order the heap is built on so the
+        // eviction can never disagree with the heap's shape. Copy the weakest
+        // score out first so the borrow ends before the pop.
         let weakest = self.heap.peek().map(|m| m.0.score);
-        if weakest.is_some_and(|w| chunk.score > w) {
+        if weakest.is_some_and(|w| chunk.score.total_cmp(&w) == Ordering::Greater) {
             self.heap.pop();
             self.heap.push(MinScored(chunk));
         }
@@ -362,6 +370,38 @@ mod tests {
     /// items but still tallies the total.
     fn count(cache: &EmbeddingCache, language: Option<&str>) -> usize {
         cache.rank_top(language, 0, |_| 0.0).unwrap().1
+    }
+
+    #[test]
+    fn topk_keeps_highest_with_ties_and_is_non_finite_safe() {
+        let ranked = |score: f32| RankedChunk {
+            file: "f".into(),
+            start_line: 1,
+            end_line: 1,
+            snippet: String::new(),
+            score,
+        };
+
+        // Top 2 by score; a tie at the cutoff is kept by arrival order.
+        let mut top = TopK::new(2);
+        for s in [1.0, 5.0, 3.0, 5.0] {
+            top.offer(ranked(s));
+        }
+        let (items, total) = top.finish();
+        assert_eq!(total, 4);
+        assert_eq!(
+            items.iter().map(|r| r.score).collect::<Vec<_>>(),
+            vec![5.0, 5.0]
+        );
+
+        // A non-finite score never displaces a real match.
+        let mut top = TopK::new(1);
+        top.offer(ranked(0.5));
+        top.offer(ranked(f32::NAN));
+        let (items, total) = top.finish();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].score, 0.5);
     }
 
     #[test]
