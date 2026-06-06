@@ -7,7 +7,7 @@ use crate::infra::lsp::protocol::{
     LspLocation, TextDocumentIdentifier, TextDocumentPositionParams,
 };
 use crate::models::lsp::path_to_uri;
-use crate::models::symbol::{Language, Location};
+use crate::models::symbol::Location;
 
 use super::converters::*;
 use super::helpers::*;
@@ -71,7 +71,7 @@ pub(super) async fn goto_definition(
     line: u32,
     column: u32,
 ) -> Result<Option<Location>, LspError> {
-    let language = Language::from_path(file);
+    let project_root = service.manager.root().to_path_buf();
     goto_location(
         service,
         file,
@@ -79,7 +79,7 @@ pub(super) async fn goto_definition(
         column,
         "textDocument/definition",
         None,
-        |locs| select_best_definition(locs, language).map(convert_location),
+        |locs| select_best_definition(locs, &project_root).map(convert_location),
     )
     .await
 }

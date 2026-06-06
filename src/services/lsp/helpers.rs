@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
 use crate::error::LspError;
-use crate::infra::file_filter::{FileFilter, FileFilterConfig};
+use crate::infra::file_filter::{FileFilter, FileFilterConfig, matches_default_pattern};
 use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position};
 use crate::infra::lsp::{
     LspFeature, SupportLevel, get_alternative_suggestion, get_support_level, language_server_name,
@@ -320,65 +320,59 @@ pub fn dedup_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
         .collect()
 }
 
+/// Source-priority tier for a navigation candidate, best first. `Vendored`
+/// is inside the project but under an ignored component (`vendor/`,
+/// `node_modules/`, `target/`, …); `External` is outside the project root
+/// entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DefinitionTier {
+    InProjectSource,
+    Vendored,
+    External,
+}
+
+fn definition_tier(path: &Path, project_root: &Path) -> DefinitionTier {
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return DefinitionTier::External;
+    };
+    // Component-wise on purpose: the shared ignore patterns match directory
+    // names (`target`, `vendor`), not full-path substrings — a file named
+    // `targets.rs` must not be demoted.
+    let vendored = relative.components().any(|c| {
+        matches!(c, std::path::Component::Normal(name)
+            if name.to_str().is_some_and(matches_default_pattern))
+    });
+    if vendored {
+        DefinitionTier::Vendored
+    } else {
+        DefinitionTier::InProjectSource
+    }
+}
+
 pub(super) fn filter_locations_within_project(
     locations: Vec<Location>,
     project_root: &Path,
 ) -> Vec<Location> {
     locations
         .into_iter()
-        .filter(|loc| {
-            // Must be within project root
-            if !loc.file.starts_with(project_root) {
-                return false;
-            }
-
-            let path_str = loc.file.to_string_lossy();
-
-            // Exclude common external/generated paths
-            !path_str.contains("node_modules")
-                && !path_str.contains(".venv")
-                && !path_str.contains("__pycache__")
-                && !path_str.contains("/vendor/")
-                && !path_str.contains("/target/debug/")
-                && !path_str.contains("/target/release/")
-                && !path_str.contains("/.git/")
-        })
+        .filter(|loc| definition_tier(&loc.file, project_root) == DefinitionTier::InProjectSource)
         .collect()
 }
 
-pub(super) fn select_best_definition(
-    locations: &[LspLocation],
-    language: Language,
-) -> Option<&LspLocation> {
-    if locations.is_empty() {
-        return None;
-    }
-
-    // Only apply filtering for TypeScript/JavaScript
-    if !matches!(language, Language::TypeScript | Language::JavaScript) {
-        return locations.first();
-    }
-
-    // Priority 1: Source files outside node_modules (not .d.ts)
-    if let Some(loc) = locations.iter().find(|l| {
-        let uri = &l.uri;
-        !uri.contains("node_modules") && !uri.ends_with(".d.ts")
-    }) {
-        return Some(loc);
-    }
-
-    // Priority 2: Any file outside node_modules
-    if let Some(loc) = locations.iter().find(|l| !l.uri.contains("node_modules")) {
-        return Some(loc);
-    }
-
-    // Priority 3: Non-.d.ts file in node_modules (actual source)
-    if let Some(loc) = locations.iter().find(|l| !l.uri.ends_with(".d.ts")) {
-        return Some(loc);
-    }
-
-    // Fallback: first result
-    locations.first()
+/// Order definition candidates by source priority: in-project source beats
+/// vendored/generated paths inside the project, which beat locations outside
+/// it. Within a tier, a TS/JS implementation beats its `.d.ts` declaration.
+/// A lone vendored or external candidate is still returned — a real location
+/// is more honest than an empty result (invariant #4).
+pub(super) fn select_best_definition<'a>(
+    locations: &'a [LspLocation],
+    project_root: &Path,
+) -> Option<&'a LspLocation> {
+    // On ties `min_by_key` keeps the first candidate, preserving server order.
+    locations.iter().min_by_key(|l| {
+        let tier = definition_tier(&uri_to_path(&l.uri), project_root);
+        (tier, l.uri.ends_with(".d.ts"))
+    })
 }
 
 pub fn find_containing_callable(symbols: &[Symbol], target_line: u32) -> Option<&Symbol> {
@@ -472,5 +466,104 @@ mod tests {
         // Line 18 should find nothing (outside all callables)
         let result = find_containing_callable(&symbols, 18);
         assert!(result.is_none());
+    }
+
+    fn lsp_location(uri: &str) -> LspLocation {
+        LspLocation {
+            uri: uri.to_string(),
+            range: Default::default(),
+        }
+    }
+
+    #[test]
+    fn definition_tier_classifies_per_component_not_substring() {
+        let root = Path::new("/proj");
+        assert_eq!(
+            definition_tier(Path::new("/proj/src/lib.rs"), root),
+            DefinitionTier::InProjectSource
+        );
+        // Vendored directory components, across languages.
+        for vendored in [
+            "/proj/vendor/dep/lib.go",
+            "/proj/.venv/lib/site.py",
+            "/proj/node_modules/dep/index.js",
+            "/proj/target/debug/gen.rs",
+        ] {
+            assert_eq!(
+                definition_tier(Path::new(vendored), root),
+                DefinitionTier::Vendored,
+                "{vendored}"
+            );
+        }
+        // A file *named* like a pattern is not a directory component match…
+        assert_eq!(
+            definition_tier(Path::new("/proj/src/targets.rs"), root),
+            DefinitionTier::InProjectSource
+        );
+        // …and anything outside the root is external.
+        assert_eq!(
+            definition_tier(Path::new("/usr/lib/go/fmt/print.go"), root),
+            DefinitionTier::External
+        );
+    }
+
+    #[test]
+    fn select_best_definition_prefers_in_project_source_for_any_language() {
+        let root = Path::new("/proj");
+        let locs = vec![
+            lsp_location("file:///proj/vendor/dep/lib.go"),
+            lsp_location("file:///usr/lib/go/fmt/print.go"),
+            lsp_location("file:///proj/internal/svc/handler.go"),
+        ];
+        assert_eq!(
+            select_best_definition(&locs, root).unwrap().uri,
+            "file:///proj/internal/svc/handler.go"
+        );
+    }
+
+    #[test]
+    fn select_best_definition_returns_a_lone_external_candidate() {
+        let root = Path::new("/proj");
+        let locs = vec![lsp_location("file:///usr/lib/python3/site-packages/os.py")];
+        // A real external location beats an empty answer (invariant #4).
+        assert!(select_best_definition(&locs, root).is_some());
+        assert!(select_best_definition(&[], root).is_none());
+    }
+
+    #[test]
+    fn select_best_definition_demotes_d_ts_within_a_tier_only() {
+        let root = Path::new("/proj");
+        // Within in-project candidates the implementation wins over .d.ts…
+        let locs = vec![
+            lsp_location("file:///proj/src/api.d.ts"),
+            lsp_location("file:///proj/src/api.ts"),
+        ];
+        assert_eq!(
+            select_best_definition(&locs, root).unwrap().uri,
+            "file:///proj/src/api.ts"
+        );
+        // …but an in-project .d.ts still beats a vendored implementation.
+        let locs = vec![
+            lsp_location("file:///proj/node_modules/dep/index.js"),
+            lsp_location("file:///proj/types/api.d.ts"),
+        ];
+        assert_eq!(
+            select_best_definition(&locs, root).unwrap().uri,
+            "file:///proj/types/api.d.ts"
+        );
+    }
+
+    #[test]
+    fn filter_locations_keeps_only_in_project_source() {
+        let root = Path::new("/proj");
+        let locations = vec![
+            Location::point(PathBuf::from("/proj/src/lib.rs"), 1, 1),
+            Location::point(PathBuf::from("/proj/vendor/dep/lib.go"), 1, 1),
+            Location::point(PathBuf::from("/proj/dist/bundle.js"), 1, 1),
+            Location::point(PathBuf::from("/elsewhere/lib.rs"), 1, 1),
+        ];
+        let kept = filter_locations_within_project(locations, root);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].file, PathBuf::from("/proj/src/lib.rs"));
     }
 }

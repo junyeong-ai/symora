@@ -290,7 +290,10 @@ impl FileFilter {
     }
 }
 
-fn matches_default_pattern(name: &str) -> bool {
+/// Whether a single path *component* name matches the default ignore set.
+/// This is a directory/file-name matcher, not a full-path substring matcher —
+/// callers must apply it per component.
+pub(crate) fn matches_default_pattern(name: &str) -> bool {
     DEFAULT_IGNORE_PATTERNS.iter().any(|p| {
         if let Some(suffix) = p.strip_prefix('*') {
             name.ends_with(suffix)
