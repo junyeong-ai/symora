@@ -19,9 +19,10 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Optional local embeddings backend (ONNX via fastembed-rs).
-# Off by default: the dependency tree is large (ort + tokenizers) and most
-# users will be happy with the BM25/FTS5 backend.
+# Optional local embeddings backend (ONNX via fastembed-rs) — adds the
+# natural-language `search semantic` command. Off by default: the dependency
+# tree is large (ort + tokenizers) and the default SQLite symbol/substring
+# search covers most navigation without it.
 # Enable with: `cargo install symora --features embeddings`.
 embeddings = ["dep:fastembed"]
 
