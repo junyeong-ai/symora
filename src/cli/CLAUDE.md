@@ -26,6 +26,6 @@ Some servers don't implement call hierarchy or `textDocument/typeDefinition`. Th
 
 ## When extending
 
-- Adding a command: also extend the MCP catalog/handler in `src/mcp/tools/` so both surfaces stay in lockstep. Exception: lifecycle commands under `commands::setup` and `commands::selfcmd` are CLI-only by design (see `src/mcp/CLAUDE.md`).
+- Adding a command an agent should drive: also extend the MCP catalog/handler in `src/mcp/tools/`. MCP is a curated subset — navigation, analysis, and edit tools — so not every command becomes a tool; config/doctor/format and machine-setup commands (`commands::setup`, `commands::selfcmd`) stay CLI-only (see `src/mcp/CLAUDE.md`).
 - Adding a flag: prefer extending an existing command over forking a new one.
 - Removing a command: delete it cleanly. No deprecation shims.

@@ -87,9 +87,9 @@ symora search nodes --lang rust
 
 ```bash
 symora map summary
-symora map file src/cli/commands/search.rs
+symora map file src/cli/commands/search/mod.rs
 symora map dir src/cli
-symora map related src/cli/commands/search.rs
+symora map related src/cli/commands/search/mod.rs
 ```
 
 ### Context and Usage Analysis
@@ -98,7 +98,7 @@ symora map related src/cli/commands/search.rs
 symora context src/main.rs:42 --all
 symora refs src/main.rs:42
 symora usage SearchCommand
-symora usage src/cli/commands/search.rs:30:10
+symora usage src/cli/commands/search/mod.rs:30:10
 symora impact src/main.rs:42
 symora diff-impact
 ```
@@ -204,7 +204,7 @@ Common settings include:
 - macOS: supported
 - Windows: not supported for daemon-based workflow because Symora uses Unix domain sockets
 
-On Unix platforms, Symora uses a daemon by default for most commands and falls back to direct LSP execution where appropriate. `daemon start` and `daemon restart` launch the daemon in the background and return immediately.
+On Unix, Symora uses a daemon by default (set `SYMORA_NO_DAEMON=1` for in-process direct execution). The mode is chosen once at startup; there is no runtime fallback. `daemon start` and `daemon restart` launch the daemon in the background and return immediately.
 
 Daemon commands:
 
@@ -229,7 +229,7 @@ Useful variants:
 
 ```bash
 # Pin a release / verify GitHub build provenance (needs gh CLI)
-curl -fsSL .../install.sh | bash -s -- --version 0.9.0 --verify-attestations
+curl -fsSL .../install.sh | bash -s -- --version 0.11.0 --verify-attestations
 
 # Source build + skill, no prompts (no checkout needed — builds the release tag from git)
 curl -fsSL .../install.sh | bash -s -- --source --skill
@@ -256,7 +256,7 @@ symora setup                          # interactive: skill + language servers
 symora setup skill                    # skill only
 symora setup deps --group core       # dependencies only (core / core-jvm / core-web / core-systems / all)
 symora self update                    # in-place upgrade to the latest release
-symora self update --version 0.9.0   # pin a version
+symora self update --version 0.11.0   # pin a version
 symora self uninstall                 # remove binary + skill + config + daemon data
 symora self uninstall --keep-skill --keep-config
 ```
@@ -271,7 +271,7 @@ symora doctor
 
 ## MCP Server
 
-Symora also runs as a Model Context Protocol server. The same command set is exposed as MCP tools that share the in-process command layer, so both surfaces produce identical results.
+Symora also runs as a Model Context Protocol server. Its main navigation, analysis, and edit commands are exposed as MCP tools (a curated subset, not the whole CLI) that share the in-process command layer, so both surfaces produce identical results.
 
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor, etc. use this by default)

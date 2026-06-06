@@ -4,6 +4,7 @@ paths:
   - "src/cli/output*.rs"
   - "src/cli/commands/**/*.rs"
   - "src/daemon/wire*.rs"
+  - "src/daemon/protocol.rs"
   - "src/mcp/tools/**/*.rs"
 ---
 
@@ -31,7 +32,7 @@ Omit optional fields with `#[serde(skip_serializing_if = "Option::is_none")]`. E
 ## Surfaces that emit JSON
 
 - `src/cli/response/` — final user-facing output. Stability bar: API.
-- `src/daemon/wire.rs` / `wire_error.rs` — daemon RPC envelope. Stability bar: API for the same reason.
+- `src/daemon/protocol.rs` — the JSON-RPC request/response envelope; `src/daemon/wire.rs` / `wire_error.rs` — the payload types it carries. Stability bar: API for the same reason.
 - `src/mcp/tools/handlers.rs` — captures the shared command-layer JSON verbatim, so the MCP surface aligns structurally rather than by a parallel definition.
 
 The first two must not drift from each other: if a CLI command grows a new output field, the wire type stays aligned. The MCP surface inherits the shape for free by capturing — don't reshape it there.
