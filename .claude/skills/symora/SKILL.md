@@ -12,7 +12,7 @@ Use `symora` when semantic code navigation is more useful than text search. Outp
 
 ## Two backends, different requirements
 
-- **Index-backed** (always works once `search index build` has run): `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. Backed by SQLite + tree-sitter.
+- **No language server needed**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search symbols` / `search content` rank the SQLite index and fall back to a filesystem scan when it isn't built; `search ast` and `map …` use tree-sitter and the file tree directly, so they need no `search index build` at all.
 - **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
 
 Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
