@@ -41,6 +41,7 @@ pub struct IndexStats {
     pub index_size_bytes: u64,
     pub last_indexed: u64,
     pub is_indexing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<f32>,
 }
 

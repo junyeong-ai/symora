@@ -9,8 +9,11 @@ use crate::services::ast_query::{AstQueryService, DefaultAstQueryService};
 use crate::services::config::{ConfigService, DefaultConfigService};
 #[cfg(unix)]
 use crate::services::daemon_lsp::DaemonLspService;
+#[cfg(unix)]
+use crate::services::daemon_store::DaemonStoreService;
 use crate::services::lsp::{DefaultLspService, LspService};
 use crate::services::project::{DefaultProjectService, ProjectService};
+use crate::services::store::{DefaultStoreService, StoreConfig, StoreService};
 
 pub struct App {
     root: PathBuf,
@@ -18,6 +21,7 @@ pub struct App {
     pub(crate) lsp: Arc<dyn LspService + Send + Sync>,
     pub(crate) ast: Arc<dyn AstQueryService>,
     pub(crate) project: Arc<dyn ProjectService>,
+    pub(crate) store: Arc<dyn StoreService>,
     pub(crate) config_service: Arc<dyn ConfigService>,
     pub(crate) config: SymoraConfig,
     test_matcher: crate::cli::utils::TestMatcher,
@@ -53,6 +57,17 @@ impl App {
             Arc::new(DefaultLspService::new(&root, Arc::clone(&runtime_config)))
         };
 
+        #[cfg(unix)]
+        let store: Arc<dyn StoreService> = if use_daemon {
+            Arc::new(DaemonStoreService::new(&root))
+        } else {
+            Arc::new(DefaultStoreService::new(&root, StoreConfig::default()))
+        };
+
+        #[cfg(not(unix))]
+        let store: Arc<dyn StoreService> =
+            Arc::new(DefaultStoreService::new(&root, StoreConfig::default()));
+
         tracing::info!(
             "Symora initialized (daemon: {})",
             if use_daemon { "enabled" } else { "disabled" }
@@ -66,6 +81,7 @@ impl App {
             lsp,
             ast,
             project,
+            store,
             config_service,
             config,
             test_matcher,
@@ -96,6 +112,7 @@ impl App {
             lsp: Arc::clone(&self.lsp),
             ast: Arc::clone(&self.ast),
             project: Arc::clone(&self.project),
+            store: Arc::clone(&self.store),
             config_service: Arc::clone(&self.config_service),
             config: self.config.clone(),
             test_matcher: self.test_matcher.clone(),

@@ -10,7 +10,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header::ORIGIN};
+use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 use serde_json::Value;
 use tokio::net::TcpListener;
 
@@ -71,10 +72,49 @@ async fn shutdown_signal() {
 
 async fn handle_message(
     State(state): State<HttpState>,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
+    // DNS-rebinding guard: a browser attaches an Origin to cross-site POSTs,
+    // so a non-loopback Origin means a web page is reaching the loopback
+    // server. Native MCP clients send no Origin and pass untouched.
+    if !origin_is_allowed(headers.get(ORIGIN)) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": { "code": -32600, "message": "Origin not allowed" }
+            })),
+        );
+    }
+
     let (status, body) = process_message(&state.app, state.profile, payload).await;
     (status, Json(body))
+}
+
+fn origin_is_allowed(origin: Option<&HeaderValue>) -> bool {
+    match origin {
+        None => true,
+        Some(value) => value.to_str().is_ok_and(is_loopback_origin),
+    }
+}
+
+/// Whether an `Origin` points at the loopback interface. Anything else —
+/// a remote host, an opaque `null`, a non-HTTP scheme — is rejected.
+fn is_loopback_origin(origin: &str) -> bool {
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => authority.split(':').next().unwrap_or(authority),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 async fn process_message(app: &App, profile: McpProfile, payload: Value) -> (StatusCode, Value) {
@@ -125,6 +165,34 @@ mod tests {
             body["result"]["protocolVersion"],
             super::super::protocol::MCP_PROTOCOL_VERSION
         );
+    }
+
+    #[test]
+    fn origin_guard_allows_absent_and_loopback_only() {
+        // Native clients send no Origin.
+        assert!(origin_is_allowed(None));
+        // Loopback in its various spellings.
+        for ok in [
+            "http://localhost",
+            "http://localhost:8787",
+            "http://127.0.0.1:3000",
+            "https://localhost",
+            "http://[::1]:9000",
+        ] {
+            assert!(is_loopback_origin(ok), "{ok} should be allowed");
+        }
+        // Everything else — remote hosts, opaque/null, non-HTTP.
+        for bad in [
+            "https://evil.example.com",
+            "http://localhost.evil.com",
+            "null",
+            "file://",
+            "file://localhost",
+            "ftp://127.0.0.1",
+            "http://10.0.0.5",
+        ] {
+            assert!(!is_loopback_origin(bad), "{bad} should be rejected");
+        }
     }
 
     #[tokio::test]

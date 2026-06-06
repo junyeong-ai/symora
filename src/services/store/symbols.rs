@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
+
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use crate::models::symbol::{Language, SymbolKind};
 
@@ -13,17 +15,19 @@ pub struct ExtractedSymbol {
     pub column: u32,
 }
 
+/// A parser and its pre-compiled extraction query for one language. The
+/// query is compiled once at startup, not per file — query compilation is
+/// the dominant per-call cost otherwise.
+struct LanguageEntry {
+    parser: Mutex<Parser>,
+    query: Query,
+}
+
+/// Tree-sitter symbol extraction for the indexed store. One registry maps
+/// each supported language to its parser and compiled query; adding a
+/// language is a single `register` call.
 pub struct SymbolExtractor {
-    rust: Mutex<Parser>,
-    go: Mutex<Parser>,
-    python: Mutex<Parser>,
-    typescript: Mutex<Parser>,
-    javascript: Mutex<Parser>,
-    java: Mutex<Parser>,
-    kotlin: Mutex<Parser>,
-    cpp: Mutex<Parser>,
-    csharp: Mutex<Parser>,
-    php: Mutex<Parser>,
+    languages: HashMap<Language, LanguageEntry>,
 }
 
 impl Default for SymbolExtractor {
@@ -34,206 +38,215 @@ impl Default for SymbolExtractor {
 
 impl SymbolExtractor {
     pub fn new() -> Self {
-        Self {
-            rust: Mutex::new(Self::create_parser(tree_sitter_rust::LANGUAGE.into())),
-            go: Mutex::new(Self::create_parser(tree_sitter_go::LANGUAGE.into())),
-            python: Mutex::new(Self::create_parser(tree_sitter_python::LANGUAGE.into())),
-            typescript: Mutex::new(Self::create_parser(
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-            )),
-            javascript: Mutex::new(Self::create_parser(tree_sitter_javascript::LANGUAGE.into())),
-            java: Mutex::new(Self::create_parser(tree_sitter_java::LANGUAGE.into())),
-            kotlin: Mutex::new(Self::create_parser(tree_sitter_kotlin_sg::LANGUAGE.into())),
-            cpp: Mutex::new(Self::create_parser(tree_sitter_cpp::LANGUAGE.into())),
-            csharp: Mutex::new(Self::create_parser(tree_sitter_c_sharp::LANGUAGE.into())),
-            php: Mutex::new(Self::create_parser(tree_sitter_php::LANGUAGE_PHP.into())),
-        }
-    }
-
-    fn create_parser(language: tree_sitter::Language) -> Parser {
-        let mut parser = Parser::new();
-        parser.set_language(&language).ok();
-        parser
+        let mut languages = HashMap::new();
+        register(
+            &mut languages,
+            Language::Rust,
+            tree_sitter_rust::LANGUAGE.into(),
+            RUST_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Go,
+            tree_sitter_go::LANGUAGE.into(),
+            GO_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Python,
+            tree_sitter_python::LANGUAGE.into(),
+            PYTHON_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::TypeScript,
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            TYPESCRIPT_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::JavaScript,
+            tree_sitter_javascript::LANGUAGE.into(),
+            JAVASCRIPT_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Java,
+            tree_sitter_java::LANGUAGE.into(),
+            JAVA_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Kotlin,
+            tree_sitter_kotlin_sg::LANGUAGE.into(),
+            KOTLIN_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Cpp,
+            tree_sitter_cpp::LANGUAGE.into(),
+            CPP_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::CSharp,
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            CSHARP_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::PHP,
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            PHP_QUERY,
+        );
+        Self { languages }
     }
 
     pub fn extract(&self, content: &str, language: Language) -> Vec<ExtractedSymbol> {
-        let Some((parser, ts_lang, query_str)) = self.get_parser_info(language) else {
+        let Some(entry) = self.languages.get(&language) else {
             return Vec::new();
         };
 
-        let Ok(mut parser_guard) = parser.lock() else {
-            return Vec::new();
-        };
-
-        let Some(tree) = parser_guard.parse(content, None) else {
-            return Vec::new();
-        };
-
-        let Ok(query) = Query::new(&ts_lang, query_str) else {
-            return Vec::new();
+        let tree = {
+            let Ok(mut parser) = entry.parser.lock() else {
+                return Vec::new();
+            };
+            match parser.parse(content, None) {
+                Some(tree) => tree,
+                None => return Vec::new(),
+            }
         };
 
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
-        let mut matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
-
+        let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
-            if let Some(symbol) = self.extract_from_match(m, content, language) {
+            if let Some(symbol) = extract_from_match(m, content, language) {
                 symbols.push(symbol);
             }
         }
-
         symbols
-    }
-
-    fn get_parser_info(
-        &self,
-        language: Language,
-    ) -> Option<(&Mutex<Parser>, tree_sitter::Language, &'static str)> {
-        match language {
-            Language::Rust => Some((&self.rust, tree_sitter_rust::LANGUAGE.into(), RUST_QUERY)),
-            Language::Go => Some((&self.go, tree_sitter_go::LANGUAGE.into(), GO_QUERY)),
-            Language::Python => Some((
-                &self.python,
-                tree_sitter_python::LANGUAGE.into(),
-                PYTHON_QUERY,
-            )),
-            Language::TypeScript => Some((
-                &self.typescript,
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                TYPESCRIPT_QUERY,
-            )),
-            Language::JavaScript => Some((
-                &self.javascript,
-                tree_sitter_javascript::LANGUAGE.into(),
-                JAVASCRIPT_QUERY,
-            )),
-            Language::Java => Some((&self.java, tree_sitter_java::LANGUAGE.into(), JAVA_QUERY)),
-            Language::Kotlin => Some((
-                &self.kotlin,
-                tree_sitter_kotlin_sg::LANGUAGE.into(),
-                KOTLIN_QUERY,
-            )),
-            Language::Cpp => Some((&self.cpp, tree_sitter_cpp::LANGUAGE.into(), CPP_QUERY)),
-            Language::CSharp => Some((
-                &self.csharp,
-                tree_sitter_c_sharp::LANGUAGE.into(),
-                CSHARP_QUERY,
-            )),
-            Language::PHP => Some((&self.php, tree_sitter_php::LANGUAGE_PHP.into(), PHP_QUERY)),
-            _ => None,
-        }
-    }
-
-    fn extract_from_match(
-        &self,
-        m: &tree_sitter::QueryMatch,
-        content: &str,
-        language: Language,
-    ) -> Option<ExtractedSymbol> {
-        let capture = m.captures.first()?;
-        let node = capture.node;
-
-        let (name, kind) = self.extract_name_and_kind(node, content, language)?;
-        let container = self.extract_container_path(node, content, language);
-        let name_path = Some(match &container {
-            Some(container) => format!("{container}/{name}"),
-            None => name.clone(),
-        });
-
-        let start = node.start_position();
-
-        Some(ExtractedSymbol {
-            name,
-            container,
-            name_path,
-            kind,
-            line: start.row as u32 + 1,
-            column: start.column as u32 + 1,
-        })
-    }
-
-    fn extract_container_path(
-        &self,
-        mut node: tree_sitter::Node,
-        content: &str,
-        language: Language,
-    ) -> Option<String> {
-        let mut parts = Vec::new();
-
-        while let Some(parent) = node.parent() {
-            node = parent;
-            if let Some((name, _)) = self.extract_name_and_kind(node, content, language)
-                && !name.is_empty()
-            {
-                parts.push(name);
-            }
-        }
-
-        parts.reverse();
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("/"))
-        }
-    }
-
-    fn extract_name_and_kind(
-        &self,
-        node: tree_sitter::Node,
-        content: &str,
-        language: Language,
-    ) -> Option<(String, SymbolKind)> {
-        let node_type = node.kind();
-        let kind = node_type_to_symbol_kind(node_type, language);
-
-        // Find name child node based on language conventions
-        let name_node = find_name_node(node, language)?;
-        let name = content
-            .get(name_node.start_byte()..name_node.end_byte())?
-            .to_string();
-
-        if name.is_empty() || name.starts_with('_') && name.len() == 1 {
-            return None;
-        }
-
-        Some((name, kind))
     }
 }
 
-fn find_name_node(node: tree_sitter::Node, language: Language) -> Option<tree_sitter::Node> {
-    // Language-specific name field extraction
+fn register(
+    languages: &mut HashMap<Language, LanguageEntry>,
+    language: Language,
+    ts_language: tree_sitter::Language,
+    query_src: &str,
+) {
+    let mut parser = Parser::new();
+    if parser.set_language(&ts_language).is_err() {
+        return;
+    }
+    let Ok(query) = Query::new(&ts_language, query_src) else {
+        return;
+    };
+    languages.insert(
+        language,
+        LanguageEntry {
+            parser: Mutex::new(parser),
+            query,
+        },
+    );
+}
+
+fn extract_from_match(
+    m: &tree_sitter::QueryMatch,
+    content: &str,
+    language: Language,
+) -> Option<ExtractedSymbol> {
+    let node = m.captures.first()?.node;
+
+    let (name, kind) = extract_name_and_kind(node, content, language)?;
+    let container = extract_container_path(node, content, language);
+    let name_path = Some(match &container {
+        Some(container) => format!("{container}/{name}"),
+        None => name.clone(),
+    });
+
+    // tree-sitter reports the column as a byte offset within the line, but
+    // CLI/JSON positions are character columns (matching the LSP side). Count
+    // characters across the line prefix so multibyte text before a symbol
+    // doesn't misplace follow-up `file:line:col` navigation.
+    let start = node.start_position();
+    let line_start = node.start_byte() - start.column;
+    let column = content
+        .get(line_start..node.start_byte())
+        .map(|prefix| prefix.chars().count() as u32)
+        .unwrap_or(start.column as u32)
+        + 1;
+    Some(ExtractedSymbol {
+        name,
+        container,
+        name_path,
+        kind,
+        line: start.row as u32 + 1,
+        column,
+    })
+}
+
+fn extract_container_path(mut node: Node, content: &str, language: Language) -> Option<String> {
+    let mut parts = Vec::new();
+    while let Some(parent) = node.parent() {
+        node = parent;
+        if let Some((name, _)) = extract_name_and_kind(node, content, language)
+            && !name.is_empty()
+        {
+            parts.push(name);
+        }
+    }
+    parts.reverse();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn extract_name_and_kind(
+    node: Node,
+    content: &str,
+    language: Language,
+) -> Option<(String, SymbolKind)> {
+    // Resolve the name first: nameless parents (blocks, lists, the source
+    // root) are walked during container resolution and must be skipped
+    // before a kind is ever assigned to them.
+    let name_node = find_name_node(node, language)?;
+    let name = content
+        .get(name_node.start_byte()..name_node.end_byte())?
+        .to_string();
+    if name.is_empty() || (name.starts_with('_') && name.len() == 1) {
+        return None;
+    }
+    Some((name, node_kind(node)))
+}
+
+fn find_name_node(node: Node, language: Language) -> Option<Node> {
     let name_field = match language {
-        Language::Rust => node.child_by_field_name("name"),
-        Language::Go => node.child_by_field_name("name"),
-        Language::Python => node.child_by_field_name("name"),
-        Language::TypeScript | Language::JavaScript => node.child_by_field_name("name"),
-        Language::Java => node.child_by_field_name("name"),
-        Language::Kotlin => node.child_by_field_name("name").or_else(|| {
-            // Kotlin function uses simple_identifier
-            node.child_by_field_name("simple_identifier")
-        }),
+        Language::Kotlin => node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("simple_identifier")),
         Language::Cpp => node
             .child_by_field_name("declarator")
             .and_then(|d| d.child_by_field_name("declarator"))
             .or_else(|| node.child_by_field_name("name")),
-        Language::CSharp => node.child_by_field_name("name"),
-        Language::PHP => node.child_by_field_name("name"),
-        _ => None,
+        _ => node.child_by_field_name("name"),
     };
 
-    // Fallback: find identifier child
     name_field.or_else(|| {
         let count = node.child_count();
         for i in 0..count {
             if let Some(child) = node.child(i as u32) {
                 let kind = child.kind();
-                if kind == "identifier"
-                    || kind == "name"
-                    || kind == "simple_identifier"
-                    || kind == "type_identifier"
-                    || kind == "property_identifier"
-                {
+                if matches!(
+                    kind,
+                    "identifier"
+                        | "name"
+                        | "simple_identifier"
+                        | "type_identifier"
+                        | "property_identifier"
+                ) {
                     return Some(child);
                 }
             }
@@ -242,66 +255,65 @@ fn find_name_node(node: tree_sitter::Node, language: Language) -> Option<tree_si
     })
 }
 
-fn node_type_to_symbol_kind(node_type: &str, _language: Language) -> SymbolKind {
-    match node_type {
-        // Functions
+/// Map a captured declaration node to a [`SymbolKind`]. Every node kind the
+/// extraction queries capture has an explicit arm; the trailing arm only
+/// ever serves nameless container parents whose kind is discarded.
+fn node_kind(node: Node) -> SymbolKind {
+    match node.kind() {
         "function_item"
         | "function_definition"
         | "function_declaration"
-        | "method_declaration"
-        | "method_definition"
+        | "func_literal"
         | "arrow_function"
-        | "function_expression"
-        | "func_literal" => SymbolKind::Function,
+        | "function_expression" => SymbolKind::Function,
 
-        // Methods
-        "method_item" => SymbolKind::Method,
+        "method_item" | "method_declaration" | "method_definition" => SymbolKind::Method,
 
-        // Classes
-        "class_declaration" | "class_definition" | "class_specifier" => SymbolKind::Class,
+        "class_declaration" | "class_definition" | "class_specifier" | "object_declaration"
+        | "impl_item" => SymbolKind::Class,
 
-        // Structs
-        "struct_item" | "struct_specifier" | "struct_type" => SymbolKind::Struct,
+        "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration" => {
+            SymbolKind::Struct
+        }
 
-        // Enums
         "enum_item" | "enum_declaration" | "enum_specifier" => SymbolKind::Enum,
 
-        // Interfaces/Traits
-        "interface_declaration" | "interface_type" | "trait_item" | "protocol_declaration" => {
-            SymbolKind::Interface
-        }
+        "interface_declaration"
+        | "interface_type"
+        | "trait_item"
+        | "trait_declaration"
+        | "protocol_declaration" => SymbolKind::Interface,
 
-        // Modules
-        "mod_item" | "module_declaration" | "namespace_declaration" | "package_declaration" => {
-            SymbolKind::Module
-        }
+        "mod_item" | "namespace_definition" | "package_declaration" => SymbolKind::Module,
 
-        // Types
-        "type_item" | "type_alias" | "type_alias_declaration" | "type_declaration" => {
-            SymbolKind::TypeParameter
-        }
+        // Go `type X = ...`: classify by the spec's underlying type.
+        "type_spec" => go_type_kind(node),
 
-        // Constants
-        "const_item" | "const_declaration" => SymbolKind::Constant,
+        // A named type alias introduces a type, not a generic `<T>` param.
+        "type_item" | "type_alias_declaration" => SymbolKind::Class,
 
-        // Variables
-        "let_declaration"
-        | "variable_declaration"
-        | "var_declaration"
-        | "short_var_declaration"
-        | "static_item" => SymbolKind::Variable,
+        "const_item" | "const_spec" => SymbolKind::Constant,
 
-        // Fields/Properties
-        "field_declaration" | "property_declaration" | "field_definition" => SymbolKind::Field,
+        "static_item" | "var_spec" | "variable_declarator" => SymbolKind::Variable,
 
-        // Impl blocks (Rust-specific)
-        "impl_item" => SymbolKind::Class,
+        "property_declaration" => SymbolKind::Property,
+        "field_declaration" => SymbolKind::Field,
 
         _ => SymbolKind::Variable,
     }
 }
 
-// Language-specific tree-sitter queries for symbol extraction
+/// Classify a Go `type_spec` by its underlying type: `struct` → Struct,
+/// `interface` → Interface, anything else is a named alias (Class).
+fn go_type_kind(node: Node) -> SymbolKind {
+    match node.child_by_field_name("type").map(|t| t.kind()) {
+        Some("struct_type") => SymbolKind::Struct,
+        Some("interface_type") => SymbolKind::Interface,
+        _ => SymbolKind::Class,
+    }
+}
+
+// Language-specific tree-sitter queries for symbol extraction.
 
 const RUST_QUERY: &str = r#"
 (function_item) @symbol
@@ -318,9 +330,9 @@ const RUST_QUERY: &str = r#"
 const GO_QUERY: &str = r#"
 (function_declaration) @symbol
 (method_declaration) @symbol
-(type_declaration (type_spec)) @symbol
-(const_declaration) @symbol
-(var_declaration) @symbol
+(type_declaration (type_spec) @symbol)
+(const_declaration (const_spec) @symbol)
+(var_declaration (var_spec) @symbol)
 "#;
 
 const PYTHON_QUERY: &str = r#"
@@ -392,36 +404,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rust_symbol_extraction() {
+    fn rust_symbols_carry_correct_kinds() {
         let extractor = SymbolExtractor::new();
         let content = r#"
 fn main() {}
 struct Foo {}
 enum Bar { A, B }
 trait Baz {}
-impl Foo {}
+type Alias = Foo;
 "#;
         let symbols = extractor.extract(content, Language::Rust);
-        assert!(symbols.iter().any(|s| s.name == "main"));
-        assert!(symbols.iter().any(|s| s.name == "Foo"));
-        assert!(symbols.iter().any(|s| s.name == "Bar"));
-        assert!(symbols.iter().any(|s| s.name == "Baz"));
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("main"), Some(SymbolKind::Function));
+        assert_eq!(kind("Foo"), Some(SymbolKind::Struct));
+        assert_eq!(kind("Bar"), Some(SymbolKind::Enum));
+        assert_eq!(kind("Baz"), Some(SymbolKind::Interface));
+        // A type alias is a named type, never a generic parameter.
+        assert_eq!(kind("Alias"), Some(SymbolKind::Class));
     }
 
     #[test]
-    fn test_go_symbol_extraction() {
+    fn go_type_declaration_classifies_by_underlying_type() {
         let extractor = SymbolExtractor::new();
         let content = r#"
 func main() {}
-func (s *Server) Start() {}
 type Config struct {}
+type Reader interface {}
+type Celsius float64
 "#;
         let symbols = extractor.extract(content, Language::Go);
-        assert!(symbols.iter().any(|s| s.name == "main"));
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("main"), Some(SymbolKind::Function));
+        assert_eq!(kind("Config"), Some(SymbolKind::Struct));
+        assert_eq!(kind("Reader"), Some(SymbolKind::Interface));
+        assert_eq!(kind("Celsius"), Some(SymbolKind::Class));
     }
 
     #[test]
-    fn test_python_symbol_extraction() {
+    fn kotlin_object_is_a_class_not_a_variable() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+class Widget {}
+object Singleton {}
+fun build() {}
+"#;
+        let symbols = extractor.extract(content, Language::Kotlin);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("Widget"), Some(SymbolKind::Class));
+        assert_eq!(kind("Singleton"), Some(SymbolKind::Class));
+        assert_eq!(kind("build"), Some(SymbolKind::Function));
+    }
+
+    #[test]
+    fn python_symbol_extraction() {
         let extractor = SymbolExtractor::new();
         let content = r#"
 def hello():
@@ -431,7 +466,8 @@ class MyClass:
     pass
 "#;
         let symbols = extractor.extract(content, Language::Python);
-        assert!(symbols.iter().any(|s| s.name == "hello"));
-        assert!(symbols.iter().any(|s| s.name == "MyClass"));
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("hello"), Some(SymbolKind::Function));
+        assert_eq!(kind("MyClass"), Some(SymbolKind::Class));
     }
 }

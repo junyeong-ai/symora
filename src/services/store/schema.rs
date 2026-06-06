@@ -50,16 +50,21 @@ pub fn build_symbol_search_query(with_kind: bool) -> String {
     // `COUNT(*) OVER ()` yields the total match count in the same scan the
     // ORDER BY already pays for, so `count` in list output is exact rather
     // than a limit-saturation guess.
+    // Relevance ladder: exact (leaf or full path) > path suffix > name
+    // prefix > substring. Exact-leaf is checked first so a nested symbol
+    // whose name equals the query still scores 1.0 (a path-suffix test
+    // would otherwise shadow it). Length is the ORDER BY tiebreaker, not a
+    // score input.
     format!(
         r#"SELECT s.name, s.name_path, s.kind, s.line, s.col, f.path, s.container,
     COUNT(*) OVER () AS total,
     CASE
-        WHEN s.name_path IS NOT NULL AND LOWER(s.name_path) = LOWER(?1) THEN 1.0
-        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || ?1 COLLATE NOCASE THEN 0.96
         WHEN LOWER(s.name) = LOWER(?1) THEN 1.0
-        WHEN s.name LIKE ?1 || '%' COLLATE NOCASE THEN 0.9
-        WHEN s.name LIKE '%' || ?1 COLLATE NOCASE THEN 0.7
-        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%' || ?1 || '%' COLLATE NOCASE THEN 0.68
+        WHEN s.name_path IS NOT NULL AND LOWER(s.name_path) = LOWER(?1) THEN 1.0
+        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || ?1 COLLATE NOCASE THEN 0.9
+        WHEN s.name LIKE ?1 || '%' COLLATE NOCASE THEN 0.8
+        WHEN s.name LIKE '%' || ?1 || '%' COLLATE NOCASE THEN 0.6
+        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%' || ?1 || '%' COLLATE NOCASE THEN 0.6
         ELSE 0.5
     END AS score
 FROM symbols s
@@ -79,15 +84,17 @@ pub fn build_content_search_query(with_lang: bool) -> String {
     } else {
         ""
     };
+    // Relevance is the match's position within the trimmed line — an
+    // earlier hit is more relevant. Line length is the ORDER BY tiebreaker
+    // only; it carries no relevance signal and must not enter the score.
     format!(
         r#"SELECT c.content, c.line_num, f.path, f.language,
     COUNT(*) OVER () AS total,
     CASE
         WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) = 1 THEN 1.0
-        WHEN LENGTH(c.content) < 80 THEN 0.85
-        WHEN INSTR(LOWER(c.content), LOWER(?1)) <= 20 THEN 0.7
-        WHEN LENGTH(c.content) < 150 THEN 0.5
-        ELSE 0.3
+        WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) BETWEEN 2 AND 8 THEN 0.8
+        WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) BETWEEN 9 AND 32 THEN 0.6
+        ELSE 0.4
     END AS score
 FROM content_lines c
 JOIN files f ON c.file_id = f.id

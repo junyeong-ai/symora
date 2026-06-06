@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::app::App;
@@ -67,17 +66,6 @@ pub struct SymbolsArgs {
     /// Maximum results
     #[arg(long)]
     pub limit: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct WorkspaceSymbolsOutput {
-    count: usize,
-    showing: usize,
-    items: Vec<SymbolOutput>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    truncated: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    hints: Vec<String>,
 }
 
 pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
@@ -271,21 +259,17 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         .map(|s| SymbolOutput::from_symbol(s, ctx.root()))
         .collect();
     let item_count = items.len();
+    let truncated = item_count < total;
+    let hints = workspace_symbol_hints(
+        name_query,
+        symbol_query,
+        lang,
+        include_kinds.is_none(),
+        truncated,
+        item_count,
+    );
 
-    ctx.print_success(WorkspaceSymbolsOutput {
-        count: total,
-        showing: item_count,
-        items,
-        truncated: total > limit,
-        hints: workspace_symbol_hints(
-            name_query,
-            symbol_query,
-            lang,
-            include_kinds.is_none(),
-            total > limit,
-            item_count,
-        ),
-    });
+    ctx.print_success(Section::with_total(items, total).with_hints(hints));
 
     Ok(())
 }

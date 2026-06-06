@@ -309,7 +309,7 @@ impl FromStr for Language {
             "php" => Ok(Self::PHP),
             "perl" | "pl" => Ok(Self::Perl),
             "lua" => Ok(Self::Lua),
-            "bash" | "sh" | "shell" => Ok(Self::Bash),
+            "bash" | "sh" | "shell" | "shellscript" => Ok(Self::Bash),
             "powershell" | "pwsh" | "ps1" => Ok(Self::PowerShell),
 
             "haskell" | "hs" => Ok(Self::Haskell),
@@ -356,6 +356,21 @@ mod tests {
     #[test]
     fn from_extension_unknown_falls_back() {
         assert_eq!(Language::from_extension("txt"), Language::Unknown);
+    }
+
+    #[test]
+    fn lsp_id_round_trips_through_parse() {
+        // The store persists languages as `lsp_id()` and the daemon wire
+        // carries that same value, so every language must parse back to
+        // itself — otherwise a daemon-mode `--lang` filter silently breaks.
+        for language in Language::all() {
+            assert_eq!(
+                Language::parse_or_default(language.lsp_id()),
+                language,
+                "lsp_id `{}` did not round-trip",
+                language.lsp_id()
+            );
+        }
     }
 
     #[test]

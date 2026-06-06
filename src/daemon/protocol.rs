@@ -111,7 +111,13 @@ impl From<crate::error::LspError> for RpcError {
 
 impl From<crate::error::StoreError> for RpcError {
     fn from(error: crate::error::StoreError) -> Self {
-        Self::new(-32603, format!("Store error: {}", error))
+        use crate::error::StoreError;
+        let code = match error {
+            StoreError::NotInitialized => StoreError::NOT_INITIALIZED_CODE,
+            StoreError::AlreadyIndexing => StoreError::ALREADY_INDEXING_CODE,
+            _ => -32603,
+        };
+        Self::new(code, format!("Store error: {error}"))
     }
 }
 

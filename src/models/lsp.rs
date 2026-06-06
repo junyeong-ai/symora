@@ -11,17 +11,21 @@ pub struct Position {
     pub character: u32,
 }
 
-/// Why a workspace-indexing-dependent answer may be incomplete.
+/// Why a result set may be an incomplete lower bound.
 ///
-/// Surfaced on `refs` / `callers` / `callees` / `impact` output so an
-/// agent can distinguish "few results" from "the server hadn't finished
-/// indexing when this was computed". Absent = not degraded.
+/// Surfaced on `refs` / `callers` / `callees` / `impact` and on semantic
+/// search so an agent can distinguish "few results" from "not everything
+/// was searched". Absent = complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexingDegradation {
     /// The workspace-indexing wait hit its budget; results are a lower
     /// bound. Retrying after the server warms up may return more.
     TimedOut,
+    /// Only part of the corpus was searched before a size cap was hit
+    /// (e.g. semantic search over a very large repo); results are a lower
+    /// bound, not a complete ranking.
+    Capped,
 }
 
 impl Position {

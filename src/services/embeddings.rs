@@ -1,11 +1,11 @@
 //! Local embeddings backend (opt-in via the `embeddings` feature).
 //!
-//! Symora keeps BM25/FTS5 as the default content-search path because it
-//! ships with no extra dependencies and works everywhere. Builds with
-//! `--features embeddings` get a local ONNX backend (fastembed-rs) and
-//! gain `symora search semantic`, which lets agents ask natural-language
-//! questions like "where is the retry logic" instead of having to guess
-//! exact identifiers.
+//! The default content-search path is the SQLite store's indexed
+//! substring/symbol search — no extra dependencies, works everywhere.
+//! Builds with `--features embeddings` add a local ONNX backend
+//! (fastembed-rs) and gain `symora search semantic`, which lets agents ask
+//! natural-language questions like "where is the retry logic" instead of
+//! having to guess exact identifiers.
 //!
 //! The trait surface is feature-agnostic so the rest of the crate can
 //! call into it without `#[cfg(feature = "embeddings")]` everywhere.

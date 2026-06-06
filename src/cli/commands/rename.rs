@@ -5,7 +5,6 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::commands::edit::apply_workspace_edits;
-#[cfg(unix)]
 use crate::cli::commands::edit::invalidate_store_files;
 use crate::cli::response::FileChangeOutput;
 use crate::cli::utils::find_symbol_at_position;
@@ -71,7 +70,6 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
             // Apply workspace edits to files
             match apply_workspace_edits(&result.changes, args.dry_run, app.root()) {
                 Ok(applied_changes) => {
-                    #[cfg(unix)]
                     if !args.dry_run {
                         let changed_files: Vec<_> =
                             applied_changes.iter().map(|c| c.file.clone()).collect();
