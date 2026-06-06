@@ -19,6 +19,15 @@ pub struct TargetOutput {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Whether the target resolved to a real symbol. Emitted only when
+    /// `false` — a synthesized `symbol@line:col` placeholder must never be
+    /// mistaken for a resolved symbol.
+    #[serde(skip_serializing_if = "is_true")]
+    pub resolved: bool,
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 impl TargetOutput {
@@ -30,6 +39,7 @@ impl TargetOutput {
             line,
             signature: None,
             body: None,
+            resolved: true,
         }
     }
 
@@ -48,6 +58,7 @@ impl TargetOutput {
             line: symbol.location.line,
             signature: None,
             body: None,
+            resolved: true,
         }
     }
 
@@ -75,12 +86,15 @@ impl TargetOutput {
                     .strip_prefix(root)
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| file.display().to_string());
-                Self::new(
-                    format!("symbol@{}:{}", line, column),
-                    "unknown".to_string(),
-                    file_str,
-                    line,
-                )
+                Self {
+                    resolved: false,
+                    ..Self::new(
+                        format!("symbol@{}:{}", line, column),
+                        "unknown".to_string(),
+                        file_str,
+                        line,
+                    )
+                }
             }
         }
     }
@@ -132,4 +146,48 @@ pub struct ImpactOutput {
     /// LSP failed to start a call hierarchy at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blast_radius: Option<crate::cli::blast_radius::BlastRadius>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::models::symbol::{Location, SymbolKind};
+
+    #[test]
+    fn resolved_is_omitted_for_a_real_symbol() {
+        let symbol = Symbol::new(
+            "process".to_string(),
+            SymbolKind::Function,
+            Location::point(PathBuf::from("/proj/src/lib.rs"), 42, 7),
+        );
+        let target = TargetOutput::from_symbol_or_fallback(
+            Some(&symbol),
+            Path::new(""),
+            0,
+            0,
+            Path::new("/proj"),
+        );
+        let value = serde_json::to_value(&target).unwrap();
+
+        assert_eq!(value["name"], "process");
+        assert!(value.get("resolved").is_none());
+    }
+
+    #[test]
+    fn fallback_target_discloses_resolved_false() {
+        let target = TargetOutput::from_symbol_or_fallback(
+            None,
+            Path::new("/proj/src/lib.rs"),
+            42,
+            7,
+            Path::new("/proj"),
+        );
+        let value = serde_json::to_value(&target).unwrap();
+
+        assert_eq!(value["name"], "symbol@42:7");
+        assert_eq!(value["kind"], "unknown");
+        assert_eq!(value["resolved"], false);
+    }
 }
