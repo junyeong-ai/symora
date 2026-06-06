@@ -6,8 +6,9 @@
 //! the cache when mtimes match and re-extracts otherwise, so warm
 //! rebuilds skip the dominant `read_to_string` + per-language scan.
 //!
-//! Schema is intentionally tiny — caches are rebuildable, so we crash
-//! on read errors and prune the file rather than maintain migrations.
+//! Schema is intentionally tiny — caches are rebuildable, so a read or
+//! decode failure is treated as a miss and a schema-version mismatch resets
+//! the rows, rather than maintaining migrations.
 
 use std::path::Path;
 
