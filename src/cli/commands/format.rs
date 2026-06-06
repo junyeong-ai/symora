@@ -37,9 +37,9 @@ pub async fn execute(args: FormatArgs, app: &App) -> Result<()> {
     match app.lsp.format(&file).await {
         Ok(edits) => {
             if args.apply && !edits.is_empty() {
-                let content = tokio::fs::read_to_string(&file).await?;
+                let content = std::fs::read_to_string(&file)?;
                 let formatted = apply_edits(&content, &edits);
-                tokio::fs::write(&file, &formatted).await?;
+                super::edit::atomic_write(&file, &formatted)?;
                 ctx.print_success(serde_json::json!({
                     "applied": true,
                     "edits": edits.len(),
