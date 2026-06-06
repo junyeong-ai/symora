@@ -179,8 +179,8 @@ impl DefaultAstQueryService {
                 file: file_path.to_path_buf(),
                 start_line: start.row as u32 + 1,
                 end_line: end.row as u32 + 1,
-                start_column: start.column as u32,
-                end_column: end.column as u32,
+                start_column: char_column(content, node.start_byte(), start.column),
+                end_column: char_column(content, node.end_byte(), end.column),
                 text,
                 captures,
             });
@@ -188,6 +188,19 @@ impl DefaultAstQueryService {
 
         Ok(results)
     }
+}
+
+/// Convert a tree-sitter position (0-indexed byte column within a line) to
+/// the 1-indexed character column the JSON contract uses everywhere else
+/// (invariant #1). `byte_column` is the node's byte offset within its line;
+/// the line begins at `byte_offset - byte_column`.
+fn char_column(content: &str, byte_offset: usize, byte_column: usize) -> u32 {
+    let line_start = byte_offset.saturating_sub(byte_column);
+    content
+        .get(line_start..byte_offset)
+        .map(|prefix| prefix.chars().count() as u32)
+        .unwrap_or(byte_column as u32)
+        + 1
 }
 
 impl Default for DefaultAstQueryService {

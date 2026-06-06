@@ -70,7 +70,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output format: pretty (default), compact (single-line JSON), or jsonl (newline-delimited).
+    /// Output format: pretty (default) or compact (single-line JSON).
     #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Pretty)]
     pub format: OutputFormat,
 
