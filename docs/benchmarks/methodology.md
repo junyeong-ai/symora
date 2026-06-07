@@ -86,10 +86,10 @@ ground-truth key authored from the repo before runs:
 
 ## Validity guards
 
-- A WITH-arm run whose transcript never shows `mcp__symora__*` tools (the
-  MCP server failed to launch — wrong binary path, bad config) is marked
-  `failed` by the harness and **excluded from the medians**: it would
-  measure "no MCP", not Symora.
+- A WITH-arm run whose `system/init` event does not list `mcp__symora__*`
+  tools (parsed into `symora_tools_exposed` — e.g. wrong binary path, bad
+  MCP config) is marked `failed` by the harness and **excluded from the
+  medians**: it would measure "no MCP", not Symora.
 - Report ties and losses honestly; short single-flow tasks can show flat/
   higher cost on the WITH arm (tool definitions sit in context and short
   tasks don't amortize them) — that is the expected "value scales with

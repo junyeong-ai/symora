@@ -62,12 +62,15 @@ run_arm() {
         --strict-mcp-config --mcp-config "$cfg" ) >"$raw" 2>>"$OUT/${arm}-run${i}.err" || true
     node "$SCRIPT_DIR/parse-run.mjs" <"$raw" >"$metrics"
 
-    # Validity guard from the methodology: a WITH run where the symora MCP
-    # tools were never even exposed measures "no MCP", not symora — mark it
-    # failed so the aggregator excludes it from the medians.
-    if [ "$arm" = "with" ] && ! grep -q "mcp__symora__" "$raw"; then
-      echo "    SKIP: with-arm run $i never exposed mcp__symora__ tools (check SYMORA_BIN / MCP config) — excluded from medians" >&2
-      node -e 'const fs=require("fs");const f=process.argv[1];const m=JSON.parse(fs.readFileSync(f,"utf8"));m.failed=true;m.failed_reason="mcp_not_exposed";fs.writeFileSync(f,JSON.stringify(m)+"\n");' "$metrics"
+    # Validity guard from the methodology: a WITH run whose system/init event
+    # never exposed the symora MCP tools (parse-run's structured
+    # `symora_tools_exposed`) measures "no MCP", not symora — mark it failed
+    # so the aggregator excludes it from the medians. Guarded so a patch
+    # failure degrades to a logged warning, not an aborted benchmark.
+    if [ "$arm" = "with" ] && ! node -e 'process.exit(require(process.argv[1]).symora_tools_exposed ? 0 : 1)' "$metrics"; then
+      echo "    FAILED: with-arm run $i never exposed mcp__symora__ tools (check SYMORA_BIN / MCP config) — excluded from medians" >&2
+      node -e 'const fs=require("fs");const f=process.argv[1];const m=JSON.parse(fs.readFileSync(f,"utf8"));m.failed=true;m.failed_reason="mcp_not_exposed";fs.writeFileSync(f,JSON.stringify(m)+"\n");' "$metrics" \
+        || echo "    WARN: could not mark $metrics failed" >&2
     fi
   done
 }
