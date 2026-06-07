@@ -75,7 +75,11 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
                 callers_status: None,
             });
         }
-        Err(ref e) if !args.no_fallback && is_not_supported(e) => {
+        // A capability gap — declared statically or answered as a runtime
+        // JSON-RPC MethodNotFound — falls back to references-derived callers;
+        // transient errors surface as errors, never as a silently weaker
+        // answer.
+        Err(ref e) if !args.no_fallback && e.is_unsupported() => {
             match fallback_from_refs(app, &loc.file, line, column, limit).await {
                 Ok((calls, total_refs)) => {
                     let items: Vec<CallHierarchyOutput> = calls
@@ -96,10 +100,6 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn is_not_supported(err: &LspError) -> bool {
-    matches!(err, LspError::FeatureNotSupported { .. })
 }
 
 /// Derive callers from plain references when the server lacks call
