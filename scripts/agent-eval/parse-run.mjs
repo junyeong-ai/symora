@@ -28,6 +28,10 @@ function emptyMetrics() {
     turns: 0,
     duration_ms: null,
     cost_usd: null,
+    // True when the system/init event's tool list contains mcp__symora__*
+    // — i.e. the MCP server actually launched and was exposed to the agent,
+    // independent of whether the agent chose to call it.
+    symora_tools_exposed: false,
   };
 }
 
@@ -77,7 +81,12 @@ export function parse(lines) {
       continue; // tolerate non-JSON noise lines
     }
 
-    if (ev.type === "assistant" && ev.message) {
+    if (ev.type === "system" && ev.subtype === "init") {
+      const tools = Array.isArray(ev.tools) ? ev.tools : [];
+      if (tools.some((t) => typeof t === "string" && t.startsWith("mcp__symora__"))) {
+        m.symora_tools_exposed = true;
+      }
+    } else if (ev.type === "assistant" && ev.message) {
       m.turns += 1;
       addUsage(m, ev.message.usage);
       for (const block of ev.message.content || []) {
@@ -101,14 +110,23 @@ export function parse(lines) {
   // A run with no terminating `result` event (or zero turns) crashed, hit a
   // budget cap, or never started the agent. It is NOT a legitimate zero — flag
   // it so the aggregator drops it instead of biasing the medians toward zero.
+  // `failed_reason` vocabulary is owned here: "no_result_or_zero_turns" (this
+  // parser) and "mcp_not_exposed" (run-ab.sh's WITH-arm validity guard).
   m.failed = !sawResult || m.turns === 0;
+  if (m.failed) m.failed_reason = "no_result_or_zero_turns";
   return m;
 }
 
 function selftest() {
-  // Two assistant turns: turn 1 calls a symora tool, turn 2 falls back to
-  // Read + a Bash grep. result carries only the LAST turn's usage.
+  // An init event exposing the symora tools, then two assistant turns:
+  // turn 1 calls a symora tool, turn 2 falls back to Read + a Bash grep.
+  // result carries only the LAST turn's usage.
   const transcript = [
+    JSON.stringify({
+      type: "system",
+      subtype: "init",
+      tools: ["Read", "Bash", "mcp__symora__get_impact", "mcp__symora__find_references"],
+    }),
     JSON.stringify({
       type: "assistant",
       message: {
@@ -158,13 +176,21 @@ function selftest() {
   expect("duration_ms", m.duration_ms, 4200);
   expect("cost_usd", m.cost_usd, 0.0123);
   expect("failed (complete run)", m.failed, false);
+  expect("symora_tools_exposed (init listed them)", m.symora_tools_exposed, true);
 
   // An empty/crashed transcript (no result event) is flagged failed, not a
   // legitimate zero — this is what stops the aggregator biasing medians.
   expect("failed (empty transcript)", parse([]).failed, true);
-  expect("failed (no result event)", parse([transcript[0]]).failed, true);
+  expect("failed_reason (empty transcript)", parse([]).failed_reason, "no_result_or_zero_turns");
+  expect("failed (no result event)", parse([transcript[1]]).failed, true);
 
-  console.log("selftest OK — token summing, tool classification, and failed-run detection verified");
+  // Exposure comes only from the init event's tool list — an init without
+  // the symora tools (the WITHOUT arm, or a failed MCP launch) stays false
+  // even though the literal string appears elsewhere in the transcript.
+  const bareInit = JSON.stringify({ type: "system", subtype: "init", tools: ["Read", "Bash"] });
+  expect("symora_tools_exposed (bare init)", parse([bareInit, transcript[1]]).symora_tools_exposed, false);
+
+  console.log("selftest OK — token summing, tool classification, failed-run and exposure detection verified");
 }
 
 async function readStdin() {
