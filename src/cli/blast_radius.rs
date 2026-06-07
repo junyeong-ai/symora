@@ -254,16 +254,15 @@ async fn detect_dynamic_dispatch(
             implementations: impls.len(),
         }),
         Ok(_) => None,
-        // `Unavailable` means a genuine capability gap, so reserve it for the
-        // server actually not implementing `textDocument/implementation` on an
-        // interface anchor. A transient error (timeout, server restart) is not
-        // a capability statement — stay silent rather than mislabel it.
-        Err(LspError::FeatureNotSupported { .. }) if kind == SymbolKind::Interface => {
-            Some(DynamicDispatch {
-                status: DispatchStatus::Unavailable,
-                implementations: 0,
-            })
-        }
+        // `Unavailable` means a genuine capability gap — the server does not
+        // implement `textDocument/implementation`, whether declared statically
+        // or answered as MethodNotFound at runtime — on an interface anchor.
+        // A transient error (timeout, server restart) is not a capability
+        // statement: stay silent rather than mislabel it.
+        Err(e) if kind == SymbolKind::Interface && e.is_unsupported() => Some(DynamicDispatch {
+            status: DispatchStatus::Unavailable,
+            implementations: 0,
+        }),
         Err(_) => None,
     }
 }
