@@ -1,0 +1,3 @@
+I'm considering changing the signature of the `compute` function in this
+codebase. Which functions and files would be affected, and how risky is the
+change? List the concrete call sites I'd need to update.
