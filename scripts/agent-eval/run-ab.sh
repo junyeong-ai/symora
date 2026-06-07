@@ -12,10 +12,11 @@
 #   SYMORA_BIN=/abs/path/to/symora \
 #   scripts/agent-eval/run-ab.sh <repo-dir> <task-file> [runs] [out-dir]
 #
-# Requires: claude (CLI), node, and a built symora binary. The repo's language
-# server must be installed for the WITH arm's LSP-backed tools to work; a cell
-# whose `symora doctor` reports a missing server is recorded as skipped, never
-# faked.
+# Requires: claude (CLI), node, and a built symora binary. Install the target
+# repo's language server first (`symora doctor <lang>`) or the WITH arm's
+# LSP-backed tools won't resolve. Runs that crash (no `result` event) or whose
+# WITH arm never exposed the symora MCP tools are marked failed and excluded
+# from the medians — never counted as legitimate zeros.
 set -euo pipefail
 
 REPO="${1:?usage: run-ab.sh <repo-dir> <task-file> [runs] [out-dir]}"
@@ -59,13 +60,15 @@ run_arm() {
         --permission-mode bypassPermissions \
         --model opus \
         --strict-mcp-config --mcp-config "$cfg" ) >"$raw" 2>>"$OUT/${arm}-run${i}.err" || true
-
-    # Validity guard the methodology requires: the WITH arm must actually have
-    # the symora MCP tools exposed, or the cell measures "no MCP" not "symora".
-    if [ "$arm" = "with" ] && ! grep -q "mcp__symora__" "$raw"; then
-      echo "    WARN: with-arm run $i never exposed/used mcp__symora__ tools — check the binary path/config" >&2
-    fi
     node "$SCRIPT_DIR/parse-run.mjs" <"$raw" >"$metrics"
+
+    # Validity guard from the methodology: a WITH run where the symora MCP
+    # tools were never even exposed measures "no MCP", not symora — mark it
+    # failed so the aggregator excludes it from the medians.
+    if [ "$arm" = "with" ] && ! grep -q "mcp__symora__" "$raw"; then
+      echo "    SKIP: with-arm run $i never exposed mcp__symora__ tools (check SYMORA_BIN / MCP config) — excluded from medians" >&2
+      node -e 'const fs=require("fs");const f=process.argv[1];const m=JSON.parse(fs.readFileSync(f,"utf8"));m.failed=true;m.failed_reason="mcp_not_exposed";fs.writeFileSync(f,JSON.stringify(m)+"\n");' "$metrics"
+    fi
   done
 }
 

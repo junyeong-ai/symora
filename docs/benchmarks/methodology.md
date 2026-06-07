@@ -86,14 +86,17 @@ ground-truth key authored from the repo before runs:
 
 ## Validity guards
 
-- Confirm `mcp__symora__*` tools are actually exposed in the WITH arm's
-  `system/init` event before trusting the cell.
+- A WITH-arm run whose transcript never shows `mcp__symora__*` tools (the
+  MCP server failed to launch — wrong binary path, bad config) is marked
+  `failed` by the harness and **excluded from the medians**: it would
+  measure "no MCP", not Symora.
 - Report ties and losses honestly; short single-flow tasks can show flat/
   higher cost on the WITH arm (tool definitions sit in context and short
   tasks don't amortize them) — that is the expected "value scales with
   complexity" boundary, not a result to hide.
-- A cell whose language server is missing is recorded **skipped**, never
-  faked.
+- The target repo's language server is an operator precondition
+  (`symora doctor <lang>` before running); a cell run without it is not
+  publishable.
 
 ## Output
 

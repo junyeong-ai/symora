@@ -30,9 +30,11 @@ SYMORA_BIN="$(pwd)/target/release/symora" \
   scripts/agent-eval/run-ab.sh /path/to/repo scripts/agent-eval/tasks/impact.txt 5
 ```
 
-Requires `claude`, `node`, and a built `symora`. The target repo's language
-server must be installed (`symora doctor <lang>`) or the WITH arm's LSP-backed
-tools won't resolve — such a cell is recorded skipped, never faked.
+Requires `claude`, `node`, and a built `symora`. Install the target repo's
+language server first (`symora doctor <lang>`) or the WITH arm's LSP-backed
+tools won't resolve. Runs that crash (no `result` event) or whose WITH arm
+never exposed the symora MCP tools are marked `failed` and excluded from the
+medians — never counted as legitimate zeros.
 
 ## Why a benchmark, and why it isn't checked in with numbers
 
