@@ -188,3 +188,18 @@ pub enum Commands {
     #[command(name = "self")]
     Selfcmd(SelfcmdArgs),
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    /// clap's internal consistency checks (duplicate flag names, conflicting
+    /// ids, …) only run as debug assertions when a command is built — a
+    /// collision panics every debug invocation while `cargo test` stays
+    /// green. Building the full tree here turns that whole failure class
+    /// into a test failure instead.
+    #[test]
+    fn clap_tree_passes_debug_assertions() {
+        super::Cli::command().debug_assert();
+    }
+}
