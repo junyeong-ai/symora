@@ -67,7 +67,7 @@ run_arm() {
     # `symora_tools_exposed`) measures "no MCP", not symora — mark it failed
     # so the aggregator excludes it from the medians. Guarded so a patch
     # failure degrades to a logged warning, not an aborted benchmark.
-    if [ "$arm" = "with" ] && ! node -e 'process.exit(require(process.argv[1]).symora_tools_exposed ? 0 : 1)' "$metrics"; then
+    if [ "$arm" = "with" ] && ! node -e 'const fs=require("fs");process.exit(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).symora_tools_exposed ? 0 : 1)' "$metrics"; then
       echo "    FAILED: with-arm run $i never exposed mcp__symora__ tools (check SYMORA_BIN / MCP config) — excluded from medians" >&2
       node -e 'const fs=require("fs");const f=process.argv[1];const m=JSON.parse(fs.readFileSync(f,"utf8"));m.failed=true;m.failed_reason="mcp_not_exposed";fs.writeFileSync(f,JSON.stringify(m)+"\n");' "$metrics" \
         || echo "    WARN: could not mark $metrics failed" >&2
