@@ -21,7 +21,7 @@ Exploration flow:
 
 Editing tools — `rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol` — write source files. Preview with dry_run=true first; the preview is an exact diff. `delete_symbol` additionally reports references that would dangle.
 
-Conventions: positions are 1-indexed lines and columns. List responses share one shape (count, showing, items, truncated, hints, next_commands). Errors carry {code, message, hint}; the hint names a working alternative.
+Conventions: positions are 1-indexed lines and columns. List responses share one shape (count, showing, items, truncated, hints, next_commands). Errors carry {code, message, hint}; the hint names a working alternative. A conflict code from an editing tool means the file changed since it was analyzed — re-read it and retry.
 
 Anti-patterns: don't guess a file:line:column — take it from a search or list result; don't read full file bodies to find one symbol; don't retry a capability the server reported as unsupported — follow the error's hint instead.";
 
