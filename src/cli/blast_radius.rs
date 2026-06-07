@@ -336,12 +336,13 @@ mod tests {
     use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
     /// Call-graph stub: maps a (line, column) position to its incoming
-    /// callers, and returns a fixed implementation set for the
-    /// dynamic-dispatch probe. Every other `LspService` method is
-    /// unreachable from `compute` and panics loudly if that ever changes.
+    /// callers, and answers the dynamic-dispatch probe with a fixed
+    /// implementation set or a synthesized JSON-RPC error (`Err(code)`).
+    /// Every other `LspService` method is unreachable from `compute` and
+    /// panics loudly if that ever changes.
     struct CallGraphStub {
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
-        implementations: Vec<Location>,
+        implementations: Result<Vec<Location>, i32>,
     }
 
     fn caller(line: u32) -> CallHierarchyItem {
@@ -416,7 +417,9 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<Vec<Location>, LspError> {
-            Ok(self.implementations.clone())
+            self.implementations
+                .clone()
+                .map_err(|code| LspError::server_error_friendly(code, "stub error".to_string()))
         }
         async fn hover(
             &self,
@@ -531,12 +534,12 @@ mod tests {
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
         cfg: BlastRadiusConfig,
     ) -> BlastRadius {
-        compute_for(incoming, vec![], None, cfg)
+        compute_for(incoming, Ok(vec![]), None, cfg)
     }
 
     fn compute_for(
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
-        implementations: Vec<Location>,
+        implementations: Result<Vec<Location>, i32>,
         anchor_kind: Option<SymbolKind>,
         cfg: BlastRadiusConfig,
     ) -> BlastRadius {
@@ -663,7 +666,7 @@ mod tests {
         incoming.insert((10, 5), vec![caller(20)]);
         let radius = compute_for(
             incoming,
-            vec![impl_at(40), impl_at(50)],
+            Ok(vec![impl_at(40), impl_at(50)]),
             Some(SymbolKind::Method),
             BlastRadiusConfig {
                 max_depth: 1,
@@ -685,7 +688,7 @@ mod tests {
         // A struct anchor is never probed, even if impls were available.
         let radius = compute_for(
             HashMap::new(),
-            vec![impl_at(40)],
+            Ok(vec![impl_at(40)]),
             Some(SymbolKind::Struct),
             BlastRadiusConfig::default(),
         );
@@ -694,7 +697,45 @@ mod tests {
         // A method with no implementations: the graph is complete, no marker.
         let radius = compute_for(
             HashMap::new(),
-            vec![],
+            Ok(vec![]),
+            Some(SymbolKind::Method),
+            BlastRadiusConfig::default(),
+        );
+        assert!(radius.dynamic_dispatch.is_none());
+    }
+
+    /// A runtime JSON-RPC MethodNotFound is the same permanent capability
+    /// statement as the static table: an interface anchor discloses
+    /// `unavailable`. Transient errors and non-interface anchors stay
+    /// silent — never a mislabeled capability claim.
+    #[test]
+    fn runtime_method_not_found_marks_interface_unavailable() {
+        let radius = compute_for(
+            HashMap::new(),
+            Err(-32601),
+            Some(SymbolKind::Interface),
+            BlastRadiusConfig::default(),
+        );
+        let dispatch = radius
+            .dynamic_dispatch
+            .expect("interface + runtime -32601 must disclose unavailability");
+        assert_eq!(dispatch.status, DispatchStatus::Unavailable);
+        assert_eq!(dispatch.implementations, 0);
+        assert!(radius.confidence <= DYNAMIC_DISPATCH_CONFIDENCE_CAP);
+
+        // A transient server error is not a capability statement.
+        let radius = compute_for(
+            HashMap::new(),
+            Err(-32603),
+            Some(SymbolKind::Interface),
+            BlastRadiusConfig::default(),
+        );
+        assert!(radius.dynamic_dispatch.is_none());
+
+        // A method can't be known virtual — silent even on -32601.
+        let radius = compute_for(
+            HashMap::new(),
+            Err(-32601),
             Some(SymbolKind::Method),
             BlastRadiusConfig::default(),
         );

@@ -182,15 +182,15 @@ fn representative_failure(failures: Vec<(Language, LspError)>) -> Option<LspErro
 
 /// Why a language is missing from the result, as a stable marker an agent
 /// can branch on (install a server, retry a timeout, or narrow with --lang).
-/// A JSON-RPC method-not-found (-32601) means the server simply does not
-/// implement workspace symbols — permanent, not retryable — so it classifies
-/// as `unsupported`, matching the central error classifier.
+/// A capability gap — `is_unsupported` covers both the static table and a
+/// runtime JSON-RPC method-not-found — classifies as `unsupported`, matching
+/// the central error classifier.
 fn coverage_reason(err: &LspError) -> &'static str {
     match err {
         LspError::ServerNotInstalled { .. } => "server_not_installed",
         LspError::Timeout(_) => "timed_out",
-        LspError::FeatureNotSupported { .. } | LspError::UnsupportedLanguage(_) => "unsupported",
-        LspError::ServerError { code, .. } if *code == -32601 => "unsupported",
+        LspError::UnsupportedLanguage(_) => "unsupported",
+        e if e.is_unsupported() => "unsupported",
         _ => "unavailable",
     }
 }
