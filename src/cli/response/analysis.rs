@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::LocationOutput;
+use super::{LocationOutput, Section};
 use crate::models::symbol::Symbol;
 
 /// Target symbol info (unified across `impact`, `context`, etc.).
@@ -100,6 +100,18 @@ impl TargetOutput {
     }
 }
 
+/// Response for the `refs` command: the resolved target symbol plus its
+/// reference list. `target` discloses what the input position snapped to —
+/// the same honesty `impact`/`context`/`usage` already provide — so a
+/// line-only query is self-describing without a second lookup. The
+/// reference `Section` is flattened in, keeping the one list contract.
+#[derive(Debug, Serialize)]
+pub struct RefsOutput {
+    pub target: TargetOutput,
+    #[serde(flatten)]
+    pub references: Section<LocationOutput>,
+}
+
 /// Reference statistics (counts, no judgements).
 #[derive(Debug, Serialize)]
 pub struct RefOutput {
@@ -189,5 +201,42 @@ mod tests {
         assert_eq!(value["name"], "symbol@42:7");
         assert_eq!(value["kind"], "unknown");
         assert_eq!(value["resolved"], false);
+    }
+
+    #[test]
+    fn refs_output_nests_target_and_flattens_the_section() {
+        let symbol = Symbol::new(
+            "process".to_string(),
+            SymbolKind::Function,
+            Location::point(PathBuf::from("/proj/src/lib.rs"), 42, 7),
+        );
+        let target = TargetOutput::from_symbol(&symbol, Path::new("/proj"))
+            .with_signature(Some("fn process()".to_string()));
+        let out = RefsOutput {
+            target,
+            references: crate::cli::response::Section::with_total(
+                vec![crate::cli::response::LocationOutput::from_path(
+                    Path::new("/proj/src/a.rs"),
+                    1,
+                    2,
+                    Path::new("/proj"),
+                )],
+                1,
+            ),
+        };
+        let value = serde_json::to_value(&out).unwrap();
+
+        // `target` is nested and self-describing.
+        assert_eq!(value["target"]["name"], "process");
+        assert_eq!(value["target"]["signature"], "fn process()");
+        // The reference Section is flattened to the top level (the one list
+        // contract), not nested under a `references` key.
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["showing"], 1);
+        assert!(value["items"].is_array());
+        assert!(
+            value.get("references").is_none(),
+            "section must be flattened, not nested under `references`"
+        );
     }
 }

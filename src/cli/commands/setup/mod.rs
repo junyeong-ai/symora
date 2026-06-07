@@ -2,6 +2,7 @@
 //! dependency install. Runs the full flow when invoked without a subcommand.
 
 mod deps;
+mod mcp;
 mod skill;
 
 use anyhow::Result;
@@ -11,6 +12,7 @@ use serde::Serialize;
 use crate::app::App;
 
 pub use deps::{DepsArgs, DepsGroup, DepsOutcome, run_deps};
+pub use mcp::{McpSetupArgs, McpSetupOutcome, run_mcp};
 pub use skill::{SkillArgs, SkillOutcome, run_skill};
 
 #[derive(Args, Debug)]
@@ -47,6 +49,9 @@ pub enum SetupCommand {
     Skill(SkillArgs),
     /// Install language servers and ripgrep.
     Deps(DepsArgs),
+    /// Wire `symora mcp serve` into installed agent hosts (Claude Code,
+    /// Codex). Reversible with `--uninstall`.
+    Mcp(McpSetupArgs),
 }
 
 #[derive(Serialize, Debug)]
@@ -56,6 +61,8 @@ struct SetupOutput {
     skill: Option<SkillOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deps: Option<DepsOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp: Option<McpSetupOutcome>,
 }
 
 pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
@@ -66,6 +73,7 @@ pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
                 status: "ok".to_string(),
                 skill: Some(outcome),
                 deps: None,
+                mcp: None,
             };
             app.output.print_success(body);
         }
@@ -75,6 +83,17 @@ pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
                 status: "ok".to_string(),
                 skill: None,
                 deps: Some(outcome),
+                mcp: None,
+            };
+            app.output.print_success(body);
+        }
+        Some(SetupCommand::Mcp(mcp_args)) => {
+            let outcome = run_mcp(mcp_args, app)?;
+            let body = SetupOutput {
+                status: "ok".to_string(),
+                skill: None,
+                deps: None,
+                mcp: Some(outcome),
             };
             app.output.print_success(body);
         }
@@ -100,6 +119,7 @@ pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
                 status: "ok".to_string(),
                 skill: skill_outcome,
                 deps: deps_outcome,
+                mcp: None,
             };
             app.output.print_success(body);
         }

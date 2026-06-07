@@ -103,8 +103,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         )
-        .with_output_schema(section_output_schema(
-            "Reference locations: file, line, column",
+        .with_output_schema(with_extra(
+            section_output_schema("Reference locations: file, line, column"),
+            &[(
+                "target",
+                "object",
+                "The symbol the position resolved to: { name, kind, file, line, signature?, resolved }",
+            )],
         )),
         ToolDefinition::read_only(
             "find_callers",

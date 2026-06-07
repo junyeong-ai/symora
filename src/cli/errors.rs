@@ -17,6 +17,11 @@ pub enum ErrorCode {
     ParseError,
     StoreNotInitialized,
     AlreadyExists,
+    /// A computed or asserted edit range no longer matches the on-disk file:
+    /// the analysis ran against a different (stale) revision. Agents branch
+    /// on this to re-read the file and retry, rather than treating it as a
+    /// generic internal failure.
+    Conflict,
     FileTooLarge,
     Io,
 }
@@ -65,6 +70,10 @@ impl OutputError {
 
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidArgument, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Conflict, message)
     }
 
     pub fn lsp_unavailable(message: impl Into<String>) -> Self {

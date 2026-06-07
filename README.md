@@ -284,6 +284,17 @@ symora doctor          # 설치된 LSP / 누락된 LSP, 플랫폼별 설치 명�
 
 Symora는 Model Context Protocol 서버로도 동작합니다. 주요 탐색·분석·편집 명령이 MCP 도구로 노출되며(전체가 아닌 선별된 집합), CLI와 동일한 in-process 명령 레이어를 공유하므로 두 표면의 결과는 일치합니다.
 
+설치된 에이전트 호스트에 MCP 서버를 한 번에 연결합니다(idempotent, `--uninstall`로 역연결).
+
+```bash
+symora setup mcp                          # 감지된 호스트에 자동 연결 (Claude Code, Codex)
+symora setup mcp --dry-run               # 변경 없이 적용 계획만 출력
+symora setup mcp --host claude_code      # 특정 호스트만
+symora setup mcp --uninstall             # 연결 해제 (자신이 만든 항목만 제거)
+```
+
+직접 실행하려면:
+
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor 등이 기본 사용)
 symora mcp serve --transport http --port 8765

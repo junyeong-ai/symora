@@ -2,9 +2,9 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::app::App;
-use crate::cli::commands::common::snap_to_symbol_anchor;
-use crate::cli::response::{LocationOutput, Section};
-use crate::cli::utils::{read_line_at, read_lines_around};
+use crate::cli::analysis::LocationAnalysis;
+use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
+use crate::cli::utils::{extract_signature, read_line_at, read_lines_around};
 use crate::cli::{LocationArg, OutputError};
 
 #[derive(Args, Debug)]
@@ -30,13 +30,15 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.refs_limit);
     let loc = args.loc.parse()?.to_absolute_with_root(Some(app.root()))?;
+    // Kept for the error path: `at` consumes the anchor, and the hint reads
+    // best against the position the agent actually typed.
+    let (err_file, err_line, err_column) = (loc.file.clone(), loc.line, loc.column);
 
-    let (line, column) =
-        snap_to_symbol_anchor(app.lsp.as_ref(), &loc.file, loc.line, loc.column).await;
-
-    match app.lsp.find_references(&loc.file, line, column).await {
-        Ok(locations) => {
-            let project_refs: Vec<_> = locations
+    match LocationAnalysis::at(app.lsp.as_ref(), loc).await {
+        Ok(analysis) => {
+            let root = ctx.root();
+            let project_refs: Vec<_> = analysis
+                .references()
                 .iter()
                 .filter(|l| ctx.is_project_path(&l.file))
                 .collect();
@@ -47,8 +49,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 .into_iter()
                 .take(limit)
                 .map(|l| {
-                    let mut output =
-                        LocationOutput::from_path(&l.file, l.line, l.column, ctx.root());
+                    let mut output = LocationOutput::from_path(&l.file, l.line, l.column, root);
                     if let Some(n) = args.context {
                         if let Ok(s) = read_lines_around(&l.file, l.line, n) {
                             output.snippet = Some(s);
@@ -62,18 +63,33 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 })
                 .collect();
 
+            // Disclose the symbol the input snapped to. The signature reuses
+            // the body `LocationAnalysis::at` already fetched, so it costs no
+            // extra lookup; it is surfaced once at the top level, never per
+            // reference.
+            let target = TargetOutput::from_symbol_or_fallback(
+                analysis.target(),
+                &analysis.anchor().file,
+                analysis.anchor().line,
+                analysis.anchor().column,
+                root,
+            )
+            .with_signature(
+                analysis
+                    .target()
+                    .and_then(|symbol| extract_signature(symbol.body.as_deref())),
+            );
+
             let hints = refs_hints(&items, total, limit);
-            let indexing = app
-                .lsp
-                .indexing_degradation(crate::models::symbol::Language::from_path(&loc.file))
-                .await;
-            ctx.print_success(
-                Section::with_total(items, total)
+            let indexing = app.lsp.indexing_degradation(analysis.language()).await;
+            ctx.print_success(RefsOutput {
+                target,
+                references: Section::with_total(items, total)
                     .with_hints(hints)
                     .with_indexing(indexing),
-            );
+            });
         }
-        Err(e) => ctx.print_error(refs_error(e, &loc.file, line, column)),
+        Err(e) => ctx.print_error(refs_error(e, &err_file, err_line, err_column)),
     }
 
     Ok(())

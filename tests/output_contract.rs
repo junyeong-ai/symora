@@ -366,6 +366,7 @@ fn impact_output_full() {
             max_depth_reached: false,
             callers_truncated: false,
             indexing: None,
+            dynamic_dispatch: None,
             callers_by_depth: vec![
                 DepthBucket {
                     depth: 1,
@@ -424,6 +425,7 @@ fn blast_radius_max_depth_reached_serializes() {
         max_depth_reached: true,
         callers_truncated: true,
         indexing: Some(symora::models::lsp::IndexingDegradation::TimedOut),
+        dynamic_dispatch: None,
         callers_by_depth: vec![
             DepthBucket {
                 depth: 1,
@@ -544,16 +546,17 @@ fn apply_action_output_success() {
 #[test]
 fn error_envelope_shape_matches_runtime() {
     // Mirrors what OutputContext::print_error emits to stdout.
-    // Note: json!() round-trips through serde_json::Value (BTreeMap), so keys
-    // come out alphabetically — that matches what the runtime actually prints.
+    // Note: serde_json is built with `preserve_order`, so object keys keep
+    // insertion order — here the `OutputError` field order (code, message,
+    // hint) — which is exactly what the runtime prints.
     let err = OutputError::not_found("symbol foo").with_hint("did you mean 'fool'?");
     let envelope = json!({ "error": err });
     assert_json_snapshot!(envelope, @r###"
     {
       "error": {
         "code": "not_found",
-        "hint": "did you mean 'fool'?",
-        "message": "symbol foo"
+        "message": "symbol foo",
+        "hint": "did you mean 'fool'?"
       }
     }
     "###);
