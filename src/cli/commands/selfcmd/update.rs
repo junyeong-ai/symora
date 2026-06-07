@@ -13,6 +13,11 @@ use crate::services::dist::{
 };
 
 #[derive(Args, Debug)]
+// The user-facing `--version <VER>` below collides with the `-V/--version`
+// that `propagate_version` auto-generates for every subcommand — clap's
+// debug assertions abort on the duplicate name. The target-version flag is
+// the documented one, so the auto-generated flag is the one to suppress.
+#[command(disable_version_flag = true)]
 pub struct UpdateArgs {
     /// Specific version to install (e.g. `0.9.0`). Defaults to the latest release.
     #[arg(long, value_name = "VER")]
