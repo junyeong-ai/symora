@@ -59,6 +59,10 @@ impl LspError {
     /// mid-request and the result would be stale. The spec's contract is
     /// "re-issue the request" — the canonical retryable error.
     const CONTENT_MODIFIED_ERROR_CODE: i32 = -32801;
+    /// JSON-RPC `MethodNotFound`: the server does not implement the
+    /// requested method — a permanent capability statement, not a transient
+    /// failure.
+    const METHOD_NOT_FOUND_ERROR_CODE: i32 = -32601;
 
     pub fn error_code(&self) -> i32 {
         match self {
@@ -74,6 +78,16 @@ impl LspError {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::RequestCancelled)
             || matches!(self, Self::ServerError { code, .. } if *code == Self::CANCELLED_ERROR_CODE)
+    }
+
+    /// True when the failure is a permanent capability statement — the
+    /// server does not implement the requested method, whether declared
+    /// statically (the capability table's `FeatureNotSupported`) or at
+    /// runtime (JSON-RPC `MethodNotFound`). The counterpart to
+    /// `is_recoverable`: retrying can never succeed.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self, Self::FeatureNotSupported { .. })
+            || matches!(self, Self::ServerError { code, .. } if *code == Self::METHOD_NOT_FOUND_ERROR_CODE)
     }
 
     pub fn is_recoverable(&self) -> bool {
@@ -278,6 +292,28 @@ mod tests {
         // mechanical retry onto every caller.
         let err = LspError::server_error_friendly(-32801, "content modified".to_string());
         assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn unsupported_covers_static_and_runtime_capability_gaps() {
+        // Statically declared (capability table)…
+        let static_gap = LspError::FeatureNotSupported {
+            language: Language::Python,
+            server: "pyright".to_string(),
+            feature: "implementations".to_string(),
+            suggestion: "use references".to_string(),
+        };
+        assert!(static_gap.is_unsupported());
+
+        // …and a runtime JSON-RPC MethodNotFound are the same permanent
+        // capability statement.
+        let runtime_gap = LspError::server_error_friendly(-32601, "method not found".to_string());
+        assert!(runtime_gap.is_unsupported());
+
+        // Transient failures are not capability statements.
+        assert!(!LspError::Timeout("t".to_string()).is_unsupported());
+        let internal = LspError::server_error_friendly(-32603, "boom".to_string());
+        assert!(!internal.is_unsupported());
     }
 
     #[test]

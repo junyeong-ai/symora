@@ -52,6 +52,10 @@ expression: payload
     "message": "x"
   },
   {
+    "code": "conflict",
+    "message": "x"
+  },
+  {
     "code": "file_too_large",
     "message": "x"
   },

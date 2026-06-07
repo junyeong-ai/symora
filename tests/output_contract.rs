@@ -137,6 +137,7 @@ fn output_error_all_codes_serialize_in_snake_case() {
         ErrorCode::ParseError,
         ErrorCode::StoreNotInitialized,
         ErrorCode::AlreadyExists,
+        ErrorCode::Conflict,
         ErrorCode::FileTooLarge,
         ErrorCode::Io,
     ];
