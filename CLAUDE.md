@@ -28,7 +28,7 @@ cargo clippy --all-targets --features embeddings -- -D warnings
 cargo test
 ```
 
-For behavior changes, also exercise the affected commands against this repo (`./symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
+For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 
 ## Anti-goals
 
