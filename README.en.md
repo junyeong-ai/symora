@@ -273,6 +273,17 @@ symora doctor
 
 Symora also runs as a Model Context Protocol server. Its main navigation, analysis, and edit commands are exposed as MCP tools (a curated subset, not the whole CLI) that share the in-process command layer, so both surfaces produce identical results.
 
+Wire the MCP server into every installed agent host in one step (idempotent; reverse with `--uninstall`):
+
+```bash
+symora setup mcp                          # auto-detect and wire installed hosts (Claude Code, Codex)
+symora setup mcp --dry-run               # show the plan without writing
+symora setup mcp --host claude_code      # a specific host only
+symora setup mcp --uninstall             # disconnect (removes only the entry it wrote)
+```
+
+Or run it directly:
+
 ```bash
 symora mcp serve                          # stdio (Claude Code, Cursor, etc. use this by default)
 symora mcp serve --transport http --port 8765

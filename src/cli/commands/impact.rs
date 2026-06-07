@@ -67,6 +67,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
             );
 
             let exported = analysis.is_exported();
+            let anchor_kind = analysis.target().map(|symbol| symbol.kind);
 
             let blast_radius = blast_radius::compute(
                 app.lsp.as_ref(),
@@ -74,6 +75,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 analysis.anchor.line,
                 analysis.anchor.column,
                 exported,
+                anchor_kind,
                 test_matcher,
                 &BlastRadiusConfig {
                     max_depth: depth,

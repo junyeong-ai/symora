@@ -37,9 +37,15 @@ clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+# preserve_order keeps JSON object key order on round-trip (structs already
+# serialize in declaration order; this only affects `Value` maps), so the MCP
+# installer never reshuffles a user's existing config keys.
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 serde_repr = "0.1.20"
 toml = "1.1"
+# Format-preserving TOML edits (comments, ordering, all table forms) for the
+# MCP installer's Codex config — the canonical crate for surgical TOML editing.
+toml_edit = "0.22"
 
 # Error Handling
 thiserror = "2.0.18"

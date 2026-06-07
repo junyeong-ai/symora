@@ -20,7 +20,15 @@ use serde::Serialize;
 use crate::cli::utils::TestMatcher;
 use crate::constants::defaults::{BLAST_RADIUS_MAX_CALLERS_PER_NODE, IMPACT_DEFAULT_DEPTH};
 use crate::error::LspError;
+use crate::models::symbol::SymbolKind;
 use crate::services::lsp::LspService;
+
+/// A dynamically-dispatched anchor's call-hierarchy graph is a lower bound:
+/// implementations' transitive callers are not folded into the counts
+/// (Phase 1 discloses the gap rather than over-approximating by widening).
+/// Such a graph therefore never earns more than this confidence, no matter
+/// how deep the walk reached.
+const DYNAMIC_DISPATCH_CONFIDENCE_CAP: f32 = 0.7;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BlastRadiusConfig {
@@ -53,6 +61,13 @@ pub struct BlastRadius {
     /// workspace indexing — every count is then a lower bound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// Present only when the anchor is dynamically dispatched (a
+    /// trait/interface method, or the interface itself). The call-hierarchy
+    /// counts then exclude callers reached through implementations, so they
+    /// are a lower bound. Absence means the graph is complete for this
+    /// anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_dispatch: Option<DynamicDispatch>,
     pub callers_by_depth: Vec<DepthBucket>,
     pub test_coverage_ratio: f32,
     pub risk: RiskLevel,
@@ -76,6 +91,30 @@ pub enum RiskLevel {
     Critical,
 }
 
+/// Why a dynamically-dispatched anchor's caller graph may be incomplete.
+/// The transitive count is a lower bound in every variant.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchStatus {
+    /// Implementations/overrides exist; their transitive callers are not
+    /// folded into the counts, so the graph is a lower bound at the anchor.
+    Incomplete,
+    /// The anchor is an interface but the language server cannot resolve
+    /// implementations, so dynamic callers can't be determined at all.
+    Unavailable,
+}
+
+/// Dynamic-dispatch disclosure for a blast radius. Surfaced only when the
+/// anchor is dynamically dispatched — extends the same honesty machinery as
+/// `indexing`/`callers_truncated`: it states that the graph is a lower
+/// bound and why, never synthesizing the missing callers.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct DynamicDispatch {
+    pub status: DispatchStatus,
+    /// Implementations/overrides discovered (0 when `unavailable`).
+    pub implementations: usize,
+}
+
 type CallerKey = (PathBuf, u32, u32);
 
 pub async fn compute(
@@ -84,6 +123,7 @@ pub async fn compute(
     line: u32,
     column: u32,
     is_exported: Option<bool>,
+    anchor_kind: Option<SymbolKind>,
     test_matcher: &TestMatcher,
     cfg: &BlastRadiusConfig,
 ) -> Result<BlastRadius, LspError> {
@@ -150,9 +190,13 @@ pub async fn compute(
         frontier = next_frontier;
     }
 
-    let indexing = lsp
-        .indexing_degradation(crate::models::symbol::Language::from_path(file))
-        .await;
+    // Both are independent post-walk probes (no data dependency on each
+    // other), so run them concurrently rather than paying two serial
+    // round-trips.
+    let (indexing, dynamic_dispatch) = tokio::join!(
+        lsp.indexing_degradation(crate::models::symbol::Language::from_path(file)),
+        detect_dynamic_dispatch(lsp, file, line, column, anchor_kind),
+    );
 
     let direct_callers = buckets.first().map(|b| b.count).unwrap_or(0);
     let transitive_callers: usize = buckets.iter().map(|b| b.count).sum();
@@ -171,11 +215,57 @@ pub async fn compute(
         max_depth_reached,
         callers_truncated,
         indexing,
+        dynamic_dispatch,
         callers_by_depth: buckets,
         test_coverage_ratio: test_ratio,
+        // Risk is computed from the *verified* call-hierarchy count only.
+        // Dynamic-dispatch incompleteness is disclosed via `dynamic_dispatch`
+        // + a capped `confidence`, never by inflating the risk label off a
+        // graph we know is a lower bound.
         risk: compute_risk(transitive_callers, is_exported, test_ratio),
-        confidence: compute_confidence(direct_callers, depth_reached),
+        confidence: compute_confidence(direct_callers, depth_reached, dynamic_dispatch.as_ref()),
     })
+}
+
+/// Disclose whether the anchor is dynamically dispatched, so the caller
+/// graph's incompleteness is visible rather than silently presented as
+/// authoritative (invariant #4). LSP truth only — no name-matching: a
+/// non-empty `find_implementations` is the sole positive signal.
+///
+/// Gated on `SymbolKind` so a non-overridable anchor (a free function, a
+/// type, a field) costs no round-trip. For an interface anchor whose server
+/// lacks the capability we say so (`unavailable`); for an ordinary method
+/// on such a server we stay silent, because we cannot tell it is virtual
+/// and a blanket marker on every method would be noise, not signal.
+async fn detect_dynamic_dispatch(
+    lsp: &dyn LspService,
+    file: &Path,
+    line: u32,
+    column: u32,
+    anchor_kind: Option<SymbolKind>,
+) -> Option<DynamicDispatch> {
+    let kind = anchor_kind?;
+    if !matches!(kind, SymbolKind::Method | SymbolKind::Interface) {
+        return None;
+    }
+    match lsp.find_implementations(file, line, column).await {
+        Ok(impls) if !impls.is_empty() => Some(DynamicDispatch {
+            status: DispatchStatus::Incomplete,
+            implementations: impls.len(),
+        }),
+        Ok(_) => None,
+        // `Unavailable` means a genuine capability gap, so reserve it for the
+        // server actually not implementing `textDocument/implementation` on an
+        // interface anchor. A transient error (timeout, server restart) is not
+        // a capability statement — stay silent rather than mislabel it.
+        Err(LspError::FeatureNotSupported { .. }) if kind == SymbolKind::Interface => {
+            Some(DynamicDispatch {
+                status: DispatchStatus::Unavailable,
+                implementations: 0,
+            })
+        }
+        Err(_) => None,
+    }
 }
 
 fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f32) -> RiskLevel {
@@ -203,7 +293,11 @@ fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f32) -> R
     RiskLevel::Low
 }
 
-fn compute_confidence(direct_callers: usize, depth_reached: u32) -> f32 {
+fn compute_confidence(
+    direct_callers: usize,
+    depth_reached: u32,
+    dynamic_dispatch: Option<&DynamicDispatch>,
+) -> f32 {
     // Confidence is high when the LSP actually returned a call hierarchy
     // (direct_callers > 0) AND we explored the requested depth without
     // tripping the safety cap. Zero direct callers is the dominant
@@ -218,7 +312,14 @@ fn compute_confidence(direct_callers: usize, depth_reached: u32) -> f32 {
     if depth_reached >= 3 {
         score += 0.1;
     }
-    score.clamp(0.0, 1.0)
+    let score = score.clamp(0.0, 1.0);
+    // A dynamically-dispatched anchor's graph is a known lower bound, so it
+    // can never be presented as high confidence regardless of depth.
+    if dynamic_dispatch.is_some() {
+        score.min(DYNAMIC_DISPATCH_CONFIDENCE_CAP)
+    } else {
+        score
+    }
 }
 
 #[cfg(test)]
@@ -236,10 +337,12 @@ mod tests {
     use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
     /// Call-graph stub: maps a (line, column) position to its incoming
-    /// callers. Every other `LspService` method is unreachable from
-    /// `compute` and panics loudly if that ever changes.
+    /// callers, and returns a fixed implementation set for the
+    /// dynamic-dispatch probe. Every other `LspService` method is
+    /// unreachable from `compute` and panics loudly if that ever changes.
     struct CallGraphStub {
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
+        implementations: Vec<Location>,
     }
 
     fn caller(line: u32) -> CallHierarchyItem {
@@ -314,7 +417,7 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<Vec<Location>, LspError> {
-            unreachable!()
+            Ok(self.implementations.clone())
         }
         async fn hover(
             &self,
@@ -429,7 +532,19 @@ mod tests {
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
         cfg: BlastRadiusConfig,
     ) -> BlastRadius {
-        let stub = CallGraphStub { incoming };
+        compute_for(incoming, vec![], None, cfg)
+    }
+
+    fn compute_for(
+        incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
+        implementations: Vec<Location>,
+        anchor_kind: Option<SymbolKind>,
+        cfg: BlastRadiusConfig,
+    ) -> BlastRadius {
+        let stub = CallGraphStub {
+            incoming,
+            implementations,
+        };
         let matcher = TestMatcher::default();
         tokio_test::block_on(compute(
             &stub,
@@ -437,6 +552,7 @@ mod tests {
             10,
             5,
             Some(false),
+            anchor_kind,
             &matcher,
             &cfg,
         ))
@@ -512,14 +628,77 @@ mod tests {
 
     #[test]
     fn confidence_zero_callers_stays_at_baseline() {
-        let c = compute_confidence(0, 1);
+        let c = compute_confidence(0, 1, None);
         assert!(c < 0.7, "expected low confidence when no callers, got {c}");
     }
 
     #[test]
     fn confidence_climbs_with_depth_and_callers() {
-        assert!(compute_confidence(5, 1) > compute_confidence(0, 1));
-        assert!(compute_confidence(5, 3) > compute_confidence(5, 1));
-        assert_eq!(compute_confidence(100, 5), 1.0);
+        assert!(compute_confidence(5, 1, None) > compute_confidence(0, 1, None));
+        assert!(compute_confidence(5, 3, None) > compute_confidence(5, 1, None));
+        assert_eq!(compute_confidence(100, 5, None), 1.0);
+    }
+
+    #[test]
+    fn dynamic_dispatch_caps_confidence() {
+        let dispatch = DynamicDispatch {
+            status: DispatchStatus::Incomplete,
+            implementations: 3,
+        };
+        // Without the marker this anchor would score 1.0; the cap pulls it
+        // down because the graph is a known lower bound.
+        assert_eq!(compute_confidence(100, 5, None), 1.0);
+        assert_eq!(
+            compute_confidence(100, 5, Some(&dispatch)),
+            DYNAMIC_DISPATCH_CONFIDENCE_CAP
+        );
+    }
+
+    fn impl_at(line: u32) -> Location {
+        Location::point(PathBuf::from("src/lib.rs"), line, 1)
+    }
+
+    #[test]
+    fn dynamic_dispatch_marked_when_implementations_exist() {
+        let mut incoming = HashMap::new();
+        incoming.insert((10, 5), vec![caller(20)]);
+        let radius = compute_for(
+            incoming,
+            vec![impl_at(40), impl_at(50)],
+            Some(SymbolKind::Method),
+            BlastRadiusConfig {
+                max_depth: 1,
+                max_callers_per_node: 8,
+            },
+        );
+        let dispatch = radius
+            .dynamic_dispatch
+            .expect("marker present for a method with impls");
+        assert_eq!(dispatch.status, DispatchStatus::Incomplete);
+        assert_eq!(dispatch.implementations, 2);
+        // The verified caller count is untouched — widening is not done.
+        assert_eq!(radius.direct_callers, 1);
+        assert!(radius.confidence <= DYNAMIC_DISPATCH_CONFIDENCE_CAP);
+    }
+
+    #[test]
+    fn no_marker_for_non_dispatch_kinds_or_without_impls() {
+        // A struct anchor is never probed, even if impls were available.
+        let radius = compute_for(
+            HashMap::new(),
+            vec![impl_at(40)],
+            Some(SymbolKind::Struct),
+            BlastRadiusConfig::default(),
+        );
+        assert!(radius.dynamic_dispatch.is_none());
+
+        // A method with no implementations: the graph is complete, no marker.
+        let radius = compute_for(
+            HashMap::new(),
+            vec![],
+            Some(SymbolKind::Method),
+            BlastRadiusConfig::default(),
+        );
+        assert!(radius.dynamic_dispatch.is_none());
     }
 }

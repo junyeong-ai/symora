@@ -16,7 +16,8 @@ mod lsp;
 mod symbol;
 
 pub use analysis::{
-    AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput, TestOutput,
+    AffectedFileOutput, ImpactOutput, RefOutput, RefsOutput, TargetOutput, TestCoverageOutput,
+    TestOutput,
 };
 pub use editing::{
     ActionOutput, ApplyActionOutput, EditDiagnostics, EditOutput, FileChangeOutput, LineRange,
