@@ -215,16 +215,25 @@ impl Symbol {
         }
     }
 
-    pub fn find_by_path<'a>(symbols: &'a [Symbol], path: &str) -> Option<&'a Symbol> {
+    /// All symbols whose exact path equals `path`, in tree order.
+    /// Children of distinct same-named parents share paths — overload
+    /// indices apply only at the colliding level, and children are keyed
+    /// off the index-free base path — so an exact path can legitimately
+    /// match more than one symbol; callers decide whether that is an
+    /// error.
+    pub fn find_all_by_path<'a>(symbols: &'a [Symbol], path: &str) -> Vec<&'a Symbol> {
+        let mut matches = Vec::new();
+        Self::collect_exact_path(symbols, path, &mut matches);
+        matches
+    }
+
+    fn collect_exact_path<'a>(symbols: &'a [Symbol], path: &str, matches: &mut Vec<&'a Symbol>) {
         for symbol in symbols {
             if symbol.path() == path {
-                return Some(symbol);
+                matches.push(symbol);
             }
-            if let Some(found) = Self::find_by_path(&symbol.children, path) {
-                return Some(found);
-            }
+            Self::collect_exact_path(&symbol.children, path, matches);
         }
-        None
     }
 
     pub fn matches_substring(&self, substring: &str) -> bool {
@@ -521,6 +530,26 @@ mod tests {
             class.children[3].name_path,
             Some("MyClass/unique".to_string())
         );
+    }
+
+    /// Colliding parents get overload indices, but their children hang
+    /// off the index-free base path — so one exact child path can match
+    /// several symbols, while an indexed parent path stays unique.
+    #[test]
+    fn find_all_by_path_returns_every_exact_match() {
+        let mut first = build_symbol("Foo", SymbolKind::Class);
+        first.children = vec![build_symbol("bar", SymbolKind::Method)];
+        let mut second = build_symbol("Foo", SymbolKind::Class);
+        second.children = vec![build_symbol("bar", SymbolKind::Method)];
+
+        let mut symbols = vec![first, second];
+        Symbol::compute_paths_for_all(&mut symbols);
+
+        assert_eq!(symbols[0].path(), "Foo[0]");
+        assert_eq!(symbols[1].path(), "Foo[1]");
+        assert_eq!(Symbol::find_all_by_path(&symbols, "Foo/bar").len(), 2);
+        assert_eq!(Symbol::find_all_by_path(&symbols, "Foo[0]").len(), 1);
+        assert!(Symbol::find_all_by_path(&symbols, "Foo/missing").is_empty());
     }
 
     #[test]

@@ -37,20 +37,50 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
+/// Enforce the `additionalProperties: false` every catalog schema
+/// advertises: an argument key the schema doesn't declare is rejected
+/// with the accepted set, never silently dropped — a typo'd key that
+/// silently falls back to another addressing mode would edit the wrong
+/// target. Null/absent arguments (the zero-argument call shape) pass
+/// through; non-object shapes fall to the handler's own parsing.
+fn check_unknown_arguments(tool: &ToolDefinition, arguments: &Value) -> Result<(), OutputError> {
+    let Some(args) = arguments.as_object() else {
+        return Ok(());
+    };
+    let Some(props) = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+    if let Some(unknown) = args.keys().find(|k| !props.contains_key(k.as_str())) {
+        let mut accepted: Vec<&str> = props.keys().map(String::as_str).collect();
+        accepted.sort_unstable();
+        return Err(OutputError::invalid(format!(
+            "Unknown argument '{unknown}' for tool '{}'",
+            tool.name
+        ))
+        .with_hint(format!("Accepted arguments: {}", accepted.join(", "))));
+    }
+    Ok(())
+}
+
 pub async fn dispatch(
     name: &str,
     arguments: Value,
     app: &App,
     profile: McpProfile,
 ) -> Result<ToolOutput, OutputError> {
-    // The profile gates calls, not just the advertised list — a hidden
-    // tool that still dispatches would make the boundary cosmetic.
-    if let Some(tool) = catalog().iter().find(|t| t.name == name)
-        && !profile.allows(tool)
-    {
-        return Err(OutputError::unsupported(format!(
-            "Tool '{name}' is excluded by the read-only profile"
-        )));
+    if let Some(tool) = catalog().iter().find(|t| t.name == name) {
+        // The profile gates calls, not just the advertised list — a hidden
+        // tool that still dispatches would make the boundary cosmetic.
+        if !profile.allows(tool) {
+            return Err(OutputError::unsupported(format!(
+                "Tool '{name}' is excluded by the read-only profile"
+            )));
+        }
+        check_unknown_arguments(tool, &arguments)?;
     }
 
     let captured = handlers::dispatch(name, arguments, app)
@@ -133,5 +163,117 @@ mod tests {
             .count();
         assert_eq!(hidden, mutating);
         assert!(mutating >= 5, "expected the editing tools to be mutating");
+    }
+
+    fn tool(name: &str) -> &'static ToolDefinition {
+        catalog()
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("tool catalog missing {name}"))
+    }
+
+    fn required_of(tool: &ToolDefinition) -> Vec<&str> {
+        tool.input_schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect()
+    }
+
+    /// The four edit tools require only `file` and advertise both
+    /// addressing modes; the location-taking tools keep their pinned
+    /// required-line contract — the relaxation is local to the edit tools.
+    #[test]
+    fn edit_tools_advertise_symbol_addressing() {
+        for name in [
+            "replace_symbol_body",
+            "insert_before_symbol",
+            "insert_after_symbol",
+            "delete_symbol",
+        ] {
+            let tool = tool(name);
+            assert_eq!(
+                required_of(tool),
+                ["file"],
+                "{name}: required must be [file]"
+            );
+            let props = tool.input_schema["properties"].as_object().unwrap();
+            for prop in ["symbol", "line", "column"] {
+                assert!(props.contains_key(prop), "{name}: missing property {prop}");
+            }
+        }
+        for name in [
+            "find_definition",
+            "find_references",
+            "find_callers",
+            "find_callees",
+            "find_implementations",
+            "get_hover",
+            "get_context",
+            "get_impact",
+            "rename_symbol",
+            "list_code_actions",
+            "apply_code_action",
+        ] {
+            assert!(
+                required_of(tool(name)).contains(&"line"),
+                "{name}: location tools keep requiring line"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_arguments_are_rejected_structurally() {
+        use serde_json::json;
+
+        let err = check_unknown_arguments(
+            tool("delete_symbol"),
+            &json!({"file": "a.rs", "symbol": "Foo", "bogus": 1}),
+        )
+        .unwrap_err();
+        assert!(matches!(err.code, crate::cli::ErrorCode::InvalidArgument));
+        assert!(err.message.contains("bogus"));
+        assert!(err.hint.unwrap().contains("file"));
+
+        assert!(
+            check_unknown_arguments(
+                tool("delete_symbol"),
+                &json!({"file": "a.rs", "symbol": "Foo"})
+            )
+            .is_ok()
+        );
+        assert!(check_unknown_arguments(tool("delete_symbol"), &Value::Null).is_ok());
+        assert!(
+            check_unknown_arguments(tool("get_project_overview"), &json!({"anything": true}))
+                .is_err()
+        );
+        assert!(
+            check_unknown_arguments(
+                tool("get_file_overview"),
+                &json!({"path": "a.rs", "depth": 2, "related_limit": 4}),
+            )
+            .is_ok()
+        );
+    }
+
+    /// Every field a handler input struct deserializes must be an
+    /// advertised catalog property — `check_unknown_arguments` rejects
+    /// undeclared keys, so an unadvertised field would be unreachable at
+    /// runtime. Walks the whole catalog so no tool can drift silently.
+    #[test]
+    fn handler_input_fields_are_advertised_properties() {
+        for tool in catalog() {
+            let fields = handlers::input_fields(tool.name)
+                .unwrap_or_else(|| panic!("{}: no input-field row in handlers.rs", tool.name));
+            let props = tool.input_schema["properties"].as_object().unwrap();
+            for field in fields {
+                assert!(
+                    props.contains_key(*field),
+                    "{}: handler deserializes '{field}' but the catalog does not advertise it",
+                    tool.name,
+                );
+            }
+        }
     }
 }

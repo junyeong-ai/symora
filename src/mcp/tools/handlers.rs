@@ -25,7 +25,7 @@ use crate::cli::commands::{
 use crate::cli::output::{BufferedSink, OutputFormat, OutputOptions};
 use crate::constants::defaults;
 
-use super::schema::LocationInput;
+use super::schema::{EditTargetInput, LocationInput};
 
 /// Captured command output plus whether the command reported a handled
 /// failure (`print_error`), so the MCP layer can set `isError` truthfully.
@@ -573,7 +573,7 @@ async fn run_apply_code_action(args: Value, app: &App) -> Result<CapturedOutput>
 #[derive(Deserialize)]
 struct ReplaceBodyInput {
     #[serde(flatten)]
-    loc: LocationInput,
+    target: EditTargetInput,
     body: String,
     #[serde(default)]
     dry_run: bool,
@@ -583,9 +583,10 @@ struct ReplaceBodyInput {
 
 async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: ReplaceBodyInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::ReplaceBody {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         body: input.body,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
@@ -596,7 +597,7 @@ async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
 #[derive(Deserialize)]
 struct InsertInput {
     #[serde(flatten)]
-    loc: LocationInput,
+    target: EditTargetInput,
     code: String,
     #[serde(default)]
     dry_run: bool,
@@ -606,9 +607,10 @@ struct InsertInput {
 
 async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: InsertInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::InsertBefore {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         code: input.code,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
@@ -618,9 +620,10 @@ async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
 
 async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: InsertInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::InsertAfter {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         code: input.code,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
@@ -631,7 +634,7 @@ async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
 #[derive(Deserialize)]
 struct DeleteSymbolInput {
     #[serde(flatten)]
-    loc: LocationInput,
+    target: EditTargetInput,
     #[serde(default)]
     dry_run: bool,
     #[serde(default)]
@@ -640,9 +643,10 @@ struct DeleteSymbolInput {
 
 async fn run_delete_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: DeleteSymbolInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::Delete {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
     })
@@ -657,4 +661,61 @@ async fn run_edit(
         crate::cli::commands::edit::execute(EditArgs { command: command() }, &a).await
     })
     .await
+}
+
+/// Field names each tool's input struct deserializes, keyed by tool name.
+/// Kept beside the structs so a new field and its row land together; the
+/// catalog lockstep test asserts every row is a subset of the tool's
+/// advertised schema properties — `dispatch` rejects undeclared keys, so
+/// an unadvertised field would be unreachable at runtime.
+#[cfg(test)]
+pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
+    Some(match tool {
+        "get_project_overview" => &[],
+        "get_file_overview" => &["path", "depth", "related_limit"],
+        "search_symbols" => &["query", "language", "kind", "limit"],
+        "search_content" => &["query", "language", "limit"],
+        "list_file_symbols" => &["file", "depth", "body", "signature"],
+        "inspect_symbol" => &["symbol_path", "language", "body"],
+        "find_definition" | "get_hover" => &["file", "line", "column"],
+        "find_references" => &["file", "line", "column", "snippet", "limit"],
+        "find_callers" | "find_callees" | "find_implementations" => {
+            &["file", "line", "column", "limit"]
+        }
+        "get_context" => &[
+            "file", "line", "column", "callers", "callees", "types", "tests", "all",
+        ],
+        "get_impact" => &["file", "line", "column", "limit", "depth"],
+        "build_context_pack" => &["tokens", "focus", "per_file", "shape"],
+        "rename_symbol" => &["file", "line", "column", "new_name", "dry_run"],
+        "list_code_actions" => &["file", "line", "column", "kind", "preferred"],
+        "apply_code_action" => &["file", "line", "column", "title", "dry_run"],
+        "replace_symbol_body" => &[
+            "file",
+            "line",
+            "column",
+            "symbol",
+            "body",
+            "dry_run",
+            "with_diagnostics",
+        ],
+        "insert_before_symbol" | "insert_after_symbol" => &[
+            "file",
+            "line",
+            "column",
+            "symbol",
+            "code",
+            "dry_run",
+            "with_diagnostics",
+        ],
+        "delete_symbol" => &[
+            "file",
+            "line",
+            "column",
+            "symbol",
+            "dry_run",
+            "with_diagnostics",
+        ],
+        _ => return None,
+    })
 }

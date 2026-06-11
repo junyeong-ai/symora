@@ -19,11 +19,11 @@ Exploration flow:
 5. Aggregate: `get_context` returns callers, callees, types, and tests in one call — prefer it over four separate queries.
 6. Before changing a symbol: `get_impact` reports test/prod reference counts, affected files, and a risk-ranked caller graph.
 
-Editing tools — `rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol` — write source files. Preview with dry_run=true first; the preview is an exact diff. `delete_symbol` additionally reports references that would dangle.
+Editing tools — `rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol` — write source files. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` take file plus exactly one of symbol or line: prefer symbol (a path like Class/method, exactly as returned by `search_symbols` or `list_file_symbols`) — it re-resolves against the live file, so sequential edits in one file don't invalidate each other the way line numbers do. `rename_symbol` and `apply_code_action` take file:line:column. Preview with dry_run=true first; the preview is an exact diff. `delete_symbol` additionally reports references that would dangle.
 
 Conventions: positions are 1-indexed lines and columns. List responses share one shape (count, showing, items, truncated, hints, next_commands). Errors carry {code, message, hint}; the hint names a working alternative. A conflict code from an editing tool means the file changed since it was analyzed — re-read it and retry.
 
-Anti-patterns: don't guess a file:line:column — take it from a search or list result; don't read full file bodies to find one symbol; don't retry a capability the server reported as unsupported — follow the error's hint instead.";
+Anti-patterns: don't address an edit by file:line:column when you hold a symbol path — line numbers go stale after every edit; don't guess a file:line:column — take it from a search or list result; don't read full file bodies to find one symbol; don't retry a capability the server reported as unsupported — follow the error's hint instead.";
 
 #[cfg(test)]
 mod tests {
