@@ -363,11 +363,19 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Delete the symbol's full definition. Target by file + symbol \
                           path (e.g. 'Class/method') or by file:line:column — exactly one of \
                           symbol or line. Always reports references outside the deleted span \
-                          that would dangle (report-only). Set dry_run=true to preview. \
-                          ⚠ Mutates source files when dry_run is false.",
+                          that would dangle; set expect_no_references=true to refuse the \
+                          delete unless verified reference-free (fail-closed when \
+                          unverifiable). Set dry_run=true to preview. ⚠ Mutates source files \
+                          when dry_run is false.",
             with_extra(
                 edit_target_schema(),
                 &[
+                    (
+                        "expect_no_references",
+                        "boolean",
+                        "Refuse the delete unless verified reference-free; refusals \
+                         return a precondition_failed error (default false)",
+                    ),
                     (
                         "dry_run",
                         "boolean",

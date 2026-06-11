@@ -636,6 +636,8 @@ struct DeleteSymbolInput {
     #[serde(flatten)]
     target: EditTargetInput,
     #[serde(default)]
+    expect_no_references: bool,
+    #[serde(default)]
     dry_run: bool,
     #[serde(default)]
     with_diagnostics: bool,
@@ -647,6 +649,7 @@ async fn run_delete_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
     run_edit(app, move || EditCommand::Delete {
         target,
         symbol,
+        expect_no_references: input.expect_no_references,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
     })
@@ -713,6 +716,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "line",
             "column",
             "symbol",
+            "expect_no_references",
             "dry_run",
             "with_diagnostics",
         ],
