@@ -5,7 +5,8 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::response::DiagnosticOutput;
+use crate::cli::OutputError;
+use crate::cli::response::{DiagnosticOutput, Section};
 use crate::models::diagnostic::{DiagnosticSeverity, DiagnosticsStatus};
 
 #[derive(Args, Debug)]
@@ -39,8 +40,9 @@ pub struct DiagnosticsOutput {
     /// Absent means the server confirmed the listed diagnostics.
     #[serde(skip_serializing_if = "DiagnosticsStatus::is_ok")]
     pub status: DiagnosticsStatus,
-    pub count: usize,
-    pub diagnostics: Vec<EnhancedDiagnostic>,
+    /// The diagnostics list, flattened in as the shared list contract.
+    #[serde(flatten)]
+    pub diagnostics: Section<EnhancedDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +71,19 @@ pub struct DiagnosticSuggestion {
     pub code: Option<String>,
 }
 
+/// Parse and validate the raw severity filter. Unknown values are
+/// rejected rather than dropped: a silently dropped term can filter
+/// every diagnostic out and make a broken file look clean.
+fn parse_severity_filter(
+    raw: Option<&[String]>,
+) -> Result<Option<Vec<DiagnosticSeverity>>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    raw.iter()
+        .map(|s| s.trim().parse::<DiagnosticSeverity>())
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
 
@@ -78,11 +93,13 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
         app.root().join(&args.file)
     };
 
-    let severity_filter: Option<Vec<DiagnosticSeverity>> = args.severity.as_ref().map(|sevs| {
-        sevs.iter()
-            .filter_map(|s| s.parse::<DiagnosticSeverity>().ok())
-            .collect()
-    });
+    let severity_filter = match parse_severity_filter(args.severity.as_deref()) {
+        Ok(filter) => filter,
+        Err(message) => {
+            ctx.print_error(OutputError::invalid(message));
+            return Ok(());
+        }
+    };
 
     match app.lsp.diagnostics(&abs_file).await {
         Ok(report) => {
@@ -145,8 +162,7 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
             let response = DiagnosticsOutput {
                 file: ctx.relative_path(&abs_file),
                 status,
-                count: enhanced_diagnostics.len(),
-                diagnostics: enhanced_diagnostics,
+                diagnostics: Section::new(enhanced_diagnostics),
             };
             ctx.print_success(response);
         }
@@ -253,8 +269,7 @@ mod tests {
         serde_json::to_value(DiagnosticsOutput {
             file: "src/lib.rs".into(),
             status,
-            count: 0,
-            diagnostics: vec![],
+            diagnostics: Section::new(vec![]),
         })
         .unwrap()
     }
@@ -271,6 +286,36 @@ mod tests {
         assert_eq!(
             output(DiagnosticsStatus::Unsupported)["status"],
             "unsupported"
+        );
+    }
+
+    #[test]
+    fn diagnostics_output_flattens_the_section_contract() {
+        let value = output(DiagnosticsStatus::Ok);
+        assert_eq!(value["file"], "src/lib.rs");
+        assert_eq!(value["count"], 0);
+        assert_eq!(value["showing"], 0);
+        assert!(value["items"].is_array());
+        assert!(
+            value.get("diagnostics").is_none(),
+            "section must be flattened, not nested under `diagnostics`"
+        );
+    }
+
+    #[test]
+    fn severity_filter_rejects_unknown_values() {
+        let err = parse_severity_filter(Some(&["error".into(), "bogus".into()])).unwrap_err();
+        assert!(err.contains("bogus"));
+    }
+
+    #[test]
+    fn severity_filter_parses_aliases_and_trims() {
+        let parsed = parse_severity_filter(Some(&[" warn ".into(), "E".into()]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed,
+            vec![DiagnosticSeverity::Warning, DiagnosticSeverity::Error]
         );
     }
 }

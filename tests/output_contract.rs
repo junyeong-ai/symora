@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use insta::assert_json_snapshot;
 use serde_json::json;
 use symora::cli::blast_radius::{BlastRadius, DepthBucket, RiskLevel};
+use symora::cli::commands::diagnostics::{DiagnosticsOutput, EnhancedDiagnostic};
 use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, DefinitionOutput,
@@ -24,6 +25,7 @@ use symora::cli::response::{
     SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput,
     TypeInfoOutput,
 };
+use symora::models::diagnostic::DiagnosticsStatus;
 use symora::models::lsp::{CallHierarchyItem, TypeHierarchyItem};
 use symora::models::symbol::{Language, Location, Symbol, SymbolKind};
 
@@ -234,6 +236,30 @@ fn diagnostic_output_full() {
         code: Some("E0308".to_string()),
         source: Some("rust-analyzer".to_string()),
         tags: vec!["unnecessary".to_string()],
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
+fn diagnostics_output_flattened_section_with_status() {
+    let out = DiagnosticsOutput {
+        file: "src/main.rs".to_string(),
+        status: DiagnosticsStatus::Unconfirmed,
+        diagnostics: Section::new(vec![EnhancedDiagnostic {
+            base: DiagnosticOutput {
+                severity: "error".to_string(),
+                message: "type mismatch".to_string(),
+                line: 30,
+                column: 8,
+                end_line: 30,
+                end_column: 16,
+                code: Some("E0308".to_string()),
+                source: Some("rust-analyzer".to_string()),
+                tags: vec![],
+            },
+            context: vec![],
+            suggestions: vec![],
+        }]),
     };
     assert_json_snapshot!(out);
 }

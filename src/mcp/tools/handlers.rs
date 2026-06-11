@@ -11,6 +11,7 @@ use crate::cli::commands::{
     callers::CallersArgs,
     context::ContextArgs,
     def::DefArgs,
+    diagnostics::DiagnosticsArgs,
     edit::{EditArgs, EditCommand},
     hover::HoverArgs,
     impact::ImpactArgs,
@@ -61,6 +62,7 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "get_hover" => run_hover(arguments, app).await,
         "get_context" => run_get_context(arguments, app).await,
         "get_impact" => run_get_impact(arguments, app).await,
+        "get_diagnostics" => run_get_diagnostics(arguments, app).await,
         "build_context_pack" => run_context_pack(arguments, app).await,
         "rename_symbol" => run_rename_symbol(arguments, app).await,
         "list_code_actions" => run_list_code_actions(arguments, app).await,
@@ -454,6 +456,36 @@ async fn run_get_impact(args: Value, app: &App) -> Result<CapturedOutput> {
 }
 
 #[derive(Deserialize)]
+struct GetDiagnosticsInput {
+    file: String,
+    severity: Option<String>,
+    source: Option<String>,
+}
+
+async fn run_get_diagnostics(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: GetDiagnosticsInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::diagnostics::execute(
+            DiagnosticsArgs {
+                file: input.file.into(),
+                severity: input
+                    .severity
+                    .map(|s| s.split(',').map(str::to_string).collect()),
+                source: input.source,
+                // Pinned off: per-diagnostic definition/type-definition and
+                // quickfix probes multiply LSP round-trips; the catalog's
+                // navigation and code-action tools cover the follow-up.
+                with_context: false,
+                with_suggestions: false,
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+#[derive(Deserialize)]
 struct ContextPackInput {
     #[serde(default = "default_pack_tokens")]
     tokens: usize,
@@ -689,6 +721,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "file", "line", "column", "callers", "callees", "types", "tests", "all",
         ],
         "get_impact" => &["file", "line", "column", "limit", "depth"],
+        "get_diagnostics" => &["file", "severity", "source"],
         "build_context_pack" => &["tokens", "focus", "per_file", "shape"],
         "rename_symbol" => &["file", "line", "column", "new_name", "dry_run"],
         "list_code_actions" => &["file", "line", "column", "kind", "preferred"],

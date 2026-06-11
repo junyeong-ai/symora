@@ -42,6 +42,11 @@ const CASES: &[ParityCase] = &[
         arguments: r#"{"query":""}"#,
         cli: &["search", "content", ""],
     },
+    ParityCase {
+        tool: "get_diagnostics",
+        arguments: r#"{"file":"src/main.rs","severity":"bogus"}"#,
+        cli: &["diagnostics", "src/main.rs", "--severity", "bogus"],
+    },
 ];
 
 fn run_cli(args: &[&str]) -> Vec<Value> {

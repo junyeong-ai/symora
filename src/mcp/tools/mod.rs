@@ -123,6 +123,7 @@ mod tests {
             "get_hover",
             "get_context",
             "get_impact",
+            "get_diagnostics",
             "build_context_pack",
             "rename_symbol",
             "list_code_actions",

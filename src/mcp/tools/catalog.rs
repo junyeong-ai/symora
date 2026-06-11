@@ -212,6 +212,52 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             ),
         ),
         ToolDefinition::read_only(
+            "get_diagnostics",
+            "LSP diagnostics (errors, warnings, hints) for one file. The \
+                          verification step after an editing tool writes a file. A `status` \
+                          field of unconfirmed or unsupported means the list is not \
+                          authoritative — empty then means unknown, not clean. When the list \
+                          floods, narrow it with severity (e.g. \"error\") instead of \
+                          reading every entry.",
+            schema_object(
+                &[
+                    ("file", "string", "Project-relative file path"),
+                    (
+                        "severity",
+                        "string",
+                        "Optional severity filter, comma-separated: error, warning, info, hint",
+                    ),
+                    (
+                        "source",
+                        "string",
+                        "Optional diagnostic source filter (e.g. rust-analyzer)",
+                    ),
+                ],
+                &["file"],
+            ),
+        )
+        .with_output_schema(with_extra(
+            section_output_schema(
+                "Diagnostics: severity, message, line, column, end_line, end_column, \
+                 code?, source?, tags?",
+            ),
+            &[
+                (
+                    "file",
+                    "string",
+                    "Project-relative file the diagnostics were pulled for",
+                ),
+                (
+                    "status",
+                    "string",
+                    "Present only when the list is not authoritative: unconfirmed \
+                     (no confirmed analysis within the wait window) or unsupported \
+                     (the server doesn't publish diagnostics) — empty items then \
+                     means unknown, not clean",
+                ),
+            ],
+        )),
+        ToolDefinition::read_only(
             "build_context_pack",
             "Build a token-budgeted context pack: PageRank-ranked files with \
                           top-level signatures fitted to a token budget. Strong first call \
