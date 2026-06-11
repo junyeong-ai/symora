@@ -4,13 +4,14 @@
 
 ## Catalog and handlers must stay in lockstep
 
-Three things are co-versioned for every tool:
+Four things are co-versioned for every tool:
 
 1. An entry in `tools/catalog.rs` (the `tools/list` schema)
 2. An input struct in `tools/handlers.rs`
 3. A branch in the `dispatch` match
+4. Every field the input struct deserializes must be an advertised property in the catalog schema. `dispatch` rejects unknown argument keys against the catalog (`check_unknown_arguments`), so an undeclared-but-deserialized field is unreachable at runtime — adding a tool option means touching the catalog entry and the input struct in the same change.
 
-A test in `tools/mod.rs` enumerates the required tool names. Adding a tool means touching all three; removing one means removing all three. The test will fail if they drift.
+Tests in `tools/mod.rs` enumerate the required tool names and assert every handler input field is an advertised property. Adding a tool means touching all four; removing one means removing all four. The tests will fail if they drift. Property names mirror the backing command's field (`path` on get_file_overview vs `file` on list_file_symbols is intentional, not drift).
 
 ## Mutating tools advertise themselves — twice, in lockstep
 
@@ -22,7 +23,7 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 ## Location input convention
 
-Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the three fields. New location-taking tools follow the same pattern.
+Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the three fields. New location-taking tools follow the same pattern. The edit tools embed `EditTargetInput` instead (file plus exactly one of symbol or line); navigation/analysis tools keep `LocationInput`.
 
 ## Output discipline
 

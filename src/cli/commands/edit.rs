@@ -890,6 +890,55 @@ fn stale_revision(message: String) -> anyhow::Error {
     anyhow::Error::new(crate::cli::OutputError::conflict(message))
 }
 
+fn symbol_not_found(pattern: &str, file: &str) -> anyhow::Error {
+    anyhow::Error::new(
+        crate::cli::OutputError::not_found(format!("Symbol not found: {pattern} in {file}"))
+            .with_hint(format!("List symbol paths with 'symora symbols {file}'")),
+    )
+}
+
+/// Candidates rendered inline in the ambiguity hint before `+N more`
+/// takes over — the message always carries the true total, and the full
+/// set stays one `symora symbols <file>` call away.
+const AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT: usize = 5;
+
+/// Several symbols sharing one exact path (children of same-named
+/// parents render identical paths) is an under-specified target the
+/// agent fixes by re-addressing; the line number is the only honest
+/// disambiguator, so the hint routes to line addressing.
+fn ambiguous_symbol_path(pattern: &str, candidates: &[&Symbol], file: &str) -> anyhow::Error {
+    let mut listing = candidates
+        .iter()
+        .take(AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT)
+        .map(|s| format!("{} ({}) line {}", s.path(), s.kind, s.location.line))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if candidates.len() > AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT {
+        listing.push_str(&format!(
+            ", +{} more",
+            candidates.len() - AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT
+        ));
+    }
+    anyhow::Error::new(
+        crate::cli::OutputError::invalid(format!(
+            "Symbol path '{pattern}' matches {} symbols in {file}",
+            candidates.len()
+        ))
+        .with_hint(format!(
+            "Candidates: {listing}. Target one by file:line instead."
+        )),
+    )
+}
+
+fn conflicting_addressing(target: &str) -> anyhow::Error {
+    anyhow::Error::new(
+        crate::cli::OutputError::invalid(format!(
+            "Target '{target}' is a location and --symbol was also given; pass exactly one"
+        ))
+        .with_hint("Use file:line[:col] alone, or a plain file path with --symbol"),
+    )
+}
+
 /// Valid columns run 1..=chars+1 — one past the last character is the
 /// zero-width position at EOL.
 fn ensure_column_in_line(col: u32, line: &str, line_no: u32) -> Result<()> {
@@ -985,16 +1034,23 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Find symbol by path pattern in a file
+/// Resolve an exact symbol path in a file to the one symbol it names.
+/// Zero matches is a structured not-found; several is a structured
+/// ambiguity listing the candidates — silently editing an arbitrary
+/// match would be plausible-but-wrong.
 async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
     let mut symbols = app
         .lsp
         .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
         .await?;
     Symbol::compute_paths_for_all(&mut symbols);
-    Symbol::find_by_path(&symbols, pattern)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", pattern))
+    let matches = Symbol::find_all_by_path(&symbols, pattern);
+    let file_display = app.output.relative_path(file);
+    match matches.as_slice() {
+        [] => Err(symbol_not_found(pattern, &file_display)),
+        [only] => Ok((*only).clone()),
+        many => Err(ambiguous_symbol_path(pattern, many, &file_display)),
+    }
 }
 
 /// Find the symbol at a position: column-precise first, so same-line
@@ -1018,7 +1074,17 @@ async fn find_symbol_at_location(app: &App, file: &Path, line: u32, column: u32)
         // line) is still an unambiguous target.
         0 => crate::cli::utils::find_symbol_at_position(&symbols, line, None)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("No symbol found at line {}", line)),
+            .ok_or_else(|| {
+                let file_display = app.output.relative_path(file);
+                anyhow::Error::new(
+                    crate::cli::OutputError::not_found(format!(
+                        "No symbol found at line {line} in {file_display}"
+                    ))
+                    .with_hint(format!(
+                        "List symbol paths with 'symora symbols {file_display}'"
+                    )),
+                )
+            }),
         1 => Ok(declared[0].clone()),
         _ => {
             let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
@@ -1048,7 +1114,8 @@ fn symbols_declared_on_line(symbols: &[Symbol], line: u32) -> Vec<&Symbol> {
 }
 
 /// Resolve full symbol from target. Auto-detects location format
-/// (`file:line[:col]`) vs file path (requires --symbol).
+/// (`file:line[:col]`) vs file path (requires --symbol); passing both
+/// addressing modes at once is refused rather than silently picking one.
 async fn resolve_symbol(
     app: &App,
     target: &str,
@@ -1056,6 +1123,9 @@ async fn resolve_symbol(
 ) -> Result<(PathBuf, Symbol)> {
     // Location mode: find symbol at position
     if ParsedLocation::is_location_format(target) {
+        if symbol_path.is_some() {
+            anyhow::bail!(conflicting_addressing(target));
+        }
         let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
         let symbol = find_symbol_at_location(app, &loc.file, loc.line, loc.column).await?;
         return Ok((loc.file, symbol));
@@ -1063,9 +1133,11 @@ async fn resolve_symbol(
 
     // Symbol mode: --symbol is required
     let pattern = symbol_path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "--symbol is required when target is a file path. \
-             Use file:line:col format for position-based editing."
+        anyhow::Error::new(
+            crate::cli::OutputError::invalid("--symbol is required when target is a file path")
+                .with_hint(
+                    "Pass file:line[:col] for position addressing, or a file path plus --symbol",
+                ),
         )
     })?;
 
@@ -1846,6 +1918,60 @@ mod tests {
         let span = LineRange { start: 1, end: 2 };
         let err = ensure_exclusive_line_ownership(&content, &sym, &span).unwrap_err();
         assert!(err.to_string().contains("shares its last line"));
+    }
+
+    fn path_candidate(line: u32) -> Symbol {
+        Symbol::new(
+            "bar".to_string(),
+            SymbolKind::Method,
+            Location::point(PathBuf::from("/tmp/a.rs"), line, 5),
+        )
+    }
+
+    /// Several symbols sharing one exact path is an under-specified
+    /// target the agent fixes by re-addressing — same code as the
+    /// multi-symbol-line case, with the candidates' lines as the honest
+    /// disambiguator.
+    #[test]
+    fn ambiguous_symbol_path_is_invalid_argument_with_candidates() {
+        use crate::cli::{ErrorCode, OutputError};
+        let first = path_candidate(10);
+        let second = path_candidate(40);
+        let out: OutputError = ambiguous_symbol_path("Foo/bar", &[&first, &second], "a.rs").into();
+        assert!(matches!(out.code, ErrorCode::InvalidArgument));
+        assert!(out.message.contains("matches 2 symbols"));
+        let hint = out.hint.unwrap();
+        assert!(hint.contains("line 10") && hint.contains("line 40"));
+        assert!(hint.contains("file:line"));
+    }
+
+    #[test]
+    fn ambiguous_symbol_path_hint_caps_candidates() {
+        use crate::cli::OutputError;
+        let symbols: Vec<Symbol> = (1..=7).map(|i| path_candidate(i * 10)).collect();
+        let candidates: Vec<&Symbol> = symbols.iter().collect();
+        let out: OutputError = ambiguous_symbol_path("Foo/bar", &candidates, "a.rs").into();
+        assert!(out.message.contains("matches 7 symbols"));
+        let hint = out.hint.unwrap();
+        assert!(hint.contains("+2 more"));
+        assert!(hint.contains("line 50") && !hint.contains("line 60"));
+    }
+
+    #[test]
+    fn symbol_not_found_is_structured() {
+        use crate::cli::{ErrorCode, OutputError};
+        let out: OutputError = symbol_not_found("Foo/bar", "src/a.rs").into();
+        assert!(matches!(out.code, ErrorCode::NotFound));
+        assert!(out.message.contains("Foo/bar"));
+        assert!(out.hint.unwrap().contains("symora symbols"));
+    }
+
+    #[test]
+    fn conflicting_addressing_is_invalid_argument() {
+        use crate::cli::{ErrorCode, OutputError};
+        let out: OutputError = conflicting_addressing("src/a.rs:10:1").into();
+        assert!(matches!(out.code, ErrorCode::InvalidArgument));
+        assert!(out.hint.unwrap().contains("--symbol"));
     }
 
     /// A symbol on a multi-symbol line resolves only with a matching

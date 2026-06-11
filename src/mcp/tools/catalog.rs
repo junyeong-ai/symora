@@ -1,6 +1,8 @@
 use crate::mcp::protocol::ToolDefinition;
 
-use super::schema::{location_schema, schema_object, section_output_schema, with_extra};
+use super::schema::{
+    edit_target_schema, location_schema, schema_object, section_output_schema, with_extra,
+};
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
     vec![
@@ -15,7 +17,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Compact map for one file: focus symbols, sibling/counterpart files, \
                           shallow symbol tree, and related-file ranking.",
             schema_object(
-                &[("path", "string", "Project-relative file path")],
+                &[
+                    ("path", "string", "Project-relative file path"),
+                    ("depth", "integer", "Nested-symbol depth (default 1)"),
+                    (
+                        "related_limit",
+                        "integer",
+                        "Maximum related files to show (default 8)",
+                    ),
+                ],
                 &["path"],
             ),
         ),
@@ -282,11 +292,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "replace_symbol_body",
-            "Replace the resolved symbol's full body with new source code at \
-                          file:line:column. Splices by the LSP's symbol range so braces / \
-                          decorators stay intact. ⚠ Mutates source files when dry_run is false.",
+            "Replace the resolved symbol's full body with new source code. \
+                          Target by file + symbol path (e.g. 'Class/method') or by \
+                          file:line:column — exactly one of symbol or line. Splices by the \
+                          LSP's symbol range so braces / decorators stay intact. \
+                          ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     ("body", "string", "New source for the symbol"),
                     (
@@ -304,10 +316,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "insert_before_symbol",
-            "Insert source code immediately before the symbol at \
-                          file:line:column. ⚠ Mutates source files when dry_run is false.",
+            "Insert source code immediately before the symbol, targeted by \
+                          file + symbol path or file:line:column — exactly one of symbol or \
+                          line. ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     ("code", "string", "Source code to insert"),
                     (
@@ -325,10 +338,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "insert_after_symbol",
-            "Insert source code immediately after the symbol at \
-                          file:line:column. ⚠ Mutates source files when dry_run is false.",
+            "Insert source code immediately after the symbol, targeted by \
+                          file + symbol path or file:line:column — exactly one of symbol or \
+                          line. ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     ("code", "string", "Source code to insert"),
                     (
@@ -346,12 +360,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "delete_symbol",
-            "Delete the symbol's full definition at file:line:column. \
-                          Always reports references outside the deleted span that would \
-                          dangle (report-only). Set dry_run=true to preview. \
+            "Delete the symbol's full definition. Target by file + symbol \
+                          path (e.g. 'Class/method') or by file:line:column — exactly one of \
+                          symbol or line. Always reports references outside the deleted span \
+                          that would dangle (report-only). Set dry_run=true to preview. \
                           ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     (
                         "dry_run",
