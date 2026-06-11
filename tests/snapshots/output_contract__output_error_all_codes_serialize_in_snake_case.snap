@@ -56,6 +56,10 @@ expression: payload
     "message": "x"
   },
   {
+    "code": "precondition_failed",
+    "message": "x"
+  },
+  {
     "code": "file_too_large",
     "message": "x"
   },

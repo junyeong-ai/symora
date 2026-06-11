@@ -110,6 +110,7 @@ symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
 symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
 symora edit delete src/main.rs:42:4 --dry-run          # reports dangling references
+symora edit delete src/main.rs:42:4 --expect-no-references # refuses unless verified reference-free
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
 symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
 symora format src/main.rs
@@ -289,7 +290,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor, etc. use
 symora mcp serve --transport http --port 8765
 ```
 
-The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` target by `file` plus exactly one of `symbol` (a path like 'Class/method') or `line`.
+The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` target by `file` plus exactly one of `symbol` (a path like 'Class/method') or `line`; delete_symbol additionally accepts expect_no_references to make reference-freedom a checked precondition (refusals return a precondition_failed error).
 
 ---
 

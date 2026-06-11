@@ -107,8 +107,10 @@ pub enum EditCommand {
     },
 
     /// Delete a symbol's full definition. Always reports references
-    /// outside the deleted span that would dangle — report-only, never
-    /// auto-edited.
+    /// outside the deleted span that would dangle; with
+    /// `--expect-no-references` the report becomes a checked
+    /// precondition and the delete is refused while they exist or
+    /// cannot be verified.
     Delete {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
@@ -116,6 +118,14 @@ pub enum EditCommand {
         /// Symbol path when target is a file (e.g., "Class/method")
         #[arg(short = 's', long)]
         symbol: Option<String>,
+
+        /// Make verified reference-freedom a precondition: refuse the delete
+        /// (no write) unless the reference check verified zero references
+        /// outside the deleted span. Fail-closed: an unsupported or failed
+        /// check, or a zero computed under degraded indexing, also refuses.
+        /// Evaluated on dry runs too.
+        #[arg(long)]
+        expect_no_references: bool,
 
         /// Preview the deletion without writing to disk.
         #[arg(long)]
@@ -273,11 +283,20 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
         EditCommand::Delete {
             target,
             symbol,
+            expect_no_references,
             dry_run,
             with_diagnostics,
         } => {
             let (file, sym) = resolve_symbol(app, &target, symbol).await?;
-            delete_symbol(app, &file, &sym, dry_run, with_diagnostics).await
+            delete_symbol(
+                app,
+                &file,
+                &sym,
+                dry_run,
+                with_diagnostics,
+                expect_no_references,
+            )
+            .await
         }
         EditCommand::Replace {
             start,
@@ -407,20 +426,31 @@ fn ensure_exclusive_line_ownership(
 }
 
 /// Delete = splice to zero lines, plus the safety check that always
-/// runs — dry-run included. The destructive path never skips it.
+/// runs — dry-run included. The destructive path never skips it. With
+/// `expect_no_references`, the check's verified-zero result becomes a
+/// precondition for the write.
 async fn delete_symbol(
     app: &App,
     file: &Path,
     symbol: &Symbol,
     dry_run: bool,
     with_diagnostics: bool,
+    expect_no_references: bool,
 ) -> Result<()> {
     let doc = FileDocument::load(file, dry_run)?;
     let span = symbol_line_span(symbol, doc.lines.len())?;
     ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
 
-    let (dangling_references, references_status) =
-        check_dangling_references(app, file, symbol, &span).await;
+    let check = check_dangling_references(app, file, symbol, &span).await;
+    if expect_no_references {
+        let refs_command = format!(
+            "symora refs {}:{}:{}",
+            app.output.relative_path(file),
+            symbol.location.line,
+            symbol.location.column,
+        );
+        ensure_no_dangling_references(&symbol.name, &refs_command, &check)?;
+    }
 
     let splice = LineSplice {
         at: span.start as usize - 1,
@@ -429,8 +459,10 @@ async fn delete_symbol(
     };
     let target = Some((symbol.path().to_string(), symbol.kind.to_string()));
     let mut output = doc.commit(app, "delete", splice, span, target, dry_run)?;
-    output.dangling_references = dangling_references;
-    output.references_status = references_status;
+    match check {
+        ReferenceCheck::Checked(section) => output.dangling_references = Some(section),
+        ReferenceCheck::Unverifiable(status) => output.references_status = Some(status),
+    }
     output.diagnostics = pull_diagnostics(app, file, dry_run, with_diagnostics).await;
     app.output.print_success(output);
     finish(app, file, dry_run).await;
@@ -441,6 +473,21 @@ async fn delete_symbol(
 /// `find_references` call away and the section says it was truncated.
 const DELETE_REFS_DISPLAY_LIMIT: usize = 50;
 
+/// Outcome of the pre-delete reference lookup. The two variants map 1:1
+/// onto `EditOutput`'s exactly-one-of `dangling_references` /
+/// `references_status` fields, so the presence rule is enforced at the
+/// producer's type rather than by convention.
+enum ReferenceCheck {
+    /// The lookup ran; the section lists span-filtered dangling
+    /// references and carries the `indexing` marker when the count is a
+    /// lower bound.
+    Checked(Section<crate::cli::response::LocationOutput>),
+    /// The lookup could not run; the status string is the
+    /// `references_status` value emitted on `EditOutput`
+    /// (`"unsupported"` | `"unavailable"`).
+    Unverifiable(&'static str),
+}
+
 /// References at the symbol's *name* position (not the declaration
 /// start the splice uses — nothing references the `pub` keyword) that
 /// live outside the deleted span. Honest per invariant 4: when the
@@ -450,17 +497,14 @@ async fn check_dangling_references(
     file: &Path,
     symbol: &Symbol,
     span: &LineRange,
-) -> (
-    Option<Section<crate::cli::response::LocationOutput>>,
-    Option<&'static str>,
-) {
+) -> ReferenceCheck {
     use crate::cli::response::LocationOutput;
     use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
 
     if get_support_level(Language::from_path(file), LspFeature::FindReferences)
         == SupportLevel::None
     {
-        return (None, Some("unsupported"));
+        return ReferenceCheck::Unverifiable("unsupported");
     }
 
     let refs = match app
@@ -471,7 +515,7 @@ async fn check_dangling_references(
         Ok(refs) => refs,
         Err(e) => {
             tracing::warn!("Reference check for delete failed: {e}");
-            return (None, Some("unavailable"));
+            return ReferenceCheck::Unverifiable("unavailable");
         }
     };
 
@@ -504,7 +548,92 @@ async fn check_dangling_references(
             symbol.location.column,
         )]);
     }
-    (Some(section), None)
+    ReferenceCheck::Checked(section)
+}
+
+/// The no-references precondition, fail-closed: the ONLY state that
+/// passes is a completed check with zero dangling references and no
+/// indexing degradation. A non-answer or a documented lower bound must
+/// never read as "confirmed reference-free" (invariant 4) — every other
+/// state refuses, naming its exact reason in the message and a working
+/// alternative in the hint.
+fn ensure_no_dangling_references(
+    symbol_name: &str,
+    refs_command: &str,
+    check: &ReferenceCheck,
+) -> Result<()> {
+    use crate::models::lsp::IndexingDegradation;
+
+    // Exhaustive on purpose: a future degradation variant is a compile
+    // error here, never a silently wrong marker. The string matches the
+    // variant's snake_case wire form.
+    fn marker(degradation: IndexingDegradation) -> &'static str {
+        match degradation {
+            IndexingDegradation::TimedOut => "timed_out",
+        }
+    }
+
+    fn refuse(message: String, hint: String) -> anyhow::Error {
+        anyhow::Error::new(crate::cli::OutputError::precondition_failed(message).with_hint(hint))
+    }
+
+    match check {
+        ReferenceCheck::Unverifiable(status) => {
+            let message = format!(
+                "Delete of '{symbol_name}' refused: the no-references precondition \
+                 cannot be verified (references_status: {status})"
+            );
+            let hint = if *status == "unsupported" {
+                format!(
+                    "Reference lookup is unsupported for this language; verify call \
+                     sites manually (try: symora search content '{symbol_name}') and \
+                     rerun without --expect-no-references."
+                )
+            } else {
+                "The reference lookup failed; retry once, check 'symora doctor', or \
+                 verify manually and rerun without --expect-no-references."
+                    .to_string()
+            };
+            anyhow::bail!(refuse(message, hint))
+        }
+        ReferenceCheck::Checked(section) if section.count > 0 => {
+            let count = section.count;
+            let message = match section.indexing {
+                None => format!(
+                    "Delete of '{symbol_name}' refused: {count} dangling references \
+                     outside the deleted span violate the no-references precondition"
+                ),
+                Some(degradation) => format!(
+                    "Delete of '{symbol_name}' refused: at least {count} dangling \
+                     references outside the deleted span violate the no-references \
+                     precondition (indexing: {} — the count is a lower bound)",
+                    marker(degradation),
+                ),
+            };
+            anyhow::bail!(refuse(
+                message,
+                format!(
+                    "List them: {refs_command}. Fix those call sites and retry, or \
+                     rerun without --expect-no-references."
+                ),
+            ))
+        }
+        ReferenceCheck::Checked(section) => match section.indexing {
+            Some(degradation) => anyhow::bail!(refuse(
+                format!(
+                    "Delete of '{symbol_name}' refused: the reference count of 0 is a \
+                     lower bound under degraded indexing (indexing: {}), which does \
+                     not verify the no-references precondition",
+                    marker(degradation),
+                ),
+                "Wait for the language server to finish indexing (check 'symora \
+                 status'), then retry; or verify manually and rerun without \
+                 --expect-no-references."
+                    .to_string(),
+            )),
+            None => Ok(()),
+        },
+    }
 }
 
 /// Post-edit diagnostics pull, gated on the flag and on the edit having
@@ -1876,6 +2005,92 @@ mod tests {
         let err = char_splice(&original, 1, 1, 1, Some(20), "x", None).unwrap_err();
         let out: OutputError = err.into();
         assert!(matches!(out.code, ErrorCode::InvalidArgument));
+    }
+
+    /// The only state that satisfies the no-references precondition: the
+    /// check ran, found zero dangling references, with no degradation.
+    #[test]
+    fn no_references_guard_passes_on_verified_zero() {
+        let check = ReferenceCheck::Checked(Section::new(vec![]));
+        assert!(
+            ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check).is_ok()
+        );
+    }
+
+    /// Dangling references refuse with the pre-cap total in the message
+    /// and the ready-to-run refs command in the hint.
+    #[test]
+    fn no_references_guard_refuses_dangling_references() {
+        use crate::cli::{ErrorCode, OutputError};
+        let check = ReferenceCheck::Checked(Section::with_total(Vec::new(), 2));
+        let err = ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check)
+            .unwrap_err();
+        let out: OutputError = err.into();
+        assert!(matches!(out.code, ErrorCode::PreconditionFailed));
+        assert!(out.message.contains("2 dangling references"));
+        assert!(out.message.contains("outside the deleted span"));
+        assert!(out.hint.unwrap().contains("symora refs src/foo.rs:2:1"));
+    }
+
+    /// An unsupported reference lookup fails closed, disclosing the
+    /// status verbatim and routing to the manual alternative.
+    #[test]
+    fn no_references_guard_refuses_unsupported_status() {
+        use crate::cli::{ErrorCode, OutputError};
+        let check = ReferenceCheck::Unverifiable("unsupported");
+        let err = ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check)
+            .unwrap_err();
+        let out: OutputError = err.into();
+        assert!(matches!(out.code, ErrorCode::PreconditionFailed));
+        assert!(out.message.contains("references_status: unsupported"));
+        assert!(out.hint.unwrap().contains("search content"));
+    }
+
+    /// A failed lookup also fails closed — "could not check" never reads
+    /// as "no references".
+    #[test]
+    fn no_references_guard_refuses_unavailable_status() {
+        use crate::cli::{ErrorCode, OutputError};
+        let check = ReferenceCheck::Unverifiable("unavailable");
+        let err = ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check)
+            .unwrap_err();
+        let out: OutputError = err.into();
+        assert!(matches!(out.code, ErrorCode::PreconditionFailed));
+        assert!(out.message.contains("references_status: unavailable"));
+        assert!(out.hint.unwrap().contains("doctor"));
+    }
+
+    /// A zero computed under degraded indexing is a lower bound, not a
+    /// verified zero — it refuses, naming the degradation.
+    #[test]
+    fn no_references_guard_refuses_degraded_zero_as_unverified() {
+        use crate::cli::{ErrorCode, OutputError};
+        use crate::models::lsp::IndexingDegradation;
+        let check = ReferenceCheck::Checked(
+            Section::new(vec![]).with_indexing(Some(IndexingDegradation::TimedOut)),
+        );
+        let err = ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check)
+            .unwrap_err();
+        let out: OutputError = err.into();
+        assert!(matches!(out.code, ErrorCode::PreconditionFailed));
+        assert!(out.message.contains("lower bound"));
+        assert!(out.message.contains("timed_out"));
+    }
+
+    /// A non-zero count under degradation is stated as "at least" so the
+    /// agent never treats it as exhaustive when fixing call sites.
+    #[test]
+    fn no_references_guard_marks_degraded_count_as_lower_bound() {
+        use crate::cli::{ErrorCode, OutputError};
+        use crate::models::lsp::IndexingDegradation;
+        let check = ReferenceCheck::Checked(
+            Section::with_total(Vec::new(), 3).with_indexing(Some(IndexingDegradation::TimedOut)),
+        );
+        let err = ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check)
+            .unwrap_err();
+        let out: OutputError = err.into();
+        assert!(matches!(out.code, ErrorCode::PreconditionFailed));
+        assert!(out.message.contains("at least 3"));
     }
 
     /// A symbol sharing its first or last line with other code must be
