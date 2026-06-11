@@ -143,17 +143,14 @@ fn pyright_resolves_across_package_boundaries() {
     let diagnostics = run_in_fixture(&["diagnostics".into(), report_rel.into()]);
     let import_errors = diagnostics["items"]
         .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|d| {
-                    d["message"]
-                        .as_str()
-                        .is_some_and(|m| m.contains("could not be resolved"))
-                })
-                .count()
+        .expect("diagnostics items")
+        .iter()
+        .filter(|d| {
+            d["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("could not be resolved"))
         })
-        .unwrap_or(0);
+        .count();
     assert_eq!(
         import_errors, 0,
         "cross-package import must resolve via the fixture venv: {diagnostics}"
