@@ -14,6 +14,13 @@ pub mod defaults {
     /// single 10k-LOC file from drowning out neighbouring context.
     pub const PACK_SYMBOLS_PER_FILE: usize = 12;
 
+    /// Token budget for `context --with-bodies` section bodies. Half of
+    /// PACK_TOKENS: a bodies-bearing context response rides alongside the
+    /// target/refs/section data the agent already pays for, and ~2000
+    /// tokens ≈ 500 LOC — comfortably a dozen typical callee bodies at
+    /// depth 1.
+    pub const CONTEXT_BODY_TOKENS: usize = 2000;
+
     /// Hard cap on file size pack will read. Keeps generated artefacts and
     /// vendored bundles from dominating the import graph.
     pub const PACK_MAX_FILE_BYTES: u64 = 256 * 1024;

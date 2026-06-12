@@ -156,3 +156,82 @@ fn pyright_resolves_across_package_boundaries() {
         "cross-package import must resolve via the fixture venv: {diagnostics}"
     );
 }
+
+/// `context --with-bodies` attaches a complete verbatim body —
+/// whole-body-or-nothing — and a starved budget discloses zero
+/// attachments without touching the items themselves. Exercised through
+/// the types section because pyright does not serve outgoing calls; both
+/// sections share one resolution and budget path, and the type here
+/// crosses the package boundary.
+#[test]
+#[ignore = "requires pyright + a built fixture venv; run: cargo test --test lang_fixtures -- --ignored"]
+fn context_with_bodies_attaches_whole_type_bodies() {
+    if !prerequisites_ready() {
+        return;
+    }
+
+    let report = fixture_root().join("packages/app/src/fixture_app/report.py");
+    let report_rel = "packages/app/src/fixture_app/report.py";
+    let geometry = fixture_root().join("packages/core/src/fixture_core/geometry.py");
+
+    let (line, col) = find_identifier(&report, "circle", 1);
+    let context = run_in_fixture(&[
+        "context".into(),
+        format!("{report_rel}:{line}:{col}"),
+        "--types".into(),
+        "--with-bodies".into(),
+    ]);
+
+    let types = &context["types"];
+    let items = types["items"].as_array().expect("types items");
+    let circle_body = items
+        .iter()
+        .find(|i| i["name"].as_str() == Some("Circle"))
+        .and_then(|i| i["body"].as_str())
+        .unwrap_or_else(|| panic!("Circle type must carry a body: {context}"));
+
+    // Verbatim completeness: the body is a contiguous slice of the real
+    // file, spanning the class head through its last method — never a
+    // partial or reconstructed fragment.
+    let geometry_src = std::fs::read_to_string(&geometry).expect("fixture source");
+    assert!(
+        geometry_src.contains(circle_body),
+        "body must be a verbatim slice of {}: {circle_body:?}",
+        geometry.display()
+    );
+    assert!(circle_body.starts_with("class Circle:"));
+    assert!(circle_body.contains("return 2 * PI * self.radius"));
+    assert_eq!(
+        types["bodies_included"].as_u64().expect("bodies_included") as usize,
+        items.iter().filter(|i| i.get("body").is_some()).count(),
+        "bodies_included must equal the items carrying a body: {context}"
+    );
+
+    // A starved budget admits nothing — whole-body-or-nothing, disclosed
+    // as zero, with the items themselves unchanged.
+    let starved = run_in_fixture(&[
+        "context".into(),
+        format!("{report_rel}:{line}:{col}"),
+        "--types".into(),
+        "--with-bodies".into(),
+        "--body-tokens".into(),
+        "1".into(),
+    ]);
+    assert_eq!(
+        starved["types"]["bodies_included"], 0,
+        "a 1-token budget must disclose zero attachments: {starved}"
+    );
+    let stripped: Vec<Value> = items
+        .iter()
+        .map(|i| {
+            let mut item = i.clone();
+            item.as_object_mut().unwrap().remove("body");
+            item
+        })
+        .collect();
+    assert_eq!(
+        starved["types"]["items"].as_array().expect("items"),
+        &stripped,
+        "starving the budget must not change the items themselves"
+    );
+}
