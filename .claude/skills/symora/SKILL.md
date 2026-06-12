@@ -89,7 +89,7 @@ Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept
 
 ## Output and global flags
 
-List responses carry `count` (total found), `showing` (emitted), `items`, and—only when relevant—`truncated`, `stale`, `hints`, `next_commands` (ready-to-run follow-ups), and `indexing`. `indexing: "timed_out"` means the language server hadn't finished indexing: `count`/`items` are a lower bound, not complete — retry once the server is warm for the full set. `stale: true` (on `search symbols`/`search content`) means index-backed rows came from files that changed on disk since indexing — they may be out of date; re-run `symora search index build`. Global flags go **before** the subcommand:
+List responses carry `count` (total found), `showing` (emitted), `items`, and—only when relevant—`truncated`, `stale`, `hints`, `next_commands` (ready-to-run follow-ups), and `indexing`. `indexing: "timed_out"` means the language server hadn't finished indexing: `count`/`items` are a lower bound, not complete — retry once the server is warm for the full set. `stale: true` (on `search symbols`/`search content`) means index-backed rows came from files that changed on disk since indexing — they may be out of date; re-run `symora search index build`. Responses are size-capped at `output.max_response_chars` (default 20000 chars of emitted JSON, 0 disables; set under `[output]` in `.symora/config.toml`): when the cap fires, whole items are dropped from the largest list, `truncated` is set, `count` stays the true total, and a hint names the key — `--format compact` fits more items under the same cap. Global flags go **before** the subcommand:
 
 ```bash
 symora --format compact search symbols AuthUser    # single-line JSON
@@ -122,6 +122,7 @@ Use these when search results are unexpectedly empty, a language server is unres
 - `usage` errors with `server_not_installed`: no detected language had a server — install per `symora doctor <lang>`, or pass `--lang` to target an installed one.
 - `usage` result carries `coverage_gaps`: coverage was partial, so `count` is a lower bound — install the named server, or ignore the gap if those languages are irrelevant.
 - Search results truncated: narrow the query or raise `--limit`.
+- `truncated` with a hint naming `output.max_response_chars`: the response hit the size ceiling — narrow the query, switch to `--format compact`, follow `next_commands` when present, or raise the ceiling under `[output]` in `.symora/config.toml`.
 
 ## Anti-patterns
 

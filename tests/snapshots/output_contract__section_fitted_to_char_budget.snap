@@ -1,0 +1,17 @@
+---
+source: tests/output_contract.rs
+expression: value
+---
+{
+  "count": 10,
+  "showing": 3,
+  "items": [
+    "src/module_01.rs:1: reference",
+    "src/module_02.rs:1: reference",
+    "src/module_03.rs:1: reference"
+  ],
+  "hints": [
+    "Response exceeded output.max_response_chars (300); items were dropped to fit — narrow the query or raise the ceiling in .symora/config.toml"
+  ],
+  "truncated": true
+}

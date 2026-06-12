@@ -137,6 +137,191 @@ impl<T> Section<T> {
     }
 }
 
+/// Fit a serialized response under `max_chars` by dropping whole trailing
+/// items from its `Section`-shaped lists, largest list first. `showing`
+/// shrinks with the items, `truncated` is set, and one disclosure hint
+/// naming `output.max_response_chars` lands on the largest list before
+/// measuring, so its own length is budgeted. `count` and per-item shape
+/// are never touched, and the value is never sliced: when even zero items
+/// stays over the ceiling, the reduced-but-whole JSON is emitted as-is.
+///
+/// `measure` must serialize exactly the string the caller will emit —
+/// the ceiling guards emitted characters, not an estimate. Returns true
+/// when any items were dropped.
+///
+/// Tail-dropping is safe because every ranked producer sorts best-first;
+/// detection is structural (count + showing + items with
+/// `items.len() == showing`, non-empty) and recursive, because commands
+/// flatten their Section to the top level (`refs`, `usage`) or nest it
+/// under a key (`map file`, `context`, `pack`) — by the time the response
+/// reaches the output layer, only the shape identifies it.
+pub fn fit_to_char_budget(
+    value: &mut serde_json::Value,
+    max_chars: usize,
+    measure: &dyn Fn(&serde_json::Value) -> usize,
+) -> bool {
+    if measure(value) <= max_chars {
+        return false;
+    }
+
+    let mut candidates = Vec::new();
+    collect_section_paths(value, &mut String::new(), &mut candidates);
+    if candidates.is_empty() {
+        return false;
+    }
+    // Largest items array first; the stable sort keeps document order on
+    // ties, and collection order is document order.
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.items_len));
+
+    if let Some(node) = value
+        .pointer_mut(&candidates[0].path)
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let hint = format!(
+            "Response exceeded output.max_response_chars ({max_chars}); items were dropped to fit — narrow the query or raise the ceiling in .symora/config.toml"
+        );
+        if let Some(hints) = node
+            .entry("hints")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+        {
+            hints.push(serde_json::Value::String(hint));
+        }
+    }
+
+    let mut dropped = false;
+    for candidate in &candidates {
+        let original = match value
+            .pointer_mut(&candidate.path)
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|node| node.get("items"))
+            .and_then(serde_json::Value::as_array)
+        {
+            Some(items) => items.clone(),
+            None => continue,
+        };
+
+        // Binary-search the largest kept count in [0, len) that fits —
+        // serialized length is monotonic in kept items, and keeping all
+        // of them is excluded because the response is already over.
+        let mut lo = 0usize;
+        let mut hi = original.len() - 1;
+        let mut best = None;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            apply_keep(value, &candidate.path, &original, mid);
+            if measure(value) <= max_chars {
+                best = Some(mid);
+                lo = mid + 1;
+            } else if mid == 0 {
+                break;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        apply_keep(value, &candidate.path, &original, best.unwrap_or(0));
+        dropped = true;
+        if best.is_some() {
+            return true;
+        }
+        // Even zero items leaves the response over the ceiling — keep the
+        // emptied list and continue with the next-largest one.
+    }
+    dropped
+}
+
+struct SectionCandidate {
+    /// JSON Pointer to the Section-shaped node.
+    path: String,
+    /// Serialized length of its `items` array — the shrink-order key.
+    items_len: usize,
+}
+
+fn collect_section_paths(
+    value: &serde_json::Value,
+    path: &mut String,
+    out: &mut Vec<SectionCandidate>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if is_section_shaped(map) {
+                let items_len = serde_json::to_string(&map["items"])
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                out.push(SectionCandidate {
+                    path: path.clone(),
+                    items_len,
+                });
+            }
+            for (key, child) in map {
+                let base = path.len();
+                path.push('/');
+                for ch in key.chars() {
+                    match ch {
+                        '~' => path.push_str("~0"),
+                        '/' => path.push_str("~1"),
+                        _ => path.push(ch),
+                    }
+                }
+                collect_section_paths(child, path, out);
+                path.truncate(base);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let base = path.len();
+                path.push('/');
+                path.push_str(&index.to_string());
+                collect_section_paths(child, path, out);
+                path.truncate(base);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The structural Section test: the typed key triple plus the
+/// `items.len() == showing` consistency check. Non-empty `items` also
+/// excludes `Section::error`'s 0/0/[] shape — there is nothing to drop.
+fn is_section_shaped(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    if map
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .is_none()
+    {
+        return false;
+    }
+    let Some(showing) = map.get("showing").and_then(serde_json::Value::as_u64) else {
+        return false;
+    };
+    let Some(items) = map.get("items").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    !items.is_empty() && items.len() as u64 == showing
+}
+
+/// Keep the first `keep` items of `original` at the section under `path`,
+/// with `showing` and `truncated` kept consistent. `truncated: true` is
+/// always correct here: `keep` < the original `showing` <= `count`.
+fn apply_keep(
+    value: &mut serde_json::Value,
+    path: &str,
+    original: &[serde_json::Value],
+    keep: usize,
+) {
+    if let Some(node) = value
+        .pointer_mut(path)
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        node.insert(
+            "items".to_string(),
+            serde_json::Value::Array(original[..keep].to_vec()),
+        );
+        node.insert("showing".to_string(), serde_json::Value::from(keep));
+        node.insert("truncated".to_string(), serde_json::Value::Bool(true));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +459,145 @@ mod tests {
         assert_eq!(value["count"], 0);
         assert_eq!(value["showing"], 0);
         assert_eq!(value["error"]["code"], "not_found");
+    }
+
+    fn compact_chars(value: &serde_json::Value) -> usize {
+        serde_json::to_string(value)
+            .map(|s| s.chars().count())
+            .unwrap_or(usize::MAX)
+    }
+
+    #[test]
+    fn fit_drops_items_sets_truncated_and_discloses_hint() {
+        let items: Vec<String> = (0..20)
+            .map(|i| format!("item-{i:02}-{}", "x".repeat(40)))
+            .collect();
+        let mut value = serde_json::to_value(Section::new(items)).unwrap();
+
+        assert!(fit_to_char_budget(&mut value, 500, &compact_chars));
+
+        assert!(compact_chars(&value) <= 500);
+        assert_eq!(value["count"], 20);
+        let showing = value["showing"].as_u64().unwrap();
+        assert!(showing < 20, "items must shrink, showing = {showing}");
+        assert_eq!(value["items"].as_array().unwrap().len() as u64, showing);
+        // Items drop from the end — the best-ranked leading items survive.
+        assert_eq!(value["items"][0], format!("item-00-{}", "x".repeat(40)));
+        assert_eq!(value["truncated"], true);
+        assert!(
+            value["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h.as_str().unwrap().contains("output.max_response_chars"))
+        );
+    }
+
+    #[test]
+    fn fit_is_noop_under_budget() {
+        let mut value = serde_json::to_value(Section::new(vec![1, 2, 3])).unwrap();
+        let before = value.clone();
+
+        assert!(!fit_to_char_budget(&mut value, 10_000, &compact_chars));
+        assert_eq!(value, before);
+    }
+
+    #[test]
+    fn fit_ignores_non_section_values() {
+        // TestCoverageOutput-like: count + files, no showing/items.
+        let mut coverage = serde_json::json!({
+            "count": 3,
+            "files": ["tests/a.rs", "tests/b.rs", "tests/c.rs"],
+        });
+        let before = coverage.clone();
+        assert!(!fit_to_char_budget(&mut coverage, 10, &compact_chars));
+        assert_eq!(coverage, before);
+
+        // count + items without showing is not a Section either.
+        let mut no_showing = serde_json::json!({ "count": 3, "items": [1, 2, 3] });
+        let before = no_showing.clone();
+        assert!(!fit_to_char_budget(&mut no_showing, 10, &compact_chars));
+        assert_eq!(no_showing, before);
+    }
+
+    #[test]
+    fn fit_handles_flattened_target_plus_section_shape() {
+        // RefsOutput / UsageOutput flatten their Section beside `target`.
+        let items: Vec<serde_json::Value> = (1..=8)
+            .map(|line| {
+                serde_json::json!({
+                    "file": "src/very/long/path/to/handler.rs",
+                    "line": line,
+                    "column": 12,
+                })
+            })
+            .collect();
+        let mut value = serde_json::json!({
+            "target": { "name": "process", "kind": "function", "file": "src/main.rs", "line": 12 },
+            "count": 8,
+            "showing": 8,
+            "items": items,
+        });
+
+        assert!(fit_to_char_budget(&mut value, 550, &compact_chars));
+
+        assert!(compact_chars(&value) <= 550);
+        assert_eq!(value["count"], 8);
+        assert!(value["showing"].as_u64().unwrap() < 8);
+        assert_eq!(value["truncated"], true);
+        // Sibling payload outside the Section is untouched.
+        assert_eq!(value["target"]["name"], "process");
+    }
+
+    #[test]
+    fn fit_handles_nested_section_shape() {
+        // MapFileOutput-like: the Section nests under a key.
+        let items: Vec<serde_json::Value> = (1..=10)
+            .map(|line| {
+                serde_json::json!({
+                    "name": format!("function_number_{line:02}"),
+                    "kind": "function",
+                    "line": line,
+                })
+            })
+            .collect();
+        let mut value = serde_json::json!({
+            "language": "rust",
+            "symbols": { "count": 10, "showing": 10, "items": items },
+        });
+
+        assert!(fit_to_char_budget(&mut value, 450, &compact_chars));
+
+        assert!(compact_chars(&value) <= 450);
+        assert_eq!(value["language"], "rust");
+        assert_eq!(value["symbols"]["count"], 10);
+        assert!(value["symbols"]["showing"].as_u64().unwrap() < 10);
+        assert_eq!(value["symbols"]["truncated"], true);
+        assert!(
+            value["symbols"]["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h.as_str().unwrap().contains("output.max_response_chars"))
+        );
+    }
+
+    #[test]
+    fn fit_never_slices_when_envelope_alone_exceeds() {
+        let mut value =
+            serde_json::to_value(Section::new(vec!["a".to_string(), "b".to_string()])).unwrap();
+
+        // A ceiling smaller than the empty envelope: everything droppable
+        // is dropped, and the whole — still valid — JSON is emitted over
+        // budget rather than sliced.
+        assert!(fit_to_char_budget(&mut value, 5, &compact_chars));
+
+        assert_eq!(value["count"], 2);
+        assert_eq!(value["showing"], 0);
+        assert!(value["items"].as_array().unwrap().is_empty());
+        assert_eq!(value["truncated"], true);
+        assert!(compact_chars(&value) > 5);
+        serde_json::to_string(&value).expect("reduced value must stay serializable");
     }
 }
 

@@ -85,6 +85,10 @@ pub struct OutputContext {
     root: PathBuf,
     options: OutputOptions,
     sink: Arc<dyn OutputSink>,
+    /// Per-response char ceiling enforced in `print_success`; 0 = off.
+    /// Constructors leave it off — `App` is the single application point,
+    /// above the daemon/direct mode boundary, so every surface agrees.
+    max_response_chars: usize,
 }
 
 impl std::fmt::Debug for OutputContext {
@@ -93,6 +97,7 @@ impl std::fmt::Debug for OutputContext {
             .field("root", &self.root)
             .field("options", &self.options)
             .field("sink", &"<dyn OutputSink>")
+            .field("max_response_chars", &self.max_response_chars)
             .finish()
     }
 }
@@ -103,6 +108,7 @@ impl OutputContext {
             root,
             options,
             sink: Arc::new(StdoutSink),
+            max_response_chars: 0,
         }
     }
 
@@ -111,7 +117,13 @@ impl OutputContext {
             root,
             options,
             sink,
+            max_response_chars: 0,
         }
+    }
+
+    pub fn with_max_response_chars(mut self, max_chars: usize) -> Self {
+        self.max_response_chars = max_chars;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -138,13 +150,33 @@ impl OutputContext {
         if self.options.quiet {
             return;
         }
-        let response = match serde_json::to_value(data) {
+        let mut response = match serde_json::to_value(data) {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("Failed to serialize response data: {e}");
                 serde_json::json!({})
             }
         };
+        if self.max_response_chars > 0 {
+            // The ceiling guards the exact string emitted in the active
+            // format — host caps apply to emitted characters, so pretty
+            // output spends its budget on indentation by design.
+            let measure = |value: &serde_json::Value| -> usize {
+                match self.options.format {
+                    OutputFormat::Pretty => serde_json::to_string_pretty(value),
+                    OutputFormat::Compact => serde_json::to_string(value),
+                }
+                .map(|s| s.chars().count())
+                .unwrap_or(usize::MAX)
+            };
+            if crate::cli::response::fit_to_char_budget(
+                &mut response,
+                self.max_response_chars,
+                &measure,
+            ) {
+                tracing::debug!("response fitted to output.max_response_chars");
+            }
+        }
         self.emit(&response);
     }
 

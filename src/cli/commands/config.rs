@@ -100,6 +100,9 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
             "max_concurrent": config.daemon.max_concurrent,
             "idle_timeout_mins": config.daemon.idle_timeout_mins,
         },
+        "output": {
+            "max_response_chars": config.output.max_response_chars,
+        },
     })
 }
 

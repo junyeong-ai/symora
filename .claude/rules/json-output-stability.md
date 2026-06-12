@@ -17,7 +17,7 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 - `count` — total matches found
 - `showing` — number actually emitted in `items`
 - `items` — the result array
-- `truncated` — boolean indicating `showing < count`
+- `truncated` — boolean indicating `showing < count`, whether from an item cap (`--limit`, config limits) or from the per-response size ceiling (`output.max_response_chars`, applied once in the output layer as the last step before emission); a size-driven reduction always appends a hint naming the config key. Items are only ever dropped whole — per-item shape never changes with response size. Layering: command-level content budgets are token-denominated and apply first inside the command (e.g. `pack --tokens`); the char-denominated transport ceiling applies last and wins. Don't add a third budget vocabulary.
 - `stale` — present (true) only when index-served rows came from files that changed on disk after indexing; re-run `symora search index build` to refresh
 - `hints` — optional next-step suggestions for the agent
 - `next_commands` — optional ready-to-run follow-up commands (omitted when empty)
