@@ -42,9 +42,12 @@ pub trait StoreService: Send + Sync {
 
     async fn index_clear(&self) -> Result<(), StoreError>;
 
-    /// Drop a file's rows so an edit isn't served stale. Best-effort:
-    /// invalidating an index that was never built is a no-op.
-    async fn invalidate_file(&self, path: &Path) -> Result<(), StoreError>;
+    /// Bring an edited file's index rows in line with the bytes on disk —
+    /// re-extracted while the file exists, dropped once it doesn't — so a
+    /// write is searchable immediately. Best-effort, and an index that was
+    /// never built stays untouched: a project without a store never gains
+    /// one just because a file was edited.
+    async fn refresh_file(&self, path: &Path) -> Result<(), StoreError>;
 }
 
 /// In-process store. The SQLite connection is opened on first use so
@@ -149,13 +152,33 @@ impl StoreService for DefaultStoreService {
         self.store().await?.clear().await
     }
 
-    async fn invalidate_file(&self, path: &Path) -> Result<(), StoreError> {
-        // Don't materialize an index just to invalidate one that was never
+    async fn refresh_file(&self, path: &Path) -> Result<(), StoreError> {
+        // Don't materialize an index just to refresh one that was never
         // built — a fresh process re-reads the file on its next indexed read.
         if !Store::db_path(&self.root).exists() {
             return Ok(());
         }
-        self.store().await?.invalidate_file(path).await;
+        self.store().await?.refresh_file(path).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The no-disk-touch guarantee: refreshing a file in a project whose
+    /// index was never built must not create `.symora` or a store DB.
+    #[tokio::test]
+    async fn refresh_without_a_store_touches_no_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+
+        let service = DefaultStoreService::new(root, StoreConfig::default());
+        service.refresh_file(&file).await.unwrap();
+
+        assert!(!root.join(".symora").exists());
     }
 }

@@ -360,7 +360,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
 }
 
 /// Shared tail for symbol-targeted line edits: resolve the span with the
-/// stale-range guard, splice, emit one `EditOutput`, invalidate.
+/// stale-range guard, splice, emit one `EditOutput`, refresh the index.
 async fn symbol_edit(
     app: &App,
     operation: &'static str,
@@ -675,7 +675,7 @@ async fn pull_diagnostics(
 
 async fn finish(app: &App, file: &Path, dry_run: bool) {
     if !dry_run {
-        invalidate_store_files(app, std::slice::from_ref(&file.to_path_buf())).await;
+        refresh_store_files(app, std::slice::from_ref(&file.to_path_buf())).await;
     }
 }
 
@@ -1544,16 +1544,19 @@ impl Drop for StagingFile {
 }
 
 // ---------------------------------------------------------------------------
-// Store invalidation
+// Store refresh
 // ---------------------------------------------------------------------------
 
-/// Best-effort invalidation of edited files in the store index, through the
-/// same `StoreService` the rest of the command layer uses — so it honors
-/// daemon/direct mode instead of reaching for the daemon directly.
-pub(crate) async fn invalidate_store_files(app: &App, files: &[PathBuf]) {
+/// Best-effort re-index of edited files in the store, through the same
+/// `StoreService` the rest of the command layer uses — so it honors
+/// daemon/direct mode instead of reaching for the daemon directly. Each
+/// file's rows are re-extracted from the bytes just written (or dropped,
+/// if the file no longer exists), so a search immediately after an edit
+/// sees the new content. A store that was never built stays untouched.
+pub(crate) async fn refresh_store_files(app: &App, files: &[PathBuf]) {
     for file in files {
-        if let Err(e) = app.store.invalidate_file(file).await {
-            tracing::warn!("Store invalidation failed for {}: {}", file.display(), e);
+        if let Err(e) = app.store.refresh_file(file).await {
+            tracing::warn!("Store refresh failed for {}: {}", file.display(), e);
         }
     }
 }

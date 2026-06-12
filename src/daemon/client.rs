@@ -17,7 +17,7 @@ use crate::models::symbol::Language;
 fn calculate_timeout(config: &LspRuntimeConfig, file: Option<&Path>, method: &str) -> Duration {
     // Daemon-only operations with fixed timeouts
     match method {
-        methods::PING | methods::STATUS | methods::SHUTDOWN | methods::INVALIDATE_FILE => {
+        methods::PING | methods::STATUS | methods::SHUTDOWN | methods::REFRESH_FILE => {
             return Duration::from_secs(30);
         }
         methods::INDEX_BUILD => return Duration::from_secs(600),
@@ -553,12 +553,12 @@ impl DaemonClient {
 
     // Store Operations
 
-    /// Best-effort file invalidation in the store index.
+    /// Best-effort re-index of an edited file in the store index.
     /// Does not start the daemon if not running.
     /// Uses a short 2-second ping timeout to avoid blocking edit workflows.
-    pub async fn invalidate_file(&self, file: &Path) -> Result<(), LspError> {
+    pub async fn refresh_file(&self, file: &Path) -> Result<(), LspError> {
         // Only a same-version daemon gets requests — the wire format is
-        // guaranteed within one version, and best-effort invalidation is
+        // guaranteed within one version, and a best-effort refresh is
         // not worth replacing a stale daemon over.
         let same_version_daemon = matches!(
             timeout(Duration::from_secs(2), self.ping()).await,
@@ -571,10 +571,10 @@ impl DaemonClient {
             "file": file.display().to_string()
         });
         if let Err(e) = self
-            .request_with_project(methods::INVALIDATE_FILE, params, Some(file))
+            .request_with_project(methods::REFRESH_FILE, params, Some(file))
             .await
         {
-            tracing::warn!("Failed to invalidate file {}: {}", file.display(), e);
+            tracing::warn!("Failed to refresh file {}: {}", file.display(), e);
         }
         Ok(())
     }
