@@ -448,7 +448,13 @@ async fn fetch_calls(
                 .take(limit)
                 .map(|c| CallHierarchyOutput::from_item(c, root))
                 .collect();
-            Section::with_total(items, total)
+            let file_rel = file
+                .strip_prefix(root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| file.display().to_string());
+            Section::with_total(items, total).with_next_commands(call_hierarchy_next_commands(
+                incoming, &file_rel, line, column, total, limit,
+            ))
         }
         Err(e) => Section::error(format_call_hierarchy_error(
             &e.to_string(),
@@ -456,6 +462,28 @@ async fn fetch_calls(
             line,
             column,
         )),
+    }
+}
+
+/// Truncation-only steering for a callers/callees section: the per-call
+/// cap is config-only (`lsp.calls_limit` has no `context` flag), so the
+/// standalone command with `--limit <total>` is the one runnable way to
+/// see the complete list. Complete sections emit nothing.
+fn call_hierarchy_next_commands(
+    incoming: bool,
+    file_rel: &str,
+    line: u32,
+    column: u32,
+    total: usize,
+    limit: usize,
+) -> Vec<String> {
+    if total > limit {
+        vec![format!(
+            "symora {} {file_rel}:{line}:{column} --limit {total}",
+            if incoming { "callers" } else { "callees" }
+        )]
+    } else {
+        Vec::new()
     }
 }
 
@@ -706,6 +734,28 @@ mod tests {
         SignatureHelp, TextEdit, TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, SymbolKind};
+
+    #[test]
+    fn truncated_callers_steer_to_callers_with_limit() {
+        assert_eq!(
+            call_hierarchy_next_commands(true, "f.rs", 12, 4, 12, 8),
+            vec!["symora callers f.rs:12:4 --limit 12"]
+        );
+    }
+
+    #[test]
+    fn complete_calls_emit_nothing() {
+        assert!(call_hierarchy_next_commands(true, "f.rs", 12, 4, 8, 8).is_empty());
+        assert!(call_hierarchy_next_commands(false, "f.rs", 12, 4, 0, 8).is_empty());
+    }
+
+    #[test]
+    fn callees_use_callees_command() {
+        assert_eq!(
+            call_hierarchy_next_commands(false, "f.rs", 12, 4, 9, 8),
+            vec!["symora callees f.rs:12:4 --limit 9"]
+        );
+    }
 
     #[test]
     fn same_symbol_name_accepts_exact_and_qualified_tails() {

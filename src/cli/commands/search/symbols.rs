@@ -8,13 +8,13 @@ use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
 use crate::cli::symbol_discovery::{
-    broad_symbol_kind_bonus, generic_exact_identifier_penalty, is_probably_test_path,
-    noisy_suffix_penalty, symbol_lookup_hints, symbol_match_priority,
+    broad_symbol_kind_bonus, coverage_reason, generic_exact_identifier_penalty,
+    is_probably_test_path, noisy_suffix_penalty, symbol_lookup_hints, symbol_match_priority,
 };
-use crate::error::StoreError;
+use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, SymbolKind};
-use crate::services::store::SymbolSearchResult;
+use crate::services::store::{SymbolExtractor, SymbolSearchResult};
 
 use super::common::{looks_like_symbol_path, resolve_search_languages};
 
@@ -70,17 +70,26 @@ pub async fn execute_symbol_search(
                 .into_iter()
                 .map(|r| index_result_output(r, ctx))
                 .collect();
+            let mut failures = Vec::new();
             if !search_languages.is_empty() && candidates.len() < limit {
-                let workspace_results =
+                let lookup =
                     collect_workspace_symbol_results(app, query, kind, limit, &search_languages)
                         .await;
-                candidates = merge_symbol_results(candidates, workspace_results, query);
+                candidates = merge_symbol_results(candidates, lookup.results, query);
+                failures = lookup.failures;
                 count = count.max(candidates.len());
             }
-            ctx.print_success(
-                finish_symbol_search(candidates, count, query, language, kind, limit)
-                    .with_stale(stale),
-            );
+            let mut section = finish_symbol_search(candidates, count, query, language, kind, limit)
+                .with_stale(stale);
+            if section.count == 0 {
+                let hints = symbol_search_coverage_hints(&failures);
+                if !hints.is_empty() {
+                    section = section
+                        .with_hints(hints)
+                        .with_next_commands(symbol_search_coverage_next_commands(query, &failures));
+                }
+            }
+            ctx.print_success(section);
         }
         // No index yet: answer from live LSP workspace symbols instead.
         Err(StoreError::NotInitialized) => {
@@ -124,7 +133,9 @@ async fn execute_workspace_symbol_search(
         return Ok(());
     }
 
-    let mut candidates = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
+    let mut candidates = collect_workspace_symbol_results(app, query, kind, limit, languages)
+        .await
+        .results;
     let mut count = candidates.len();
     let mut stale = false;
 
@@ -181,17 +192,29 @@ fn finish_symbol_search(
         .with_next_commands(next_commands)
 }
 
+/// Workspace-symbol fan-out outcome: the ranked results plus each failed
+/// language with its error, so an empty result can disclose which
+/// languages it does not actually cover instead of swallowing them.
+struct WorkspaceSymbolLookup {
+    results: Vec<SymbolResultOutput>,
+    failures: Vec<(Language, LspError)>,
+}
+
 async fn collect_workspace_symbol_results(
     app: &App,
     query: &str,
     kind: Option<&str>,
     limit: usize,
     languages: &[Language],
-) -> Vec<SymbolResultOutput> {
+) -> WorkspaceSymbolLookup {
     let ctx = &app.output;
     let parsed_kind = kind.map(crate::models::symbol::SymbolKind::parse_or_default);
+    let mut failures = Vec::new();
     if languages.is_empty() {
-        return Vec::new();
+        return WorkspaceSymbolLookup {
+            results: Vec::new(),
+            failures,
+        };
     }
 
     let workspace_query = workspace_query_from_pattern(query);
@@ -204,8 +227,12 @@ async fn collect_workspace_symbol_results(
     let mut results = Vec::new();
 
     for language in languages {
-        let Ok(mut symbols) = app.lsp.workspace_symbols(&workspace_query, *language).await else {
-            continue;
+        let mut symbols = match app.lsp.workspace_symbols(&workspace_query, *language).await {
+            Ok(symbols) => symbols,
+            Err(e) => {
+                failures.push((*language, e));
+                continue;
+            }
         };
 
         for symbol in &mut symbols {
@@ -281,7 +308,10 @@ async fn collect_workspace_symbol_results(
         .collect();
     sort_symbol_results(&mut outputs, query);
     prune_low_value_symbol_results(&mut outputs, query, limit);
-    outputs
+    WorkspaceSymbolLookup {
+        results: outputs,
+        failures,
+    }
 }
 
 /// Dedup + rank the union of two result sets. Emission capping and noise
@@ -334,7 +364,9 @@ async fn collect_document_path_results(
 
     if candidate_files.len() < limit {
         let workspace_seeds =
-            collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages).await;
+            collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages)
+                .await
+                .results;
         for result in workspace_seeds {
             let file = app.root().join(&result.file);
             if seen_files.insert(file.clone()) {
@@ -577,6 +609,53 @@ fn symbol_search_hints(
     )
 }
 
+/// Failed languages whose zero an empty result cannot vouch for: no
+/// compiled-in index extractor AND this call's workspace-symbol lookup
+/// failed. Extractor-covered languages are answered by the index
+/// regardless of LSP state, so they never qualify. Sorted by language id
+/// for deterministic output.
+fn uncovered_language_failures(failures: &[(Language, LspError)]) -> Vec<&(Language, LspError)> {
+    let mut uncovered: Vec<_> = failures
+        .iter()
+        .filter(|(language, _)| !SymbolExtractor::is_supported(*language))
+        .collect();
+    uncovered.sort_by_key(|(language, _)| language.lsp_id());
+    uncovered
+}
+
+fn symbol_search_coverage_hints(failures: &[(Language, LspError)]) -> Vec<String> {
+    let mut hints: Vec<String> = uncovered_language_failures(failures)
+        .into_iter()
+        .map(|(language, err)| {
+            format!(
+                "This zero does not cover {lang}: {lang} has no index symbol extractor and its language server is unavailable ({reason})",
+                lang = language.lsp_id(),
+                reason = coverage_reason(err)
+            )
+        })
+        .collect();
+    hints.truncate(2);
+    hints
+}
+
+fn symbol_search_coverage_next_commands(
+    query: &str,
+    failures: &[(Language, LspError)],
+) -> Vec<String> {
+    let mut commands: Vec<String> = uncovered_language_failures(failures)
+        .first()
+        .map(|(language, _)| {
+            let lang = language.lsp_id();
+            vec![
+                format!("symora search content '{query}' --lang {lang}"),
+                format!("symora doctor {lang}"),
+            ]
+        })
+        .unwrap_or_default();
+    commands.truncate(2);
+    commands
+}
+
 fn symbol_search_next_commands(
     results: &[SymbolResultOutput],
     query: &str,
@@ -668,5 +747,47 @@ mod tests {
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);
         assert!(!section.truncated);
+    }
+
+    #[test]
+    fn coverage_hint_fires_for_uncovered_language_with_failed_server() {
+        let failures = vec![(
+            Language::Lua,
+            LspError::ServerNotInstalled {
+                name: "lua-language-server".to_string(),
+                install_hint: "brew install lua-language-server".to_string(),
+            },
+        )];
+
+        let hints = symbol_search_coverage_hints(&failures);
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("lua"));
+        assert!(hints[0].contains("server_not_installed"));
+
+        assert_eq!(
+            symbol_search_coverage_next_commands("q", &failures),
+            vec!["symora search content 'q' --lang lua", "symora doctor lua"]
+        );
+    }
+
+    #[test]
+    fn coverage_hint_silent_for_extractor_language() {
+        // Rust is index-covered: a failed server does not make its zero
+        // non-exhaustive, so no disclosure fires.
+        let failures = vec![(
+            Language::Rust,
+            LspError::ServerNotInstalled {
+                name: "rust-analyzer".to_string(),
+                install_hint: "rustup component add rust-analyzer".to_string(),
+            },
+        )];
+        assert!(symbol_search_coverage_hints(&failures).is_empty());
+        assert!(symbol_search_coverage_next_commands("q", &failures).is_empty());
+    }
+
+    #[test]
+    fn coverage_hint_silent_with_no_failures() {
+        assert!(symbol_search_coverage_hints(&[]).is_empty());
+        assert!(symbol_search_coverage_next_commands("q", &[]).is_empty());
     }
 }

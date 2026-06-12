@@ -500,6 +500,7 @@ fn impact_output_full() {
             risk: RiskLevel::Medium,
             confidence: 0.9,
         }),
+        next_commands: vec!["symora impact src/main.rs:12:4 --depth 2".to_string()],
     };
     assert_json_snapshot!(out);
 }
@@ -527,6 +528,7 @@ fn impact_output_without_blast_radius() {
         },
         files: vec![],
         blast_radius: None,
+        next_commands: vec![],
     };
     assert_json_snapshot!(out);
 }
