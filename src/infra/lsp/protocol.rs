@@ -212,6 +212,11 @@ pub struct ClientCapabilities {
     pub text_document: Option<TextDocumentClientCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceClientCapabilities>,
+    /// Server-specific extension capabilities (the LSP `experimental`
+    /// bag). Servers ignore keys they don't know, so opting into one
+    /// server's extension is safe to send everywhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<Value>,
 }
 
 /// General client capabilities (LSP 3.17+)
