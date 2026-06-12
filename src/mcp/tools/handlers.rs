@@ -713,9 +713,10 @@ async fn run_edit(
 
 /// Field names each tool's input struct deserializes, keyed by tool name.
 /// Kept beside the structs so a new field and its row land together; the
-/// catalog lockstep test asserts every row is a subset of the tool's
-/// advertised schema properties — `dispatch` rejects undeclared keys, so
-/// an unadvertised field would be unreachable at runtime.
+/// catalog lockstep test asserts every row equals the tool's advertised
+/// schema property set — `dispatch` rejects undeclared keys, so an
+/// unadvertised field would be unreachable at runtime, and an advertised
+/// property no struct consumes would be silently dropped by serde.
 #[cfg(test)]
 pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
     Some(match tool {

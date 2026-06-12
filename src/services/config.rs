@@ -379,10 +379,11 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
 const SERVER_OVERRIDE_FIELDS: [&str; 3] = ["command", "args", "tier"];
 
 /// Partition [lsp.servers] stanzas: strictly canonical `Language::lsp_id`
-/// keys with only known fields are applied; alias keys, unknown keys,
-/// unknown fields, and mistyped values are recorded with a corrective
-/// message and the stanza dropped — never applied, never a load error
-/// for the rest of the config. A stanza with an unknown field is
+/// keys with only known, well-typed fields are applied; alias keys,
+/// unknown keys, unknown fields, and mistyped values are recorded with a
+/// corrective message and the stanza dropped — never applied, never a
+/// load error for the rest of the config. A stanza's unknown fields and
+/// mistyped values are reported together in one pass, and the stanza is
 /// rejected whole: applying its remainder would let a typo'd `command`
 /// silently fall back to the builtin launch.
 fn resolve_server_overrides(
@@ -393,29 +394,35 @@ fn resolve_server_overrides(
     for (key, table) in raw {
         match Language::from_str(&key) {
             Ok(language) if language.lsp_id() == key => {
-                let unknown_fields: Vec<&String> = table
-                    .keys()
-                    .filter(|field| !SERVER_OVERRIDE_FIELDS.contains(&field.as_str()))
-                    .collect();
-                if !unknown_fields.is_empty() {
-                    errors.extend(unknown_fields.into_iter().map(|field| ServerOverrideError {
-                        key: format!("lsp.servers.{key}.{field}"),
-                        message: format!(
-                            "unknown field `{field}` — valid fields are `{}`",
-                            SERVER_OVERRIDE_FIELDS.join("`, `")
-                        ),
-                    }));
-                    continue;
-                }
-                match toml::Value::Table(table).try_into::<ServerOverride>() {
-                    Ok(value) => {
-                        applied.insert(key, value);
+                let mut known = toml::Table::new();
+                let mut stanza_errors = Vec::new();
+                for (field, value) in table {
+                    if SERVER_OVERRIDE_FIELDS.contains(&field.as_str()) {
+                        known.insert(field, value);
+                    } else {
+                        stanza_errors.push(ServerOverrideError {
+                            key: format!("lsp.servers.{key}.{field}"),
+                            message: format!(
+                                "unknown field `{field}` — valid fields are `{}`",
+                                SERVER_OVERRIDE_FIELDS.join("`, `")
+                            ),
+                        });
                     }
-                    Err(e) => errors.push(ServerOverrideError {
+                }
+                // Typing the known-field remainder surfaces mistyped
+                // values alongside any unknown fields in the same load.
+                match toml::Value::Table(known).try_into::<ServerOverride>() {
+                    Ok(value) => {
+                        if stanza_errors.is_empty() {
+                            applied.insert(key, value);
+                        }
+                    }
+                    Err(e) => stanza_errors.push(ServerOverrideError {
                         key: format!("lsp.servers.{key}"),
-                        message: e.to_string().trim().to_string(),
+                        message: single_line(&e.to_string()),
                     }),
                 }
+                errors.extend(stanza_errors);
             }
             Ok(language) => errors.push(ServerOverrideError {
                 key: format!("lsp.servers.{key}"),
@@ -438,6 +445,13 @@ fn resolve_server_overrides(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// toml's error messages span multiple lines (message, then `in \`field\``
+/// context); a recorded config error travels inside a JSON string, so
+/// collapse internal whitespace runs to single spaces.
+fn single_line(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 fn merge_vec(base: Vec<String>, overlay: Vec<String>) -> Vec<String> {
     if overlay.is_empty() {
@@ -551,6 +565,36 @@ comand = "/custom/rust-analyzer"
         let errors = &config.lsp.server_override_errors;
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].key, "lsp.servers.rust");
+        // toml's multi-line message is collapsed: the error travels inside
+        // a JSON string, where embedded newlines read as literal `\n`.
+        assert!(!errors[0].message.is_empty());
+        assert!(!errors[0].message.contains('\n'));
+    }
+
+    /// Both error classes for one stanza surface in a single load — an
+    /// unknown field must not pre-empt the mistyped-value report, or the
+    /// user fixes the typo only to hit a second rejection.
+    #[test]
+    fn server_override_reports_unknown_field_and_mistyped_value_together() {
+        let config = resolve_str("[lsp.servers.rust]\ncomand = \"/x\"\nargs = \"--stdio\"\n");
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].key, "lsp.servers.rust");
+        assert!(errors[0].message.contains("invalid type"));
+        assert_eq!(errors[1].key, "lsp.servers.rust.comand");
+        assert!(errors[1].message.contains("unknown field `comand`"));
+    }
+
+    /// A stanza whose known fields are all well-typed is still rejected
+    /// whole when it carries an unknown field.
+    #[test]
+    fn server_override_unknown_field_still_rejects_well_typed_remainder() {
+        let config = resolve_str("[lsp.servers.rust]\ncommand = \"/x\"\nbogus = 1\n");
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "lsp.servers.rust.bogus");
     }
 
     /// `SERVER_OVERRIDE_FIELDS` is the unknown-field gate; it must track

@@ -202,14 +202,17 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "with_bodies",
                         "boolean",
-                        "Attach complete symbol bodies under the body_tokens budget; \
-                         per-section bodies_included discloses how many items carry one \
-                         (default false)",
+                        "Attach complete verbatim bodies: the target's whole body \
+                         unbudgeted, callee and type bodies under the body_tokens \
+                         budget; per-section bodies_included discloses how many items \
+                         carry one (default false)",
                     ),
                     (
                         "body_tokens",
                         "integer",
-                        "Token budget for bodies attached by with_bodies=true (default 2000)",
+                        "Token budget for the callee and type bodies attached by \
+                         with_bodies=true — the target's own body is exempt \
+                         (default 2000)",
                     ),
                 ],
             ),

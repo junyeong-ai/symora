@@ -258,23 +258,28 @@ mod tests {
         );
     }
 
-    /// Every field a handler input struct deserializes must be an
-    /// advertised catalog property — `check_unknown_arguments` rejects
-    /// undeclared keys, so an unadvertised field would be unreachable at
-    /// runtime. Walks the whole catalog so no tool can drift silently.
+    /// The fields a handler input struct deserializes and the properties
+    /// its catalog schema advertises must be the same set, in both
+    /// directions: `check_unknown_arguments` rejects undeclared keys, so
+    /// an unadvertised field would be unreachable at runtime, and an
+    /// advertised property no struct consumes would be silently dropped
+    /// by serde. Walks the whole catalog so no tool can drift silently.
     #[test]
-    fn handler_input_fields_are_advertised_properties() {
+    fn handler_input_fields_match_advertised_properties_exactly() {
         for tool in catalog() {
             let fields = handlers::input_fields(tool.name)
                 .unwrap_or_else(|| panic!("{}: no input-field row in handlers.rs", tool.name));
             let props = tool.input_schema["properties"].as_object().unwrap();
-            for field in fields {
-                assert!(
-                    props.contains_key(*field),
-                    "{}: handler deserializes '{field}' but the catalog does not advertise it",
-                    tool.name,
-                );
-            }
+            let mut consumed: Vec<&str> = fields.to_vec();
+            consumed.sort_unstable();
+            let mut advertised: Vec<&str> = props.keys().map(String::as_str).collect();
+            advertised.sort_unstable();
+            assert_eq!(
+                consumed, advertised,
+                "{}: handler input fields and advertised catalog properties \
+                 must be the same set",
+                tool.name,
+            );
         }
     }
 
