@@ -23,7 +23,7 @@ use symora::cli::response::{
     DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput, LineRange,
     LocationOutput, ParameterOutput, RefOutput, Section, ServerStatusOutput, SignatureHelpOutput,
     SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput,
-    TypeInfoOutput,
+    TypeInfoOutput, fit_to_char_budget,
 };
 use symora::models::diagnostic::DiagnosticsStatus;
 use symora::models::lsp::{CallHierarchyItem, TypeHierarchyItem};
@@ -104,6 +104,27 @@ fn section_with_hints_and_next_commands() {
       ]
     }
     "###);
+}
+
+/// Pins the post-fit shape and the disclosure wording of the
+/// `output.max_response_chars` size ceiling: items dropped whole from the
+/// tail, `showing` updated, `truncated` set, `count` untouched, one hint
+/// naming the config key — and no new envelope keys.
+#[test]
+fn section_fitted_to_char_budget() {
+    let items: Vec<String> = (1..=10)
+        .map(|i| format!("src/module_{i:02}.rs:1: reference"))
+        .collect();
+    let mut value = serde_json::to_value(Section::new(items)).unwrap();
+
+    let fitted = fit_to_char_budget(&mut value, 300, &|v: &serde_json::Value| {
+        serde_json::to_string(v)
+            .map(|s| s.chars().count())
+            .unwrap_or(usize::MAX)
+    });
+
+    assert!(fitted);
+    assert_json_snapshot!(value);
 }
 
 #[test]

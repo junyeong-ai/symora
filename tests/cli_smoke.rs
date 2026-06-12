@@ -247,6 +247,81 @@ fn quiet_mode_suppresses_stdout_for_success() {
     );
 }
 
+/// End-to-end proof that `output.max_response_chars` governs the emitted
+/// bytes: config load → App → OutputContext → fitted JSON, through the
+/// real binary. `search content` falls back to a filesystem scan in an
+/// unindexed project, so the test needs no language server.
+#[cfg(unix)]
+#[test]
+fn response_size_ceiling_keeps_json_parseable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = String::new();
+    for i in 0..30 {
+        source.push_str(&format!("fn needle_{i:02}() {{ let _ = {i}; }}\n"));
+    }
+    source.push_str("fn main() {}\n");
+    std::fs::write(dir.path().join("main.rs"), source).unwrap();
+
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[output]\nmax_response_chars = 800\n",
+    )
+    .unwrap();
+
+    let args = &["--format", "compact", "search", "content", "needle"];
+    let out = run_in(dir.path(), args);
+    assert!(
+        out.status.success(),
+        "search content failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("fitted stdout must stay valid JSON");
+    assert_eq!(json["truncated"], true);
+    assert!(json["showing"].as_u64().unwrap() < json["count"].as_u64().unwrap());
+    assert!(
+        json["hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h.as_str().unwrap().contains("max_response_chars")),
+        "size-fitted response must disclose the config key; hints: {}",
+        json["hints"]
+    );
+    assert!(
+        stdout.trim().chars().count() <= 800,
+        "emitted response must fit the ceiling, got {} chars",
+        stdout.trim().chars().count()
+    );
+
+    // 0 disables the ceiling: the same query emits every match.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[output]\nmax_response_chars = 0\n",
+    )
+    .unwrap();
+    let out = run_in(dir.path(), args);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(json.get("truncated").is_none());
+    assert_eq!(json["showing"], json["count"]);
+    assert!(json["count"].as_u64().unwrap() >= 30);
+    assert!(stdout.trim().chars().count() > 800);
+    if let Some(hints) = json.get("hints") {
+        assert!(
+            hints
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|h| !h.as_str().unwrap().contains("max_response_chars"))
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_reports_override_provenance_and_spawnability() {

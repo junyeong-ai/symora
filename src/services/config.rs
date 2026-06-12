@@ -190,6 +190,8 @@ struct RawSymoraConfig {
     #[serde(default)]
     daemon: RawDaemonConfig,
     #[serde(default)]
+    output: RawOutputConfig,
+    #[serde(default)]
     test: crate::models::config::TestConfig,
 }
 
@@ -220,6 +222,11 @@ struct RawDaemonConfig {
     idle_timeout_mins: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RawOutputConfig {
+    max_response_chars: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Merge raw configs: overlay.field.or(base.field) preserves explicit values
 // ---------------------------------------------------------------------------
@@ -230,6 +237,7 @@ fn merge_raw_config(base: RawSymoraConfig, overlay: RawSymoraConfig) -> RawSymor
         lsp: merge_raw_lsp(base.lsp, overlay.lsp),
         search: merge_raw_search(base.search, overlay.search),
         daemon: merge_raw_daemon(base.daemon, overlay.daemon),
+        output: merge_raw_output(base.output, overlay.output),
         test: merge_test(base.test, overlay.test),
     }
 }
@@ -284,6 +292,12 @@ fn merge_raw_daemon(base: RawDaemonConfig, overlay: RawDaemonConfig) -> RawDaemo
     RawDaemonConfig {
         max_concurrent: overlay.max_concurrent.or(base.max_concurrent),
         idle_timeout_mins: overlay.idle_timeout_mins.or(base.idle_timeout_mins),
+    }
+}
+
+fn merge_raw_output(base: RawOutputConfig, overlay: RawOutputConfig) -> RawOutputConfig {
+    RawOutputConfig {
+        max_response_chars: overlay.max_response_chars.or(base.max_response_chars),
     }
 }
 
@@ -345,6 +359,12 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
                 .daemon
                 .idle_timeout_mins
                 .unwrap_or_else(defaults::idle_timeout_mins),
+        },
+        output: OutputConfig {
+            max_response_chars: raw
+                .output
+                .max_response_chars
+                .unwrap_or_else(defaults::max_response_chars),
         },
         test: raw.test,
     }

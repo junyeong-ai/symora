@@ -20,6 +20,9 @@ pub struct SymoraConfig {
     pub daemon: DaemonConfig,
 
     #[serde(default)]
+    pub output: OutputConfig,
+
+    #[serde(default)]
     pub test: TestConfig,
 }
 
@@ -196,6 +199,11 @@ pub(crate) mod defaults {
     pub fn idle_timeout_mins() -> u64 {
         30
     }
+
+    // Output
+    pub fn max_response_chars() -> usize {
+        20_000
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +301,24 @@ impl Default for DaemonConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// Char ceiling on each emitted JSON response, measured on the exact
+    /// serialized string in the active format. When a response exceeds it,
+    /// Section items are dropped whole (never reshaped) until it fits; the
+    /// reduction is disclosed via truncated + a hint. 0 disables.
+    #[serde(default = "defaults::max_response_chars")]
+    pub max_response_chars: usize,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            max_response_chars: defaults::max_response_chars(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TestConfig {
     #[serde(default)]
@@ -318,6 +344,7 @@ mod tests {
         assert_eq!(config.lsp.tests_limit, 10);
         assert_eq!(config.search.limit, 100);
         assert_eq!(config.daemon.idle_timeout_mins, 30);
+        assert_eq!(config.output.max_response_chars, 20_000);
     }
 
     #[test]

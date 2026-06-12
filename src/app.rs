@@ -33,9 +33,11 @@ impl App {
 
         tracing::debug!("Initializing Symora at {:?}", root);
 
-        let output = OutputContext::new(root.clone(), output_options);
         let config_service = Arc::new(DefaultConfigService::new(&root));
         let config = config_service.load(false).await.unwrap_or_default();
+
+        let output = OutputContext::new(root.clone(), output_options)
+            .with_max_response_chars(config.output.max_response_chars);
 
         let runtime_config = Arc::new(LspRuntimeConfig::from(&config));
 
@@ -105,7 +107,8 @@ impl App {
     /// Used by the MCP adapter to capture command output into a buffer
     /// instead of stdout, without spawning a subprocess.
     pub fn with_output_sink(&self, sink: Arc<dyn OutputSink>, options: OutputOptions) -> Self {
-        let output = OutputContext::with_sink(self.root.clone(), options, sink);
+        let output = OutputContext::with_sink(self.root.clone(), options, sink)
+            .with_max_response_chars(self.config.output.max_response_chars);
         Self {
             root: self.root.clone(),
             output,
