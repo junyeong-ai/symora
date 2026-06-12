@@ -362,15 +362,21 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "replace_symbol_body",
-            "Replace the resolved symbol's full body with new source code. \
-                          Target by file + symbol path (e.g. 'Class/method') or by \
-                          file:line:column — exactly one of symbol or line. Splices by the \
-                          LSP's symbol range so braces / decorators stay intact. \
+            "Replace the symbol's ENTIRE definition span — signature, \
+                          braces/decorators, and body. Pass the complete definition as \
+                          body, not just the inner code. Target by file + symbol path \
+                          (e.g. 'Class/method') or by file:line[:column] — exactly one of \
+                          symbol or line. \
                           ⚠ Mutates source files when dry_run is false.",
             with_extra(
                 edit_target_schema(),
                 &[
-                    ("body", "string", "New source for the symbol"),
+                    (
+                        "body",
+                        "string",
+                        "Complete replacement for the symbol's definition \
+                         (signature + braces + body)",
+                    ),
                     (
                         "dry_run",
                         "boolean",

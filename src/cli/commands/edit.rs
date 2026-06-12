@@ -35,8 +35,9 @@ pub struct EditArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum EditCommand {
-    /// Replace a symbol's full definition (whole lines, declaration
-    /// through closing brace). For a raw character range use `replace`.
+    /// Replace a symbol's ENTIRE definition span (whole lines, signature
+    /// through closing brace) — pass the complete definition, not just
+    /// the inner code. For a raw character range use `replace`.
     ReplaceBody {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
@@ -45,8 +46,9 @@ pub enum EditCommand {
         #[arg(short = 's', long)]
         symbol: Option<String>,
 
-        /// New source for the symbol, indentation included. Pass `-` to
-        /// read from stdin.
+        /// Complete replacement for the symbol's definition — signature,
+        /// braces, and body, indentation included. Pass `-` to read from
+        /// stdin.
         #[arg(long)]
         body: String,
 
