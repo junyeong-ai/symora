@@ -320,12 +320,19 @@ impl From<Signature> for lsp::SignatureInfo {
 pub struct SymbolsResponse {
     pub count: usize,
     pub symbols: Vec<Symbol>,
+    /// Computation-time indexing snapshot (workspace-symbol responses
+    /// only; `find_symbols` is a single-document query and leaves it
+    /// absent). See `models::lsp::Indexed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReferencesResponse {
     pub count: usize,
     pub references: Vec<Location>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -349,12 +356,16 @@ pub struct HoverResponse {
 pub struct ImplementationsResponse {
     pub count: usize,
     pub implementations: Vec<Location>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CallsResponse {
     pub count: usize,
     pub calls: Vec<CallItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -462,6 +473,8 @@ impl From<Vec<lsp::TextEdit>> for FormatResponse {
 pub struct TypeHierarchyResponse {
     pub count: usize,
     pub items: Vec<TypeHierarchyItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -651,11 +664,12 @@ impl From<CodeAction> for lsp::CodeAction {
 
 macro_rules! impl_vec_response {
     ($resp:ty, $field:ident, $domain:ty, $wire:ty) => {
-        impl From<Vec<$domain>> for $resp {
-            fn from(items: Vec<$domain>) -> Self {
+        impl From<lsp::Indexed<Vec<$domain>>> for $resp {
+            fn from(result: lsp::Indexed<Vec<$domain>>) -> Self {
                 Self {
-                    count: items.len(),
-                    $field: items.iter().map(<$wire>::from).collect(),
+                    count: result.data.len(),
+                    $field: result.data.iter().map(<$wire>::from).collect(),
+                    indexing: result.indexing,
                 }
             }
         }
@@ -849,6 +863,28 @@ mod tests {
     use super::*;
     use crate::models::lsp::{CallHierarchyItem as LspCallItem, TypeHierarchyItem as LspTypeItem};
     use crate::models::symbol::{Location as SymLocation, Symbol as SymSymbol, SymbolKind};
+
+    /// The computation-time indexing marker must survive the daemon wire
+    /// (INV3: daemon and direct answers carry the same disclosure), and a
+    /// complete answer must omit the field rather than ship filler.
+    #[test]
+    fn indexing_marker_round_trips_and_omits_when_absent() {
+        let degraded = ReferencesResponse::from(lsp::Indexed::new(
+            vec![SymLocation::point(PathBuf::from("src/a.rs"), 3, 7)],
+            Some(lsp::IndexingDegradation::TimedOut),
+        ));
+        let wire = serde_json::to_value(&degraded).unwrap();
+        assert_eq!(wire["indexing"], "timed_out");
+        let back: ReferencesResponse = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.indexing, Some(lsp::IndexingDegradation::TimedOut));
+        assert_eq!(back.count, 1);
+
+        let complete = ReferencesResponse::from(lsp::Indexed::complete(Vec::<SymLocation>::new()));
+        let wire = serde_json::to_value(&complete).unwrap();
+        assert!(wire.get("indexing").is_none());
+        let back: ReferencesResponse = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.indexing, None);
+    }
 
     // ---------------------------------------------------------------
     // Location roundtrip tests

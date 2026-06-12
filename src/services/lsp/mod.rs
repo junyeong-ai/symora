@@ -21,13 +21,20 @@ use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
-    SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    HoverInfo, Indexed, InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange,
+    ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
 pub use service::DefaultLspService;
 
+/// The LSP service every command speaks to. Workspace-dependent queries —
+/// anything whose answer scales with how much of the workspace the server
+/// has indexed (references, call/type hierarchies, implementations,
+/// workspace symbols) — return [`Indexed`], pairing the data with the
+/// indexing state it was computed under so output markers are derived
+/// from a computation-time snapshot, never from a racy after-the-fact
+/// read.
 #[async_trait]
 pub trait LspService: Send + Sync {
     async fn find_symbols(
@@ -40,14 +47,14 @@ pub trait LspService: Send + Sync {
         &self,
         query: &str,
         language: Language,
-    ) -> Result<Vec<Symbol>, LspError>;
+    ) -> Result<Indexed<Vec<Symbol>>, LspError>;
 
     async fn find_references(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<Location>, LspError>;
+    ) -> Result<Indexed<Vec<Location>>, LspError>;
 
     async fn goto_definition(
         &self,
@@ -68,7 +75,7 @@ pub trait LspService: Send + Sync {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<Location>, LspError>;
+    ) -> Result<Indexed<Vec<Location>>, LspError>;
 
     async fn hover(
         &self,
@@ -106,28 +113,28 @@ pub trait LspService: Send + Sync {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<CallHierarchyItem>, LspError>;
+    ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError>;
 
     async fn outgoing_calls(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<CallHierarchyItem>, LspError>;
+    ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError>;
 
     async fn supertypes(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<TypeHierarchyItem>, LspError>;
+    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError>;
 
     async fn subtypes(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<TypeHierarchyItem>, LspError>;
+    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError>;
 
     async fn inlay_hints(&self, file: &Path, range: Range) -> Result<Vec<InlayHint>, LspError>;
 
@@ -160,12 +167,14 @@ pub trait LspService: Send + Sync {
 
     async fn server_status(&self, language: Language) -> ServerStatus;
 
-    /// Whether the language's workspace indexing is in a degraded state
-    /// (latched on the running session by `await_indexing_signal`). Commands
-    /// whose answers depend on workspace indexing query this after their
-    /// data call and mark the response, so an agent never mistakes a
-    /// cold-server lower bound for a complete answer.
-    async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation>;
+    /// Symora itself just wrote these files. Both implementations bring
+    /// the language layer in line with the new bytes — invalidate per-file
+    /// symbol caches, advance the workspace-content generation so cached
+    /// workspace-wide answers can't outlive the write, and sync + save any
+    /// live server's overlay (rust-analyzer re-checks on save) — without
+    /// ever booting a server just to note an edit. Best-effort: an edit's
+    /// success never depends on it.
+    async fn note_files_edited(&self, _files: &[std::path::PathBuf]) {}
 }
 
 impl From<ServerStatusDetail> for ServerStatus {

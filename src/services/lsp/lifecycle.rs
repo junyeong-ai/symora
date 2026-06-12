@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -16,10 +15,6 @@ impl DefaultLspService {
 
     pub async fn cleanup_idle(&self, timeout: Duration) -> usize {
         self.manager.cleanup_idle(timeout).await
-    }
-
-    pub async fn invalidate_file_cache(&self, file: &Path) {
-        self.symbol_cache.invalidate(file).await;
     }
 
     pub async fn clear_caches(&self) {

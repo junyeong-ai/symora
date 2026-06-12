@@ -88,10 +88,18 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 analysis.anchor().column,
             );
             let next_commands = refs_next_commands(&items, total, limit, &anchor);
-            let indexing = app.lsp.indexing_degradation(analysis.language()).await;
+            // Captured when the reference query ran (LocationAnalysis),
+            // not re-read here — quiescence landing mid-request must not
+            // strip the marker from a lower-bound answer.
+            let indexing = analysis.indexing();
+            let hints = analysis
+                .ambiguity_hint()
+                .map(|h| vec![h.to_string()])
+                .unwrap_or_default();
             ctx.print_success(RefsOutput {
                 target,
                 references: Section::with_total(items, total)
+                    .with_hints(hints)
                     .with_next_commands(next_commands)
                     .with_indexing(indexing),
             });

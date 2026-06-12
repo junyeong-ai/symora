@@ -16,7 +16,7 @@ use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, IndexingDegradation, InlayHint, Position, PrepareRenameResult, Range, RenameResult,
+    HoverInfo, Indexed, InlayHint, Position, PrepareRenameResult, Range, RenameResult,
     SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
@@ -59,7 +59,7 @@ impl LspService for DaemonLspService {
         &self,
         query: &str,
         language: Language,
-    ) -> Result<Vec<Symbol>, LspError> {
+    ) -> Result<Indexed<Vec<Symbol>>, LspError> {
         let result = self
             .client
             .workspace_symbols(query, &language.to_string())
@@ -67,7 +67,10 @@ impl LspService for DaemonLspService {
 
         let response: SymbolsResponse = parse(result)?;
 
-        Ok(response.symbols.into_iter().map(Symbol::from).collect())
+        Ok(Indexed::new(
+            response.symbols.into_iter().map(Symbol::from).collect(),
+            response.indexing,
+        ))
     }
 
     async fn find_references(
@@ -75,12 +78,15 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<Location>, LspError> {
+    ) -> Result<Indexed<Vec<Location>>, LspError> {
         let result = self.client.find_references(file, line, column).await?;
 
         let response: ReferencesResponse = parse(result)?;
 
-        Ok(response.references.into_iter().map(Into::into).collect())
+        Ok(Indexed::new(
+            response.references.into_iter().map(Into::into).collect(),
+            response.indexing,
+        ))
     }
 
     async fn goto_definition(
@@ -114,16 +120,19 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<Location>, LspError> {
+    ) -> Result<Indexed<Vec<Location>>, LspError> {
         let result = self.client.find_implementations(file, line, column).await?;
 
         let response: ImplementationsResponse = parse(result)?;
 
-        Ok(response
-            .implementations
-            .into_iter()
-            .map(Into::into)
-            .collect())
+        Ok(Indexed::new(
+            response
+                .implementations
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            response.indexing,
+        ))
     }
 
     async fn hover(
@@ -260,12 +269,15 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
         let result = self.client.incoming_calls(file, line, column).await?;
 
         let response: CallsResponse = parse(result)?;
 
-        Ok(response.calls.into_iter().map(Into::into).collect())
+        Ok(Indexed::new(
+            response.calls.into_iter().map(Into::into).collect(),
+            response.indexing,
+        ))
     }
 
     async fn outgoing_calls(
@@ -273,12 +285,15 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
         let result = self.client.outgoing_calls(file, line, column).await?;
 
         let response: CallsResponse = parse(result)?;
 
-        Ok(response.calls.into_iter().map(Into::into).collect())
+        Ok(Indexed::new(
+            response.calls.into_iter().map(Into::into).collect(),
+            response.indexing,
+        ))
     }
 
     async fn supertypes(
@@ -286,10 +301,13 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
         let result = self.client.supertypes(file, line, column).await?;
         let response: TypeHierarchyResponse = parse(result)?;
-        Ok(response.items.into_iter().map(Into::into).collect())
+        Ok(Indexed::new(
+            response.items.into_iter().map(Into::into).collect(),
+            response.indexing,
+        ))
     }
 
     async fn subtypes(
@@ -297,10 +315,13 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
         let result = self.client.subtypes(file, line, column).await?;
         let response: TypeHierarchyResponse = parse(result)?;
-        Ok(response.items.into_iter().map(Into::into).collect())
+        Ok(Indexed::new(
+            response.items.into_iter().map(Into::into).collect(),
+            response.indexing,
+        ))
     }
 
     async fn inlay_hints(&self, file: &Path, range: Range) -> Result<Vec<InlayHint>, LspError> {
@@ -409,12 +430,13 @@ impl LspService for DaemonLspService {
         }
     }
 
-    async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation> {
-        let response = self
-            .client
-            .indexing_degradation(&language.to_string())
-            .await
-            .ok()?;
-        serde_json::from_value(response.get("degradation")?.clone()).ok()?
+    /// Forward the post-edit note to the daemon, where the caches and
+    /// overlays live. Best-effort by contract: a daemon that is not
+    /// running has nothing to catch up, and a forwarding failure must
+    /// not fail the edit that triggered it.
+    async fn note_files_edited(&self, files: &[PathBuf]) {
+        if let Err(e) = self.client.note_files_edited(files).await {
+            tracing::warn!("Post-edit LSP note failed: {e}");
+        }
     }
 }

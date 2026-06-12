@@ -204,13 +204,15 @@ pub(super) async fn dispatch(
         methods::LANGUAGE_STATUS => {
             handlers::handle_language_status(&params, projects, lsp_config).await
         }
-        methods::INDEXING_DEGRADATION => {
-            handlers::handle_indexing_degradation(&params, projects, lsp_config).await
+
+        // Post-edit notes
+        methods::NOTE_FILES_EDITED => {
+            handlers::handle_note_files_edited(&params, projects, lsp_config).await
         }
 
         // Store operations
-        methods::REFRESH_FILE => {
-            store_handlers::handle_refresh_file(&params, projects, lsp_config).await
+        methods::REFRESH_FILES => {
+            store_handlers::handle_refresh_files(&params, projects, lsp_config).await
         }
         methods::SEARCH_SYMBOLS => {
             store_handlers::handle_search_symbols(&params, projects, lsp_config).await

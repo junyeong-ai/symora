@@ -47,6 +47,14 @@ fn bump_content_generation() {
     CONTENT_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
+/// Record a workspace content change that happened outside any client's
+/// overlay — symora's own write to a file no server has open. Caches of
+/// workspace-wide answers validate against the generation, so the bump
+/// must not depend on a live client having the file open.
+pub fn note_workspace_content_changed() {
+    bump_content_generation();
+}
+
 #[derive(Debug, Clone, Copy)]
 enum LogLevel {
     Error,
@@ -116,6 +124,15 @@ impl DocumentState {
         self.version += 1;
         self.content_hash = crate::infra::hash_content(new_content);
     }
+}
+
+/// What a document sync did to the server's view: opened a fresh overlay,
+/// changed an existing one, or matched it (no notification sent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncOutcome {
+    Opened,
+    Changed,
+    Unchanged,
 }
 
 use std::collections::VecDeque;
@@ -190,9 +207,10 @@ impl DocumentCache {
 /// notification, a drained set of indexing-progress tokens, a known
 /// readiness log line) — never assumed. `TimedOut` means the wait budget
 /// expired before any such signal: usable, but degraded, and disclosed
-/// as such via `indexing_degradation`. The state is re-evaluated by every
-/// signal that arrives — a server that reports busy (`InProgress`) and
-/// later quiescent flips back to `Ready` with no latch in between.
+/// as such via the `indexing` marker. The state moves only through the
+/// transition table in [`IndexingState::on_event`], applied atomically
+/// (compare-and-swap) so a racing signal can never be stomped by a
+/// blind store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IndexingState {
@@ -200,6 +218,23 @@ pub enum IndexingState {
     InProgress = 1,
     Ready = 2,
     TimedOut = 3,
+}
+
+/// The events that may move [`IndexingState`]. Every state change goes
+/// through `IndexingState::on_event` — there is no other write path — so
+/// the legal transitions live in exactly one testable place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexingEvent {
+    /// A bounded wait is claiming the session (start of
+    /// `await_indexing_signal`).
+    WaitStarted,
+    /// The bounded wait's budget expired without a readiness signal.
+    WaitTimedOut,
+    /// The server signalled a fully analyzed workspace (quiescent=true,
+    /// a drained progress-token set, a known readiness log line).
+    ServerQuiescent,
+    /// The server signalled it is (re)working (quiescent=false).
+    ServerBusy,
 }
 
 impl IndexingState {
@@ -219,6 +254,32 @@ impl IndexingState {
     pub fn is_usable(self) -> bool {
         matches!(self, Self::Ready | Self::TimedOut)
     }
+
+    /// The legal transition table. Anything not listed is a no-op, which
+    /// is what makes the racy interleavings safe:
+    ///
+    /// - Only a quiescence signal ever produces `Ready`.
+    /// - A timeout verdict only concludes an in-flight wait
+    ///   (`InProgress`); it can never overwrite a `Ready` that landed
+    ///   while the waiter slept.
+    /// - A busy signal re-opens `InProgress` from `Ready` (the server is
+    ///   genuinely re-working) but NOT from `TimedOut`: a timed-out index
+    ///   that is still incomplete must keep its disclosed marker until
+    ///   quiescence proves completion.
+    /// - Claiming the wait only moves the initial `NotStarted` state.
+    pub fn on_event(self, event: IndexingEvent) -> IndexingState {
+        use IndexingEvent::*;
+        use IndexingState::*;
+        match (self, event) {
+            (_, ServerQuiescent) => Ready,
+            (TimedOut, ServerBusy) => TimedOut,
+            (_, ServerBusy) => InProgress,
+            (NotStarted, WaitStarted) => InProgress,
+            (state, WaitStarted) => state,
+            (InProgress, WaitTimedOut) => TimedOut,
+            (state, WaitTimedOut) => state,
+        }
+    }
 }
 
 pub struct LspClient {
@@ -237,6 +298,13 @@ pub struct LspClient {
     shutdown: RwLock<bool>,
     indexing_state: AtomicU8,
     indexing_notify: Notify,
+    /// Serializes the drift sweep's `didClose` against in-flight requests:
+    /// each request holds a read guard for its full dispatch window, and
+    /// closing a vanished overlay takes the write guard — so an overlay is
+    /// never closed out from under a request that may be answering from it.
+    /// Requests are NOT serialized through one connection (the pending map
+    /// allows true concurrency), which is why the gate exists.
+    dispatch_gate: RwLock<()>,
     terminated: AtomicBool,
     cross_file_waited: AtomicBool,
     /// Set once the server demonstrates an explicit status protocol
@@ -285,6 +353,7 @@ impl LspClient {
             shutdown: RwLock::new(false),
             indexing_state: AtomicU8::new(IndexingState::NotStarted.to_u8()),
             indexing_notify: Notify::new(),
+            dispatch_gate: RwLock::new(()),
             terminated: AtomicBool::new(false),
             cross_file_waited: AtomicBool::new(false),
             status_channel_seen: AtomicBool::new(false),
@@ -747,8 +816,15 @@ impl LspClient {
         }
 
         // The document-access invariant: nothing is asked of the server
-        // while an overlay it holds has drifted from disk.
+        // while an overlay it holds has drifted from disk. The sweep runs
+        // BEFORE this request takes its dispatch-gate read guard, so a
+        // sweep that must close a vanished overlay (write guard) never
+        // deadlocks with its own request.
         self.refresh_drifted_overlays().await;
+
+        // Held for the full dispatch window: a concurrent sweep's
+        // `didClose` (write guard) waits until no request is in flight.
+        let _dispatch = self.dispatch_gate.read().await;
 
         // Generate unique request ID
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -1047,16 +1123,70 @@ impl LspClient {
 
     /// Sync the document and return the version the server now knows it
     /// at — the key for judging `publishDiagnostics` freshness.
+    ///
+    /// When the sync produced a `didChange` — the content on disk moved
+    /// under an open overlay — a `textDocument/didSave` follows: every
+    /// caller passes content read straight from disk, so the overlay now
+    /// matches the saved file, and save is the signal that triggers
+    /// save-driven analysis (rust-analyzer runs flycheck on save, so a
+    /// warm daemon's diagnostics would otherwise stay unconfirmed after
+    /// every edit). A no-op sync sends nothing.
     pub async fn sync_document(&self, uri: &str, content: &str) -> Result<u32, LspError> {
-        self.sync_document_inner(uri, content).await
-    }
-
-    async fn sync_document_inner(&self, uri: &str, content: &str) -> Result<u32, LspError> {
         // Fingerprint the backing file alongside the content being sent,
         // so the drift sweep can later skip unchanged documents on a stat
-        // instead of a read.
+        // instead of a read. Probed after the caller's read — a write
+        // landing between the read and this probe is healed by the next
+        // direct sync of the file (every targeted command performs one).
         let disk = DiskState::probe(&crate::models::lsp::uri_to_path(uri)).await;
-        let (version, evicted) = {
+        let (version, outcome) = self.sync_document_inner(uri, content, disk).await?;
+        if outcome == SyncOutcome::Changed {
+            self.notify_did_save(uri).await;
+        }
+        Ok(version)
+    }
+
+    /// Sync `uri`'s overlay to the bytes symora itself just wrote, and
+    /// nudge save-driven analysis. Probes the disk fingerprint BEFORE
+    /// reading the content, so a racing write can only make the stored
+    /// fingerprint older than the content — the next sweep then re-detects
+    /// drift (always-detect, never silently-fresh). Sends `didSave` for a
+    /// fresh open too: the server has never analyzed the post-edit bytes,
+    /// and our own write is exactly a save.
+    pub async fn sync_edited_document(&self, file: &std::path::Path) -> Result<(), LspError> {
+        let disk = DiskState::probe(file).await;
+        let content = tokio::fs::read_to_string(file)
+            .await
+            .map_err(|e| LspError::Protocol(format!("read {}: {e}", file.display())))?;
+        let uri = path_to_uri(file);
+        let (_, outcome) = self.sync_document_inner(&uri, &content, disk).await?;
+        if outcome != SyncOutcome::Unchanged {
+            self.notify_did_save(&uri).await;
+            if outcome == SyncOutcome::Opened {
+                // The didChange path already noted the content change; a
+                // fresh open of just-edited bytes is the same event for
+                // settle windows and workspace-answer caches.
+                self.note_document_changed();
+            }
+        }
+        Ok(())
+    }
+
+    async fn notify_did_save(&self, uri: &str) {
+        let _ = self
+            .notify(
+                "textDocument/didSave",
+                Some(serde_json::json!({ "textDocument": { "uri": uri } })),
+            )
+            .await;
+    }
+
+    async fn sync_document_inner(
+        &self,
+        uri: &str,
+        content: &str,
+        disk: Option<DiskState>,
+    ) -> Result<(u32, SyncOutcome), LspError> {
+        let (version, outcome, evicted) = {
             let mut cache = self.document_cache.write().await;
             let language_id = self.language.to_string().to_lowercase();
 
@@ -1065,16 +1195,19 @@ impl LspClient {
                 if state.needs_update(content) {
                     state.update(content);
                     self.note_document_changed();
+                    let version = state.version;
                     self.notify(
                         "textDocument/didChange",
                         Some(serde_json::json!({
-                            "textDocument": { "uri": uri, "version": state.version },
+                            "textDocument": { "uri": uri, "version": version },
                             "contentChanges": [{ "text": content }]
                         })),
                     )
                     .await?;
+                    (version, SyncOutcome::Changed, None)
+                } else {
+                    (state.version, SyncOutcome::Unchanged, None)
                 }
-                (state.version, None)
             } else {
                 // Opening a file the server already indexed from disk adds
                 // no new information — only a content *change* re-arms the
@@ -1094,7 +1227,11 @@ impl LspClient {
                     })),
                 )
                 .await?;
-                (version, cache.insert(uri.to_string(), state))
+                (
+                    version,
+                    SyncOutcome::Opened,
+                    cache.insert(uri.to_string(), state),
+                )
             }
         };
 
@@ -1106,7 +1243,7 @@ impl LspClient {
                 )
                 .await;
         }
-        Ok(version)
+        Ok((version, outcome))
     }
 
     /// The document-access invariant, enforced before every request:
@@ -1138,11 +1275,32 @@ impl LspClient {
             }
             match tokio::fs::read_to_string(&path).await {
                 Ok(content) => {
-                    if let Err(e) = self.sync_document_inner(&uri, &content).await {
-                        tracing::debug!("Failed to re-sync drifted overlay {uri}: {e}");
+                    // `current` was probed BEFORE this read: a write
+                    // landing in between can only make the stored
+                    // fingerprint older than the content, so the next
+                    // sweep re-detects the drift. Probing after the read
+                    // would record the write's fingerprint against the
+                    // pre-write content — drift hidden until re-target.
+                    let outcome = self.sync_document_inner(&uri, &content, current).await;
+                    match outcome {
+                        Ok((_, SyncOutcome::Changed)) => self.notify_did_save(&uri).await,
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!("Failed to re-sync drifted overlay {uri}: {e}")
+                        }
                     }
                 }
-                Err(_) => self.close_document(&uri).await,
+                // Only a confirmed deletion closes the overlay. Any other
+                // read error (permissions blip, an atomic-save window where
+                // the path is briefly unreadable) is transient: skip this
+                // sweep round and let the next request re-check, instead
+                // of telling the server real bytes are gone.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.close_document(&uri).await
+                }
+                Err(e) => {
+                    tracing::debug!("Skipping drift re-sync for {uri} (transient read error: {e})")
+                }
             }
         }
     }
@@ -1150,7 +1308,13 @@ impl LspClient {
     /// Close an overlay whose backing file disappeared. The close is the
     /// honest signal — the server falls back to its own (absent) disk
     /// view instead of answering from bytes that no longer exist.
+    ///
+    /// Takes the dispatch gate's write guard first: requests on this
+    /// client run concurrently (pending map, not a serialized connection),
+    /// so an unguarded close could yank the overlay out from under an
+    /// in-flight request that is being answered from it.
     async fn close_document(&self, uri: &str) {
+        let _gate = self.dispatch_gate.write().await;
         let removed = self.document_cache.write().await.remove(uri);
         if removed {
             let _ = self
@@ -1185,11 +1349,41 @@ impl LspClient {
         }
     }
 
-    pub fn set_indexing_state(&self, state: IndexingState) {
-        self.indexing_state.store(state.to_u8(), Ordering::Release);
-        if state == IndexingState::Ready {
-            self.indexing_notify.notify_waiters();
+    /// Apply one indexing event atomically and return the state it
+    /// produced. The transition table (`IndexingState::on_event`) is the
+    /// only authority; the compare-and-swap loop guarantees a concurrent
+    /// signal is incorporated, never overwritten — the failure mode the
+    /// old blind `store` had (a quiescence landing mid-update was stomped
+    /// and its wake-up lost, latching a permanent false `TimedOut`).
+    pub fn apply_indexing_event(&self, event: IndexingEvent) -> IndexingState {
+        loop {
+            let current = self.indexing_state();
+            let next = current.on_event(event);
+            if next == current {
+                return current;
+            }
+            if self
+                .indexing_state
+                .compare_exchange(
+                    current.to_u8(),
+                    next.to_u8(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                if next == IndexingState::Ready {
+                    self.indexing_notify.notify_waiters();
+                }
+                return next;
+            }
         }
+    }
+
+    /// Test-only raw setter for staging a scenario mid-table.
+    #[cfg(test)]
+    fn force_indexing_state(&self, state: IndexingState) {
+        self.indexing_state.store(state.to_u8(), Ordering::Release);
     }
 
     /// A document's content changed under this session (our own edit or
@@ -1206,22 +1400,25 @@ impl LspClient {
     }
 
     pub async fn await_indexing_signal(&self) -> IndexingState {
-        let current = self.indexing_state();
         // `TimedOut` is terminal-usable: re-waiting the full budget on
         // every request would make a slow server cost the timeout per
-        // query forever. Recovery is signal-driven — any later readiness
+        // query forever. Recovery is signal-driven — a later quiescence
         // signal flips the state to `Ready` — and degraded answers stay
-        // marked via `indexing_degradation` until one arrives.
-        if current.is_usable() {
-            return current;
+        // marked via the `indexing` marker until one arrives. Claiming
+        // the wait is a transition (NotStarted → InProgress), not a blind
+        // store, so a `Ready` that landed since the caller checked is
+        // returned, never overwritten.
+        let state = self.apply_indexing_event(IndexingEvent::WaitStarted);
+        if state.is_usable() {
+            return state;
         }
-
-        self.set_indexing_state(IndexingState::InProgress);
 
         let max_wait = self.indexing_timeout();
         if max_wait.is_zero() {
-            self.set_indexing_state(IndexingState::Ready);
-            return IndexingState::Ready;
+            // No budget means no signal was observed — that is a disclosed
+            // timeout, not a manufactured readiness. (The transition is a
+            // no-op if a real signal landed in the meantime.)
+            return self.apply_indexing_event(IndexingEvent::WaitTimedOut);
         }
 
         tracing::debug!(
@@ -1230,21 +1427,36 @@ impl LspClient {
             self.language
         );
 
-        tokio::select! {
-            _ = self.indexing_notify.notified() => {
-                tracing::debug!("{} indexing completed via notification", self.language);
-                self.set_indexing_state(IndexingState::Ready);
-                IndexingState::Ready
+        let deadline = tokio::time::Instant::now() + max_wait;
+        loop {
+            let notified = self.indexing_notify.notified();
+            tokio::pin!(notified);
+            // Register the waiter BEFORE re-reading the state, so a
+            // quiescence signal that lands in the gap either flips the
+            // state we are about to read or wakes the registered waiter —
+            // it can no longer fall between the two.
+            notified.as_mut().enable();
+            let current = self.indexing_state();
+            if current.is_usable() {
+                return current;
             }
-            _ = tokio::time::sleep(max_wait) => {
-                // A readiness signal that raced the notify registration
-                // still counts — only an absent signal is a timeout.
-                if self.indexing_state() == IndexingState::Ready {
-                    return IndexingState::Ready;
+            tokio::select! {
+                _ = &mut notified => {
+                    let state = self.indexing_state();
+                    if state.is_usable() {
+                        tracing::debug!("{} indexing completed via notification", self.language);
+                        return state;
+                    }
+                    // A busy signal re-opened InProgress between the wake
+                    // and the read: keep waiting on the remaining budget.
                 }
-                tracing::debug!("{} indexing timeout", self.language);
-                self.set_indexing_state(IndexingState::TimedOut);
-                IndexingState::TimedOut
+                _ = tokio::time::sleep_until(deadline) => {
+                    tracing::debug!("{} indexing timeout", self.language);
+                    // The transition refuses to conclude anything but an
+                    // in-flight wait, so a Ready that arrived between the
+                    // deadline firing and this store is returned intact.
+                    return self.apply_indexing_event(IndexingEvent::WaitTimedOut);
+                }
             }
         }
     }
@@ -1278,10 +1490,10 @@ impl LspClient {
                 client_status
                     .status_channel_seen
                     .store(true, Ordering::Release);
-                client_status.set_indexing_state(if quiescent {
-                    IndexingState::Ready
+                client_status.apply_indexing_event(if quiescent {
+                    IndexingEvent::ServerQuiescent
                 } else {
-                    IndexingState::InProgress
+                    IndexingEvent::ServerBusy
                 });
             }
         })
@@ -1292,7 +1504,7 @@ impl LspClient {
             if params.get("type").and_then(|v| v.as_str()) == Some("ProjectStatus")
                 && params.get("message").and_then(|v| v.as_str()) == Some("OK")
             {
-                client_lang.set_indexing_state(IndexingState::Ready);
+                client_lang.apply_indexing_event(IndexingEvent::ServerQuiescent);
             }
         })
         .await;
@@ -1335,7 +1547,7 @@ impl LspClient {
                     let mut tokens = indexing_tokens.lock().expect("indexing token set poisoned");
                     if tokens.remove(&token) && tokens.is_empty() {
                         drop(tokens);
-                        client_progress.set_indexing_state(IndexingState::Ready);
+                        client_progress.apply_indexing_event(IndexingEvent::ServerQuiescent);
                     }
                 }
                 _ => {}
@@ -1352,7 +1564,7 @@ impl LspClient {
             if let Some(msg) = params.get("message").and_then(|m| m.as_str())
                 && Self::is_readiness_signal(language, msg)
             {
-                client_log.set_indexing_state(IndexingState::Ready);
+                client_log.apply_indexing_event(IndexingEvent::ServerQuiescent);
             }
         })
         .await;
@@ -1625,7 +1837,7 @@ mod tests {
     async fn server_status_clears_a_timed_out_verdict() {
         let client = test_client();
         client.register_default_handlers().await;
-        client.set_indexing_state(IndexingState::TimedOut);
+        client.force_indexing_state(IndexingState::TimedOut);
 
         notify_client(
             &client,
@@ -1634,6 +1846,82 @@ mod tests {
         )
         .await;
         assert_eq!(client.indexing_state(), IndexingState::Ready);
+    }
+
+    /// A busy signal must NOT clear a timed-out verdict: the index is
+    /// still incomplete, so the disclosed degraded state stands until a
+    /// quiescence signal proves completion. (Clearing it would let the
+    /// next answer emit unmarked off the same incomplete index.)
+    #[tokio::test]
+    async fn server_busy_does_not_clear_a_timed_out_verdict() {
+        let client = test_client();
+        client.register_default_handlers().await;
+        client.force_indexing_state(IndexingState::TimedOut);
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": false}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::TimedOut);
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": true}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::Ready);
+    }
+
+    /// The full transition table: every pair not explicitly legal is a
+    /// no-op. This is the single place the legal moves are encoded, so
+    /// the race fixes (no blind stores) reduce to this table being right.
+    #[test]
+    fn indexing_transition_table_is_exact() {
+        use IndexingEvent::*;
+        use IndexingState::*;
+
+        let states = [NotStarted, InProgress, Ready, TimedOut];
+
+        // A quiescence signal is the only path to Ready, from anywhere.
+        for state in states {
+            assert_eq!(state.on_event(ServerQuiescent), Ready);
+        }
+
+        // Busy re-opens InProgress — except from the disclosed TimedOut.
+        assert_eq!(NotStarted.on_event(ServerBusy), InProgress);
+        assert_eq!(InProgress.on_event(ServerBusy), InProgress);
+        assert_eq!(Ready.on_event(ServerBusy), InProgress);
+        assert_eq!(TimedOut.on_event(ServerBusy), TimedOut);
+
+        // Claiming the wait only moves the initial state — it can never
+        // stomp a Ready/TimedOut that landed since the caller checked.
+        assert_eq!(NotStarted.on_event(WaitStarted), InProgress);
+        assert_eq!(InProgress.on_event(WaitStarted), InProgress);
+        assert_eq!(Ready.on_event(WaitStarted), Ready);
+        assert_eq!(TimedOut.on_event(WaitStarted), TimedOut);
+
+        // A timeout verdict only concludes an in-flight wait — it never
+        // overwrites a Ready that raced it, and never stamps a session
+        // that has no wait running.
+        assert_eq!(InProgress.on_event(WaitTimedOut), TimedOut);
+        assert_eq!(NotStarted.on_event(WaitTimedOut), NotStarted);
+        assert_eq!(Ready.on_event(WaitTimedOut), Ready);
+        assert_eq!(TimedOut.on_event(WaitTimedOut), TimedOut);
+    }
+
+    /// An already-quiescent server must never be re-latched into a false
+    /// TimedOut by a waiter racing the signal: the wait claim is a
+    /// transition, so the landed Ready is returned, not overwritten.
+    #[tokio::test]
+    async fn wait_returns_a_ready_that_landed_before_the_claim() {
+        let client = test_client();
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(client.await_indexing_signal().await, IndexingState::Ready);
+        // And again — quiescence is durable across repeated waits.
+        assert_eq!(client.await_indexing_signal().await, IndexingState::Ready);
     }
 
     /// The progress heuristic flips Ready only when the LAST tracked
@@ -1702,11 +1990,11 @@ mod tests {
     #[tokio::test]
     async fn document_change_does_not_unprove_readiness() {
         let client = test_client();
-        client.set_indexing_state(IndexingState::Ready);
+        client.force_indexing_state(IndexingState::Ready);
         client.note_document_changed();
         assert_eq!(client.indexing_state(), IndexingState::Ready);
 
-        client.set_indexing_state(IndexingState::TimedOut);
+        client.force_indexing_state(IndexingState::TimedOut);
         client.note_document_changed();
         assert_eq!(
             client.indexing_state(),

@@ -104,6 +104,9 @@ pub(super) async fn handle_find_symbols(
     to_json(SymbolsResponse {
         count: symbols.len(),
         symbols: symbols.iter().map(wire::Symbol::from).collect(),
+        // Document symbols are a single-file query; the indexing marker
+        // belongs to workspace-dependent answers only.
+        indexing: None,
     })
     .map_err(RpcError::from)
 }
@@ -123,15 +126,16 @@ pub(super) async fn handle_workspace_symbols(
         .map(Language::parse_or_default)
         .unwrap_or(Language::Unknown);
 
-    let symbols = ctx
+    let result = ctx
         .lsp
         .workspace_symbols(&p.query, language)
         .await
         .map_err(RpcError::from)?;
 
     to_json(SymbolsResponse {
-        count: symbols.len(),
-        symbols: symbols.iter().map(wire::Symbol::from).collect(),
+        count: result.data.len(),
+        symbols: result.data.iter().map(wire::Symbol::from).collect(),
+        indexing: result.indexing,
     })
     .map_err(RpcError::from)
 }
@@ -296,17 +300,20 @@ pub(super) async fn handle_language_status(
     }))
 }
 
-pub(super) async fn handle_indexing_degradation(
+/// Bring the daemon's language layer in line with files the requesting
+/// process just wrote: symbol-cache invalidation, workspace-generation
+/// bump, and a live server's overlay sync + save — the daemon-side half
+/// of the edit flow's `note_files_edited`.
+pub(super) async fn handle_note_files_edited(
     params: &serde_json::Value,
     projects: &ProjectsMap,
     lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: LanguageStatusParams = parse_params(params)?;
+    let p: crate::daemon::params::EditedFilesParams = parse_params(params)?;
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
 
-    let language = Language::parse_or_default(&p.language);
-    let degradation = ctx.lsp.indexing_degradation(language).await;
-
-    Ok(serde_json::json!({ "degradation": degradation }))
+    let paths: Vec<PathBuf> = p.files.iter().map(PathBuf::from).collect();
+    ctx.lsp.note_files_edited(&paths).await;
+    Ok(serde_json::json!({"noted": true}))
 }

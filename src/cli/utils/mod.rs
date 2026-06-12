@@ -16,5 +16,8 @@ pub mod ui;
 pub use io::{read_line_at, read_lines_around};
 pub use refs::{RefsClassification, classify_refs, extract_module};
 pub use signature::extract_signature;
-pub use symbol_nav::{find_symbol_at_position, resolve_symbol_anchor};
+pub use symbol_nav::{
+    SymbolResolution, column_addressed_symbol, find_symbol_at_position, line_addressed_symbol,
+    resolve_symbol_anchor, symbols_declared_on_line,
+};
 pub use test_matcher::TestMatcher;

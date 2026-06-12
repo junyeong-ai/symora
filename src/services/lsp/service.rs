@@ -11,7 +11,7 @@ use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
+    HoverInfo, Indexed, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
     SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem, path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
@@ -115,7 +115,7 @@ impl LspService for DefaultLspService {
         &self,
         query: &str,
         language: Language,
-    ) -> Result<Vec<Symbol>, LspError> {
+    ) -> Result<Indexed<Vec<Symbol>>, LspError> {
         symbols::workspace_symbols(self, query, language).await
     }
 
@@ -124,7 +124,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<Location>, LspError> {
+    ) -> Result<Indexed<Vec<Location>>, LspError> {
         navigation::find_references(self, file, line, column).await
     }
 
@@ -151,7 +151,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<Location>, LspError> {
+    ) -> Result<Indexed<Vec<Location>>, LspError> {
         navigation::find_implementations(self, file, line, column).await
     }
 
@@ -201,7 +201,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
         hierarchy::incoming_calls(self, file, line, column).await
     }
 
@@ -210,7 +210,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<CallHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
         hierarchy::outgoing_calls(self, file, line, column).await
     }
 
@@ -219,7 +219,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
         hierarchy::supertypes(self, file, line, column).await
     }
 
@@ -228,7 +228,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+    ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
         hierarchy::subtypes(self, file, line, column).await
     }
 
@@ -281,17 +281,28 @@ impl LspService for DefaultLspService {
         lifecycle::server_status(self, language).await
     }
 
-    async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation> {
-        let client = self.manager.peek_client(language).await?;
-        // Readiness is strictly signal-driven (`Ready` only ever follows
-        // an explicit server signal — see `register_default_handlers`),
-        // so an unmarked answer was genuinely served from a complete
-        // index. `TimedOut` — the wait budget expired before any signal —
-        // is the one degraded state results can be computed under, and it
-        // clears the moment the server reports quiescence.
-        match client.indexing_state() {
-            IndexingState::TimedOut => Some(IndexingDegradation::TimedOut),
-            _ => None,
+    /// Bring the language layer in line with files symora just wrote:
+    /// per-file symbol caches are invalidated, the workspace-content
+    /// generation advances (cached workspace-wide answers must not
+    /// outlive the write — even when no server has the file open), and a
+    /// LIVE server's overlay is synced from disk and saved so
+    /// save-driven analysis re-runs. Peek only: an edit never boots a
+    /// server just to be noted.
+    async fn note_files_edited(&self, files: &[std::path::PathBuf]) {
+        for file in files {
+            self.symbol_cache.invalidate(file).await;
+        }
+        crate::infra::lsp::note_workspace_content_changed();
+        for file in files {
+            let Ok(language) = Self::language_for_file(file) else {
+                continue;
+            };
+            let Some(client) = self.manager.peek_client(language).await else {
+                continue;
+            };
+            if let Err(e) = client.sync_edited_document(file).await {
+                tracing::debug!("Post-edit overlay sync failed for {}: {e}", file.display());
+            }
         }
     }
 }
@@ -300,6 +311,19 @@ impl Drop for DefaultLspService {
     fn drop(&mut self) {
         self.health_shutdown.store(true, Ordering::Release);
         self.health_handle.abort();
+    }
+}
+
+/// Map a computation-time indexing snapshot to the output marker. Readiness
+/// is strictly signal-driven (`Ready` only ever follows an explicit server
+/// signal — see `register_default_handlers`), so an unmarked answer was
+/// genuinely served from a complete index; `TimedOut` — the wait budget
+/// expired before any signal — is the one degraded state a result can be
+/// computed under.
+pub(super) fn degradation_of(state: IndexingState) -> Option<IndexingDegradation> {
+    match state {
+        IndexingState::TimedOut => Some(IndexingDegradation::TimedOut),
+        _ => None,
     }
 }
 

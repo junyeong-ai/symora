@@ -97,8 +97,11 @@ impl StoreService for DaemonStoreService {
         Ok(())
     }
 
-    async fn refresh_file(&self, path: &Path) -> Result<(), StoreError> {
-        self.client.refresh_file(path).await.map_err(store_error)?;
+    async fn refresh_files(&self, paths: &[std::path::PathBuf]) -> Result<(), StoreError> {
+        self.client
+            .refresh_files(paths)
+            .await
+            .map_err(store_error)?;
         Ok(())
     }
 }
