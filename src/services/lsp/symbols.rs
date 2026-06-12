@@ -144,8 +144,16 @@ pub(super) async fn workspace_symbols(
     let manager = Arc::clone(&service.manager);
     let cache = Arc::clone(&service.workspace_symbol_cache);
 
+    // The cache decision must see post-drift state: sweep a live client's
+    // overlays first so an external edit bumps the content generation
+    // before it is read. Peek only — a cache hit must not boot a server.
+    if let Some(client) = manager.peek_client(language).await {
+        client.refresh_drifted_overlays().await;
+    }
+    let generation = crate::infra::lsp::content_generation();
+
     let symbols = cache
-        .get_or_compute(language, query, || {
+        .get_or_compute(language, query, generation, || {
             let manager = Arc::clone(&manager);
             let query = query.to_string();
             async move {
