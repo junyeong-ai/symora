@@ -206,8 +206,12 @@ struct RawLspConfig {
     type_hierarchy_limit: Option<usize>,
     tests_limit: Option<usize>,
     diagnostics_wait_ms: Option<u64>,
+    /// Raw [lsp.servers.<lang>] stanzas. Kept as TOML tables so
+    /// `resolve_server_overrides` can partition unknown keys AND unknown
+    /// fields into corrective errors instead of failing the whole config
+    /// or silently dropping a typo'd field.
     #[serde(default)]
-    servers: HashMap<String, ServerOverride>,
+    servers: HashMap<String, toml::Table>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -370,19 +374,48 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
     }
 }
 
-/// Partition [lsp.servers] keys: strictly canonical `Language::lsp_id`
-/// keys are applied; alias and unknown keys are recorded with a
-/// corrective message and dropped — never applied, never a load error
-/// for the rest of the config.
+/// The field set a [lsp.servers.<lang>] stanza accepts — the
+/// `ServerOverride` fields, kept in lockstep by the unit test below.
+const SERVER_OVERRIDE_FIELDS: [&str; 3] = ["command", "args", "tier"];
+
+/// Partition [lsp.servers] stanzas: strictly canonical `Language::lsp_id`
+/// keys with only known fields are applied; alias keys, unknown keys,
+/// unknown fields, and mistyped values are recorded with a corrective
+/// message and the stanza dropped — never applied, never a load error
+/// for the rest of the config. A stanza with an unknown field is
+/// rejected whole: applying its remainder would let a typo'd `command`
+/// silently fall back to the builtin launch.
 fn resolve_server_overrides(
-    raw: HashMap<String, ServerOverride>,
+    raw: HashMap<String, toml::Table>,
 ) -> (HashMap<String, ServerOverride>, Vec<ServerOverrideError>) {
     let mut applied = HashMap::new();
     let mut errors = Vec::new();
-    for (key, value) in raw {
+    for (key, table) in raw {
         match Language::from_str(&key) {
             Ok(language) if language.lsp_id() == key => {
-                applied.insert(key, value);
+                let unknown_fields: Vec<&String> = table
+                    .keys()
+                    .filter(|field| !SERVER_OVERRIDE_FIELDS.contains(&field.as_str()))
+                    .collect();
+                if !unknown_fields.is_empty() {
+                    errors.extend(unknown_fields.into_iter().map(|field| ServerOverrideError {
+                        key: format!("lsp.servers.{key}.{field}"),
+                        message: format!(
+                            "unknown field `{field}` — valid fields are `{}`",
+                            SERVER_OVERRIDE_FIELDS.join("`, `")
+                        ),
+                    }));
+                    continue;
+                }
+                match toml::Value::Table(table).try_into::<ServerOverride>() {
+                    Ok(value) => {
+                        applied.insert(key, value);
+                    }
+                    Err(e) => errors.push(ServerOverrideError {
+                        key: format!("lsp.servers.{key}"),
+                        message: e.to_string().trim().to_string(),
+                    }),
+                }
             }
             Ok(language) => errors.push(ServerOverrideError {
                 key: format!("lsp.servers.{key}"),
@@ -487,6 +520,60 @@ tier = "slow"
         assert!(ts.message.contains("typescript"));
         let bash = errors.iter().find(|e| e.key == "lsp.servers.bash").unwrap();
         assert!(bash.message.contains("shellscript"));
+    }
+
+    #[test]
+    fn server_override_unknown_field_recorded_not_applied() {
+        let config = resolve_str(
+            r#"
+[lsp]
+timeout_secs = 99
+
+[lsp.servers.rust]
+comand = "/custom/rust-analyzer"
+"#,
+        );
+        assert!(config.lsp.servers.is_empty());
+        assert_eq!(config.lsp.timeout_secs, 99);
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "lsp.servers.rust.comand");
+        assert!(errors[0].message.contains("unknown field `comand`"));
+        for field in SERVER_OVERRIDE_FIELDS {
+            assert!(errors[0].message.contains(&format!("`{field}`")));
+        }
+    }
+
+    #[test]
+    fn server_override_mistyped_value_recorded_not_applied() {
+        let config = resolve_str("[lsp.servers.rust]\nargs = \"--stdio\"\n");
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "lsp.servers.rust");
+    }
+
+    /// `SERVER_OVERRIDE_FIELDS` is the unknown-field gate; it must track
+    /// the `ServerOverride` struct exactly or a real field would be
+    /// rejected (or a removed one accepted).
+    #[test]
+    fn server_override_field_list_stays_in_lockstep() {
+        let full = ServerOverride {
+            command: Some("/x".to_string()),
+            args: Some(vec![]),
+            tier: Some(ServerTier::Fast),
+        };
+        let table = toml::Value::try_from(&full).unwrap();
+        let mut keys: Vec<&str> = table
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = SERVER_OVERRIDE_FIELDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 
     #[test]

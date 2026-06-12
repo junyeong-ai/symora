@@ -170,9 +170,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "get_context",
             "Aggregated context for a symbol at file:line:column — by default \
                           callers, callees, related types, and tests in one response. Set \
-                          with_bodies=true to also receive complete verbatim source bodies \
-                          (target, then callees in listed order, then types) under a token \
-                          budget — answers how-does-X-work without follow-up inspect_symbol \
+                          with_bodies=true to also receive complete verbatim source bodies: \
+                          the target's whole body attaches unbudgeted; callee bodies (in \
+                          listed order) and type bodies draw on the body_tokens budget — \
+                          answers how-does-X-work without follow-up inspect_symbol \
                           calls. Each body-bearing section reports bodies_included; an item \
                           without a body was omitted because the budget ran out, the symbol \
                           was unresolvable at its position, or it has no body (prototypes, \

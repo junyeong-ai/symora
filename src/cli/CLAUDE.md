@@ -8,9 +8,9 @@ All command output goes through `OutputContext` (`src/cli/output.rs`) and the `S
 
 List responses wrap items in `Section<T>`; its fields and stability rules are the single source of truth in `.claude/rules/json-output-stability.md` and the `Section<T>` doc-comment. Reuse `Section<T>` for any new list response rather than hand-rolling one.
 
-## Discovery heuristics
+## Discovery and steering heuristics
 
-Broad-query handling, test/noise suppression, and ranking hints are centralized in `src/cli/symbol_discovery.rs`. `search`, `symbols --name`, and `usage` all go through it. If you find yourself reimplementing similar logic in a command handler, move it there instead.
+Shared discovery and steering heuristics are centralized in `src/cli/symbol_discovery.rs`: broad-query handling, test/noise suppression, and ranking hints (`search`, `symbols --name`, and `usage` go through them), plus the gating predicates and disclosure vocabulary behind `hints`/`next_commands` — `is_single_file_concentration` for the `refs`/`impact` steering gates and `coverage_reason` for the `search`/`usage` coverage disclosures. If you find yourself reimplementing similar logic in a command handler, move it there instead.
 
 ## Symbol-path resolution
 

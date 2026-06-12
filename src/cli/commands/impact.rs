@@ -138,6 +138,9 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 /// would dead-end); a truncated file list re-runs with the exact total, so
 /// the complete re-run can never re-fire the gate; a single-file
 /// concentration reads best through the snippeted reference list there.
+/// An `impact` re-run carries the call's other flag whenever it differs
+/// from its default, so following one suggestion never silently resets
+/// the other dimension and re-fires its gate.
 fn impact_next_commands(
     anchor: &str,
     total_files: usize,
@@ -146,9 +149,23 @@ fn impact_next_commands(
     depth: u32,
     blast_radius: Option<&BlastRadius>,
 ) -> Vec<String> {
+    let limit_flag = if limit == IMPACT_FILES_LIMIT {
+        String::new()
+    } else {
+        format!(" --limit {limit}")
+    };
+    let depth_flag = if depth == IMPACT_DEFAULT_DEPTH {
+        String::new()
+    } else {
+        format!(" --depth {depth}")
+    };
+
     let mut commands = Vec::new();
     if blast_radius.is_some_and(|b| b.max_depth_reached) && depth < IMPACT_MAX_DEPTH {
-        commands.push(format!("symora impact {anchor} --depth {}", depth + 1));
+        commands.push(format!(
+            "symora impact {anchor} --depth {}{limit_flag}",
+            depth + 1
+        ));
     }
     if blast_radius
         .and_then(|b| b.dynamic_dispatch)
@@ -157,7 +174,9 @@ fn impact_next_commands(
         commands.push(format!("symora implementations {anchor}"));
     }
     if total_files > limit {
-        commands.push(format!("symora impact {anchor} --limit {total_files}"));
+        commands.push(format!(
+            "symora impact {anchor} --limit {total_files}{depth_flag}"
+        ));
     }
     if is_single_file_concentration(total_files, total_refs) {
         commands.push(format!("symora refs {anchor} --snippet"));
@@ -235,6 +254,28 @@ mod tests {
         assert_eq!(commands, vec!["symora impact src/main.rs:10:5 --limit 80"]);
     }
 
+    /// Each `impact` re-run carries the other flag's non-default value, so
+    /// an agent following one suggestion can't oscillate between the
+    /// depth and limit gates.
+    #[test]
+    fn depth_rerun_carries_non_default_limit() {
+        let radius = radius(true, None);
+        let commands = impact_next_commands("src/main.rs:10:5", 3, 10, 8, 1, Some(&radius));
+        assert_eq!(
+            commands,
+            vec!["symora impact src/main.rs:10:5 --depth 2 --limit 10"]
+        );
+    }
+
+    #[test]
+    fn limit_rerun_carries_non_default_depth() {
+        let commands = impact_next_commands("src/main.rs:10:5", 80, 50, 200, 2, None);
+        assert_eq!(
+            commands,
+            vec!["symora impact src/main.rs:10:5 --limit 80 --depth 2"]
+        );
+    }
+
     #[test]
     fn concentration_steers_to_refs_snippet() {
         let commands = impact_next_commands("src/main.rs:10:5", 1, 50, 5, 1, None);
@@ -248,7 +289,7 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                "symora impact src/main.rs:10:5 --depth 2",
+                "symora impact src/main.rs:10:5 --depth 2 --limit 0",
                 "symora implementations src/main.rs:10:5",
                 "symora impact src/main.rs:10:5 --limit 1",
             ]

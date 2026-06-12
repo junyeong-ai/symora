@@ -395,6 +395,43 @@ mod tests {
         assert_eq!(response["error"]["code"], RpcError::PARSE_ERROR);
     }
 
+    /// The `output.max_response_chars` ceiling governs the JSON captured
+    /// through the MCP sink exactly as it governs stdout (invariant 3):
+    /// the tool result body arrives fitted, with the Section semantics —
+    /// `truncated` set, `count` keeping the true total, and a hint naming
+    /// the config key. `search_content` scans the filesystem when the
+    /// index isn't built, so no language server is needed.
+    #[tokio::test]
+    async fn tool_call_response_is_fitted_to_the_size_ceiling() {
+        let mut app = dummy_app().await;
+        app.config.output.max_response_chars = 700;
+        let response = handle_line(
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"fn"}}}"#,
+            &app,
+            McpProfile::Full,
+        )
+        .await
+        .unwrap();
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.chars().count() <= 700,
+            "MCP tool body must fit the ceiling, got {} chars",
+            text.chars().count()
+        );
+        let body: Value = serde_json::from_str(text).expect("fitted body must stay valid JSON");
+        assert_eq!(body["truncated"], true);
+        assert!(body["showing"].as_u64().unwrap() < body["count"].as_u64().unwrap());
+        assert!(
+            body["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|h| h.as_str().unwrap().contains("max_response_chars")),
+            "size-fitted response must disclose the config key; hints: {}",
+            body["hints"]
+        );
+    }
+
     async fn dummy_app() -> App {
         // No daemon, no real LSP needed for the protocol-level tests above.
         App::new(crate::cli::OutputOptions::default(), false)

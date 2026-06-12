@@ -1,6 +1,5 @@
 ---
 source: tests/output_contract.rs
-assertion_line: 505
 expression: out
 ---
 {

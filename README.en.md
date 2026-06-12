@@ -300,7 +300,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor, etc. use
 symora mcp serve --transport http --port 8765
 ```
 
-The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` target by `file` plus exactly one of `symbol` (a path like 'Class/method') or `line`; delete_symbol additionally accepts expect_no_references to make reference-freedom a checked precondition (refusals return a precondition_failed error).
+The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` target by `file` plus exactly one of `symbol` (a path like 'Class/method') or `line`; `delete_symbol` additionally accepts `expect_no_references` to make reference-freedom a checked precondition (refusals return a `precondition_failed` error).
 
 ---
 

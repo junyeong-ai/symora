@@ -277,4 +277,44 @@ mod tests {
             }
         }
     }
+
+    /// The complementary direction: an args object populating every
+    /// advertised property (dummy value per declared type) must
+    /// deserialize into the handler's input struct. A required struct
+    /// field missing from the catalog (and the `input_fields` registry)
+    /// fails here as a missing-field error; so does a type mismatch
+    /// between a property's declared type and its struct field.
+    #[test]
+    fn advertised_properties_deserialize_into_handler_inputs() {
+        use serde_json::json;
+
+        for tool in catalog() {
+            let props = tool.input_schema["properties"].as_object().unwrap();
+            let mut args = serde_json::Map::new();
+            for (name, schema) in props {
+                let value = match (tool.name, name.as_str()) {
+                    // Enum-valued string: an arbitrary dummy string is not
+                    // a variant, so use one.
+                    ("build_context_pack", "shape") => json!("json"),
+                    _ => match schema["type"].as_str().unwrap() {
+                        "string" => json!("dummy"),
+                        "integer" => json!(1),
+                        "boolean" => json!(true),
+                        "array" => json!([]),
+                        other => panic!("{}.{name}: unhandled property type {other}", tool.name),
+                    },
+                };
+                args.insert(name.clone(), value);
+            }
+            handlers::deserialize_input(tool.name, Value::Object(args))
+                .unwrap_or_else(|| panic!("{}: no input-deserialize row in handlers.rs", tool.name))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{}: advertised properties failed to deserialize into the \
+                         handler input struct: {e}",
+                        tool.name
+                    )
+                });
+        }
+    }
 }

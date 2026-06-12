@@ -168,23 +168,35 @@ impl EditTargetInput {
                      1-indexed line — never both",
                 ),
             )),
-            (None, None) => Err(anyhow::Error::new(
-                crate::cli::OutputError::invalid("Pass exactly one of 'symbol' or 'line'")
-                    .with_hint(
+            (None, None) => {
+                let message = if self.column.is_some() {
+                    "'column' applies only with 'line'; pass exactly one of 'symbol' or 'line'"
+                } else {
+                    "Pass exactly one of 'symbol' or 'line'"
+                };
+                Err(anyhow::Error::new(
+                    crate::cli::OutputError::invalid(message).with_hint(
                         "Take a symbol path from search_symbols or list_file_symbols, or a \
                          1-indexed line",
                     ),
-            )),
+                ))
+            }
             (Some(line), None) => Ok((
                 format!("{}:{}:{}", self.file, line, self.column.unwrap_or(1)),
                 None,
             )),
             (None, Some(symbol)) => {
                 if self.column.is_some() {
-                    Err(anyhow::Error::new(crate::cli::OutputError::invalid(
-                        "'column' applies only with 'line'; a symbol path already addresses \
-                         the target",
-                    )))
+                    Err(anyhow::Error::new(
+                        crate::cli::OutputError::invalid(
+                            "'column' applies only with 'line'; a symbol path already \
+                             addresses the target",
+                        )
+                        .with_hint(
+                            "Drop 'column' to address by symbol, or pass a 1-indexed line \
+                             and column instead",
+                        ),
+                    ))
                 } else {
                     Ok((self.file, Some(symbol)))
                 }
@@ -271,11 +283,12 @@ mod tests {
         );
     }
 
-    fn expect_invalid_argument(input: serde_json::Value) {
+    fn expect_invalid_argument(input: serde_json::Value) -> crate::cli::OutputError {
         use crate::cli::{ErrorCode, OutputError};
         let input: EditTargetInput = serde_json::from_value(input).unwrap();
         let out: OutputError = input.into_target().unwrap_err().into();
         assert!(matches!(out.code, ErrorCode::InvalidArgument));
+        out
     }
 
     #[test]
@@ -285,11 +298,25 @@ mod tests {
 
     #[test]
     fn edit_target_input_rejects_neither() {
-        expect_invalid_argument(json!({"file": "a.rs"}));
+        let err = expect_invalid_argument(json!({"file": "a.rs"}));
+        assert!(!err.message.contains("column"));
+    }
+
+    /// A stray `column` with neither `symbol` nor `line` is named in the
+    /// refusal — the generic neither-arm message would hide the one
+    /// argument the caller actually passed.
+    #[test]
+    fn edit_target_input_rejects_column_alone_naming_it() {
+        let err = expect_invalid_argument(json!({"file": "a.rs", "column": 3}));
+        assert!(err.message.contains("'column' applies only with 'line'"));
+        assert!(err.hint.is_some());
     }
 
     #[test]
     fn edit_target_input_rejects_column_with_symbol() {
-        expect_invalid_argument(json!({"file": "a.rs", "symbol": "Foo/bar", "column": 3}));
+        let err =
+            expect_invalid_argument(json!({"file": "a.rs", "symbol": "Foo/bar", "column": 3}));
+        assert!(err.message.contains("'column' applies only with 'line'"));
+        assert!(err.hint.unwrap().contains("Drop 'column'"));
     }
 }

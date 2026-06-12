@@ -778,3 +778,42 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         _ => return None,
     })
 }
+
+/// The complementary lockstep direction: deserialize `args` into the
+/// tool's input struct and discard the value. The catalog lockstep test
+/// feeds this an object covering every advertised property, so a
+/// required struct field the catalog (and the `input_fields` row above)
+/// doesn't advertise fails here as a missing-field error instead of
+/// surfacing as a runtime invalid_argument.
+#[cfg(test)]
+pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), String>> {
+    fn check<T: serde::de::DeserializeOwned>(args: Value) -> Result<(), String> {
+        serde_json::from_value::<T>(args)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+    Some(match tool {
+        "get_project_overview" => Ok(()),
+        "get_file_overview" => check::<FileOverviewInput>(args),
+        "search_symbols" => check::<SearchSymbolsInput>(args),
+        "search_content" => check::<SearchContentInput>(args),
+        "list_file_symbols" => check::<ListFileSymbolsInput>(args),
+        "inspect_symbol" => check::<InspectSymbolInput>(args),
+        "find_definition" | "get_hover" => check::<LocationInput>(args),
+        "find_references" => check::<FindReferencesInput>(args),
+        "find_callers" | "find_callees" | "find_implementations" => {
+            check::<CallHierarchyInput>(args)
+        }
+        "get_context" => check::<GetContextInput>(args),
+        "get_impact" => check::<GetImpactInput>(args),
+        "get_diagnostics" => check::<GetDiagnosticsInput>(args),
+        "build_context_pack" => check::<ContextPackInput>(args),
+        "rename_symbol" => check::<RenameSymbolInput>(args),
+        "list_code_actions" => check::<ListCodeActionsInput>(args),
+        "apply_code_action" => check::<ApplyCodeActionInput>(args),
+        "replace_symbol_body" => check::<ReplaceBodyInput>(args),
+        "insert_before_symbol" | "insert_after_symbol" => check::<InsertInput>(args),
+        "delete_symbol" => check::<DeleteSymbolInput>(args),
+        _ => return None,
+    })
+}
