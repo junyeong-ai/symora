@@ -63,6 +63,10 @@ pub struct CallHierarchyOutput {
     pub location: LocationOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_site: Option<LocationOutput>,
+    /// Complete verbatim source body, set only by `context --with-bodies`
+    /// callee attachment — absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 impl CallHierarchyOutput {
@@ -79,6 +83,7 @@ impl CallHierarchyOutput {
                 .call_site
                 .as_ref()
                 .map(|cs| LocationOutput::from_path(&cs.file, cs.line, cs.column, root)),
+            body: None,
         }
     }
 }
@@ -90,6 +95,10 @@ pub struct TypeInfoOutput {
     pub location: LocationOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Complete verbatim source body, set only by `context --with-bodies`
+    /// type attachment — absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 impl TypeInfoOutput {
@@ -104,6 +113,7 @@ impl TypeInfoOutput {
                 root,
             ),
             detail: item.detail.clone(),
+            body: None,
         }
     }
 }

@@ -169,7 +169,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "get_context",
             "Aggregated context for a symbol at file:line:column — by default \
-                          callers, callees, related types, and tests in one response.",
+                          callers, callees, related types, and tests in one response. Set \
+                          with_bodies=true to also receive complete verbatim source bodies \
+                          (target, then callees in listed order, then types) under a token \
+                          budget — answers how-does-X-work without follow-up inspect_symbol \
+                          calls. Each body-bearing section reports bodies_included; an item \
+                          without a body was omitted because the budget ran out, the symbol \
+                          was unresolvable at its position, or it has no body (prototypes, \
+                          interface methods) — only the first is cured by raising \
+                          body_tokens.",
             with_extra(
                 location_schema(),
                 &[
@@ -189,6 +197,18 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "all",
                         "boolean",
                         "Include every context section (default true)",
+                    ),
+                    (
+                        "with_bodies",
+                        "boolean",
+                        "Attach complete symbol bodies under the body_tokens budget; \
+                         per-section bodies_included discloses how many items carry one \
+                         (default false)",
+                    ),
+                    (
+                        "body_tokens",
+                        "integer",
+                        "Token budget for bodies attached by with_bodies=true (default 2000)",
                     ),
                 ],
             ),

@@ -395,10 +395,18 @@ struct GetContextInput {
     tests: bool,
     #[serde(default = "default_context_all")]
     all: bool,
+    #[serde(default)]
+    with_bodies: bool,
+    #[serde(default = "default_body_tokens")]
+    body_tokens: usize,
 }
 
 fn default_context_all() -> bool {
     true
+}
+
+fn default_body_tokens() -> usize {
+    defaults::CONTEXT_BODY_TOKENS
 }
 
 async fn run_get_context(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -412,7 +420,12 @@ async fn run_get_context(args: Value, app: &App) -> Result<CapturedOutput> {
                 callees: input.callees,
                 types: input.types,
                 tests: input.tests,
+                // Pinned off: the unbudgeted target-body flag bloats every
+                // call; with_bodies is the token-budgeted route to bodies
+                // (it includes the target's).
                 body: false,
+                with_bodies: input.with_bodies,
+                body_tokens: input.body_tokens,
             },
             &a,
         )
@@ -718,7 +731,16 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             &["file", "line", "column", "limit"]
         }
         "get_context" => &[
-            "file", "line", "column", "callers", "callees", "types", "tests", "all",
+            "file",
+            "line",
+            "column",
+            "callers",
+            "callees",
+            "types",
+            "tests",
+            "all",
+            "with_bodies",
+            "body_tokens",
         ],
         "get_impact" => &["file", "line", "column", "limit", "depth"],
         "get_diagnostics" => &["file", "severity", "source"],

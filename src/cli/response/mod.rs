@@ -44,6 +44,8 @@ use super::errors::OutputError;
 /// - `stale` — present (and `true`) only when index-served rows came from
 ///   files that changed on disk after indexing
 /// - `hints` / `next_commands` — omitted when empty
+/// - `bodies_included` — present only on sections where body attachment
+///   ran (`context --with-bodies`) and that still contain items
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section<T> {
     pub count: usize,
@@ -62,6 +64,19 @@ pub struct Section<T> {
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_commands: Vec<String>,
+    /// Present only on sections where body attachment ran
+    /// (`context --with-bodies`) and that still contain items. Invariant:
+    /// always equals the number of `items` carrying a complete `body` —
+    /// at emission, and re-established by the transport size fitter if it
+    /// drops items. `showing - bodies_included` items had their body
+    /// omitted for one of three causes: the token budget was exhausted,
+    /// the symbol was unresolvable at the item's position, or the symbol
+    /// genuinely has no body (prototypes, interface methods). Only the
+    /// first is cured by raising `body_tokens` — an omission that
+    /// persists after a large raise is not budget-caused. Omission is
+    /// disclosed, never silent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bodies_included: Option<usize>,
     /// Present only when the answer was computed under degraded
     /// workspace indexing — the list is then a lower bound, not a
     /// complete enumeration.
@@ -92,6 +107,7 @@ impl<T> Section<T> {
             stale: false,
             hints: vec![],
             next_commands: vec![],
+            bodies_included: None,
             indexing: None,
             error: Some(error.into()),
         }
@@ -115,6 +131,11 @@ impl<T> Section<T> {
         self
     }
 
+    pub fn with_bodies_included(mut self, bodies_included: Option<usize>) -> Self {
+        self.bodies_included = bodies_included;
+        self
+    }
+
     pub fn with_stale(mut self, stale: bool) -> Self {
         self.stale = stale;
         self
@@ -131,6 +152,7 @@ impl<T> Section<T> {
             stale: false,
             hints: vec![],
             next_commands: vec![],
+            bodies_included: None,
             indexing: None,
             error: None,
         }
@@ -148,6 +170,12 @@ impl<T> Section<T> {
 /// `measure` must serialize exactly the string the caller will emit —
 /// the ceiling guards emitted characters, not an estimate. Returns true
 /// when any items were dropped.
+///
+/// A section carrying `bodies_included` has the field recounted against
+/// the items that survive (count of items with a `body` key), and removed
+/// when the section empties — its contract is structural equality with
+/// the emitted items, so a fitted response must re-establish it. The
+/// fitter never inserts the key where attachment didn't run.
 ///
 /// Tail-dropping is safe because every ranked producer sorts best-first;
 /// detection is structural (count + showing + items with
@@ -219,7 +247,15 @@ pub fn fit_to_char_budget(
                 hi = mid - 1;
             }
         }
-        apply_keep(value, &candidate.path, &original, best.unwrap_or(0));
+        let keep = best.unwrap_or(0);
+        apply_keep(value, &candidate.path, &original, keep);
+        if keep == 0
+            && let Some(node) = value
+                .pointer_mut(&candidate.path)
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            node.remove("bodies_included");
+        }
         dropped = true;
         if best.is_some() {
             return true;
@@ -303,6 +339,8 @@ fn is_section_shaped(map: &serde_json::Map<String, serde_json::Value>) -> bool {
 /// Keep the first `keep` items of `original` at the section under `path`,
 /// with `showing` and `truncated` kept consistent. `truncated: true` is
 /// always correct here: `keep` < the original `showing` <= `count`.
+/// `bodies_included`, when present, is recounted against the kept items
+/// so its structural equality survives every probe.
 fn apply_keep(
     value: &mut serde_json::Value,
     path: &str,
@@ -319,6 +357,16 @@ fn apply_keep(
         );
         node.insert("showing".to_string(), serde_json::Value::from(keep));
         node.insert("truncated".to_string(), serde_json::Value::Bool(true));
+        if node.contains_key("bodies_included") {
+            let with_body = original[..keep]
+                .iter()
+                .filter(|item| item.get("body").is_some())
+                .count();
+            node.insert(
+                "bodies_included".to_string(),
+                serde_json::Value::from(with_body),
+            );
+        }
     }
 }
 
@@ -388,6 +436,21 @@ mod tests {
     }
 
     #[test]
+    fn bodies_included_serializes_only_when_present() {
+        let some =
+            serde_json::to_value(Section::new(vec![1, 2]).with_bodies_included(Some(2))).unwrap();
+        assert_eq!(some["bodies_included"], 2);
+
+        // Zero is meaningful — attachment ran, none admitted — not filler.
+        let zero =
+            serde_json::to_value(Section::new(vec![1]).with_bodies_included(Some(0))).unwrap();
+        assert_eq!(zero["bodies_included"], 0);
+
+        let none = serde_json::to_value(Section::new(vec![1]).with_bodies_included(None)).unwrap();
+        assert!(none.get("bodies_included").is_none());
+    }
+
+    #[test]
     fn section_round_trips_through_the_wire() {
         let wire = serde_json::to_value(Section::with_total(vec![1, 2], 7)).unwrap();
         let parsed: Section<i32> = serde_json::from_value(wire).unwrap();
@@ -407,7 +470,8 @@ mod tests {
             .with_hints(vec!["h".to_string()])
             .with_next_commands(vec!["c".to_string()])
             .with_indexing(Some(crate::models::lsp::IndexingDegradation::TimedOut))
-            .with_stale(true);
+            .with_stale(true)
+            .with_bodies_included(Some(1));
         section.error = Some(crate::cli::OutputError::not_found("e"));
 
         let value = serde_json::to_value(section).unwrap();
@@ -421,6 +485,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "bodies_included",
                 "count",
                 "error",
                 "hints",
@@ -580,6 +645,52 @@ mod tests {
                 .iter()
                 .any(|h| h.as_str().unwrap().contains("output.max_response_chars"))
         );
+    }
+
+    fn body_bearing_callees(bodies_included: Option<usize>) -> serde_json::Value {
+        let mut section = serde_json::json!({
+            "count": 4,
+            "showing": 4,
+            "items": [
+                { "name": "alpha", "body": format!("fn alpha() {{ {} }}", "x".repeat(400)) },
+                { "name": "beta" },
+                { "name": "gamma", "body": format!("fn gamma() {{ {} }}", "y".repeat(400)) },
+                { "name": "delta" },
+            ],
+        });
+        if let Some(n) = bodies_included {
+            section["bodies_included"] = serde_json::Value::from(n);
+        }
+        serde_json::json!({ "callees": section })
+    }
+
+    /// `bodies_included`'s contract is structural equality with the
+    /// emitted items — a fitted response must recount it (never exceed
+    /// `showing`, never describe dropped items), remove it when the
+    /// section empties, and never invent it where attachment didn't run.
+    #[test]
+    fn fit_recounts_bodies_included() {
+        // (a) Dropping the body-carrying tail recounts to the survivors.
+        let mut value = body_bearing_callees(Some(2));
+        assert!(fit_to_char_budget(&mut value, 800, &compact_chars));
+        let section = &value["callees"];
+        assert_eq!(section["showing"], 2, "ceiling must drop the last 2 items");
+        assert_eq!(section["bodies_included"], 1);
+        let showing = section["showing"].as_u64().unwrap();
+        assert!(section["bodies_included"].as_u64().unwrap() <= showing);
+
+        // (b) An emptied section has nothing to disclose — key removed.
+        let mut value = body_bearing_callees(Some(2));
+        assert!(fit_to_char_budget(&mut value, 50, &compact_chars));
+        assert!(value["callees"]["items"].as_array().unwrap().is_empty());
+        assert!(value["callees"].get("bodies_included").is_none());
+
+        // (c) Coincidental `body` keys never grow the field where body
+        // attachment didn't run.
+        let mut value = body_bearing_callees(None);
+        assert!(fit_to_char_budget(&mut value, 800, &compact_chars));
+        assert!(value["callees"]["showing"].as_u64().unwrap() < 4);
+        assert!(value["callees"].get("bodies_included").is_none());
     }
 
     #[test]

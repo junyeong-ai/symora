@@ -21,6 +21,7 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 - `stale` — present (true) only when index-served rows came from files that changed on disk after indexing; re-run `symora search index build` to refresh
 - `hints` — optional next-step suggestions for the agent
 - `next_commands` — optional ready-to-run follow-up commands (omitted when empty)
+- `bodies_included` — present only on sections where body attachment ran (`context --with-bodies`) and that still contain items: always equals the number of `items` carrying a complete `body`; items without `body` under it were omitted — token budget exhausted, symbol unresolvable at the item's position, or genuinely bodiless (prototypes, interface methods) — disclosed, never silent. If the transport size ceiling drops items from the section, the fitter recounts this field against the remaining items (removing it when the section empties), so the equality holds in every emitted response.
 - `indexing` — degradation marker, present only when the answer was computed under degraded workspace indexing (e.g. `"timed_out"`)
 - `error` — structured `{code, message, hint}` failure, omitted on success
 

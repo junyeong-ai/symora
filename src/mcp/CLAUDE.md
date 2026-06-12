@@ -1,6 +1,6 @@
 # src/mcp — MCP Server Rules
 
-`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set, e.g. `get_context` fixes `body: false`).
+`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set — e.g. `get_context` pins the unbudgeted `body` flag false and instead exposes the token-budgeted `with_bodies` option, which attaches whole symbol bodies until the body_tokens budget is spent and discloses omissions via bodies_included).
 
 ## Catalog and handlers must stay in lockstep
 
