@@ -54,7 +54,13 @@ pub async fn execute_symbol_search(
     let use_workspace = workspace_symbols || looks_like_symbol_path(query);
 
     if use_workspace {
-        return execute_workspace_symbol_search(app, query, kind, limit, &search_languages).await;
+        let route = if workspace_symbols {
+            WorkspaceSearchRoute::Forced
+        } else {
+            WorkspaceSearchRoute::PathQuery
+        };
+        return execute_workspace_symbol_search(app, query, kind, limit, &search_languages, route)
+            .await;
     }
 
     match app
@@ -93,8 +99,15 @@ pub async fn execute_symbol_search(
         }
         // No index yet: answer from live LSP workspace symbols instead.
         Err(StoreError::NotInitialized) => {
-            return execute_workspace_symbol_search(app, query, kind, limit, &search_languages)
-                .await;
+            return execute_workspace_symbol_search(
+                app,
+                query,
+                kind,
+                limit,
+                &search_languages,
+                WorkspaceSearchRoute::IndexNotBuilt,
+            )
+            .await;
         }
         Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
     }
@@ -118,12 +131,28 @@ fn index_result_output(row: SymbolSearchResult, ctx: &OutputContext) -> SymbolRe
     }
 }
 
+/// Which entry point routed the call to live workspace symbols. An empty
+/// result's failure disclosure keys its remedy off this — the honest next
+/// command depends on why the index was skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceSearchRoute {
+    /// `--workspace-symbols` explicitly skipped the index.
+    Forced,
+    /// The store reported `NotInitialized`; the live lookup is the
+    /// fallback and the zero is workspace-only.
+    IndexNotBuilt,
+    /// A path-like query routed here; a built index still supplements
+    /// the live results in the same call.
+    PathQuery,
+}
+
 async fn execute_workspace_symbol_search(
     app: &App,
     query: &str,
     kind: Option<&str>,
     limit: usize,
     languages: &[Language],
+    route: WorkspaceSearchRoute,
 ) -> Result<()> {
     let ctx = &app.output;
     if languages.is_empty() {
@@ -138,6 +167,7 @@ async fn execute_workspace_symbol_search(
     let failures = lookup.failures;
     let mut count = candidates.len();
     let mut stale = false;
+    let mut index_answered = false;
 
     if looks_like_symbol_path(query) && candidates.len() < limit {
         let expanded =
@@ -151,6 +181,7 @@ async fn execute_workspace_symbol_search(
             .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default))
             .await
     {
+        index_answered = true;
         count = count.max(page.total);
         // The merged output contains index rows, so the page's staleness
         // applies to it; the live workspace results are current by nature.
@@ -167,25 +198,45 @@ async fn execute_workspace_symbol_search(
     let section = with_workspace_failure_disclosure(
         finish_symbol_search(candidates, count, query, None, kind, limit).with_stale(stale),
         &failures,
+        query,
+        route,
+        index_answered,
     );
     ctx.print_success(section);
     Ok(())
 }
 
-/// Empty workspace-only results disclose this call's failed lookups —
-/// every language whose live workspace-symbol query errored is a coverage
-/// gap the zero cannot vouch for. Non-empty results stay bare, and a
-/// clean empty stays a genuine zero.
+/// Empty results disclose this call's failed lookups — every language
+/// whose zero the call cannot vouch for is a coverage gap. When the index
+/// supplement answered in this same call, extractor-covered languages are
+/// answered regardless of LSP state, so only `uncovered_language_failures`
+/// qualify — the same gate and vocabulary as the index path. Otherwise the
+/// zero is workspace-only and every failure is a gap, with the remedy
+/// keyed to the route. Non-empty results stay bare, and a clean empty
+/// stays a genuine zero.
 fn with_workspace_failure_disclosure(
     section: Section<SymbolResultOutput>,
     failures: &[(Language, LspError)],
+    query: &str,
+    route: WorkspaceSearchRoute,
+    index_answered: bool,
 ) -> Section<SymbolResultOutput> {
     if section.count != 0 || failures.is_empty() {
         return section;
     }
+    if index_answered {
+        let hints = symbol_search_coverage_hints(failures);
+        if hints.is_empty() {
+            return section;
+        }
+        let next_commands = symbol_search_coverage_next_commands(query, failures);
+        return section.with_hints(hints).with_next_commands(next_commands);
+    }
     section
         .with_hints(workspace_symbol_failure_hints(failures))
-        .with_next_commands(workspace_symbol_failure_next_commands(failures))
+        .with_next_commands(workspace_symbol_failure_next_commands(
+            query, failures, route,
+        ))
 }
 
 /// Final shaping shared by both search paths: suppress low-value noise,
@@ -693,20 +744,42 @@ fn workspace_symbol_failure_hints(failures: &[(Language, LspError)]) -> Vec<Stri
     hints
 }
 
-fn workspace_symbol_failure_next_commands(failures: &[(Language, LspError)]) -> Vec<String> {
+/// Route-appropriate remedies for a workspace-only zero, keyed on the
+/// first failed language: a forced live lookup is cured by dropping the
+/// flag so the index can answer; an unbuilt index is cured by building it
+/// — but only for a language the extractor covers. `search index build`
+/// can never help a language with no extractor, so those steer to content
+/// search instead, like the index path's coverage commands.
+fn workspace_symbol_failure_next_commands(
+    query: &str,
+    failures: &[(Language, LspError)],
+    route: WorkspaceSearchRoute,
+) -> Vec<String> {
     let mut sorted: Vec<_> = failures.iter().collect();
     sorted.sort_by_key(|(language, _)| language.lsp_id());
-    let mut commands: Vec<String> = sorted
-        .first()
-        .map(|(language, _)| {
-            vec![
-                "symora search index build".to_string(),
-                format!("symora doctor {}", language.lsp_id()),
-            ]
-        })
-        .unwrap_or_default();
-    commands.truncate(2);
-    commands
+    let Some((language, _)) = sorted.first() else {
+        return Vec::new();
+    };
+    let lang = language.lsp_id();
+    match route {
+        WorkspaceSearchRoute::Forced => vec![
+            format!("symora search symbols '{query}'"),
+            format!("symora doctor {lang}"),
+        ],
+        WorkspaceSearchRoute::IndexNotBuilt | WorkspaceSearchRoute::PathQuery => {
+            if SymbolExtractor::is_supported(*language) {
+                vec![
+                    "symora search index build".to_string(),
+                    format!("symora doctor {lang}"),
+                ]
+            } else {
+                vec![
+                    format!("symora search content '{query}' --lang {lang}"),
+                    format!("symora doctor {lang}"),
+                ]
+            }
+        }
+    }
 }
 
 fn symbol_search_next_commands(
@@ -854,14 +927,61 @@ mod tests {
         )
     }
 
+    /// The reviewer's live scenario: built index covering rust + rust LSP
+    /// failing + path-like query. The index answered in this same call,
+    /// so its zero covers rust — no coverage claim, no index-build no-op.
     #[test]
-    fn workspace_failure_disclosure_fires_on_empty_result_with_failures() {
+    fn index_answered_route_stays_bare_for_extractor_covered_failure() {
         let failures = vec![server_failure(Language::Rust)];
-        let section =
-            with_workspace_failure_disclosure(Section::with_total(Vec::new(), 0), &failures);
+        let section = with_workspace_failure_disclosure(
+            Section::with_total(Vec::new(), 0),
+            &failures,
+            "Nonexistent/missing_xyz",
+            WorkspaceSearchRoute::PathQuery,
+            true,
+        );
+        assert!(section.hints.is_empty());
+        assert!(section.next_commands.is_empty());
+    }
 
+    /// With the index answered, an extractor-less failure is a genuine
+    /// gap and gets the index path's hint/command family — never a
+    /// `search index build` that cannot cover the language.
+    #[test]
+    fn index_answered_route_steers_extractor_less_failure_to_content_search() {
+        let failures = vec![server_failure(Language::Lua)];
+        let section = with_workspace_failure_disclosure(
+            Section::with_total(Vec::new(), 0),
+            &failures,
+            "Mod/handler",
+            WorkspaceSearchRoute::PathQuery,
+            true,
+        );
+        assert_eq!(section.hints.len(), 1);
+        assert!(section.hints[0].contains("lua"));
+        assert!(section.hints[0].contains("no index symbol extractor"));
+        assert_eq!(
+            section.next_commands,
+            vec![
+                "symora search content 'Mod/handler' --lang lua",
+                "symora doctor lua"
+            ]
+        );
+    }
+
+    #[test]
+    fn index_not_built_route_steers_extractor_covered_failure_to_index_build() {
+        let failures = vec![server_failure(Language::Rust)];
+        let section = with_workspace_failure_disclosure(
+            Section::with_total(Vec::new(), 0),
+            &failures,
+            "alpha",
+            WorkspaceSearchRoute::IndexNotBuilt,
+            false,
+        );
         assert_eq!(section.hints.len(), 1);
         assert!(section.hints[0].contains("rust"));
+        assert!(section.hints[0].contains("workspace symbol lookup failed"));
         assert!(section.hints[0].contains("server_not_installed"));
         assert_eq!(
             section.next_commands,
@@ -869,11 +989,66 @@ mod tests {
         );
     }
 
+    /// `search index build` can never help a language with no extractor;
+    /// the unbuilt-index route steers those to content search instead.
+    #[test]
+    fn index_not_built_route_never_suggests_index_build_for_extractor_less_language() {
+        let failures = vec![server_failure(Language::Lua)];
+        let section = with_workspace_failure_disclosure(
+            Section::with_total(Vec::new(), 0),
+            &failures,
+            "alpha",
+            WorkspaceSearchRoute::IndexNotBuilt,
+            false,
+        );
+        assert_eq!(section.hints.len(), 1);
+        assert!(section.hints[0].contains("lua"));
+        assert_eq!(
+            section.next_commands,
+            vec![
+                "symora search content 'alpha' --lang lua",
+                "symora doctor lua"
+            ]
+        );
+    }
+
+    /// A forced live lookup skipped the index deliberately; the cure is
+    /// dropping the flag so the index can answer, not rebuilding it.
+    #[test]
+    fn forced_route_suggests_dropping_the_flag() {
+        let failures = vec![server_failure(Language::Rust)];
+        let section = with_workspace_failure_disclosure(
+            Section::with_total(Vec::new(), 0),
+            &failures,
+            "alpha",
+            WorkspaceSearchRoute::Forced,
+            false,
+        );
+        assert_eq!(section.hints.len(), 1);
+        assert!(section.hints[0].contains("workspace symbol lookup failed"));
+        assert_eq!(
+            section.next_commands,
+            vec!["symora search symbols 'alpha'", "symora doctor rust"]
+        );
+    }
+
     #[test]
     fn workspace_failure_disclosure_silent_on_empty_result_without_failures() {
-        let section = with_workspace_failure_disclosure(Section::with_total(Vec::new(), 0), &[]);
-        assert!(section.hints.is_empty());
-        assert!(section.next_commands.is_empty());
+        for route in [
+            WorkspaceSearchRoute::Forced,
+            WorkspaceSearchRoute::IndexNotBuilt,
+            WorkspaceSearchRoute::PathQuery,
+        ] {
+            let section = with_workspace_failure_disclosure(
+                Section::with_total(Vec::new(), 0),
+                &[],
+                "alpha",
+                route,
+                false,
+            );
+            assert!(section.hints.is_empty());
+            assert!(section.next_commands.is_empty());
+        }
     }
 
     #[test]
@@ -882,6 +1057,9 @@ mod tests {
         let section = with_workspace_failure_disclosure(
             Section::with_total(vec![result("alpha", "src/a.rs")], 1),
             &failures,
+            "alpha",
+            WorkspaceSearchRoute::IndexNotBuilt,
+            false,
         );
         assert!(section.hints.is_empty());
         assert!(section.next_commands.is_empty());

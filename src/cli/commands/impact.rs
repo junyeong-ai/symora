@@ -33,6 +33,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let test_matcher = app.test_matcher();
     let root = ctx.root();
     let depth = args.depth.clamp(1, IMPACT_MAX_DEPTH);
+    let limit = normalize_limit(args.limit);
 
     match LocationAnalysis::at(app.lsp.as_ref(), loc).await {
         Ok(analysis) => {
@@ -49,7 +50,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 .collect();
             affected_files.sort_by_key(|f| std::cmp::Reverse(f.refs));
             let total_files = affected_files.len();
-            affected_files.truncate(args.limit);
+            affected_files.truncate(limit);
 
             let test_files: Vec<String> = classified
                 .test_refs
@@ -95,7 +96,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
             let next_commands = impact_next_commands(
                 &anchor,
                 total_files,
-                args.limit,
+                limit,
                 classified.total,
                 depth,
                 blast_radius.as_ref(),
@@ -140,7 +141,17 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 /// concentration reads best through the snippeted reference list there.
 /// An `impact` re-run carries the call's other flag whenever it differs
 /// from its default, so following one suggestion never silently resets
-/// the other dimension and re-fires its gate.
+/// the other dimension and re-fires its gate. Both flags arrive
+/// normalized (`depth` clamped to 1..=`IMPACT_MAX_DEPTH`, `limit`
+/// floored at 1 where args are read), so a carried flag is always a
+/// value worth re-running with.
+/// `--limit 0` would empty the file list and make every re-run
+/// suggestion carry an always-truncating flag; floor it at the input
+/// boundary, like `depth`.
+fn normalize_limit(limit: usize) -> usize {
+    limit.max(1)
+}
+
 fn impact_next_commands(
     anchor: &str,
     total_files: usize,
@@ -285,15 +296,33 @@ mod tests {
     #[test]
     fn commands_cap_at_three_in_fixed_order() {
         let radius = radius(true, Some(DispatchStatus::Incomplete));
-        let commands = impact_next_commands("src/main.rs:10:5", 1, 0, 5, 1, Some(&radius));
+        let commands = impact_next_commands("src/main.rs:10:5", 2, 1, 5, 1, Some(&radius));
         assert_eq!(
             commands,
             vec![
-                "symora impact src/main.rs:10:5 --depth 2 --limit 0",
+                "symora impact src/main.rs:10:5 --depth 2 --limit 1",
                 "symora implementations src/main.rs:10:5",
-                "symora impact src/main.rs:10:5 --limit 1",
+                "symora impact src/main.rs:10:5 --limit 2",
             ]
         );
+    }
+
+    /// `--limit 0` is floored to 1 where args are read, so even with the
+    /// depth and limit gates firing together no suggestion can carry
+    /// `--limit 0` back into a loop of always-truncated re-runs.
+    #[test]
+    fn zero_limit_is_normalized_before_both_gates() {
+        let normalized = normalize_limit(0);
+        let radius = radius(true, None);
+        let commands = impact_next_commands("src/main.rs:10:5", 3, normalized, 8, 1, Some(&radius));
+        assert_eq!(
+            commands,
+            vec![
+                "symora impact src/main.rs:10:5 --depth 2 --limit 1",
+                "symora impact src/main.rs:10:5 --limit 3",
+            ]
+        );
+        assert!(commands.iter().all(|c| !c.contains("--limit 0")));
     }
 
     #[test]

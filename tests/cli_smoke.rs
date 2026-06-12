@@ -397,9 +397,92 @@ fn doctor_reports_override_provenance_and_spawnability() {
         .unwrap();
     assert!(rust.get("source").is_none());
 
+    // `config show` surfaces the same disclosure under the same field
+    // name and presence rule as doctor.
     let out = run_in(dir.path(), &["--format", "compact", "config", "show"]);
     assert!(out.status.success());
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["config"]["lsp"]["timeout_secs"], 99);
     assert_eq!(json["config"]["lsp"]["servers"], serde_json::json!({}));
+    let errors = json["config_errors"]
+        .as_array()
+        .expect("config show must disclose the rejected key");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("lsp.servers.klingon"))
+    );
+
+    // A clean config emits no config_errors on config show either.
+    std::fs::write(config_dir.join("config.toml"), "[lsp]\ntimeout_secs = 99\n").unwrap();
+    let out = run_in(dir.path(), &["--format", "compact", "config", "show"]);
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(json.get("config_errors").is_none());
+}
+
+/// The C-1 scenario: a built index covering rust plus a rust LSP that
+/// cannot start. An empty path-like query consults the index in the same
+/// call, so its zero covers rust — it must stay bare (no coverage claim
+/// against rust, no `search index build` no-op), exactly like the
+/// plain-name query on the same state.
+#[cfg(unix)]
+#[test]
+fn pathlike_zero_with_built_index_stays_bare_for_covered_language() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() {}\nfn helper_alpha() {}\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer-missing\"\n",
+    )
+    .unwrap();
+
+    let out = run_in(dir.path(), &["search", "index", "build"]);
+    assert!(
+        out.status.success(),
+        "index build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for query in ["Nonexistent/missing_xyz", "nonexistent_missing_xyz"] {
+        let out = run_in(
+            dir.path(),
+            &["--format", "compact", "search", "symbols", query],
+        );
+        assert!(
+            out.status.success(),
+            "search symbols '{query}' failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["count"], 0, "query '{query}' should find nothing");
+        let hints = json
+            .get("hints")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            hints
+                .iter()
+                .all(|h| !h.as_str().unwrap().contains("does not cover rust")),
+            "query '{query}': the index covered rust in this call, \
+             yet the zero claims otherwise: {hints:?}"
+        );
+        let next = json
+            .get("next_commands")
+            .and_then(|n| n.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            next.iter()
+                .all(|c| !c.as_str().unwrap().contains("search index build")),
+            "query '{query}': index build is a no-op remedy here: {next:?}"
+        );
+    }
 }

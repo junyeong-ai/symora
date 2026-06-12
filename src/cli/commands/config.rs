@@ -57,6 +57,12 @@ struct ConfigInitOutput {
 struct ConfigShowOutput {
     level: &'static str,
     config: serde_json::Value,
+    /// Config problems affecting this view: rejected [lsp.servers]
+    /// stanzas — non-canonical keys, unknown fields, mistyped values —
+    /// recorded at load and never applied. Same field name and presence
+    /// rule as `doctor`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    config_errors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +141,12 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                 Ok(config) => {
                     let response = ConfigShowOutput {
                         level,
+                        config_errors: config
+                            .lsp
+                            .server_override_errors
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
                         config: config_to_json(&config),
                     };
                     ctx.print_success(response);
@@ -175,4 +187,34 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `config_errors` follows doctor's presence rule: omitted entirely on
+    /// a clean config, an array of strings when stanzas were rejected.
+    #[test]
+    fn config_show_output_omits_config_errors_when_clean() {
+        let clean = ConfigShowOutput {
+            level: "merged",
+            config: serde_json::json!({}),
+            config_errors: Vec::new(),
+        };
+        let value = serde_json::to_value(&clean).unwrap();
+        assert!(value.get("config_errors").is_none());
+
+        let rejected = ConfigShowOutput {
+            level: "merged",
+            config: serde_json::json!({}),
+            config_errors: vec![
+                "Invalid value for 'lsp.servers.klingon': unknown language — \
+                 use the `language` id shown by `symora doctor`"
+                    .to_string(),
+            ],
+        };
+        let value = serde_json::to_value(&rejected).unwrap();
+        assert_eq!(value["config_errors"].as_array().unwrap().len(), 1);
+    }
 }
