@@ -3,7 +3,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::infra::lsp::servers::{Platform, ServerTier, check_all_servers};
+use crate::infra::lsp::servers::{Platform, check_all_servers};
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -54,7 +54,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
             server: s.name.to_string(),
             installed: s.installed,
             version: s.version,
-            tier: tier_to_string(s.tier),
+            tier: s.tier.as_str().to_string(),
             install: if s.installed {
                 None
             } else {
@@ -78,15 +78,6 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
 
     ctx.print_success(response);
     Ok(())
-}
-
-fn tier_to_string(tier: ServerTier) -> String {
-    match tier {
-        ServerTier::Fast => "fast",
-        ServerTier::Standard => "standard",
-        ServerTier::Slow => "slow",
-    }
-    .to_string()
 }
 
 fn platform_to_string(platform: Platform) -> String {
