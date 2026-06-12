@@ -32,6 +32,10 @@ The boundary: an unbounded list — anything whose length scales with the codeba
 
 Omit optional fields with `#[serde(skip_serializing_if = "Option::is_none")]`. Empty strings, zero values, or empty arrays for absent data force agents to write defensive parsing — don't make them.
 
+## Doctor provenance fields
+
+`doctor` rows carry `source: "config"` and `command` only when an `[lsp.servers.<lang>]` override applies — both omitted for builtin servers, and that absence is contract: it is how an agent detects an override that failed to apply. Both fields describe what the NEXT server start will use — a warm daemon keeps its startup table until `symora daemon restart`. Top-level `config_errors` (array of strings, omitted when empty) lists config problems affecting the report: rejected `[lsp.servers]` keys — recorded at load, never applied, never fatal to the rest of the config — and whole-config load failures (the report then reflects builtin defaults).
+
 ## Surfaces that emit JSON
 
 - `src/cli/response/` — final user-facing output. Stability bar: API.

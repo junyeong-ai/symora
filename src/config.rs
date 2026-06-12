@@ -100,6 +100,10 @@ pub struct LspRuntimeConfig {
     pub diagnostics_wait: Duration,
     /// Custom project entry files per language (overrides defaults in find_project_entry)
     pub entry_files: HashMap<String, Vec<String>>,
+    /// [lsp.servers] launch overrides, keyed by Language::lsp_id(). Merged
+    /// over servers::defaults() by LspManager at construction. Only
+    /// validated (canonical-key) entries reach this map.
+    pub servers: HashMap<String, crate::models::config::ServerOverride>,
     /// Hard cap on simultaneously running language servers. Prevents
     /// memory-bound monorepos from spawning a server per language and
     /// running out of file descriptors / RAM.
@@ -116,6 +120,7 @@ impl Default for LspRuntimeConfig {
                 crate::models::config::defaults::diagnostics_wait_ms(),
             ),
             entry_files: HashMap::new(),
+            servers: HashMap::new(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }
     }
@@ -129,6 +134,7 @@ impl From<&SymoraConfig> for LspRuntimeConfig {
             auto_restart: config.lsp.auto_restart,
             diagnostics_wait: Duration::from_millis(config.lsp.diagnostics_wait_ms),
             entry_files: config.project.entry_files.clone(),
+            servers: config.lsp.servers.clone(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }
     }
@@ -209,6 +215,24 @@ mod tests {
         // TypeScript rename: 60s * 2.5 * 10.0 = 1500s
         let ts_rename = config.timeout_for(Language::TypeScript, "textDocument/rename");
         assert_eq!(ts_rename, Duration::from_secs(1500));
+    }
+
+    #[test]
+    fn runtime_config_carries_server_overrides() {
+        use crate::models::config::ServerOverride;
+
+        let mut config = SymoraConfig::default();
+        config.lsp.servers.insert(
+            "rust".to_string(),
+            ServerOverride {
+                command: Some("/custom/rust-analyzer".to_string()),
+                args: None,
+                tier: None,
+            },
+        );
+        let runtime = LspRuntimeConfig::from(&config);
+        assert_eq!(runtime.servers, config.lsp.servers);
+        assert!(LspRuntimeConfig::default().servers.is_empty());
     }
 
     #[test]

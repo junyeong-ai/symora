@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::error::LspError;
-use crate::models::config::ServerTier;
+use crate::models::config::{ServerOverride, ServerTier};
 use crate::models::symbol::Language;
 
 // Platform Detection
@@ -105,7 +105,10 @@ impl ServerConfig {
     pub fn resolve(&self) -> Result<PathBuf, LspError> {
         resolve_command(&self.command).map_err(|searched| LspError::ServerNotInstalled {
             name: self.display_name.to_string(),
-            install_hint: not_found_hint(self.install.current(), &searched),
+            install_hint: match self.source {
+                ServerSource::Builtin => not_found_hint(self.install.current(), &searched),
+                ServerSource::Config => override_not_found_hint(&self.command, &searched),
+            },
         })
     }
 
@@ -142,6 +145,22 @@ impl ServerConfig {
         text.lines()
             .find(|line| !line.trim().is_empty())
             .map(|s| s.trim().to_string())
+    }
+
+    fn apply_override(&mut self, o: &ServerOverride) {
+        if let Some(command) = &o.command {
+            self.command = command.clone();
+        }
+        if let Some(args) = &o.args {
+            self.args = args.clone();
+        }
+        if let Some(tier) = o.tier {
+            self.tier = tier;
+        }
+        // An override stanza existing is truthful provenance even when all
+        // fields are None — doctor then shows the default command as the
+        // effective one, which is accurate.
+        self.source = ServerSource::Config;
     }
 }
 
@@ -234,7 +253,9 @@ fn is_executable_file(path: &Path) -> bool {
 
 fn not_found_hint(install: &str, searched: &[PathBuf]) -> String {
     let mut hint = format!(
-        "{install}. Searched: {}",
+        "{install}. Searched: {}. If the server is installed somewhere off PATH, set \
+         command = \"/absolute/path\" under [lsp.servers.<language>] in \
+         .symora/config.toml and run `symora daemon restart`",
         searched
             .iter()
             .map(|d| d.display().to_string())
@@ -245,11 +266,25 @@ fn not_found_hint(install: &str, searched: &[PathBuf]) -> String {
         && home.join(".nvm").is_dir()
     {
         hint.push_str(
-            ". nvm detected: nvm-managed binaries are not on the daemon's PATH — \
-             run `nvm use` in your shell or symlink the binary into ~/.local/bin",
+            ". nvm detected: nvm-managed binaries are not on the daemon's PATH — point \
+             [lsp.servers.<language>] command at the binary under \
+             ~/.nvm/versions/node/<version>/bin",
         );
     }
     hint
+}
+
+fn override_not_found_hint(command: &str, searched: &[PathBuf]) -> String {
+    format!(
+        "command `{command}` is set by [lsp.servers] in symora config but was not found \
+         or not executable. Searched: {}. Fix the override's path or remove it to fall \
+         back to the builtin server, then run `symora daemon restart`",
+        searched
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// `Command::output()` with a hard deadline; kills the child on timeout.
@@ -954,6 +989,21 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     configs
 }
 
+/// The builtin table with [lsp.servers] overrides applied. This is THE
+/// server table: LspManager spawn, doctor, and setup deps must all read
+/// it so "reported installed" can never diverge from "actually spawnable".
+pub fn merged(overrides: &HashMap<String, ServerOverride>) -> HashMap<Language, ServerConfig> {
+    let mut configs = defaults();
+    for (key, o) in overrides {
+        if let Ok(language) = key.parse::<Language>()
+            && let Some(config) = configs.get_mut(&language)
+        {
+            config.apply_override(o);
+        }
+    }
+    configs
+}
+
 /// Server health check result
 #[derive(Debug, Clone)]
 pub struct ServerHealth {
@@ -963,11 +1013,13 @@ pub struct ServerHealth {
     pub version: Option<String>,
     pub install_instruction: &'static str,
     pub tier: ServerTier,
+    pub source: ServerSource,
+    /// Effective spawn command from the merged table.
+    pub command: String,
 }
 
-/// Check health of all configured servers
-pub fn check_all_servers() -> Vec<ServerHealth> {
-    let configs = defaults();
+/// Check health of every server in the given table
+pub fn check_all_servers(configs: HashMap<Language, ServerConfig>) -> Vec<ServerHealth> {
     let mut results = Vec::new();
 
     for (language, config) in configs {
@@ -985,6 +1037,8 @@ pub fn check_all_servers() -> Vec<ServerHealth> {
             version,
             install_instruction: config.install.current(),
             tier: config.tier,
+            source: config.source,
+            command: config.command,
         });
     }
 
@@ -1076,6 +1130,91 @@ mod tests {
         assert!(hint.contains("npm install -g fake-ls"));
         assert!(hint.contains("/nowhere/a"));
         assert!(hint.contains("/nowhere/b"));
+        assert!(hint.contains("If the server is installed somewhere off PATH"));
+        assert!(hint.contains("[lsp.servers.<language>]"));
+    }
+
+    #[test]
+    fn resolve_hint_names_config_override_when_source_is_config() {
+        let config = ServerConfig {
+            display_name: "fake-ls",
+            command: "/nonexistent/fake-ls".to_string(),
+            args: vec![],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g fake-ls",
+                linux: "npm install -g fake-ls",
+                windows: "npm install -g fake-ls",
+            },
+            tier: ServerTier::Fast,
+            source: ServerSource::Config,
+        };
+        let err = config.resolve().unwrap_err();
+        let LspError::ServerNotInstalled { install_hint, .. } = err else {
+            panic!("expected ServerNotInstalled");
+        };
+        assert!(install_hint.contains("lsp.servers"));
+        assert!(install_hint.contains("/nonexistent/fake-ls"));
+        assert!(!install_hint.contains("npm install -g fake-ls"));
+    }
+
+    #[test]
+    fn merged_with_no_overrides_matches_defaults() {
+        let merged = merged(&HashMap::new());
+        let base = defaults();
+        assert_eq!(merged.len(), base.len());
+        for (language, config) in &merged {
+            let default = &base[language];
+            assert_eq!(config.command, default.command);
+            assert_eq!(config.args, default.args);
+            assert_eq!(config.tier, default.tier);
+            assert_eq!(config.source, ServerSource::Builtin);
+        }
+    }
+
+    #[test]
+    fn merged_command_only_override_keeps_builtin_args() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "typescript".to_string(),
+            ServerOverride {
+                command: Some("/custom/typescript-language-server".to_string()),
+                args: None,
+                tier: None,
+            },
+        );
+        let merged = merged(&overrides);
+        let ts = &merged[&Language::TypeScript];
+        assert_eq!(ts.command, "/custom/typescript-language-server");
+        assert_eq!(ts.args, vec!["--stdio".to_string()]);
+        assert_eq!(ts.tier, defaults()[&Language::TypeScript].tier);
+        assert_eq!(ts.source, ServerSource::Config);
+    }
+
+    #[test]
+    fn merged_overrides_args_and_tier() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "typescript".to_string(),
+            ServerOverride {
+                command: None,
+                args: Some(vec![]),
+                tier: Some(ServerTier::Fast),
+            },
+        );
+        let merged = merged(&overrides);
+        let ts = &merged[&Language::TypeScript];
+        assert!(ts.args.is_empty());
+        assert_eq!(ts.tier, ServerTier::Fast);
+        assert_eq!(ts.source, ServerSource::Config);
+    }
+
+    #[test]
+    fn defaults_cover_every_language() {
+        let keys: std::collections::HashSet<Language> = defaults().keys().copied().collect();
+        let all: std::collections::HashSet<Language> = Language::all().into_iter().collect();
+        assert_eq!(keys, all);
     }
 
     #[test]
@@ -1120,8 +1259,9 @@ mod tests {
 
     #[test]
     fn test_check_all_servers() {
-        let health = check_all_servers();
+        let health = check_all_servers(defaults());
         // Should have health info for all supported languages
         assert!(health.len() >= 6);
+        assert!(health.iter().all(|h| h.source == ServerSource::Builtin));
     }
 }

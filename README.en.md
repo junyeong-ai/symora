@@ -196,6 +196,16 @@ Common settings include:
 - daemon behavior
 - test file patterns
 - ignored paths
+- language-server launch overrides (`[lsp.servers.<lang>]`: command/args/tier)
+
+```toml
+[lsp.servers.typescript]
+command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
+args = ["--stdio"]   # optional; absent = inherit builtin args
+tier = "slow"        # optional; one of fast|standard|slow
+```
+
+Keys are the `language` ids printed by `symora doctor` — a rejected key is reported in doctor's `config_errors` and never applied. The daemon reads config at start; run `symora daemon restart` after changing it.
 
 ---
 

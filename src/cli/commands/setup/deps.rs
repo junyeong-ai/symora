@@ -2,12 +2,15 @@
 //! managers. The matrix here mirrors the install instructions surfaced by
 //! `symora doctor` (`infra/lsp/servers.rs`); both should stay aligned.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
 use crate::cli::utils::ui::{Step, prompt, section, step};
-use crate::infra::lsp::servers::Platform;
+use crate::infra::lsp::servers::{Platform, ServerConfig, ServerSource};
+use crate::models::symbol::Language;
 use crate::services::dist::process::{have, run_streaming};
 
 #[derive(Args, Debug)]
@@ -87,7 +90,11 @@ pub enum DepStatus {
     Manual,
 }
 
-pub fn run_deps(args: DepsArgs, assume_yes: bool) -> Result<DepsOutcome> {
+pub fn run_deps(
+    args: DepsArgs,
+    assume_yes: bool,
+    server_configs: &HashMap<Language, ServerConfig>,
+) -> Result<DepsOutcome> {
     section("setup deps");
 
     let group = if args.group == DepsGroup::None {
@@ -115,23 +122,25 @@ pub fn run_deps(args: DepsArgs, assume_yes: bool) -> Result<DepsOutcome> {
         match slot {
             Slot::Ripgrep => items.push(install_ripgrep()),
             Slot::Core => {
-                items.push(install_rust_analyzer());
-                items.push(install_typescript_lsp());
-                items.push(install_pyright());
-                items.push(install_gopls());
+                items.push(install_rust_analyzer(&server_configs[&Language::Rust]));
+                items.push(install_typescript_lsp(
+                    &server_configs[&Language::TypeScript],
+                ));
+                items.push(install_pyright(&server_configs[&Language::Python]));
+                items.push(install_gopls(&server_configs[&Language::Go]));
             }
             Slot::Jvm => {
-                items.push(install_jdtls());
-                items.push(install_kotlin_lsp());
+                items.push(install_jdtls(&server_configs[&Language::Java]));
+                items.push(install_kotlin_lsp(&server_configs[&Language::Kotlin]));
             }
             Slot::Web => {
-                items.push(install_vue_lsp());
-                items.push(install_intelephense());
-                items.push(install_yaml_lsp());
+                items.push(install_vue_lsp(&server_configs[&Language::Vue]));
+                items.push(install_intelephense(&server_configs[&Language::PHP]));
+                items.push(install_yaml_lsp(&server_configs[&Language::Yaml]));
             }
             Slot::Systems => {
-                items.push(install_clangd());
-                items.push(install_zls());
+                items.push(install_clangd(&server_configs[&Language::Cpp]));
+                items.push(install_zls(&server_configs[&Language::Zig]));
             }
         }
     }
@@ -168,17 +177,30 @@ fn choose_group_interactive(assume_yes: bool) -> DepsGroup {
     }
 }
 
-fn already_installed(name: &'static str, command: &str) -> Option<DepResult> {
-    if have(command) {
-        step(Step::Skip, format!("{name}: already installed"));
-        Some(DepResult {
-            name,
+/// Pre-install gate evaluated against the same merged table the spawn path
+/// uses, so AlreadyInstalled always means "symora can spawn it".
+/// None = proceed with the platform install commands.
+fn check_server(config: &ServerConfig) -> Option<DepResult> {
+    if config.is_installed() {
+        step(
+            Step::Skip,
+            format!("{}: already installed", config.display_name),
+        );
+        return Some(DepResult {
+            name: config.display_name,
             status: DepStatus::AlreadyInstalled,
             note: None,
-        })
-    } else {
-        None
+        });
     }
+    if config.source == ServerSource::Config {
+        return Some(manual(
+            config.display_name,
+            "command is overridden by [lsp.servers] in symora config — installing the \
+             stock server would not change what symora spawns; fix the override path or \
+             remove the override first",
+        ));
+    }
+    None
 }
 
 fn run_install(name: &'static str, program: &str, args: &[&str]) -> DepResult {
@@ -222,8 +244,13 @@ fn manual(name: &'static str, hint: &str) -> DepResult {
 // ─── individual installers ──────────────────────────────────────────────
 
 fn install_ripgrep() -> DepResult {
-    if let Some(r) = already_installed("ripgrep", "rg") {
-        return r;
+    if have("rg") {
+        step(Step::Skip, "ripgrep: already installed");
+        return DepResult {
+            name: "ripgrep",
+            status: DepStatus::AlreadyInstalled,
+            note: None,
+        };
     }
     match Platform::current() {
         Platform::MacOS if have("brew") => run_install("ripgrep", "brew", &["install", "ripgrep"]),
@@ -250,8 +277,8 @@ fn install_ripgrep() -> DepResult {
     }
 }
 
-fn install_rust_analyzer() -> DepResult {
-    if let Some(r) = already_installed("rust-analyzer", "rust-analyzer") {
+fn install_rust_analyzer(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("rustup") {
@@ -267,8 +294,8 @@ fn install_rust_analyzer() -> DepResult {
     )
 }
 
-fn install_typescript_lsp() -> DepResult {
-    if let Some(r) = already_installed("typescript-language-server", "typescript-language-server") {
+fn install_typescript_lsp(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("npm") {
@@ -281,8 +308,8 @@ fn install_typescript_lsp() -> DepResult {
     )
 }
 
-fn install_pyright() -> DepResult {
-    if let Some(r) = already_installed("pyright", "pyright") {
+fn install_pyright(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("npm") {
@@ -291,8 +318,8 @@ fn install_pyright() -> DepResult {
     run_install("pyright", "npm", &["install", "-g", "pyright"])
 }
 
-fn install_gopls() -> DepResult {
-    if let Some(r) = already_installed("gopls", "gopls") {
+fn install_gopls(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("go") {
@@ -305,8 +332,8 @@ fn install_gopls() -> DepResult {
     )
 }
 
-fn install_jdtls() -> DepResult {
-    if let Some(r) = already_installed("jdtls", "jdtls") {
+fn install_jdtls(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     match Platform::current() {
@@ -315,8 +342,8 @@ fn install_jdtls() -> DepResult {
     }
 }
 
-fn install_kotlin_lsp() -> DepResult {
-    if let Some(r) = already_installed("kotlin-lsp", "kotlin-lsp") {
+fn install_kotlin_lsp(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     match Platform::current() {
@@ -332,8 +359,8 @@ fn install_kotlin_lsp() -> DepResult {
     }
 }
 
-fn install_vue_lsp() -> DepResult {
-    if let Some(r) = already_installed("vue-language-server", "vue-language-server") {
+fn install_vue_lsp(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("npm") {
@@ -346,8 +373,8 @@ fn install_vue_lsp() -> DepResult {
     )
 }
 
-fn install_intelephense() -> DepResult {
-    if let Some(r) = already_installed("intelephense", "intelephense") {
+fn install_intelephense(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("npm") {
@@ -356,8 +383,8 @@ fn install_intelephense() -> DepResult {
     run_install("intelephense", "npm", &["install", "-g", "intelephense"])
 }
 
-fn install_yaml_lsp() -> DepResult {
-    if let Some(r) = already_installed("yaml-language-server", "yaml-language-server") {
+fn install_yaml_lsp(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     if !have("npm") {
@@ -370,8 +397,8 @@ fn install_yaml_lsp() -> DepResult {
     )
 }
 
-fn install_clangd() -> DepResult {
-    if let Some(r) = already_installed("clangd", "clangd") {
+fn install_clangd(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     match Platform::current() {
@@ -388,12 +415,65 @@ fn install_clangd() -> DepResult {
     }
 }
 
-fn install_zls() -> DepResult {
-    if let Some(r) = already_installed("zls", "zls") {
+fn install_zls(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
         return r;
     }
     match Platform::current() {
         Platform::MacOS if have("brew") => run_install("zls", "brew", &["install", "zls"]),
         _ => manual("zls", "see https://github.com/zigtools/zls/releases"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infra::lsp::servers::InstallInstructions;
+    use crate::models::config::ServerTier;
+
+    fn server(command: String, source: ServerSource) -> ServerConfig {
+        ServerConfig {
+            display_name: "fake-ls",
+            command,
+            args: vec![],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "none",
+                linux: "none",
+                windows: "none",
+            },
+            tier: ServerTier::Fast,
+            source,
+        }
+    }
+
+    #[test]
+    fn check_server_none_for_missing_builtin() {
+        let config = server("/nonexistent/fake-ls".to_string(), ServerSource::Builtin);
+        assert!(check_server(&config).is_none());
+    }
+
+    #[test]
+    fn check_server_already_installed_for_resolvable_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-ls");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let config = server(path.to_string_lossy().into_owned(), ServerSource::Builtin);
+        let result = check_server(&config).unwrap();
+        assert_eq!(result.status, DepStatus::AlreadyInstalled);
+    }
+
+    #[test]
+    fn check_server_blocks_install_when_override_missing() {
+        let config = server("/nonexistent/fake-ls".to_string(), ServerSource::Config);
+        let result = check_server(&config).unwrap();
+        assert_eq!(result.status, DepStatus::Manual);
+        assert!(result.note.unwrap().contains("lsp.servers"));
     }
 }

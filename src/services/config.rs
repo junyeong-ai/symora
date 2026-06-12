@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::error::ConfigError;
-use crate::models::config::SymoraConfig;
+use crate::models::config::{ServerOverride, ServerOverrideError, SymoraConfig};
+use crate::models::symbol::Language;
 
 #[async_trait]
 pub trait ConfigService: Send + Sync {
@@ -201,6 +204,8 @@ struct RawLspConfig {
     type_hierarchy_limit: Option<usize>,
     tests_limit: Option<usize>,
     diagnostics_wait_ms: Option<u64>,
+    #[serde(default)]
+    servers: HashMap<String, ServerOverride>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -260,6 +265,11 @@ fn merge_raw_lsp(base: RawLspConfig, overlay: RawLspConfig) -> RawLspConfig {
         type_hierarchy_limit: overlay.type_hierarchy_limit.or(base.type_hierarchy_limit),
         tests_limit: overlay.tests_limit.or(base.tests_limit),
         diagnostics_wait_ms: overlay.diagnostics_wait_ms.or(base.diagnostics_wait_ms),
+        servers: {
+            let mut merged = base.servers;
+            merged.extend(overlay.servers);
+            merged
+        },
     }
 }
 
@@ -296,6 +306,8 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
     use crate::models::config::defaults;
     use crate::models::config::*;
 
+    let (servers, server_override_errors) = resolve_server_overrides(raw.lsp.servers);
+
     SymoraConfig {
         project: raw.project,
         lsp: LspConfig {
@@ -314,6 +326,8 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
                 .lsp
                 .diagnostics_wait_ms
                 .unwrap_or_else(defaults::diagnostics_wait_ms),
+            servers,
+            server_override_errors,
         },
         search: SearchConfig {
             limit: raw.search.limit.unwrap_or_else(defaults::search_limit),
@@ -334,6 +348,38 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
         },
         test: raw.test,
     }
+}
+
+/// Partition [lsp.servers] keys: strictly canonical `Language::lsp_id`
+/// keys are applied; alias and unknown keys are recorded with a
+/// corrective message and dropped — never applied, never a load error
+/// for the rest of the config.
+fn resolve_server_overrides(
+    raw: HashMap<String, ServerOverride>,
+) -> (HashMap<String, ServerOverride>, Vec<ServerOverrideError>) {
+    let mut applied = HashMap::new();
+    let mut errors = Vec::new();
+    for (key, value) in raw {
+        match Language::from_str(&key) {
+            Ok(language) if language.lsp_id() == key => {
+                applied.insert(key, value);
+            }
+            Ok(language) => errors.push(ServerOverrideError {
+                key: format!("lsp.servers.{key}"),
+                message: format!(
+                    "use `{}` (the canonical language id shown by `symora doctor`)",
+                    language.lsp_id()
+                ),
+            }),
+            Err(_) => errors.push(ServerOverrideError {
+                key: format!("lsp.servers.{key}"),
+                message: "unknown language — use the `language` id shown by `symora doctor`"
+                    .to_string(),
+            }),
+        }
+    }
+    errors.sort_by(|a, b| a.key.cmp(&b.key));
+    (applied, errors)
 }
 
 // ---------------------------------------------------------------------------
@@ -366,4 +412,100 @@ fn apply_env_overrides(mut config: SymoraConfig) -> SymoraConfig {
         config.lsp.timeout_secs = timeout;
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::config::ServerTier;
+
+    fn resolve_str(content: &str) -> SymoraConfig {
+        let raw: RawSymoraConfig = toml::from_str(content).unwrap();
+        resolve_config(raw)
+    }
+
+    #[test]
+    fn server_override_parses_and_resolves() {
+        let config = resolve_str(
+            r#"
+[lsp.servers.typescript]
+command = "/custom/typescript-language-server"
+args = ["--stdio"]
+tier = "slow"
+"#,
+        );
+        let o = &config.lsp.servers["typescript"];
+        assert_eq!(
+            o.command.as_deref(),
+            Some("/custom/typescript-language-server")
+        );
+        assert_eq!(o.args, Some(vec!["--stdio".to_string()]));
+        assert_eq!(o.tier, Some(ServerTier::Slow));
+        assert!(config.lsp.server_override_errors.is_empty());
+    }
+
+    #[test]
+    fn server_override_unknown_key_recorded_not_applied() {
+        let config = resolve_str("[lsp.servers.klingon]\ncommand = \"/nope\"\n");
+        assert!(config.lsp.servers.is_empty());
+        assert_eq!(config.lsp.server_override_errors.len(), 1);
+        assert_eq!(
+            config.lsp.server_override_errors[0].key,
+            "lsp.servers.klingon"
+        );
+    }
+
+    #[test]
+    fn server_override_alias_key_suggests_canonical() {
+        let config = resolve_str(
+            "[lsp.servers.ts]\ncommand = \"/a\"\n\n[lsp.servers.bash]\ncommand = \"/b\"\n",
+        );
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 2);
+        let ts = errors.iter().find(|e| e.key == "lsp.servers.ts").unwrap();
+        assert!(ts.message.contains("typescript"));
+        let bash = errors.iter().find(|e| e.key == "lsp.servers.bash").unwrap();
+        assert!(bash.message.contains("shellscript"));
+    }
+
+    #[test]
+    fn server_override_rejection_preserves_rest_of_config() {
+        let config = resolve_str(
+            r#"
+[lsp]
+timeout_secs = 99
+
+[lsp.servers.klingon]
+command = "/nope"
+
+[lsp.servers.rust]
+command = "/custom/rust-analyzer"
+"#,
+        );
+        assert_eq!(config.lsp.timeout_secs, 99);
+        assert_eq!(
+            config.lsp.servers["rust"].command.as_deref(),
+            Some("/custom/rust-analyzer")
+        );
+        assert_eq!(config.lsp.server_override_errors.len(), 1);
+        assert_eq!(
+            config.lsp.server_override_errors[0].key,
+            "lsp.servers.klingon"
+        );
+    }
+
+    #[test]
+    fn project_server_override_replaces_global() {
+        let global: RawSymoraConfig =
+            toml::from_str("[lsp.servers.rust]\ncommand = \"/global/rust-analyzer\"\nargs = []\n")
+                .unwrap();
+        let project: RawSymoraConfig =
+            toml::from_str("[lsp.servers.rust]\ncommand = \"/project/rust-analyzer\"\n").unwrap();
+        let resolved = resolve_config(merge_raw_config(global, project));
+        let o = &resolved.lsp.servers["rust"];
+        assert_eq!(o.command.as_deref(), Some("/project/rust-analyzer"));
+        // Wholesale replacement: the global stanza's explicit args are gone.
+        assert_eq!(o.args, None);
+    }
 }

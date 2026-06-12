@@ -56,6 +56,16 @@ fn run(args: &[&str]) -> std::process::Output {
         .expect("symora binary should exist")
 }
 
+#[cfg(unix)]
+fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(SYMORA)
+        .args(args)
+        .env("SYMORA_NO_DAEMON", "1")
+        .current_dir(dir)
+        .output()
+        .expect("symora binary should exist")
+}
+
 #[test]
 fn root_help_lists_every_subcommand() {
     let out = run(&["--help"]);
@@ -235,4 +245,86 @@ fn quiet_mode_suppresses_stdout_for_success() {
         "quiet mode should produce no stdout, got: {}",
         String::from_utf8_lossy(&out.stdout)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_override_provenance_and_spawnability() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("fake-rust-analyzer");
+    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!("[lsp.servers.rust]\ncommand = \"{}\"\n", bin.display()),
+    )
+    .unwrap();
+
+    // The override applies: rust resolves to the configured binary and the
+    // row discloses provenance.
+    let out = run_in(dir.path(), &["--format", "compact", "doctor", "rust"]);
+    assert!(out.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("doctor stdout must be valid JSON");
+    let rust = json["languages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["language"] == "rust")
+        .expect("doctor must report a rust row");
+    assert_eq!(rust["installed"], true);
+    assert_eq!(rust["source"], "config");
+    assert_eq!(rust["command"], bin.to_str().unwrap());
+
+    // Builtin rows carry neither source nor command, and a clean config
+    // emits no config_errors at all.
+    let out = run_in(dir.path(), &["--format", "compact", "doctor"]);
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let go = json["languages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["language"] == "go")
+        .expect("doctor must report a go row");
+    assert!(go.get("source").is_none());
+    assert!(go.get("command").is_none());
+    assert!(json.get("config_errors").is_none());
+
+    // A rejected key is disclosed in config_errors, never applied, and
+    // never costs the rest of the config.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp]\ntimeout_secs = 99\n\n[lsp.servers.klingon]\ncommand = \"/nope\"\n",
+    )
+    .unwrap();
+    let out = run_in(dir.path(), &["--format", "compact", "doctor", "rust"]);
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let errors = json["config_errors"]
+        .as_array()
+        .expect("config_errors must be present for a rejected key");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("lsp.servers.klingon"))
+    );
+    let rust = json["languages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["language"] == "rust")
+        .unwrap();
+    assert!(rust.get("source").is_none());
+
+    let out = run_in(dir.path(), &["--format", "compact", "config", "show"]);
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["config"]["lsp"]["timeout_secs"], 99);
+    assert_eq!(json["config"]["lsp"]["servers"], serde_json::json!({}));
 }
