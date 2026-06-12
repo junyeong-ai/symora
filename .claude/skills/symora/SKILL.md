@@ -13,7 +13,7 @@ Use `symora` when semantic code navigation is more useful than text search. Outp
 ## Two backends, different requirements
 
 - **Index & structural search**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search ast` uses tree-sitter directly, and the `map` family reads the file tree for structure (summary, siblings, related files, directory layout) — no index, no language server. `search content` ranks the SQLite index and scans the filesystem when it isn't built. Two cases in this group still reach the language server: `search symbols` falls back to **LSP workspace symbols** when the index isn't built, and `map file`'s embedded `symbols` field is LSP-backed (its outer shape is not — see step 4).
-- **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output.
+- **LSP-backed** (needs the language server installed for the target language): `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output or point `[lsp.servers.<lang>]` at an existing binary.
 
 Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
 
@@ -115,7 +115,7 @@ Use these when search results are unexpectedly empty, a language server is unres
 ## When commands fail
 
 - `count: 0` from `search …`: run `symora search index status` — if `symbol_count: 0` the index has never been built, run `symora search index build`.
-- `server_not_installed` error: run `symora doctor <lang>` and install per its `install` field. While the LSP is missing, fall back to `search symbols`, `search content`, `map file`, `map dir`.
+- `server_not_installed` error: run `symora doctor <lang>` and install per its `install` field. If the binary exists but is off PATH (nvm/mise/asdf, hermetic CI), set `command = "/absolute/path"` under `[lsp.servers.<lang>]` in `.symora/config.toml` (key = the `language` id doctor prints), run `symora daemon restart`, then confirm with `symora doctor <lang>` — the row shows `source: "config"`; if it doesn't, check the top-level `config_errors` for a rejected key. While the LSP is missing, fall back to `search symbols`, `search content`, `map file`, `map dir`.
 - `context` or `refs` reports an unsupported feature: follow the suggested fallback rather than retrying.
 - `conflict` error from `edit`/`rename`: the file changed since it was analyzed — re-read it (`symora symbols <file>` or `map file`) and retry with fresh coordinates. Recoverable; do not treat it as a hard failure.
 - `precondition_failed` error from `edit delete --expect-no-references`: the symbol is not verified reference-free. If the message counts references, fix or remove those call sites (the hint's `symora refs …` lists them) and retry; if it says the check was unsupported/unavailable/degraded, verify manually and rerun without the flag. Unlike `conflict`, do not blind-retry.

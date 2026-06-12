@@ -60,7 +60,7 @@ impl LspManager {
         Self {
             root,
             clients: RwLock::new(HashMap::new()),
-            configs: servers::defaults(),
+            configs: servers::merged(&runtime_config.servers),
             runtime_config,
         }
     }

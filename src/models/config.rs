@@ -1,3 +1,4 @@
+use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,16 @@ pub struct LspConfig {
     /// reported as unconfirmed rather than synthesized as clean.
     #[serde(default = "defaults::diagnostics_wait_ms")]
     pub diagnostics_wait_ms: u64,
+
+    /// [lsp.servers.<lang>] launch overrides, keyed by Language::lsp_id().
+    /// Only validated (canonical-key) entries live here.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub servers: std::collections::HashMap<String, ServerOverride>,
+
+    /// Rejected [lsp.servers] keys from the last resolve — never applied,
+    /// never serialized. Disclosed by `symora doctor` as `config_errors`.
+    #[serde(skip)]
+    pub server_override_errors: Vec<ServerOverrideError>,
 }
 
 impl Default for LspConfig {
@@ -107,7 +118,37 @@ impl Default for LspConfig {
             type_hierarchy_limit: defaults::type_hierarchy_limit(),
             tests_limit: defaults::tests_limit(),
             diagnostics_wait_ms: defaults::diagnostics_wait_ms(),
+            servers: std::collections::HashMap::new(),
+            server_override_errors: Vec::new(),
         }
+    }
+}
+
+/// A [lsp.servers.<lang>] launch override. An absent field inherits the
+/// builtin default for that server; an explicit `args = []` means no args.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ServerTier>,
+}
+
+/// A rejected [lsp.servers] key, recorded at config resolution. Never
+/// serialized; carried so `doctor` can disclose overrides that did not
+/// apply without re-parsing config. Display matches
+/// ConfigError::InvalidValue: "Invalid value for '{key}': {message}".
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerOverrideError {
+    pub key: String,
+    pub message: String,
+}
+
+impl fmt::Display for ServerOverrideError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Invalid value for '{}': {}", self.key, self.message)
     }
 }
 

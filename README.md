@@ -196,6 +196,16 @@ symora config init --global
 - daemon 동작
 - 테스트 파일 패턴
 - ignore 경로
+- 언어 서버 실행 오버라이드 (`[lsp.servers.<lang>]`: command/args/tier)
+
+```toml
+[lsp.servers.typescript]
+command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
+args = ["--stdio"]   # 생략 시 기본 args 상속
+tier = "slow"        # 생략 가능; fast|standard|slow
+```
+
+키는 `symora doctor`가 출력하는 `language` id입니다 — 잘못된 키는 doctor의 `config_errors`로 보고되며 적용되지 않습니다. daemon은 시작 시 설정을 읽으므로 변경 후 `symora daemon restart`를 실행하세요.
 
 ---
 
