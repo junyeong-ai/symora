@@ -60,99 +60,25 @@ symora usage src/main.rs:42:10
 
 ## Core Capabilities
 
-### Semantic Navigation
+- **Semantic navigation** — `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`
+- **Search and discovery** — `search symbols`, `search content`, `search ast`, plus `pack` for a token-budgeted repo brief
+- **Project and file exploration** — `map summary`, `map file`, `map dir`, `map related`
+- **Context and impact analysis** — `context`, `usage`, `impact`, `diff-impact`
+- **Edit and refactor** — `rename`, `actions`, the `edit` subcommands (symbol- or line-addressed splices with exact dry-run previews and a reference-guarded `delete`), `format`
+- **Health checks** — `diagnostics`, `doctor`, `status`
 
-```bash
-symora symbols src/main.rs
-symora def src/main.rs:10:5
-symora refs src/main.rs:10:5
-symora hover src/main.rs:10:5
-symora callers src/main.rs:10:5
-symora callees src/main.rs:10:5
-symora typedef src/main.rs:10:5
-symora implementations src/main.rs:10:5
-symora rename src/main.rs:10:5 new_name
-```
-
-### Search and Discovery
-
-```bash
-symora search symbols AuthUser
-symora search content "async fn"
-symora search ast "(function_item)" --lang rust
-symora search nodes --lang rust
-```
-
-### Project and File Exploration
-
-```bash
-symora map summary
-symora map file src/cli/commands/search/mod.rs
-symora map dir src/cli
-symora map related src/cli/commands/search/mod.rs
-```
-
-### Context and Usage Analysis
-
-```bash
-symora context src/main.rs:42 --all
-symora refs src/main.rs:42
-symora usage SearchCommand
-symora usage src/cli/commands/search/mod.rs:30:10
-symora impact src/main.rs:42
-symora diff-impact
-```
-
-### Edit and Refactor Support
-
-```bash
-symora actions list src/main.rs:42:5
-symora actions apply src/main.rs:42:5 "Extract method"
-symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
-symora edit delete src/main.rs:42:4 --dry-run          # reports dangling references
-symora edit delete src/main.rs:42:4 --expect-no-references # refuses unless verified reference-free
-symora edit replace src/main.rs:10:1 --text "new code" --dry-run
-symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
-symora format src/main.rs
-```
+Every command prints JSON; `--help` on any of them shows its flags and output shape.
 
 ---
 
-## Workflow Design
+## For AI Agents
 
-Symora works best when used in this order:
+The agent-facing playbook — workflow order, command selection, the output contract, failure handling — ships with the tool rather than this README, so it stays in lockstep with the binary:
 
-1. `symora map summary` for project entrypoints and major areas
-2. `symora search symbols <query>` for rough workspace discovery
-3. `symora map file <path>` for a compact file overview
-4. `symora symbols <file>` or `symora symbols --symbol <path>` for exact inspection
-5. `symora context`, `symora refs`, and `symora usage` for exact follow-up
+- `symora setup skill` installs the Claude Code skill (the full CLI playbook).
+- `symora mcp serve` returns the same guidance through the MCP `initialize` instructions.
 
-This split is intentional:
-
-- `search symbols` is for rough discovery
-- `symbols` is for exact semantic inspection
-- `map file` is a compact overview, not a full symbol dump
-
----
-
-## Output Model
-
-Symora prints JSON by default.
-
-Important characteristics:
-
-- project-relative paths when possible
-- stable list-like fields such as `count`, `showing`, `items`, `truncated`, and `hints`
-- compact mode for lower token usage
-
-Global flags:
-
-```bash
-symora --format compact search symbols AuthUser   # compact JSON
-symora -q refs src/main.rs:10:5     # errors only
-symora -v status                    # debug logging
-```
+The short version: list responses share one stable shape (`count`, `showing`, `items`, with disclosed `truncated`/`hints`/`next_commands`), positions are 1-indexed, failures are structured `{code, message, hint}`, and discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`). Global flags such as `--format compact` (single-line JSON) and `-q` (errors only) may be placed before the subcommand.
 
 ---
 
@@ -240,7 +166,7 @@ Useful variants:
 
 ```bash
 # Pin a release / verify GitHub build provenance (needs gh CLI)
-curl -fsSL .../install.sh | bash -s -- --version 0.11.0 --verify-attestations
+curl -fsSL .../install.sh | bash -s -- --version <version> --verify-attestations
 
 # Source build + skill, no prompts (no checkout needed — builds the release tag from git)
 curl -fsSL .../install.sh | bash -s -- --source --skill
@@ -267,7 +193,7 @@ symora setup                          # interactive: skill + language servers
 symora setup skill                    # skill only
 symora setup deps --group core       # dependencies only (core / core-jvm / core-web / core-systems / all)
 symora self update                    # in-place upgrade to the latest release
-symora self update --version 0.11.0   # pin a version
+symora self update --version <version>   # pin a version
 symora self uninstall                 # remove binary + skill + config + daemon data
 symora self uninstall --keep-skill --keep-config
 ```
@@ -300,17 +226,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor, etc. use
 symora mcp serve --transport http --port 8765
 ```
 
-The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` target by `file` plus exactly one of `symbol` (a path like 'Class/method') or `line`; `delete_symbol` additionally accepts `expect_no_references` to make reference-freedom a checked precondition (refusals return a `precondition_failed` error).
-
----
-
-## Practical Notes
-
-- `context`, `refs`, and `usage` accept exact locations such as `file:line:column`
-- `usage` also accepts a location and resolves the symbol automatically
-- `context` includes fallback guidance when the active LSP server does not support call hierarchy or type definition well
-- semantic file/location commands require the language server for that language to be installed; check with `symora doctor <lang>` when in doubt
-- `map related` is a heuristic helper for adjacent files, not a guaranteed dependency graph
+The tool list and input schemas are returned by `tools/list`; mutating tools are marked twice (`Mutates` in the description, `annotations.readOnlyHint: false`) and all support `dry_run`. The server's `initialize` response carries the full usage playbook — tool sequencing, edit addressing, error recovery — so a connected agent needs no further setup.
 
 ---
 
