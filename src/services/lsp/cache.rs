@@ -199,7 +199,7 @@ impl SymbolCache {
     }
 }
 
-// --- WorkspaceSymbolCache: language+query keyed, TTL-only validated ---
+// --- WorkspaceSymbolCache: language+query keyed, generation validated ---
 
 pub struct WorkspaceSymbolCache {
     inner: AsyncCache<WorkspaceCacheKey, Arc<Vec<Symbol>>>,
@@ -224,10 +224,16 @@ impl WorkspaceSymbolCache {
         }
     }
 
+    /// Get or compute a workspace-symbol answer, valid only for the
+    /// workspace-content `generation` it was computed under (see
+    /// `infra::lsp::content_generation`). Any edit — ours or external —
+    /// bumps the generation, so a cached answer can never describe a
+    /// workspace that no longer exists; the TTL only bounds memory.
     pub async fn get_or_compute<F, Fut>(
         &self,
         language: Language,
         query: &str,
+        generation: u64,
         compute: F,
     ) -> Result<Arc<Vec<Symbol>>, crate::error::LspError>
     where
@@ -238,9 +244,10 @@ impl WorkspaceSymbolCache {
             language,
             query: query.to_string(),
         };
-        // extra_hash=0 means TTL-only validation
         self.inner
-            .get_or_compute(&key, 0, || async { Ok(Arc::new(compute().await?)) })
+            .get_or_compute(&key, generation, || async {
+                Ok(Arc::new(compute().await?))
+            })
             .await
     }
 
@@ -324,6 +331,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(symbols[0].name, "bar");
+    }
+
+    /// A workspace-symbol answer is bound to the content generation it
+    /// was computed under: the same generation hits, a newer one (any
+    /// edit happened since) recomputes — a cached answer must never
+    /// describe a workspace that no longer exists.
+    #[tokio::test]
+    async fn workspace_cache_invalidates_on_generation_change() {
+        let cache = WorkspaceSymbolCache::default();
+        let symbol = |name: &str| {
+            vec![Symbol::new(
+                name.to_string(),
+                SymbolKind::Function,
+                Location::point(PathBuf::from("/test/file.rs"), 1, 1),
+            )]
+        };
+
+        let first = cache
+            .get_or_compute(Language::Rust, "alpha", 1, || async { Ok(symbol("old")) })
+            .await
+            .unwrap();
+        assert_eq!(first[0].name, "old");
+
+        // Same generation: served from cache.
+        let hit = cache
+            .get_or_compute(Language::Rust, "alpha", 1, || async { Ok(symbol("new")) })
+            .await
+            .unwrap();
+        assert_eq!(hit[0].name, "old");
+
+        // The workspace changed: the entry is invalid, recompute.
+        let fresh = cache
+            .get_or_compute(Language::Rust, "alpha", 2, || async { Ok(symbol("new")) })
+            .await
+            .unwrap();
+        assert_eq!(fresh[0].name, "new");
     }
 
     #[tokio::test]

@@ -29,6 +29,24 @@ type NotificationHandler = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 const MAX_OPEN_DOCUMENTS: usize = 100;
 const MAX_DIAGNOSTICS_CACHE: usize = 200;
 
+/// Monotonic workspace-content generation. Bumped whenever any client
+/// learns that content changed — a `didChange` from our own edits or the
+/// drift sweep, a `didClose` of a vanished file — and when a client
+/// session starts (a fresh server is a fresh world). Caches of
+/// workspace-wide answers validate against it, so no cached answer ever
+/// outlives the content it was computed from. Starts at 1: cache layers
+/// reserve 0 as their "no validation" sentinel.
+static CONTENT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Current workspace-content generation (see `CONTENT_GENERATION`).
+pub fn content_generation() -> u64 {
+    CONTENT_GENERATION.load(Ordering::Acquire)
+}
+
+fn bump_content_generation() {
+    CONTENT_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 #[derive(Debug, Clone, Copy)]
 enum LogLevel {
     Error,
@@ -250,6 +268,7 @@ impl LspClient {
         root: PathBuf,
         config: Arc<crate::config::LspRuntimeConfig>,
     ) -> Arc<Self> {
+        bump_content_generation();
         Arc::new(Self {
             language,
             process: Mutex::new(None),
@@ -1102,7 +1121,11 @@ impl LspClient {
     /// produces a `didChange`. A document whose backing file is gone or
     /// no longer reads as text is closed: an overlay with no bytes
     /// behind it must not keep answering.
-    async fn refresh_drifted_overlays(&self) {
+    ///
+    /// Public so layers that cache workspace-wide answers can run the
+    /// sweep before reading `content_generation` — the cache decision
+    /// must see post-drift state.
+    pub async fn refresh_drifted_overlays(&self) {
         if *self.shutdown.read().await {
             return;
         }
@@ -1174,9 +1197,12 @@ impl LspClient {
     /// signal-driven and stays put — an edit doesn't unprove a server's
     /// demonstrated quiescence, and a server that genuinely re-indexes
     /// reports busy through its status channel — but the next cross-file
-    /// query deserves a fresh settle window, not a latched skip.
+    /// query deserves a fresh settle window, not a latched skip, and any
+    /// cached workspace-wide answer is now of a world that no longer
+    /// exists.
     pub fn note_document_changed(&self) {
         self.cross_file_waited.store(false, Ordering::Release);
+        bump_content_generation();
     }
 
     pub async fn await_indexing_signal(&self) -> IndexingState {
@@ -1687,6 +1713,16 @@ mod tests {
             IndexingState::TimedOut,
             "an edit doesn't complete an incomplete index either"
         );
+    }
+
+    /// Every content change advances the workspace generation, so caches
+    /// validated against it can never serve a pre-edit answer.
+    #[test]
+    fn content_changes_advance_the_workspace_generation() {
+        let client = test_client();
+        let before = content_generation();
+        client.note_document_changed();
+        assert!(content_generation() > before);
     }
 
     #[test]
