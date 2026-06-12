@@ -209,8 +209,8 @@ pub(super) async fn dispatch(
         }
 
         // Store operations
-        methods::INVALIDATE_FILE => {
-            store_handlers::handle_invalidate_file(&params, projects, lsp_config).await
+        methods::REFRESH_FILE => {
+            store_handlers::handle_refresh_file(&params, projects, lsp_config).await
         }
         methods::SEARCH_SYMBOLS => {
             store_handlers::handle_search_symbols(&params, projects, lsp_config).await

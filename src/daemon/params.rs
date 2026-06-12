@@ -94,7 +94,7 @@ pub(crate) struct SearchContentParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct InvalidateFileParams {
+pub(crate) struct RefreshFileParams {
     pub file: String,
     pub project: String,
 }

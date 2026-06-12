@@ -153,7 +153,7 @@ pub mod methods {
     pub const STATUS: &str = "status";
     pub const SHUTDOWN: &str = "shutdown";
 
-    pub const INVALIDATE_FILE: &str = "invalidate_file";
+    pub const REFRESH_FILE: &str = "refresh_file";
     pub const LANGUAGE_STATUS: &str = "language_status";
     pub const INDEXING_DEGRADATION: &str = "indexing_degradation";
 
@@ -189,7 +189,7 @@ pub mod methods {
             PREPARE_RENAME => Some("textDocument/prepareRename"),
             RENAME => Some("textDocument/rename"),
             FORMAT => Some("textDocument/formatting"),
-            PING | STATUS | SHUTDOWN | INVALIDATE_FILE | LANGUAGE_STATUS | INDEX_BUILD
+            PING | STATUS | SHUTDOWN | REFRESH_FILE | LANGUAGE_STATUS | INDEX_BUILD
             | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS | SEARCH_CONTENT => None,
             _ => None,
         }

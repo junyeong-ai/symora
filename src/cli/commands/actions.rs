@@ -5,7 +5,7 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
 use crate::cli::commands::edit::apply_workspace_edits;
-use crate::cli::commands::edit::invalidate_store_files;
+use crate::cli::commands::edit::refresh_store_files;
 use crate::cli::response::{ActionOutput, ApplyActionOutput, FileChangeOutput, Section};
 
 #[derive(Args, Debug)]
@@ -120,7 +120,7 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
                             if !args.dry_run {
                                 let changed_files: Vec<_> =
                                     applied_changes.iter().map(|c| c.file.clone()).collect();
-                                invalidate_store_files(app, &changed_files).await;
+                                refresh_store_files(app, &changed_files).await;
                             }
 
                             let response = ApplyActionOutput {

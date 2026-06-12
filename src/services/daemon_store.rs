@@ -97,11 +97,8 @@ impl StoreService for DaemonStoreService {
         Ok(())
     }
 
-    async fn invalidate_file(&self, path: &Path) -> Result<(), StoreError> {
-        self.client
-            .invalidate_file(path)
-            .await
-            .map_err(store_error)?;
+    async fn refresh_file(&self, path: &Path) -> Result<(), StoreError> {
+        self.client.refresh_file(path).await.map_err(store_error)?;
         Ok(())
     }
 }

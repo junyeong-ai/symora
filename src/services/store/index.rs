@@ -12,6 +12,14 @@ use crate::error::StoreError;
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::{Language, SymbolKind};
 
+/// Extensions a full index pass covers when no language filter narrows it.
+/// Also the domain `refresh_file` honors, so an edit can never index a file
+/// kind a build wouldn't.
+const INDEXED_EXTENSIONS: &[&str] = &[
+    "rs", "go", "py", "ts", "tsx", "js", "jsx", "java", "kt", "kts", "cpp", "cc", "cxx", "c", "h",
+    "hpp", "cs", "rb", "php", "lua", "sh",
+];
+
 pub struct Store {
     db: SqliteDb,
     project_root: PathBuf,
@@ -239,7 +247,32 @@ impl Store {
         Ok(page)
     }
 
-    pub async fn invalidate_file(&self, path: &Path) {
+    /// Bring one file's rows in line with the bytes on disk: re-extract
+    /// when the file still exists and a build would cover it, drop the rows
+    /// when it doesn't. This is the edit flow's endpoint — a write becomes
+    /// searchable immediately instead of leaving a hole until the next
+    /// `index build`. Best-effort: failures are logged, never surfaced to
+    /// the edit that triggered the refresh.
+    pub async fn refresh_file(&self, path: &Path) {
+        if self.is_indexable(path) && tokio::fs::try_exists(path).await.unwrap_or(false) {
+            if let Err(e) = self.index_file(path).await {
+                tracing::debug!("Failed to refresh {} in index: {e}", path.display());
+            }
+            return;
+        }
+        self.remove_file_rows(path).await;
+    }
+
+    /// Whether a full build pass would cover this file: an indexed
+    /// extension, not excluded by the project's ignore rules.
+    fn is_indexable(&self, path: &Path) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| INDEXED_EXTENSIONS.contains(&ext))
+            && FileFilter::with_gitignore(&self.project_root).should_include(path)
+    }
+
+    async fn remove_file_rows(&self, path: &Path) {
         let path_str = path.display().to_string();
         if let Err(e) = self
             .db
@@ -259,7 +292,7 @@ impl Store {
             })
             .await
         {
-            tracing::debug!("Failed to invalidate file {}: {e}", path.display());
+            tracing::debug!("Failed to drop index rows for {}: {e}", path.display());
         }
     }
 
@@ -353,12 +386,7 @@ impl Store {
             .languages
             .as_ref()
             .map(|langs| langs.iter().flat_map(|l| l.extensions()).copied().collect())
-            .unwrap_or_else(|| {
-                vec![
-                    "rs", "go", "py", "ts", "tsx", "js", "jsx", "java", "kt", "kts", "cpp", "cc",
-                    "cxx", "c", "h", "hpp", "cs", "rb", "php", "lua", "sh",
-                ]
-            });
+            .unwrap_or_else(|| INDEXED_EXTENSIONS.to_vec());
 
         let files = filter.discover_files(&extensions);
         let discovered_paths: std::collections::HashSet<String> = files
@@ -670,6 +698,74 @@ mod tests {
         let after = store.stats().await.unwrap().symbol_count;
         assert_eq!(before, after);
         assert_eq!(total_matches(&store, "beta").await, 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_file_reindexes_edited_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        // The edit flow: write new bytes, then refresh that one file. The
+        // old rows are replaced — not just dropped — so a search finds the
+        // new content immediately, with no stale banner.
+        tokio::fs::write(&file, "fn beta() {}\n").await.unwrap();
+        store.refresh_file(&file).await;
+        assert_eq!(total_matches(&store, "alpha").await, 0);
+        let page = store.search_symbols("beta", 50, None).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert!(!page.stale);
+    }
+
+    #[tokio::test]
+    async fn refresh_file_drops_rows_for_a_deleted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        tokio::fs::remove_file(&file).await.unwrap();
+        store.refresh_file(&file).await;
+        assert_eq!(total_matches(&store, "alpha").await, 0);
+        assert_eq!(store.stats().await.unwrap().file_count, 0);
+    }
+
+    /// `refresh_file` honors the same domain as a build pass: a file kind
+    /// the indexer never covers, or a path under an ignored component,
+    /// must not gain rows just because it was edited.
+    #[tokio::test]
+    async fn refresh_file_skips_files_a_build_would_not_cover() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        let baseline = store.stats().await.unwrap().file_count;
+
+        let notes = root.join("notes.txt");
+        tokio::fs::write(&notes, "fn fake() {}\n").await.unwrap();
+        store.refresh_file(&notes).await;
+
+        let generated = root.join("target").join("gen.rs");
+        tokio::fs::create_dir_all(generated.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&generated, "fn generated() {}\n")
+            .await
+            .unwrap();
+        store.refresh_file(&generated).await;
+
+        assert_eq!(store.stats().await.unwrap().file_count, baseline);
+        assert_eq!(total_matches(&store, "generated").await, 0);
     }
 
     #[tokio::test]

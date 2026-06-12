@@ -421,6 +421,54 @@ fn doctor_reports_override_provenance_and_spawnability() {
     assert!(json.get("config_errors").is_none());
 }
 
+/// An applied edit re-indexes the touched file in the same flow, so a
+/// search immediately after the write finds the new content and has no
+/// memory of the old — no manual `search index build` in between.
+#[cfg(unix)]
+#[test]
+fn edit_reindexes_the_store_so_search_sees_the_new_content() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
+
+    let out = run_in(dir.path(), &["search", "index", "build"]);
+    assert!(
+        out.status.success(),
+        "index build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // `edit replace` resolves no symbols, so this exercises the write +
+    // refresh flow without a language server.
+    let out = run_in(
+        dir.path(),
+        &["edit", "replace", "lib.rs:1:1", "--text", "fn beta() {}"],
+    );
+    assert!(
+        out.status.success(),
+        "edit replace failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let count_for = |kind: &str, query: &str| -> serde_json::Value {
+        let out = run_in(dir.path(), &["--format", "compact", "search", kind, query]);
+        assert!(
+            out.status.success(),
+            "search {kind} '{query}' failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["count"].clone()
+    };
+
+    assert_eq!(count_for("symbols", "beta"), 1, "edited symbol not indexed");
+    assert_eq!(count_for("symbols", "alpha"), 0, "old symbol still indexed");
+    assert_eq!(
+        count_for("content", "beta"),
+        1,
+        "edited content not indexed"
+    );
+}
+
 /// The C-1 scenario: a built index covering rust plus a rust LSP that
 /// cannot start. An empty path-like query consults the index in the same
 /// call, so its zero covers rust — it must stay bare (no coverage claim

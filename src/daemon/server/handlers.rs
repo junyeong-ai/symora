@@ -136,15 +136,12 @@ pub(super) async fn handle_workspace_symbols(
     .map_err(RpcError::from)
 }
 
-async fn invalidate_changed_files(
-    ctx: &ProjectContext,
-    changes: &[crate::models::lsp::FileChangeWithEdits],
-) {
-    for change in changes {
-        let _ = ctx.store.invalidate_file(&change.file).await;
-        ctx.lsp.invalidate_file_cache(&change.file).await;
-    }
-}
+// Rename and code-action handlers only COMPUTE workspace edits — the
+// write happens in the requesting process after this response returns,
+// and that writer then refreshes each touched file through the store
+// service (`refresh_file`), which lands back here post-write. Touching
+// the store or the symbol cache before the bytes change would re-index
+// the pre-write content and accomplish nothing.
 
 pub(super) async fn handle_rename(
     params: &serde_json::Value,
@@ -160,8 +157,6 @@ pub(super) async fn handle_rename(
         .rename(Path::new(&p.file), p.line, p.column, &p.new_name)
         .await
         .map_err(RpcError::from)?;
-
-    invalidate_changed_files(&ctx, &result.changes).await;
 
     to_json(RenameResponse {
         changes: result.changes.iter().map(wire::FileChange::from).collect(),
@@ -261,8 +256,6 @@ pub(super) async fn handle_apply_action(
         .apply_code_action(Path::new(&p.file), &action)
         .await
         .map_err(RpcError::from)?;
-
-    invalidate_changed_files(&ctx, &result.changes).await;
 
     to_json(wire::ApplyActionResponse {
         changes: result.changes.iter().map(wire::FileChange::from).collect(),
