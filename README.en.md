@@ -110,6 +110,7 @@ symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
 symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
 symora edit delete src/main.rs:42:4 --dry-run          # reports dangling references
+symora edit delete src/main.rs:42:4 --expect-no-references # refuses unless verified reference-free
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
 symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
 symora format src/main.rs
@@ -195,6 +196,16 @@ Common settings include:
 - daemon behavior
 - test file patterns
 - ignored paths
+- language-server launch overrides (`[lsp.servers.<lang>]`: command/args/tier)
+
+```toml
+[lsp.servers.typescript]
+command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
+args = ["--stdio"]   # optional; absent = inherit builtin args
+tier = "slow"        # optional; one of fast|standard|slow
+```
+
+Keys are the `language` ids printed by `symora doctor` — a rejected key is reported in doctor's `config_errors` and never applied. The daemon reads config at start; run `symora daemon restart` after changing it.
 
 ---
 
@@ -289,7 +300,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor, etc. use
 symora mcp serve --transport http --port 8765
 ```
 
-The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option.
+The tool list and input schemas are returned by `tools/list`. Mutating tools (`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_*`, `delete_symbol`) carry `Mutates` in their descriptions and `annotations.readOnlyHint: false` and all support a `dry_run` option. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, and `delete_symbol` target by `file` plus exactly one of `symbol` (a path like 'Class/method') or `line`; `delete_symbol` additionally accepts `expect_no_references` to make reference-freedom a checked precondition (refusals return a `precondition_failed` error).
 
 ---
 

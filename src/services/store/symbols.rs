@@ -102,6 +102,26 @@ impl SymbolExtractor {
         Self { languages }
     }
 
+    /// Languages with a compiled-in index extractor.
+    pub fn supported_languages() -> &'static [Language] {
+        &[
+            Language::Rust,
+            Language::Go,
+            Language::Python,
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Java,
+            Language::Kotlin,
+            Language::Cpp,
+            Language::CSharp,
+            Language::PHP,
+        ]
+    }
+
+    pub fn is_supported(language: Language) -> bool {
+        Self::supported_languages().contains(&language)
+    }
+
     pub fn extract(&self, content: &str, language: Language) -> Vec<ExtractedSymbol> {
         let Some(entry) = self.languages.get(&language) else {
             return Vec::new();
@@ -409,32 +429,29 @@ const PHP_QUERY: &str = r#"
 mod tests {
     use super::*;
 
-    /// The set of languages with a symbol extractor. A grammar bump that
-    /// breaks one language's ABI or extraction query drops it here, failing
-    /// this test loudly instead of degrading to silent empty results.
-    const EXTRACTOR_LANGUAGES: [Language; 10] = [
-        Language::Rust,
-        Language::Go,
-        Language::Python,
-        Language::TypeScript,
-        Language::JavaScript,
-        Language::Java,
-        Language::Kotlin,
-        Language::Cpp,
-        Language::CSharp,
-        Language::PHP,
-    ];
-
+    /// Pins the static `supported_languages` answer to runtime registration:
+    /// a grammar bump that breaks one language's ABI or extraction query
+    /// fails here loudly instead of degrading to silent empty results.
     #[test]
     fn every_supported_language_registers_an_extractor() {
         let extractor = SymbolExtractor::new();
-        for language in EXTRACTOR_LANGUAGES {
+        for language in SymbolExtractor::supported_languages() {
             assert!(
-                extractor.languages.contains_key(&language),
+                extractor.languages.contains_key(language),
                 "{language:?} failed to register — its grammar ABI or extraction query is broken"
             );
         }
-        assert_eq!(extractor.languages.len(), EXTRACTOR_LANGUAGES.len());
+        assert_eq!(
+            extractor.languages.len(),
+            SymbolExtractor::supported_languages().len()
+        );
+    }
+
+    #[test]
+    fn extractor_support_is_static_and_distinct_from_ast() {
+        assert!(SymbolExtractor::is_supported(Language::Rust));
+        assert!(!SymbolExtractor::is_supported(Language::Ruby));
+        assert!(crate::infra::ast::is_supported(Language::Ruby));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use crate::error::LspError;
+
 pub fn symbol_lookup_hints(
     query: &str,
     path_mode: bool,
@@ -36,6 +38,28 @@ pub fn symbol_lookup_hints(
     }
     hints.truncate(3);
     hints
+}
+
+/// True when a result set worth steering on sits entirely in one file:
+/// more than one match, all sharing a single file. Excludes empty and
+/// single-match sets (nothing to concentrate) and multi-file spreads.
+pub fn is_single_file_concentration(unique_files: usize, total: usize) -> bool {
+    total > 1 && unique_files == 1
+}
+
+/// Why a language is missing from the result, as a stable marker an agent
+/// can branch on (install a server, retry a timeout, or narrow with --lang).
+/// A capability gap — `is_unsupported` covers both the static table and a
+/// runtime JSON-RPC method-not-found — classifies as `unsupported`, matching
+/// the central error classifier.
+pub fn coverage_reason(err: &LspError) -> &'static str {
+    match err {
+        LspError::ServerNotInstalled { .. } => "server_not_installed",
+        LspError::Timeout(_) => "timed_out",
+        LspError::UnsupportedLanguage(_) => "unsupported",
+        e if e.is_unsupported() => "unsupported",
+        _ => "unavailable",
+    }
 }
 
 pub fn symbol_match_priority(query: &str, name: &str, path: &str) -> i32 {
@@ -166,4 +190,17 @@ fn is_simple_lower_query(query: &str) -> bool {
 fn is_generic_broad_query(query: &str) -> bool {
     let q = query.trim().trim_start_matches('/');
     !q.is_empty() && q.len() <= 8 && is_simple_lower_query(q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_file_concentration_requires_multiple_matches_in_one_file() {
+        assert!(!is_single_file_concentration(0, 0));
+        assert!(!is_single_file_concentration(1, 1));
+        assert!(is_single_file_concentration(1, 5));
+        assert!(!is_single_file_concentration(2, 5));
+    }
 }

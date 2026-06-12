@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
@@ -13,7 +14,9 @@ use crate::cli::response::{
 use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_position};
 use crate::cli::{LocationArg, OutputError};
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
+use crate::models::symbol::Symbol;
 use crate::services::lsp::LspService;
+use crate::utils::estimate_tokens;
 
 #[derive(Args, Debug)]
 pub struct ContextArgs {
@@ -43,6 +46,17 @@ pub struct ContextArgs {
     /// Include source body of target symbol
     #[arg(long)]
     pub body: bool,
+
+    /// Attach complete verbatim bodies: the target's whole body
+    /// unbudgeted, then callees in listed order and types under
+    /// --body-tokens (target-only when no section is requested)
+    #[arg(long)]
+    pub with_bodies: bool,
+
+    /// Token budget for the callee/type bodies attached by --with-bodies
+    /// (whole-body-or-nothing per item; inert without --with-bodies)
+    #[arg(long, default_value_t = crate::constants::defaults::CONTEXT_BODY_TOKENS)]
+    pub body_tokens: usize,
 }
 
 /// Context response with pure fact data
@@ -140,7 +154,7 @@ async fn fetch_context(
         );
         if let Some(sym) = analysis.target.as_ref() {
             t = t.with_signature(extract_signature(sym.body.as_deref()));
-            if args.body || args.all {
+            if args.body || args.all || args.with_bodies {
                 t = t.with_body(sym.body.clone());
             }
         }
@@ -181,7 +195,7 @@ async fn fetch_context(
     let want_types = args.types || args.all;
     let want_tests = args.tests || args.all;
 
-    let (callers, callees, types, tests) = tokio::join!(
+    let (callers, mut callees, mut types, tests) = tokio::join!(
         async {
             if want_callers {
                 Some(
@@ -242,6 +256,17 @@ async fn fetch_context(
         },
     );
 
+    if args.with_bodies {
+        apply_section_bodies(
+            lsp,
+            root,
+            args.body_tokens,
+            callees.as_mut(),
+            types.as_mut(),
+        )
+        .await;
+    }
+
     ContextOutput {
         target,
         refs: refs_summary,
@@ -250,6 +275,154 @@ async fn fetch_context(
         types,
         tests,
     }
+}
+
+/// Attach complete verbatim bodies to the callee items (in displayed
+/// order) and the type item, whole-body-or-nothing under `budget_tokens`
+/// — callees first, then types from whatever budget remains. Sequential
+/// by design: admission order is the visible item order, so an agent can
+/// correlate every omission to an item it sees. Each qualifying section
+/// gets `bodies_included` (the count of items that carry a body); an
+/// item left without one was omitted because the budget ran out, the
+/// symbol was unresolvable at its position, or it genuinely has no body
+/// — disclosed, never silent.
+async fn apply_section_bodies(
+    lsp: &dyn LspService,
+    root: &Path,
+    budget_tokens: usize,
+    callees: Option<&mut Section<CallHierarchyOutput>>,
+    types: Option<&mut Section<TypeInfoOutput>>,
+) {
+    let mut remaining = budget_tokens;
+    let mut symbols_by_file: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
+
+    if let Some(section) = callees
+        && section.error.is_none()
+        && section.showing > 0
+    {
+        let mut candidates = Vec::with_capacity(section.items.len());
+        for item in &section.items {
+            // Joining an already-absolute path replaces the base, so
+            // out-of-root locations (emitted absolute) resolve too.
+            let file = root.join(&item.location.file);
+            candidates.push(
+                resolve_body(
+                    lsp,
+                    &file,
+                    item.location.line,
+                    item.location.column,
+                    &item.name,
+                    &mut symbols_by_file,
+                )
+                .await,
+            );
+        }
+        let (bodies, admitted) = fit_bodies_to_budget(candidates, &mut remaining);
+        for (item, body) in section.items.iter_mut().zip(bodies) {
+            item.body = body;
+        }
+        section.bodies_included = Some(admitted);
+    }
+
+    if let Some(section) = types
+        && section.error.is_none()
+        && section.showing > 0
+    {
+        let mut candidates = Vec::with_capacity(section.items.len());
+        for item in &section.items {
+            let file = root.join(&item.location.file);
+            candidates.push(
+                resolve_body(
+                    lsp,
+                    &file,
+                    item.location.line,
+                    item.location.column,
+                    &item.name,
+                    &mut symbols_by_file,
+                )
+                .await,
+            );
+        }
+        let (bodies, admitted) = fit_bodies_to_budget(candidates, &mut remaining);
+        for (item, body) in section.items.iter_mut().zip(bodies) {
+            item.body = body;
+        }
+        section.bodies_included = Some(admitted);
+    }
+}
+
+/// Resolve the complete tree-sitter body of the symbol at `line:column`
+/// in `file`, memoizing one `find_symbols` call per file (a failed fetch
+/// memoizes an empty tree — one attempt per file). Column-precise
+/// resolution falls back to line-only, then the resolved symbol must
+/// match `expected_name` — a mismatch signals position drift, where the
+/// body would belong to a different symbol, so it fails closed to
+/// omission rather than attaching a plausible-but-wrong body.
+async fn resolve_body(
+    lsp: &dyn LspService,
+    file: &Path,
+    line: u32,
+    column: u32,
+    expected_name: &str,
+    symbols_by_file: &mut HashMap<PathBuf, Vec<Symbol>>,
+) -> Option<String> {
+    if !symbols_by_file.contains_key(file) {
+        let symbols = lsp
+            .find_symbols(file, FindSymbolsOptions::default().with_body())
+            .await
+            .unwrap_or_default();
+        symbols_by_file.insert(file.to_path_buf(), symbols);
+    }
+    let symbols = &symbols_by_file[file];
+    let symbol = find_symbol_at_position(symbols, line, Some(column))
+        .or_else(|| find_symbol_at_position(symbols, line, None))?;
+    if !is_same_symbol_name(expected_name, &symbol.name) {
+        return None;
+    }
+    symbol.body.clone().filter(|b| !b.is_empty())
+}
+
+/// Greedy whole-body-or-nothing admission in candidate order: an
+/// oversized body is skipped — to None — and smaller later bodies may
+/// still admit, so one outlier can't starve the rest. The stated budget
+/// is never exceeded (no admit-first override: a context response stays
+/// fully useful without bodies). Returns the positionally aligned
+/// admitted bodies and how many were admitted; `remaining` carries the
+/// leftover budget to the next section.
+fn fit_bodies_to_budget(
+    candidates: Vec<Option<String>>,
+    remaining: &mut usize,
+) -> (Vec<Option<String>>, usize) {
+    let mut admitted = 0;
+    let bodies = candidates
+        .into_iter()
+        .map(|candidate| {
+            let body = candidate?;
+            let cost = estimate_tokens(&body);
+            if cost <= *remaining {
+                *remaining -= cost;
+                admitted += 1;
+                Some(body)
+            } else {
+                None
+            }
+        })
+        .collect();
+    (bodies, admitted)
+}
+
+/// True when the two names denote the same symbol: exact, or one is the
+/// `::`/`.`-qualified form of the other (e.g. `Type.method` vs `method`).
+/// Both names come from the same language server, so a mismatch means
+/// the position resolved to a different symbol.
+fn is_same_symbol_name(item_name: &str, symbol_name: &str) -> bool {
+    if item_name == symbol_name {
+        return true;
+    }
+    let qualified_tail = |qualified: &str, tail: &str| {
+        qualified.ends_with(&format!("::{tail}")) || qualified.ends_with(&format!(".{tail}"))
+    };
+    qualified_tail(item_name, symbol_name) || qualified_tail(symbol_name, item_name)
 }
 
 async fn fetch_calls(
@@ -275,7 +448,13 @@ async fn fetch_calls(
                 .take(limit)
                 .map(|c| CallHierarchyOutput::from_item(c, root))
                 .collect();
-            Section::with_total(items, total)
+            let file_rel = file
+                .strip_prefix(root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| file.display().to_string());
+            Section::with_total(items, total).with_next_commands(call_hierarchy_next_commands(
+                incoming, &file_rel, line, column, total, limit,
+            ))
         }
         Err(e) => Section::error(format_call_hierarchy_error(
             &e.to_string(),
@@ -283,6 +462,28 @@ async fn fetch_calls(
             line,
             column,
         )),
+    }
+}
+
+/// Truncation-only steering for a callers/callees section: the per-call
+/// cap is config-only (`lsp.calls_limit` has no `context` flag), so the
+/// standalone command with `--limit <total>` is the one runnable way to
+/// see the complete list. Complete sections emit nothing.
+fn call_hierarchy_next_commands(
+    incoming: bool,
+    file_rel: &str,
+    line: u32,
+    column: u32,
+    total: usize,
+    limit: usize,
+) -> Vec<String> {
+    if total > limit {
+        vec![format!(
+            "symora {} {file_rel}:{line}:{column} --limit {total}",
+            if incoming { "callers" } else { "callees" }
+        )]
+    } else {
+        Vec::new()
     }
 }
 
@@ -315,6 +516,7 @@ async fn fetch_types(
                     root,
                 ),
                 detail: None,
+                body: None,
             }];
             Section::new(items)
         }
@@ -517,4 +719,484 @@ fn extract_fn_name(line: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+
+    use crate::error::LspError;
+    use crate::models::lsp::{
+        ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, IndexingDegradation,
+        InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus,
+        SignatureHelp, TextEdit, TypeHierarchyItem,
+    };
+    use crate::models::symbol::{Language, Location, SymbolKind};
+
+    #[test]
+    fn truncated_callers_steer_to_callers_with_limit() {
+        assert_eq!(
+            call_hierarchy_next_commands(true, "f.rs", 12, 4, 12, 8),
+            vec!["symora callers f.rs:12:4 --limit 12"]
+        );
+    }
+
+    #[test]
+    fn complete_calls_emit_nothing() {
+        assert!(call_hierarchy_next_commands(true, "f.rs", 12, 4, 8, 8).is_empty());
+        assert!(call_hierarchy_next_commands(false, "f.rs", 12, 4, 0, 8).is_empty());
+    }
+
+    #[test]
+    fn callees_use_callees_command() {
+        assert_eq!(
+            call_hierarchy_next_commands(false, "f.rs", 12, 4, 9, 8),
+            vec!["symora callees f.rs:12:4 --limit 9"]
+        );
+    }
+
+    #[test]
+    fn same_symbol_name_accepts_exact_and_qualified_tails() {
+        assert!(is_same_symbol_name("process", "process"));
+        assert!(is_same_symbol_name("Handler::process", "process"));
+        assert!(is_same_symbol_name("process", "Handler::process"));
+        assert!(is_same_symbol_name("Handler.process", "process"));
+        assert!(is_same_symbol_name("process", "Handler.process"));
+    }
+
+    #[test]
+    fn same_symbol_name_rejects_different_symbols() {
+        assert!(!is_same_symbol_name("process", "prepare"));
+        assert!(!is_same_symbol_name("Handler::process", "prepare"));
+        // A bare suffix without a qualification separator is a different
+        // identifier, not a qualified form.
+        assert!(!is_same_symbol_name("reprocess", "process"));
+        assert!(!is_same_symbol_name("process", "reprocess"));
+    }
+
+    #[test]
+    fn budget_fit_admits_an_exact_fit_boundary() {
+        // 8 chars = exactly 2 tokens under the 4-chars-per-token estimate.
+        let mut remaining = 2;
+        let (bodies, admitted) =
+            fit_bodies_to_budget(vec![Some("12345678".to_string())], &mut remaining);
+        assert_eq!(bodies, vec![Some("12345678".to_string())]);
+        assert_eq!(admitted, 1);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn budget_fit_skips_an_oversized_body_and_admits_a_smaller_later_one() {
+        let big = "x".repeat(100); // 25 tokens
+        let small = "y".repeat(20); // 5 tokens
+        let mut remaining = 10;
+        let (bodies, admitted) =
+            fit_bodies_to_budget(vec![Some(big), Some(small.clone())], &mut remaining);
+        assert_eq!(bodies, vec![None, Some(small)]);
+        assert_eq!(admitted, 1);
+        assert_eq!(remaining, 5);
+    }
+
+    #[test]
+    fn budget_fit_shares_remaining_across_sequential_calls() {
+        let mut remaining = 12;
+        let (_, first) = fit_bodies_to_budget(vec![Some("a".repeat(40))], &mut remaining); // 10 tokens
+        assert_eq!(first, 1);
+        assert_eq!(remaining, 2);
+        // The second (types) call only sees what the first left over.
+        let (bodies, second) = fit_bodies_to_budget(vec![Some("b".repeat(40))], &mut remaining);
+        assert_eq!(bodies, vec![None]);
+        assert_eq!(second, 0);
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn budget_fit_passes_unresolved_candidates_through() {
+        let mut remaining = 100;
+        let (bodies, admitted) = fit_bodies_to_budget(vec![None, None], &mut remaining);
+        assert_eq!(bodies, vec![None, None]);
+        assert_eq!(admitted, 0);
+        assert_eq!(remaining, 100);
+    }
+
+    #[test]
+    fn budget_fit_admits_nothing_under_a_zero_budget() {
+        let mut remaining = 0;
+        let (bodies, admitted) =
+            fit_bodies_to_budget(vec![Some("fn f() {}".to_string())], &mut remaining);
+        assert_eq!(bodies, vec![None]);
+        assert_eq!(admitted, 0);
+    }
+
+    /// Body-lookup stub: serves canned per-file `documentSymbol` trees
+    /// with bodies. Every other `LspService` method is unreachable from
+    /// `apply_section_bodies` and panics loudly if that ever changes.
+    struct BodyLookupStub {
+        symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
+    }
+
+    fn body_symbol(name: &str, file: &Path, line: u32, end_line: u32, body: &str) -> Symbol {
+        Symbol::new(
+            name.to_string(),
+            SymbolKind::Function,
+            Location::full(file.to_path_buf(), line, 1, line, 1, end_line, 1),
+        )
+        .with_body(body.to_string())
+    }
+
+    #[async_trait]
+    impl LspService for BodyLookupStub {
+        async fn find_symbols(
+            &self,
+            file: &Path,
+            _options: FindSymbolsOptions,
+        ) -> Result<Vec<Symbol>, LspError> {
+            self.symbols_by_file
+                .get(file)
+                .cloned()
+                .ok_or_else(|| LspError::server_error_friendly(-1, "no symbols".to_string()))
+        }
+
+        async fn workspace_symbols(
+            &self,
+            _query: &str,
+            _language: Language,
+        ) -> Result<Vec<Symbol>, LspError> {
+            unreachable!()
+        }
+        async fn find_references(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<Location>, LspError> {
+            unreachable!()
+        }
+        async fn goto_definition(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<Location>, LspError> {
+            unreachable!()
+        }
+        async fn goto_type_definition(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<Location>, LspError> {
+            unreachable!()
+        }
+        async fn find_implementations(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<Location>, LspError> {
+            unreachable!()
+        }
+        async fn hover(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<HoverInfo>, LspError> {
+            unreachable!()
+        }
+        async fn signature_help(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<SignatureHelp>, LspError> {
+            unreachable!()
+        }
+        async fn diagnostics(
+            &self,
+            _file: &Path,
+        ) -> Result<crate::models::diagnostic::DiagnosticsReport, LspError> {
+            unreachable!()
+        }
+        async fn prepare_rename(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Option<PrepareRenameResult>, LspError> {
+            unreachable!()
+        }
+        async fn rename(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+            _new_name: &str,
+        ) -> Result<RenameResult, LspError> {
+            unreachable!()
+        }
+        async fn incoming_calls(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<CallHierarchyItem>, LspError> {
+            unreachable!()
+        }
+        async fn outgoing_calls(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<CallHierarchyItem>, LspError> {
+            unreachable!()
+        }
+        async fn supertypes(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+            unreachable!()
+        }
+        async fn subtypes(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+            unreachable!()
+        }
+        async fn inlay_hints(
+            &self,
+            _file: &Path,
+            _range: Range,
+        ) -> Result<Vec<InlayHint>, LspError> {
+            unreachable!()
+        }
+        async fn folding_ranges(&self, _file: &Path) -> Result<Vec<FoldingRange>, LspError> {
+            unreachable!()
+        }
+        async fn selection_ranges(
+            &self,
+            _file: &Path,
+            _positions: Vec<(u32, u32)>,
+        ) -> Result<Vec<SelectionRange>, LspError> {
+            unreachable!()
+        }
+        async fn code_lenses(&self, _file: &Path) -> Result<Vec<CodeLens>, LspError> {
+            unreachable!()
+        }
+        async fn code_actions(
+            &self,
+            _file: &Path,
+            _line: u32,
+            _column: u32,
+        ) -> Result<Vec<CodeAction>, LspError> {
+            unreachable!()
+        }
+        async fn apply_code_action(
+            &self,
+            _file: &Path,
+            _action: &CodeAction,
+        ) -> Result<ApplyActionResult, LspError> {
+            unreachable!()
+        }
+        async fn format(&self, _file: &Path) -> Result<Vec<TextEdit>, LspError> {
+            unreachable!()
+        }
+        async fn is_available(&self, _language: Language) -> bool {
+            unreachable!()
+        }
+        async fn server_status(&self, _language: Language) -> ServerStatus {
+            unreachable!()
+        }
+        async fn indexing_degradation(&self, _language: Language) -> Option<IndexingDegradation> {
+            unreachable!()
+        }
+    }
+
+    fn callee_item(name: &str, file: &str, line: u32) -> CallHierarchyOutput {
+        CallHierarchyOutput {
+            name: name.to_string(),
+            location: LocationOutput {
+                file: file.to_string(),
+                line,
+                column: 1,
+                snippet: None,
+            },
+            call_site: None,
+            body: None,
+        }
+    }
+
+    fn type_item(name: &str, file: &str, line: u32) -> TypeInfoOutput {
+        TypeInfoOutput {
+            name: name.to_string(),
+            kind: "struct".to_string(),
+            location: LocationOutput {
+                file: file.to_string(),
+                line,
+                column: 1,
+                snippet: None,
+            },
+            detail: None,
+            body: None,
+        }
+    }
+
+    fn stub_with(symbols: Vec<(&str, Vec<Symbol>)>) -> BodyLookupStub {
+        BodyLookupStub {
+            symbols_by_file: symbols
+                .into_iter()
+                .map(|(file, syms)| (PathBuf::from(file), syms))
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn bodies_attach_in_display_order_with_disclosed_count() {
+        let root = Path::new("/repo");
+        let file = Path::new("/repo/src/a.rs");
+        let stub = stub_with(vec![(
+            "/repo/src/a.rs",
+            vec![
+                body_symbol("alpha", file, 10, 12, "fn alpha() { 1 }"),
+                body_symbol("beta", file, 20, 22, "fn beta() { 2 }"),
+            ],
+        )]);
+        let mut callees = Some(Section::new(vec![
+            callee_item("alpha", "src/a.rs", 10),
+            callee_item("beta", "src/a.rs", 20),
+        ]));
+
+        apply_section_bodies(&stub, root, 1000, callees.as_mut(), None).await;
+
+        let section = callees.unwrap();
+        assert_eq!(section.items[0].body.as_deref(), Some("fn alpha() { 1 }"));
+        assert_eq!(section.items[1].body.as_deref(), Some("fn beta() { 2 }"));
+        assert_eq!(section.bodies_included, Some(2));
+    }
+
+    #[tokio::test]
+    async fn unresolvable_file_omits_its_body_and_the_pass_continues() {
+        let root = Path::new("/repo");
+        let file = Path::new("/repo/src/a.rs");
+        let stub = stub_with(vec![(
+            "/repo/src/a.rs",
+            vec![body_symbol("alpha", file, 10, 12, "fn alpha() { 1 }")],
+        )]);
+        let mut callees = Some(Section::new(vec![
+            callee_item("ghost", "src/missing.rs", 5),
+            callee_item("alpha", "src/a.rs", 10),
+        ]));
+
+        apply_section_bodies(&stub, root, 1000, callees.as_mut(), None).await;
+
+        let section = callees.unwrap();
+        assert_eq!(section.items[0].body, None);
+        assert_eq!(section.items[1].body.as_deref(), Some("fn alpha() { 1 }"));
+        assert_eq!(section.bodies_included, Some(1));
+    }
+
+    #[tokio::test]
+    async fn name_mismatch_fails_closed_to_disclosed_omission() {
+        let root = Path::new("/repo");
+        let file = Path::new("/repo/src/a.rs");
+        let stub = stub_with(vec![(
+            "/repo/src/a.rs",
+            vec![body_symbol("alpha", file, 10, 12, "fn alpha() { 1 }")],
+        )]);
+        // The item claims a different symbol at alpha's position — stale
+        // index drift; attaching alpha's body would be plausible-but-wrong.
+        let mut callees = Some(Section::new(vec![callee_item("other", "src/a.rs", 10)]));
+
+        apply_section_bodies(&stub, root, 1000, callees.as_mut(), None).await;
+
+        let section = callees.unwrap();
+        assert_eq!(section.items[0].body, None);
+        assert_eq!(section.bodies_included, Some(0));
+    }
+
+    #[tokio::test]
+    async fn zero_budget_still_discloses_that_attachment_ran() {
+        let root = Path::new("/repo");
+        let file = Path::new("/repo/src/a.rs");
+        let stub = stub_with(vec![(
+            "/repo/src/a.rs",
+            vec![body_symbol("alpha", file, 10, 12, "fn alpha() { 1 }")],
+        )]);
+        let mut callees = Some(Section::new(vec![callee_item("alpha", "src/a.rs", 10)]));
+
+        apply_section_bodies(&stub, root, 0, callees.as_mut(), None).await;
+
+        let section = callees.unwrap();
+        assert_eq!(section.items[0].body, None);
+        assert_eq!(section.bodies_included, Some(0));
+    }
+
+    #[tokio::test]
+    async fn errored_section_gets_no_bodies_included() {
+        let root = Path::new("/repo");
+        let stub = stub_with(vec![]);
+        let mut callees: Option<Section<CallHierarchyOutput>> = Some(Section::error(
+            OutputError::unsupported("no call hierarchy"),
+        ));
+
+        apply_section_bodies(&stub, root, 1000, callees.as_mut(), None).await;
+
+        assert_eq!(callees.unwrap().bodies_included, None);
+    }
+
+    #[tokio::test]
+    async fn types_draw_only_the_budget_callees_left_over() {
+        let root = Path::new("/repo");
+        let a = Path::new("/repo/src/a.rs");
+        let t = Path::new("/repo/src/t.rs");
+        let callee_body = "a".repeat(40); // 10 tokens
+        let type_body = "t".repeat(40); // 10 tokens — over the 2 left
+        let stub = stub_with(vec![
+            (
+                "/repo/src/a.rs",
+                vec![body_symbol("alpha", a, 10, 12, &callee_body)],
+            ),
+            (
+                "/repo/src/t.rs",
+                vec![body_symbol("MyType", t, 5, 9, &type_body)],
+            ),
+        ]);
+        let mut callees = Some(Section::new(vec![callee_item("alpha", "src/a.rs", 10)]));
+        let mut types = Some(Section::new(vec![type_item("MyType", "src/t.rs", 5)]));
+
+        apply_section_bodies(&stub, root, 12, callees.as_mut(), types.as_mut()).await;
+
+        let callees = callees.unwrap();
+        assert_eq!(callees.items[0].body.as_deref(), Some(callee_body.as_str()));
+        assert_eq!(callees.bodies_included, Some(1));
+        let types = types.unwrap();
+        assert_eq!(types.items[0].body, None);
+        assert_eq!(types.bodies_included, Some(0));
+    }
+
+    #[tokio::test]
+    async fn type_body_attaches_when_budget_remains() {
+        let root = Path::new("/repo");
+        let t = Path::new("/repo/src/t.rs");
+        let stub = stub_with(vec![(
+            "/repo/src/t.rs",
+            vec![body_symbol("MyType", t, 5, 9, "struct MyType { x: u32 }")],
+        )]);
+        let mut types = Some(Section::new(vec![type_item("MyType", "src/t.rs", 5)]));
+
+        apply_section_bodies(&stub, root, 1000, None, types.as_mut()).await;
+
+        let types = types.unwrap();
+        assert_eq!(
+            types.items[0].body.as_deref(),
+            Some("struct MyType { x: u32 }")
+        );
+        assert_eq!(types.bodies_included, Some(1));
+    }
 }

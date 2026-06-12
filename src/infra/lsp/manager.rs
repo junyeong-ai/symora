@@ -60,7 +60,7 @@ impl LspManager {
         Self {
             root,
             clients: RwLock::new(HashMap::new()),
-            configs: servers::defaults(),
+            configs: servers::merged(&runtime_config.servers),
             runtime_config,
         }
     }
@@ -206,7 +206,7 @@ impl LspManager {
             Arc::clone(&self.runtime_config),
         );
         client
-            .start(&command.to_string_lossy(), config.args)
+            .start(&command.to_string_lossy(), &config.args)
             .await?;
 
         tracing::info!("{:?} language server started", language);

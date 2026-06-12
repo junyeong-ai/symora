@@ -51,5 +51,8 @@ expression: out
     "test_coverage_ratio": 0.33,
     "risk": "medium",
     "confidence": 0.9
-  }
+  },
+  "next_commands": [
+    "symora impact src/main.rs:12:4 --depth 2"
+  ]
 }

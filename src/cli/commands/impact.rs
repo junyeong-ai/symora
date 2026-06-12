@@ -4,10 +4,11 @@ use clap::Args;
 use crate::app::App;
 use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
-use crate::cli::blast_radius::{self, BlastRadiusConfig};
+use crate::cli::blast_radius::{self, BlastRadius, BlastRadiusConfig, DispatchStatus};
 use crate::cli::response::{
     AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput,
 };
+use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::constants::defaults::{IMPACT_DEFAULT_DEPTH, IMPACT_FILES_LIMIT, IMPACT_MAX_DEPTH};
 
 #[derive(Args, Debug)]
@@ -85,6 +86,21 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
             .await
             .ok();
 
+            let anchor = format!(
+                "{}:{}:{}",
+                ctx.relative_path(&analysis.anchor.file),
+                analysis.anchor.line,
+                analysis.anchor.column,
+            );
+            let next_commands = impact_next_commands(
+                &anchor,
+                total_files,
+                args.limit,
+                classified.total,
+                depth,
+                blast_radius.as_ref(),
+            );
+
             let response = ImpactOutput {
                 target,
                 refs: RefOutput {
@@ -101,6 +117,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 },
                 files: affected_files,
                 blast_radius,
+                next_commands,
             };
 
             ctx.print_success(response);
@@ -109,4 +126,180 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Gated follow-up commands, in fixed priority order. Every gate keys off
+/// a disclosure the output already carries: `max_depth_reached` means the
+/// final frontier still had unexplored callers, so one more depth widens a
+/// graph known incomplete (silent at `IMPACT_MAX_DEPTH`); an `incomplete`
+/// dynamic dispatch means `find_implementations` returned a non-empty set,
+/// so the steered command enumerates exactly the unfolded implementations
+/// (`unavailable` is excluded — that lookup already failed, steering to it
+/// would dead-end); a truncated file list re-runs with the exact total, so
+/// the complete re-run can never re-fire the gate; a single-file
+/// concentration reads best through the snippeted reference list there.
+/// An `impact` re-run carries the call's other flag whenever it differs
+/// from its default, so following one suggestion never silently resets
+/// the other dimension and re-fires its gate.
+fn impact_next_commands(
+    anchor: &str,
+    total_files: usize,
+    limit: usize,
+    total_refs: usize,
+    depth: u32,
+    blast_radius: Option<&BlastRadius>,
+) -> Vec<String> {
+    let limit_flag = if limit == IMPACT_FILES_LIMIT {
+        String::new()
+    } else {
+        format!(" --limit {limit}")
+    };
+    let depth_flag = if depth == IMPACT_DEFAULT_DEPTH {
+        String::new()
+    } else {
+        format!(" --depth {depth}")
+    };
+
+    let mut commands = Vec::new();
+    if blast_radius.is_some_and(|b| b.max_depth_reached) && depth < IMPACT_MAX_DEPTH {
+        commands.push(format!(
+            "symora impact {anchor} --depth {}{limit_flag}",
+            depth + 1
+        ));
+    }
+    if blast_radius
+        .and_then(|b| b.dynamic_dispatch)
+        .is_some_and(|d| d.status == DispatchStatus::Incomplete)
+    {
+        commands.push(format!("symora implementations {anchor}"));
+    }
+    if total_files > limit {
+        commands.push(format!(
+            "symora impact {anchor} --limit {total_files}{depth_flag}"
+        ));
+    }
+    if is_single_file_concentration(total_files, total_refs) {
+        commands.push(format!("symora refs {anchor} --snippet"));
+    }
+    commands.truncate(3);
+    commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::blast_radius::{DynamicDispatch, RiskLevel};
+
+    fn radius(max_depth_reached: bool, dispatch: Option<DispatchStatus>) -> BlastRadius {
+        BlastRadius {
+            direct_callers: 2,
+            transitive_callers: 4,
+            depth: 1,
+            max_depth_reached,
+            callers_truncated: false,
+            indexing: None,
+            dynamic_dispatch: dispatch.map(|status| DynamicDispatch {
+                status,
+                implementations: if status == DispatchStatus::Incomplete {
+                    2
+                } else {
+                    0
+                },
+            }),
+            callers_by_depth: vec![],
+            test_coverage_ratio: 0.0,
+            risk: RiskLevel::Low,
+            confidence: 0.8,
+        }
+    }
+
+    #[test]
+    fn depth_gate_reruns_one_deeper() {
+        let radius = radius(true, None);
+        let commands = impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&radius));
+        assert_eq!(commands, vec!["symora impact src/main.rs:10:5 --depth 2"]);
+    }
+
+    #[test]
+    fn depth_gate_silent_at_max() {
+        let radius = radius(true, None);
+        let commands = impact_next_commands(
+            "src/main.rs:10:5",
+            3,
+            50,
+            8,
+            IMPACT_MAX_DEPTH,
+            Some(&radius),
+        );
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn incomplete_dispatch_steers_to_implementations() {
+        let incomplete = radius(false, Some(DispatchStatus::Incomplete));
+        assert_eq!(
+            impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&incomplete)),
+            vec!["symora implementations src/main.rs:10:5"]
+        );
+
+        let unavailable = radius(false, Some(DispatchStatus::Unavailable));
+        assert!(
+            impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&unavailable)).is_empty()
+        );
+    }
+
+    #[test]
+    fn files_truncation_reruns_with_exact_limit() {
+        let commands = impact_next_commands("src/main.rs:10:5", 80, 50, 200, 1, None);
+        assert_eq!(commands, vec!["symora impact src/main.rs:10:5 --limit 80"]);
+    }
+
+    /// Each `impact` re-run carries the other flag's non-default value, so
+    /// an agent following one suggestion can't oscillate between the
+    /// depth and limit gates.
+    #[test]
+    fn depth_rerun_carries_non_default_limit() {
+        let radius = radius(true, None);
+        let commands = impact_next_commands("src/main.rs:10:5", 3, 10, 8, 1, Some(&radius));
+        assert_eq!(
+            commands,
+            vec!["symora impact src/main.rs:10:5 --depth 2 --limit 10"]
+        );
+    }
+
+    #[test]
+    fn limit_rerun_carries_non_default_depth() {
+        let commands = impact_next_commands("src/main.rs:10:5", 80, 50, 200, 2, None);
+        assert_eq!(
+            commands,
+            vec!["symora impact src/main.rs:10:5 --limit 80 --depth 2"]
+        );
+    }
+
+    #[test]
+    fn concentration_steers_to_refs_snippet() {
+        let commands = impact_next_commands("src/main.rs:10:5", 1, 50, 5, 1, None);
+        assert_eq!(commands, vec!["symora refs src/main.rs:10:5 --snippet"]);
+    }
+
+    #[test]
+    fn commands_cap_at_three_in_fixed_order() {
+        let radius = radius(true, Some(DispatchStatus::Incomplete));
+        let commands = impact_next_commands("src/main.rs:10:5", 1, 0, 5, 1, Some(&radius));
+        assert_eq!(
+            commands,
+            vec![
+                "symora impact src/main.rs:10:5 --depth 2 --limit 0",
+                "symora implementations src/main.rs:10:5",
+                "symora impact src/main.rs:10:5 --limit 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_fires_emits_empty() {
+        let radius = radius(false, None);
+        assert!(impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&radius)).is_empty());
+        assert!(impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, None).is_empty());
+    }
 }

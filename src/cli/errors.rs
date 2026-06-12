@@ -22,6 +22,12 @@ pub enum ErrorCode {
     /// on this to re-read the file and retry, rather than treating it as a
     /// generic internal failure.
     Conflict,
+    /// An asserted precondition on a mutating command is unmet or could not
+    /// be verified (e.g. `--expect-no-references` on `edit delete`). Unlike
+    /// `Conflict`, re-reading and retrying will not clear it: the agent must
+    /// change the underlying state (fix the references), wait out the named
+    /// degradation, or drop the assertion.
+    PreconditionFailed,
     FileTooLarge,
     Io,
 }
@@ -74,6 +80,10 @@ impl OutputError {
 
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Conflict, message)
+    }
+
+    pub fn precondition_failed(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::PreconditionFailed, message)
     }
 
     pub fn lsp_unavailable(message: impl Into<String>) -> Self {

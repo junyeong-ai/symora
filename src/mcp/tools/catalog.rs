@@ -1,6 +1,8 @@
 use crate::mcp::protocol::ToolDefinition;
 
-use super::schema::{location_schema, schema_object, section_output_schema, with_extra};
+use super::schema::{
+    edit_target_schema, location_schema, schema_object, section_output_schema, with_extra,
+};
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
     vec![
@@ -15,7 +17,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Compact map for one file: focus symbols, sibling/counterpart files, \
                           shallow symbol tree, and related-file ranking.",
             schema_object(
-                &[("path", "string", "Project-relative file path")],
+                &[
+                    ("path", "string", "Project-relative file path"),
+                    ("depth", "integer", "Nested-symbol depth (default 1)"),
+                    (
+                        "related_limit",
+                        "integer",
+                        "Maximum related files to show (default 8)",
+                    ),
+                ],
                 &["path"],
             ),
         ),
@@ -159,7 +169,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "get_context",
             "Aggregated context for a symbol at file:line:column — by default \
-                          callers, callees, related types, and tests in one response.",
+                          callers, callees, related types, and tests in one response. Set \
+                          with_bodies=true to also receive complete verbatim source bodies: \
+                          the target's whole body attaches unbudgeted; callee bodies (in \
+                          listed order) and type bodies draw on the body_tokens budget — \
+                          answers how-does-X-work without follow-up inspect_symbol \
+                          calls. Each body-bearing section reports bodies_included; an item \
+                          without a body was omitted because the budget ran out, the symbol \
+                          was unresolvable at its position, or it has no body (prototypes, \
+                          interface methods) — only the first is cured by raising \
+                          body_tokens.",
             with_extra(
                 location_schema(),
                 &[
@@ -179,6 +198,18 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "all",
                         "boolean",
                         "Include every context section (default true)",
+                    ),
+                    (
+                        "with_bodies",
+                        "boolean",
+                        "Attach complete symbol bodies under the body_tokens budget; \
+                         per-section bodies_included discloses how many items carry one \
+                         (default false)",
+                    ),
+                    (
+                        "body_tokens",
+                        "integer",
+                        "Token budget for bodies attached by with_bodies=true (default 2000)",
                     ),
                 ],
             ),
@@ -201,6 +232,52 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         ),
+        ToolDefinition::read_only(
+            "get_diagnostics",
+            "LSP diagnostics (errors, warnings, hints) for one file. The \
+                          verification step after an editing tool writes a file. A `status` \
+                          field of unconfirmed or unsupported means the list is not \
+                          authoritative — empty then means unknown, not clean. When the list \
+                          floods, narrow it with severity (e.g. \"error\") instead of \
+                          reading every entry.",
+            schema_object(
+                &[
+                    ("file", "string", "Project-relative file path"),
+                    (
+                        "severity",
+                        "string",
+                        "Optional severity filter, comma-separated: error, warning, info, hint",
+                    ),
+                    (
+                        "source",
+                        "string",
+                        "Optional diagnostic source filter (e.g. rust-analyzer)",
+                    ),
+                ],
+                &["file"],
+            ),
+        )
+        .with_output_schema(with_extra(
+            section_output_schema(
+                "Diagnostics: severity, message, line, column, end_line, end_column, \
+                 code?, source?, tags?",
+            ),
+            &[
+                (
+                    "file",
+                    "string",
+                    "Project-relative file the diagnostics were pulled for",
+                ),
+                (
+                    "status",
+                    "string",
+                    "Present only when the list is not authoritative: unconfirmed \
+                     (no confirmed analysis within the wait window) or unsupported \
+                     (the server doesn't publish diagnostics) — empty items then \
+                     means unknown, not clean",
+                ),
+            ],
+        )),
         ToolDefinition::read_only(
             "build_context_pack",
             "Build a token-budgeted context pack: PageRank-ranked files with \
@@ -282,11 +359,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "replace_symbol_body",
-            "Replace the resolved symbol's full body with new source code at \
-                          file:line:column. Splices by the LSP's symbol range so braces / \
-                          decorators stay intact. ⚠ Mutates source files when dry_run is false.",
+            "Replace the resolved symbol's full body with new source code. \
+                          Target by file + symbol path (e.g. 'Class/method') or by \
+                          file:line:column — exactly one of symbol or line. Splices by the \
+                          LSP's symbol range so braces / decorators stay intact. \
+                          ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     ("body", "string", "New source for the symbol"),
                     (
@@ -304,10 +383,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "insert_before_symbol",
-            "Insert source code immediately before the symbol at \
-                          file:line:column. ⚠ Mutates source files when dry_run is false.",
+            "Insert source code immediately before the symbol, targeted by \
+                          file + symbol path or file:line:column — exactly one of symbol or \
+                          line. ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     ("code", "string", "Source code to insert"),
                     (
@@ -325,10 +405,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "insert_after_symbol",
-            "Insert source code immediately after the symbol at \
-                          file:line:column. ⚠ Mutates source files when dry_run is false.",
+            "Insert source code immediately after the symbol, targeted by \
+                          file + symbol path or file:line:column — exactly one of symbol or \
+                          line. ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
                     ("code", "string", "Source code to insert"),
                     (
@@ -346,13 +427,22 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "delete_symbol",
-            "Delete the symbol's full definition at file:line:column. \
-                          Always reports references outside the deleted span that would \
-                          dangle (report-only). Set dry_run=true to preview. \
-                          ⚠ Mutates source files when dry_run is false.",
+            "Delete the symbol's full definition. Target by file + symbol \
+                          path (e.g. 'Class/method') or by file:line:column — exactly one of \
+                          symbol or line. Always reports references outside the deleted span \
+                          that would dangle; set expect_no_references=true to refuse the \
+                          delete unless verified reference-free (fail-closed when \
+                          unverifiable). Set dry_run=true to preview. ⚠ Mutates source files \
+                          when dry_run is false.",
             with_extra(
-                location_schema(),
+                edit_target_schema(),
                 &[
+                    (
+                        "expect_no_references",
+                        "boolean",
+                        "Refuse the delete unless verified reference-free; refusals \
+                         return a precondition_failed error (default false)",
+                    ),
                     (
                         "dry_run",
                         "boolean",
