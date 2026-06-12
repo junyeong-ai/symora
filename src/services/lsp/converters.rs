@@ -169,6 +169,16 @@ pub(super) fn extract_body_from_range(content: &str, range: &Range) -> Option<St
     extract_lines(content, range.start.line as usize, range.end.line as usize)
 }
 
+/// LSP `Diagnostic.code` is a string-or-number union. Surface the value
+/// itself — a string's content, a number's decimal form — never the JSON
+/// literal a blind re-serialization would produce (`"\"E0308\""`).
+pub(super) fn diagnostic_code_string(code: serde_json::Value) -> String {
+    match code {
+        serde_json::Value::String(code) => code,
+        other => other.to_string(),
+    }
+}
+
 pub(super) fn parse_position(value: &serde_json::Value) -> Option<crate::models::lsp::Position> {
     let line = value.get("line")?.as_u64()? as u32;
     let character = value.get("character")?.as_u64()? as u32;
@@ -352,7 +362,15 @@ pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<Signatur
 
 #[cfg(test)]
 mod tests {
-    use super::{find_resource_operation, parse_workspace_edit};
+    use super::{diagnostic_code_string, find_resource_operation, parse_workspace_edit};
+
+    /// Both arms of the LSP string-or-number union come out as the bare
+    /// value — `"E0308"` stays `E0308`, `6133` becomes `6133`.
+    #[test]
+    fn diagnostic_code_unwraps_the_union() {
+        assert_eq!(diagnostic_code_string(serde_json::json!("E0308")), "E0308");
+        assert_eq!(diagnostic_code_string(serde_json::json!(6133)), "6133");
+    }
 
     /// When a server fills both representations, `documentChanges` wins and
     /// `changes` is ignored — reading both would apply every edit twice.

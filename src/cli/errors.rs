@@ -121,6 +121,10 @@ impl From<LspError> for OutputError {
                 Self::new(ErrorCode::LspUnavailable, message).with_hint("Try: symora daemon start")
             }
             LspError::Timeout(_) => Self::new(ErrorCode::Timeout, message),
+            // Same recovery contract as a timeout — the answer arrives once
+            // the server warms up — so it shares the retryable code.
+            LspError::Indexing { .. } => Self::new(ErrorCode::Timeout, message)
+                .with_hint("The language server is still indexing; retry shortly."),
             LspError::RequestCancelled => Self::new(ErrorCode::Cancelled, message),
             LspError::FileTooLarge { .. } => Self::new(ErrorCode::FileTooLarge, message),
             LspError::ServerError { code, message: m } => classify_server_error(code, &m, message),
