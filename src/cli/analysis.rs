@@ -8,9 +8,12 @@
 use std::path::Path;
 
 use crate::cli::ParsedLocation;
-use crate::cli::utils::{RefsClassification, TestMatcher, classify_refs, find_symbol_at_position};
+use crate::cli::utils::{
+    RefsClassification, SymbolResolution, TestMatcher, classify_refs, column_addressed_symbol,
+    line_addressed_symbol,
+};
 use crate::error::LspError;
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
 
@@ -19,6 +22,15 @@ pub struct LocationAnalysis {
     pub(crate) language: Language,
     pub(crate) target: Option<Symbol>,
     pub(crate) references: Vec<Location>,
+    /// The indexing state the reference query ran under, captured at
+    /// computation time by the service layer — the `indexing` output
+    /// marker derives from this, never from a racy after-the-fact read.
+    pub(crate) indexing: Option<IndexingDegradation>,
+    /// Disclosure for a line-only anchor that hit a multi-declaration
+    /// line: the first declaration was analyzed, and this hint names the
+    /// alternatives (picking silently would violate invariant 4; failing
+    /// a read that used to succeed helps nobody).
+    pub(crate) ambiguity: Option<String>,
 }
 
 impl LocationAnalysis {
@@ -37,10 +49,19 @@ impl LocationAnalysis {
     pub fn references(&self) -> &[Location] {
         &self.references
     }
+
+    pub fn indexing(&self) -> Option<IndexingDegradation> {
+        self.indexing
+    }
+
+    pub fn ambiguity_hint(&self) -> Option<&str> {
+        self.ambiguity.as_deref()
+    }
 }
 
 impl LocationAnalysis {
-    /// Resolve the target symbol and fetch references in parallel.
+    /// Resolve the target symbol and then fetch references from its
+    /// anchor.
     ///
     /// Soft-fails on `find_symbols` (target stays `None`); hard-fails on
     /// `find_references` because every caller needs the refs list.
@@ -58,11 +79,10 @@ impl LocationAnalysis {
             )
             .await
             .ok();
-        let target = symbols.as_ref().and_then(|symbols| {
-            find_symbol_at_position(symbols, anchor.line, Some(anchor.column))
-                .or_else(|| find_symbol_at_position(symbols, anchor.line, None))
-                .cloned()
-        });
+        let (target, ambiguity) = match symbols.as_ref() {
+            Some(symbols) => resolve_navigation_target(symbols, &anchor),
+            None => (None, None),
+        };
         let anchor = match &target {
             Some(symbol) => ParsedLocation {
                 file: anchor.file,
@@ -79,7 +99,9 @@ impl LocationAnalysis {
             anchor,
             language,
             target,
-            references,
+            references: references.data,
+            indexing: references.indexing,
+            ambiguity,
         })
     }
 
@@ -105,7 +127,9 @@ impl LocationAnalysis {
             anchor,
             language,
             target: Some(symbol),
-            references,
+            references: references.data,
+            indexing: references.indexing,
+            ambiguity: None,
         })
     }
 
@@ -126,6 +150,45 @@ impl LocationAnalysis {
     pub fn is_exported(&self) -> Option<bool> {
         let body = self.target.as_ref().and_then(|s| s.body.as_deref())?;
         Some(detect_exported(body, self.language))
+    }
+}
+
+/// Resolve a navigation anchor through the same line/column addressing
+/// rules the edit surface uses (`cli::utils::symbol_nav`): a column
+/// addresses the position precisely; an omitted column addresses the
+/// symbol DECLARED on the line, with body lines falling back to the
+/// enclosing symbol. The same user intent — "the symbol on this line" —
+/// must resolve identically whether it is being read or rewritten.
+///
+/// Where the surfaces differ is ambiguity: a multi-declaration line makes
+/// an edit refuse (a guessed write is destructive), while navigation
+/// analyzes the line's FIRST declaration and returns a disclosure hint
+/// naming the alternatives — the resolved `target` is echoed in the
+/// output, so the choice is visible, never silent.
+fn resolve_navigation_target(
+    symbols: &[Symbol],
+    anchor: &ParsedLocation,
+) -> (Option<Symbol>, Option<String>) {
+    let resolution = if anchor.column_explicit {
+        column_addressed_symbol(symbols, anchor.line, anchor.column)
+    } else {
+        line_addressed_symbol(symbols, anchor.line)
+    };
+    match resolution {
+        SymbolResolution::Match(symbol) => (Some(symbol.clone()), None),
+        SymbolResolution::NotFound => (None, None),
+        SymbolResolution::Ambiguous(declared) => {
+            let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
+            let first = declared[0];
+            let hint = format!(
+                "Line {} declares multiple symbols ({}); resolved to '{}' — pass an \
+                 explicit column (file:line:column) to target another",
+                anchor.line,
+                names.join(", "),
+                first.name,
+            );
+            (Some(first.clone()), Some(hint))
+        }
     }
 }
 

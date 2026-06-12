@@ -77,16 +77,19 @@ pub async fn execute_symbol_search(
                 .map(|r| index_result_output(r, ctx))
                 .collect();
             let mut failures = Vec::new();
+            let mut indexing = None;
             if !search_languages.is_empty() && candidates.len() < limit {
                 let lookup =
                     collect_workspace_symbol_results(app, query, kind, limit, &search_languages)
                         .await;
                 candidates = merge_symbol_results(candidates, lookup.results, query);
                 failures = lookup.failures;
+                indexing = lookup.indexing;
                 count = count.max(candidates.len());
             }
             let mut section = finish_symbol_search(candidates, count, query, language, kind, limit)
-                .with_stale(stale);
+                .with_stale(stale)
+                .with_indexing(indexing);
             if section.count == 0 {
                 let hints = symbol_search_coverage_hints(&failures);
                 if !hints.is_empty() {
@@ -165,6 +168,7 @@ async fn execute_workspace_symbol_search(
     let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
     let mut candidates = lookup.results;
     let failures = lookup.failures;
+    let indexing = lookup.indexing;
     let mut count = candidates.len();
     let mut stale = false;
     let mut index_answered = false;
@@ -196,7 +200,11 @@ async fn execute_workspace_symbol_search(
 
     count = count.max(candidates.len());
     let section = with_workspace_failure_disclosure(
-        finish_symbol_search(candidates, count, query, None, kind, limit).with_stale(stale),
+        finish_symbol_search(candidates, count, query, None, kind, limit)
+            .with_stale(stale)
+            // Any emitted language having run timed-out makes the whole
+            // list a lower bound — captured when each query ran.
+            .with_indexing(indexing),
         &failures,
         query,
         route,
@@ -264,9 +272,12 @@ fn finish_symbol_search(
 /// Workspace-symbol fan-out outcome: the ranked results plus each failed
 /// language with its error, so an empty result can disclose which
 /// languages it does not actually cover instead of swallowing them.
+/// `indexing` is present when any answering language's query ran under
+/// degraded indexing — the combined result is then a lower bound.
 struct WorkspaceSymbolLookup {
     results: Vec<SymbolResultOutput>,
     failures: Vec<(Language, LspError)>,
+    indexing: Option<crate::models::lsp::IndexingDegradation>,
 }
 
 async fn collect_workspace_symbol_results(
@@ -279,10 +290,12 @@ async fn collect_workspace_symbol_results(
     let ctx = &app.output;
     let parsed_kind = kind.map(crate::models::symbol::SymbolKind::parse_or_default);
     let mut failures = Vec::new();
+    let mut indexing = None;
     if languages.is_empty() {
         return WorkspaceSymbolLookup {
             results: Vec::new(),
             failures,
+            indexing,
         };
     }
 
@@ -297,7 +310,12 @@ async fn collect_workspace_symbol_results(
 
     for language in languages {
         let mut symbols = match app.lsp.workspace_symbols(&workspace_query, *language).await {
-            Ok(symbols) => symbols,
+            Ok(symbols) => {
+                if indexing.is_none() {
+                    indexing = symbols.indexing;
+                }
+                symbols.data
+            }
             Err(e) => {
                 failures.push((*language, e));
                 continue;
@@ -380,6 +398,7 @@ async fn collect_workspace_symbol_results(
     WorkspaceSymbolLookup {
         results: outputs,
         failures,
+        indexing,
     }
 }
 

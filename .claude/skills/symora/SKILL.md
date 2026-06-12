@@ -71,7 +71,7 @@ symora refs src/cli/commands/search/mod.rs:30
 symora usage src/cli/commands/search/mod.rs:30:10 --max-symbols 10 --limit 5
 ```
 
-The location commands here and above — `refs`, `callers`, `callees`, `context`, `impact`, `usage` — accept a `file:line` (column optional) and resolve it to the enclosing symbol's name, so a `search symbols` result row can be passed straight through without pinning the exact name column.
+The location commands here and above — `refs`, `callers`, `callees`, `context`, `impact`, `usage` — accept a `file:line` (column optional) and resolve it by the same addressing rules as `edit`: a column-less `file:line` targets the symbol *declared* on that line (a method's declaration line means the method, never the impl/class spanning it), and a body line falls back to the enclosing symbol — so a `search symbols` result row can be passed straight through without pinning the exact name column. When a line declares several symbols, these read commands analyze the first declaration and say so in `hints` (the resolved `target` is always echoed); only `edit` refuses with an ambiguity error, because a guessed write is destructive.
 
 - `refs`, `context`, and `impact` echo what they resolved as a top-level `target` (with `resolved: false` on a placeholder), so a snapped query is never silently mistaken for a different symbol. (`def`, `hover`, `typedef` stay position-exact, since you may target a specific token mid-line.)
 - `context` on a non-declaration line (e.g. a `use` statement) returns `resolved: false` — re-anchor to a declaration line instead of retrying the same position.

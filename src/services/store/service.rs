@@ -42,12 +42,17 @@ pub trait StoreService: Send + Sync {
 
     async fn index_clear(&self) -> Result<(), StoreError>;
 
-    /// Bring an edited file's index rows in line with the bytes on disk —
-    /// re-extracted while the file exists, dropped once it doesn't — so a
-    /// write is searchable immediately. Best-effort, and an index that was
-    /// never built stays untouched: a project without a store never gains
-    /// one just because a file was edited.
-    async fn refresh_file(&self, path: &Path) -> Result<(), StoreError>;
+    /// Bring just-edited files' index rows in line with the bytes on disk
+    /// — re-extracted while a file exists, dropped once it doesn't — so a
+    /// write is searchable immediately. One call covers a whole edit batch
+    /// (rename and actions touch many files), so ignore rules are built
+    /// once per batch. Best-effort from the edit's point of view (a
+    /// returned error is logged, never fails the edit), and an index that
+    /// was never *built* stays untouched: neither a project without a
+    /// store nor a store materialized by a mere read gains rows because a
+    /// file was edited — the persisted build marker decides, not file
+    /// existence.
+    async fn refresh_files(&self, paths: &[PathBuf]) -> Result<(), StoreError>;
 }
 
 /// In-process store. The SQLite connection is opened on first use so
@@ -152,14 +157,16 @@ impl StoreService for DefaultStoreService {
         self.store().await?.clear().await
     }
 
-    async fn refresh_file(&self, path: &Path) -> Result<(), StoreError> {
-        // Don't materialize an index just to refresh one that was never
-        // built — a fresh process re-reads the file on its next indexed read.
+    async fn refresh_files(&self, paths: &[PathBuf]) -> Result<(), StoreError> {
+        // Don't materialize a DB just to refresh an index that was never
+        // built. This existence check is only the no-disk-touch guard; the
+        // authoritative never-built gate is the build marker inside the
+        // store (`Store::refresh_files`), because any read materializes
+        // the DB file without ever building an index.
         if !Store::db_path(&self.root).exists() {
             return Ok(());
         }
-        self.store().await?.refresh_file(path).await;
-        Ok(())
+        self.store().await?.refresh_files(paths).await
     }
 }
 
@@ -177,8 +184,77 @@ mod tests {
         tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
 
         let service = DefaultStoreService::new(root, StoreConfig::default());
-        service.refresh_file(&file).await.unwrap();
+        service
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
 
         assert!(!root.join(".symora").exists());
+    }
+
+    /// The porous-guard regression: ANY read materializes the DB file
+    /// (`store_for_read` → `Store::open`), so a DB that merely exists is
+    /// not a built index. An edit after such a read must leave the store
+    /// empty and the search path bare (`NotInitialized` → live fallback),
+    /// never a 1-file index answering authoritatively for a never-indexed
+    /// project.
+    #[tokio::test]
+    async fn refresh_after_a_read_materialized_store_stays_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+
+        let service = DefaultStoreService::new(root, StoreConfig::default());
+
+        // A read on a never-built project: NotInitialized, but the DB file
+        // now exists on disk.
+        let read = service.search_symbols("alpha", 10, None).await;
+        assert!(matches!(read, Err(StoreError::NotInitialized)));
+        assert!(Store::db_path(root).exists());
+
+        // The edit flow refreshes the file — the never-built store must
+        // not gain rows from it.
+        tokio::fs::write(&file, "fn beta() {}\n").await.unwrap();
+        service
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
+
+        let after = service.search_symbols("beta", 10, None).await;
+        assert!(
+            matches!(after, Err(StoreError::NotInitialized)),
+            "a read-materialized store must stay never-built after an edit"
+        );
+        assert_eq!(service.index_status().await.unwrap().symbol_count, 0);
+    }
+
+    /// After a real build, the refresh path works exactly as before.
+    #[tokio::test]
+    async fn refresh_after_a_full_build_reindexes_the_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+
+        let service = DefaultStoreService::new(root, StoreConfig::default());
+        service.index(IndexOptions::default()).await.unwrap();
+
+        tokio::fs::write(&file, "fn beta() {}\n").await.unwrap();
+        service
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
+
+        let page = service.search_symbols("beta", 10, None).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(
+            service
+                .search_symbols("alpha", 10, None)
+                .await
+                .unwrap()
+                .total,
+            0
+        );
     }
 }

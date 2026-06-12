@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::error::LspError;
 use crate::infra::lsp::IndexingState;
 use crate::infra::lsp::protocol::{DocumentSymbol, SymbolInformation};
-use crate::models::lsp::{FindSymbolsOptions, path_to_uri};
+use crate::models::lsp::{FindSymbolsOptions, Indexed, path_to_uri};
 use crate::models::symbol::{Language, Symbol};
 
 use super::converters::*;
@@ -139,7 +139,7 @@ pub(super) async fn workspace_symbols(
     service: &DefaultLspService,
     query: &str,
     language: Language,
-) -> Result<Vec<Symbol>, LspError> {
+) -> Result<Indexed<Vec<Symbol>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let manager = Arc::clone(&service.manager);
     let cache = Arc::clone(&service.workspace_symbol_cache);
@@ -169,6 +169,9 @@ pub(super) async fn workspace_symbols(
                 } else {
                     tracing::warn!("No {} files found in workspace for indexing", language);
                 }
+                // Snapshot at computation time: the marker rides with the
+                // answer (and gates caching), never a post-hoc state read.
+                let ran_under = super::service::degradation_of(client.indexing_state());
 
                 let params = serde_json::json!({ "query": query });
                 tracing::debug!(
@@ -200,12 +203,12 @@ pub(super) async fn workspace_symbols(
                     })
                     .collect();
 
-                Ok(dedup_symbols(all_symbols))
+                Ok(Indexed::new(dedup_symbols(all_symbols), ran_under))
             }
         })
         .await?;
 
-    Ok((*symbols).clone())
+    Ok(Indexed::new((*symbols.data).clone(), symbols.indexing))
 }
 
 fn filter_by_depth(symbols: Vec<Symbol>, max_depth: u32) -> Vec<Symbol> {

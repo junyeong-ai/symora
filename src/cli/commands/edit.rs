@@ -522,18 +522,17 @@ async fn check_dangling_references(
     };
 
     let dangling: Vec<LocationOutput> = refs
+        .data
         .iter()
         .filter(|r| r.file != file || r.line < span.start || r.line > span.end)
         .map(|r| LocationOutput::from_path(&r.file, r.line, r.column, app.output.root()))
         .collect();
     let total = dangling.len();
     // A server still indexing returns a *lower bound*, not the truth —
-    // the canonical `indexing` marker keeps a cold-start zero from
-    // reading as "confirmed no references".
-    let indexing = app
-        .lsp
-        .indexing_degradation(Language::from_path(file))
-        .await;
+    // the canonical `indexing` marker (captured when the reference query
+    // ran, not re-read afterwards) keeps a cold-start zero from reading
+    // as "confirmed no references".
+    let indexing = refs.indexing;
     let mut section = Section::with_total(
         dangling
             .into_iter()
@@ -1184,65 +1183,21 @@ async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Sy
     }
 }
 
-/// How an edit target position resolved against the symbol tree. Both
-/// addressing modes produce one of these, so the error mapping lives in
-/// one place.
-enum SymbolResolution<'a> {
-    Match(&'a Symbol),
-    /// Several symbols are declared on the target line and the input
-    /// doesn't single one out — guessing would edit a sibling the caller
-    /// didn't address.
-    Ambiguous(Vec<&'a Symbol>),
-    NotFound,
-}
-
-/// Resolution for a column-addressed target (`file:line:col`): the
-/// innermost symbol whose range contains the exact position. When the
-/// column matches nothing, fall back to the line's declarations while
-/// that stays unambiguous.
-fn column_addressed_symbol<'a>(
-    symbols: &'a [Symbol],
-    line: u32,
-    column: u32,
-) -> SymbolResolution<'a> {
-    if let Some(symbol) = crate::cli::utils::find_symbol_at_position(symbols, line, Some(column)) {
-        return SymbolResolution::Match(symbol);
-    }
-    declared_or_enclosing(symbols, line)
-}
-
-/// Resolution for a line-addressed target (`file:line`, no column): a
-/// symbol DECLARED on the line wins over any enclosing block, so naming a
-/// method's declaration line edits the method — never the impl/class that
-/// happens to span it. Range matching only decides when the line declares
-/// nothing (a body line), where the enclosing symbol is the one honest
-/// reading.
-fn line_addressed_symbol<'a>(symbols: &'a [Symbol], line: u32) -> SymbolResolution<'a> {
-    declared_or_enclosing(symbols, line)
-}
-
-fn declared_or_enclosing<'a>(symbols: &'a [Symbol], line: u32) -> SymbolResolution<'a> {
-    let declared = symbols_declared_on_line(symbols, line);
-    match declared.as_slice() {
-        [] => match crate::cli::utils::find_symbol_at_position(symbols, line, None) {
-            Some(symbol) => SymbolResolution::Match(symbol),
-            None => SymbolResolution::NotFound,
-        },
-        [only] => SymbolResolution::Match(only),
-        _ => SymbolResolution::Ambiguous(declared),
-    }
-}
-
-/// Find the symbol an edit target addresses. With a column, resolution is
-/// position-precise; without one, the line's own declaration is preferred
-/// over the enclosing block (`line_addressed_symbol`). Ambiguity and
-/// misses become structured errors the agent can act on.
+/// Find the symbol an edit target addresses, through the shared
+/// resolution functions every surface uses (`cli::utils::symbol_nav`).
+/// With a column, resolution is position-precise; without one, the line's
+/// own declaration is preferred over the enclosing block
+/// (`line_addressed_symbol`). Ambiguity and misses become structured
+/// errors the agent can act on — guessing would edit a sibling the caller
+/// didn't address.
 async fn find_symbol_at_location(
     app: &App,
     file: &Path,
     line: u32,
     column: Option<u32>,
 ) -> Result<Symbol> {
+    use crate::cli::utils::{SymbolResolution, column_addressed_symbol, line_addressed_symbol};
+
     let symbols = app
         .lsp
         .find_symbols(file, FindSymbolsOptions::default())
@@ -1285,19 +1240,6 @@ async fn find_symbol_at_location(
             ))
         }
     }
-}
-
-/// Symbols whose declaration (name position) sits on `line`, innermost
-/// scope included.
-fn symbols_declared_on_line(symbols: &[Symbol], line: u32) -> Vec<&Symbol> {
-    let mut found = Vec::new();
-    for symbol in symbols {
-        if symbol.location.line == line {
-            found.push(symbol);
-        }
-        found.extend(symbols_declared_on_line(&symbol.children, line));
-    }
-    found
 }
 
 /// Resolve full symbol from target. Auto-detects location format
@@ -1607,18 +1549,21 @@ impl Drop for StagingFile {
 // Store refresh
 // ---------------------------------------------------------------------------
 
-/// Best-effort re-index of edited files in the store, through the same
-/// `StoreService` the rest of the command layer uses — so it honors
-/// daemon/direct mode instead of reaching for the daemon directly. Each
-/// file's rows are re-extracted from the bytes just written (or dropped,
-/// if the file no longer exists), so a search immediately after an edit
-/// sees the new content. A store that was never built stays untouched.
+/// Best-effort post-write catch-up for everything that answers about
+/// files, through the same `StoreService`/`LspService` the rest of the
+/// command layer uses — so it honors daemon/direct mode instead of
+/// reaching for the daemon directly. The store re-extracts each file's
+/// rows from the bytes just written (or drops them, if the file no longer
+/// exists), so a search immediately after an edit sees the new content —
+/// a store that was never built stays untouched. The LSP layer is told
+/// the same files changed, so cached workspace answers expire and a live
+/// server's overlay is synced and saved (fresh diagnostics on a warm
+/// daemon). Failures are logged, never fail the edit that already landed.
 pub(crate) async fn refresh_store_files(app: &App, files: &[PathBuf]) {
-    for file in files {
-        if let Err(e) = app.store.refresh_file(file).await {
-            tracing::warn!("Store refresh failed for {}: {}", file.display(), e);
-        }
+    if let Err(e) = app.store.refresh_files(files).await {
+        tracing::warn!("Store refresh failed after edit: {e}");
     }
+    app.lsp.note_files_edited(files).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1858,6 +1803,9 @@ fn line_char_to_byte_offset(content: &str, line: usize, character: usize) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::utils::{
+        SymbolResolution, column_addressed_symbol, line_addressed_symbol, symbols_declared_on_line,
+    };
     use crate::models::symbol::{Location, SymbolKind};
 
     fn lines(v: &[&str]) -> Vec<String> {

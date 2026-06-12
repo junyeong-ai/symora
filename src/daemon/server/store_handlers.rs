@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::cli::response::Section;
 use crate::config::LspRuntimeConfig;
 use crate::daemon::params::{
-    IndexBuildParams, ProjectParams, RefreshFileParams, SearchContentParams, SearchSymbolsParams,
+    EditedFilesParams, IndexBuildParams, ProjectParams, SearchContentParams, SearchSymbolsParams,
 };
 use crate::daemon::protocol::RpcError;
 use crate::models::symbol::{Language, SymbolKind};
@@ -12,17 +12,23 @@ use crate::services::store::{IndexOptions, StoreService};
 use super::context::{ProjectsMap, get_context};
 use super::dispatch::parse_params;
 
-pub(super) async fn handle_refresh_file(
+/// Re-index just-edited files in the store. A failure travels back to the
+/// requesting process as an error so its edit layer can log the warn the
+/// disclosed-best-effort path expects — the edit itself already succeeded,
+/// and the daemon never swallows the failure silently.
+pub(super) async fn handle_refresh_files(
     params: &serde_json::Value,
     projects: &ProjectsMap,
     lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: RefreshFileParams = parse_params(params)?;
+    let p: EditedFilesParams = parse_params(params)?;
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
-    let path = std::path::PathBuf::from(&p.file);
-    let _ = ctx.store.refresh_file(&path).await;
-    ctx.lsp.invalidate_file_cache(&path).await;
+    let paths: Vec<std::path::PathBuf> = p.files.iter().map(std::path::PathBuf::from).collect();
+    ctx.store
+        .refresh_files(&paths)
+        .await
+        .map_err(RpcError::from)?;
     Ok(serde_json::json!({"refreshed": true}))
 }
 

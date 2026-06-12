@@ -93,9 +93,12 @@ pub(crate) struct SearchContentParams {
     pub language: Option<String>,
 }
 
+/// A batch of files symora just wrote — shared by `refresh_files` (store
+/// re-index) and `note_files_edited` (LSP-layer note), so multi-file
+/// operations (rename, actions apply) cost one request, not one per file.
 #[derive(Debug, Deserialize)]
-pub(crate) struct RefreshFileParams {
-    pub file: String,
+pub(crate) struct EditedFilesParams {
+    pub files: Vec<String>,
     pub project: String,
 }
 

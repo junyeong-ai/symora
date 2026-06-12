@@ -434,7 +434,7 @@ async fn fetch_calls(
     limit: usize,
     incoming: bool,
 ) -> Section<CallHierarchyOutput> {
-    let result: Result<Vec<CallHierarchyItem>, _> = if incoming {
+    let result: Result<crate::models::lsp::Indexed<Vec<CallHierarchyItem>>, _> = if incoming {
         lsp.incoming_calls(file, line, column).await
     } else {
         lsp.outgoing_calls(file, line, column).await
@@ -442,8 +442,9 @@ async fn fetch_calls(
 
     match result {
         Ok(calls) => {
-            let total = calls.len();
+            let total = calls.data.len();
             let items: Vec<CallHierarchyOutput> = calls
+                .data
                 .iter()
                 .take(limit)
                 .map(|c| CallHierarchyOutput::from_item(c, root))
@@ -452,9 +453,14 @@ async fn fetch_calls(
                 .strip_prefix(root)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| file.display().to_string());
-            Section::with_total(items, total).with_next_commands(call_hierarchy_next_commands(
-                incoming, &file_rel, line, column, total, limit,
-            ))
+            Section::with_total(items, total)
+                .with_next_commands(call_hierarchy_next_commands(
+                    incoming, &file_rel, line, column, total, limit,
+                ))
+                // The same computation-time marker every cross-file
+                // section carries: a cold-start caller/callee list is a
+                // lower bound and must say so.
+                .with_indexing(calls.indexing)
         }
         Err(e) => Section::error(format_call_hierarchy_error(
             &e.to_string(),
@@ -729,9 +735,9 @@ mod tests {
 
     use crate::error::LspError;
     use crate::models::lsp::{
-        ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, IndexingDegradation,
-        InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus,
-        SignatureHelp, TextEdit, TypeHierarchyItem,
+        ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, InlayHint,
+        PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus, SignatureHelp,
+        TextEdit, TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, SymbolKind};
 
@@ -863,7 +869,7 @@ mod tests {
             &self,
             _query: &str,
             _language: Language,
-        ) -> Result<Vec<Symbol>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<Symbol>>, LspError> {
             unreachable!()
         }
         async fn find_references(
@@ -871,7 +877,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<Location>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<Location>>, LspError> {
             unreachable!()
         }
         async fn goto_definition(
@@ -895,7 +901,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<Location>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<Location>>, LspError> {
             unreachable!()
         }
         async fn hover(
@@ -942,7 +948,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<CallHierarchyItem>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<CallHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn outgoing_calls(
@@ -950,7 +956,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<CallHierarchyItem>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<CallHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn supertypes(
@@ -958,7 +964,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn subtypes(
@@ -966,7 +972,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+        ) -> Result<crate::models::lsp::Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn inlay_hints(
@@ -1011,9 +1017,6 @@ mod tests {
             unreachable!()
         }
         async fn server_status(&self, _language: Language) -> ServerStatus {
-            unreachable!()
-        }
-        async fn indexing_degradation(&self, _language: Language) -> Option<IndexingDegradation> {
             unreachable!()
         }
     }

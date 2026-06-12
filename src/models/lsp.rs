@@ -24,6 +24,35 @@ pub enum IndexingDegradation {
     TimedOut,
 }
 
+/// A workspace-dependent query result paired with the indexing state it
+/// was computed under, captured at computation time inside the service
+/// layer. Reading the state *after* the result returns is racy: a
+/// quiescence signal landing mid-request would strip the marker from an
+/// answer that was computed against an incomplete index — exactly the
+/// cold-start lower bound the marker exists to disclose.
+#[derive(Debug, Clone, Default)]
+pub struct Indexed<T> {
+    pub data: T,
+    /// `Some` when the query ran under degraded workspace indexing —
+    /// `data` is then a lower bound, not a complete enumeration.
+    pub indexing: Option<IndexingDegradation>,
+}
+
+impl<T> Indexed<T> {
+    pub fn new(data: T, indexing: Option<IndexingDegradation>) -> Self {
+        Self { data, indexing }
+    }
+
+    /// A result whose computation did not depend on workspace indexing
+    /// (or that was verified complete).
+    pub fn complete(data: T) -> Self {
+        Self {
+            data,
+            indexing: None,
+        }
+    }
+}
+
 impl Position {
     pub fn new(line: u32, character: u32) -> Self {
         Self { line, character }

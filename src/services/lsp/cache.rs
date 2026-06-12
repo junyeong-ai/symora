@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 
+use crate::models::lsp::Indexed;
 use crate::models::symbol::{Language, Symbol};
 
 struct CacheEntry<V> {
@@ -95,6 +96,36 @@ impl<K: Eq + Hash + Clone, V: Clone> AsyncCache<K, V> {
         {
             entries.remove(&oldest_key);
         }
+    }
+
+    /// Fast-path lookup: the cached value when present and valid for
+    /// `extra_hash`, else `None`. Counts a hit only on success.
+    async fn get_valid(&self, key: &K, extra_hash: u64) -> Option<V> {
+        let entries = self.entries.read().await;
+        let entry = entries.get(key)?;
+        if entry.is_valid(extra_hash, self.ttl) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(entry.value.clone());
+        }
+        None
+    }
+
+    /// Store a freshly computed value (counted as a miss), evicting the
+    /// oldest entry when the cap is reached.
+    async fn insert(&self, key: K, value: V, extra_hash: u64) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let mut entries = self.entries.write().await;
+        if entries.len() >= self.max_entries && !entries.contains_key(&key) {
+            Self::evict_oldest(&mut entries);
+        }
+        entries.insert(
+            key,
+            CacheEntry {
+                value,
+                extra_hash,
+                created_at: Instant::now(),
+            },
+        );
     }
 
     async fn remove(&self, key: &K) {
@@ -226,29 +257,43 @@ impl WorkspaceSymbolCache {
 
     /// Get or compute a workspace-symbol answer, valid only for the
     /// workspace-content `generation` it was computed under (see
-    /// `infra::lsp::content_generation`). Any edit — ours or external —
-    /// bumps the generation, so a cached answer can never describe a
-    /// workspace that no longer exists; the TTL only bounds memory.
+    /// `infra::lsp::content_generation`). What bumps the generation: our
+    /// own writes (`note_files_edited` after every edit), open-overlay
+    /// drift picked up by the pre-request sweep, and client start (a
+    /// fresh server is a fresh world). An EXTERNAL edit to a file no
+    /// server has open is the one change the generation cannot see — that
+    /// staleness is bounded by the TTL, which is why the TTL is short
+    /// rather than memory-only.
+    ///
+    /// Answers computed under degraded indexing are returned with their
+    /// marker but never cached: the server is still warming, and serving
+    /// the lower bound for a whole TTL after quiescence would trap the
+    /// "retry once warm" path the marker tells an agent to take.
     pub async fn get_or_compute<F, Fut>(
         &self,
         language: Language,
         query: &str,
         generation: u64,
         compute: F,
-    ) -> Result<Arc<Vec<Symbol>>, crate::error::LspError>
+    ) -> Result<Indexed<Arc<Vec<Symbol>>>, crate::error::LspError>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<Symbol>, crate::error::LspError>>,
+        Fut: std::future::Future<Output = Result<Indexed<Vec<Symbol>>, crate::error::LspError>>,
     {
         let key = WorkspaceCacheKey {
             language,
             query: query.to_string(),
         };
-        self.inner
-            .get_or_compute(&key, generation, || async {
-                Ok(Arc::new(compute().await?))
-            })
-            .await
+        // Only undegraded answers are ever stored, so a hit is complete.
+        if let Some(cached) = self.inner.get_valid(&key, generation).await {
+            return Ok(Indexed::complete(cached));
+        }
+        let computed = compute().await?;
+        let value = Arc::new(computed.data);
+        if computed.indexing.is_none() {
+            self.inner.insert(key, Arc::clone(&value), generation).await;
+        }
+        Ok(Indexed::new(value, computed.indexing))
     }
 
     pub async fn invalidate_language(&self, language: Language) {
@@ -341,32 +386,84 @@ mod tests {
     async fn workspace_cache_invalidates_on_generation_change() {
         let cache = WorkspaceSymbolCache::default();
         let symbol = |name: &str| {
-            vec![Symbol::new(
+            Indexed::complete(vec![Symbol::new(
                 name.to_string(),
                 SymbolKind::Function,
                 Location::point(PathBuf::from("/test/file.rs"), 1, 1),
-            )]
+            )])
         };
 
         let first = cache
             .get_or_compute(Language::Rust, "alpha", 1, || async { Ok(symbol("old")) })
             .await
             .unwrap();
-        assert_eq!(first[0].name, "old");
+        assert_eq!(first.data[0].name, "old");
 
         // Same generation: served from cache.
         let hit = cache
             .get_or_compute(Language::Rust, "alpha", 1, || async { Ok(symbol("new")) })
             .await
             .unwrap();
-        assert_eq!(hit[0].name, "old");
+        assert_eq!(hit.data[0].name, "old");
 
         // The workspace changed: the entry is invalid, recompute.
         let fresh = cache
             .get_or_compute(Language::Rust, "alpha", 2, || async { Ok(symbol("new")) })
             .await
             .unwrap();
-        assert_eq!(fresh[0].name, "new");
+        assert_eq!(fresh.data[0].name, "new");
+    }
+
+    /// An answer computed under degraded indexing is returned with its
+    /// marker but never cached: once the server reaches quiescence, the
+    /// next query must recompute against the complete index instead of
+    /// serving the stale lower bound for a whole TTL.
+    #[tokio::test]
+    async fn workspace_cache_never_stores_degraded_answers() {
+        use crate::models::lsp::IndexingDegradation;
+
+        let cache = WorkspaceSymbolCache::default();
+        let symbol = |name: &str, marker: Option<IndexingDegradation>| {
+            Indexed::new(
+                vec![Symbol::new(
+                    name.to_string(),
+                    SymbolKind::Function,
+                    Location::point(PathBuf::from("/test/file.rs"), 1, 1),
+                )],
+                marker,
+            )
+        };
+
+        let degraded = cache
+            .get_or_compute(Language::Rust, "alpha", 1, || async {
+                Ok(symbol("partial", Some(IndexingDegradation::TimedOut)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(degraded.indexing, Some(IndexingDegradation::TimedOut));
+        assert_eq!(degraded.data[0].name, "partial");
+
+        // Same generation, but the degraded answer was not cached — the
+        // recompute (now complete) wins and IS cached.
+        let complete = cache
+            .get_or_compute(Language::Rust, "alpha", 1, || async {
+                Ok(symbol("full", None))
+            })
+            .await
+            .unwrap();
+        assert_eq!(complete.indexing, None);
+        assert_eq!(complete.data[0].name, "full");
+
+        let hit = cache
+            .get_or_compute(Language::Rust, "alpha", 1, || async {
+                Err::<Indexed<Vec<Symbol>>, _>(crate::error::LspError::Protocol(
+                    "must be served from cache".to_string(),
+                ))
+            })
+            .await
+            .expect("the complete answer was cached");
+        assert_eq!(hit.indexing, None);
+        assert_eq!(hit.data[0].name, "full");
     }
 
     #[tokio::test]

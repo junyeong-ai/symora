@@ -45,33 +45,32 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
     let loc = args.loc.parse()?.to_absolute()?;
-    let (line, column) = crate::cli::commands::common::snap_to_symbol_anchor(
+    let anchor = crate::cli::commands::common::snap_to_symbol_anchor(
         app.lsp.as_ref(),
         &loc.file,
         loc.line,
-        loc.column,
+        loc.column_explicit.then_some(loc.column),
     )
     .await;
+    let (line, column) = (anchor.line, anchor.column);
+    let anchor_hints = || anchor.hint.clone().map(|h| vec![h]).unwrap_or_default();
 
     let result = app.lsp.incoming_calls(&loc.file, line, column).await;
 
-    let indexing = || async {
-        app.lsp
-            .indexing_degradation(crate::models::symbol::Language::from_path(&loc.file))
-            .await
-    };
-
     match result {
         Ok(calls) => {
-            let total = calls.len();
+            let total = calls.data.len();
             let items: Vec<CallHierarchyOutput> = calls
+                .data
                 .into_iter()
                 .take(limit)
                 .map(|c| CallHierarchyOutput::from_item(&c, ctx.root()))
                 .collect();
 
             ctx.print_success(CallersOutput {
-                section: Section::with_total(items, total).with_indexing(indexing().await),
+                section: Section::with_total(items, total)
+                    .with_hints(anchor_hints())
+                    .with_indexing(calls.indexing),
                 callers_status: None,
             });
         }
@@ -81,7 +80,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         // answer.
         Err(ref e) if !args.no_fallback && e.is_unsupported() => {
             match fallback_from_refs(app, &loc.file, line, column, limit).await {
-                Ok((calls, total_refs)) => {
+                Ok((calls, total_refs, indexing)) => {
                     let items: Vec<CallHierarchyOutput> = calls
                         .iter()
                         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
@@ -89,7 +88,8 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
                     ctx.print_success(CallersOutput {
                         section: Section::with_total(items, total_refs)
-                            .with_indexing(indexing().await),
+                            .with_hints(anchor_hints())
+                            .with_indexing(indexing),
                         callers_status: Some("references_derived"),
                     });
                 }
@@ -105,21 +105,31 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 /// Derive callers from plain references when the server lacks call
 /// hierarchy. Returns up to `limit` caller items plus the exact count of
 /// *unique callers* found — the same domain as the items, never the raw
-/// reference count (several references inside one caller are one caller).
+/// reference count (several references inside one caller are one caller)
+/// — and the indexing state the reference query ran under, so the
+/// fallback's marker is as computation-time-accurate as the direct path's.
 async fn fallback_from_refs(
     app: &App,
     file: &Path,
     line: u32,
     column: u32,
     limit: usize,
-) -> Result<(Vec<CallHierarchyItem>, usize), LspError> {
+) -> Result<
+    (
+        Vec<CallHierarchyItem>,
+        usize,
+        Option<crate::models::lsp::IndexingDegradation>,
+    ),
+    LspError,
+> {
     let refs = app.lsp.find_references(file, line, column).await?;
+    let indexing = refs.indexing;
 
     let mut seen = HashSet::new();
     let mut callers = Vec::new();
     let mut symbol_cache: HashMap<PathBuf, Vec<crate::models::symbol::Symbol>> = HashMap::new();
 
-    for ref_loc in refs {
+    for ref_loc in refs.data {
         if ref_loc.file == file && ref_loc.line == line {
             continue;
         }
@@ -155,7 +165,7 @@ async fn fallback_from_refs(
         }
     }
 
-    Ok((callers, seen.len()))
+    Ok((callers, seen.len(), indexing))
 }
 
 #[cfg(test)]

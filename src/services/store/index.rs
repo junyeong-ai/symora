@@ -13,12 +13,78 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::{Language, SymbolKind};
 
 /// Extensions a full index pass covers when no language filter narrows it.
-/// Also the domain `refresh_file` honors, so an edit can never index a file
-/// kind a build wouldn't.
+/// Also the domain an unrestricted build's `refresh_files` honors, so an
+/// edit can never index a file kind a build wouldn't.
 const INDEXED_EXTENSIONS: &[&str] = &[
     "rs", "go", "py", "ts", "tsx", "js", "jsx", "java", "kt", "kts", "cpp", "cc", "cxx", "c", "h",
     "hpp", "cs", "rb", "php", "lua", "sh",
 ];
+
+/// Meta key recording that a full build completed, and what it covered.
+/// Its presence IS the build-completed marker: a store without it was
+/// never built (merely opening the DB for a read materializes the file,
+/// so file existence proves nothing), and `refresh_files` must not grow
+/// a 1-file index inside it.
+const META_BUILD_SCOPE: &str = "build_scope";
+
+/// The language scope the last completed build covered. Persisted in the
+/// store's `meta` table so per-file refreshes honor the build's narrowing
+/// (`search index build --lang rust` must not gain `.py` rows from an
+/// edit) and so a never-built store is recognizable regardless of whether
+/// the DB file exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BuildScope {
+    /// Unrestricted build: every extension in `INDEXED_EXTENSIONS`.
+    All,
+    Languages(Vec<Language>),
+}
+
+impl BuildScope {
+    fn from_options(languages: &Option<Vec<Language>>) -> Self {
+        match languages {
+            None => Self::All,
+            Some(langs) => {
+                let mut langs = langs.clone();
+                langs.sort_by_key(|l| l.lsp_id());
+                langs.dedup();
+                Self::Languages(langs)
+            }
+        }
+    }
+
+    /// The extension set a build under this scope discovers — also the
+    /// domain a refresh honors.
+    fn extensions(&self) -> Vec<&'static str> {
+        match self {
+            Self::All => INDEXED_EXTENSIONS.to_vec(),
+            Self::Languages(langs) => langs.iter().flat_map(|l| l.extensions()).copied().collect(),
+        }
+    }
+
+    fn meta_value(&self) -> String {
+        match self {
+            Self::All => "all".to_string(),
+            Self::Languages(langs) => langs
+                .iter()
+                .map(|l| l.lsp_id())
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        if value == "all" {
+            return Self::All;
+        }
+        Self::Languages(
+            value
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(Language::parse_or_default)
+                .collect(),
+        )
+    }
+}
 
 pub struct Store {
     db: SqliteDb,
@@ -247,35 +313,96 @@ impl Store {
         Ok(page)
     }
 
-    /// Bring one file's rows in line with the bytes on disk: re-extract
-    /// when the file still exists and a build would cover it, drop the rows
-    /// when it doesn't. This is the edit flow's endpoint — a write becomes
-    /// searchable immediately instead of leaving a hole until the next
-    /// `index build`. Best-effort: failures are logged, never surfaced to
-    /// the edit that triggered the refresh.
-    pub async fn refresh_file(&self, path: &Path) {
-        if self.is_indexable(path) && tokio::fs::try_exists(path).await.unwrap_or(false) {
-            if let Err(e) = self.index_file(path).await {
+    /// Bring just-edited files' rows in line with the bytes on disk:
+    /// re-extract while a file exists and the last build's scope covers
+    /// it, drop its rows when it doesn't. This is the edit flow's
+    /// endpoint — a write becomes searchable immediately instead of
+    /// leaving a hole until the next `index build`.
+    ///
+    /// A store with no completed build is left untouched: opening the DB
+    /// for a read already materializes the file, so the build marker —
+    /// not file existence — decides "never built", and an edit must not
+    /// grow a 1-file index that would then answer authoritatively.
+    ///
+    /// Failures keep the old rows (the next read sees them flagged
+    /// `stale`) and propagate to the caller, which logs the disclosed
+    /// warn — the edit itself already succeeded and stays successful.
+    pub async fn refresh_files(&self, paths: &[PathBuf]) -> Result<(), StoreError> {
+        let Some(scope) = self.build_scope().await? else {
+            tracing::debug!("Skipping index refresh: the index was never built");
+            return Ok(());
+        };
+        // One ignore-rules build for the whole batch — multi-file
+        // operations (rename, actions apply) refresh many files at once.
+        let filter = FileFilter::with_gitignore(&self.project_root);
+        let extensions = scope.extensions();
+
+        let mut first_err: Option<StoreError> = None;
+        for path in paths {
+            let result = if Self::is_indexable(path, &extensions, &filter)
+                && tokio::fs::try_exists(path).await.unwrap_or(false)
+            {
+                self.index_file(path).await
+            } else {
+                self.remove_file_rows(path).await
+            };
+            if let Err(e) = result {
                 tracing::debug!("Failed to refresh {} in index: {e}", path.display());
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
             }
-            return;
         }
-        self.remove_file_rows(path).await;
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
-    /// Whether a full build pass would cover this file: an indexed
-    /// extension, not excluded by the project's ignore rules.
-    fn is_indexable(&self, path: &Path) -> bool {
+    /// Whether the last build would cover this file: an extension inside
+    /// the recorded build scope, not excluded by the project's ignore
+    /// rules.
+    fn is_indexable(path: &Path, scope_extensions: &[&str], filter: &FileFilter) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|ext| INDEXED_EXTENSIONS.contains(&ext))
-            && FileFilter::with_gitignore(&self.project_root).should_include(path)
+            .is_some_and(|ext| scope_extensions.contains(&ext))
+            && filter.should_include(path)
     }
 
-    async fn remove_file_rows(&self, path: &Path) {
-        let path_str = path.display().to_string();
-        if let Err(e) = self
+    /// The scope of the last completed build, or `None` when no build has
+    /// ever completed against this store.
+    async fn build_scope(&self) -> Result<Option<BuildScope>, StoreError> {
+        let value: Option<String> = self
             .db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT value FROM meta WHERE key = ?1",
+                    rusqlite::params![META_BUILD_SCOPE],
+                    |r| r.get(0),
+                )
+                .optional()
+            })
+            .await?;
+        Ok(value.as_deref().map(BuildScope::parse))
+    }
+
+    async fn record_build_scope(&self, scope: &BuildScope) -> Result<(), StoreError> {
+        let value = scope.meta_value();
+        self.db
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![META_BUILD_SCOPE, value],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
+    async fn remove_file_rows(&self, path: &Path) -> Result<(), StoreError> {
+        let path_str = path.display().to_string();
+        self.db
             .call(move |conn| {
                 let file_id: Option<i64> = conn
                     .query_row(
@@ -291,9 +418,6 @@ impl Store {
                 Ok(())
             })
             .await
-        {
-            tracing::debug!("Failed to drop index rows for {}: {e}", path.display());
-        }
     }
 
     pub async fn cleanup_expired(&self) -> usize {
@@ -325,9 +449,15 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// Empty the index, including the build-completed marker: a cleared
+    /// store is "never built" again, so a stray per-file refresh can't
+    /// start regrowing a partial index inside it.
     pub async fn clear(&self) -> Result<(), StoreError> {
         self.db
-            .execute("DELETE FROM content_lines; DELETE FROM symbols; DELETE FROM files; VACUUM;")
+            .execute(
+                "DELETE FROM content_lines; DELETE FROM symbols; DELETE FROM files; \
+                 DELETE FROM meta; VACUUM;",
+            )
             .await?;
         self.index_ready.store(false, Ordering::SeqCst);
         Ok(())
@@ -382,11 +512,8 @@ impl Store {
 
     async fn do_index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
         let filter = FileFilter::with_gitignore(&self.project_root);
-        let extensions: Vec<&str> = options
-            .languages
-            .as_ref()
-            .map(|langs| langs.iter().flat_map(|l| l.extensions()).copied().collect())
-            .unwrap_or_else(|| INDEXED_EXTENSIONS.to_vec());
+        let scope = BuildScope::from_options(&options.languages);
+        let extensions = scope.extensions();
 
         let files = filter.discover_files(&extensions);
         let discovered_paths: std::collections::HashSet<String> = files
@@ -424,6 +551,11 @@ impl Store {
             }
         }
 
+        // The durable build-completed marker, with the scope this build
+        // covered. Last build wins on purpose: the pruning above already
+        // narrows the row domain to this scope, so the recorded scope must
+        // follow it — and per-file refreshes honor exactly this domain.
+        self.record_build_scope(&scope).await?;
         self.index_ready.store(true, Ordering::SeqCst);
         let _ = self.checkpoint().await;
         self.stats().await
@@ -714,7 +846,10 @@ mod tests {
         // old rows are replaced — not just dropped — so a search finds the
         // new content immediately, with no stale banner.
         tokio::fs::write(&file, "fn beta() {}\n").await.unwrap();
-        store.refresh_file(&file).await;
+        store
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
         assert_eq!(total_matches(&store, "alpha").await, 0);
         let page = store.search_symbols("beta", 50, None).await.unwrap();
         assert_eq!(page.total, 1);
@@ -732,7 +867,10 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
 
         tokio::fs::remove_file(&file).await.unwrap();
-        store.refresh_file(&file).await;
+        store
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
         assert_eq!(total_matches(&store, "alpha").await, 0);
         assert_eq!(store.stats().await.unwrap().file_count, 0);
     }
@@ -753,7 +891,7 @@ mod tests {
 
         let notes = root.join("notes.txt");
         tokio::fs::write(&notes, "fn fake() {}\n").await.unwrap();
-        store.refresh_file(&notes).await;
+        store.refresh_files(&[notes]).await.unwrap();
 
         let generated = root.join("target").join("gen.rs");
         tokio::fs::create_dir_all(generated.parent().unwrap())
@@ -762,10 +900,119 @@ mod tests {
         tokio::fs::write(&generated, "fn generated() {}\n")
             .await
             .unwrap();
-        store.refresh_file(&generated).await;
+        store.refresh_files(&[generated]).await.unwrap();
 
         assert_eq!(store.stats().await.unwrap().file_count, baseline);
         assert_eq!(total_matches(&store, "generated").await, 0);
+    }
+
+    /// A narrowed build's scope is durable: after `--lang rust`, editing
+    /// a `.py` file must add nothing — the build excluded that language,
+    /// and a refresh honoring the full extension table would contradict
+    /// the recorded build domain.
+    #[tokio::test]
+    async fn refresh_honors_the_builds_language_narrowing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+        let script = root.join("tool.py");
+        tokio::fs::write(&script, "def beta(): pass\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store
+            .index(IndexOptions {
+                force: false,
+                languages: Some(vec![Language::Rust]),
+            })
+            .await
+            .unwrap();
+        assert_eq!(total_matches(&store, "alpha").await, 1);
+        assert_eq!(total_matches(&store, "beta").await, 0);
+
+        // Edit the .py file: the rust-scoped index must not gain rows.
+        tokio::fs::write(&script, "def beta_v2(): pass\n")
+            .await
+            .unwrap();
+        store
+            .refresh_files(std::slice::from_ref(&script))
+            .await
+            .unwrap();
+        assert_eq!(total_matches(&store, "beta_v2").await, 0);
+
+        // An in-scope edit still refreshes.
+        tokio::fs::write(root.join("lib.rs"), "fn gamma() {}\n")
+            .await
+            .unwrap();
+        store.refresh_files(&[root.join("lib.rs")]).await.unwrap();
+        assert_eq!(total_matches(&store, "gamma").await, 1);
+    }
+
+    /// An unrestricted build records the unrestricted scope, so an edit
+    /// to any indexed-extension file refreshes — including one created
+    /// after the build.
+    #[tokio::test]
+    async fn full_build_scope_covers_every_indexed_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let script = root.join("tool.py");
+        tokio::fs::write(&script, "def beta(): pass\n")
+            .await
+            .unwrap();
+        store.refresh_files(&[script]).await.unwrap();
+        assert_eq!(total_matches(&store, "beta").await, 1);
+    }
+
+    /// A store that was merely OPENED (any read does this) has no build
+    /// marker: a refresh must leave it empty — never grow a partial index
+    /// that would then answer authoritatively. `index clear` returns the
+    /// store to the same never-built state.
+    #[tokio::test]
+    async fn refresh_is_inert_without_a_completed_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        assert_eq!(store.stats().await.unwrap().symbol_count, 0);
+
+        // Build, then clear: the marker must clear with the rows.
+        store.index(IndexOptions::default()).await.unwrap();
+        store.clear().await.unwrap();
+        store
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        assert_eq!(store.stats().await.unwrap().symbol_count, 0);
+    }
+
+    /// The build scope round-trips through its meta representation.
+    #[test]
+    fn build_scope_meta_value_round_trips() {
+        let all = BuildScope::All;
+        assert_eq!(BuildScope::parse(&all.meta_value()), all);
+
+        let narrowed = BuildScope::from_options(&Some(vec![Language::Python, Language::Rust]));
+        let parsed = BuildScope::parse(&narrowed.meta_value());
+        assert_eq!(parsed, narrowed);
+        let exts = parsed.extensions();
+        assert!(exts.contains(&"rs") && exts.contains(&"py"));
+        assert!(!exts.contains(&"go"));
     }
 
     #[tokio::test]

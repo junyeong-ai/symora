@@ -209,9 +209,10 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let mut symbols = Vec::new();
     let mut seen = HashSet::new();
     for language in &languages {
-        let Ok(mut batch) = app.lsp.workspace_symbols(&query, *language).await else {
+        let Ok(batch) = app.lsp.workspace_symbols(&query, *language).await else {
             continue;
         };
+        let mut batch = batch.data;
         for symbol in &mut batch {
             if let Some(path) = synthesized_symbol_path(symbol) {
                 symbol.name_path = Some(path);

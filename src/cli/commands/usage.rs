@@ -16,7 +16,7 @@ use crate::cli::symbol_discovery::{
     generic_exact_identifier_penalty, is_probably_test_path, noisy_suffix_penalty,
     symbol_match_priority,
 };
-use crate::cli::utils::{TestMatcher, find_symbol_at_position, read_line_at};
+use crate::cli::utils::{TestMatcher, read_line_at};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
@@ -154,7 +154,7 @@ async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language])
         match app.lsp.workspace_symbols(pattern, *language).await {
             Ok(batch) => {
                 answered = true;
-                symbols.extend(batch);
+                symbols.extend(batch.data);
             }
             Err(e) => failures.push((*language, e)),
         }
@@ -529,8 +529,19 @@ async fn resolve_usage_query(
         .lsp
         .find_symbols(&loc.file, FindSymbolsOptions::default().with_depth(10))
         .await?;
-    let symbol = find_symbol_at_position(&symbols, loc.line, Some(loc.column))
-        .or_else(|| find_symbol_at_position(&symbols, loc.line, None));
+    // The shared line/column addressing rules: an omitted column targets
+    // the symbol DECLARED on the line (first declaration on ambiguity —
+    // the resolved name is echoed via `resolved_from`/`query`), a column
+    // resolves position-precisely.
+    let resolution = match loc.column_explicit {
+        true => crate::cli::utils::column_addressed_symbol(&symbols, loc.line, loc.column),
+        false => crate::cli::utils::line_addressed_symbol(&symbols, loc.line),
+    };
+    let symbol = match resolution {
+        crate::cli::utils::SymbolResolution::Match(symbol) => Some(symbol),
+        crate::cli::utils::SymbolResolution::Ambiguous(declared) => declared.first().copied(),
+        crate::cli::utils::SymbolResolution::NotFound => None,
+    };
     let Some(symbol) = symbol else {
         return Ok(ResolvedUsageQuery {
             query: input.to_string(),
@@ -633,6 +644,7 @@ async fn fetch_single_symbol_refs(
             symbol.location.column,
         )
         .await
+        .map(|r| r.data)
         .unwrap_or_default();
 
     let ref_count = refs.len();

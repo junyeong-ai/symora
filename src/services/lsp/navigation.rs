@@ -6,19 +6,19 @@ use crate::infra::lsp::LspFeature;
 use crate::infra::lsp::protocol::{
     LspLocation, TextDocumentIdentifier, TextDocumentPositionParams,
 };
-use crate::models::lsp::path_to_uri;
+use crate::models::lsp::{Indexed, path_to_uri};
 use crate::models::symbol::Location;
 
 use super::converters::*;
 use super::helpers::*;
-use super::service::{DefaultLspService, ensure_indexed};
+use super::service::{DefaultLspService, degradation_of, ensure_indexed};
 
 pub(super) async fn find_references(
     service: &DefaultLspService,
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Vec<Location>, LspError> {
+) -> Result<Indexed<Vec<Location>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -32,6 +32,11 @@ pub(super) async fn find_references(
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
+                // Snapshot the indexing state the query is issued under —
+                // the marker derives from this, never from a re-read after
+                // the result lands (quiescence racing the request must not
+                // strip the marker from a lower-bound answer).
+                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -48,7 +53,7 @@ pub(super) async fn find_references(
                     .await?;
 
                 if result.is_null() {
-                    return Ok(Vec::new());
+                    return Ok(Indexed::new(Vec::new(), ran_under));
                 }
 
                 let locations: Vec<LspLocation> = serde_json::from_value(result)
@@ -56,9 +61,9 @@ pub(super) async fn find_references(
 
                 let all_locations: Vec<Location> = locations.iter().map(convert_location).collect();
 
-                Ok(filter_locations_within_project(
-                    all_locations,
-                    &project_root,
+                Ok(Indexed::new(
+                    filter_locations_within_project(all_locations, &project_root),
+                    ran_under,
                 ))
             }
         })
@@ -154,7 +159,7 @@ pub(super) async fn find_implementations(
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Vec<Location>, LspError> {
+) -> Result<Indexed<Vec<Location>>, LspError> {
     check_feature_support(file, LspFeature::FindImplementations)?;
 
     let max_file_size = service.max_file_size_bytes();
@@ -168,6 +173,7 @@ pub(super) async fn find_implementations(
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
+                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -185,9 +191,12 @@ pub(super) async fn find_implementations(
                     )
                     .await?;
 
-                Ok(parse_location_response(&result)
-                    .map(|locs| locs.iter().map(convert_location).collect())
-                    .unwrap_or_default())
+                Ok(Indexed::new(
+                    parse_location_response(&result)
+                        .map(|locs| locs.iter().map(convert_location).collect())
+                        .unwrap_or_default(),
+                    ran_under,
+                ))
             }
         })
         .await

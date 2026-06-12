@@ -135,12 +135,31 @@ pub async fn compute(
     let mut buckets: Vec<DepthBucket> = Vec::with_capacity(max_depth as usize);
     let mut max_depth_reached = false;
     let mut callers_truncated = false;
+    // The walk's degradation marker aggregates the computation-time
+    // snapshots of every `incoming_calls` round-trip: if ANY hop of the
+    // graph was computed under degraded indexing, the whole count is a
+    // lower bound — and quiescence landing mid-walk must not strip that.
+    let mut indexing: Option<crate::models::lsp::IndexingDegradation> = None;
 
     for depth in 1..=max_depth {
-        let calls_per_node = join_all(frontier.iter().map(|(f, l, c)| async move {
-            lsp.incoming_calls(f, *l, *c).await.unwrap_or_default()
-        }))
+        let results_per_node = join_all(
+            frontier
+                .iter()
+                .map(|(f, l, c)| async move { lsp.incoming_calls(f, *l, *c).await.ok() }),
+        )
         .await;
+        let calls_per_node: Vec<Vec<crate::models::lsp::CallHierarchyItem>> = results_per_node
+            .into_iter()
+            .map(|result| match result {
+                Some(indexed) => {
+                    if indexing.is_none() {
+                        indexing = indexed.indexing;
+                    }
+                    indexed.data
+                }
+                None => Vec::new(),
+            })
+            .collect();
 
         let mut next_frontier: Vec<CallerKey> = Vec::new();
         let mut depth_total = 0usize;
@@ -190,13 +209,7 @@ pub async fn compute(
         frontier = next_frontier;
     }
 
-    // Both are independent post-walk probes (no data dependency on each
-    // other), so run them concurrently rather than paying two serial
-    // round-trips.
-    let (indexing, dynamic_dispatch) = tokio::join!(
-        lsp.indexing_degradation(crate::models::symbol::Language::from_path(file)),
-        detect_dynamic_dispatch(lsp, file, line, column, anchor_kind),
-    );
+    let dynamic_dispatch = detect_dynamic_dispatch(lsp, file, line, column, anchor_kind).await;
 
     let direct_callers = buckets.first().map(|b| b.count).unwrap_or(0);
     let transitive_callers: usize = buckets.iter().map(|b| b.count).sum();
@@ -249,9 +262,9 @@ async fn detect_dynamic_dispatch(
         return None;
     }
     match lsp.find_implementations(file, line, column).await {
-        Ok(impls) if !impls.is_empty() => Some(DynamicDispatch {
+        Ok(impls) if !impls.data.is_empty() => Some(DynamicDispatch {
             status: DispatchStatus::Incomplete,
-            implementations: impls.len(),
+            implementations: impls.data.len(),
         }),
         Ok(_) => None,
         // `Unavailable` means a genuine capability gap — the server does not
@@ -330,8 +343,8 @@ mod tests {
 
     use crate::models::lsp::{
         ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions,
-        FoldingRange, HoverInfo, IndexingDegradation, InlayHint, PrepareRenameResult, Range,
-        RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+        FoldingRange, HoverInfo, Indexed, InlayHint, PrepareRenameResult, Range, RenameResult,
+        SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
@@ -356,21 +369,18 @@ mod tests {
 
     #[async_trait]
     impl LspService for CallGraphStub {
-        async fn indexing_degradation(&self, _language: Language) -> Option<IndexingDegradation> {
-            None
-        }
-
         async fn incoming_calls(
             &self,
             _file: &Path,
             line: u32,
             column: u32,
-        ) -> Result<Vec<CallHierarchyItem>, LspError> {
-            Ok(self
-                .incoming
-                .get(&(line, column))
-                .cloned()
-                .unwrap_or_default())
+        ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
+            Ok(Indexed::complete(
+                self.incoming
+                    .get(&(line, column))
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
         }
 
         async fn find_symbols(
@@ -384,7 +394,7 @@ mod tests {
             &self,
             _query: &str,
             _language: Language,
-        ) -> Result<Vec<Symbol>, LspError> {
+        ) -> Result<Indexed<Vec<Symbol>>, LspError> {
             unreachable!()
         }
         async fn find_references(
@@ -392,7 +402,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<Location>, LspError> {
+        ) -> Result<Indexed<Vec<Location>>, LspError> {
             unreachable!()
         }
         async fn goto_definition(
@@ -416,9 +426,10 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<Location>, LspError> {
+        ) -> Result<Indexed<Vec<Location>>, LspError> {
             self.implementations
                 .clone()
+                .map(Indexed::complete)
                 .map_err(|code| LspError::server_error_friendly(code, "stub error".to_string()))
         }
         async fn hover(
@@ -465,7 +476,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<CallHierarchyItem>, LspError> {
+        ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn supertypes(
@@ -473,7 +484,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn subtypes(
@@ -481,7 +492,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Vec<TypeHierarchyItem>, LspError> {
+        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
         async fn inlay_hints(

@@ -346,6 +346,7 @@ async fn analyze_symbol_impact(
             .await
             .map(|calls| {
                 calls
+                    .data
                     .iter()
                     .take(calls_limit)
                     .map(|c| CallHierarchyOutput::from_item(c, root))

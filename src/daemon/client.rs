@@ -17,7 +17,11 @@ use crate::models::symbol::Language;
 fn calculate_timeout(config: &LspRuntimeConfig, file: Option<&Path>, method: &str) -> Duration {
     // Daemon-only operations with fixed timeouts
     match method {
-        methods::PING | methods::STATUS | methods::SHUTDOWN | methods::REFRESH_FILE => {
+        methods::PING
+        | methods::STATUS
+        | methods::SHUTDOWN
+        | methods::REFRESH_FILES
+        | methods::NOTE_FILES_EDITED => {
             return Duration::from_secs(30);
         }
         methods::INDEX_BUILD => return Duration::from_secs(600),
@@ -473,17 +477,23 @@ impl DaemonClient {
             .and_then(Self::extract_result)
     }
 
-    pub async fn indexing_degradation(
-        &self,
-        language: &str,
-    ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
-        let params = serde_json::json!({
-            "language": language
-        });
-        self.request_with_project(methods::INDEXING_DEGRADATION, params, None)
-            .await
-            .and_then(Self::extract_result)
+    /// Tell the daemon symora just wrote these files, so its LSP layer
+    /// (symbol caches, workspace generation, live overlays) catches up.
+    /// Best-effort with the same gating as `refresh_files`: a daemon that
+    /// is not running has no caches or overlays to catch up, so this never
+    /// starts one.
+    pub async fn note_files_edited(&self, files: &[PathBuf]) -> Result<(), LspError> {
+        let Some(params) = self.edited_files_params(files).await else {
+            return Ok(());
+        };
+        self.request_with_project(
+            methods::NOTE_FILES_EDITED,
+            params,
+            files.first().map(PathBuf::as_path),
+        )
+        .await
+        .and_then(Self::extract_result)
+        .map(|_| ())
     }
 
     // Search Operations
@@ -553,30 +563,45 @@ impl DaemonClient {
 
     // Store Operations
 
-    /// Best-effort re-index of an edited file in the store index.
-    /// Does not start the daemon if not running.
-    /// Uses a short 2-second ping timeout to avoid blocking edit workflows.
-    pub async fn refresh_file(&self, file: &Path) -> Result<(), LspError> {
-        // Only a same-version daemon gets requests — the wire format is
-        // guaranteed within one version, and a best-effort refresh is
-        // not worth replacing a stale daemon over.
+    /// Shared gating for the post-edit batch calls: only a live,
+    /// same-version daemon gets them — the wire format is guaranteed
+    /// within one version, and a best-effort note is not worth replacing
+    /// a stale daemon over. Uses a short 2-second ping timeout to avoid
+    /// blocking edit workflows. `None` means "skip silently".
+    async fn edited_files_params(&self, files: &[PathBuf]) -> Option<serde_json::Value> {
+        if files.is_empty() {
+            return None;
+        }
         let same_version_daemon = matches!(
             timeout(Duration::from_secs(2), self.ping()).await,
             Ok(Ok(true))
         );
         if !same_version_daemon {
-            return Ok(()); // Not running, slow, or a different binary.
+            return None; // Not running, slow, or a different binary.
         }
-        let params = serde_json::json!({
-            "file": file.display().to_string()
-        });
-        if let Err(e) = self
-            .request_with_project(methods::REFRESH_FILE, params, Some(file))
-            .await
-        {
-            tracing::warn!("Failed to refresh file {}: {}", file.display(), e);
-        }
-        Ok(())
+        Some(serde_json::json!({
+            "files": files
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Re-index just-edited files in the daemon's store. Does not start a
+    /// daemon; a refresh failure from a running daemon is returned so the
+    /// edit layer can log the disclosed warn (the edit already succeeded).
+    pub async fn refresh_files(&self, files: &[PathBuf]) -> Result<(), LspError> {
+        let Some(params) = self.edited_files_params(files).await else {
+            return Ok(());
+        };
+        self.request_with_project(
+            methods::REFRESH_FILES,
+            params,
+            files.first().map(PathBuf::as_path),
+        )
+        .await
+        .and_then(Self::extract_result)
+        .map(|_| ())
     }
 
     // Daemon Control Operations
