@@ -12,8 +12,9 @@ use crate::cli::ParsedLocation;
 use crate::cli::output::OutputContext;
 use crate::cli::response::Section;
 use crate::cli::symbol_discovery::{
-    broad_symbol_kind_bonus, detect_languages_by_file_count, generic_exact_identifier_penalty,
-    is_probably_test_path, noisy_suffix_penalty, symbol_match_priority,
+    broad_symbol_kind_bonus, coverage_reason, detect_languages_by_file_count,
+    generic_exact_identifier_penalty, is_probably_test_path, noisy_suffix_penalty,
+    symbol_match_priority,
 };
 use crate::cli::utils::{TestMatcher, find_symbol_at_position, read_line_at};
 use crate::error::LspError;
@@ -178,21 +179,6 @@ fn representative_failure(failures: Vec<(Language, LspError)>) -> Option<LspErro
         return Some(errors.swap_remove(pos));
     }
     errors.into_iter().next()
-}
-
-/// Why a language is missing from the result, as a stable marker an agent
-/// can branch on (install a server, retry a timeout, or narrow with --lang).
-/// A capability gap — `is_unsupported` covers both the static table and a
-/// runtime JSON-RPC method-not-found — classifies as `unsupported`, matching
-/// the central error classifier.
-fn coverage_reason(err: &LspError) -> &'static str {
-    match err {
-        LspError::ServerNotInstalled { .. } => "server_not_installed",
-        LspError::Timeout(_) => "timed_out",
-        LspError::UnsupportedLanguage(_) => "unsupported",
-        e if e.is_unsupported() => "unsupported",
-        _ => "unavailable",
-    }
 }
 
 /// Every language absent from the result — one whose server failed, or one

@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
+use crate::services::store::SymbolExtractor;
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -34,6 +35,11 @@ struct LanguageStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
     tier: String,
+    /// Static build facts, independent of server install state: whether the
+    /// compiled-in index extractor and the tree-sitter AST grammar cover
+    /// this language. Always emitted — `false` is the load-bearing value.
+    symbol_extraction: bool,
+    ast_search: bool,
     /// Some("config") iff an [lsp.servers] override applies — what the
     /// next server start will use. Omitted for builtin servers; that
     /// absence is how an agent detects an override that did not apply.
@@ -100,6 +106,8 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 installed: s.installed,
                 version: s.version,
                 tier: s.tier.as_str().to_string(),
+                symbol_extraction: SymbolExtractor::is_supported(s.language),
+                ast_search: crate::infra::ast::is_supported(s.language),
                 source: overridden.then(|| "config".to_string()),
                 command: overridden.then_some(s.command),
                 install,
@@ -132,4 +140,31 @@ fn platform_to_string(platform: Platform) -> String {
         Platform::Windows => "windows",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::symbol::Language;
+
+    #[test]
+    fn language_rows_always_carry_the_capability_booleans() {
+        // Ruby has a tree-sitter AST grammar but no index extractor — the
+        // row must say both, with `false` emitted rather than omitted.
+        let status = LanguageStatus {
+            language: "ruby".to_string(),
+            server: "ruby-lsp".to_string(),
+            installed: false,
+            version: None,
+            tier: "fast".to_string(),
+            symbol_extraction: SymbolExtractor::is_supported(Language::Ruby),
+            ast_search: crate::infra::ast::is_supported(Language::Ruby),
+            source: None,
+            command: None,
+            install: None,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["symbol_extraction"], false);
+        assert_eq!(value["ast_search"], true);
+    }
 }
