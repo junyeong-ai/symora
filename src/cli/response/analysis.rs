@@ -158,6 +158,11 @@ pub struct ImpactOutput {
     /// LSP failed to start a call hierarchy at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blast_radius: Option<crate::cli::blast_radius::BlastRadius>,
+    /// Ready-to-run follow-ups, emitted only when a disclosure above says
+    /// the analysis is incomplete (depth cap, unfolded dynamic dispatch,
+    /// truncated file list) or concentrated in one file — never boilerplate.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next_commands: Vec<String>,
 }
 
 #[cfg(test)]

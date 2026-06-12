@@ -16,14 +16,16 @@ use std::path::PathBuf;
 use insta::assert_json_snapshot;
 use serde_json::json;
 use symora::cli::blast_radius::{BlastRadius, DepthBucket, RiskLevel};
+use symora::cli::commands::diagnostics::{DiagnosticsOutput, EnhancedDiagnostic};
 use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, DefinitionOutput,
     DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput, LineRange,
     LocationOutput, ParameterOutput, RefOutput, Section, ServerStatusOutput, SignatureHelpOutput,
     SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput,
-    TypeInfoOutput,
+    TypeInfoOutput, fit_to_char_budget,
 };
+use symora::models::diagnostic::DiagnosticsStatus;
 use symora::models::lsp::{CallHierarchyItem, TypeHierarchyItem};
 use symora::models::symbol::{Language, Location, Symbol, SymbolKind};
 
@@ -104,6 +106,45 @@ fn section_with_hints_and_next_commands() {
     "###);
 }
 
+/// Pins the post-fit shape and the disclosure wording of the
+/// `output.max_response_chars` size ceiling: items dropped whole from the
+/// tail, `showing` updated, `truncated` set, `count` untouched, one hint
+/// naming the config key — and no new envelope keys.
+#[test]
+fn section_fitted_to_char_budget() {
+    let items: Vec<String> = (1..=10)
+        .map(|i| format!("src/module_{i:02}.rs:1: reference"))
+        .collect();
+    let mut value = serde_json::to_value(Section::new(items)).unwrap();
+
+    let fitted = fit_to_char_budget(&mut value, 300, &|v: &serde_json::Value| {
+        serde_json::to_string(v)
+            .map(|s| s.chars().count())
+            .unwrap_or(usize::MAX)
+    });
+
+    assert!(fitted);
+    assert_json_snapshot!(value);
+}
+
+/// Pins the disclosure field of `context --with-bodies`: present only on
+/// sections where body attachment ran, equal to the number of items
+/// carrying a `body`.
+#[test]
+fn section_with_bodies_included() {
+    let section = Section::new(vec![1u32]).with_bodies_included(Some(1));
+    assert_json_snapshot!(section, @r###"
+    {
+      "count": 1,
+      "showing": 1,
+      "items": [
+        1
+      ],
+      "bodies_included": 1
+    }
+    "###);
+}
+
 #[test]
 fn section_with_structured_error() {
     let section: Section<i32> =
@@ -138,6 +179,7 @@ fn output_error_all_codes_serialize_in_snake_case() {
         ErrorCode::StoreNotInitialized,
         ErrorCode::AlreadyExists,
         ErrorCode::Conflict,
+        ErrorCode::PreconditionFailed,
         ErrorCode::FileTooLarge,
         ErrorCode::Io,
     ];
@@ -238,6 +280,30 @@ fn diagnostic_output_full() {
 }
 
 #[test]
+fn diagnostics_output_flattened_section_with_status() {
+    let out = DiagnosticsOutput {
+        file: "src/main.rs".to_string(),
+        status: DiagnosticsStatus::Unconfirmed,
+        diagnostics: Section::new(vec![EnhancedDiagnostic {
+            base: DiagnosticOutput {
+                severity: "error".to_string(),
+                message: "type mismatch".to_string(),
+                line: 30,
+                column: 8,
+                end_line: 30,
+                end_column: 16,
+                code: Some("E0308".to_string()),
+                source: Some("rust-analyzer".to_string()),
+                tags: vec![],
+            },
+            context: vec![],
+            suggestions: vec![],
+        }]),
+    };
+    assert_json_snapshot!(out);
+}
+
+#[test]
 fn call_hierarchy_output_with_call_site() {
     let item = CallHierarchyItem {
         name: "process".to_string(),
@@ -247,6 +313,29 @@ fn call_hierarchy_output_with_call_site() {
     };
     let out = CallHierarchyOutput::from_item(&item, &root());
     assert_json_snapshot!(out);
+}
+
+/// `body` appears on a callee item only when `context --with-bodies`
+/// admitted it — every other producer leaves it `None` (omitted).
+#[test]
+fn call_hierarchy_output_with_body() {
+    let out = CallHierarchyOutput {
+        name: "callee".to_string(),
+        location: sample_location(12, 4),
+        call_site: None,
+        body: Some("fn callee() {}".to_string()),
+    };
+    assert_json_snapshot!(out, @r###"
+    {
+      "name": "callee",
+      "location": {
+        "file": "src/main.rs",
+        "line": 12,
+        "column": 4
+      },
+      "body": "fn callee() {}"
+    }
+    "###);
 }
 
 #[test]
@@ -300,6 +389,31 @@ fn type_info_output_with_detail() {
     };
     let out = TypeInfoOutput::from_item(&item, &root());
     assert_json_snapshot!(out);
+}
+
+/// `body` appears on the type item only when `context --with-bodies`
+/// admitted it — every other producer leaves it `None` (omitted).
+#[test]
+fn type_info_output_with_body() {
+    let out = TypeInfoOutput {
+        name: "Config".to_string(),
+        kind: "struct".to_string(),
+        location: sample_location(5, 12),
+        detail: None,
+        body: Some("struct Config { path: PathBuf }".to_string()),
+    };
+    assert_json_snapshot!(out, @r###"
+    {
+      "name": "Config",
+      "kind": "struct",
+      "location": {
+        "file": "src/main.rs",
+        "line": 5,
+        "column": 12
+      },
+      "body": "struct Config { path: PathBuf }"
+    }
+    "###);
 }
 
 #[test]
@@ -386,6 +500,7 @@ fn impact_output_full() {
             risk: RiskLevel::Medium,
             confidence: 0.9,
         }),
+        next_commands: vec!["symora impact src/main.rs:12:4 --depth 2".to_string()],
     };
     assert_json_snapshot!(out);
 }
@@ -413,6 +528,7 @@ fn impact_output_without_blast_radius() {
         },
         files: vec![],
         blast_radius: None,
+        next_commands: vec![],
     };
     assert_json_snapshot!(out);
 }

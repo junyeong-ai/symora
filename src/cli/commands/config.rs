@@ -90,6 +90,7 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
             "calls_limit": config.lsp.calls_limit,
             "type_hierarchy_limit": config.lsp.type_hierarchy_limit,
             "tests_limit": config.lsp.tests_limit,
+            "servers": config.lsp.servers,
         },
         "search": {
             "limit": config.search.limit,
@@ -98,6 +99,9 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
         "daemon": {
             "max_concurrent": config.daemon.max_concurrent,
             "idle_timeout_mins": config.daemon.idle_timeout_mins,
+        },
+        "output": {
+            "max_response_chars": config.output.max_response_chars,
         },
     })
 }

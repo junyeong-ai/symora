@@ -11,6 +11,7 @@ use crate::cli::commands::{
     callers::CallersArgs,
     context::ContextArgs,
     def::DefArgs,
+    diagnostics::DiagnosticsArgs,
     edit::{EditArgs, EditCommand},
     hover::HoverArgs,
     impact::ImpactArgs,
@@ -25,7 +26,7 @@ use crate::cli::commands::{
 use crate::cli::output::{BufferedSink, OutputFormat, OutputOptions};
 use crate::constants::defaults;
 
-use super::schema::LocationInput;
+use super::schema::{EditTargetInput, LocationInput};
 
 /// Captured command output plus whether the command reported a handled
 /// failure (`print_error`), so the MCP layer can set `isError` truthfully.
@@ -61,6 +62,7 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "get_hover" => run_hover(arguments, app).await,
         "get_context" => run_get_context(arguments, app).await,
         "get_impact" => run_get_impact(arguments, app).await,
+        "get_diagnostics" => run_get_diagnostics(arguments, app).await,
         "build_context_pack" => run_context_pack(arguments, app).await,
         "rename_symbol" => run_rename_symbol(arguments, app).await,
         "list_code_actions" => run_list_code_actions(arguments, app).await,
@@ -393,10 +395,18 @@ struct GetContextInput {
     tests: bool,
     #[serde(default = "default_context_all")]
     all: bool,
+    #[serde(default)]
+    with_bodies: bool,
+    #[serde(default = "default_body_tokens")]
+    body_tokens: usize,
 }
 
 fn default_context_all() -> bool {
     true
+}
+
+fn default_body_tokens() -> usize {
+    defaults::CONTEXT_BODY_TOKENS
 }
 
 async fn run_get_context(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -410,7 +420,12 @@ async fn run_get_context(args: Value, app: &App) -> Result<CapturedOutput> {
                 callees: input.callees,
                 types: input.types,
                 tests: input.tests,
+                // Pinned off: the unbudgeted target-body flag bloats every
+                // call; with_bodies is the token-budgeted route to bodies
+                // (it includes the target's).
                 body: false,
+                with_bodies: input.with_bodies,
+                body_tokens: input.body_tokens,
             },
             &a,
         )
@@ -445,6 +460,36 @@ async fn run_get_impact(args: Value, app: &App) -> Result<CapturedOutput> {
                 loc: input.loc.into_arg(),
                 limit: input.limit,
                 depth: input.depth,
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct GetDiagnosticsInput {
+    file: String,
+    severity: Option<String>,
+    source: Option<String>,
+}
+
+async fn run_get_diagnostics(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: GetDiagnosticsInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::diagnostics::execute(
+            DiagnosticsArgs {
+                file: input.file.into(),
+                severity: input
+                    .severity
+                    .map(|s| s.split(',').map(str::to_string).collect()),
+                source: input.source,
+                // Pinned off: per-diagnostic definition/type-definition and
+                // quickfix probes multiply LSP round-trips; the catalog's
+                // navigation and code-action tools cover the follow-up.
+                with_context: false,
+                with_suggestions: false,
             },
             &a,
         )
@@ -573,7 +618,7 @@ async fn run_apply_code_action(args: Value, app: &App) -> Result<CapturedOutput>
 #[derive(Deserialize)]
 struct ReplaceBodyInput {
     #[serde(flatten)]
-    loc: LocationInput,
+    target: EditTargetInput,
     body: String,
     #[serde(default)]
     dry_run: bool,
@@ -583,9 +628,10 @@ struct ReplaceBodyInput {
 
 async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: ReplaceBodyInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::ReplaceBody {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         body: input.body,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
@@ -596,7 +642,7 @@ async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
 #[derive(Deserialize)]
 struct InsertInput {
     #[serde(flatten)]
-    loc: LocationInput,
+    target: EditTargetInput,
     code: String,
     #[serde(default)]
     dry_run: bool,
@@ -606,9 +652,10 @@ struct InsertInput {
 
 async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: InsertInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::InsertBefore {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         code: input.code,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
@@ -618,9 +665,10 @@ async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
 
 async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: InsertInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::InsertAfter {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
         code: input.code,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
@@ -631,7 +679,9 @@ async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
 #[derive(Deserialize)]
 struct DeleteSymbolInput {
     #[serde(flatten)]
-    loc: LocationInput,
+    target: EditTargetInput,
+    #[serde(default)]
+    expect_no_references: bool,
     #[serde(default)]
     dry_run: bool,
     #[serde(default)]
@@ -640,9 +690,11 @@ struct DeleteSymbolInput {
 
 async fn run_delete_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
     let input: DeleteSymbolInput = parse_args(args)?;
+    let (target, symbol) = input.target.into_target()?;
     run_edit(app, move || EditCommand::Delete {
-        target: input.loc.to_string(),
-        symbol: None,
+        target,
+        symbol,
+        expect_no_references: input.expect_no_references,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
     })
@@ -657,4 +709,111 @@ async fn run_edit(
         crate::cli::commands::edit::execute(EditArgs { command: command() }, &a).await
     })
     .await
+}
+
+/// Field names each tool's input struct deserializes, keyed by tool name.
+/// Kept beside the structs so a new field and its row land together; the
+/// catalog lockstep test asserts every row is a subset of the tool's
+/// advertised schema properties — `dispatch` rejects undeclared keys, so
+/// an unadvertised field would be unreachable at runtime.
+#[cfg(test)]
+pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
+    Some(match tool {
+        "get_project_overview" => &[],
+        "get_file_overview" => &["path", "depth", "related_limit"],
+        "search_symbols" => &["query", "language", "kind", "limit"],
+        "search_content" => &["query", "language", "limit"],
+        "list_file_symbols" => &["file", "depth", "body", "signature"],
+        "inspect_symbol" => &["symbol_path", "language", "body"],
+        "find_definition" | "get_hover" => &["file", "line", "column"],
+        "find_references" => &["file", "line", "column", "snippet", "limit"],
+        "find_callers" | "find_callees" | "find_implementations" => {
+            &["file", "line", "column", "limit"]
+        }
+        "get_context" => &[
+            "file",
+            "line",
+            "column",
+            "callers",
+            "callees",
+            "types",
+            "tests",
+            "all",
+            "with_bodies",
+            "body_tokens",
+        ],
+        "get_impact" => &["file", "line", "column", "limit", "depth"],
+        "get_diagnostics" => &["file", "severity", "source"],
+        "build_context_pack" => &["tokens", "focus", "per_file", "shape"],
+        "rename_symbol" => &["file", "line", "column", "new_name", "dry_run"],
+        "list_code_actions" => &["file", "line", "column", "kind", "preferred"],
+        "apply_code_action" => &["file", "line", "column", "title", "dry_run"],
+        "replace_symbol_body" => &[
+            "file",
+            "line",
+            "column",
+            "symbol",
+            "body",
+            "dry_run",
+            "with_diagnostics",
+        ],
+        "insert_before_symbol" | "insert_after_symbol" => &[
+            "file",
+            "line",
+            "column",
+            "symbol",
+            "code",
+            "dry_run",
+            "with_diagnostics",
+        ],
+        "delete_symbol" => &[
+            "file",
+            "line",
+            "column",
+            "symbol",
+            "expect_no_references",
+            "dry_run",
+            "with_diagnostics",
+        ],
+        _ => return None,
+    })
+}
+
+/// The complementary lockstep direction: deserialize `args` into the
+/// tool's input struct and discard the value. The catalog lockstep test
+/// feeds this an object covering every advertised property, so a
+/// required struct field the catalog (and the `input_fields` row above)
+/// doesn't advertise fails here as a missing-field error instead of
+/// surfacing as a runtime invalid_argument.
+#[cfg(test)]
+pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), String>> {
+    fn check<T: serde::de::DeserializeOwned>(args: Value) -> Result<(), String> {
+        serde_json::from_value::<T>(args)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+    Some(match tool {
+        "get_project_overview" => Ok(()),
+        "get_file_overview" => check::<FileOverviewInput>(args),
+        "search_symbols" => check::<SearchSymbolsInput>(args),
+        "search_content" => check::<SearchContentInput>(args),
+        "list_file_symbols" => check::<ListFileSymbolsInput>(args),
+        "inspect_symbol" => check::<InspectSymbolInput>(args),
+        "find_definition" | "get_hover" => check::<LocationInput>(args),
+        "find_references" => check::<FindReferencesInput>(args),
+        "find_callers" | "find_callees" | "find_implementations" => {
+            check::<CallHierarchyInput>(args)
+        }
+        "get_context" => check::<GetContextInput>(args),
+        "get_impact" => check::<GetImpactInput>(args),
+        "get_diagnostics" => check::<GetDiagnosticsInput>(args),
+        "build_context_pack" => check::<ContextPackInput>(args),
+        "rename_symbol" => check::<RenameSymbolInput>(args),
+        "list_code_actions" => check::<ListCodeActionsInput>(args),
+        "apply_code_action" => check::<ApplyCodeActionInput>(args),
+        "replace_symbol_body" => check::<ReplaceBodyInput>(args),
+        "insert_before_symbol" | "insert_after_symbol" => check::<InsertInput>(args),
+        "delete_symbol" => check::<DeleteSymbolInput>(args),
+        _ => return None,
+    })
 }

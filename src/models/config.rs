@@ -1,3 +1,6 @@
+use std::fmt;
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use super::symbol::Language;
@@ -15,6 +18,9 @@ pub struct SymoraConfig {
 
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    #[serde(default)]
+    pub output: OutputConfig,
 
     #[serde(default)]
     pub test: TestConfig,
@@ -91,6 +97,17 @@ pub struct LspConfig {
     /// reported as unconfirmed rather than synthesized as clean.
     #[serde(default = "defaults::diagnostics_wait_ms")]
     pub diagnostics_wait_ms: u64,
+
+    /// [lsp.servers.<lang>] launch overrides, keyed by Language::lsp_id().
+    /// Only validated (canonical-key) entries live here.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub servers: std::collections::HashMap<String, ServerOverride>,
+
+    /// Rejected [lsp.servers] stanzas from the last resolve (non-canonical
+    /// keys, unknown fields, mistyped values) — never applied, never
+    /// serialized. Disclosed by `symora doctor` as `config_errors`.
+    #[serde(skip)]
+    pub server_override_errors: Vec<ServerOverrideError>,
 }
 
 impl Default for LspConfig {
@@ -105,7 +122,38 @@ impl Default for LspConfig {
             type_hierarchy_limit: defaults::type_hierarchy_limit(),
             tests_limit: defaults::tests_limit(),
             diagnostics_wait_ms: defaults::diagnostics_wait_ms(),
+            servers: std::collections::HashMap::new(),
+            server_override_errors: Vec::new(),
         }
+    }
+}
+
+/// A [lsp.servers.<lang>] launch override. An absent field inherits the
+/// builtin default for that server; an explicit `args = []` means no args.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ServerTier>,
+}
+
+/// A rejected [lsp.servers] stanza or field, recorded at config
+/// resolution. Never serialized; carried so `doctor` can disclose
+/// overrides that did not apply without re-parsing config. Display
+/// matches ConfigError::InvalidValue: "Invalid value for '{key}':
+/// {message}".
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerOverrideError {
+    pub key: String,
+    pub message: String,
+}
+
+impl fmt::Display for ServerOverrideError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Invalid value for '{}': {}", self.key, self.message)
     }
 }
 
@@ -152,6 +200,60 @@ pub(crate) mod defaults {
     }
     pub fn idle_timeout_mins() -> u64 {
         30
+    }
+
+    // Output
+    pub fn max_response_chars() -> usize {
+        20_000
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerTier {
+    /// Fast servers (< 15s init): rust-analyzer, clangd, gopls
+    Fast,
+    /// Standard servers (15-45s init): intelephense, kotlin-ls, ruby-lsp
+    Standard,
+    /// Slow servers (45-120s init): pyright, typescript-language-server, jdtls
+    Slow,
+}
+
+impl ServerTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Standard => "standard",
+            Self::Slow => "slow",
+        }
+    }
+
+    pub fn init_timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_secs(15),
+            Self::Standard => Duration::from_secs(45),
+            Self::Slow => Duration::from_secs(120),
+        }
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_secs(15),
+            Self::Standard => Duration::from_secs(30),
+            Self::Slow => Duration::from_secs(60),
+        }
+    }
+
+    pub fn cross_file_timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_secs(20),
+            Self::Standard => Duration::from_secs(45),
+            Self::Slow => Duration::from_secs(90),
+        }
+    }
+
+    pub fn shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(5)
     }
 }
 
@@ -201,6 +303,24 @@ impl Default for DaemonConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// Char ceiling on each emitted JSON response, measured on the exact
+    /// serialized string in the active format. When a response exceeds it,
+    /// Section items are dropped whole (never reshaped) until it fits; the
+    /// reduction is disclosed via truncated + a hint. 0 disables.
+    #[serde(default = "defaults::max_response_chars")]
+    pub max_response_chars: usize,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            max_response_chars: defaults::max_response_chars(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TestConfig {
     #[serde(default)]
@@ -226,6 +346,7 @@ mod tests {
         assert_eq!(config.lsp.tests_limit, 10);
         assert_eq!(config.search.limit, 100);
         assert_eq!(config.daemon.idle_timeout_mins, 30);
+        assert_eq!(config.output.max_response_chars, 20_000);
     }
 
     #[test]

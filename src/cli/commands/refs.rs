@@ -4,6 +4,7 @@ use clap::Args;
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
+use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::cli::utils::{extract_signature, read_line_at, read_lines_around};
 use crate::cli::{LocationArg, OutputError};
 
@@ -80,12 +81,18 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                     .and_then(|symbol| extract_signature(symbol.body.as_deref())),
             );
 
-            let hints = refs_hints(&items, total, limit);
+            let anchor = format!(
+                "{}:{}:{}",
+                ctx.relative_path(&analysis.anchor().file),
+                analysis.anchor().line,
+                analysis.anchor().column,
+            );
+            let next_commands = refs_next_commands(&items, total, limit, &anchor);
             let indexing = app.lsp.indexing_degradation(analysis.language()).await;
             ctx.print_success(RefsOutput {
                 target,
                 references: Section::with_total(items, total)
-                    .with_hints(hints)
+                    .with_next_commands(next_commands)
                     .with_indexing(indexing),
             });
         }
@@ -121,41 +128,106 @@ fn refs_error(
     mapped
 }
 
-fn refs_hints(items: &[LocationOutput], total: usize, limit: usize) -> Vec<String> {
-    let mut hints = Vec::new();
+/// Gated follow-up commands for a reference list, in fixed priority order:
+/// a single reference is the declaration itself, so `usage` answers what
+/// the list couldn't; a truncated multi-file spread is summarized whole by
+/// one `impact` call (cheaper than re-paying the reference query with a
+/// raised limit); a multi-reference set concentrated in one file — whether
+/// complete or truncated — reads best through `context --all` there. The
+/// truncation gate requires the spread (`unique_files > 1`) so a
+/// single-file truncation steers to `context`, never bouncing between
+/// `refs` and `impact`.
+fn refs_next_commands(
+    items: &[LocationOutput],
+    total: usize,
+    limit: usize,
+    anchor: &str,
+) -> Vec<String> {
+    let unique_files = items
+        .iter()
+        .map(|item| item.file.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    let mut commands = Vec::new();
     if total == 1 {
-        hints.push("Only the declaration reference was found; try `symora usage <location>` for broader symbol-family analysis".to_string());
+        commands.push(format!("symora usage {anchor}"));
     }
-    if total > limit {
-        hints.push("Increase --limit to inspect more references or add --snippet/--context for quicker triage".to_string());
+    if total > limit && unique_files > 1 {
+        commands.push(format!("symora impact {anchor}"));
     }
-    if items.len() > 1 {
-        let unique_files = items
-            .iter()
-            .map(|item| item.file.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        if unique_files == 1 {
-            hints.push("All references are in one file; use `symora context <location> --all` for nearby semantic context".to_string());
-        }
+    if is_single_file_concentration(unique_files, total) {
+        commands.push(format!("symora context {anchor} --all"));
     }
-    hints.truncate(2);
-    hints
+    commands.truncate(2);
+    commands
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn refs_hints_include_self_only_guidance() {
-        let items = vec![LocationOutput {
-            file: "src/main.rs".to_string(),
-            line: 10,
+    fn item(file: &str, line: u32) -> LocationOutput {
+        LocationOutput {
+            file: file.to_string(),
+            line,
             column: 5,
             snippet: None,
-        }];
-        let hints = refs_hints(&items, 1, 20);
-        assert!(hints.iter().any(|h| h.contains("declaration reference")));
+        }
+    }
+
+    #[test]
+    fn declaration_only_steers_to_usage() {
+        let items = vec![item("src/main.rs", 10)];
+        assert_eq!(
+            refs_next_commands(&items, 1, 20, "src/main.rs:10:5"),
+            vec!["symora usage src/main.rs:10:5"]
+        );
+    }
+
+    #[test]
+    fn multi_file_truncation_steers_to_impact() {
+        let items = vec![item("src/a.rs", 1), item("src/b.rs", 2)];
+        assert_eq!(
+            refs_next_commands(&items, 30, 20, "src/main.rs:10:5"),
+            vec!["symora impact src/main.rs:10:5"]
+        );
+    }
+
+    #[test]
+    fn single_file_truncation_steers_to_context_not_impact() {
+        let items = vec![item("src/a.rs", 1), item("src/a.rs", 2)];
+        assert_eq!(
+            refs_next_commands(&items, 30, 20, "src/main.rs:10:5"),
+            vec!["symora context src/main.rs:10:5 --all"]
+        );
+    }
+
+    #[test]
+    fn single_file_concentration_steers_to_context() {
+        let items = vec![
+            item("src/a.rs", 1),
+            item("src/a.rs", 2),
+            item("src/a.rs", 3),
+        ];
+        assert_eq!(
+            refs_next_commands(&items, 3, 20, "src/main.rs:10:5"),
+            vec!["symora context src/main.rs:10:5 --all"]
+        );
+    }
+
+    #[test]
+    fn complete_multi_file_spread_emits_nothing() {
+        let items = vec![
+            item("src/a.rs", 1),
+            item("src/b.rs", 2),
+            item("src/a.rs", 3),
+        ];
+        assert!(refs_next_commands(&items, 3, 20, "src/main.rs:10:5").is_empty());
+    }
+
+    #[test]
+    fn empty_result_emits_nothing() {
+        assert!(refs_next_commands(&[], 0, 20, "src/main.rs:10:5").is_empty());
     }
 }

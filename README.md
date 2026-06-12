@@ -110,6 +110,7 @@ symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
 symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
 symora edit delete src/main.rs:42:4 --dry-run          # dangling 참조를 함께 보고
+symora edit delete src/main.rs:42:4 --expect-no-references  # 참조 0건이 검증된 경우에만 삭제
 symora edit replace src/main.rs:10:1 --text "new code" --dry-run
 symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
 symora format src/main.rs
@@ -195,6 +196,16 @@ symora config init --global
 - daemon 동작
 - 테스트 파일 패턴
 - ignore 경로
+- 언어 서버 실행 오버라이드 (`[lsp.servers.<lang>]`: command/args/tier)
+
+```toml
+[lsp.servers.typescript]
+command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
+args = ["--stdio"]   # 생략 시 기본 args 상속
+tier = "slow"        # 생략 가능; fast|standard|slow
+```
+
+키는 `symora doctor`가 출력하는 `language` id입니다 — 잘못된 키는 doctor의 `config_errors`로 보고되며 적용되지 않습니다. daemon은 시작 시 설정을 읽으므로 변경 후 `symora daemon restart`를 실행하세요.
 
 ---
 
@@ -300,7 +311,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor 등이 �
 symora mcp serve --transport http --port 8765
 ```
 
-도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다.
+도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`는 `file`과 함께 `symbol`(예: 'Class/method') 또는 `line` 중 정확히 하나로 대상을 지정합니다. `delete_symbol`은 `expect_no_references` 옵션으로 참조 0건 검증을 삭제의 전제 조건으로 만들 수 있으며, 거부 시 `precondition_failed` 오류를 반환합니다.
 
 ---
 

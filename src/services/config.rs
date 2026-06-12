@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::error::ConfigError;
-use crate::models::config::SymoraConfig;
+use crate::models::config::{ServerOverride, ServerOverrideError, SymoraConfig};
+use crate::models::symbol::Language;
 
 #[async_trait]
 pub trait ConfigService: Send + Sync {
@@ -187,6 +190,8 @@ struct RawSymoraConfig {
     #[serde(default)]
     daemon: RawDaemonConfig,
     #[serde(default)]
+    output: RawOutputConfig,
+    #[serde(default)]
     test: crate::models::config::TestConfig,
 }
 
@@ -201,6 +206,12 @@ struct RawLspConfig {
     type_hierarchy_limit: Option<usize>,
     tests_limit: Option<usize>,
     diagnostics_wait_ms: Option<u64>,
+    /// Raw [lsp.servers.<lang>] stanzas. Kept as TOML tables so
+    /// `resolve_server_overrides` can partition unknown keys AND unknown
+    /// fields into corrective errors instead of failing the whole config
+    /// or silently dropping a typo'd field.
+    #[serde(default)]
+    servers: HashMap<String, toml::Table>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -215,6 +226,11 @@ struct RawDaemonConfig {
     idle_timeout_mins: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RawOutputConfig {
+    max_response_chars: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------
 // Merge raw configs: overlay.field.or(base.field) preserves explicit values
 // ---------------------------------------------------------------------------
@@ -225,6 +241,7 @@ fn merge_raw_config(base: RawSymoraConfig, overlay: RawSymoraConfig) -> RawSymor
         lsp: merge_raw_lsp(base.lsp, overlay.lsp),
         search: merge_raw_search(base.search, overlay.search),
         daemon: merge_raw_daemon(base.daemon, overlay.daemon),
+        output: merge_raw_output(base.output, overlay.output),
         test: merge_test(base.test, overlay.test),
     }
 }
@@ -260,6 +277,11 @@ fn merge_raw_lsp(base: RawLspConfig, overlay: RawLspConfig) -> RawLspConfig {
         type_hierarchy_limit: overlay.type_hierarchy_limit.or(base.type_hierarchy_limit),
         tests_limit: overlay.tests_limit.or(base.tests_limit),
         diagnostics_wait_ms: overlay.diagnostics_wait_ms.or(base.diagnostics_wait_ms),
+        servers: {
+            let mut merged = base.servers;
+            merged.extend(overlay.servers);
+            merged
+        },
     }
 }
 
@@ -274,6 +296,12 @@ fn merge_raw_daemon(base: RawDaemonConfig, overlay: RawDaemonConfig) -> RawDaemo
     RawDaemonConfig {
         max_concurrent: overlay.max_concurrent.or(base.max_concurrent),
         idle_timeout_mins: overlay.idle_timeout_mins.or(base.idle_timeout_mins),
+    }
+}
+
+fn merge_raw_output(base: RawOutputConfig, overlay: RawOutputConfig) -> RawOutputConfig {
+    RawOutputConfig {
+        max_response_chars: overlay.max_response_chars.or(base.max_response_chars),
     }
 }
 
@@ -296,6 +324,8 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
     use crate::models::config::defaults;
     use crate::models::config::*;
 
+    let (servers, server_override_errors) = resolve_server_overrides(raw.lsp.servers);
+
     SymoraConfig {
         project: raw.project,
         lsp: LspConfig {
@@ -314,6 +344,8 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
                 .lsp
                 .diagnostics_wait_ms
                 .unwrap_or_else(defaults::diagnostics_wait_ms),
+            servers,
+            server_override_errors,
         },
         search: SearchConfig {
             limit: raw.search.limit.unwrap_or_else(defaults::search_limit),
@@ -332,8 +364,75 @@ fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
                 .idle_timeout_mins
                 .unwrap_or_else(defaults::idle_timeout_mins),
         },
+        output: OutputConfig {
+            max_response_chars: raw
+                .output
+                .max_response_chars
+                .unwrap_or_else(defaults::max_response_chars),
+        },
         test: raw.test,
     }
+}
+
+/// The field set a [lsp.servers.<lang>] stanza accepts — the
+/// `ServerOverride` fields, kept in lockstep by the unit test below.
+const SERVER_OVERRIDE_FIELDS: [&str; 3] = ["command", "args", "tier"];
+
+/// Partition [lsp.servers] stanzas: strictly canonical `Language::lsp_id`
+/// keys with only known fields are applied; alias keys, unknown keys,
+/// unknown fields, and mistyped values are recorded with a corrective
+/// message and the stanza dropped — never applied, never a load error
+/// for the rest of the config. A stanza with an unknown field is
+/// rejected whole: applying its remainder would let a typo'd `command`
+/// silently fall back to the builtin launch.
+fn resolve_server_overrides(
+    raw: HashMap<String, toml::Table>,
+) -> (HashMap<String, ServerOverride>, Vec<ServerOverrideError>) {
+    let mut applied = HashMap::new();
+    let mut errors = Vec::new();
+    for (key, table) in raw {
+        match Language::from_str(&key) {
+            Ok(language) if language.lsp_id() == key => {
+                let unknown_fields: Vec<&String> = table
+                    .keys()
+                    .filter(|field| !SERVER_OVERRIDE_FIELDS.contains(&field.as_str()))
+                    .collect();
+                if !unknown_fields.is_empty() {
+                    errors.extend(unknown_fields.into_iter().map(|field| ServerOverrideError {
+                        key: format!("lsp.servers.{key}.{field}"),
+                        message: format!(
+                            "unknown field `{field}` — valid fields are `{}`",
+                            SERVER_OVERRIDE_FIELDS.join("`, `")
+                        ),
+                    }));
+                    continue;
+                }
+                match toml::Value::Table(table).try_into::<ServerOverride>() {
+                    Ok(value) => {
+                        applied.insert(key, value);
+                    }
+                    Err(e) => errors.push(ServerOverrideError {
+                        key: format!("lsp.servers.{key}"),
+                        message: e.to_string().trim().to_string(),
+                    }),
+                }
+            }
+            Ok(language) => errors.push(ServerOverrideError {
+                key: format!("lsp.servers.{key}"),
+                message: format!(
+                    "use `{}` (the canonical language id shown by `symora doctor`)",
+                    language.lsp_id()
+                ),
+            }),
+            Err(_) => errors.push(ServerOverrideError {
+                key: format!("lsp.servers.{key}"),
+                message: "unknown language — use the `language` id shown by `symora doctor`"
+                    .to_string(),
+            }),
+        }
+    }
+    errors.sort_by(|a, b| a.key.cmp(&b.key));
+    (applied, errors)
 }
 
 // ---------------------------------------------------------------------------
@@ -366,4 +465,154 @@ fn apply_env_overrides(mut config: SymoraConfig) -> SymoraConfig {
         config.lsp.timeout_secs = timeout;
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::config::ServerTier;
+
+    fn resolve_str(content: &str) -> SymoraConfig {
+        let raw: RawSymoraConfig = toml::from_str(content).unwrap();
+        resolve_config(raw)
+    }
+
+    #[test]
+    fn server_override_parses_and_resolves() {
+        let config = resolve_str(
+            r#"
+[lsp.servers.typescript]
+command = "/custom/typescript-language-server"
+args = ["--stdio"]
+tier = "slow"
+"#,
+        );
+        let o = &config.lsp.servers["typescript"];
+        assert_eq!(
+            o.command.as_deref(),
+            Some("/custom/typescript-language-server")
+        );
+        assert_eq!(o.args, Some(vec!["--stdio".to_string()]));
+        assert_eq!(o.tier, Some(ServerTier::Slow));
+        assert!(config.lsp.server_override_errors.is_empty());
+    }
+
+    #[test]
+    fn server_override_unknown_key_recorded_not_applied() {
+        let config = resolve_str("[lsp.servers.klingon]\ncommand = \"/nope\"\n");
+        assert!(config.lsp.servers.is_empty());
+        assert_eq!(config.lsp.server_override_errors.len(), 1);
+        assert_eq!(
+            config.lsp.server_override_errors[0].key,
+            "lsp.servers.klingon"
+        );
+    }
+
+    #[test]
+    fn server_override_alias_key_suggests_canonical() {
+        let config = resolve_str(
+            "[lsp.servers.ts]\ncommand = \"/a\"\n\n[lsp.servers.bash]\ncommand = \"/b\"\n",
+        );
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 2);
+        let ts = errors.iter().find(|e| e.key == "lsp.servers.ts").unwrap();
+        assert!(ts.message.contains("typescript"));
+        let bash = errors.iter().find(|e| e.key == "lsp.servers.bash").unwrap();
+        assert!(bash.message.contains("shellscript"));
+    }
+
+    #[test]
+    fn server_override_unknown_field_recorded_not_applied() {
+        let config = resolve_str(
+            r#"
+[lsp]
+timeout_secs = 99
+
+[lsp.servers.rust]
+comand = "/custom/rust-analyzer"
+"#,
+        );
+        assert!(config.lsp.servers.is_empty());
+        assert_eq!(config.lsp.timeout_secs, 99);
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "lsp.servers.rust.comand");
+        assert!(errors[0].message.contains("unknown field `comand`"));
+        for field in SERVER_OVERRIDE_FIELDS {
+            assert!(errors[0].message.contains(&format!("`{field}`")));
+        }
+    }
+
+    #[test]
+    fn server_override_mistyped_value_recorded_not_applied() {
+        let config = resolve_str("[lsp.servers.rust]\nargs = \"--stdio\"\n");
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "lsp.servers.rust");
+    }
+
+    /// `SERVER_OVERRIDE_FIELDS` is the unknown-field gate; it must track
+    /// the `ServerOverride` struct exactly or a real field would be
+    /// rejected (or a removed one accepted).
+    #[test]
+    fn server_override_field_list_stays_in_lockstep() {
+        let full = ServerOverride {
+            command: Some("/x".to_string()),
+            args: Some(vec![]),
+            tier: Some(ServerTier::Fast),
+        };
+        let table = toml::Value::try_from(&full).unwrap();
+        let mut keys: Vec<&str> = table
+            .as_table()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = SERVER_OVERRIDE_FIELDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn server_override_rejection_preserves_rest_of_config() {
+        let config = resolve_str(
+            r#"
+[lsp]
+timeout_secs = 99
+
+[lsp.servers.klingon]
+command = "/nope"
+
+[lsp.servers.rust]
+command = "/custom/rust-analyzer"
+"#,
+        );
+        assert_eq!(config.lsp.timeout_secs, 99);
+        assert_eq!(
+            config.lsp.servers["rust"].command.as_deref(),
+            Some("/custom/rust-analyzer")
+        );
+        assert_eq!(config.lsp.server_override_errors.len(), 1);
+        assert_eq!(
+            config.lsp.server_override_errors[0].key,
+            "lsp.servers.klingon"
+        );
+    }
+
+    #[test]
+    fn project_server_override_replaces_global() {
+        let global: RawSymoraConfig =
+            toml::from_str("[lsp.servers.rust]\ncommand = \"/global/rust-analyzer\"\nargs = []\n")
+                .unwrap();
+        let project: RawSymoraConfig =
+            toml::from_str("[lsp.servers.rust]\ncommand = \"/project/rust-analyzer\"\n").unwrap();
+        let resolved = resolve_config(merge_raw_config(global, project));
+        let o = &resolved.lsp.servers["rust"];
+        assert_eq!(o.command.as_deref(), Some("/project/rust-analyzer"));
+        // Wholesale replacement: the global stanza's explicit args are gone.
+        assert_eq!(o.args, None);
+    }
 }

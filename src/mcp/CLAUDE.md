@@ -1,16 +1,17 @@
 # src/mcp — MCP Server Rules
 
-`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set, e.g. `get_context` fixes `body: false`).
+`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set — e.g. `get_context` pins the unbudgeted `body` flag false and instead exposes the `with_bodies` option, which attaches the target's whole body and budgets callee/type bodies under body_tokens, disclosing omissions via bodies_included).
 
 ## Catalog and handlers must stay in lockstep
 
-Three things are co-versioned for every tool:
+Four things are co-versioned for every tool:
 
 1. An entry in `tools/catalog.rs` (the `tools/list` schema)
 2. An input struct in `tools/handlers.rs`
 3. A branch in the `dispatch` match
+4. Every field the input struct deserializes must be an advertised property in the catalog schema. `dispatch` rejects unknown argument keys against the catalog (`check_unknown_arguments`), so an undeclared-but-deserialized field is unreachable at runtime — adding a tool option means touching the catalog entry and the input struct in the same change.
 
-A test in `tools/mod.rs` enumerates the required tool names. Adding a tool means touching all three; removing one means removing all three. The test will fail if they drift.
+Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep in both directions through the test-only registries kept beside the input structs in `tools/handlers.rs`: every field in the `input_fields` registry must be an advertised catalog property, and an args object covering every advertised property must deserialize into the input struct (`deserialize_input`). Adding a tool means touching all four; removing one means removing all four. The tests will fail if the registries drift. Property names mirror the backing command's field (`path` on get_file_overview vs `file` on get_diagnostics and list_file_symbols is intentional, not drift).
 
 ## Mutating tools advertise themselves — twice, in lockstep
 
@@ -22,7 +23,7 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 ## Location input convention
 
-Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the three fields. New location-taking tools follow the same pattern.
+Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the three fields. New location-taking tools follow the same pattern. The edit tools embed `EditTargetInput` instead (file plus exactly one of symbol or line); navigation/analysis tools keep `LocationInput`.
 
 ## Output discipline
 

@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::infra::lsp::servers::{Platform, ServerTier, check_all_servers};
+use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
+use crate::services::store::SymbolExtractor;
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -17,6 +20,11 @@ struct DoctorOutput {
     platform: String,
     languages: Vec<LanguageStatus>,
     summary: Summary,
+    /// Config problems affecting this report: rejected [lsp.servers] keys
+    /// (recorded at load, never applied) and/or a whole-config load
+    /// failure (the report then reflects builtin defaults).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    config_errors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -27,6 +35,19 @@ struct LanguageStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
     tier: String,
+    /// Static build facts, independent of server install state: whether the
+    /// compiled-in index extractor and the tree-sitter AST grammar cover
+    /// this language. Always emitted — `false` is the load-bearing value.
+    symbol_extraction: bool,
+    ast_search: bool,
+    /// Some("config") iff an [lsp.servers] override applies — what the
+    /// next server start will use. Omitted for builtin servers; that
+    /// absence is how an agent detects an override that did not apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// Effective spawn command; present iff `source` is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install: Option<String>,
 }
@@ -40,7 +61,23 @@ struct Summary {
 
 pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let all_servers = check_all_servers();
+
+    // Re-load through the same ConfigService every command uses, so the
+    // report reflects on-disk config and can disclose load failures that
+    // App::new falls back from silently.
+    let (overrides, config_errors) = match app.config_service.load(false).await {
+        Ok(config) => {
+            let errors = config
+                .lsp
+                .server_override_errors
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            (config.lsp.servers, errors)
+        }
+        Err(e) => (HashMap::new(), vec![e.to_string()]),
+    };
+    let all_servers = check_all_servers(servers::merged(&overrides));
 
     let languages: Vec<LanguageStatus> = all_servers
         .into_iter()
@@ -49,17 +86,32 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 .as_ref()
                 .is_none_or(|filter| s.language.to_string().contains(&filter.to_lowercase()))
         })
-        .map(|s| LanguageStatus {
-            language: s.language.to_string(),
-            server: s.name.to_string(),
-            installed: s.installed,
-            version: s.version,
-            tier: tier_to_string(s.tier),
-            install: if s.installed {
+        .map(|s| {
+            let overridden = s.source == ServerSource::Config;
+            let install = if s.installed {
                 None
+            } else if overridden {
+                Some(format!(
+                    "fix [lsp.servers.{}]: command `{}` not found or not executable — \
+                     correct the path or remove the override to fall back to the builtin \
+                     server",
+                    s.language, s.command
+                ))
             } else {
                 Some(s.install_instruction.to_string())
-            },
+            };
+            LanguageStatus {
+                language: s.language.to_string(),
+                server: s.name.to_string(),
+                installed: s.installed,
+                version: s.version,
+                tier: s.tier.as_str().to_string(),
+                symbol_extraction: SymbolExtractor::is_supported(s.language),
+                ast_search: crate::infra::ast::is_supported(s.language),
+                source: overridden.then(|| "config".to_string()),
+                command: overridden.then_some(s.command),
+                install,
+            }
         })
         .collect();
 
@@ -74,19 +126,11 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
             missing: total - installed_count,
         },
         languages,
+        config_errors,
     };
 
     ctx.print_success(response);
     Ok(())
-}
-
-fn tier_to_string(tier: ServerTier) -> String {
-    match tier {
-        ServerTier::Fast => "fast",
-        ServerTier::Standard => "standard",
-        ServerTier::Slow => "slow",
-    }
-    .to_string()
 }
 
 fn platform_to_string(platform: Platform) -> String {
@@ -96,4 +140,31 @@ fn platform_to_string(platform: Platform) -> String {
         Platform::Windows => "windows",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::symbol::Language;
+
+    #[test]
+    fn language_rows_always_carry_the_capability_booleans() {
+        // Ruby has a tree-sitter AST grammar but no index extractor — the
+        // row must say both, with `false` emitted rather than omitted.
+        let status = LanguageStatus {
+            language: "ruby".to_string(),
+            server: "ruby-lsp".to_string(),
+            installed: false,
+            version: None,
+            tier: "fast".to_string(),
+            symbol_extraction: SymbolExtractor::is_supported(Language::Ruby),
+            ast_search: crate::infra::ast::is_supported(Language::Ruby),
+            source: None,
+            command: None,
+            install: None,
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["symbol_extraction"], false);
+        assert_eq!(value["ast_search"], true);
+    }
 }
