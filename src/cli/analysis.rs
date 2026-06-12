@@ -68,6 +68,7 @@ impl LocationAnalysis {
                 file: anchor.file,
                 line: symbol.location.line,
                 column: symbol.location.column,
+                column_explicit: true,
             },
             None => anchor,
         };
@@ -94,6 +95,7 @@ impl LocationAnalysis {
             file: file.to_path_buf(),
             line: symbol.location.line,
             column: symbol.location.column,
+            column_explicit: true,
         };
         let language = Language::from_path(file);
         let references = lsp

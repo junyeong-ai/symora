@@ -54,7 +54,8 @@ pub fn edit_target_schema() -> Value {
             (
                 "column",
                 "integer",
-                "1-indexed column number (default 1). Only valid together with line.",
+                "1-indexed column for position-precise targeting. Only valid together \
+                 with line; omitted, the symbol declared on the line is targeted.",
             ),
         ],
         &["file"],
@@ -154,9 +155,10 @@ pub struct EditTargetInput {
 impl EditTargetInput {
     /// Convert into the edit command layer's `(target, symbol)` pair,
     /// enforcing exactly one of `symbol` or `line`. Line mode produces
-    /// the same `file:line:column` target string as `LocationInput`
-    /// (column defaulting to 1), so both addressing modes feed one
-    /// resolution path in the shared command layer.
+    /// the same `file:line[:column]` target string the CLI accepts — an
+    /// omitted column stays omitted, so the shared resolution path keeps
+    /// its line-addressed semantics (the symbol declared on the line)
+    /// instead of being pinned to column 1.
     pub fn into_target(self) -> anyhow::Result<(String, Option<String>)> {
         match (self.line, self.symbol) {
             (Some(_), Some(_)) => Err(anyhow::Error::new(
@@ -182,7 +184,10 @@ impl EditTargetInput {
                 ))
             }
             (Some(line), None) => Ok((
-                format!("{}:{}:{}", self.file, line, self.column.unwrap_or(1)),
+                match self.column {
+                    Some(column) => format!("{}:{}:{}", self.file, line, column),
+                    None => format!("{}:{}", self.file, line),
+                },
                 None,
             )),
             (None, Some(symbol)) => {
@@ -255,15 +260,14 @@ mod tests {
         assert_eq!(schema["additionalProperties"], json!(false));
     }
 
-    /// Line mode must build a target string byte-identical to
-    /// `LocationInput`'s `file:line:column` form, column defaulting to 1.
+    /// Line mode builds the same `file:line[:column]` string the CLI
+    /// accepts: an omitted column stays omitted (line-addressed
+    /// resolution), an explicit one is carried through.
     #[test]
     fn edit_target_input_line_mode_builds_location_target() {
         let input: EditTargetInput =
             serde_json::from_value(json!({"file": "a.rs", "line": 10})).unwrap();
-        let loc: LocationInput =
-            serde_json::from_value(json!({"file": "a.rs", "line": 10})).unwrap();
-        assert_eq!(input.into_target().unwrap(), (loc.to_string(), None));
+        assert_eq!(input.into_target().unwrap(), ("a.rs:10".to_string(), None));
 
         let input: EditTargetInput =
             serde_json::from_value(json!({"file": "a.rs", "line": 10, "column": 5})).unwrap();
