@@ -49,17 +49,44 @@ pub struct PublishedDiagnostics {
     pub items: Vec<LspDiagnostic>,
 }
 
+/// Cheap fingerprint of an overlay's backing file, captured when content
+/// is sent to the server. A later mismatch (or a failed probe) is the
+/// drift signal that triggers a content re-read on access; equality skips
+/// it. mtime+len can miss a write that lands between the caller's read
+/// and the probe — the next direct sync of that file (every targeted
+/// command performs one) heals that window, and a probe failure always
+/// reads as drift, never as fresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskState {
+    mtime: std::time::SystemTime,
+    len: u64,
+}
+
+impl DiskState {
+    async fn probe(path: &std::path::Path) -> Option<Self> {
+        let meta = tokio::fs::metadata(path).await.ok()?;
+        Some(Self {
+            mtime: meta.modified().ok()?,
+            len: meta.len(),
+        })
+    }
+}
+
 #[derive(Debug)]
 struct DocumentState {
     version: u32,
     content_hash: u64,
+    /// Fingerprint of the backing file at the time `content_hash` was
+    /// sent. `None` means the probe failed and the next access re-reads.
+    disk: Option<DiskState>,
 }
 
 impl DocumentState {
-    fn new(content: &str) -> Self {
+    fn new(content: &str, disk: Option<DiskState>) -> Self {
         Self {
             version: 1,
             content_hash: crate::infra::hash_content(content),
+            disk,
         }
     }
 
@@ -123,8 +150,31 @@ impl DocumentCache {
         }
         None
     }
+
+    fn remove(&mut self, uri: &str) -> bool {
+        self.lru_order.retain(|u| u != uri);
+        self.docs.remove(uri).is_some()
+    }
+
+    /// Snapshot for the drift sweep: every open document with the disk
+    /// fingerprint its overlay was sent under.
+    fn overlay_snapshot(&self) -> Vec<(String, Option<DiskState>)> {
+        self.docs
+            .iter()
+            .map(|(uri, state)| (uri.clone(), state.disk))
+            .collect()
+    }
 }
 
+/// Workspace-indexing readiness, derived from server signals.
+///
+/// `Ready` is reached only through an explicit signal (a quiescence
+/// notification, a drained set of indexing-progress tokens, a known
+/// readiness log line) — never assumed. `TimedOut` means the wait budget
+/// expired before any such signal: usable, but degraded, and disclosed
+/// as such via `indexing_degradation`. The state is re-evaluated by every
+/// signal that arrives — a server that reports busy (`InProgress`) and
+/// later quiescent flips back to `Ready` with no latch in between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IndexingState {
@@ -132,7 +182,6 @@ pub enum IndexingState {
     InProgress = 1,
     Ready = 2,
     TimedOut = 3,
-    Stale = 4,
 }
 
 impl IndexingState {
@@ -141,7 +190,6 @@ impl IndexingState {
             1 => Self::InProgress,
             2 => Self::Ready,
             3 => Self::TimedOut,
-            4 => Self::Stale,
             _ => Self::NotStarted,
         }
     }
@@ -173,6 +221,11 @@ pub struct LspClient {
     indexing_notify: Notify,
     terminated: AtomicBool,
     cross_file_waited: AtomicBool,
+    /// Set once the server demonstrates an explicit status protocol
+    /// (`experimental/serverStatus`). From then on the fuzzy progress and
+    /// log-line readiness heuristics stand down — a heuristic must never
+    /// overrule a server that can state readiness precisely.
+    status_channel_seen: AtomicBool,
     /// The initializationOptions payload, kept as the single source of
     /// truth for settings: servers that pull configuration at runtime
     /// (`workspace/configuration` — pyright reads `python.pythonPath`
@@ -215,6 +268,7 @@ impl LspClient {
             indexing_notify: Notify::new(),
             terminated: AtomicBool::new(false),
             cross_file_waited: AtomicBool::new(false),
+            status_channel_seen: AtomicBool::new(false),
             settings: RwLock::new(None),
         })
     }
@@ -619,6 +673,13 @@ impl LspClient {
             window: Some(window),
             text_document: Some(text_document),
             workspace: Some(workspace),
+            // `serverStatusNotification` asks rust-analyzer to send
+            // `experimental/serverStatus` — the authoritative quiescent
+            // signal the readiness state machine prefers over progress
+            // titles. Other servers ignore unknown experimental keys.
+            experimental: Some(serde_json::json!({
+                "serverStatusNotification": true
+            })),
         }
     }
 
@@ -665,6 +726,10 @@ impl LspClient {
                 language: self.language,
             });
         }
+
+        // The document-access invariant: nothing is asked of the server
+        // while an overlay it holds has drifted from disk.
+        self.refresh_drifted_overlays().await;
 
         // Generate unique request ID
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -968,14 +1033,19 @@ impl LspClient {
     }
 
     async fn sync_document_inner(&self, uri: &str, content: &str) -> Result<u32, LspError> {
+        // Fingerprint the backing file alongside the content being sent,
+        // so the drift sweep can later skip unchanged documents on a stat
+        // instead of a read.
+        let disk = DiskState::probe(&crate::models::lsp::uri_to_path(uri)).await;
         let (version, evicted) = {
             let mut cache = self.document_cache.write().await;
             let language_id = self.language.to_string().to_lowercase();
 
             if let Some(state) = cache.get_mut(uri) {
+                state.disk = disk;
                 if state.needs_update(content) {
                     state.update(content);
-                    self.invalidate_index();
+                    self.note_document_changed();
                     self.notify(
                         "textDocument/didChange",
                         Some(serde_json::json!({
@@ -988,10 +1058,10 @@ impl LspClient {
                 (state.version, None)
             } else {
                 // Opening a file the server already indexed from disk adds
-                // no new information — only a content *change* invalidates
-                // the workspace index. Invalidating here put every warm
-                // session through a pointless re-wait per first-open.
-                let state = DocumentState::new(content);
+                // no new information — only a content *change* re-arms the
+                // cross-file settle window. Re-arming here put every warm
+                // session through a pointless wait per first-open.
+                let state = DocumentState::new(content, disk);
                 let version = state.version;
                 self.notify(
                     "textDocument/didOpen",
@@ -1018,6 +1088,56 @@ impl LspClient {
                 .await;
         }
         Ok(version)
+    }
+
+    /// The document-access invariant, enforced before every request:
+    /// each overlay the server holds must match the bytes on disk.
+    /// External edits (other tools, git) change files the server has
+    /// open without a `didChange`; left alone, every cross-file answer —
+    /// references, call hierarchies, rename sites — keeps reflecting
+    /// deleted code until that exact file happens to be re-targeted.
+    ///
+    /// Check-on-access only — no polling, no watcher: a stat per open
+    /// document gates a content re-read, and only a real content change
+    /// produces a `didChange`. A document whose backing file is gone or
+    /// no longer reads as text is closed: an overlay with no bytes
+    /// behind it must not keep answering.
+    async fn refresh_drifted_overlays(&self) {
+        if *self.shutdown.read().await {
+            return;
+        }
+        let open_docs = self.document_cache.read().await.overlay_snapshot();
+        for (uri, recorded) in open_docs {
+            let path = crate::models::lsp::uri_to_path(&uri);
+            let current = DiskState::probe(&path).await;
+            if current.is_some() && current == recorded {
+                continue;
+            }
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => {
+                    if let Err(e) = self.sync_document_inner(&uri, &content).await {
+                        tracing::debug!("Failed to re-sync drifted overlay {uri}: {e}");
+                    }
+                }
+                Err(_) => self.close_document(&uri).await,
+            }
+        }
+    }
+
+    /// Close an overlay whose backing file disappeared. The close is the
+    /// honest signal — the server falls back to its own (absent) disk
+    /// view instead of answering from bytes that no longer exist.
+    async fn close_document(&self, uri: &str) {
+        let removed = self.document_cache.write().await.remove(uri);
+        if removed {
+            let _ = self
+                .notify(
+                    "textDocument/didClose",
+                    Some(serde_json::json!({ "textDocument": { "uri": uri } })),
+                )
+                .await;
+            self.note_document_changed();
+        }
     }
 
     pub fn indexing_state(&self) -> IndexingState {
@@ -1049,24 +1169,23 @@ impl LspClient {
         }
     }
 
-    pub fn invalidate_index(&self) {
-        let current = self.indexing_state();
-        if matches!(current, IndexingState::Ready | IndexingState::TimedOut) {
-            self.indexing_state
-                .store(IndexingState::Stale.to_u8(), Ordering::Release);
-            // The next cross-file query after an edit deserves a fresh
-            // settle window, not a latched skip.
-            self.cross_file_waited.store(false, Ordering::Release);
-        }
+    /// A document's content changed under this session (our own edit or
+    /// an external one picked up by the drift sweep). Readiness itself is
+    /// signal-driven and stays put — an edit doesn't unprove a server's
+    /// demonstrated quiescence, and a server that genuinely re-indexes
+    /// reports busy through its status channel — but the next cross-file
+    /// query deserves a fresh settle window, not a latched skip.
+    pub fn note_document_changed(&self) {
+        self.cross_file_waited.store(false, Ordering::Release);
     }
 
     pub async fn await_indexing_signal(&self) -> IndexingState {
         let current = self.indexing_state();
         // `TimedOut` is terminal-usable: re-waiting the full budget on
         // every request would make a slow server cost the timeout per
-        // query forever. Recovery runs through `invalidate_index` (file
-        // edits -> `Stale`) or a session restart, and degraded answers
-        // stay marked via `indexing_degradation`.
+        // query forever. Recovery is signal-driven — any later readiness
+        // signal flips the state to `Ready` — and degraded answers stay
+        // marked via `indexing_degradation` until one arrives.
         if current.is_usable() {
             return current;
         }
@@ -1092,6 +1211,11 @@ impl LspClient {
                 IndexingState::Ready
             }
             _ = tokio::time::sleep(max_wait) => {
+                // A readiness signal that raced the notify registration
+                // still counts — only an absent signal is a timeout.
+                if self.indexing_state() == IndexingState::Ready {
+                    return IndexingState::Ready;
+                }
                 tracing::debug!("{} indexing timeout", self.language);
                 self.set_indexing_state(IndexingState::TimedOut);
                 IndexingState::TimedOut
@@ -1115,12 +1239,24 @@ impl LspClient {
     }
 
     pub async fn register_default_handlers(self: &Arc<Self>) {
+        // The authoritative quiescence channel (rust-analyzer's
+        // `experimental/serverStatus`, requested via the matching client
+        // capability): quiescent=true means the workspace is fully
+        // analyzed, false that the server is (re)working — including
+        // after edits, so readiness re-evaluates instead of latching.
+        // Once a server demonstrates this channel, the fuzzy progress and
+        // log heuristics below stand down for good.
         let client_status = Arc::clone(self);
         self.on_notification("experimental/serverStatus", move |params| {
-            if let Some(quiescent) = params.get("quiescent").and_then(|v| v.as_bool())
-                && quiescent
-            {
-                client_status.set_indexing_state(IndexingState::Ready);
+            if let Some(quiescent) = params.get("quiescent").and_then(|v| v.as_bool()) {
+                client_status
+                    .status_channel_seen
+                    .store(true, Ordering::Release);
+                client_status.set_indexing_state(if quiescent {
+                    IndexingState::Ready
+                } else {
+                    IndexingState::InProgress
+                });
             }
         })
         .await;
@@ -1136,13 +1272,21 @@ impl LspClient {
         .await;
 
         let client_progress = Arc::clone(self);
+        // Heuristic for servers without a status protocol.
         // `WorkDoneProgressBegin` carries the `title`; `End` carries only
         // the token. Remember which tokens began an indexing-shaped task
-        // so the matching `end` can flip readiness — reading `title` off
-        // `end` never fires on spec-compliant servers.
+        // and flip readiness only when the LAST of them ends — flipping
+        // on the first end would present a half-built index as
+        // authoritative while a sibling phase is still running. A server
+        // that leaks a begin-token never reaches a heuristic Ready;
+        // that fails toward the disclosed `timed_out` marker, never
+        // toward a false "complete".
         let indexing_tokens: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
             Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         self.on_notification("$/progress", move |params| {
+            if client_progress.status_channel_seen.load(Ordering::Acquire) {
+                return;
+            }
             let Some(token) = params.get("token").map(|t| t.to_string()) else {
                 return;
             };
@@ -1161,20 +1305,12 @@ impl LspClient {
                         }
                     }
                 }
-                Some("end")
-                    if indexing_tokens
-                        .lock()
-                        .expect("indexing token set poisoned")
-                        .remove(&token) =>
-                {
-                    // Readiness makes any other pending begin-tokens moot;
-                    // clearing bounds the set against servers that never
-                    // end a token.
-                    indexing_tokens
-                        .lock()
-                        .expect("indexing token set poisoned")
-                        .clear();
-                    client_progress.set_indexing_state(IndexingState::Ready);
+                Some("end") => {
+                    let mut tokens = indexing_tokens.lock().expect("indexing token set poisoned");
+                    if tokens.remove(&token) && tokens.is_empty() {
+                        drop(tokens);
+                        client_progress.set_indexing_state(IndexingState::Ready);
+                    }
                 }
                 _ => {}
             }
@@ -1184,6 +1320,9 @@ impl LspClient {
         let client_log = Arc::clone(self);
         let language = self.language;
         self.on_notification("window/logMessage", move |params| {
+            if client_log.status_channel_seen.load(Ordering::Acquire) {
+                return;
+            }
             if let Some(msg) = params.get("message").and_then(|m| m.as_str())
                 && Self::is_readiness_signal(language, msg)
             {
@@ -1395,6 +1534,160 @@ impl Drop for LspClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_client() -> Arc<LspClient> {
+        LspClient::new(
+            Language::Rust,
+            PathBuf::from("/tmp"),
+            Arc::new(crate::config::LspRuntimeConfig::default()),
+        )
+    }
+
+    async fn notify_client(client: &Arc<LspClient>, method: &str, params: serde_json::Value) {
+        client
+            .handle_message(Message::Notification(Notification::new(
+                method,
+                Some(params),
+            )))
+            .await;
+    }
+
+    fn progress(token: &str, kind: &str, title: Option<&str>) -> serde_json::Value {
+        let mut value = serde_json::json!({ "kind": kind });
+        if let Some(title) = title {
+            value["title"] = serde_json::Value::String(title.to_string());
+        }
+        serde_json::json!({ "token": token, "value": value })
+    }
+
+    /// `experimental/serverStatus` drives readiness in BOTH directions:
+    /// quiescent=true is Ready, false re-opens InProgress — the state is
+    /// re-evaluated per signal, never latched on a one-shot verdict.
+    #[tokio::test]
+    async fn server_status_drives_readiness_in_both_directions() {
+        let client = test_client();
+        client.register_default_handlers().await;
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": true}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::Ready);
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": false}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::InProgress);
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": true}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::Ready);
+    }
+
+    /// A quiescence signal also clears an earlier timed-out verdict —
+    /// the degradation marker must stop the moment the server is ready.
+    #[tokio::test]
+    async fn server_status_clears_a_timed_out_verdict() {
+        let client = test_client();
+        client.register_default_handlers().await;
+        client.set_indexing_state(IndexingState::TimedOut);
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": true}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::Ready);
+    }
+
+    /// The progress heuristic flips Ready only when the LAST tracked
+    /// indexing token ends — one phase finishing while a sibling runs is
+    /// not readiness.
+    #[tokio::test]
+    async fn progress_heuristic_waits_for_all_indexing_tokens_to_drain() {
+        let client = test_client();
+        client.register_default_handlers().await;
+
+        notify_client(
+            &client,
+            "$/progress",
+            progress("t1", "begin", Some("Indexing")),
+        )
+        .await;
+        notify_client(
+            &client,
+            "$/progress",
+            progress("t2", "begin", Some("Loading workspace")),
+        )
+        .await;
+        notify_client(&client, "$/progress", progress("t1", "end", None)).await;
+        assert_eq!(
+            client.indexing_state(),
+            IndexingState::NotStarted,
+            "a sibling indexing phase is still in flight"
+        );
+
+        notify_client(&client, "$/progress", progress("t2", "end", None)).await;
+        assert_eq!(client.indexing_state(), IndexingState::Ready);
+    }
+
+    /// Once the server demonstrates an explicit status channel, progress
+    /// titles stop being readiness signals — a fuzzy heuristic must not
+    /// overrule a server that reported itself busy.
+    #[tokio::test]
+    async fn progress_heuristic_stands_down_once_the_status_channel_speaks() {
+        let client = test_client();
+        client.register_default_handlers().await;
+
+        notify_client(
+            &client,
+            "experimental/serverStatus",
+            serde_json::json!({"quiescent": false}),
+        )
+        .await;
+        notify_client(
+            &client,
+            "$/progress",
+            progress("t1", "begin", Some("Indexing")),
+        )
+        .await;
+        notify_client(&client, "$/progress", progress("t1", "end", None)).await;
+        assert_eq!(
+            client.indexing_state(),
+            IndexingState::InProgress,
+            "the status channel owns readiness once it has spoken"
+        );
+    }
+
+    /// An edit does not unprove a server's demonstrated quiescence: the
+    /// state stays Ready (servers that genuinely re-index report busy via
+    /// their status channel), so the post-edit checked-delete workflow
+    /// never starves on a signal that will never re-fire.
+    #[tokio::test]
+    async fn document_change_does_not_unprove_readiness() {
+        let client = test_client();
+        client.set_indexing_state(IndexingState::Ready);
+        client.note_document_changed();
+        assert_eq!(client.indexing_state(), IndexingState::Ready);
+
+        client.set_indexing_state(IndexingState::TimedOut);
+        client.note_document_changed();
+        assert_eq!(
+            client.indexing_state(),
+            IndexingState::TimedOut,
+            "an edit doesn't complete an incomplete index either"
+        );
+    }
 
     #[test]
     fn test_request_id_generation() {

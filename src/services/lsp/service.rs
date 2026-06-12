@@ -283,6 +283,12 @@ impl LspService for DefaultLspService {
 
     async fn indexing_degradation(&self, language: Language) -> Option<IndexingDegradation> {
         let client = self.manager.peek_client(language).await?;
+        // Readiness is strictly signal-driven (`Ready` only ever follows
+        // an explicit server signal — see `register_default_handlers`),
+        // so an unmarked answer was genuinely served from a complete
+        // index. `TimedOut` — the wait budget expired before any signal —
+        // is the one degraded state results can be computed under, and it
+        // clears the moment the server reports quiescence.
         match client.indexing_state() {
             IndexingState::TimedOut => Some(IndexingDegradation::TimedOut),
             _ => None,
@@ -306,7 +312,9 @@ pub(super) async fn ensure_indexed(client: &LspClient, file: &Path, root: &Path)
         return;
     }
 
-    if matches!(state, IndexingState::NotStarted | IndexingState::Stale) {
+    // A server that has seen no document yet may never start indexing —
+    // opening the project's entry file kicks the workspace load off.
+    if state == IndexingState::NotStarted {
         let language = Language::from_path(file);
         if let Some(entry_file) = find_project_entry(root, language, client.config())
             && let Ok(content) = tokio::fs::read_to_string(&entry_file).await
