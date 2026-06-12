@@ -33,6 +33,9 @@ pub enum WireLspError {
     ServerTerminated {
         language: Language,
     },
+    Indexing {
+        language: Language,
+    },
     Timeout {
         message: String,
     },
@@ -80,6 +83,9 @@ impl From<&LspError> for WireLspError {
                 suggestion: suggestion.clone(),
             },
             LspError::ServerTerminated { language } => Self::ServerTerminated {
+                language: *language,
+            },
+            LspError::Indexing { language } => Self::Indexing {
                 language: *language,
             },
             LspError::Timeout(msg) => Self::Timeout {
@@ -135,6 +141,7 @@ impl From<WireLspError> for LspError {
                 suggestion,
             },
             WireLspError::ServerTerminated { language } => LspError::ServerTerminated { language },
+            WireLspError::Indexing { language } => LspError::Indexing { language },
             WireLspError::Timeout { message } => LspError::Timeout(message),
             WireLspError::RequestCancelled => LspError::RequestCancelled,
             WireLspError::ServerError { code, message } => LspError::ServerError { code, message },
@@ -210,6 +217,20 @@ mod tests {
         match recovered {
             LspError::ServerTerminated { language } => assert_eq!(language, Language::Rust),
             other => panic!("expected ServerTerminated, got {other:?}"),
+        }
+    }
+
+    /// The cold-session "still indexing" answer must survive the socket
+    /// typed — daemon and direct execution map it to the same structured
+    /// error (invariant: the two modes never diverge in meaning).
+    #[test]
+    fn indexing_round_trips_language() {
+        let recovered = round_trip(LspError::Indexing {
+            language: Language::Rust,
+        });
+        match recovered {
+            LspError::Indexing { language } => assert_eq!(language, Language::Rust),
+            other => panic!("expected Indexing, got {other:?}"),
         }
     }
 

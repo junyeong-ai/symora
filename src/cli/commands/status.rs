@@ -62,7 +62,10 @@ pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
 
     let response = StatusOutput {
         initialized: status.initialized,
-        path: ctx.relative_path(app.root()),
+        // The resolved project root, absolute on purpose: project-relative
+        // rendering would collapse it to "", which tells an agent nothing
+        // about which project answered.
+        path: app.root().display().to_string(),
         project,
         lsp_servers,
         symora_dir: if args.detailed {

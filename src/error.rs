@@ -27,6 +27,16 @@ pub enum LspError {
     #[error("{language:?} language server terminated unexpectedly")]
     ServerTerminated { language: Language },
 
+    /// The server declined to answer because its workspace analysis is
+    /// still incomplete (cold session, large project). Distinct from
+    /// `Timeout`: the request round-tripped fine — the answer just does
+    /// not exist yet. Surfacing it keeps a cold non-answer from reading
+    /// as an authoritative empty result.
+    #[error(
+        "{language:?} language server is still indexing the workspace; the result is not available yet"
+    )]
+    Indexing { language: Language },
+
     #[error("{0}")]
     Timeout(String),
 
@@ -121,6 +131,7 @@ impl LspError {
         match self {
             Self::ServerTerminated { language } => Some(*language),
             Self::FeatureNotSupported { language, .. } => Some(*language),
+            Self::Indexing { language } => Some(*language),
             _ => None,
         }
     }

@@ -182,7 +182,7 @@ pub(super) async fn diagnostics(
                             },
                             severity,
                             message: d.message,
-                            code: d.code.map(|c| c.to_string()),
+                            code: d.code.map(diagnostic_code_string),
                             source: d.source,
                             tags,
                             related_information,

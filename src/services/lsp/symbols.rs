@@ -2,13 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::LspError;
+use crate::infra::lsp::IndexingState;
 use crate::infra::lsp::protocol::{DocumentSymbol, SymbolInformation};
 use crate::models::lsp::{FindSymbolsOptions, path_to_uri};
 use crate::models::symbol::{Language, Symbol};
 
 use super::converters::*;
 use super::helpers::*;
-use super::service::DefaultLspService;
+use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn find_symbols(
     service: &DefaultLspService,
@@ -30,6 +31,7 @@ pub(super) async fn find_symbols(
             let client_fut = service.get_client_for_file(&file_path);
             let content_clone = content.clone();
             let file_clone = file_path.clone();
+            let root = service.manager.root().to_path_buf();
             async move {
                 let client = client_fut.await?;
                 let uri = path_to_uri(&file_clone);
@@ -39,41 +41,27 @@ pub(super) async fn find_symbols(
                     "textDocument": { "uri": uri }
                 });
 
-                let result: Result<Vec<DocumentSymbol>, _> = client
+                let mut result: serde_json::Value = client
                     .request("textDocument/documentSymbol", Some(params.clone()))
-                    .await;
-
-                if let Ok(doc_symbols) = result {
-                    return Ok(convert_document_symbols(
-                        &doc_symbols,
-                        &file_clone,
-                        &base_options,
-                        None,
-                        None,
-                        0,
-                    ));
-                }
-
-                let symbols: Vec<SymbolInformation> = client
-                    .request("textDocument/documentSymbol", Some(params))
                     .await?;
 
-                Ok(symbols
-                    .into_iter()
-                    .map(|s| {
-                        let mut sym = Symbol::new(
-                            s.name,
-                            convert_symbol_kind(s.kind),
-                            convert_location(&s.location),
-                        );
-                        if let Some(container) = s.container_name
-                            && !container.is_empty()
-                        {
-                            sym = sym.with_container(container);
-                        }
-                        sym
-                    })
-                    .collect())
+                // `null` from a server that hasn't reached readiness is a
+                // non-answer, not "no symbols". Give the workspace its
+                // bounded indexing wait and ask once more before judging.
+                if result.is_null() && client.indexing_state() != IndexingState::Ready {
+                    ensure_indexed(&client, &file_clone, &root).await;
+                    result = client
+                        .request("textDocument/documentSymbol", Some(params))
+                        .await?;
+                }
+
+                parse_document_symbols(
+                    result,
+                    &file_clone,
+                    &base_options,
+                    client.indexing_state(),
+                    client.language(),
+                )
             }
         })
         .await?;
@@ -93,6 +81,58 @@ pub(super) async fn find_symbols(
     }
 
     Ok(symbols)
+}
+
+/// Decode a `textDocument/documentSymbol` result. The wire union is
+/// `DocumentSymbol[] | SymbolInformation[] | null`, and `null` has two
+/// honest readings: from a `Ready` server it means "no symbols"; from one
+/// still indexing it means "no answer yet" and must surface as the typed
+/// indexing error — an authoritative-looking empty would mislead
+/// (invariant 4).
+fn parse_document_symbols(
+    result: serde_json::Value,
+    file: &Path,
+    options: &FindSymbolsOptions,
+    state: IndexingState,
+    language: Language,
+) -> Result<Vec<Symbol>, LspError> {
+    if result.is_null() {
+        return if state == IndexingState::Ready {
+            Ok(Vec::new())
+        } else {
+            Err(LspError::Indexing { language })
+        };
+    }
+
+    if let Ok(doc_symbols) = serde_json::from_value::<Vec<DocumentSymbol>>(result.clone()) {
+        return Ok(convert_document_symbols(
+            &doc_symbols,
+            file,
+            options,
+            None,
+            None,
+            0,
+        ));
+    }
+
+    let symbols: Vec<SymbolInformation> =
+        serde_json::from_value(result).map_err(|e| LspError::Protocol(e.to_string()))?;
+    Ok(symbols
+        .into_iter()
+        .map(|s| {
+            let mut sym = Symbol::new(
+                s.name,
+                convert_symbol_kind(s.kind),
+                convert_location(&s.location),
+            );
+            if let Some(container) = s.container_name
+                && !container.is_empty()
+            {
+                sym = sym.with_container(container);
+            }
+            sym
+        })
+        .collect())
 }
 
 pub(super) async fn workspace_symbols(
@@ -179,4 +219,43 @@ fn filter_by_depth(symbols: Vec<Symbol>, max_depth: u32) -> Vec<Symbol> {
             .collect()
     }
     filter_recursive(symbols, 0, max_depth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn parse_null(state: IndexingState) -> Result<Vec<Symbol>, LspError> {
+        parse_document_symbols(
+            serde_json::Value::Null,
+            &PathBuf::from("a.rs"),
+            &FindSymbolsOptions::default(),
+            state,
+            Language::Rust,
+        )
+    }
+
+    #[test]
+    fn null_from_a_ready_server_is_an_empty_symbol_list() {
+        assert!(parse_null(IndexingState::Ready).unwrap().is_empty());
+    }
+
+    /// A `null` before readiness is a non-answer: the typed indexing
+    /// error, never an empty list that would read as authoritative.
+    #[test]
+    fn null_before_readiness_is_the_typed_indexing_error() {
+        for state in [
+            IndexingState::NotStarted,
+            IndexingState::InProgress,
+            IndexingState::TimedOut,
+        ] {
+            match parse_null(state) {
+                Err(LspError::Indexing { language }) => {
+                    assert_eq!(language, Language::Rust)
+                }
+                other => panic!("expected the indexing error for {state:?}, got {other:?}"),
+            }
+        }
+    }
 }
