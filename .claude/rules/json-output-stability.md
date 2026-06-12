@@ -17,11 +17,16 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 - `count` — total matches found
 - `showing` — number actually emitted in `items`
 - `items` — the result array
-- `truncated` — boolean indicating `showing < count`, whether from an item cap (`--limit`, config limits) or from the per-response size ceiling (`output.max_response_chars`, applied once in the output layer as the last step before emission); a size-driven reduction always appends a hint naming the config key. Items are only ever dropped whole — per-item shape never changes with response size. Layering: command-level content budgets are token-denominated and apply first inside the command (e.g. `pack --tokens`); the char-denominated transport ceiling applies last and wins. Don't add a third budget vocabulary.
+- `truncated` — boolean indicating `showing < count`, whether from an item cap (`--limit`, config limits) or from the per-response size ceiling (`output.max_response_chars`, applied once in the output layer as the last step before emission).
+  - A size-driven reduction always appends a hint naming the config key.
+  - Items are only ever dropped whole — per-item shape never changes with response size.
+  - Layering: command-level content budgets are token-denominated and apply first inside the command (e.g. `pack --tokens`); the char-denominated transport ceiling applies last and wins. Don't add a third budget vocabulary.
 - `stale` — present (true) only when index-served rows came from files that changed on disk after indexing; re-run `symora search index build` to refresh
 - `hints` — optional next-step suggestions for the agent
 - `next_commands` — optional ready-to-run follow-up commands (omitted when empty); also emitted as a top-level field by non-list outputs (`map` summary, `impact`)
-- `bodies_included` — present only on sections where body attachment ran (`context --with-bodies`) and that still contain items: always equals the number of `items` carrying a complete `body`; items without `body` under it were omitted — token budget exhausted, symbol unresolvable at the item's position, or genuinely bodiless (prototypes, interface methods) — disclosed, never silent. If the transport size ceiling drops items from the section, the fitter recounts this field against the remaining items (removing it when the section empties), so the equality holds in every emitted response.
+- `bodies_included` — present only on sections where body attachment ran (`context --with-bodies`) and that still contain items: always equals the number of `items` carrying a complete `body`.
+  - Items without `body` under it were omitted — token budget exhausted, symbol unresolvable at the item's position, or genuinely bodiless (prototypes, interface methods) — disclosed, never silent.
+  - If the transport size ceiling drops items from the section, the fitter recounts this field against the remaining items (removing it when the section empties), so the equality holds in every emitted response.
 - `indexing` — degradation marker, present only when the answer was computed under degraded workspace indexing (e.g. `"timed_out"`)
 - `error` — structured `{code, message, hint}` failure, omitted on success
 

@@ -60,99 +60,25 @@ symora usage src/main.rs:42:10
 
 ## 핵심 기능
 
-### 의미론 탐색
+- **의미론 탐색** — `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`
+- **검색과 탐색 시작점** — `search symbols`, `search content`, `search ast`, 그리고 토큰 예산 기반 저장소 브리핑 `pack`
+- **프로젝트/파일 탐색** — `map summary`, `map file`, `map dir`, `map related`
+- **컨텍스트와 영향 분석** — `context`, `usage`, `impact`, `diff-impact`
+- **편집 및 리팩터링** — `rename`, `actions`, `edit` 서브커맨드(심볼 또는 라인 지정 splice, 정확한 dry-run 미리보기, 참조 검증이 붙은 `delete`), `format`
+- **상태 점검** — `diagnostics`, `doctor`, `status`
 
-```bash
-symora symbols src/main.rs
-symora def src/main.rs:10:5
-symora refs src/main.rs:10:5
-symora hover src/main.rs:10:5
-symora callers src/main.rs:10:5
-symora callees src/main.rs:10:5
-symora typedef src/main.rs:10:5
-symora implementations src/main.rs:10:5
-symora rename src/main.rs:10:5 new_name
-```
-
-### 검색과 탐색 시작점
-
-```bash
-symora search symbols AuthUser
-symora search content "async fn"
-symora search ast "(function_item)" --lang rust
-symora search nodes --lang rust
-```
-
-### 프로젝트/파일 탐색
-
-```bash
-symora map summary
-symora map file src/cli/commands/search/mod.rs
-symora map dir src/cli
-symora map related src/cli/commands/search/mod.rs
-```
-
-### 컨텍스트와 사용 분석
-
-```bash
-symora context src/main.rs:42 --all
-symora refs src/main.rs:42
-symora usage SearchCommand
-symora usage src/cli/commands/search/mod.rs:30:10
-symora impact src/main.rs:42
-symora diff-impact
-```
-
-### 편집 및 리팩터링 보조
-
-```bash
-symora actions list src/main.rs:42:5
-symora actions apply src/main.rs:42:5 "Extract method"
-symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
-symora edit delete src/main.rs:42:4 --dry-run          # dangling 참조를 함께 보고
-symora edit delete src/main.rs:42:4 --expect-no-references  # 참조 0건이 검증된 경우에만 삭제
-symora edit replace src/main.rs:10:1 --text "new code" --dry-run
-symora edit insert-after src/main.rs:42:4 --code "fn extra() {}" --with-diagnostics
-symora format src/main.rs
-```
+모든 명령은 JSON을 출력하며, 각 명령의 `--help`에서 플래그와 출력 형태를 확인할 수 있습니다.
 
 ---
 
-## 권장 워크플로우
+## AI 에이전트를 위해
 
-Symora는 보통 아래 순서로 사용할 때 가장 잘 맞습니다.
+에이전트용 플레이북 — 워크플로우 순서, 명령 선택, 출력 계약, 실패 처리 — 은 이 README가 아니라 도구와 함께 배포되어 바이너리와 항상 일치합니다.
 
-1. `symora map summary` 로 프로젝트 진입점과 주요 영역 파악
-2. `symora search symbols <query>` 로 workspace 단위 대략적 탐색
-3. `symora map file <path>` 로 파일 개요 확인
-4. `symora symbols <file>` 또는 `symora symbols --symbol <path>` 로 정확한 심볼 확인
-5. `symora context`, `symora refs`, `symora usage` 로 정밀 후속 분석
+- `symora setup skill` 은 Claude Code 스킬(전체 CLI 플레이북)을 설치합니다.
+- `symora mcp serve` 는 동일한 가이드를 MCP `initialize` instructions로 반환합니다.
 
-이 역할 구분은 의도적입니다.
-
-- `search symbols` 는 rough discovery 용도
-- `symbols` 는 exact semantic inspection 용도
-- `map file` 은 compact overview 용도이며 전체 심볼 덤프가 아닙니다
-
----
-
-## 출력 모델
-
-Symora는 기본적으로 JSON을 출력합니다.
-
-주요 특징:
-
-- 가능하면 프로젝트 상대 경로 사용
-- `count`, `showing`, `items`, `truncated`, `hints` 같은 안정적인 리스트 필드 사용
-- 토큰 절약을 위한 compact mode 제공
-
-전역 옵션:
-
-```bash
-symora --format compact search symbols AuthUser   # compact JSON
-symora -q refs src/main.rs:10:5     # 에러만 출력
-symora -v status                    # 디버그 로그
-```
+요약하면: 리스트 응답은 하나의 안정적인 형태(`count`, `showing`, `items`와 공개되는 `truncated`/`hints`/`next_commands`)를 공유하고, 위치는 1-indexed이며, 실패는 구조화된 `{code, message, hint}`로 전달되고, 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐릅니다. `--format compact`(단일 라인 JSON), `-q`(에러만 출력) 같은 전역 플래그는 서브커맨드 앞에 둘 수 있습니다.
 
 ---
 
@@ -249,7 +175,7 @@ symora setup deps --group core   # 의존성만 (core / core-jvm / core-web / co
 ```bash
 # 특정 버전 핀
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
-  | bash -s -- --version 0.11.0
+  | bash -s -- --version <version>
 
 # GitHub build provenance 검증 (gh CLI 필요)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
@@ -277,7 +203,7 @@ curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/ins
 
 ```bash
 symora self update                    # 최신 릴리스로 in-place 교체
-symora self update --version 0.11.0    # 특정 버전 핀
+symora self update --version <version>    # 특정 버전 핀
 symora self update --verify-attestations
 symora self uninstall                 # 바이너리 + 스킬 + config + daemon 흔적 전부 제거
 symora self uninstall --keep-skill --keep-config
@@ -311,17 +237,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor 등이 �
 symora mcp serve --transport http --port 8765
 ```
 
-도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`는 `file`과 함께 `symbol`(예: 'Class/method') 또는 `line` 중 정확히 하나로 대상을 지정합니다. `delete_symbol`은 `expect_no_references` 옵션으로 참조 0건 검증을 삭제의 전제 조건으로 만들 수 있으며, 거부 시 `precondition_failed` 오류를 반환합니다.
-
----
-
-## 실전 사용 메모
-
-- `context`, `refs`, `usage` 는 `file:line:column` 형식 위치를 직접 받을 수 있습니다
-- `usage` 는 위치를 주면 해당 심볼 이름을 자동으로 해석합니다
-- `context` 는 active LSP 서버가 call hierarchy나 type definition을 잘 지원하지 않을 때 fallback guidance를 제공합니다
-- semantic file/location 명령은 해당 언어의 language server가 설치되어 있어야 하며, 설치 여부는 `symora doctor <lang>`로 확인할 수 있습니다
-- `map related` 는 인접 파일을 찾는 heuristic helper이며, 완전한 dependency graph는 아닙니다
+도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구는 두 곳에서 함께 표시되며(description의 `Mutates`, `annotations.readOnlyHint: false`) 모두 `dry_run`을 지원합니다. 서버의 `initialize` 응답에는 전체 사용 플레이북 — 도구 호출 순서, 편집 대상 지정, 오류 복구 — 이 포함되므로, 연결된 에이전트는 추가 설정이 필요 없습니다.
 
 ---
 
