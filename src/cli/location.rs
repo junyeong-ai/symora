@@ -20,7 +20,15 @@ impl LocationArg {
 pub struct ParsedLocation {
     pub file: PathBuf,
     pub line: u32,
+    /// Defaults to 1 when the input omitted it; `column_explicit` says
+    /// which case this is.
     pub column: u32,
+    /// Whether the input actually carried a column. Consumers for which a
+    /// missing column means something different from column 1 — symbol
+    /// resolution on an edit target prefers the symbol *declared* on the
+    /// line over whatever block interior column 1 happens to fall in —
+    /// branch on this instead of guessing from the value.
+    pub column_explicit: bool,
 }
 
 impl ParsedLocation {
@@ -67,7 +75,12 @@ impl ParsedLocation {
         let file = PathBuf::from(file_part);
         let (line, column) = Self::parse_position(rest)?;
 
-        Ok(Self { file, line, column })
+        Ok(Self {
+            file,
+            line,
+            column: column.unwrap_or(1),
+            column_explicit: column.is_some(),
+        })
     }
 
     fn split_path_and_position(input: &str) -> Result<(&str, &str)> {
@@ -104,7 +117,7 @@ impl ParsedLocation {
         Ok((&input[..split_pos], &input[split_pos + 1..]))
     }
 
-    fn parse_position(rest: &str) -> Result<(u32, u32)> {
+    fn parse_position(rest: &str) -> Result<(u32, Option<u32>)> {
         let parts: Vec<&str> = rest.splitn(2, ':').collect();
 
         let line_str = parts.first().unwrap_or(&"");
@@ -112,18 +125,19 @@ impl ParsedLocation {
             .parse()
             .map_err(|_| CliInputError::InvalidLine((*line_str).to_string()))?;
 
-        let column: u32 = if let Some(col_str) = parts.get(1) {
-            col_str
-                .parse()
-                .map_err(|_| CliInputError::InvalidColumn((*col_str).to_string()))?
-        } else {
-            1
+        let column: Option<u32> = match parts.get(1) {
+            Some(col_str) => Some(
+                col_str
+                    .parse()
+                    .map_err(|_| CliInputError::InvalidColumn((*col_str).to_string()))?,
+            ),
+            None => None,
         };
 
         if line == 0 {
             bail!(CliInputError::LineMustBePositive);
         }
-        if column == 0 {
+        if column == Some(0) {
             bail!(CliInputError::ColumnMustBePositive);
         }
 
@@ -172,6 +186,7 @@ impl ParsedLocation {
             file: canonical,
             line: self.line,
             column: self.column,
+            column_explicit: self.column_explicit,
         })
     }
 
@@ -251,6 +266,7 @@ mod tests {
         assert_eq!(loc.file, PathBuf::from("src/main.rs"));
         assert_eq!(loc.line, 10);
         assert_eq!(loc.column, 5);
+        assert!(loc.column_explicit);
     }
 
     #[test]
@@ -259,6 +275,16 @@ mod tests {
         assert_eq!(loc.file, PathBuf::from("src/main.rs"));
         assert_eq!(loc.line, 10);
         assert_eq!(loc.column, 1);
+        assert!(!loc.column_explicit);
+    }
+
+    /// An explicit `:1` is an addressed column, not the omitted-column
+    /// default — the two must stay distinguishable.
+    #[test]
+    fn test_parse_explicit_column_one() {
+        let loc = ParsedLocation::parse("src/main.rs:10:1").unwrap();
+        assert_eq!(loc.column, 1);
+        assert!(loc.column_explicit);
     }
 
     #[test]
@@ -317,6 +343,7 @@ mod tests {
             file: PathBuf::from("test.rs"),
             line: 2,
             column: 5,
+            column_explicit: true,
         };
 
         let content = "line1\nline2\nline3";
@@ -326,6 +353,7 @@ mod tests {
             file: PathBuf::from("test.rs"),
             line: 10,
             column: 1,
+            column_explicit: true,
         };
         assert!(loc_invalid.validate_position_with_content(content).is_err());
     }

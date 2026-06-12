@@ -1182,48 +1182,104 @@ async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Sy
     }
 }
 
-/// Find the symbol at a position: column-precise first, so same-line
-/// siblings resolve to the one actually addressed. When the column
-/// misses, falling back to line matching is allowed only while it is
-/// unambiguous — with several symbols declared on the line, guessing
-/// would edit a sibling the caller didn't address.
-async fn find_symbol_at_location(app: &App, file: &Path, line: u32, column: u32) -> Result<Symbol> {
+/// How an edit target position resolved against the symbol tree. Both
+/// addressing modes produce one of these, so the error mapping lives in
+/// one place.
+enum SymbolResolution<'a> {
+    Match(&'a Symbol),
+    /// Several symbols are declared on the target line and the input
+    /// doesn't single one out — guessing would edit a sibling the caller
+    /// didn't address.
+    Ambiguous(Vec<&'a Symbol>),
+    NotFound,
+}
+
+/// Resolution for a column-addressed target (`file:line:col`): the
+/// innermost symbol whose range contains the exact position. When the
+/// column matches nothing, fall back to the line's declarations while
+/// that stays unambiguous.
+fn column_addressed_symbol<'a>(
+    symbols: &'a [Symbol],
+    line: u32,
+    column: u32,
+) -> SymbolResolution<'a> {
+    if let Some(symbol) = crate::cli::utils::find_symbol_at_position(symbols, line, Some(column)) {
+        return SymbolResolution::Match(symbol);
+    }
+    declared_or_enclosing(symbols, line)
+}
+
+/// Resolution for a line-addressed target (`file:line`, no column): a
+/// symbol DECLARED on the line wins over any enclosing block, so naming a
+/// method's declaration line edits the method — never the impl/class that
+/// happens to span it. Range matching only decides when the line declares
+/// nothing (a body line), where the enclosing symbol is the one honest
+/// reading.
+fn line_addressed_symbol<'a>(symbols: &'a [Symbol], line: u32) -> SymbolResolution<'a> {
+    declared_or_enclosing(symbols, line)
+}
+
+fn declared_or_enclosing<'a>(symbols: &'a [Symbol], line: u32) -> SymbolResolution<'a> {
+    let declared = symbols_declared_on_line(symbols, line);
+    match declared.as_slice() {
+        [] => match crate::cli::utils::find_symbol_at_position(symbols, line, None) {
+            Some(symbol) => SymbolResolution::Match(symbol),
+            None => SymbolResolution::NotFound,
+        },
+        [only] => SymbolResolution::Match(only),
+        _ => SymbolResolution::Ambiguous(declared),
+    }
+}
+
+/// Find the symbol an edit target addresses. With a column, resolution is
+/// position-precise; without one, the line's own declaration is preferred
+/// over the enclosing block (`line_addressed_symbol`). Ambiguity and
+/// misses become structured errors the agent can act on.
+async fn find_symbol_at_location(
+    app: &App,
+    file: &Path,
+    line: u32,
+    column: Option<u32>,
+) -> Result<Symbol> {
     let symbols = app
         .lsp
         .find_symbols(file, FindSymbolsOptions::default())
         .await?;
 
-    if let Some(symbol) = crate::cli::utils::find_symbol_at_position(&symbols, line, Some(column)) {
-        return Ok(symbol.clone());
-    }
+    let resolution = match column {
+        Some(col) => column_addressed_symbol(&symbols, line, col),
+        None => line_addressed_symbol(&symbols, line),
+    };
 
-    let declared = symbols_declared_on_line(&symbols, line);
-    match declared.len() {
-        // Nothing declared here: a containing multi-line symbol (a body
-        // line) is still an unambiguous target.
-        0 => crate::cli::utils::find_symbol_at_position(&symbols, line, None)
-            .cloned()
-            .ok_or_else(|| {
-                let file_display = app.output.relative_path(file);
-                anyhow::Error::new(
-                    crate::cli::OutputError::not_found(format!(
-                        "No symbol found at line {line} in {file_display}"
-                    ))
-                    .with_hint(format!(
-                        "List symbol paths with 'symora symbols {file_display}'"
-                    )),
-                )
-            }),
-        1 => Ok(declared[0].clone()),
-        _ => {
-            let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
+    match resolution {
+        SymbolResolution::Match(symbol) => Ok(symbol.clone()),
+        SymbolResolution::NotFound => {
+            let file_display = app.output.relative_path(file);
             Err(anyhow::Error::new(
-                crate::cli::OutputError::invalid(format!(
-                    "Line {line} declares multiple symbols ({}); column {column} \
+                crate::cli::OutputError::not_found(format!(
+                    "No symbol found at line {line} in {file_display}"
+                ))
+                .with_hint(format!(
+                    "List symbol paths with 'symora symbols {file_display}'"
+                )),
+            ))
+        }
+        SymbolResolution::Ambiguous(declared) => {
+            let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
+            let message = match column {
+                Some(col) => format!(
+                    "Line {line} declares multiple symbols ({}); column {col} \
                      matches none of them",
                     names.join(", "),
-                ))
-                .with_hint("Pass the exact column of the symbol to edit"),
+                ),
+                None => format!(
+                    "Line {line} declares multiple symbols ({})",
+                    names.join(", "),
+                ),
+            };
+            Err(anyhow::Error::new(
+                crate::cli::OutputError::invalid(message)
+                    .with_hint("Pass the exact column of the symbol to edit (file:line:col)"),
             ))
         }
     }
@@ -1250,13 +1306,15 @@ async fn resolve_symbol(
     target: &str,
     symbol_path: Option<String>,
 ) -> Result<(PathBuf, Symbol)> {
-    // Location mode: find symbol at position
+    // Location mode: find symbol at position. An omitted column is its
+    // own addressing mode (line-declared symbol first), not column 1.
     if ParsedLocation::is_location_format(target) {
         if symbol_path.is_some() {
             anyhow::bail!(conflicting_addressing(target));
         }
         let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
-        let symbol = find_symbol_at_location(app, &loc.file, loc.line, loc.column).await?;
+        let column = loc.column_explicit.then_some(loc.column);
+        let symbol = find_symbol_at_location(app, &loc.file, loc.line, column).await?;
         return Ok((loc.file, symbol));
     }
 
@@ -1810,6 +1868,87 @@ mod tests {
             SymbolKind::Function,
             Location::full(PathBuf::from("/tmp/foo.rs"), start, 1, start, 1, end, 1),
         )
+    }
+
+    /// A method inside an impl/class, addressed line-only: the symbol
+    /// DECLARED on the line wins over the enclosing block whose range
+    /// also contains it.
+    #[test]
+    fn line_addressing_prefers_the_symbol_declared_on_the_line() {
+        let symbols = impl_with_method();
+        match line_addressed_symbol(&symbols, 26) {
+            SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "new"),
+            _ => panic!("expected the method declared on line 26"),
+        }
+    }
+
+    /// A body line (no declaration) still resolves to the innermost
+    /// enclosing symbol.
+    #[test]
+    fn line_addressing_falls_back_to_the_enclosing_symbol_inside_a_body() {
+        let symbols = impl_with_method();
+        match line_addressed_symbol(&symbols, 27) {
+            SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "new"),
+            _ => panic!("expected the enclosing method for a body line"),
+        }
+        match line_addressed_symbol(&symbols, 31) {
+            SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "Rect"),
+            _ => panic!("expected the enclosing impl for a line between methods"),
+        }
+    }
+
+    #[test]
+    fn line_addressing_reports_multiple_declarations_as_ambiguous() {
+        let symbols = vec![
+            Symbol::new(
+                "A".to_string(),
+                SymbolKind::Constant,
+                Location::full(PathBuf::from("/tmp/foo.rs"), 5, 7, 5, 1, 5, 18),
+            ),
+            Symbol::new(
+                "B".to_string(),
+                SymbolKind::Constant,
+                Location::full(PathBuf::from("/tmp/foo.rs"), 5, 26, 5, 20, 5, 37),
+            ),
+        ];
+        match line_addressed_symbol(&symbols, 5) {
+            SymbolResolution::Ambiguous(declared) => assert_eq!(declared.len(), 2),
+            _ => panic!("two declarations on one line must stay ambiguous"),
+        }
+    }
+
+    /// `file:line:col` semantics are untouched by the line-only rule: an
+    /// exact column resolves by range, so a column inside the impl but
+    /// before the method name still addresses the impl.
+    #[test]
+    fn column_addressing_keeps_position_precise_range_matching() {
+        let symbols = impl_with_method();
+        match column_addressed_symbol(&symbols, 26, 12) {
+            SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "new"),
+            _ => panic!("the method name column must address the method"),
+        }
+        match column_addressed_symbol(&symbols, 26, 1) {
+            SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "Rect"),
+            _ => panic!("column 1 falls in the impl's interior range"),
+        }
+    }
+
+    /// `impl Rect` spanning lines 24..=32 with `pub fn new` declared on
+    /// line 26 (name at column 12), body through line 29.
+    fn impl_with_method() -> Vec<Symbol> {
+        let method = Symbol::new(
+            "new".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/foo.rs"), 26, 12, 26, 5, 29, 6),
+        );
+        vec![
+            Symbol::new(
+                "Rect".to_string(),
+                SymbolKind::Struct,
+                Location::full(PathBuf::from("/tmp/foo.rs"), 24, 6, 24, 1, 32, 2),
+            )
+            .with_children(vec![method]),
+        ]
     }
 
     #[test]
