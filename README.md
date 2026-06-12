@@ -311,7 +311,7 @@ symora mcp serve                          # stdio (Claude Code, Cursor 등이 �
 symora mcp serve --transport http --port 8765
 ```
 
-도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`는 `file`과 함께 `symbol`(예: 'Class/method') 또는 `line` 중 정확히 하나로 대상을 지정합니다. `delete_symbol`은 expect_no_references 옵션으로 참조 0건 검증을 삭제의 전제 조건으로 만들 수 있으며, 거부 시 precondition_failed 오류를 반환합니다.
+도구 목록과 입력 스키마는 `tools/list` 응답으로 확인할 수 있습니다. 소스 파일을 수정하는 도구(`rename_symbol`, `apply_code_action`, `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`)는 description에 `Mutates` 표시와 `annotations.readOnlyHint: false`를 함께 가지며, 모두 `dry_run` 옵션을 지원합니다. `replace_symbol_body`, `insert_before_symbol`, `insert_after_symbol`, `delete_symbol`는 `file`과 함께 `symbol`(예: 'Class/method') 또는 `line` 중 정확히 하나로 대상을 지정합니다. `delete_symbol`은 `expect_no_references` 옵션으로 참조 0건 검증을 삭제의 전제 조건으로 만들 수 있으며, 거부 시 `precondition_failed` 오류를 반환합니다.
 
 ---
 

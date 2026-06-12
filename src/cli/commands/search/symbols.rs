@@ -133,9 +133,9 @@ async fn execute_workspace_symbol_search(
         return Ok(());
     }
 
-    let mut candidates = collect_workspace_symbol_results(app, query, kind, limit, languages)
-        .await
-        .results;
+    let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
+    let mut candidates = lookup.results;
+    let failures = lookup.failures;
     let mut count = candidates.len();
     let mut stale = false;
 
@@ -164,10 +164,28 @@ async fn execute_workspace_symbol_search(
     }
 
     count = count.max(candidates.len());
-    ctx.print_success(
+    let section = with_workspace_failure_disclosure(
         finish_symbol_search(candidates, count, query, None, kind, limit).with_stale(stale),
+        &failures,
     );
+    ctx.print_success(section);
     Ok(())
+}
+
+/// Empty workspace-only results disclose this call's failed lookups —
+/// every language whose live workspace-symbol query errored is a coverage
+/// gap the zero cannot vouch for. Non-empty results stay bare, and a
+/// clean empty stays a genuine zero.
+fn with_workspace_failure_disclosure(
+    section: Section<SymbolResultOutput>,
+    failures: &[(Language, LspError)],
+) -> Section<SymbolResultOutput> {
+    if section.count != 0 || failures.is_empty() {
+        return section;
+    }
+    section
+        .with_hints(workspace_symbol_failure_hints(failures))
+        .with_next_commands(workspace_symbol_failure_next_commands(failures))
 }
 
 /// Final shaping shared by both search paths: suppress low-value noise,
@@ -656,6 +674,41 @@ fn symbol_search_coverage_next_commands(
     commands
 }
 
+/// Sorted by language id for deterministic output, capped like the
+/// index-path coverage hints.
+fn workspace_symbol_failure_hints(failures: &[(Language, LspError)]) -> Vec<String> {
+    let mut sorted: Vec<_> = failures.iter().collect();
+    sorted.sort_by_key(|(language, _)| language.lsp_id());
+    let mut hints: Vec<String> = sorted
+        .into_iter()
+        .map(|(language, err)| {
+            format!(
+                "This zero does not cover {lang}: its workspace symbol lookup failed ({reason})",
+                lang = language.lsp_id(),
+                reason = coverage_reason(err)
+            )
+        })
+        .collect();
+    hints.truncate(2);
+    hints
+}
+
+fn workspace_symbol_failure_next_commands(failures: &[(Language, LspError)]) -> Vec<String> {
+    let mut sorted: Vec<_> = failures.iter().collect();
+    sorted.sort_by_key(|(language, _)| language.lsp_id());
+    let mut commands: Vec<String> = sorted
+        .first()
+        .map(|(language, _)| {
+            vec![
+                "symora search index build".to_string(),
+                format!("symora doctor {}", language.lsp_id()),
+            ]
+        })
+        .unwrap_or_default();
+    commands.truncate(2);
+    commands
+}
+
 fn symbol_search_next_commands(
     results: &[SymbolResultOutput],
     query: &str,
@@ -789,5 +842,48 @@ mod tests {
     fn coverage_hint_silent_with_no_failures() {
         assert!(symbol_search_coverage_hints(&[]).is_empty());
         assert!(symbol_search_coverage_next_commands("q", &[]).is_empty());
+    }
+
+    fn server_failure(language: Language) -> (Language, LspError) {
+        (
+            language,
+            LspError::ServerNotInstalled {
+                name: "server".to_string(),
+                install_hint: "install it".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn workspace_failure_disclosure_fires_on_empty_result_with_failures() {
+        let failures = vec![server_failure(Language::Rust)];
+        let section =
+            with_workspace_failure_disclosure(Section::with_total(Vec::new(), 0), &failures);
+
+        assert_eq!(section.hints.len(), 1);
+        assert!(section.hints[0].contains("rust"));
+        assert!(section.hints[0].contains("server_not_installed"));
+        assert_eq!(
+            section.next_commands,
+            vec!["symora search index build", "symora doctor rust"]
+        );
+    }
+
+    #[test]
+    fn workspace_failure_disclosure_silent_on_empty_result_without_failures() {
+        let section = with_workspace_failure_disclosure(Section::with_total(Vec::new(), 0), &[]);
+        assert!(section.hints.is_empty());
+        assert!(section.next_commands.is_empty());
+    }
+
+    #[test]
+    fn workspace_failure_disclosure_keeps_non_empty_results_bare() {
+        let failures = vec![server_failure(Language::Rust)];
+        let section = with_workspace_failure_disclosure(
+            Section::with_total(vec![result("alpha", "src/a.rs")], 1),
+            &failures,
+        );
+        assert!(section.hints.is_empty());
+        assert!(section.next_commands.is_empty());
     }
 }

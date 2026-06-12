@@ -73,13 +73,28 @@ pub struct DiagnosticSuggestion {
 
 /// Parse and validate the raw severity filter. Unknown values are
 /// rejected rather than dropped: a silently dropped term can filter
-/// every diagnostic out and make a broken file look clean.
+/// every diagnostic out and make a broken file look clean. Empty
+/// segments (a trailing comma) are ignored; a filter made of only empty
+/// segments is rejected as a caller error rather than read as "no
+/// filter".
 fn parse_severity_filter(
     raw: Option<&[String]>,
 ) -> Result<Option<Vec<DiagnosticSeverity>>, String> {
     let Some(raw) = raw else { return Ok(None) };
-    raw.iter()
-        .map(|s| s.trim().parse::<DiagnosticSeverity>())
+    let segments: Vec<&str> = raw
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return Err(format!(
+            "Unknown severity: '{}'. Valid: error, warning, info, hint",
+            raw.join(",")
+        ));
+    }
+    segments
+        .into_iter()
+        .map(str::parse::<DiagnosticSeverity>)
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
 }
@@ -317,5 +332,24 @@ mod tests {
             parsed,
             vec![DiagnosticSeverity::Warning, DiagnosticSeverity::Error]
         );
+    }
+
+    /// A trailing comma ("error,") splits into an empty segment — ignored,
+    /// not parsed into an unknown-severity error.
+    #[test]
+    fn severity_filter_ignores_empty_segments() {
+        let parsed = parse_severity_filter(Some(&["error".into(), "".into()]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, vec![DiagnosticSeverity::Error]);
+    }
+
+    /// An explicit filter of only empty segments is a caller error, not an
+    /// absent filter — silently widening to everything would mask the typo.
+    #[test]
+    fn severity_filter_rejects_only_empty_segments() {
+        let err = parse_severity_filter(Some(&["".into(), " ".into()])).unwrap_err();
+        assert!(err.contains("Unknown severity"));
+        assert!(err.contains("Valid: error, warning, info, hint"));
     }
 }

@@ -995,6 +995,13 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
 pub fn merged(overrides: &HashMap<String, ServerOverride>) -> HashMap<Language, ServerConfig> {
     let mut configs = defaults();
     for (key, o) in overrides {
+        // Resolve-time partitioning is the sole validator: only canonical
+        // `Language::lsp_id` keys may reach this map, so a key that fails
+        // to apply here is a partitioning bug, not user input to tolerate.
+        debug_assert!(
+            key.parse::<Language>().is_ok_and(|l| l.lsp_id() == key),
+            "non-canonical [lsp.servers] key '{key}' reached merged()"
+        );
         if let Ok(language) = key.parse::<Language>()
             && let Some(config) = configs.get_mut(&language)
         {

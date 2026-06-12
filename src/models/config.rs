@@ -103,8 +103,9 @@ pub struct LspConfig {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub servers: std::collections::HashMap<String, ServerOverride>,
 
-    /// Rejected [lsp.servers] keys from the last resolve — never applied,
-    /// never serialized. Disclosed by `symora doctor` as `config_errors`.
+    /// Rejected [lsp.servers] stanzas from the last resolve (non-canonical
+    /// keys, unknown fields, mistyped values) — never applied, never
+    /// serialized. Disclosed by `symora doctor` as `config_errors`.
     #[serde(skip)]
     pub server_override_errors: Vec<ServerOverrideError>,
 }
@@ -139,10 +140,11 @@ pub struct ServerOverride {
     pub tier: Option<ServerTier>,
 }
 
-/// A rejected [lsp.servers] key, recorded at config resolution. Never
-/// serialized; carried so `doctor` can disclose overrides that did not
-/// apply without re-parsing config. Display matches
-/// ConfigError::InvalidValue: "Invalid value for '{key}': {message}".
+/// A rejected [lsp.servers] stanza or field, recorded at config
+/// resolution. Never serialized; carried so `doctor` can disclose
+/// overrides that did not apply without re-parsing config. Display
+/// matches ConfigError::InvalidValue: "Invalid value for '{key}':
+/// {message}".
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerOverrideError {
     pub key: String,

@@ -47,9 +47,9 @@ pub struct ContextArgs {
     #[arg(long)]
     pub body: bool,
 
-    /// Attach complete verbatim bodies under --body-tokens: target, then
-    /// callees in listed order, then types (target-only when no section
-    /// is requested)
+    /// Attach complete verbatim bodies: the target's whole body
+    /// unbudgeted, then callees in listed order and types under
+    /// --body-tokens (target-only when no section is requested)
     #[arg(long)]
     pub with_bodies: bool,
 
