@@ -220,7 +220,7 @@ impl LspClient {
     }
 
     /// Start the language server
-    pub async fn start(self: &Arc<Self>, command: &str, args: &[&str]) -> Result<(), LspError> {
+    pub async fn start(self: &Arc<Self>, command: &str, args: &[String]) -> Result<(), LspError> {
         // Check if already running
         if self.is_running().await {
             return Ok(());

@@ -4,49 +4,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::error::LspError;
+use crate::models::config::ServerTier;
 use crate::models::symbol::Language;
-
-// Server Performance Tiers
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServerTier {
-    /// Fast servers (< 15s init): rust-analyzer, clangd, gopls
-    Fast,
-    /// Standard servers (15-45s init): intelephense, kotlin-ls, ruby-lsp
-    Standard,
-    /// Slow servers (45-120s init): pyright, typescript-language-server, jdtls
-    Slow,
-}
-
-impl ServerTier {
-    pub fn init_timeout(&self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_secs(15),
-            Self::Standard => Duration::from_secs(45),
-            Self::Slow => Duration::from_secs(120),
-        }
-    }
-
-    pub fn request_timeout(&self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_secs(15),
-            Self::Standard => Duration::from_secs(30),
-            Self::Slow => Duration::from_secs(60),
-        }
-    }
-
-    pub fn cross_file_timeout(&self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_secs(20),
-            Self::Standard => Duration::from_secs(45),
-            Self::Slow => Duration::from_secs(90),
-        }
-    }
-
-    pub fn shutdown_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
-}
 
 // Platform Detection
 
@@ -88,11 +47,20 @@ impl InstallInstructions {
     }
 }
 
+/// Where a server table entry's launch values come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerSource {
+    /// Entry comes from the builtin defaults() table untouched.
+    Builtin,
+    /// At least one [lsp.servers.<lang>] override was applied.
+    Config,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub display_name: &'static str,
-    pub command: &'static str,
-    pub args: &'static [&'static str],
+    pub command: String,
+    pub args: Vec<String>,
     pub install: InstallInstructions,
     pub version_arg: &'static str,
     /// Binary to run for the `doctor` version report when the stdio
@@ -101,6 +69,7 @@ pub struct ServerConfig {
     /// reports it). `None` = probe `command`.
     pub version_command: Option<&'static str>,
     pub tier: ServerTier,
+    pub source: ServerSource,
 }
 
 impl ServerConfig {
@@ -134,7 +103,7 @@ impl ServerConfig {
     /// Failure is loud: the error hint lists every directory searched
     /// plus the install instruction.
     pub fn resolve(&self) -> Result<PathBuf, LspError> {
-        resolve_command(self.command).map_err(|searched| LspError::ServerNotInstalled {
+        resolve_command(&self.command).map_err(|searched| LspError::ServerNotInstalled {
             name: self.display_name.to_string(),
             install_hint: not_found_hint(self.install.current(), &searched),
         })
@@ -152,7 +121,7 @@ impl ServerConfig {
     /// entrypoint handed an unknown flag can block on stdin, and a
     /// diagnostic must never hang the report.
     pub fn probe_version(&self) -> Option<String> {
-        let probe = self.version_command.unwrap_or(self.command);
+        let probe = self.version_command.unwrap_or(self.command.as_str());
         let path = resolve_command(probe).ok()?;
         let output = run_with_timeout(&path, self.version_arg, Duration::from_secs(2))?;
         if !output.status.success() {
@@ -319,8 +288,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Rust,
         ServerConfig {
             display_name: "rust-analyzer",
-            command: "rust-analyzer",
-            args: &[],
+            command: "rust-analyzer".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -329,6 +298,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "rustup component add rust-analyzer",
             },
             tier: ServerTier::Fast,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -336,14 +306,14 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Cpp,
         ServerConfig {
             display_name: "clangd",
-            command: "clangd",
-            args: &[
-                "--background-index",
-                "--header-insertion=iwyu",
-                "--clang-tidy",
-                "--completion-style=detailed",
-                "--function-arg-placeholders",
-                "--pch-storage=memory",
+            command: "clangd".to_string(),
+            args: vec![
+                "--background-index".to_string(),
+                "--header-insertion=iwyu".to_string(),
+                "--clang-tidy".to_string(),
+                "--completion-style=detailed".to_string(),
+                "--function-arg-placeholders".to_string(),
+                "--pch-storage=memory".to_string(),
             ],
             version_arg: "--version",
             version_command: None,
@@ -353,6 +323,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://clangd.llvm.org/installation",
             },
             tier: ServerTier::Fast,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -360,8 +331,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Zig,
         ServerConfig {
             display_name: "zls",
-            command: "zls",
-            args: &[],
+            command: "zls".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -370,6 +341,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/zigtools/zls/releases",
             },
             tier: ServerTier::Fast,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -377,8 +349,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Java,
         ServerConfig {
             display_name: "jdtls",
-            command: "jdtls",
-            args: &[],
+            command: "jdtls".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -387,6 +359,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://download.eclipse.org/jdtls/snapshots/",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -394,8 +367,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Kotlin,
         ServerConfig {
             display_name: "kotlin-lsp",
-            command: "kotlin-lsp",
-            args: &["--stdio"],
+            command: "kotlin-lsp".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--help",
             version_command: None,
             install: InstallInstructions {
@@ -404,6 +377,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/JetBrains/kotlin-lsp/releases",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -411,8 +385,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Scala,
         ServerConfig {
             display_name: "metals",
-            command: "metals",
-            args: &[],
+            command: "metals".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -421,6 +395,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "cs install metals",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -428,8 +403,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Clojure,
         ServerConfig {
             display_name: "clojure-lsp",
-            command: "clojure-lsp",
-            args: &[],
+            command: "clojure-lsp".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -438,6 +413,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/clojure-lsp/clojure-lsp/releases",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -445,8 +421,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::CSharp,
         ServerConfig {
             display_name: "csharp-ls",
-            command: "csharp-ls",
-            args: &[],
+            command: "csharp-ls".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -455,6 +431,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "dotnet tool install -g csharp-ls",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -462,8 +439,11 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::FSharp,
         ServerConfig {
             display_name: "fsautocomplete",
-            command: "fsautocomplete",
-            args: &["--adaptive-lsp-server-enabled", "--project-graph-enabled"],
+            command: "fsautocomplete".to_string(),
+            args: vec![
+                "--adaptive-lsp-server-enabled".to_string(),
+                "--project-graph-enabled".to_string(),
+            ],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -472,6 +452,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "dotnet tool install -g fsautocomplete",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -479,8 +460,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::TypeScript,
         ServerConfig {
             display_name: "typescript-language-server",
-            command: "typescript-language-server",
-            args: &["--stdio"],
+            command: "typescript-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -489,6 +470,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g typescript typescript-language-server",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -496,8 +478,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::JavaScript,
         ServerConfig {
             display_name: "typescript-language-server",
-            command: "typescript-language-server",
-            args: &["--stdio"],
+            command: "typescript-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -506,6 +488,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g typescript typescript-language-server",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -513,8 +496,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Vue,
         ServerConfig {
             display_name: "vue-language-server",
-            command: "vue-language-server",
-            args: &["--stdio"],
+            command: "vue-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -523,6 +506,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g @vue/language-server",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -530,8 +514,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Python,
         ServerConfig {
             display_name: "pyright",
-            command: "pyright-langserver",
-            args: &["--stdio"],
+            command: "pyright-langserver".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: Some("pyright"),
             install: InstallInstructions {
@@ -540,6 +524,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g pyright",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -547,8 +532,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Ruby,
         ServerConfig {
             display_name: "ruby-lsp",
-            command: "ruby-lsp",
-            args: &[],
+            command: "ruby-lsp".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -557,6 +542,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "gem install ruby-lsp",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -564,8 +550,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::PHP,
         ServerConfig {
             display_name: "intelephense",
-            command: "intelephense",
-            args: &["--stdio"],
+            command: "intelephense".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -574,6 +560,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g intelephense",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -581,8 +568,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Perl,
         ServerConfig {
             display_name: "PerlNavigator",
-            command: "perlnavigator",
-            args: &["--stdio"],
+            command: "perlnavigator".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -591,6 +578,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g perlnavigator-server",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -598,8 +586,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Lua,
         ServerConfig {
             display_name: "lua-language-server",
-            command: "lua-language-server",
-            args: &[],
+            command: "lua-language-server".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -608,6 +596,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/LuaLS/lua-language-server/releases",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -615,8 +604,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Bash,
         ServerConfig {
             display_name: "bash-language-server",
-            command: "bash-language-server",
-            args: &["start"],
+            command: "bash-language-server".to_string(),
+            args: vec!["start".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -625,6 +614,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g bash-language-server",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -632,8 +622,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::PowerShell,
         ServerConfig {
             display_name: "PowerShell EditorServices",
-            command: "pwsh",
-            args: &["-NoLogo", "-NoProfile", "-Command", "Import-Module PowerShellEditorServices; Start-EditorServices -HostName symora -HostProfileId symora -HostVersion 1.0.0 -BundledModulesPath $env:PSES_BUNDLE_PATH -Stdio"],
+            command: "pwsh".to_string(),
+            args: vec!["-NoLogo".to_string(), "-NoProfile".to_string(), "-Command".to_string(), "Import-Module PowerShellEditorServices; Start-EditorServices -HostName symora -HostProfileId symora -HostVersion 1.0.0 -BundledModulesPath $env:PSES_BUNDLE_PATH -Stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -642,6 +632,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Install-Module -Name PowerShellEditorServices -Scope CurrentUser",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -649,8 +640,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Haskell,
         ServerConfig {
             display_name: "haskell-language-server",
-            command: "haskell-language-server-wrapper",
-            args: &["--lsp"],
+            command: "haskell-language-server-wrapper".to_string(),
+            args: vec!["--lsp".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -659,6 +650,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "ghcup install hls",
             },
             tier: ServerTier::Slow,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -666,8 +658,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Elixir,
         ServerConfig {
             display_name: "elixir-ls",
-            command: "elixir-ls",
-            args: &[],
+            command: "elixir-ls".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -676,6 +668,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/elixir-lsp/elixir-ls/releases",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -683,8 +676,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Erlang,
         ServerConfig {
             display_name: "erlang_ls",
-            command: "erlang_ls",
-            args: &[],
+            command: "erlang_ls".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -693,6 +686,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/erlang-ls/erlang_ls/releases",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -700,8 +694,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Elm,
         ServerConfig {
             display_name: "elm-language-server",
-            command: "elm-language-server",
-            args: &[],
+            command: "elm-language-server".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -710,6 +704,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g @elm-tooling/elm-language-server",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -717,8 +712,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::OCaml,
         ServerConfig {
             display_name: "ocamllsp",
-            command: "ocamllsp",
-            args: &[],
+            command: "ocamllsp".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -727,6 +722,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "opam install ocaml-lsp-server",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -734,8 +730,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Go,
         ServerConfig {
             display_name: "gopls",
-            command: "gopls",
-            args: &["serve"],
+            command: "gopls".to_string(),
+            args: vec!["serve".to_string()],
             version_arg: "version",
             version_command: None,
             install: InstallInstructions {
@@ -744,6 +740,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "go install golang.org/x/tools/gopls@latest",
             },
             tier: ServerTier::Fast,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -751,8 +748,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Swift,
         ServerConfig {
             display_name: "sourcekit-lsp",
-            command: "sourcekit-lsp",
-            args: &[],
+            command: "sourcekit-lsp".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -761,6 +758,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://swift.org/download/",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -768,8 +766,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Dart,
         ServerConfig {
             display_name: "dart-language-server",
-            command: "dart",
-            args: &["language-server", "--protocol=lsp"],
+            command: "dart".to_string(),
+            args: vec!["language-server".to_string(), "--protocol=lsp".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -778,6 +776,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "choco install dart-sdk",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -785,8 +784,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Terraform,
         ServerConfig {
             display_name: "terraform-ls",
-            command: "terraform-ls",
-            args: &["serve"],
+            command: "terraform-ls".to_string(),
+            args: vec!["serve".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -795,6 +794,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "choco install terraform-ls",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -802,8 +802,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Yaml,
         ServerConfig {
             display_name: "yaml-language-server",
-            command: "yaml-language-server",
-            args: &["--stdio"],
+            command: "yaml-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -812,6 +812,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "npm install -g yaml-language-server",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -819,8 +820,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Toml,
         ServerConfig {
             display_name: "taplo",
-            command: "taplo",
-            args: &["lsp", "stdio"],
+            command: "taplo".to_string(),
+            args: vec!["lsp".to_string(), "stdio".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -829,6 +830,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "cargo install taplo-cli --locked",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -836,8 +838,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Nix,
         ServerConfig {
             display_name: "nil",
-            command: "nil",
-            args: &[],
+            command: "nil".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -846,6 +848,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "nix profile install nixpkgs#nil",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -853,8 +856,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Rego,
         ServerConfig {
             display_name: "regal",
-            command: "regal",
-            args: &["language-server"],
+            command: "regal".to_string(),
+            args: vec!["language-server".to_string()],
             version_arg: "version",
             version_command: None,
             install: InstallInstructions {
@@ -863,6 +866,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/StyraInc/regal/releases",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -870,8 +874,12 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::R,
         ServerConfig {
             display_name: "R languageserver",
-            command: "R",
-            args: &["--slave", "-e", "languageserver::run()"],
+            command: "R".to_string(),
+            args: vec![
+                "--slave".to_string(),
+                "-e".to_string(),
+                "languageserver::run()".to_string(),
+            ],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -880,6 +888,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "R -e 'install.packages(\"languageserver\")'",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -887,12 +896,12 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Julia,
         ServerConfig {
             display_name: "LanguageServer.jl",
-            command: "julia",
-            args: &[
-                "--startup-file=no",
-                "--history-file=no",
-                "-e",
-                "using LanguageServer; runserver()",
+            command: "julia".to_string(),
+            args: vec![
+                "--startup-file=no".to_string(),
+                "--history-file=no".to_string(),
+                "-e".to_string(),
+                "using LanguageServer; runserver()".to_string(),
             ],
             version_arg: "--version",
             version_command: None,
@@ -902,6 +911,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "julia -e 'using Pkg; Pkg.add(\"LanguageServer\")'",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -909,8 +919,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Fortran,
         ServerConfig {
             display_name: "fortls",
-            command: "fortls",
-            args: &[],
+            command: "fortls".to_string(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -919,6 +929,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "pip install fortls",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -926,8 +937,8 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         Language::Markdown,
         ServerConfig {
             display_name: "marksman",
-            command: "marksman",
-            args: &["server"],
+            command: "marksman".to_string(),
+            args: vec!["server".to_string()],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -936,6 +947,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 windows: "Download from https://github.com/artempyanykh/marksman/releases",
             },
             tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
         },
     );
 
@@ -1038,8 +1050,8 @@ mod tests {
         let bin = fake_executable(dir.path(), "grumpy-ls"); // exits 1 on any arg
         let config = ServerConfig {
             display_name: "grumpy-ls",
-            command: Box::leak(bin.to_string_lossy().into_owned().into_boxed_str()),
-            args: &[],
+            command: bin.to_string_lossy().into_owned(),
+            args: vec![],
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1048,6 +1060,7 @@ mod tests {
                 windows: "none",
             },
             tier: ServerTier::Fast,
+            source: ServerSource::Builtin,
         };
         assert!(config.is_installed());
         assert!(config.resolve().is_ok());
@@ -1063,6 +1076,16 @@ mod tests {
         assert!(hint.contains("npm install -g fake-ls"));
         assert!(hint.contains("/nowhere/a"));
         assert!(hint.contains("/nowhere/b"));
+    }
+
+    #[test]
+    fn tier_serde_matches_as_str() {
+        for tier in [ServerTier::Fast, ServerTier::Standard, ServerTier::Slow] {
+            let serialized = serde_json::to_string(&tier).unwrap();
+            assert_eq!(serialized, format!("\"{}\"", tier.as_str()));
+            let parsed: ServerTier = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(parsed, tier);
+        }
     }
 
     #[test]

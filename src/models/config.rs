@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use super::symbol::Language;
@@ -152,6 +154,55 @@ pub(crate) mod defaults {
     }
     pub fn idle_timeout_mins() -> u64 {
         30
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerTier {
+    /// Fast servers (< 15s init): rust-analyzer, clangd, gopls
+    Fast,
+    /// Standard servers (15-45s init): intelephense, kotlin-ls, ruby-lsp
+    Standard,
+    /// Slow servers (45-120s init): pyright, typescript-language-server, jdtls
+    Slow,
+}
+
+impl ServerTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Standard => "standard",
+            Self::Slow => "slow",
+        }
+    }
+
+    pub fn init_timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_secs(15),
+            Self::Standard => Duration::from_secs(45),
+            Self::Slow => Duration::from_secs(120),
+        }
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_secs(15),
+            Self::Standard => Duration::from_secs(30),
+            Self::Slow => Duration::from_secs(60),
+        }
+    }
+
+    pub fn cross_file_timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_secs(20),
+            Self::Standard => Duration::from_secs(45),
+            Self::Slow => Duration::from_secs(90),
+        }
+    }
+
+    pub fn shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(5)
     }
 }
 
