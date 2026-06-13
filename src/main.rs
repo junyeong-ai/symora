@@ -100,7 +100,17 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::debug!("Received shutdown signal");
             Ok(())
         }
+    }?;
+
+    // A handler that hit a recoverable failure printed the `{error}` JSON to
+    // stdout and returned Ok; surface that as a non-zero exit so a CI / `set
+    // -e` caller gets the same failure signal the MCP `isError` flag carries,
+    // without scraping stdout. Checked above the daemon/direct split so both
+    // modes agree; a shutdown-signal win leaves the flag false and exits 0.
+    if app.errored() {
+        std::process::exit(2);
     }
+    Ok(())
 }
 
 async fn run_workspace_dispatch(name: &str, output_options: OutputOptions) -> anyhow::Result<()> {

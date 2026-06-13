@@ -106,6 +106,13 @@ impl App {
     ///
     /// Used by the MCP adapter to capture command output into a buffer
     /// instead of stdout, without spawning a subprocess.
+    /// True once a handler reported a handled failure via `print_error`.
+    /// Exposed publicly so the binary crate's `main` can set a non-zero exit
+    /// code (the field on `OutputContext` is `pub(crate)`).
+    pub fn errored(&self) -> bool {
+        self.output.errored()
+    }
+
     pub fn with_output_sink(&self, sink: Arc<dyn OutputSink>, options: OutputOptions) -> Self {
         let output = OutputContext::with_sink(self.root.clone(), options, sink)
             .with_max_response_chars(self.config.output.max_response_chars);
