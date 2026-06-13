@@ -105,7 +105,11 @@ pub(super) async fn goto_type_definition(
         line,
         column,
         "textDocument/typeDefinition",
-        Some(LspFeature::GotoTypeDefinition),
+        // No static capability gate: typeDefinition is near-universal and
+        // degrades to definition on servers that lack it; get_support_level
+        // never yields None for it, so a gate here would be inert dead code. A
+        // genuine -32601 from the server is already mapped to honest Unsupported.
+        None,
         |locs| locs.first().cloned(),
     )
     .await

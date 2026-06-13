@@ -229,7 +229,6 @@ fn extract_name(s: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareRenameResult {
     pub placeholder: String,
-    pub range: Range,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

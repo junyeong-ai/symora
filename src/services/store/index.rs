@@ -113,9 +113,19 @@ impl Store {
 
         let db = match Self::try_open_db(&db_path).await {
             Ok(db) => db,
-            Err(_) => {
+            // A clean schema upgrade is an expected migration, not corruption:
+            // the rebuild action is identical, but classify it honestly so the
+            // log doesn't cry "corrupted" on every version bump.
+            Err(StoreError::SchemaMismatch { found, expected }) => {
+                tracing::info!(
+                    "Store schema changed (db v{found} -> v{expected}), rebuilding index: {}",
+                    db_path.display()
+                );
+                Self::recover_db(&db_path).await?
+            }
+            Err(e) => {
                 tracing::warn!(
-                    "Store database corrupted, recreating: {}",
+                    "Store database unreadable, recreating: {}: {e}",
                     db_path.display()
                 );
                 Self::recover_db(&db_path).await?
@@ -149,9 +159,10 @@ impl Store {
             .await?;
 
         if version != 0 && version != SCHEMA_VERSION {
-            return Err(StoreError::Database(format!(
-                "schema version mismatch: db={version}, expected={SCHEMA_VERSION}"
-            )));
+            return Err(StoreError::SchemaMismatch {
+                found: version,
+                expected: SCHEMA_VERSION,
+            });
         }
 
         db.execute(INIT_SCHEMA).await?;

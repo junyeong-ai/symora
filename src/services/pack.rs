@@ -549,9 +549,11 @@ fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) ->
     ordered.sort_by(|a, b| {
         let ra = ranks.get(&a.id).copied().unwrap_or(0.0);
         let rb = ranks.get(&b.id).copied().unwrap_or(0.0);
-        // Total order: rank desc, then rel_path asc (unique) as a tiebreak, so
-        // a genuine rank tie drops the same file at the budget boundary every
-        // run rather than relying on the unstable sort's input order.
+        // Total order: rank desc, then rel_path asc (unique) as a tiebreak.
+        // `sort_by` is stable, so a rank tie would otherwise fall through to the
+        // input order; the rel_path tiebreak makes the comparator a self-contained
+        // total order (rel_path is unique among nodes), dropping the same file at
+        // the budget boundary every run regardless of input arrival order.
         rb.partial_cmp(&ra)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.rel_path.cmp(&b.rel_path))

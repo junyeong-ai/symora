@@ -239,13 +239,9 @@ impl LspService for DaemonLspService {
 
         let response: PrepareRenameResponse = parse(result)?;
 
-        match (response.placeholder, response.range) {
-            (Some(placeholder), Some(range)) => Ok(Some(PrepareRenameResult {
-                placeholder,
-                range: range.into(),
-            })),
-            _ => Ok(None),
-        }
+        Ok(response
+            .placeholder
+            .map(|placeholder| PrepareRenameResult { placeholder }))
     }
 
     async fn rename(

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use futures::future::join_all;
 
-use crate::constants::defaults::{BLAST_RADIUS_MAX_CALLERS_PER_NODE, IMPACT_DEFAULT_DEPTH};
+use crate::constants::defaults::{CALL_GRAPH_MAX_NEIGHBORS_PER_NODE, IMPACT_DEFAULT_DEPTH};
 use crate::models::lsp::{CallHierarchyItem, IndexingDegradation};
 use crate::services::lsp::LspService;
 
@@ -44,7 +44,7 @@ impl Default for WalkConfig {
     fn default() -> Self {
         Self {
             max_depth: IMPACT_DEFAULT_DEPTH,
-            max_neighbors_per_node: BLAST_RADIUS_MAX_CALLERS_PER_NODE,
+            max_neighbors_per_node: CALL_GRAPH_MAX_NEIGHBORS_PER_NODE,
         }
     }
 }
@@ -76,6 +76,11 @@ pub struct CallGraphWalk {
     /// Present when any hop ran under degraded workspace indexing — every
     /// count is then a lower bound.
     pub indexing: Option<IndexingDegradation>,
+    /// At least one hop's call-hierarchy request failed (LSP error/unavailable)
+    /// and was treated as an empty neighbour set. The discovered graph — and any
+    /// "no path" verdict or count derived from it — is therefore a lower bound,
+    /// never an exhaustive negative.
+    pub incomplete: bool,
 }
 
 impl CallGraphWalk {
@@ -112,7 +117,7 @@ impl CallGraphWalk {
     }
 }
 
-fn key_of(item: &CallHierarchyItem) -> NodeKey {
+pub(crate) fn key_of(item: &CallHierarchyItem) -> NodeKey {
     (
         item.location.file.clone(),
         item.location.line,
@@ -138,6 +143,7 @@ pub async fn walk(
     let mut levels: Vec<Vec<CallHierarchyItem>> = Vec::with_capacity(max_depth as usize);
     let mut max_depth_reached = false;
     let mut truncated = false;
+    let mut incomplete = false;
     // Aggregates the computation-time snapshot of every hop: if ANY hop ran
     // under degraded indexing the whole walk is a lower bound, and quiescence
     // landing mid-walk must not strip that.
@@ -155,7 +161,6 @@ pub async fn walk(
                     Direction::Incoming => lsp.incoming_calls(&f, l, c).await,
                     Direction::Outgoing => lsp.outgoing_calls(&f, l, c).await,
                 }
-                .ok()
             }
         }))
         .await;
@@ -165,13 +170,20 @@ pub async fn walk(
 
         for (parent, neighbors) in frontier.iter().zip(neighbors_per_node) {
             let mut items = match neighbors {
-                Some(indexed) => {
+                Ok(indexed) => {
                     if indexing.is_none() {
                         indexing = indexed.indexing;
                     }
                     indexed.data
                 }
-                None => Vec::new(),
+                // A failed hop is treated as empty so the walk can continue, but
+                // it is NOT a genuine empty neighbour set — flag it so a derived
+                // verdict or count degrades to a lower bound rather than an
+                // exhaustive "no path".
+                Err(_) => {
+                    incomplete = true;
+                    Vec::new()
+                }
             };
             if items.len() > cfg.max_neighbors_per_node {
                 truncated = true;
@@ -216,6 +228,7 @@ pub async fn walk(
         max_depth_reached,
         truncated,
         indexing,
+        incomplete,
     }
 }
 
@@ -227,7 +240,7 @@ pub async fn walk(
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
     use async_trait::async_trait;
@@ -247,6 +260,9 @@ pub(crate) mod test_support {
         pub incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
         pub outgoing: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
         pub implementations: Result<Vec<Location>, i32>,
+        /// Positions whose `incoming_calls`/`outgoing_calls` return an error,
+        /// to exercise the swallowed-hop `incomplete` lower-bound marker.
+        pub errors: HashSet<(u32, u32)>,
     }
 
     impl CallGraphStub {
@@ -258,6 +274,7 @@ pub(crate) mod test_support {
                 incoming: HashMap::new(),
                 outgoing: map,
                 implementations: Ok(vec![]),
+                errors: HashSet::new(),
             }
         }
     }
@@ -280,6 +297,12 @@ pub(crate) mod test_support {
             line: u32,
             column: u32,
         ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
+            if self.errors.contains(&(line, column)) {
+                return Err(LspError::server_error_friendly(
+                    -32000,
+                    "stub hop error".to_string(),
+                ));
+            }
             Ok(Indexed::complete(
                 self.incoming
                     .get(&(line, column))
@@ -294,6 +317,12 @@ pub(crate) mod test_support {
             line: u32,
             column: u32,
         ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
+            if self.errors.contains(&(line, column)) {
+                return Err(LspError::server_error_friendly(
+                    -32000,
+                    "stub hop error".to_string(),
+                ));
+            }
             Ok(Indexed::complete(
                 self.outgoing
                     .get(&(line, column))
@@ -473,6 +502,40 @@ mod tests {
     }
 
     #[test]
+    fn swallowed_interior_hop_error_sets_incomplete() {
+        // anchor (10,5) -> node_20 (20,1); node_20's own outgoing hop errors,
+        // so the walk cannot see past it. The result must be flagged a lower
+        // bound (`incomplete`) rather than a clean, exhaustive empty — that is
+        // what stops a derived verdict from claiming an absolute "no path".
+        let mut outgoing = HashMap::new();
+        outgoing.insert((10, 5), vec![node(20)]);
+        let mut stub = CallGraphStub::outgoing(outgoing);
+        stub.errors.insert((20, 1));
+        // Depth > 1 so the walk actually issues node_20's (erroring) hop.
+        let cfg = WalkConfig {
+            max_depth: 3,
+            ..Default::default()
+        };
+        let errored = tokio_test::block_on(walk(&stub, anchor(), Direction::Outgoing, &cfg));
+        assert!(
+            errored.incomplete,
+            "a swallowed hop error must set the incomplete lower-bound marker"
+        );
+
+        // The same shape without the error is a genuine, complete walk.
+        let mut clean = HashMap::new();
+        clean.insert((10, 5), vec![node(20)]);
+        let clean_walk = walk_outgoing(
+            clean,
+            WalkConfig {
+                max_depth: 3,
+                ..Default::default()
+            },
+        );
+        assert!(!clean_walk.incomplete);
+    }
+
+    #[test]
     fn direction_selects_the_hop_method() {
         // The same key resolves through outgoing_calls under Outgoing; the
         // incoming map (which would answer differently) is never consulted.
@@ -486,6 +549,7 @@ mod tests {
             },
             outgoing,
             implementations: Ok(vec![]),
+            errors: std::collections::HashSet::new(),
         };
         let out = tokio_test::block_on(walk(
             &stub,

@@ -341,8 +341,9 @@ async fn run_find_callers(args: Value, app: &App) -> Result<CapturedOutput> {
 
 /// `find_callees` takes an optional transitive `depth`, so it has its own
 /// input rather than the shared `CallHierarchyInput` (which would leak `depth`
-/// to `find_callers`/`find_implementations`). Path queries (`--to`) stay
-/// CLI-only — their output shape is not a `Section`.
+/// to `find_callers`/`find_implementations`). Path queries (`--to`) are exposed
+/// as the separate `find_call_path` tool — their output is a 3-state
+/// reachability verdict, not a `Section`.
 #[derive(Deserialize)]
 struct FindCalleesInput {
     #[serde(flatten)]

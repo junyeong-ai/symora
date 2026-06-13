@@ -41,6 +41,13 @@ pub struct DiffImpactOutput {
     pub total_references: usize,
     pub coverage: DiffCoverage,
     pub changes: Vec<ChangedSymbolImpact>,
+    /// Files whose changes could not be measured because the language server
+    /// failed to return symbols for them (Added/Modified hunks present but
+    /// `find_symbols` errored). Their changes are absent from `changes`, so the
+    /// result is a lower bound for these files — disclosed, never silently
+    /// dropped. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unmeasured_files: Vec<String>,
 }
 
 /// Test coverage summary for diff analysis (aggregate over all changed symbols)
@@ -48,7 +55,11 @@ pub struct DiffImpactOutput {
 pub struct DiffCoverage {
     pub with_tests: usize,
     pub without_tests: usize,
-    pub ratio: f32,
+    /// Tested fraction of the *measurable* (Added/Modified) symbols. Omitted
+    /// when nothing was measurable (an empty or pure-deletion diff), so a ratio
+    /// is never asserted over zero measurements as a vacuous 1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f32>,
 }
 
 /// Changed symbol impact data (pure fact). Added/Modified rows carry the
@@ -135,9 +146,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             coverage: DiffCoverage {
                 with_tests: 0,
                 without_tests: 0,
-                ratio: 1.0,
+                ratio: None,
             },
             changes: vec![],
+            unmeasured_files: vec![],
         });
         return Ok(());
     }
@@ -152,7 +164,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         args.revision.as_str()
     };
 
-    let changes = analyze_hunks(
+    let (changes, unmeasured_files) = analyze_hunks(
         app.lsp.as_ref(),
         &hunks,
         root,
@@ -177,9 +189,9 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         .count();
     let without_tests = measurable.saturating_sub(with_tests);
     let coverage_ratio = if measurable == 0 {
-        1.0
+        None
     } else {
-        with_tests as f32 / measurable as f32
+        Some(with_tests as f32 / measurable as f32)
     };
 
     let response = DiffImpactOutput {
@@ -193,6 +205,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             ratio: coverage_ratio,
         },
         changes,
+        unmeasured_files,
     };
 
     ctx.print_success(response);
@@ -202,7 +215,13 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 fn parse_git_diff(root: &Path, revision: &str, staged: bool) -> Result<Vec<DiffHunk>> {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
-    cmd.args(["diff", "--unified=0", "--no-color"]);
+    cmd.args([
+        "-c",
+        "core.quotepath=false",
+        "diff",
+        "--unified=0",
+        "--no-color",
+    ]);
 
     if staged {
         cmd.arg("--cached");
@@ -223,20 +242,55 @@ fn parse_git_diff(root: &Path, revision: &str, staged: bool) -> Result<Vec<DiffH
 
 fn parse_diff_output(diff: &str, root: &Path) -> Vec<DiffHunk> {
     let mut hunks = Vec::new();
+    let mut old_file: Option<PathBuf> = None;
     let mut current_file: Option<PathBuf> = None;
+    let mut in_header = false;
 
     for line in diff.lines() {
-        if let Some(path_str) = line.strip_prefix("+++ b/") {
-            current_file = Some(root.join(path_str));
-        } else if line.starts_with("@@ ")
-            && let Some(ref file) = current_file
-            && let Some(hunk) = parse_hunk_header(line, file.clone())
-        {
-            hunks.push(hunk);
+        if line.starts_with("diff --git ") {
+            // Each file block starts here; only its `---`/`+++` lines before
+            // the first `@@` name the file. A `---`/`+++` line after a hunk is
+            // deleted/added content (e.g. a Lua `--` comment becomes `--- …`)
+            // and must not be mistaken for a header.
+            in_header = true;
+            old_file = None;
+            current_file = None;
+        } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
+            old_file = diff_header_path(rest).map(|p| root.join(p));
+        } else if in_header && let Some(rest) = line.strip_prefix("+++ ") {
+            // A fully deleted file's new side is `/dev/null`; fall back to the
+            // old-side path so its hunk is attributed and the pre-image can be
+            // read — never silently dropped.
+            current_file = diff_header_path(rest)
+                .map(|p| root.join(p))
+                .or_else(|| old_file.clone());
+        } else if line.starts_with("@@ ") {
+            in_header = false;
+            if let Some(ref file) = current_file
+                && let Some(hunk) = parse_hunk_header(line, file.clone())
+            {
+                hunks.push(hunk);
+            }
         }
     }
 
     hunks
+}
+
+/// The path inside a `--- `/`+++ ` diff header: strips the `a/`/`b/` prefix and
+/// any trailing tab-separated metadata (git appends a tab when the path holds a
+/// space). `None` for `/dev/null`. Paths are literal because the diff is
+/// produced with `core.quotepath=false`.
+fn diff_header_path(rest: &str) -> Option<&str> {
+    let path = rest.split('\t').next().unwrap_or(rest);
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(
+        path.strip_prefix("a/")
+            .or_else(|| path.strip_prefix("b/"))
+            .unwrap_or(path),
+    )
 }
 
 fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
@@ -286,6 +340,19 @@ fn parse_range(range: &str) -> (u32, u32) {
     (start, count)
 }
 
+/// Whether a changed line at `line` meaningfully attributes to `sym`. A callable
+/// (Function/Method/Constructor) owns its whole body; a leaf symbol (no
+/// children) owns all its lines; any symbol owns its own declaration line. A
+/// non-callable CONTAINER (impl/class/module/namespace) spans its whole block
+/// with members as children, so a line in the gap BETWEEN members resolves
+/// innermost to the container yet carries none of its meaning — attributing it,
+/// and the container's full reference set, to that line would be a false
+/// positive, so it is excluded. Shared by the deletion and live (Added/Modified)
+/// hunk paths so both attribute identically.
+fn line_attributes_to_symbol(sym: &crate::models::symbol::Symbol, line: u32) -> bool {
+    sym.kind.is_callable() || sym.children.is_empty() || line == sym.location.line
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn analyze_hunks(
     lsp: &dyn LspService,
@@ -296,7 +363,7 @@ async fn analyze_hunks(
     include_callers: bool,
     max_symbols: usize,
     calls_limit: usize,
-) -> Vec<ChangedSymbolImpact> {
+) -> (Vec<ChangedSymbolImpact>, Vec<String>) {
     // Group hunks by file
     let mut file_hunks: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
@@ -304,6 +371,7 @@ async fn analyze_hunks(
     }
 
     let mut changes = Vec::new();
+    let mut unmeasured = Vec::new();
     let mut symbol_count = 0;
     let at_cap = |n: usize| max_symbols > 0 && n >= max_symbols;
 
@@ -312,10 +380,29 @@ async fn analyze_hunks(
             break;
         }
 
-        // Deleted hunks resolve against the pre-image, so they are handled even
-        // when the file no longer exists in the working tree, and never flow
-        // through the current-tree resolution that would map them onto a live
-        // neighbour.
+        // Current-tree symbols, loaded once when the file survives — needed both
+        // for live (Added/Modified) hunks and to recognise a deletion that only
+        // removed body lines of a surviving symbol (a Modified, not a deletion).
+        let file_exists = file.exists();
+        let current_symbols = if file_exists {
+            lsp.find_symbols(file, FindSymbolsOptions::default())
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        // One dedup set per file, keyed by declaration identity (line, column),
+        // NOT name: two distinct same-named declarations (impl A::new vs
+        // impl B::new) both count, while one symbol touched by several hunks
+        // counts once. Spans deletion-derived and live rows alike.
+        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+
+        // Deletion hunks. A deletion whose old range held an actual declaration
+        // is a deleted symbol, resolved against the pre-image. A deletion that
+        // removed only body lines of a surviving symbol MODIFIED that symbol —
+        // resolve it against the current tree instead of emitting a useless
+        // Unresolved deletion (a still-existing function is not "deleted").
         for hunk in hunks
             .iter()
             .filter(|h| matches!(h.change_type, ChangeType::Deleted))
@@ -323,7 +410,48 @@ async fn analyze_hunks(
             if at_cap(symbol_count) {
                 break;
             }
-            for row in resolve_deleted_hunk(root, preimage_ref, file, hunk) {
+            let deleted_rows = resolve_deleted_hunk(root, preimage_ref, file, hunk);
+            let no_declaration_deleted = deleted_rows.len() == 1
+                && deleted_rows[0].deletion == Some(DeletionResolution::Unresolved);
+
+            // Reclassify a body-line deletion (no declaration removed) as a
+            // Modified of the enclosing CURRENT symbol, using the shared
+            // `line_attributes_to_symbol` rule (callable body / leaf / own
+            // declaration line — never a container's inter-member gap) plus a
+            // strict-interior check: the deletion point must be before the
+            // symbol's last line, so a blank line AFTER it (new_start == f_end)
+            // is not attributed. Both guard against a false `Modified <container>`
+            // row that would carry the container's irrelevant references.
+            let enclosing = if no_declaration_deleted {
+                current_symbols.as_ref().and_then(|s| {
+                    let f = find_symbol_at_position(s, hunk.start_line, None)?;
+                    let f_end = f.location.end_line.unwrap_or(f.location.line);
+                    (line_attributes_to_symbol(f, hunk.start_line) && hunk.start_line < f_end)
+                        .then_some(f)
+                })
+            } else {
+                None
+            };
+            if let Some(sym) = enclosing {
+                if seen.insert((sym.location.line, sym.location.column)) {
+                    let impact = analyze_symbol_impact(
+                        lsp,
+                        file,
+                        sym.clone(),
+                        ChangeType::Modified,
+                        root,
+                        test_matcher,
+                        include_callers,
+                        calls_limit,
+                    )
+                    .await;
+                    changes.push(impact);
+                    symbol_count += 1;
+                }
+                continue;
+            }
+
+            for row in deleted_rows {
                 if at_cap(symbol_count) {
                     break;
                 }
@@ -332,18 +460,28 @@ async fn analyze_hunks(
             }
         }
 
-        // Added/Modified need the current tree.
-        let live_hunks: Vec<&&DiffHunk> = hunks
+        // Added/Modified hunks need the current tree.
+        let live_hunks: Vec<&DiffHunk> = hunks
             .iter()
             .filter(|h| !matches!(h.change_type, ChangeType::Deleted))
+            .copied()
             .collect();
-        if live_hunks.is_empty() || !file.exists() {
+        if live_hunks.is_empty() {
             continue;
         }
-
-        let symbols = match lsp.find_symbols(file, FindSymbolsOptions::default()).await {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Some(symbols) = current_symbols.as_ref() else {
+            // Added/Modified hunks exist but no current symbols. If the file is
+            // present, find_symbols errored — disclose it as an unmeasured file
+            // (a lower bound) instead of silently dropping its changes.
+            if file_exists {
+                unmeasured.push(
+                    file.strip_prefix(root)
+                        .unwrap_or(file)
+                        .display()
+                        .to_string(),
+                );
+            }
+            continue;
         };
 
         for hunk in live_hunks {
@@ -351,16 +489,21 @@ async fn analyze_hunks(
                 break;
             }
 
-            // Find symbols affected by this hunk
+            // Find symbols affected by this hunk. Same attribution rule as the
+            // deletion path (one shared helper): a changed line that resolves
+            // innermost to a non-callable container gap (a comment/blank line
+            // between members) carries none of the container's meaning, so it is
+            // NOT attributed to the container with the container's references.
             let affected_symbols: Vec<_> = (hunk.start_line
                 ..hunk.start_line + hunk.line_count.max(1))
-                .filter_map(|line| find_symbol_at_position(&symbols, line, None))
+                .filter_map(|line| {
+                    find_symbol_at_position(symbols, line, None)
+                        .filter(|sym| line_attributes_to_symbol(sym, line))
+                })
                 .collect();
 
-            // Deduplicate by symbol name
-            let mut seen_names = std::collections::HashSet::new();
             for sym in affected_symbols {
-                if !seen_names.insert(sym.name.clone()) {
+                if !seen.insert((sym.location.line, sym.location.column)) {
                     continue;
                 }
 
@@ -386,7 +529,7 @@ async fn analyze_hunks(
         }
     }
 
-    changes
+    (changes, unmeasured)
 }
 
 async fn analyze_symbol_impact(
@@ -407,14 +550,17 @@ async fn analyze_symbol_impact(
     let analysis = match LocationAnalysis::for_symbol(lsp, file, sym).await {
         Ok(a) => a,
         Err(_) => {
+            // Measurement failed (LSP error/unavailable) — emit absent refs,
+            // never a fabricated `0` that reads as a verified "no references".
+            // Coverage already excludes rows whose refs are `None`.
             return ChangedSymbolImpact {
                 name: Some(name),
                 kind: Some(kind),
                 location: Some(LocationOutput::from_path(file, line, column, root)),
                 change_type,
-                refs: Some(0),
-                test_refs: Some(0),
-                prod_refs: Some(0),
+                refs: None,
+                test_refs: None,
+                prod_refs: None,
                 callers: vec![],
                 deletion: None,
             };
@@ -510,7 +656,12 @@ fn resolve_deleted_hunk(
 
 /// `git show <ref>:<relpath>` — the file content at the pre-image revision.
 fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
-    let spec = format!("{reference}:{}", relpath.display());
+    // git pathspecs use forward slashes on every platform; relpath.display()
+    // would emit backslashes on Windows and break `git show <ref>:<path>`.
+    let spec = format!(
+        "{reference}:{}",
+        relpath.to_string_lossy().replace('\\', "/")
+    );
     let output = Command::new("git")
         .current_dir(root)
         .args(["show", &spec])
@@ -714,6 +865,33 @@ mod tests {
         assert!(v.get("deletion").is_none());
     }
 
+    // ---------------------------------------------------------------
+    // line_attributes_to_symbol — the shared attribution rule guarding
+    // both the deletion-reclassification and live (Added/Modified) paths
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn line_attributes_to_symbol_excludes_container_gaps() {
+        use crate::models::symbol::{Location, Symbol, SymbolKind};
+
+        let pt = |line: u32| Location::point(PathBuf::from("x.rs"), line, 1);
+        let method = Symbol::new("bar".to_string(), SymbolKind::Method, pt(3));
+        let container = Symbol::new("Foo".to_string(), SymbolKind::Class, pt(1))
+            .with_children(vec![method.clone()]);
+        let leaf_field = Symbol::new("FIELD".to_string(), SymbolKind::Field, pt(12));
+
+        // A callable owns its whole body — a body line attributes to it.
+        assert!(line_attributes_to_symbol(&method, 4));
+        // A non-callable container's inter-member gap line does NOT attribute to
+        // the container (this is the false-`Modified <container>` row six rounds
+        // of review eliminated).
+        assert!(!line_attributes_to_symbol(&container, 7));
+        // ...but editing the container's own declaration line does attribute.
+        assert!(line_attributes_to_symbol(&container, 1));
+        // A leaf symbol (no children) owns all of its lines.
+        assert!(line_attributes_to_symbol(&leaf_field, 13));
+    }
+
     #[test]
     fn parse_hunk_header_invalid_format_returns_none() {
         // Fewer than 3 whitespace-separated parts → None
@@ -838,10 +1016,11 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
-    fn parse_diff_output_dev_null_prefix_not_matched() {
+    fn parse_diff_output_whole_file_deletion_attributes_old_path() {
         let root = Path::new("/project");
-        // +++ /dev/null appears for deleted files; it doesn't start with "+++ b/"
-        // so current_file stays None and no hunks are produced for that section
+        // A fully deleted file: git emits `+++ /dev/null`. The hunk must be
+        // attributed to the old-side path (from `--- a/…`) so its pre-image can
+        // be resolved — never silently dropped.
         let diff = "\
 diff --git a/src/old.rs b/src/old.rs
 --- a/src/old.rs
@@ -849,6 +1028,50 @@ diff --git a/src/old.rs b/src/old.rs
 @@ -1,10 +0,0 @@";
 
         let hunks = parse_diff_output(diff, root);
-        assert!(hunks.is_empty());
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, root.join("src/old.rs"));
+        assert_eq!(hunks[0].old_start, 1);
+        assert_eq!(hunks[0].old_count, 10);
+        assert!(matches!(hunks[0].change_type, ChangeType::Deleted));
+    }
+
+    #[test]
+    fn parse_diff_output_non_ascii_and_spaced_paths() {
+        let root = Path::new("/repo");
+        // With core.quotepath=false a non-ASCII path is literal; a path holding
+        // a space gets a trailing tab in the header. Both must map to the right
+        // file rather than being dropped or attributed to the previous file.
+        let diff = "\
+diff --git a/src/모듈.rs b/src/모듈.rs
+--- a/src/모듈.rs
++++ b/src/모듈.rs
+@@ -3,2 +3,4 @@ fn 함수() {
+diff --git a/src/with space.rs b/src/with space.rs
+--- a/src/with space.rs\t
++++ b/src/with space.rs\t
+@@ -1,1 +1,2 @@";
+
+        let hunks = parse_diff_output(diff, root);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].file, root.join("src/모듈.rs"));
+        assert_eq!(hunks[1].file, root.join("src/with space.rs"));
+    }
+
+    #[test]
+    fn parse_diff_output_deleted_comment_line_is_not_a_header() {
+        let root = Path::new("/project");
+        // A deleted `--` comment line becomes `--- …` and an added one `+++ …`;
+        // appearing after the `@@`, they are content, not a file header.
+        let diff = "\
+diff --git a/x.lua b/x.lua
+--- a/x.lua
++++ b/x.lua
+@@ -5,1 +5,1 @@ local function f()
+--- old comment
++++ new comment";
+
+        let hunks = parse_diff_output(diff, root);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].file, root.join("x.lua"));
     }
 }

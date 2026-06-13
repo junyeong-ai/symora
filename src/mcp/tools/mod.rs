@@ -167,6 +167,36 @@ mod tests {
         assert!(mutating >= 5, "expected the editing tools to be mutating");
     }
 
+    /// Every tool that advertises an output schema must stay error-tolerant: no
+    /// `additionalProperties: false` (which would reject the handled-failure
+    /// `{ "error": ... }` envelope and any forward-compatible field) and an
+    /// explicit `error` property. find_call_path once shipped a strict output
+    /// schema that rejected its own error responses; this keeps the class shut.
+    #[test]
+    fn output_schemas_accommodate_the_error_envelope() {
+        for tool in catalog() {
+            let Some(schema) = &tool.output_schema else {
+                continue;
+            };
+            assert_ne!(
+                schema.get("additionalProperties"),
+                Some(&serde_json::json!(false)),
+                "{}: output schema must not set additionalProperties:false — it would \
+                 reject the tool's own {{error}} envelope",
+                tool.name,
+            );
+            assert!(
+                schema
+                    .get("properties")
+                    .and_then(|p| p.get("error"))
+                    .is_some(),
+                "{}: output schema must declare an `error` property so a handled \
+                 failure validates",
+                tool.name,
+            );
+        }
+    }
+
     fn tool(name: &str) -> &'static ToolDefinition {
         catalog()
             .iter()

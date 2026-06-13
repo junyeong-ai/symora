@@ -104,6 +104,28 @@ pub fn section_output_schema(items_description: &str) -> Value {
     })
 }
 
+/// Loose output schema for a non-list tool: declares the success fields but
+/// stays open — no `additionalProperties: false`, no `required` — and always
+/// carries the shared `error` property, so a handled-failure `{ "error": ... }`
+/// envelope validates the same as the success shape. The list-shaped analog is
+/// `section_output_schema`; like it, the openness is deliberate — a strict
+/// output schema that rejects the tool's own error envelope is worse than a
+/// loose one.
+pub fn output_schema(fields: &[(&str, &str, &str)]) -> Value {
+    let mut props = serde_json::Map::new();
+    for (name, ty, desc) in fields {
+        props.insert(
+            (*name).to_string(),
+            json!({ "type": ty, "description": desc }),
+        );
+    }
+    props.insert(
+        "error".to_string(),
+        json!({ "type": "object", "description": "Structured failure: { code, message, hint? }" }),
+    );
+    json!({ "type": "object", "properties": props })
+}
+
 pub fn with_extra(mut base: Value, extras: &[(&str, &str, &str)]) -> Value {
     let props = base
         .get_mut("properties")

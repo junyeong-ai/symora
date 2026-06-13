@@ -61,21 +61,17 @@ pub(super) async fn prepare_rename(
                     })
                 }
 
-                // Format 1: { placeholder: string, range: Range }
-                if let Some(placeholder) = value.get("placeholder").and_then(|p| p.as_str())
-                    && let Some(range) = value.get("range")
-                {
-                    let start = range.get("start").and_then(extract_position);
-                    let end = range.get("end").and_then(extract_position);
-                    if let (Some(start), Some(end)) = (start, end) {
-                        return Ok(Some(PrepareRenameResult {
-                            placeholder: placeholder.to_string(),
-                            range: crate::models::lsp::Range { start, end },
-                        }));
-                    }
+                // Format 1: { placeholder, range } — only the placeholder is
+                // used (it pre-fills the rename); the affected range is consumed
+                // nowhere, so it is not carried.
+                if let Some(placeholder) = value.get("placeholder").and_then(|p| p.as_str()) {
+                    return Ok(Some(PrepareRenameResult {
+                        placeholder: placeholder.to_string(),
+                    }));
                 }
 
-                // Format 2: Range (just start/end positions, extract placeholder from source)
+                // Format 2: a bare Range — extract the placeholder from the
+                // source span (wire offsets index the line's bytes).
                 if let (Some(start), Some(end)) = (value.get("start"), value.get("end")) {
                     let start_pos = extract_position(start);
                     let end_pos = extract_position(end);
@@ -83,43 +79,22 @@ pub(super) async fn prepare_rename(
                         let placeholder = read_line_streaming(&file, start_pos.line)
                             .await
                             .and_then(|line| {
-                                // start/end are wire offsets into this line.
                                 let s =
                                     encoded_offset_to_byte(encoding, &line, start_pos.character);
                                 let e = encoded_offset_to_byte(encoding, &line, end_pos.character);
-                                if s < e && e <= line.len() {
-                                    Some(line[s..e].to_string())
-                                } else {
-                                    None
-                                }
+                                (s < e && e <= line.len()).then(|| line[s..e].to_string())
                             });
 
                         if let Some(placeholder) = placeholder {
-                            return Ok(Some(PrepareRenameResult {
-                                placeholder,
-                                range: crate::models::lsp::Range {
-                                    start: start_pos,
-                                    end: end_pos,
-                                },
-                            }));
+                            return Ok(Some(PrepareRenameResult { placeholder }));
                         }
                     }
                 }
 
-                // Format 3: { defaultBehavior: true }
+                // Format 3: { defaultBehavior: true } — no placeholder text.
                 if value.get("defaultBehavior").and_then(|v| v.as_bool()) == Some(true) {
                     return Ok(Some(PrepareRenameResult {
                         placeholder: String::new(),
-                        range: crate::models::lsp::Range {
-                            start: crate::models::lsp::Position {
-                                line: line.saturating_sub(1),
-                                character: column.saturating_sub(1),
-                            },
-                            end: crate::models::lsp::Position {
-                                line: line.saturating_sub(1),
-                                character: column,
-                            },
-                        },
                     }));
                 }
 
@@ -184,6 +159,6 @@ pub(super) async fn rename(
         )));
     }
 
-    let changes = parse_workspace_edit(&result, encoding);
+    let changes = parse_workspace_edit(&result, encoding)?;
     Ok(RenameResult { changes })
 }

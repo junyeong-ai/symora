@@ -52,9 +52,10 @@ CREATE INDEX IF NOT EXISTS idx_content_file ON content_lines(file_id);
 -- FTS5 trigram index over content_lines, as an EXTERNAL-CONTENT table: it
 -- stores no copy of the text, deriving everything from content_lines via the
 -- triggers below. The trigram tokenizer is the only FTS5 tokenizer that
--- preserves arbitrary infix substrings (for queries >= 3 chars), so a MATCH is
--- a true necessary condition for the LIKE '%q%' the search still applies as the
--- authority. case_sensitive 0 mirrors LIKE's ASCII case-insensitivity;
+-- preserves arbitrary infix substrings (for queries >= 3 chars), so a trigram
+-- MATCH is a necessary condition for `content LIKE '%q%'`. The LIKE filter still
+-- runs as the authority, so MATCH only narrows the candidate set and never
+-- changes result membership. case_sensitive 0 mirrors LIKE's ASCII case-insensitivity;
 -- remove_diacritics 0 keeps accents so folding matches LIKE.
 CREATE VIRTUAL TABLE IF NOT EXISTS content_lines_fts USING fts5(
     content,

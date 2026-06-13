@@ -141,8 +141,7 @@ pub(super) async fn dispatch(
             handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
                 let result = ctx.lsp.prepare_rename(&f, l, c).await?;
                 to_json(wire::PrepareRenameResponse {
-                    placeholder: result.as_ref().map(|r| r.placeholder.clone()),
-                    range: result.map(|r| wire::Range::from(&r.range)),
+                    placeholder: result.map(|r| r.placeholder),
                 })
             })
             .await

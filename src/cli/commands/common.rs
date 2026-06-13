@@ -19,6 +19,11 @@ pub(crate) struct SnappedAnchor {
     pub line: u32,
     pub column: u32,
     pub hint: Option<String>,
+    /// Whether the input actually resolved to a symbol. `false` means the
+    /// position was left unsnapped (no symbol on the line, or symbols could not
+    /// be read) — a caller must not present a position-derived verdict about an
+    /// unresolved anchor as authoritative.
+    pub resolved: bool,
 }
 
 /// Snap an input position to the authoritative name anchor of the symbol
@@ -46,6 +51,7 @@ pub(crate) async fn snap_to_symbol_anchor(
         line,
         column: column.unwrap_or(1),
         hint: None,
+        resolved: false,
     };
     let Ok(symbols) = lsp
         .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
@@ -62,6 +68,7 @@ pub(crate) async fn snap_to_symbol_anchor(
             line: symbol.location.line,
             column: symbol.location.column,
             hint: None,
+            resolved: true,
         },
         SymbolResolution::Ambiguous(declared) => {
             let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
@@ -76,6 +83,7 @@ pub(crate) async fn snap_to_symbol_anchor(
                     names.join(", "),
                     first.name,
                 )),
+                resolved: true,
             }
         }
         SymbolResolution::NotFound => unsnapped,
