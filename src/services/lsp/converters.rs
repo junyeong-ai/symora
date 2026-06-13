@@ -409,6 +409,43 @@ mod tests {
         PositionEncoding, diagnostic_code_string, find_resource_operation, parse_workspace_edit,
     };
 
+    /// Regression guard for the I5 non-BMP corruption class: an edit range's
+    /// wire column is decoded to a native scalar offset against the target
+    /// file BEFORE it reaches the edit applier. `let x = "😀";` — the closing
+    /// quote is utf-16 unit 11 but scalar 10; a missing conversion would slice
+    /// the wrong byte.
+    #[test]
+    fn parse_text_edits_decodes_wire_columns_to_native_scalars() {
+        use crate::services::lsp::position::PositionConverter;
+        let file = std::path::Path::new("seeded.rs");
+        let mut conv =
+            PositionConverter::new(PositionEncoding::Utf16).with_content(file, "let x = \"😀\";");
+        let edits = serde_json::json!([{
+            "range": {
+                "start": { "line": 0, "character": 11 },
+                "end": { "line": 0, "character": 11 }
+            },
+            "newText": "Z"
+        }]);
+        let parsed = super::parse_text_edits(&edits, file, &mut conv);
+        assert_eq!(parsed.len(), 1);
+        // utf-16 character 11 -> scalar 10 (the emoji counts as 1 scalar).
+        assert_eq!(parsed[0].range.start.character, 10);
+        assert_eq!(parsed[0].range.end.character, 10);
+        // utf-8 server: the same logical position is byte offset 13 -> scalar 10.
+        let mut conv8 =
+            PositionConverter::new(PositionEncoding::Utf8).with_content(file, "let x = \"😀\";");
+        let edits8 = serde_json::json!([{
+            "range": {
+                "start": { "line": 0, "character": 13 },
+                "end": { "line": 0, "character": 13 }
+            },
+            "newText": "Z"
+        }]);
+        let parsed8 = super::parse_text_edits(&edits8, file, &mut conv8);
+        assert_eq!(parsed8[0].range.start.character, 10);
+    }
+
     /// Both arms of the LSP string-or-number union come out as the bare
     /// value — `"E0308"` stays `E0308`, `6133` becomes `6133`.
     #[test]
