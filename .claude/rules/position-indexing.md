@@ -10,27 +10,29 @@ paths:
   - "src/models/symbol/**/*.rs"
 ---
 
-# Position Indexing — Asymmetric on Purpose
+# Position Indexing — Asymmetric and Encoding-Aware
 
-CLI inputs and JSON outputs use **1-indexed** lines and columns. LSP wire values use **0-indexed**. Every conversion site must be deliberate.
+CLI inputs and JSON outputs use **1-indexed lines** and **1-indexed Unicode-scalar columns** (one column per `char`). LSP wire values are **0-indexed**, and their columns are measured in the server's **negotiated `positionEncoding`** — UTF-8 bytes or UTF-16 code units. A column is therefore *transcoded*, not merely shifted by one. Every conversion is deliberate and lives at the LSP boundary.
 
-## Direction matters
+## Two axes, converted differently
 
-- CLI → LSP: `line - 1`, `column - 1` (with `saturating_sub(1)` so 0 doesn't underflow `u32`).
-- LSP → CLI: `line + 1`, `column + 1`.
+- **Line** — a flat shift. CLI → LSP `line - 1`; LSP → CLI `line + 1` (`saturating_sub(1)` guards the `u32` floor).
+- **Column** — a scalar ↔ encoded-offset transcode against that line's text, keyed by the negotiated encoding. `column - 1` yields the *scalar* index only; turning a scalar index into a wire offset (or back) goes through `PositionConverter`, never raw arithmetic.
 
-## End-of-line conventions
+For pure ASCII the two collapse (scalar == byte == UTF-16 unit), which is why a missed transcode passes every ASCII test and corrupts the first line holding a multi-byte or non-BMP character.
 
-LSP `Range::end` is exclusive. When converting a range to CLI form, the off-by-one for the end position depends on whether the consumer wants inclusive or exclusive — pick one per command and stay consistent.
+## The encoding is negotiated, never assumed
 
-## Why this gets wrong silently
-
-A single missed conversion shifts every reference, anchor, and edit by one line or column. Tests that operate on small files (a function on line 1) often won't catch it. Verify against a multi-line file with content that exercises both ends.
+`initialize` advertises `["utf-8", "utf-16"]`; the server's chosen encoding is read from its capabilities and held on the client (LSP 3.17 defaults to UTF-16 when the server is silent). Read it per request — don't hard-code UTF-16, and don't assume byte == char.
 
 ## Where conversions live
 
-- `src/cli/location.rs` — parses `file:line:column` input strings (1-indexed).
-- `src/services/lsp/converters.rs` — LSP → display: `+1` as model `Location`s are built from LSP ranges. The display → LSP direction is `to_lsp_position` in `src/services/lsp/helpers.rs` (`saturating_sub(1)`), applied where a CLI position is sent into an LSP request.
-- `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the wire adds no conversions: `wire.rs` copies each position through as-is, carrying whatever indexing its model type uses (`Location` is 1-indexed; raw LSP `Position`/`Range` payloads stay 0-indexed). The one client-side `saturating_sub(1)` is `daemon_lsp.rs::diagnostics`, which carries 1-indexed values on the wire and rebuilds a 0-indexed `Range`.
+- `src/cli/location.rs` — parses `file:line:column` inputs (1-indexed scalar).
+- `src/services/lsp/position.rs` — the boundary converter `PositionConverter`: `scalar_to_wire` (outbound scalar column → wire offset), `scalar_column` / `encoded_offset_to_scalar` (inbound wire offset → scalar column), `encoded_offset_to_byte` (wire offset → byte index for slicing), `floor_char_boundary` (clamp a stray offset to a char edge), seeded per file with `with_content`.
+- `src/services/lsp/helpers.rs` — `to_lsp_position(line, column, content, encoding)` builds an outbound `Position`: `line - 1` plus `scalar_to_wire`.
+- `src/services/lsp/converters.rs` — inbound LSP range → model `Location`: every returned offset is decoded through `PositionConverter` (`scalar_column`), then `+1` to scalar 1-indexed. Every new inbound reader follows this; an undecoded range is the bug below.
+- `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the wire adds no conversion: each position crosses in whatever indexing its model type already carries (`Location` is 1-indexed scalar; raw LSP `Position`/`Range` payloads stay 0-indexed/encoded).
 
-Keep conversions at these boundaries — the LSP request/response edge, or a command's own output edge when it emits LSP-native ranges (e.g. `folding`, `inlay-hints`, `format`). A `+1`/`-1` buried in computation logic, away from a boundary, is the layering bug to avoid. (Converting a 1-indexed line to a 0-based array index inside a command is not a boundary conversion and is fine.)
+## The bug to avoid
+
+A `±1` — or worse, an `offset + len` in wire units — buried in command logic away from the boundary. **Outbound:** build the `Position` from scalar columns via `to_lsp_position`; never advance a wire offset directly. **Inbound:** decode every returned range through `PositionConverter` before it reaches CLI/JSON; never emit a raw wire column. Verify against a file whose lines hold non-BMP characters (emoji, CJK) and exercise both ends of a range — a function on line 1 of ASCII proves nothing.

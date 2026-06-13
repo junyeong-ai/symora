@@ -6,8 +6,8 @@ This file contains repo-wide invariants. Module-specific rules live in nested `C
 
 ## Invariants
 
-**1. Position indexing is asymmetric.**
-CLI inputs and JSON outputs use 1-indexed line and column. LSP wire values are 0-indexed. Every conversion site must be deliberate — a wrong direction silently misplaces every reference, anchor, and edit.
+**1. Position indexing is asymmetric and encoding-aware.**
+CLI inputs and JSON outputs use 1-indexed lines and 1-indexed Unicode-scalar columns. LSP wire values are 0-indexed, with columns in the server's negotiated `positionEncoding` (utf-8/utf-16) — a column is transcoded through the boundary converter, not merely shifted by one. A wrong direction, or a raw wire offset that escapes the converter, silently misplaces every reference, anchor, and edit. Detail: `.claude/rules/position-indexing.md`.
 
 **2. JSON output is the public API.**
 Field names, presence rules, and the shared list-response shape are stable contracts (the canonical field set lives in `.claude/rules/json-output-stability.md`). Treat renames the same way you'd treat a breaking signature change. Don't add decorative fields; an agent has to parse every key you emit.
