@@ -6,7 +6,9 @@ use crate::models::lsp::{PrepareRenameResult, RenameResult, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
+use super::position::encoded_offset_to_byte;
 use super::service::{DefaultLspService, ensure_indexed};
+use crate::infra::lsp::protocol::PositionEncoding;
 
 pub(super) async fn prepare_rename(
     service: &DefaultLspService,
@@ -34,9 +36,10 @@ pub(super) async fn prepare_rename(
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
+                let encoding = client.position_encoding().await;
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
-                    "position": to_lsp_position(line, column)
+                    "position": to_lsp_position(line, column, &content, encoding)
                 });
 
                 let result: Result<Option<serde_json::Value>, _> = client
@@ -80,8 +83,10 @@ pub(super) async fn prepare_rename(
                         let placeholder = read_line_streaming(&file, start_pos.line)
                             .await
                             .and_then(|line| {
-                                let s = char_to_byte_index(&line, start_pos.character as usize);
-                                let e = char_to_byte_index(&line, end_pos.character as usize);
+                                // start/end are wire offsets into this line.
+                                let s =
+                                    encoded_offset_to_byte(encoding, &line, start_pos.character);
+                                let e = encoded_offset_to_byte(encoding, &line, end_pos.character);
                                 if s < e && e <= line.len() {
                                     Some(line[s..e].to_string())
                                 } else {
@@ -138,7 +143,7 @@ pub(super) async fn rename(
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
 
-    let result: serde_json::Value = service
+    let (result, encoding): (serde_json::Value, PositionEncoding) = service
         .execute_with_retry(&file, |client| {
             let uri = uri.clone();
             let content = content.clone();
@@ -155,10 +160,11 @@ pub(super) async fn rename(
                 client.sync_document(&uri, &content).await?;
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
-                    "position": to_lsp_position(line, column),
+                    "position": to_lsp_position(line, column, &content, client.position_encoding().await),
                     "newName": new_name
                 });
-                client.request("textDocument/rename", Some(params)).await
+                let result = client.request("textDocument/rename", Some(params)).await?;
+                Ok((result, client.position_encoding().await))
             }
         })
         .await?;
@@ -178,6 +184,6 @@ pub(super) async fn rename(
         )));
     }
 
-    let changes = parse_workspace_edit(&result);
+    let changes = parse_workspace_edit(&result, encoding);
     Ok(RenameResult { changes })
 }

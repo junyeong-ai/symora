@@ -9,6 +9,7 @@ use crate::models::lsp::{HoverInfo, SignatureHelp, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
+use super::position::PositionConverter;
 use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn hover(
@@ -34,17 +35,27 @@ pub(super) async fn hover(
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
-                    position: to_lsp_position(line, column),
+                    position: to_lsp_position(
+                        line,
+                        column,
+                        &content,
+                        client.position_encoding().await,
+                    ),
                 };
 
                 let result: Option<Hover> = client
                     .request("textDocument/hover", Some(serde_json::to_value(params)?))
                     .await?;
 
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
                 Ok(result.map(|h| {
-                    let content = extract_hover_content(&h.contents);
-                    let range = h.range.map(|r| range_to_location(&file, &r));
-                    HoverInfo { content, range }
+                    let hover_text = extract_hover_content(&h.contents);
+                    let range = h.range.map(|r| range_to_location(&file, &r, &mut conv));
+                    HoverInfo {
+                        content: hover_text,
+                        range,
+                    }
                 }))
             }
         })
@@ -74,7 +85,12 @@ pub(super) async fn signature_help(
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
-                    position: to_lsp_position(line, column),
+                    position: to_lsp_position(
+                        line,
+                        column,
+                        &content,
+                        client.position_encoding().await,
+                    ),
                 };
 
                 let result: Option<serde_json::Value> = client
@@ -84,7 +100,8 @@ pub(super) async fn signature_help(
                     )
                     .await?;
 
-                Ok(result.and_then(|v| parse_signature_help(&v)))
+                let encoding = client.position_encoding().await;
+                Ok(result.and_then(|v| parse_signature_help(&v, encoding)))
             }
         })
         .await
@@ -135,6 +152,8 @@ pub(super) async fn diagnostics(
                     });
                 };
 
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
                 let items = lsp_diagnostics
                     .into_iter()
                     .map(|d| {
@@ -163,7 +182,7 @@ pub(super) async fn diagnostics(
                             .related_information
                             .into_iter()
                             .map(|r| crate::models::diagnostic::DiagnosticRelatedInfo {
-                                location: convert_location(&r.location),
+                                location: convert_location(&r.location, &mut conv),
                                 message: r.message,
                             })
                             .collect();
@@ -173,11 +192,19 @@ pub(super) async fn diagnostics(
                             range: LspRange {
                                 start: LspPosition {
                                     line: d.range.start.line,
-                                    character: d.range.start.character,
+                                    character: conv.scalar_offset(
+                                        &file,
+                                        d.range.start.line,
+                                        d.range.start.character,
+                                    ),
                                 },
                                 end: LspPosition {
                                     line: d.range.end.line,
-                                    character: d.range.end.character,
+                                    character: conv.scalar_offset(
+                                        &file,
+                                        d.range.end.line,
+                                        d.range.end.character,
+                                    ),
                                 },
                             },
                             severity,

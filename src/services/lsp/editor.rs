@@ -10,6 +10,7 @@ use crate::models::lsp::{
 
 use super::converters::*;
 use super::helpers::*;
+use super::position::PositionConverter;
 use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn inlay_hints(
@@ -160,9 +161,10 @@ pub(super) async fn selection_ranges(
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
+                let encoding = client.position_encoding().await;
                 let lsp_positions: Vec<_> = positions
                     .iter()
-                    .map(|(line, col)| to_lsp_position(*line, *col))
+                    .map(|(line, col)| to_lsp_position(*line, *col, &content, encoding))
                     .collect();
 
                 let params = serde_json::json!({
@@ -272,7 +274,7 @@ pub(super) async fn code_actions(
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
-                let position = to_lsp_position(line, column);
+                let position = to_lsp_position(line, column, &content, client.position_encoding().await);
 
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
@@ -386,7 +388,7 @@ pub(super) async fn apply_code_action(
                 }
 
                 Ok(ApplyActionResult {
-                    changes: parse_workspace_edit(&edit),
+                    changes: parse_workspace_edit(&edit, client.position_encoding().await),
                 })
             }
         })
@@ -427,7 +429,9 @@ pub(super) async fn format(
                     return Ok(Vec::new());
                 }
 
-                let edits = parse_text_edits(&result);
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
+                let edits = parse_text_edits(&result, &file, &mut conv);
                 Ok(edits)
             }
         })

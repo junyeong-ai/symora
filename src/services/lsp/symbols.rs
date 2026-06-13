@@ -9,6 +9,7 @@ use crate::models::symbol::{Language, Symbol};
 
 use super::converters::*;
 use super::helpers::*;
+use super::position::PositionConverter;
 use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn find_symbols(
@@ -55,12 +56,15 @@ pub(super) async fn find_symbols(
                         .await?;
                 }
 
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file_clone, &content_clone);
                 parse_document_symbols(
                     result,
                     &file_clone,
                     &base_options,
                     client.indexing_state(),
                     client.language(),
+                    &mut conv,
                 )
             }
         })
@@ -95,6 +99,7 @@ fn parse_document_symbols(
     options: &FindSymbolsOptions,
     state: IndexingState,
     language: Language,
+    conv: &mut PositionConverter,
 ) -> Result<Vec<Symbol>, LspError> {
     if result.is_null() {
         return if state == IndexingState::Ready {
@@ -112,6 +117,7 @@ fn parse_document_symbols(
             None,
             None,
             0,
+            conv,
         ));
     }
 
@@ -123,7 +129,7 @@ fn parse_document_symbols(
             let mut sym = Symbol::new(
                 s.name,
                 convert_symbol_kind(s.kind),
-                convert_location(&s.location),
+                convert_location(&s.location, conv),
             );
             if let Some(container) = s.container_name
                 && !container.is_empty()
@@ -188,11 +194,12 @@ pub(super) async fn workspace_symbols(
                     symbols.as_ref().map(|s| s.len()).unwrap_or(0)
                 );
 
+                let mut conv = PositionConverter::new(client.position_encoding().await);
                 let all_symbols: Vec<Symbol> = symbols
                     .unwrap_or_default()
                     .into_iter()
                     .map(|s| {
-                        let location = convert_location(&s.location);
+                        let location = convert_location(&s.location, &mut conv);
                         let mut sym = Symbol::new(s.name, convert_symbol_kind(s.kind), location);
                         if let Some(container) = s.container_name
                             && !container.is_empty()
@@ -238,12 +245,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn parse_null(state: IndexingState) -> Result<Vec<Symbol>, LspError> {
+        let mut conv =
+            PositionConverter::new(crate::infra::lsp::protocol::PositionEncoding::default());
         parse_document_symbols(
             serde_json::Value::Null,
             &PathBuf::from("a.rs"),
             &FindSymbolsOptions::default(),
             state,
             Language::Rust,
+            &mut conv,
         )
     }
 

@@ -9,7 +9,8 @@ use crate::models::lsp::{
 };
 use crate::models::symbol::{Location, Symbol, SymbolKind};
 
-use super::helpers::char_to_byte_index;
+use super::position::{PositionConverter, encoded_offset_to_byte};
+use crate::infra::lsp::protocol::PositionEncoding;
 
 pub(super) fn convert_symbol_kind(kind: LspSymbolKind) -> SymbolKind {
     use LspSymbolKind as LspKind;
@@ -43,28 +44,42 @@ pub(super) fn convert_symbol_kind(kind: LspSymbolKind) -> SymbolKind {
     }
 }
 
-fn location_from_range(file: std::path::PathBuf, range: &Range) -> Location {
+fn location_from_range(
+    file: std::path::PathBuf,
+    range: &Range,
+    conv: &mut PositionConverter,
+) -> Location {
+    let column = conv.scalar_column(&file, range.start.line, range.start.character);
+    let end_column = conv.scalar_column(&file, range.end.line, range.end.character);
     Location {
         file,
         line: range.start.line + 1,
-        column: range.start.character + 1,
+        column,
         range_start_line: None,
         range_start_column: None,
         end_line: Some(range.end.line + 1),
-        end_column: Some(range.end.character + 1),
+        end_column: Some(end_column),
     }
 }
 
-pub(super) fn convert_location(loc: &LspLocation) -> Location {
-    location_from_range(uri_to_path(&loc.uri), &loc.range)
+pub(super) fn convert_location(loc: &LspLocation, conv: &mut PositionConverter) -> Location {
+    location_from_range(uri_to_path(&loc.uri), &loc.range, conv)
 }
 
-pub(super) fn range_to_location(file: &Path, range: &Range) -> Location {
-    location_from_range(file.to_path_buf(), range)
+pub(super) fn range_to_location(
+    file: &Path,
+    range: &Range,
+    conv: &mut PositionConverter,
+) -> Location {
+    location_from_range(file.to_path_buf(), range, conv)
 }
 
-pub(super) fn uri_range_to_location(uri: &str, range: &Range) -> Location {
-    location_from_range(uri_to_path(uri), range)
+pub(super) fn uri_range_to_location(
+    uri: &str,
+    range: &Range,
+    conv: &mut PositionConverter,
+) -> Location {
+    location_from_range(uri_to_path(uri), range, conv)
 }
 
 pub(super) fn extract_hover_content(contents: &HoverContents) -> String {
@@ -91,18 +106,21 @@ pub(super) fn convert_document_symbols(
     content: Option<&str>,
     container: Option<&str>,
     current_depth: u32,
+    conv: &mut PositionConverter,
 ) -> Vec<Symbol> {
     symbols
         .iter()
         .map(|doc_sym| {
+            let sel = &doc_sym.selection_range;
+            let range = &doc_sym.range;
             let location = Location::full(
                 file.to_path_buf(),
-                doc_sym.selection_range.start.line + 1,
-                doc_sym.selection_range.start.character + 1,
-                doc_sym.range.start.line + 1,
-                doc_sym.range.start.character + 1,
-                doc_sym.range.end.line + 1,
-                doc_sym.range.end.character + 1,
+                sel.start.line + 1,
+                conv.scalar_column(file, sel.start.line, sel.start.character),
+                range.start.line + 1,
+                conv.scalar_column(file, range.start.line, range.start.character),
+                range.end.line + 1,
+                conv.scalar_column(file, range.end.line, range.end.character),
             );
 
             let mut symbol = Symbol::new(
@@ -131,6 +149,7 @@ pub(super) fn convert_document_symbols(
                     content,
                     Some(&doc_sym.name),
                     current_depth + 1,
+                    conv,
                 );
                 symbol = symbol.with_children(child_symbols);
             }
@@ -191,7 +210,15 @@ pub(super) fn parse_range(value: &serde_json::Value) -> Option<crate::models::ls
     Some(crate::models::lsp::Range::new(start, end))
 }
 
-pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWithEdits> {
+pub(super) fn parse_workspace_edit(
+    edit: &serde_json::Value,
+    encoding: PositionEncoding,
+) -> Vec<FileChangeWithEdits> {
+    // Each edit's range arrives in the negotiated wire encoding; it is decoded
+    // to a native scalar column HERE (against the edit's own target file) so the
+    // edit applier in edit.rs receives native coordinates and never has to know
+    // an encoding exists. One converter caches every target file's lines.
+    let mut conv = PositionConverter::new(encoding);
     // `documentChanges` and `changes` are two representations of the same
     // edit. A server that emits `documentChanges` (which Symora advertises
     // support for) must be read from there with `changes` ignored — reading
@@ -205,7 +232,7 @@ pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWi
                 let file = uri_to_path(uri);
 
                 if let Some(edits) = change.get("edits") {
-                    let text_edits = parse_text_edits(edits);
+                    let text_edits = parse_text_edits(edits, &file, &mut conv);
                     if !text_edits.is_empty() {
                         changes.push(FileChangeWithEdits {
                             file,
@@ -222,7 +249,7 @@ pub(super) fn parse_workspace_edit(edit: &serde_json::Value) -> Vec<FileChangeWi
     if let Some(file_changes) = edit.get("changes").and_then(|c| c.as_object()) {
         for (uri, edits) in file_changes {
             let file = uri_to_path(uri);
-            let text_edits = parse_text_edits(edits);
+            let text_edits = parse_text_edits(edits, &file, &mut conv);
             if !text_edits.is_empty() {
                 changes.push(FileChangeWithEdits {
                     file,
@@ -248,7 +275,11 @@ pub(super) fn find_resource_operation(edit: &serde_json::Value) -> Option<&str> 
         })
 }
 
-pub(super) fn parse_text_edits(edits: &serde_json::Value) -> Vec<crate::models::lsp::TextEdit> {
+pub(super) fn parse_text_edits(
+    edits: &serde_json::Value,
+    file: &Path,
+    conv: &mut PositionConverter,
+) -> Vec<crate::models::lsp::TextEdit> {
     use crate::models::lsp::TextEdit as LspTextEdit;
 
     let arr = match edits.as_array() {
@@ -258,7 +289,13 @@ pub(super) fn parse_text_edits(edits: &serde_json::Value) -> Vec<crate::models::
 
     arr.iter()
         .filter_map(|edit| {
-            let range = parse_range(edit.get("range")?)?;
+            let mut range = parse_range(edit.get("range")?)?;
+            // Decode the wire columns to native scalar offsets against the
+            // target file, so apply_text_edits slices the correct bytes — the
+            // close of the non-BMP corruption hole.
+            range.start.character =
+                conv.scalar_offset(file, range.start.line, range.start.character);
+            range.end.character = conv.scalar_offset(file, range.end.line, range.end.character);
 
             Some(LspTextEdit {
                 range,
@@ -272,7 +309,10 @@ pub(super) fn parse_text_edits(edits: &serde_json::Value) -> Vec<crate::models::
         .collect()
 }
 
-pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<SignatureHelp> {
+pub(super) fn parse_signature_help(
+    value: &serde_json::Value,
+    encoding: PositionEncoding,
+) -> Option<SignatureHelp> {
     let signatures = value.get("signatures")?.as_array()?;
 
     let parsed_signatures: Vec<SignatureInfo> = signatures
@@ -300,10 +340,13 @@ pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<Signatur
                                 if let Some(s) = l.as_str() {
                                     Some(s.to_string())
                                 } else if let Some(arr) = l.as_array() {
-                                    let start = arr.first()?.as_u64()? as usize;
-                                    let end = arr.get(1)?.as_u64()? as usize;
-                                    let byte_start = char_to_byte_index(&label, start);
-                                    let byte_end = char_to_byte_index(&label, end);
+                                    // labelOffset indexes the label STRING in the
+                                    // negotiated wire encoding, not a source line.
+                                    let start = arr.first()?.as_u64()? as u32;
+                                    let end = arr.get(1)?.as_u64()? as u32;
+                                    let byte_start =
+                                        encoded_offset_to_byte(encoding, &label, start);
+                                    let byte_end = encoded_offset_to_byte(encoding, &label, end);
                                     label.get(byte_start..byte_end).map(|s| s.to_string())
                                 } else {
                                     None
@@ -362,7 +405,9 @@ pub(super) fn parse_signature_help(value: &serde_json::Value) -> Option<Signatur
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_code_string, find_resource_operation, parse_workspace_edit};
+    use super::{
+        PositionEncoding, diagnostic_code_string, find_resource_operation, parse_workspace_edit,
+    };
 
     /// Both arms of the LSP string-or-number union come out as the bare
     /// value — `"E0308"` stays `E0308`, `6133` becomes `6133`.
@@ -393,7 +438,7 @@ mod tests {
                   ] }
             ]
         });
-        let parsed = parse_workspace_edit(&both);
+        let parsed = parse_workspace_edit(&both, PositionEncoding::Utf16);
         assert_eq!(parsed.len(), 1, "the file appears once, not duplicated");
         assert_eq!(parsed[0].edits.len(), 1);
     }
@@ -410,7 +455,10 @@ mod tests {
                 ]
             }
         });
-        assert_eq!(parse_workspace_edit(&changes_only).len(), 1);
+        assert_eq!(
+            parse_workspace_edit(&changes_only, PositionEncoding::Utf16).len(),
+            1
+        );
     }
 
     /// Text-only edits pass; any create/rename/delete resource operation
