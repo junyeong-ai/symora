@@ -695,6 +695,7 @@ fn edit_output_symbol_applied() {
         dangling_references: None,
         references_status: None,
         diagnostics: None,
+        caller_verification: None,
     };
     assert_json_snapshot!(out, @r###"
     {
@@ -727,6 +728,7 @@ fn edit_output_range_dry_run() {
         dangling_references: None,
         references_status: None,
         diagnostics: None,
+        caller_verification: None,
     };
     assert_json_snapshot!(out, @r###"
     {
@@ -760,6 +762,7 @@ fn edit_output_delete_with_clean_reference_check() {
         dangling_references: Some(Section::new(vec![sample_location(50, 12)])),
         references_status: None,
         diagnostics: None,
+        caller_verification: None,
     };
     assert_json_snapshot!(out, @r###"
     {

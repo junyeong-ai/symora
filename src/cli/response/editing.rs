@@ -39,10 +39,40 @@ pub struct EditOutput {
     /// an empty list is a real "none found", not a fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub references_status: Option<&'static str>,
-    /// Post-edit diagnostics, present only when `--with-diagnostics`
-    /// was passed on an applied (non-dry-run) edit.
+    /// Post-edit diagnostics for the edited file, present only when
+    /// `--with-diagnostics` was passed on an applied (non-dry-run) edit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<EditDiagnostics>,
+    /// Post-edit diagnostics for the edited symbol's caller files, present
+    /// only when `--verify-callers` was passed on an applied symbol edit.
+    /// Closes the read->edit->verify loop across the blast radius in one call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_verification: Option<CallerVerification>,
+}
+
+/// Diagnostics for the files that reference the edited symbol — the one-hop
+/// caller set, never the transitive caller graph. The `Section` carries the
+/// honest set completeness (count/showing/truncated/indexing); each file's own
+/// `EditDiagnostics.status` carries its confirmation state. Every listed file's
+/// diagnostics are its CURRENT full state, not a delta caused by this edit, so
+/// a pre-existing error is never misattributed to the edit.
+#[derive(Debug, Serialize)]
+pub struct CallerVerification {
+    #[serde(flatten)]
+    pub callers: Section<CallerFileDiagnostics>,
+    /// Set only when the reference lookup could not run: `unsupported`
+    /// (language server lacks references) or `unavailable` (the lookup
+    /// failed). Never paired with a non-empty list — an empty `Section` under
+    /// a status is "could not enumerate callers", not "no callers".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CallerFileDiagnostics {
+    pub file: String,
+    #[serde(flatten)]
+    pub diagnostics: EditDiagnostics,
 }
 
 /// Post-edit diagnostics pull. `status` is always present so an empty
