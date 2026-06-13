@@ -16,6 +16,10 @@ Shared discovery and steering heuristics are centralized in `src/cli/symbol_disc
 
 `Symbol::compute_paths_for_all` (in `src/models/symbol/`) is the single source of truth for path strings like `Class/method`. Path matching (substring, suffix, exact) is what makes `--symbol` flows reliable — keep its semantics stable.
 
+## One call-graph traversal
+
+Depth-bounded call-graph walks share one core, `src/cli/call_graph.rs` (`walk` over a `Direction` with a `WalkConfig`): `impact`/`blast_radius` walk `Incoming`, `callees --depth`/`--to` walk `Outgoing`. The core owns frontier ordering (sorted → deterministic), the visited set, the depth/fan-out caps, and the lower-bound markers (`max_depth_reached`, truncation). Don't hand-roll a second BFS in a command — extend the core and surface its markers, so a swallowed hop never reads as a genuine empty result.
+
 ## One mutation surface
 
 Every command that splices source text by symbol or range lives in `commands/edit.rs`, sharing one root-validated resolution path, one validation gate, one splice core (`LineSplice`), one preview format (an exact hunk derived from the splice — never a re-diff), and one typed output (`EditOutput`). Don't add a second file-writing command; add a subcommand that reduces to the splice core. Previews and safety checks (dangling references on `delete`, optional `--with-diagnostics`) run on the same path for every operation — the destructive path never gets to skip them.

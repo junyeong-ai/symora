@@ -32,7 +32,7 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
 
 If a new list response needs a different shape, that's a strong signal the underlying command should be reshaped instead.
 
-The boundary: an unbounded list — anything whose length scales with the codebase or the finding count (references, symbols, diagnostics) — wraps in `Section<T>`, usually flattened beside the response's own fields (`refs`, `usage`, `diagnostics` all do this). Bounded summary arrays (e.g. `impact`'s `files`, capped at `IMPACT_FILES_LIMIT` = 50) stay plain arrays.
+The boundary: an unbounded list — anything whose length scales with the codebase or the finding count (references, symbols, diagnostics) — wraps in `Section<T>`, usually flattened beside the response's own fields (`refs`, `usage`, `diagnostics` all do this). Bounded summary arrays (e.g. `impact`'s `files`, capped at `IMPACT_FILES_LIMIT`) stay plain arrays.
 
 ## Field omission
 

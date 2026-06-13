@@ -2,7 +2,7 @@
 name: symora
 version: 0.12.2
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
-when_to_use: User asks "where is this defined", "who calls this", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
+when_to_use: User asks "where is this defined", "who calls this", "how does this function reach that one", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
 ---
 
@@ -69,6 +69,9 @@ symora context src/cli/commands/search/mod.rs:30 --all
 symora context src/cli/commands/search/mod.rs:30 --callees --with-bodies   # callee list + complete bodies in one call
 symora refs src/cli/commands/search/mod.rs:30
 symora usage src/cli/commands/search/mod.rs:30:10 --max-symbols 10 --limit 5
+symora callees src/cli/commands/search/mod.rs:30                  # direct callees (single hop)
+symora callees src/cli/commands/search/mod.rs:30 --depth 3        # downward reachable set to depth 3
+symora callees src/cli/commands/search/mod.rs:30 --to src/services/store/index.rs:42   # shortest call chain to a target
 ```
 
 The location commands here and above — `refs`, `callers`, `callees`, `context`, `impact`, `usage` — accept a `file:line` (column optional) and resolve it by the same addressing rules as `edit`: a column-less `file:line` targets the symbol *declared* on that line (a method's declaration line means the method, never the impl/class spanning it), and a body line falls back to the enclosing symbol — so a `search symbols` result row can be passed straight through without pinning the exact name column. When a line declares several symbols, these read commands analyze the first declaration and say so in `hints` (the resolved `target` is always echoed); only `edit` refuses with an ambiguity error, because a guessed write is destructive.
@@ -81,6 +84,7 @@ The location commands here and above — `refs`, `callers`, `callees`, `context`
 - `context --with-bodies` additionally attaches complete verbatim bodies: the target's body always attaches whole and unbudgeted; callee bodies (in listed order) and type bodies draw on the `--body-tokens` budget (default 2000), whole-body-or-nothing per item. `--with-bodies` is a `context` flag only — the standalone `callers`/`callees` commands do not accept it.
 - Body-bearing sections report `bodies_included`; an item without `body` there was omitted for one of three causes: the token budget ran out, the symbol was unresolvable at its position, or it genuinely has no body (prototypes, interface methods). Only the first is cured by raising `--body-tokens` — an omission that persists after a large raise is not budget-caused; fetch a specific body with `symora symbols <file> --body`.
 - `refs`, `context` (callers/callees sections), and `impact` emit gated `next_commands` — ready-to-run follow-ups — only when a condition holds (declaration-only result, truncation, single-file concentration, or an incomplete caller graph), so their presence is signal, never boilerplate.
+- `callees` has three modes: direct (single hop, default), `--depth N` (the downward *reachable set* to depth N, carrying `max_depth_reached`/`callees_truncated` lower-bound markers), and `--to <file:line[:col]>` (the shortest call *chain* to a target). `--to` reports `reachability`: `found` (the ordered `chain` follows), `not_reached_within_bound` (raise `--depth`), or `no_static_path` (no chain through statically-resolved calls — still a lower bound; dynamic dispatch is not folded in).
 
 ### Refactor and health checks
 
@@ -92,7 +96,7 @@ symora edit replace-body src/main.rs --symbol 'Config/load' --body "$(cat new_fn
 symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
 symora edit delete src/main.rs:42:4 --dry-run
 symora edit delete src/main.rs:42:4 --expect-no-references
-symora diagnostics src/main.rs --with-context
+symora diagnostics src/main.rs --with-context --with-suggestions
 symora impact src/main.rs:42
 symora diff-impact
 ```
@@ -108,6 +112,8 @@ Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept
 - `edit delete` always reports references outside the deleted span that would dangle (`dangling_references` with the standard list shape; `references_status: "unsupported"|"unavailable"` when the check couldn't run).
 - With `--expect-no-references`, verified reference-freedom becomes a precondition: the delete is refused (no write, `precondition_failed` error) when dangling references exist, when the check is `unsupported`/`unavailable`, or when an indexing-degraded zero leaves it unverified — the message says which, and the hint carries the next command. Unlike `conflict`, re-reading and retrying alone will not clear it.
 - Add `--with-diagnostics` to any applied edit to attach post-edit LSP diagnostics: `{"status": "ok"|"unconfirmed"|"unsupported"|"unavailable", "count", "items"}` — an empty list under `unconfirmed` means *unknown*, not clean. The standalone `diagnostics` command carries the same `status` key only when the result is not authoritative.
+- Add `--verify-callers` to an applied (non-dry-run) `edit replace-body`/`insert-before`/`insert-after` to pull post-edit diagnostics on the edited symbol's callers — a read→edit→verify loop that catches a signature break at its call sites (caller files are capped and the cap disclosed). Ignored on `--dry-run`.
+- `diagnostics --with-context` attaches each finding's surrounding code; `--with-suggestions` attaches the LSP's fix suggestions. Both are opt-in.
 - `impact` on a trait/interface method reports `blast_radius.dynamic_dispatch` (`status: "incomplete"` with the implementation count, or `"unavailable"`) — caller counts are then a lower bound and `confidence` is capped.
 
 ## Output and global flags
