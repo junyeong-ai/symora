@@ -30,11 +30,6 @@ pub struct OutputOptions {
 /// subprocess.
 pub trait OutputSink: Send + Sync {
     fn write_line(&self, line: &str);
-
-    /// Called once per handled command failure (`print_error`), so an
-    /// adapter capturing output can report success/failure truthfully
-    /// without re-parsing the emitted JSON.
-    fn record_error(&self) {}
 }
 
 pub struct StdoutSink;
@@ -48,7 +43,6 @@ impl OutputSink for StdoutSink {
 #[derive(Default, Clone)]
 pub struct BufferedSink {
     lines: Arc<Mutex<Vec<String>>>,
-    errored: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BufferedSink {
@@ -59,11 +53,6 @@ impl BufferedSink {
     pub fn take(&self) -> Vec<String> {
         std::mem::take(&mut *self.lines.lock().expect("buffered sink poisoned"))
     }
-
-    /// True when the captured command reported a handled failure.
-    pub fn errored(&self) -> bool {
-        self.errored.load(std::sync::atomic::Ordering::Relaxed)
-    }
 }
 
 impl OutputSink for BufferedSink {
@@ -72,11 +61,6 @@ impl OutputSink for BufferedSink {
             .lock()
             .expect("buffered sink poisoned")
             .push(line.to_string());
-    }
-
-    fn record_error(&self) {
-        self.errored
-            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -89,6 +73,12 @@ pub struct OutputContext {
     /// Constructors leave it off — `App` is the single application point,
     /// above the daemon/direct mode boundary, so every surface agrees.
     max_response_chars: usize,
+    /// Set once when a handler reports a handled failure via `print_error`.
+    /// Lifted here (above the sink) so the bare CLI and the MCP adapter read
+    /// the SAME failure signal — the one that drives both the process exit
+    /// code and the MCP `isError` flag. The `Arc` is shared across clones so a
+    /// scoped context's failure is visible to whoever built it.
+    errored: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for OutputContext {
@@ -98,6 +88,7 @@ impl std::fmt::Debug for OutputContext {
             .field("options", &self.options)
             .field("sink", &"<dyn OutputSink>")
             .field("max_response_chars", &self.max_response_chars)
+            .field("errored", &self.errored())
             .finish()
     }
 }
@@ -109,6 +100,7 @@ impl OutputContext {
             options,
             sink: Arc::new(StdoutSink),
             max_response_chars: 0,
+            errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -118,6 +110,7 @@ impl OutputContext {
             options,
             sink,
             max_response_chars: 0,
+            errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -182,9 +175,28 @@ impl OutputContext {
 
     pub fn print_error<E: Into<OutputError>>(&self, error: E) {
         let err: OutputError = error.into();
-        self.sink.record_error();
+        // Categorical: the flag is keyed on the print_error path itself, never
+        // on inspecting emitted JSON. A successful command that reports
+        // diagnostics or an embedded `Section` error as DATA (via
+        // print_success) is not a command failure and leaves this false.
+        self.errored
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let response = serde_json::json!({ "error": err });
         self.emit(&response);
+    }
+
+    /// True once any handler reported a handled failure via `print_error`.
+    /// The single predicate behind the CLI process exit code and the MCP
+    /// `isError` flag.
+    pub fn errored(&self) -> bool {
+        self.errored.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A shared handle to the failure flag, for a caller that must read it
+    /// after moving the owning context (the MCP capture moves its scoped
+    /// `App` into the command future, then reports `isError` from this).
+    pub(crate) fn errored_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.errored)
     }
 
     /// Emit raw text output (used by markdown / plain-text shapes that bypass
@@ -303,5 +315,49 @@ mod tests {
         );
         ctx.print_success(serde_json::json!({ "ok": true }));
         assert!(buf.take().is_empty());
+    }
+
+    // The failure flag is the single predicate behind the CLI exit code and
+    // the MCP isError flag. It is keyed on the print_error path, never on
+    // output content.
+
+    #[test]
+    fn print_error_sets_errored_print_success_does_not() {
+        let ctx = OutputContext::new(PathBuf::from("/project"), OutputOptions::default());
+        assert!(!ctx.errored());
+        ctx.print_success(serde_json::json!({ "ok": true }));
+        assert!(!ctx.errored(), "a successful response is not a failure");
+        ctx.print_error(OutputError::not_found("missing".to_string()));
+        assert!(ctx.errored());
+    }
+
+    #[test]
+    fn quiet_mode_still_records_and_emits_errors() {
+        // --quiet is "errors only": it suppresses success bodies but an error
+        // is still emitted AND still flips the flag (so CI gets exit 2).
+        let buf = BufferedSink::new();
+        let ctx = OutputContext::with_sink(
+            PathBuf::from("/project"),
+            OutputOptions {
+                quiet: true,
+                ..Default::default()
+            },
+            Arc::new(buf.clone()),
+        );
+        ctx.print_error(OutputError::not_found("missing".to_string()));
+        assert!(ctx.errored());
+        assert!(!buf.take().is_empty(), "errors are shown under --quiet");
+    }
+
+    #[test]
+    fn errored_flag_is_shared_across_clones() {
+        // The MCP capture reads the flag after the scoped context is moved;
+        // a clone must observe a failure set on the original (shared Arc).
+        let ctx = OutputContext::new(PathBuf::from("/project"), OutputOptions::default());
+        let flag = ctx.errored_flag();
+        let clone = ctx.clone();
+        ctx.print_error(OutputError::not_found("missing".to_string()));
+        assert!(clone.errored());
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

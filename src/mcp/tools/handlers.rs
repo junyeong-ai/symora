@@ -91,10 +91,13 @@ where
             token_estimate: false,
         },
     );
+    // Grab the failure-flag handle before the scoped App moves into the
+    // command future; this is the same flag the CLI exit code reads.
+    let errored = scoped.output.errored_flag();
     run(scoped).await?;
     Ok(CapturedOutput {
         body: buf.take().join("\n"),
-        errored: buf.errored(),
+        errored: errored.load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
