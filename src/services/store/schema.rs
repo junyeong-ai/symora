@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub const INIT_SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -8,7 +8,7 @@ PRAGMA cache_size = -16384;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 134217728;
 PRAGMA busy_timeout = 5000;
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -48,6 +48,36 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_name_nocase ON symbols(name COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_symbols_name_path_nocase ON symbols(name_path COLLATE NOCASE);
 CREATE INDEX IF NOT EXISTS idx_content_file ON content_lines(file_id);
+
+-- FTS5 trigram index over content_lines, as an EXTERNAL-CONTENT table: it
+-- stores no copy of the text, deriving everything from content_lines via the
+-- triggers below. The trigram tokenizer is the only FTS5 tokenizer that
+-- preserves arbitrary infix substrings (for queries >= 3 chars), so a MATCH is
+-- a true necessary condition for the LIKE '%q%' the search still applies as the
+-- authority. case_sensitive 0 mirrors LIKE's ASCII case-insensitivity;
+-- remove_diacritics 0 keeps accents so folding matches LIKE.
+CREATE VIRTUAL TABLE IF NOT EXISTS content_lines_fts USING fts5(
+    content,
+    content='content_lines',
+    content_rowid='id',
+    tokenize='trigram case_sensitive 0 remove_diacritics 0'
+);
+
+-- Keep the FTS index in lockstep with content_lines through every mutation
+-- site automatically — including the two bulk paths (cleanup_expired, clear)
+-- that bypass the per-file delete helper — so the index can never desync.
+CREATE TRIGGER IF NOT EXISTS content_lines_ai AFTER INSERT ON content_lines BEGIN
+    INSERT INTO content_lines_fts(rowid, content) VALUES (new.id, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS content_lines_ad AFTER DELETE ON content_lines BEGIN
+    INSERT INTO content_lines_fts(content_lines_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS content_lines_au AFTER UPDATE ON content_lines BEGIN
+    INSERT INTO content_lines_fts(content_lines_fts, rowid, content)
+        VALUES ('delete', old.id, old.content);
+    INSERT INTO content_lines_fts(rowid, content) VALUES (new.id, new.content);
+END;
 "#;
 
 pub fn build_symbol_search_query(with_kind: bool) -> String {
@@ -83,9 +113,22 @@ LIMIT ?2"#
     )
 }
 
-pub fn build_content_search_query(with_lang: bool) -> String {
+pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
     let lang_filter = if with_lang {
         " AND f.language = ?3"
+    } else {
+        ""
+    };
+    // For queries >= 3 chars, an FTS5 trigram MATCH pre-filters candidate rows
+    // sub-linearly. It is ONLY a pre-filter: the LIKE below stays authoritative,
+    // so a trigram coincidence that is not a real substring is still rejected,
+    // and the result SET, the relevance ladder, and COUNT(*) OVER() are
+    // byte-identical to the LIKE-only scan (proven by a set-identity test). The
+    // query text is wrapped as a single FTS5 string literal — doubling any
+    // embedded quote — so FTS syntax characters in user input never error or
+    // change the match. Shorter queries have no trigrams and skip FTS.
+    let fts_prefilter = if use_fts {
+        r#"c.id IN (SELECT rowid FROM content_lines_fts WHERE content_lines_fts MATCH '"' || REPLACE(?1, '"', '""') || '"') AND "#
     } else {
         ""
     };
@@ -103,8 +146,13 @@ pub fn build_content_search_query(with_lang: bool) -> String {
     END AS score
 FROM content_lines c
 JOIN files f ON c.file_id = f.id
-WHERE c.content LIKE '%' || ?1 || '%' COLLATE NOCASE{lang_filter}
+WHERE {fts_prefilter}c.content LIKE '%' || ?1 || '%' COLLATE NOCASE{lang_filter}
 ORDER BY score DESC, LENGTH(c.content) ASC
 LIMIT ?2"#
     )
 }
+
+/// Minimum query length for the FTS5 trigram pre-filter. A trigram index has
+/// no tokens for inputs shorter than 3 characters, so a MATCH would return the
+/// empty set; such queries run the LIKE-only scan instead.
+pub const FTS_MIN_QUERY_CHARS: usize = 3;

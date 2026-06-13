@@ -263,11 +263,14 @@ impl Store {
         let query = query.to_string();
         let limit = limit as i64;
         let lang_str = language.map(|l| l.lsp_id().to_string());
+        // The trigram pre-filter needs >= 3 chars; shorter queries fall back to
+        // the LIKE-only scan (the deterministic threshold, not a guess).
+        let use_fts = query.chars().count() >= FTS_MIN_QUERY_CHARS;
 
         let (mut page, snapshot) = self
             .db
             .call(move |conn| {
-                let sql = build_content_search_query(lang_str.is_some());
+                let sql = build_content_search_query(lang_str.is_some(), use_fts);
                 let mut stmt = conn.prepare(&sql)?;
                 let rows = match &lang_str {
                     Some(l) => stmt.query(rusqlite::params![query, limit, l])?,
@@ -801,6 +804,154 @@ mod tests {
 
     async fn total_matches(store: &Store, query: &str) -> usize {
         store.search_symbols(query, 50, None).await.unwrap().total
+    }
+
+    /// Run the content-search SQL directly with a chosen `use_fts`, returning
+    /// comparable (content, line, path, score) rows — so a test can assert the
+    /// FTS pre-filter is set-identical to the LIKE-only scan.
+    async fn content_rows(store: &Store, query: &str, use_fts: bool) -> Vec<(String, i64, f64)> {
+        let q = query.to_string();
+        store
+            .db
+            .call(move |conn| {
+                let sql = build_content_search_query(false, use_fts);
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map(rusqlite::params![q, 10_000_i64], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, f64>(5)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn fts_row_count(store: &Store) -> i64 {
+        store
+            .db
+            .call(|conn| conn.query_row("SELECT count(*) FROM content_lines_fts", [], |r| r.get(0)))
+            .await
+            .unwrap()
+    }
+
+    async fn content_row_count(store: &Store) -> i64 {
+        store
+            .db
+            .call(|conn| conn.query_row("SELECT count(*) FROM content_lines", [], |r| r.get(0)))
+            .await
+            .unwrap()
+    }
+
+    /// SHIP-BLOCKER: the FTS trigram pre-filter must return exactly the same
+    /// rows, scores, and order as the LIKE-only scan for every >= 3-char query,
+    /// including FTS-syntax characters, mixed case, and non-ASCII text. Any
+    /// divergence means the index path silently disagrees with its own
+    /// authority — fail the build.
+    #[tokio::test]
+    async fn fts_prefilter_is_set_identical_to_like_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(
+            root.join("corpus.rs"),
+            "fn foo_bar() {}\n\
+             let Foo = 1;\n\
+             const BAR_BAZ = 2;\n\
+             let value = cafe_latte();\n\
+             let accented = \"café\";\n\
+             fn 안녕하세요() {}\n\
+             // punctuation a:b and x-y and (z) here\n\
+             match thing { OR_AND_NOT => 0 }\n\
+             let repeated = foo_bar_foo();\n",
+        )
+        .await
+        .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        // Every probe is >= 3 chars (the production FTS threshold): real
+        // substrings across case, snake_case, accents, CJK, FTS-syntax chars,
+        // and a guaranteed non-match.
+        let probes = [
+            "foo",
+            "Foo",
+            "FOO",
+            "foo_bar",
+            "bar_baz",
+            "value",
+            "café",
+            "안녕하",
+            "NOT",
+            "a:b",
+            "x-y",
+            "(z)",
+            "OR_",
+            "zzz_nomatch",
+        ];
+        for q in probes {
+            let fts = content_rows(&store, q, true).await;
+            let like = content_rows(&store, q, false).await;
+            assert_eq!(
+                fts, like,
+                "FTS pre-filter diverged from LIKE-only for {q:?}"
+            );
+        }
+    }
+
+    /// The FTS index is external-content and trigger-maintained, so it must
+    /// stay row-for-row in sync with content_lines through both the per-file
+    /// delete and the bulk clear path.
+    #[tokio::test]
+    async fn fts_index_stays_in_sync_with_content_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn alpha() {}\nfn beta() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        assert!(content_row_count(&store).await > 0);
+        assert_eq!(fts_row_count(&store).await, content_row_count(&store).await);
+
+        // Delete the file's rows via refresh — triggers must purge FTS too.
+        tokio::fs::remove_file(&file).await.unwrap();
+        store
+            .refresh_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        assert_eq!(content_row_count(&store).await, 0);
+        assert_eq!(
+            fts_row_count(&store).await,
+            0,
+            "FTS rows orphaned after delete"
+        );
+    }
+
+    /// Sub-3-char queries have no trigrams, so production routes them to the
+    /// LIKE-only path; the result must equal the LIKE-only scan (a non-empty
+    /// 2-char substring still returns its matches, not a silent zero).
+    #[tokio::test]
+    async fn short_queries_use_like_only_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn fox() {}\nlet ok = 1;\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        // "fn" is 2 chars: search_content must gate it onto the LIKE path and
+        // still find the line, identical to the LIKE-only scan.
+        let via_api = store.search_content("fn", 50, None).await.unwrap();
+        let like_only = content_rows(&store, "fn", false).await;
+        assert_eq!(via_api.total, like_only.len());
+        assert!(via_api.total > 0);
     }
 
     #[tokio::test]
