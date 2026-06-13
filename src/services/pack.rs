@@ -7,7 +7,7 @@
 //! search index. A single repo walk + per-language regex extraction is
 //! enough to produce a useful, deterministic pack.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -205,6 +205,17 @@ fn collect_nodes(
             signatures,
         });
     }
+
+    // Canonical node order: the ignore::Walk yields entries in filesystem
+    // readdir order (walk_builder does not set sort_by_file_path), which is
+    // machine-dependent. Sort by rel_path — unique among nodes — and renumber
+    // so the whole pack (import graph, PageRank, budget fit) is reproducible
+    // for a fixed source state, as pack.rs's own contract promises. ids are
+    // opaque keys into the graph maps, so renumber-after-sort is safe.
+    nodes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    for (i, node) in nodes.iter_mut().enumerate() {
+        node.id = i;
+    }
     nodes
 }
 
@@ -268,7 +279,11 @@ fn derive_aliases(abs_path: &Path, root: &Path) -> Vec<String> {
 
 // --- graph -----------------------------------------------------------------
 
-type Graph = HashMap<usize, Vec<usize>>;
+// BTreeMap, not HashMap: PageRank accumulates f64 scores by iterating this
+// graph, and float addition is non-associative — a random HashMap iteration
+// order would make scores differ by a ULP run-to-run, breaking pack's
+// reproducibility contract. Ascending-id iteration is the canonical order.
+type Graph = BTreeMap<usize, Vec<usize>>;
 
 fn build_import_graph(nodes: &[Node]) -> Graph {
     let mut alias_index: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -278,7 +293,7 @@ fn build_import_graph(nodes: &[Node]) -> Graph {
         }
     }
 
-    let mut graph: Graph = HashMap::new();
+    let mut graph: Graph = BTreeMap::new();
     for node in nodes {
         graph.entry(node.id).or_default();
         let mut seen = HashSet::new();
@@ -439,8 +454,8 @@ fn tokenize_import(raw: &str) -> Vec<String> {
 
 // --- PageRank --------------------------------------------------------------
 
-fn personalization_vector(nodes: &[Node], focus: Option<&str>) -> HashMap<usize, f64> {
-    let mut v = HashMap::new();
+fn personalization_vector(nodes: &[Node], focus: Option<&str>) -> BTreeMap<usize, f64> {
+    let mut v = BTreeMap::new();
     let n = nodes.len().max(1) as f64;
     let baseline = 1.0 / n;
 
@@ -478,19 +493,19 @@ fn personalization_vector(nodes: &[Node], focus: Option<&str>) -> HashMap<usize,
 
 fn page_rank(
     graph: &Graph,
-    personalization: &HashMap<usize, f64>,
+    personalization: &BTreeMap<usize, f64>,
     cfg: &PackConfig,
-) -> HashMap<usize, f64> {
+) -> BTreeMap<usize, f64> {
     let n = graph.len();
     if n == 0 {
-        return HashMap::new();
+        return BTreeMap::new();
     }
 
     let inv_n = 1.0 / n as f64;
-    let mut score: HashMap<usize, f64> = graph.keys().map(|k| (*k, inv_n)).collect();
+    let mut score: BTreeMap<usize, f64> = graph.keys().map(|k| (*k, inv_n)).collect();
 
     for _ in 0..cfg.max_iterations {
-        let mut next: HashMap<usize, f64> = graph
+        let mut next: BTreeMap<usize, f64> = graph
             .keys()
             .map(|k| {
                 let teleport = personalization.get(k).copied().unwrap_or(inv_n);
@@ -529,12 +544,17 @@ fn page_rank(
 
 // --- budget fit ------------------------------------------------------------
 
-fn fit_to_budget(nodes: &[Node], ranks: &HashMap<usize, f64>, budget: usize) -> PackResult {
+fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) -> PackResult {
     let mut ordered: Vec<&Node> = nodes.iter().collect();
     ordered.sort_by(|a, b| {
         let ra = ranks.get(&a.id).copied().unwrap_or(0.0);
         let rb = ranks.get(&b.id).copied().unwrap_or(0.0);
-        rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+        // Total order: rank desc, then rel_path asc (unique) as a tiebreak, so
+        // a genuine rank tie drops the same file at the budget boundary every
+        // run rather than relying on the unstable sort's input order.
+        rb.partial_cmp(&ra)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
     });
 
     let mut packed = Vec::new();
@@ -1075,11 +1095,11 @@ mod tests {
 
     #[test]
     fn pagerank_converges_on_simple_chain() {
-        let mut g: Graph = HashMap::new();
+        let mut g: Graph = BTreeMap::new();
         g.insert(0, vec![1]);
         g.insert(1, vec![2]);
         g.insert(2, vec![]);
-        let pers: HashMap<usize, f64> = (0..3).map(|i| (i, 1.0 / 3.0)).collect();
+        let pers: BTreeMap<usize, f64> = (0..3).map(|i| (i, 1.0 / 3.0)).collect();
         let ranks = page_rank(&g, &pers, &PackConfig::default());
         let total: f64 = ranks.values().sum();
         assert!(
@@ -1138,7 +1158,7 @@ mod tests {
             ),
             node(1, "src/b.rs", &["b"], "pub fn small() {}\n"),
         ];
-        let ranks: HashMap<usize, f64> = [(0, 0.6), (1, 0.4)].into();
+        let ranks: BTreeMap<usize, f64> = [(0, 0.6), (1, 0.4)].into();
         let result = fit_to_budget(&nodes, &ranks, 50);
         // We always emit at least one file, but the second should be dropped
         // because the first already overflows the tiny 50-token budget.
@@ -1152,10 +1172,26 @@ mod tests {
             node(0, "src/low.rs", &["low"], "pub fn low() {}\n"),
             node(1, "src/high.rs", &["high"], "pub fn high() {}\n"),
         ];
-        let ranks: HashMap<usize, f64> = [(0, 0.1), (1, 0.9)].into();
+        let ranks: BTreeMap<usize, f64> = [(0, 0.1), (1, 0.9)].into();
         let result = fit_to_budget(&nodes, &ranks, 10_000);
         assert_eq!(result.files[0].path, PathBuf::from("src/high.rs"));
         assert_eq!(result.files[1].path, PathBuf::from("src/low.rs"));
+    }
+
+    #[test]
+    fn fit_to_budget_tie_breaks_by_rel_path() {
+        // Equal rank, both fit: the order is decided by rel_path ascending,
+        // independent of the input Vec order — so a genuine tie is reproducible
+        // rather than left to the unstable sort's arrival order. Input is given
+        // in reversed (zebra-before-alpha) order on purpose.
+        let nodes = vec![
+            node(0, "src/zebra.rs", &["z"], "pub fn z() {}\n"),
+            node(1, "src/alpha.rs", &["a"], "pub fn a() {}\n"),
+        ];
+        let ranks: BTreeMap<usize, f64> = [(0, 0.5), (1, 0.5)].into();
+        let result = fit_to_budget(&nodes, &ranks, 10_000);
+        assert_eq!(result.files[0].path, PathBuf::from("src/alpha.rs"));
+        assert_eq!(result.files[1].path, PathBuf::from("src/zebra.rs"));
     }
 
     #[test]
