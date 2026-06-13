@@ -338,16 +338,27 @@ async fn run_find_callers(args: Value, app: &App) -> Result<CapturedOutput> {
     .await
 }
 
+/// `find_callees` takes an optional transitive `depth`, so it has its own
+/// input rather than the shared `CallHierarchyInput` (which would leak `depth`
+/// to `find_callers`/`find_implementations`). Path queries (`--to`) stay
+/// CLI-only — their output shape is not a `Section`.
+#[derive(Deserialize)]
+struct FindCalleesInput {
+    #[serde(flatten)]
+    loc: LocationInput,
+    limit: Option<usize>,
+    /// Transitive callee depth; `>1` returns the downward reachable set.
+    depth: Option<u32>,
+}
+
 async fn run_find_callees(args: Value, app: &App) -> Result<CapturedOutput> {
-    let input: CallHierarchyInput = parse_args(args)?;
+    let input: FindCalleesInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::callees::execute(
             CalleesArgs {
                 loc: input.loc.into_arg(),
                 limit: input.limit,
-                // MCP exposes direct callees only; the depth/path traversal
-                // surface settles on the CLI first.
-                depth: None,
+                depth: input.depth,
                 to: None,
             },
             &a,
@@ -735,9 +746,8 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "inspect_symbol" => &["symbol_path", "language", "body"],
         "find_definition" | "get_hover" => &["file", "line", "column"],
         "find_references" => &["file", "line", "column", "snippet", "limit"],
-        "find_callers" | "find_callees" | "find_implementations" => {
-            &["file", "line", "column", "limit"]
-        }
+        "find_callers" | "find_implementations" => &["file", "line", "column", "limit"],
+        "find_callees" => &["file", "line", "column", "limit", "depth"],
         "get_context" => &[
             "file",
             "line",
@@ -809,9 +819,8 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "inspect_symbol" => check::<InspectSymbolInput>(args),
         "find_definition" | "get_hover" => check::<LocationInput>(args),
         "find_references" => check::<FindReferencesInput>(args),
-        "find_callers" | "find_callees" | "find_implementations" => {
-            check::<CallHierarchyInput>(args)
-        }
+        "find_callers" | "find_implementations" => check::<CallHierarchyInput>(args),
+        "find_callees" => check::<FindCalleesInput>(args),
         "get_context" => check::<GetContextInput>(args),
         "get_impact" => check::<GetImpactInput>(args),
         "get_diagnostics" => check::<GetDiagnosticsInput>(args),
