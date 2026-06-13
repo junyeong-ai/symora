@@ -286,12 +286,7 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
 /// ever serves nameless container parents whose kind is discarded.
 fn node_kind(node: Node) -> SymbolKind {
     match node.kind() {
-        "function_item"
-        | "function_definition"
-        | "function_declaration"
-        | "func_literal"
-        | "arrow_function"
-        | "function_expression" => SymbolKind::Function,
+        "function_item" | "function_definition" | "function_declaration" => SymbolKind::Function,
 
         "method_item" | "method_declaration" | "method_definition" => SymbolKind::Method,
 
@@ -320,7 +315,12 @@ fn node_kind(node: Node) -> SymbolKind {
 
         "const_item" | "const_spec" => SymbolKind::Constant,
 
-        "static_item" | "var_spec" | "variable_declarator" => SymbolKind::Variable,
+        "static_item" | "var_spec" => SymbolKind::Variable,
+
+        // JS/TS `const f = () => {}` is a callable; classify by the
+        // initializer rather than always Variable (which is_low_level would
+        // drop under exclude_low_level).
+        "variable_declarator" => declarator_kind(node),
 
         "property_declaration" => SymbolKind::Property,
         "field_declaration" => SymbolKind::Field,
@@ -336,6 +336,17 @@ fn go_type_kind(node: Node) -> SymbolKind {
         Some("struct_type") => SymbolKind::Struct,
         Some("interface_type") => SymbolKind::Interface,
         _ => SymbolKind::Class,
+    }
+}
+
+/// Classify a JS/TS `variable_declarator` by its initializer: a function value
+/// (arrow function or function expression) is a callable Function; anything
+/// else is a plain Variable. Mirrors `go_type_kind`'s value-field dispatch and
+/// keeps the decision structural — no name heuristics.
+fn declarator_kind(node: Node) -> SymbolKind {
+    match node.child_by_field_name("value").map(|v| v.kind()) {
+        Some("arrow_function") | Some("function_expression") => SymbolKind::Function,
+        _ => SymbolKind::Variable,
     }
 }
 
@@ -366,6 +377,12 @@ const PYTHON_QUERY: &str = r#"
 (class_definition) @symbol
 "#;
 
+// Module-scope `const f = () => {}` / `export const f = function () {}` is the
+// dominant TS/JS function form, but it parses as a variable_declarator, not a
+// function_declaration. Capture it — anchored to module scope and filtered to a
+// function-valued initializer — so it is indexed without dragging in nested
+// locals, loop counters, or destructuring patterns. Both lexical_declaration
+// (const/let) and variable_declaration (var), bare and export-wrapped.
 const TYPESCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
 (class_declaration) @symbol
@@ -373,13 +390,20 @@ const TYPESCRIPT_QUERY: &str = r#"
 (type_alias_declaration) @symbol
 (enum_declaration) @symbol
 (method_definition) @symbol
+(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
+(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
+(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
+(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
 (class_declaration) @symbol
 (method_definition) @symbol
-(variable_declarator) @symbol
+(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
+(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
+(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
+(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -537,6 +561,68 @@ enum Color { Red, Blue }
         assert_eq!(kind("Service"), Some(SymbolKind::Class));
         assert_eq!(kind("Shape"), Some(SymbolKind::Interface));
         assert_eq!(kind("Color"), Some(SymbolKind::Enum));
+    }
+
+    #[test]
+    fn typescript_module_scope_function_declarators_are_functions() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+const greet = (x: number) => x;
+export const handler = async () => {};
+const fexpr = function named() {};
+var legacy = () => {};
+const config = makeConfig();
+const VERSION = "1.0";
+const klass = class {};
+const { a, b } = obj;
+const [c, d] = arr;
+function outer() {
+    const inner = () => {};
+    for (let i = 0; i < 10; i++) {}
+}
+"#;
+        let symbols = extractor.extract(content, Language::TypeScript);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        // Module-scope function-valued declarators are Functions (callable),
+        // not low-level Variables.
+        assert_eq!(kind("greet"), Some(SymbolKind::Function));
+        assert_eq!(kind("handler"), Some(SymbolKind::Function));
+        assert_eq!(kind("fexpr"), Some(SymbolKind::Function));
+        assert_eq!(kind("legacy"), Some(SymbolKind::Function));
+        // Non-function initializers are never captured by the value-filtered
+        // query (they would only ever be Variables, which are not indexed here).
+        assert_eq!(kind("config"), None);
+        assert_eq!(kind("VERSION"), None);
+        assert_eq!(kind("klass"), None);
+        // Destructuring patterns never emit a brace-named symbol.
+        assert_eq!(kind("a"), None);
+        assert_eq!(kind("b"), None);
+        // Nested locals and loop counters are excluded by the module-scope
+        // anchor — the regression guard against re-introducing JS's noise.
+        assert_eq!(kind("inner"), None);
+        assert_eq!(kind("i"), None);
+        // The const-arrow survives exclude_low_level — proof the kind fix
+        // restored callability, not just the label (a Variable is_low_level).
+        assert!(!SymbolKind::Function.is_low_level());
+        assert!(kind("greet").is_some_and(|k| !k.is_low_level()));
+    }
+
+    #[test]
+    fn javascript_module_scope_const_arrows_match_typescript() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+const greet = () => {};
+export const handler = function () {};
+function outer() {
+    const inner = () => {};
+}
+"#;
+        let symbols = extractor.extract(content, Language::JavaScript);
+        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+        assert_eq!(kind("greet"), Some(SymbolKind::Function));
+        assert_eq!(kind("handler"), Some(SymbolKind::Function));
+        // The bare (variable_declarator) capture is gone: no nested-local noise.
+        assert_eq!(kind("inner"), None);
     }
 
     #[test]
