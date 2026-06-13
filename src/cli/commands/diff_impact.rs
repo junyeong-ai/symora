@@ -12,6 +12,7 @@ use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::{TestMatcher, find_symbol_at_position};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::services::lsp::LspService;
+use crate::services::store::SymbolExtractor;
 
 #[derive(Args, Debug)]
 pub struct DiffImpactArgs {
@@ -50,21 +51,37 @@ pub struct DiffCoverage {
     pub ratio: f32,
 }
 
-/// Changed symbol impact data (pure fact)
+/// Changed symbol impact data (pure fact). Added/Modified rows carry the
+/// symbol's current-tree identity and reference counts. Deleted rows carry the
+/// pre-image identity and OMIT references — a deleted symbol has no current
+/// references to count, and a literal `0` would read as a verified "no
+/// references". The omitted fields make that absence structural, never a
+/// synthesized zero.
 #[derive(Debug, Serialize)]
 pub struct ChangedSymbolImpact {
-    pub name: String,
-    pub kind: String,
-    pub location: LocationOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationOutput>,
     pub change_type: ChangeType,
-    /// Total reference count
-    pub refs: usize,
-    /// Test code references
-    pub test_refs: usize,
-    /// Production code references
-    pub prod_refs: usize,
+    /// Total reference count (Added/Modified only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refs: Option<usize>,
+    /// Test code references (Added/Modified only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_refs: Option<usize>,
+    /// Production code references (Added/Modified only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prod_refs: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<CallHierarchyOutput>,
+    /// Present only on Deleted rows: whether the deleted symbol was identified
+    /// from the pre-image. The disclosure that the row is a deletion fact, not
+    /// a live-symbol measurement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletion: Option<DeletionResolution>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,10 +92,30 @@ pub enum ChangeType {
     Deleted,
 }
 
+/// How a Deleted row's symbol was resolved. Mirrors the `DispatchStatus` /
+/// `IndexingDegradation` disclosure idiom: a typed enum naming the state,
+/// omitted when not applicable.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionResolution {
+    /// The deleted symbol was identified from the pre-image (old git tree); its
+    /// references are not recomputed (it no longer exists).
+    Resolved,
+    /// The deleted symbol could not be identified — name/location omitted
+    /// rather than guessed from diff text or a live neighbour.
+    Unresolved,
+}
+
 struct DiffHunk {
     file: PathBuf,
+    /// New-file coordinates — used to locate Added/Modified symbols in the
+    /// current tree.
     start_line: u32,
     line_count: u32,
+    /// Old-file coordinates — used to locate Deleted symbols in the pre-image
+    /// (the deleted symbol no longer exists in the current tree).
+    old_start: u32,
+    old_count: u32,
     change_type: ChangeType,
 }
 
@@ -107,10 +144,19 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 
     let calls_limit = app.config().lsp.calls_limit;
 
+    // The pre-image (where a deleted symbol still exists): the revision being
+    // diffed against, or HEAD when diffing the staged index.
+    let preimage_ref = if args.staged {
+        "HEAD"
+    } else {
+        args.revision.as_str()
+    };
+
     let changes = analyze_hunks(
         app.lsp.as_ref(),
         &hunks,
         root,
+        preimage_ref,
         test_matcher,
         args.callers,
         args.max_symbols,
@@ -119,13 +165,21 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     .await;
 
     let changed_files: std::collections::HashSet<_> = hunks.iter().map(|h| &h.file).collect();
-    let total_refs: usize = changes.iter().map(|c| c.refs).sum();
-    let with_tests = changes.iter().filter(|c| c.test_refs > 0).count();
-    let without_tests = changes.len().saturating_sub(with_tests);
-    let coverage_ratio = if changes.is_empty() {
+    // Coverage is measured only over rows that have reference counts
+    // (Added/Modified). Deleted rows carry no refs — counting them as
+    // "without tests" would pollute the ratio with symbols that have no live
+    // references to test.
+    let total_refs: usize = changes.iter().filter_map(|c| c.refs).sum();
+    let measurable = changes.iter().filter(|c| c.refs.is_some()).count();
+    let with_tests = changes
+        .iter()
+        .filter(|c| c.test_refs.is_some_and(|t| t > 0))
+        .count();
+    let without_tests = measurable.saturating_sub(with_tests);
+    let coverage_ratio = if measurable == 0 {
         1.0
     } else {
-        with_tests as f32 / changes.len() as f32
+        with_tests as f32 / measurable as f32
     };
 
     let response = DiffImpactOutput {
@@ -195,7 +249,7 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
     let old_range = parts[1].trim_start_matches('-');
     let new_range = parts[2].trim_start_matches('+');
 
-    let (_old_start, old_count) = parse_range(old_range);
+    let (old_start, old_count) = parse_range(old_range);
     let (new_start, new_count) = parse_range(new_range);
 
     let change_type = if old_count == 0 {
@@ -206,18 +260,17 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
         ChangeType::Modified
     };
 
-    // Always use new file coordinates. For deletions, new_start is the
-    // adjacent line in the current file; use count=1 to anchor the lookup.
-    let (start_line, line_count) = if matches!(change_type, ChangeType::Deleted) {
-        (new_start.max(1), 1)
-    } else {
-        (new_start, new_count)
-    };
-
+    // Both coordinate systems are carried verbatim. Added/Modified resolve
+    // against the new (current) tree via start_line/line_count; Deleted
+    // resolves against the pre-image via old_start/old_count — never anchored
+    // onto a current-tree line, which would map a deletion onto a live
+    // neighbour and attribute its references to the deleted symbol.
     Some(DiffHunk {
         file,
-        start_line,
-        line_count,
+        start_line: new_start,
+        line_count: new_count,
+        old_start,
+        old_count,
         change_type,
     })
 }
@@ -233,10 +286,12 @@ fn parse_range(range: &str) -> (u32, u32) {
     (start, count)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn analyze_hunks(
     lsp: &dyn LspService,
     hunks: &[DiffHunk],
     root: &Path,
+    preimage_ref: &str,
     test_matcher: &TestMatcher,
     include_callers: bool,
     max_symbols: usize,
@@ -250,13 +305,39 @@ async fn analyze_hunks(
 
     let mut changes = Vec::new();
     let mut symbol_count = 0;
+    let at_cap = |n: usize| max_symbols > 0 && n >= max_symbols;
 
     for (file, hunks) in file_hunks {
-        if max_symbols > 0 && symbol_count >= max_symbols {
+        if at_cap(symbol_count) {
             break;
         }
 
-        if !file.exists() {
+        // Deleted hunks resolve against the pre-image, so they are handled even
+        // when the file no longer exists in the working tree, and never flow
+        // through the current-tree resolution that would map them onto a live
+        // neighbour.
+        for hunk in hunks
+            .iter()
+            .filter(|h| matches!(h.change_type, ChangeType::Deleted))
+        {
+            if at_cap(symbol_count) {
+                break;
+            }
+            for row in resolve_deleted_hunk(root, preimage_ref, file, hunk) {
+                if at_cap(symbol_count) {
+                    break;
+                }
+                changes.push(row);
+                symbol_count += 1;
+            }
+        }
+
+        // Added/Modified need the current tree.
+        let live_hunks: Vec<&&DiffHunk> = hunks
+            .iter()
+            .filter(|h| !matches!(h.change_type, ChangeType::Deleted))
+            .collect();
+        if live_hunks.is_empty() || !file.exists() {
             continue;
         }
 
@@ -265,8 +346,8 @@ async fn analyze_hunks(
             Err(_) => continue,
         };
 
-        for hunk in hunks {
-            if max_symbols > 0 && symbol_count >= max_symbols {
+        for hunk in live_hunks {
+            if at_cap(symbol_count) {
                 break;
             }
 
@@ -283,7 +364,7 @@ async fn analyze_hunks(
                     continue;
                 }
 
-                if max_symbols > 0 && symbol_count >= max_symbols {
+                if at_cap(symbol_count) {
                     break;
                 }
 
@@ -327,14 +408,15 @@ async fn analyze_symbol_impact(
         Ok(a) => a,
         Err(_) => {
             return ChangedSymbolImpact {
-                name,
-                kind,
-                location: LocationOutput::from_path(file, line, column, root),
+                name: Some(name),
+                kind: Some(kind),
+                location: Some(LocationOutput::from_path(file, line, column, root)),
                 change_type,
-                refs: 0,
-                test_refs: 0,
-                prod_refs: 0,
+                refs: Some(0),
+                test_refs: Some(0),
+                prod_refs: Some(0),
                 callers: vec![],
+                deletion: None,
             };
         }
     };
@@ -358,15 +440,86 @@ async fn analyze_symbol_impact(
     };
 
     ChangedSymbolImpact {
-        name,
-        kind,
-        location: LocationOutput::from_path(file, line, column, root),
+        name: Some(name),
+        kind: Some(kind),
+        location: Some(LocationOutput::from_path(file, line, column, root)),
         change_type,
-        refs: classified.total,
-        test_refs: classified.test,
-        prod_refs: classified.prod,
+        refs: Some(classified.total),
+        test_refs: Some(classified.test),
+        prod_refs: Some(classified.prod),
         callers,
+        deletion: None,
     }
+}
+
+/// Resolve a deleted hunk against the pre-image (old git tree) — never the
+/// current tree. Returns one row per symbol declared inside the deleted line
+/// range; if the pre-image is unavailable or declares no symbol there, one
+/// `Unresolved` row, so a deletion is disclosed rather than silently dropped.
+fn resolve_deleted_hunk(
+    root: &Path,
+    preimage_ref: &str,
+    file: &Path,
+    hunk: &DiffHunk,
+) -> Vec<ChangedSymbolImpact> {
+    let unresolved = || ChangedSymbolImpact {
+        name: None,
+        kind: None,
+        location: None,
+        change_type: ChangeType::Deleted,
+        refs: None,
+        test_refs: None,
+        prod_refs: None,
+        callers: vec![],
+        deletion: Some(DeletionResolution::Unresolved),
+    };
+
+    let relpath = file.strip_prefix(root).unwrap_or(file);
+    let Some(content) = git_show(root, preimage_ref, relpath) else {
+        return vec![unresolved()];
+    };
+
+    let language = crate::models::symbol::Language::from_path(file);
+    let lo = hunk.old_start;
+    let hi = hunk.old_start.saturating_add(hunk.old_count.max(1));
+    let matched: Vec<ChangedSymbolImpact> = SymbolExtractor::new()
+        .extract(&content, language)
+        .into_iter()
+        .filter(|s| s.line >= lo && s.line < hi)
+        .map(|s| ChangedSymbolImpact {
+            name: Some(s.name),
+            kind: Some(s.kind.to_string()),
+            // Old-file coordinates: the only honest position for a symbol that
+            // no longer exists in the current tree.
+            location: Some(LocationOutput::from_path(file, s.line, s.column, root)),
+            change_type: ChangeType::Deleted,
+            refs: None,
+            test_refs: None,
+            prod_refs: None,
+            callers: vec![],
+            deletion: Some(DeletionResolution::Resolved),
+        })
+        .collect();
+
+    if matched.is_empty() {
+        vec![unresolved()]
+    } else {
+        matched
+    }
+}
+
+/// `git show <ref>:<relpath>` — the file content at the pre-image revision.
+fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
+    let spec = format!("{reference}:{}", relpath.display());
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["show", &spec])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
 
 #[cfg(test)]
@@ -460,22 +613,105 @@ mod tests {
     }
 
     #[test]
-    fn parse_hunk_header_deleted_lines() {
-        // new_count=0 means pure deletion; function adjusts to (new_start.max(1), 1)
+    fn parse_hunk_header_deleted_lines_carry_old_coordinates() {
+        // new_count=0 means pure deletion; the OLD coordinates locate the
+        // deleted symbol in the pre-image — they are never anchored onto a
+        // current-tree line.
         let hunk = parse_hunk_header("@@ -10,4 +9,0 @@", dummy_file());
         let hunk = hunk.expect("should parse deletion hunk");
-        assert_eq!(hunk.start_line, 9);
-        assert_eq!(hunk.line_count, 1);
         assert!(matches!(hunk.change_type, ChangeType::Deleted));
+        assert_eq!(hunk.old_start, 10);
+        assert_eq!(hunk.old_count, 4);
+        // New coords are passed through verbatim (unused for deletions), not
+        // re-anchored to a phantom (new_start.max(1), 1).
+        assert_eq!(hunk.start_line, 9);
+        assert_eq!(hunk.line_count, 0);
     }
 
     #[test]
-    fn parse_hunk_header_deleted_at_line_zero_clamps_to_one() {
+    fn parse_hunk_header_deletion_at_file_start() {
         let hunk = parse_hunk_header("@@ -1,2 +0,0 @@", dummy_file());
         let hunk = hunk.expect("should parse deletion at line 0");
-        assert_eq!(hunk.start_line, 1); // max(0, 1) = 1
-        assert_eq!(hunk.line_count, 1);
         assert!(matches!(hunk.change_type, ChangeType::Deleted));
+        assert_eq!(hunk.old_start, 1);
+        assert_eq!(hunk.old_count, 2);
+        assert_eq!(hunk.start_line, 0);
+    }
+
+    // The Deleted-row JSON contract: never a live neighbour's identity, never
+    // a synthesized zero reference count.
+
+    fn loc() -> LocationOutput {
+        LocationOutput {
+            file: "src/lib.rs".to_string(),
+            line: 10,
+            column: 1,
+            snippet: None,
+        }
+    }
+
+    #[test]
+    fn deleted_resolved_row_omits_refs_and_discloses() {
+        let row = ChangedSymbolImpact {
+            name: Some("gone".to_string()),
+            kind: Some("function".to_string()),
+            location: Some(loc()),
+            change_type: ChangeType::Deleted,
+            refs: None,
+            test_refs: None,
+            prod_refs: None,
+            callers: vec![],
+            deletion: Some(DeletionResolution::Resolved),
+        };
+        let v = serde_json::to_value(row).unwrap();
+        assert_eq!(v["change_type"], "deleted");
+        assert_eq!(v["deletion"], "resolved");
+        assert_eq!(v["name"], "gone");
+        // No reference counts on a deleted symbol — keys absent, never 0.
+        assert!(v.get("refs").is_none());
+        assert!(v.get("test_refs").is_none());
+        assert!(v.get("prod_refs").is_none());
+    }
+
+    #[test]
+    fn deleted_unresolved_row_omits_identity() {
+        let row = ChangedSymbolImpact {
+            name: None,
+            kind: None,
+            location: None,
+            change_type: ChangeType::Deleted,
+            refs: None,
+            test_refs: None,
+            prod_refs: None,
+            callers: vec![],
+            deletion: Some(DeletionResolution::Unresolved),
+        };
+        let v = serde_json::to_value(row).unwrap();
+        assert_eq!(v["deletion"], "unresolved");
+        // Never a guessed name or a live neighbour's location.
+        assert!(v.get("name").is_none());
+        assert!(v.get("location").is_none());
+    }
+
+    #[test]
+    fn modified_row_shape_is_unchanged() {
+        // Added/Modified rows serialize refs as bare numbers and carry no
+        // deletion key — byte-identical to the pre-change shape.
+        let row = ChangedSymbolImpact {
+            name: Some("touched".to_string()),
+            kind: Some("function".to_string()),
+            location: Some(loc()),
+            change_type: ChangeType::Modified,
+            refs: Some(3),
+            test_refs: Some(1),
+            prod_refs: Some(2),
+            callers: vec![],
+            deletion: None,
+        };
+        let v = serde_json::to_value(row).unwrap();
+        assert_eq!(v["refs"], 3);
+        assert_eq!(v["test_refs"], 1);
+        assert!(v.get("deletion").is_none());
     }
 
     #[test]
@@ -574,10 +810,13 @@ diff --git a/src/bar.rs b/src/bar.rs
         assert_eq!(hunks[1].line_count, 3);
         assert!(matches!(hunks[1].change_type, ChangeType::Modified));
 
-        // Second file, second hunk: deletion (new_count=0 → adjusted)
+        // Second file, second hunk: deletion — old coords locate the deleted
+        // symbol in the pre-image; new coords pass through verbatim.
         assert_eq!(hunks[2].file, root.join("src/bar.rs"));
+        assert_eq!(hunks[2].old_start, 30);
+        assert_eq!(hunks[2].old_count, 5);
         assert_eq!(hunks[2].start_line, 31);
-        assert_eq!(hunks[2].line_count, 1);
+        assert_eq!(hunks[2].line_count, 0);
         assert!(matches!(hunks[2].change_type, ChangeType::Deleted));
     }
 
