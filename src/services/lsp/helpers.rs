@@ -6,7 +6,8 @@ use crate::error::LspError;
 use crate::infra::file_filter::{FileFilter, FileFilterConfig, matches_default_pattern};
 use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position, PositionEncoding};
 use crate::infra::lsp::{
-    LspFeature, SupportLevel, get_alternative_suggestion, get_support_level, language_server_name,
+    LspClient, LspFeature, SupportLevel, get_alternative_suggestion, get_support_level,
+    language_server_name,
 };
 use crate::models::lsp::{TypeHierarchyItem, uri_to_path};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
@@ -92,15 +93,42 @@ pub(super) fn check_feature_support(
     let level = get_support_level(lang, feature);
 
     if level == SupportLevel::None {
-        return Err(LspError::feature_not_supported(
-            lang,
-            language_server_name(lang),
-            feature.display_name(),
-            &get_alternative_suggestion(lang, feature),
-        ));
+        return Err(unsupported_error(file, feature));
     }
 
     Ok(level)
+}
+
+/// The `FeatureNotSupported` error for a feature, naming the server and a
+/// working alternative — the one place that shape is built, shared by the
+/// static gate, the live pre-flight gate, and the post-flight reclassifier.
+pub(super) fn unsupported_error(file: &Path, feature: LspFeature) -> LspError {
+    let lang = Language::from_path(file);
+    LspError::feature_not_supported(
+        lang,
+        language_server_name(lang),
+        feature.display_name(),
+        &get_alternative_suggestion(lang, feature),
+    )
+}
+
+/// Pre-flight gate that consults the live server. The static table is only a
+/// hint: when it says None but the connected server advertises the provider,
+/// the request proceeds (a runtime -32601 still falls back). This turns a
+/// static false-negative into a correct attempt; it never refuses a server the
+/// caps advertise, and never downgrades a statically-supported feature.
+pub(super) async fn check_feature_support_live(
+    client: &LspClient,
+    file: &Path,
+    feature: LspFeature,
+) -> Result<(), LspError> {
+    let lang = Language::from_path(file);
+    if get_support_level(lang, feature) != SupportLevel::None
+        || client.feature_advertised(feature).await
+    {
+        return Ok(());
+    }
+    Err(unsupported_error(file, feature))
 }
 
 pub(super) fn find_project_entry(

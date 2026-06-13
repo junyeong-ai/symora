@@ -421,6 +421,25 @@ impl PositionEncoding {
     }
 }
 
+impl ServerCapabilities {
+    /// Whether the server affirmatively advertises a provider for `feature`:
+    /// the field is present and not `false`. Per LSP, an absent provider and
+    /// `false` mean the same thing (no support), so this collapses to one
+    /// binary signal — the only distinction symora acts on. Defined for the
+    /// features whose handlers consult live capabilities (call hierarchy, type
+    /// hierarchy, implementation); every other feature returns false.
+    pub fn advertises(&self, feature: super::capabilities::LspFeature) -> bool {
+        use super::capabilities::LspFeature;
+        let provider = match feature {
+            LspFeature::IncomingCalls | LspFeature::OutgoingCalls => &self.call_hierarchy_provider,
+            LspFeature::TypeHierarchy => &self.type_hierarchy_provider,
+            LspFeature::FindImplementations => &self.implementation_provider,
+            _ => return false,
+        };
+        provider.as_ref().is_some_and(|v| *v != Value::Bool(false))
+    }
+}
+
 /// Initialize result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -646,6 +665,31 @@ pub struct CallHierarchyOutgoingCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advertises_is_present_and_not_false() {
+        use crate::infra::lsp::capabilities::LspFeature;
+        let with_ch = |v: Option<serde_json::Value>| ServerCapabilities {
+            call_hierarchy_provider: v,
+            ..Default::default()
+        };
+        // present-and-truthy: bool true and an options object both count.
+        assert!(with_ch(Some(serde_json::json!(true))).advertises(LspFeature::IncomingCalls));
+        assert!(with_ch(Some(serde_json::json!({}))).advertises(LspFeature::OutgoingCalls));
+        // explicit false and absent both mean "not offered".
+        assert!(!with_ch(Some(serde_json::json!(false))).advertises(LspFeature::IncomingCalls));
+        assert!(!with_ch(None).advertises(LspFeature::IncomingCalls));
+
+        // Each gated feature reads its own provider field.
+        let impl_caps = ServerCapabilities {
+            implementation_provider: Some(serde_json::json!(true)),
+            ..Default::default()
+        };
+        assert!(impl_caps.advertises(LspFeature::FindImplementations));
+        assert!(!impl_caps.advertises(LspFeature::TypeHierarchy));
+        // A feature with no live-capability gate never reports advertised.
+        assert!(!impl_caps.advertises(LspFeature::Hover));
+    }
 
     #[test]
     fn position_encoding_omitted_or_unrecognized_defaults_to_utf16() {
