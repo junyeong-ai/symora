@@ -20,7 +20,8 @@ pub use analysis::{
     TestOutput,
 };
 pub use editing::{
-    ActionOutput, ApplyActionOutput, EditDiagnostics, EditOutput, FileChangeOutput, LineRange,
+    ActionOutput, ApplyActionOutput, CallerFileDiagnostics, CallerVerification, EditDiagnostics,
+    EditOutput, FileChangeOutput, LineRange,
 };
 pub use lsp::{
     CallHierarchyOutput, DefinitionOutput, DiagnosticOutput, HoverOutput, ParameterOutput,

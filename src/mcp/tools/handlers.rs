@@ -642,6 +642,8 @@ struct ReplaceBodyInput {
     dry_run: bool,
     #[serde(default)]
     with_diagnostics: bool,
+    #[serde(default)]
+    verify_callers: bool,
 }
 
 async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -653,6 +655,7 @@ async fn run_replace_body(args: Value, app: &App) -> Result<CapturedOutput> {
         body: input.body,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
+        verify_callers: input.verify_callers,
     })
     .await
 }
@@ -666,6 +669,8 @@ struct InsertInput {
     dry_run: bool,
     #[serde(default)]
     with_diagnostics: bool,
+    #[serde(default)]
+    verify_callers: bool,
 }
 
 async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -677,6 +682,7 @@ async fn run_insert_before(args: Value, app: &App) -> Result<CapturedOutput> {
         code: input.code,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
+        verify_callers: input.verify_callers,
     })
     .await
 }
@@ -690,6 +696,7 @@ async fn run_insert_after(args: Value, app: &App) -> Result<CapturedOutput> {
         code: input.code,
         dry_run: input.dry_run,
         with_diagnostics: input.with_diagnostics,
+        verify_callers: input.verify_callers,
     })
     .await
 }
@@ -774,6 +781,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "body",
             "dry_run",
             "with_diagnostics",
+            "verify_callers",
         ],
         "insert_before_symbol" | "insert_after_symbol" => &[
             "file",
@@ -783,6 +791,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "code",
             "dry_run",
             "with_diagnostics",
+            "verify_callers",
         ],
         "delete_symbol" => &[
             "file",

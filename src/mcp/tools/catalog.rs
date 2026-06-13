@@ -395,6 +395,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "boolean",
                         "Attach post-edit LSP diagnostics (default false)",
                     ),
+                    (
+                        "verify_callers",
+                        "boolean",
+                        "Also attach diagnostics for the edited symbol's caller files \
+                         (its one-hop references), closing read->edit->verify across \
+                         callers (default false)",
+                    ),
                 ],
             ),
         ),
@@ -417,6 +424,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "boolean",
                         "Attach post-edit LSP diagnostics (default false)",
                     ),
+                    (
+                        "verify_callers",
+                        "boolean",
+                        "Also attach diagnostics for the edited symbol's caller files \
+                         (its one-hop references), closing read->edit->verify across \
+                         callers (default false)",
+                    ),
                 ],
             ),
         ),
@@ -438,6 +452,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "with_diagnostics",
                         "boolean",
                         "Attach post-edit LSP diagnostics (default false)",
+                    ),
+                    (
+                        "verify_callers",
+                        "boolean",
+                        "Also attach diagnostics for the edited symbol's caller files \
+                         (its one-hop references), closing read->edit->verify across \
+                         callers (default false)",
                     ),
                 ],
             ),

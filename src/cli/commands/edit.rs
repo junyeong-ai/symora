@@ -60,6 +60,12 @@ pub enum EditCommand {
         /// attach them to the output. Ignored on dry runs.
         #[arg(long)]
         with_diagnostics: bool,
+
+        /// After an applied edit, also pull diagnostics for the edited
+        /// symbol's caller files (its one-hop references), closing the
+        /// read->edit->verify loop across callers. Ignored on dry runs.
+        #[arg(long)]
+        verify_callers: bool,
     },
 
     /// Insert source lines immediately before a symbol.
@@ -83,6 +89,12 @@ pub enum EditCommand {
         /// attach them to the output. Ignored on dry runs.
         #[arg(long)]
         with_diagnostics: bool,
+
+        /// After an applied edit, also pull diagnostics for the edited
+        /// symbol's caller files (its one-hop references), closing the
+        /// read->edit->verify loop across callers. Ignored on dry runs.
+        #[arg(long)]
+        verify_callers: bool,
     },
 
     /// Insert source lines immediately after a symbol.
@@ -106,6 +118,12 @@ pub enum EditCommand {
         /// attach them to the output. Ignored on dry runs.
         #[arg(long)]
         with_diagnostics: bool,
+
+        /// After an applied edit, also pull diagnostics for the edited
+        /// symbol's caller files (its one-hop references), closing the
+        /// read->edit->verify loop across callers. Ignored on dry runs.
+        #[arg(long)]
+        verify_callers: bool,
     },
 
     /// Delete a symbol's full definition. Always reports references
@@ -216,6 +234,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             body,
             dry_run,
             with_diagnostics,
+            verify_callers,
         } => {
             let body = read_payload(&body)?;
             let (file, sym) = resolve_symbol(app, &target, symbol).await?;
@@ -226,6 +245,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
                 &sym,
                 dry_run,
                 with_diagnostics,
+                verify_callers,
                 |span| LineSplice {
                     at: span.start as usize - 1,
                     removed: (span.end - span.start + 1) as usize,
@@ -240,6 +260,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             code,
             dry_run,
             with_diagnostics,
+            verify_callers,
         } => {
             let code = read_payload(&code)?;
             let (file, sym) = resolve_symbol(app, &target, symbol).await?;
@@ -250,6 +271,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
                 &sym,
                 dry_run,
                 with_diagnostics,
+                verify_callers,
                 |span| LineSplice {
                     at: span.start as usize - 1,
                     removed: 0,
@@ -264,6 +286,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             code,
             dry_run,
             with_diagnostics,
+            verify_callers,
         } => {
             let code = read_payload(&code)?;
             let (file, sym) = resolve_symbol(app, &target, symbol).await?;
@@ -274,6 +297,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
                 &sym,
                 dry_run,
                 with_diagnostics,
+                verify_callers,
                 |span| LineSplice {
                     at: span.end as usize,
                     removed: 0,
@@ -363,6 +387,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
 
 /// Shared tail for symbol-targeted line edits: resolve the span with the
 /// stale-range guard, splice, emit one `EditOutput`, refresh the index.
+#[allow(clippy::too_many_arguments)]
 async fn symbol_edit(
     app: &App,
     operation: &'static str,
@@ -370,6 +395,7 @@ async fn symbol_edit(
     symbol: &Symbol,
     dry_run: bool,
     with_diagnostics: bool,
+    verify_callers: bool,
     make_splice: impl FnOnce(&LineRange) -> LineSplice,
 ) -> Result<()> {
     let doc = FileDocument::load(file, dry_run)?;
@@ -378,9 +404,21 @@ async fn symbol_edit(
     if splice.removed > 0 {
         ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
     }
+    // Resolve the caller files BEFORE the edit lands: editing a symbol does not
+    // move which files reference it, and resolving against the pre-edit state
+    // avoids any post-edit position drift. The diagnostics for those files are
+    // pulled AFTER the write, so they reflect the edit's effect.
+    let caller_files = if verify_callers && !dry_run {
+        Some(collect_caller_files(app, file, symbol).await)
+    } else {
+        None
+    };
     let target = Some((symbol.path().to_string(), symbol.kind.to_string()));
     let mut output = doc.commit(app, operation, splice, span, target, dry_run)?;
     output.diagnostics = pull_diagnostics(app, file, dry_run, with_diagnostics).await;
+    if let Some(callers) = caller_files {
+        output.caller_verification = Some(verify_caller_files(app, callers).await);
+    }
     app.output.print_success(output);
     finish(app, file, dry_run).await;
     Ok(())
@@ -647,14 +685,22 @@ async fn pull_diagnostics(
     dry_run: bool,
     with_diagnostics: bool,
 ) -> Option<crate::cli::response::EditDiagnostics> {
-    use crate::cli::response::{DiagnosticOutput, EditDiagnostics};
-    use crate::models::diagnostic::DiagnosticsStatus;
-
     if !with_diagnostics || dry_run {
         return None;
     }
+    Some(diagnostics_for(app, file).await)
+}
+
+/// Pull one file's LSP diagnostics into the honest tri-state `EditDiagnostics`.
+/// The single place that maps a diagnostics report (or a failed pull) to the
+/// `ok`/`unconfirmed`/`unsupported`/`unavailable` status, shared by the
+/// edited-file and caller-file verification paths.
+async fn diagnostics_for(app: &App, file: &Path) -> crate::cli::response::EditDiagnostics {
+    use crate::cli::response::{DiagnosticOutput, EditDiagnostics};
+    use crate::models::diagnostic::DiagnosticsStatus;
+
     match app.lsp.diagnostics(file).await {
-        Ok(report) => Some(EditDiagnostics {
+        Ok(report) => EditDiagnostics {
             status: match report.status {
                 DiagnosticsStatus::Ok => "ok",
                 DiagnosticsStatus::Unconfirmed => "unconfirmed",
@@ -662,15 +708,97 @@ async fn pull_diagnostics(
             },
             count: report.items.len(),
             items: report.items.iter().map(DiagnosticOutput::from).collect(),
-        }),
+        },
         Err(e) => {
-            tracing::warn!("Post-edit diagnostics pull failed: {e}");
-            Some(EditDiagnostics {
+            tracing::warn!("Diagnostics pull failed for {}: {e}", file.display());
+            EditDiagnostics {
                 status: "unavailable",
                 count: 0,
                 items: Vec::new(),
-            })
+            }
         }
+    }
+}
+
+/// The most caller files `--verify-callers` will pull diagnostics for. Bounds
+/// the LSP fan-out; the overflow is disclosed via the `Section`'s truncation.
+const VERIFY_CALLERS_FILE_LIMIT: usize = 10;
+
+/// The one-hop caller files of `symbol`, resolved before the edit lands.
+struct CallerFiles {
+    files: Vec<PathBuf>,
+    total: usize,
+    indexing: Option<crate::models::lsp::IndexingDegradation>,
+    status: Option<&'static str>,
+}
+
+/// Resolve the distinct files that reference `symbol` (excluding the edited
+/// file), capped and deterministic. `status` is set only when the reference
+/// lookup could not run — never paired with files.
+async fn collect_caller_files(app: &App, file: &Path, symbol: &Symbol) -> CallerFiles {
+    use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
+
+    let empty = |status| CallerFiles {
+        files: Vec::new(),
+        total: 0,
+        indexing: None,
+        status: Some(status),
+    };
+    if get_support_level(Language::from_path(file), LspFeature::FindReferences)
+        == SupportLevel::None
+    {
+        return empty("unsupported");
+    }
+    let refs = match app
+        .lsp
+        .find_references(file, symbol.location.line, symbol.location.column)
+        .await
+    {
+        Ok(refs) => refs,
+        Err(e) => {
+            tracing::warn!("verify-callers reference lookup failed: {e}");
+            return empty("unavailable");
+        }
+    };
+    let indexing = refs.indexing;
+    let mut seen = std::collections::HashSet::new();
+    let mut files: Vec<PathBuf> = refs
+        .data
+        .iter()
+        .map(|r| r.file.clone())
+        .filter(|f| f.as_path() != file && seen.insert(f.clone()))
+        .collect();
+    files.sort();
+    let total = files.len();
+    files.truncate(VERIFY_CALLERS_FILE_LIMIT);
+    CallerFiles {
+        files,
+        total,
+        indexing,
+        status: None,
+    }
+}
+
+/// Pull each caller file's diagnostics concurrently and assemble the honest
+/// `CallerVerification`. Wall-clock is bounded by one diagnostics-wait budget
+/// (the pulls run in parallel) and the file cap.
+async fn verify_caller_files(
+    app: &App,
+    callers: CallerFiles,
+) -> crate::cli::response::CallerVerification {
+    use crate::cli::response::{CallerFileDiagnostics, CallerVerification};
+
+    let items = futures::future::join_all(callers.files.iter().map(|f| async move {
+        CallerFileDiagnostics {
+            file: app.output.relative_path(f),
+            diagnostics: diagnostics_for(app, f).await,
+        }
+    }))
+    .await;
+
+    CallerVerification {
+        callers: Section::with_total(items, callers.total).with_indexing(callers.indexing),
+        status: callers.status,
     }
 }
 
@@ -809,6 +937,7 @@ impl FileDocument {
             dangling_references: None,
             references_status: None,
             diagnostics: None,
+            caller_verification: None,
         })
     }
 }
@@ -1413,6 +1542,7 @@ async fn pattern_edit(
             dangling_references: None,
             references_status: None,
             diagnostics: None,
+            caller_verification: None,
         });
 
         if !dry_run {
