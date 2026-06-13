@@ -158,6 +158,58 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Outgoing calls with callee locations",
         )),
         ToolDefinition::read_only(
+            "find_call_path",
+            "Shortest call path FROM a function (file:line:column) TO a target (`to`): \
+                          how does the anchor reach that function? Returns the ordered call \
+                          chain when reachable, or an honest 3-state verdict (found / \
+                          not_reached_within_bound / no_static_path) that never overclaims — \
+                          dynamic dispatch stays a disclosed lower bound, never an absolute \
+                          'unreachable'.",
+            with_extra(
+                location_schema(),
+                &[
+                    (
+                        "to",
+                        "string",
+                        "Target location (file:line[:column]) the call chain is sought to",
+                    ),
+                    ("depth", "integer", "Max search depth, 1-3 (default 3)"),
+                ],
+            ),
+        )
+        .with_output_schema(schema_object(
+            &[
+                (
+                    "target",
+                    "object",
+                    "The target the chain was sought to (file, line, column)",
+                ),
+                (
+                    "reachability",
+                    "string",
+                    "found | not_reached_within_bound | no_static_path",
+                ),
+                (
+                    "chain",
+                    "array",
+                    "Ordered call frames from the first hop through the target; present \
+                     only when reachability is found",
+                ),
+                ("depth", "integer", "Depth searched"),
+                (
+                    "max_depth_reached",
+                    "boolean",
+                    "Search stopped at the depth cap (the negative is a lower bound)",
+                ),
+                (
+                    "callees_truncated",
+                    "boolean",
+                    "A node's fan-out hit the per-node cap (lower bound)",
+                ),
+            ],
+            &["target", "reachability", "depth"],
+        )),
+        ToolDefinition::read_only(
             "find_implementations",
             "All concrete implementations of a trait/interface at a precise \
                           file:line:column.",

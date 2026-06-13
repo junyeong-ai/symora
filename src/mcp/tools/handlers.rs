@@ -58,6 +58,7 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "find_references" => run_find_references(arguments, app).await,
         "find_callers" => run_find_callers(arguments, app).await,
         "find_callees" => run_find_callees(arguments, app).await,
+        "find_call_path" => run_find_call_path(arguments, app).await,
         "find_implementations" => run_find_implementations(arguments, app).await,
         "get_hover" => run_hover(arguments, app).await,
         "get_context" => run_get_context(arguments, app).await,
@@ -360,6 +361,34 @@ async fn run_find_callees(args: Value, app: &App) -> Result<CapturedOutput> {
                 limit: input.limit,
                 depth: input.depth,
                 to: None,
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+/// `find_call_path` carries a `to` target and an optional `depth`; its output
+/// is a 3-state reachability verdict, not a `Section`, so it is its own tool
+/// rather than a mode on find_callees.
+#[derive(Deserialize)]
+struct FindCallPathInput {
+    #[serde(flatten)]
+    loc: LocationInput,
+    to: String,
+    depth: Option<u32>,
+}
+
+async fn run_find_call_path(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: FindCallPathInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::callees::execute(
+            CalleesArgs {
+                loc: input.loc.into_arg(),
+                limit: None,
+                depth: input.depth,
+                to: Some(input.to),
             },
             &a,
         )
@@ -755,6 +784,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "find_references" => &["file", "line", "column", "snippet", "limit"],
         "find_callers" | "find_implementations" => &["file", "line", "column", "limit"],
         "find_callees" => &["file", "line", "column", "limit", "depth"],
+        "find_call_path" => &["file", "line", "column", "to", "depth"],
         "get_context" => &[
             "file",
             "line",
@@ -830,6 +860,7 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "find_references" => check::<FindReferencesInput>(args),
         "find_callers" | "find_implementations" => check::<CallHierarchyInput>(args),
         "find_callees" => check::<FindCalleesInput>(args),
+        "find_call_path" => check::<FindCallPathInput>(args),
         "get_context" => check::<GetContextInput>(args),
         "get_impact" => check::<GetImpactInput>(args),
         "get_diagnostics" => check::<GetDiagnosticsInput>(args),
