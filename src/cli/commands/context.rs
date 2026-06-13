@@ -736,8 +736,8 @@ mod tests {
     use crate::error::LspError;
     use crate::models::lsp::{
         ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, InlayHint,
-        PrepareRenameResult, Range, RenameResult, SelectionRange, ServerStatus, SignatureHelp,
-        TextEdit, TypeHierarchyItem,
+        PrepareRenameResult, RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit,
+        TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, SymbolKind};
 
@@ -978,7 +978,8 @@ mod tests {
         async fn inlay_hints(
             &self,
             _file: &Path,
-            _range: Range,
+            _start_line: u32,
+            _end_line: u32,
         ) -> Result<Vec<InlayHint>, LspError> {
             unreachable!()
         }

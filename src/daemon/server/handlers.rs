@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::config::LspRuntimeConfig;
 use crate::daemon::params::{
-    ApplyActionParams, FileParams, LanguageStatusParams, RangeParams, RenameParams,
+    ApplyActionParams, FileParams, InlayHintsParams, LanguageStatusParams, RenameParams,
     SelectionRangeParams, WorkspaceSymbolParams,
 };
 use crate::daemon::protocol::RpcError;
@@ -173,18 +173,13 @@ pub(super) async fn handle_inlay_hints(
     projects: &ProjectsMap,
     lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: RangeParams = parse_params(params)?;
+    let p: InlayHintsParams = parse_params(params)?;
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
 
-    let range = crate::models::lsp::Range::new(
-        crate::models::lsp::Position::new(p.start_line, p.start_column),
-        crate::models::lsp::Position::new(p.end_line, p.end_column),
-    );
-
     let hints = ctx
         .lsp
-        .inlay_hints(Path::new(&p.file), range)
+        .inlay_hints(Path::new(&p.file), p.start_line, p.end_line)
         .await
         .map_err(RpcError::from)?;
 

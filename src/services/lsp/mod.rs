@@ -22,8 +22,8 @@ use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, Indexed, InlayHint, PrepareRenameResult, Range, RenameResult, SelectionRange,
-    ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    HoverInfo, Indexed, InlayHint, PrepareRenameResult, RenameResult, SelectionRange, ServerStatus,
+    SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -137,7 +137,15 @@ pub trait LspService: Send + Sync {
         column: u32,
     ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError>;
 
-    async fn inlay_hints(&self, file: &Path, range: Range) -> Result<Vec<InlayHint>, LspError>;
+    /// Inlay hints across an inclusive line range. The surface is line-granular
+    /// by contract — there are no column bounds — so the type cannot advertise a
+    /// precision it does not honor; the implementation spans whole lines.
+    async fn inlay_hints(
+        &self,
+        file: &Path,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<InlayHint>, LspError>;
 
     async fn folding_ranges(&self, file: &Path) -> Result<Vec<FoldingRange>, LspError>;
 

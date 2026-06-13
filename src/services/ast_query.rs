@@ -52,9 +52,9 @@ fn register(
     // The grammar is compiled into the binary, so registration is
     // deterministic for a given build. A failure means a defective grammar
     // (an incompatible ABI) — skip that one language so an unrelated language
-    // never loses AST queries over it. The registration-completeness test
-    // turns such a regression into a loud, targeted CI failure before it can
-    // ship.
+    // never loses AST queries over it. The registration-completeness test fails
+    // loudly when a language is unregistered, so a defective grammar surfaces as
+    // a targeted test failure rather than silent loss of AST queries.
     let mut parser = Parser::new();
     if parser.set_language(&ts_language).is_err() {
         return;

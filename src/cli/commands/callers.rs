@@ -53,7 +53,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     )
     .await;
     let (line, column) = (anchor.line, anchor.column);
-    let anchor_hints = || anchor.hint.clone().map(|h| vec![h]).unwrap_or_default();
+    let relative = ctx.relative_path(&loc.file);
 
     let result = app.lsp.incoming_calls(&loc.file, line, column).await;
 
@@ -69,7 +69,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
             ctx.print_success(CallersOutput {
                 section: Section::with_total(items, total)
-                    .with_hints(anchor_hints())
+                    .with_hints(anchor.anchor_hints(&relative, "callers", total == 0))
                     .with_indexing(calls.indexing),
                 callers_status: None,
             });
@@ -88,7 +88,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
                     ctx.print_success(CallersOutput {
                         section: Section::with_total(items, total_refs)
-                            .with_hints(anchor_hints())
+                            .with_hints(anchor.anchor_hints(&relative, "callers", total_refs == 0))
                             .with_indexing(indexing),
                         callers_status: Some("references_derived"),
                     });

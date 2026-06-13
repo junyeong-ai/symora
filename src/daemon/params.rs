@@ -51,12 +51,10 @@ pub(crate) struct ApplyActionParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct RangeParams {
+pub(crate) struct InlayHintsParams {
     pub file: String,
     pub start_line: u32,
-    pub start_column: u32,
     pub end_line: u32,
-    pub end_column: u32,
     pub project: String,
 }
 

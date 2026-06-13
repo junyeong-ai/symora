@@ -159,8 +159,9 @@ fn register(
     // is deterministic for a given build. A failure means a defective grammar
     // (an incompatible ABI or a query whose node types moved) — skip that one
     // language so an unrelated language never loses indexing over it. The
-    // registration- and extraction-completeness tests turn such a regression
-    // into a loud, targeted CI failure before it can ship.
+    // registration- and extraction-completeness tests fail loudly when a
+    // language is missing or under-extracted, so a defective grammar surfaces as
+    // a targeted test failure rather than silent index loss.
     let mut parser = Parser::new();
     if parser.set_language(&ts_language).is_err() {
         return;

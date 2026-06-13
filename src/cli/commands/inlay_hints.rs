@@ -6,7 +6,6 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::response::Section;
-use crate::models::lsp::{Position, Range};
 
 #[derive(Args, Debug)]
 pub struct InlayHintsArgs {
@@ -46,14 +45,11 @@ pub async fn execute(args: InlayHintsArgs, app: &App) -> Result<()> {
     } else {
         app.root().join(&args.file)
     };
-    let end_line = args.end_line.unwrap_or(u32::MAX);
+    // The surface is line-granular and 1-indexed; the LSP wire is 0-indexed.
+    let start_line = args.start_line.saturating_sub(1);
+    let end_line = args.end_line.unwrap_or(u32::MAX).saturating_sub(1);
 
-    let range = Range::new(
-        Position::new(args.start_line.saturating_sub(1), 0),
-        Position::new(end_line.saturating_sub(1), u32::MAX),
-    );
-
-    match app.lsp.inlay_hints(&file, range).await {
+    match app.lsp.inlay_hints(&file, start_line, end_line).await {
         Ok(hints) => {
             let items: Vec<InlayHintOutput> = hints
                 .into_iter()

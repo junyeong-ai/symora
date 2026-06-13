@@ -170,8 +170,8 @@ mod tests {
     /// Every tool that advertises an output schema must stay error-tolerant: no
     /// `additionalProperties: false` (which would reject the handled-failure
     /// `{ "error": ... }` envelope and any forward-compatible field) and an
-    /// explicit `error` property. find_call_path once shipped a strict output
-    /// schema that rejected its own error responses; this keeps the class shut.
+    /// explicit `error` property — so a tool's own error response always
+    /// validates against its declared output schema.
     #[test]
     fn output_schemas_accommodate_the_error_envelope() {
         for tool in catalog() {
@@ -252,6 +252,54 @@ mod tests {
             assert!(
                 required_of(tool(name)).contains(&"line"),
                 "{name}: location tools keep requiring line"
+            );
+        }
+    }
+
+    /// The location schema is split by omitted-column semantics: symbol-level
+    /// tools snap an omitted column to the symbol on the line, position-exact
+    /// tools resolve at the literal column. The two families share an identical
+    /// `{file, line, column}` shape, so only the `column` description tells them
+    /// apart — this biconditional pins each tool to its family, so a tool wired
+    /// to the wrong schema fails here instead of drifting silently.
+    #[test]
+    fn location_tools_advertise_their_column_semantics() {
+        let column_desc = |name: &str| -> String {
+            tool(name).input_schema["properties"]["column"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: column property missing a description"))
+                .to_string()
+        };
+
+        // Position-exact: an omitted column resolves at the literal column.
+        for name in [
+            "find_definition",
+            "get_hover",
+            "rename_symbol",
+            "list_code_actions",
+            "apply_code_action",
+        ] {
+            let desc = column_desc(name);
+            assert!(
+                desc.contains("does not snap"),
+                "{name}: position-exact tool must advertise position-exact column semantics, got: {desc}",
+            );
+        }
+
+        // Symbol-level: an omitted column snaps to the symbol on the line.
+        for name in [
+            "find_references",
+            "find_callers",
+            "find_callees",
+            "find_call_path",
+            "find_implementations",
+            "get_context",
+            "get_impact",
+        ] {
+            let desc = column_desc(name);
+            assert!(
+                desc.contains("address the symbol on the line"),
+                "{name}: symbol-level tool must advertise symbol-snapping column semantics, got: {desc}",
             );
         }
     }

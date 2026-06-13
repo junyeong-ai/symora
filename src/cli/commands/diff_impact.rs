@@ -883,8 +883,8 @@ mod tests {
         // A callable owns its whole body — a body line attributes to it.
         assert!(line_attributes_to_symbol(&method, 4));
         // A non-callable container's inter-member gap line does NOT attribute to
-        // the container (this is the false-`Modified <container>` row six rounds
-        // of review eliminated).
+        // the container — otherwise a blank line between members would surface a
+        // spurious `Modified <container>` row.
         assert!(!line_attributes_to_symbol(&container, 7));
         // ...but editing the container's own declaration line does attribute.
         assert!(line_attributes_to_symbol(&container, 1));

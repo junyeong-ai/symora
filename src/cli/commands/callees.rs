@@ -69,9 +69,10 @@ struct CalleesReachOutput {
     /// reachable set is a lower bound.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
-    /// The anchor (the queried from-position) did not resolve to a symbol, so
-    /// the reachable set is from a phantom position — an empty result here means
-    /// "not a symbol", not "no callees".
+    /// The anchor (the queried from-position) did not resolve to a verified
+    /// symbol — either it is not a symbol, or its symbols could not be read to
+    /// snap it. An empty reachable set here is therefore not authoritatively
+    /// "no callees"; the hints distinguish the two causes.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     anchor_unresolved: bool,
 }
@@ -103,7 +104,7 @@ struct CalleesPathOutput {
     /// only when `reachability` is `found`.
     #[serde(skip_serializing_if = "Option::is_none")]
     chain: Option<Vec<CallHierarchyOutput>>,
-    /// Depth searched.
+    /// Depth actually reached.
     depth: u32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     max_depth_reached: bool,
@@ -114,13 +115,15 @@ struct CalleesPathOutput {
     /// `not_reached_within_bound` and this flag discloses why.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
-    /// The `--to` target never resolved to a symbol (typo'd/blank/EOF line), so
-    /// the verdict is about a phantom position — never an authoritative negative.
-    /// The verdict is forced to the non-absolute `not_reached_within_bound`.
+    /// The `--to` target did not resolve to a verified symbol (not a symbol, or
+    /// its symbols could not be read), so the verdict about it is never an
+    /// authoritative negative — it is forced to the non-absolute
+    /// `not_reached_within_bound`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     target_unresolved: bool,
-    /// The anchor (from-position) did not resolve to a symbol, so the verdict is
-    /// about a phantom start — never an authoritative negative.
+    /// The anchor (from-position) did not resolve to a verified symbol (not a
+    /// symbol, or its symbols could not be read), so the verdict is never an
+    /// authoritative negative.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     anchor_unresolved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,6 +153,7 @@ pub async fn execute(args: CalleesArgs, app: &App) -> Result<()> {
                 app,
                 args.loc,
                 limit,
+                "callees",
                 |file, line, col| async move { app.lsp.outgoing_calls(&file, line, col).await },
                 |c, root| CallHierarchyOutput::from_item(&c, root),
             )
@@ -207,17 +211,8 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
 
-    let anchor_unresolved = !anchor.resolved;
-    let mut hints: Vec<String> = anchor.hint.into_iter().collect();
-    if anchor_unresolved {
-        hints.push(format!(
-            "from-position {}:{} did not resolve to a symbol; an empty reachable set here \
-             means the anchor is not a symbol, not that it has no callees — anchor at a \
-             declaration (e.g. a search_symbols result)",
-            ctx.relative_path(&loc.file),
-            loc.line,
-        ));
-    }
+    let anchor_unresolved = !anchor.is_resolved();
+    let hints = anchor.anchor_hints(&ctx.relative_path(&loc.file), "callees", total == 0);
 
     ctx.print_success(CalleesReachOutput {
         section: Section::with_total(items, total)
@@ -274,11 +269,13 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     )
     .await;
 
-    // A --to target that never resolved to a symbol (typo'd/blank/EOF line) has a
-    // phantom key: skip the lookup so it can never coincidentally read as `found`,
-    // and the `!target.resolved` term below keeps the verdict off the absolute
-    // `no_static_path`.
-    let chain_keys = if target.resolved && anchor.resolved {
+    // Only look up a path when both endpoints snapped cleanly to a symbol. An
+    // endpoint that is not a symbol has a phantom key (it could coincidentally
+    // read as `found`); one whose symbols could not be read was never snapped to
+    // its declaration, so a path from it would not be the path the user meant.
+    // Either way the `!is_resolved()` terms below keep the verdict off the
+    // absolute `no_static_path`.
+    let chain_keys = if target.is_resolved() && anchor.is_resolved() {
         walk.path_to(&anchor_key, &target_key)
     } else {
         None
@@ -315,8 +312,8 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
                 || walk.truncated
                 || walk.indexing.is_some()
                 || walk.incomplete
-                || !target.resolved
-                || !anchor.resolved;
+                || !target.is_resolved()
+                || !anchor.is_resolved();
             let verdict = if bounded {
                 Reachability::NotReachedWithinBound
             } else {
@@ -326,27 +323,18 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         }
     };
 
-    let target_unresolved = !target.resolved;
-    let anchor_unresolved = !anchor.resolved;
-    let mut hints = Vec::new();
-    hints.extend(anchor.hint);
-    hints.extend(target.hint);
-    if anchor_unresolved {
-        hints.push(format!(
-            "from-position {}:{} did not resolve to a symbol; the reachability verdict is \
-             not authoritative — anchor at a declaration (e.g. a search_symbols result)",
-            ctx.relative_path(&loc.file),
-            loc.line,
-        ));
-    }
-    if target_unresolved {
-        hints.push(format!(
-            "--to target {}:{} did not resolve to a symbol; the reachability verdict is \
-             not authoritative — point --to at a declaration (e.g. a search_symbols result)",
-            ctx.relative_path(&target_loc.file),
-            target_loc.line,
-        ));
-    }
+    let target_unresolved = !target.is_resolved();
+    let anchor_unresolved = !anchor.is_resolved();
+    let mut hints = anchor.verdict_hints(
+        "from-position",
+        &ctx.relative_path(&loc.file),
+        "anchor at a declaration (e.g. a search_symbols result)",
+    );
+    hints.extend(target.verdict_hints(
+        "--to target",
+        &ctx.relative_path(&target_loc.file),
+        "point --to at a declaration (e.g. a search_symbols result)",
+    ));
 
     ctx.print_success(CalleesPathOutput {
         target: LocationOutput::from_path(&target_loc.file, target.line, target.column, ctx.root()),
