@@ -6,6 +6,7 @@ mod hierarchy;
 mod info;
 mod lifecycle;
 mod navigation;
+mod position;
 mod rename;
 mod service;
 mod symbols;

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::error::LspError;
 use crate::infra::file_filter::{FileFilter, FileFilterConfig, matches_default_pattern};
-use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position};
+use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position, PositionEncoding};
 use crate::infra::lsp::{
     LspFeature, SupportLevel, get_alternative_suggestion, get_support_level, language_server_name,
 };
@@ -12,6 +12,7 @@ use crate::models::lsp::{TypeHierarchyItem, uri_to_path};
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
 use super::converters::convert_symbol_kind;
+use super::position::{PositionConverter, scalar_to_wire};
 
 pub(super) async fn read_file_validated(
     file: &Path,
@@ -50,8 +51,6 @@ pub(super) async fn read_file_validated(
         .map_err(|_| LspError::Protocol(format!("Cannot process binary file: {}", file.display())))
 }
 
-pub(super) use crate::utils::char_to_byte_index;
-
 pub(super) async fn read_line_streaming(file: &Path, target_line: u32) -> Option<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -70,8 +69,19 @@ pub(super) async fn read_line_streaming(file: &Path, target_line: u32) -> Option
     None
 }
 
-pub(super) fn to_lsp_position(line: u32, column: u32) -> Position {
-    Position::new(line.saturating_sub(1), column.saturating_sub(1))
+/// Build an LSP request position from a symora-native 1-indexed scalar
+/// `(line, column)`, encoding the column for the wire so a position after a
+/// non-BMP char on the line lands where the server expects it.
+pub(super) fn to_lsp_position(
+    line: u32,
+    column: u32,
+    content: &str,
+    encoding: PositionEncoding,
+) -> Position {
+    let line0 = line.saturating_sub(1);
+    let line_text = content.lines().nth(line0 as usize).unwrap_or("");
+    let character = scalar_to_wire(encoding, line_text, column.saturating_sub(1));
+    Position::new(line0, character)
 }
 
 pub(super) fn check_feature_support(
@@ -263,7 +273,10 @@ pub(super) fn parse_location_response(result: &serde_json::Value) -> Option<Vec<
     }
 }
 
-pub(super) fn parse_type_hierarchy_item(item: &serde_json::Value) -> Option<TypeHierarchyItem> {
+pub(super) fn parse_type_hierarchy_item(
+    item: &serde_json::Value,
+    conv: &mut PositionConverter,
+) -> Option<TypeHierarchyItem> {
     let name = item.get("name")?.as_str()?.to_string();
     // One LSP-taxonomy decoder for the whole crate: the numeric code becomes
     // a typed `LspSymbolKind`, then `convert_symbol_kind` maps it like every
@@ -272,10 +285,12 @@ pub(super) fn parse_type_hierarchy_item(item: &serde_json::Value) -> Option<Type
         .map(convert_symbol_kind)
         .unwrap_or(SymbolKind::Variable);
     let uri = item.get("uri")?.as_str()?;
+    let path = uri_to_path(uri);
     let range = item.get("selectionRange")?;
     let start = range.get("start")?;
-    let line = start.get("line")?.as_u64()? as u32 + 1;
-    let column = start.get("character")?.as_u64()? as u32 + 1;
+    let line0 = start.get("line")?.as_u64()? as u32;
+    let wire_char = start.get("character")?.as_u64()? as u32;
+    let column = conv.scalar_column(&path, line0, wire_char);
     let detail = item
         .get("detail")
         .and_then(|d| d.as_str())
@@ -284,7 +299,7 @@ pub(super) fn parse_type_hierarchy_item(item: &serde_json::Value) -> Option<Type
     Some(TypeHierarchyItem {
         name,
         kind,
-        location: Location::point(uri_to_path(uri), line, column),
+        location: Location::point(path, line0 + 1, column),
         detail,
     })
 }
@@ -420,10 +435,21 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_to_lsp_position() {
-        let pos = to_lsp_position(10, 5);
-        assert_eq!(pos.line, 9);
+    fn to_lsp_position_encodes_the_column_for_the_wire() {
+        // ASCII line: scalar column and wire character coincide (1-indexed in,
+        // 0-indexed out).
+        let pos = to_lsp_position(1, 5, "fn main() {}", PositionEncoding::Utf16);
+        assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 4);
+
+        // A non-BMP char before the column shifts the utf-16 wire offset: the
+        // `;` after `let x = "😀"` is scalar column 11, utf-16 character 11.
+        let line = "let x = \"😀\";";
+        let pos = to_lsp_position(1, 11, line, PositionEncoding::Utf16);
+        assert_eq!(pos.character, 11);
+        // utf-8 wire offset for the same column is the byte offset, 13.
+        let pos = to_lsp_position(1, 11, line, PositionEncoding::Utf8);
+        assert_eq!(pos.character, 13);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crate::models::symbol::Location;
 
 use super::converters::*;
 use super::helpers::*;
+use super::position::PositionConverter;
 use super::service::{DefaultLspService, degradation_of, ensure_indexed};
 
 pub(super) async fn find_references(
@@ -44,7 +45,7 @@ pub(super) async fn find_references(
 
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
-                    "position": to_lsp_position(line, column),
+                    "position": to_lsp_position(line, column, &content, client.position_encoding().await),
                     "context": { "includeDeclaration": true }
                 });
 
@@ -59,7 +60,10 @@ pub(super) async fn find_references(
                 let locations: Vec<LspLocation> = serde_json::from_value(result)
                     .map_err(|e| LspError::Protocol(e.to_string()))?;
 
-                let all_locations: Vec<Location> = locations.iter().map(convert_location).collect();
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
+                let all_locations: Vec<Location> =
+                    locations.iter().map(|l| convert_location(l, &mut conv)).collect();
 
                 Ok(Indexed::new(
                     filter_locations_within_project(all_locations, &project_root),
@@ -84,7 +88,7 @@ pub(super) async fn goto_definition(
         column,
         "textDocument/definition",
         None,
-        |locs| select_best_definition(locs, &project_root).map(convert_location),
+        |locs| select_best_definition(locs, &project_root).cloned(),
     )
     .await
 }
@@ -102,7 +106,7 @@ pub(super) async fn goto_type_definition(
         column,
         "textDocument/typeDefinition",
         Some(LspFeature::GotoTypeDefinition),
-        |locs| locs.first().map(convert_location),
+        |locs| locs.first().cloned(),
     )
     .await
 }
@@ -114,7 +118,7 @@ async fn goto_location(
     column: u32,
     method: &str,
     feature: Option<LspFeature>,
-    select: impl Fn(&[LspLocation]) -> Option<Location>,
+    select: impl Fn(&[LspLocation]) -> Option<LspLocation>,
 ) -> Result<Option<Location>, LspError> {
     if let Some(feat) = feature {
         check_feature_support(file, feat)?;
@@ -130,6 +134,7 @@ async fn goto_location(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             let method = method.clone();
+            let select = &select;
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
@@ -140,18 +145,31 @@ async fn goto_location(
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
-                    position: to_lsp_position(line, column),
+                    position: to_lsp_position(
+                        line,
+                        column,
+                        &content,
+                        client.position_encoding().await,
+                    ),
                 };
 
                 let result: serde_json::Value = client
                     .request(&method, Some(serde_json::to_value(params)?))
                     .await?;
 
-                Ok(parse_location_response(&result))
+                // The chosen target is decoded from the wire encoding here,
+                // where the client (and so the encoding) is in scope.
+                let chosen = parse_location_response(&result).and_then(|locs| select(&locs));
+                match chosen {
+                    Some(loc) => {
+                        let mut conv = PositionConverter::new(client.position_encoding().await);
+                        Ok(Some(convert_location(&loc, &mut conv)))
+                    }
+                    None => Ok(None),
+                }
             }
         })
         .await
-        .map(|locs| locs.and_then(|l| select(&l)))
 }
 
 pub(super) async fn find_implementations(
@@ -181,7 +199,12 @@ pub(super) async fn find_implementations(
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
-                    position: to_lsp_position(line, column),
+                    position: to_lsp_position(
+                        line,
+                        column,
+                        &content,
+                        client.position_encoding().await,
+                    ),
                 };
 
                 let result: serde_json::Value = client
@@ -191,9 +214,15 @@ pub(super) async fn find_implementations(
                     )
                     .await?;
 
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
                 Ok(Indexed::new(
                     parse_location_response(&result)
-                        .map(|locs| locs.iter().map(convert_location).collect())
+                        .map(|locs| {
+                            locs.iter()
+                                .map(|l| convert_location(l, &mut conv))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                     ran_under,
                 ))

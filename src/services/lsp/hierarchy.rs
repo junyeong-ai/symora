@@ -10,6 +10,7 @@ use crate::models::lsp::{CallHierarchyItem, Indexed, TypeHierarchyItem, path_to_
 
 use super::converters::*;
 use super::helpers::*;
+use super::position::PositionConverter;
 use super::service::{DefaultLspService, degradation_of, ensure_indexed};
 
 pub(super) async fn incoming_calls(
@@ -65,7 +66,7 @@ async fn call_hierarchy(
 
                 let prepare_params = serde_json::json!({
                     "textDocument": { "uri": uri },
-                    "position": to_lsp_position(line, column)
+                    "position": to_lsp_position(line, column, &content, client.position_encoding().await)
                 });
 
                 let items: Option<Vec<LspCallHierarchyItem>> = client
@@ -78,6 +79,12 @@ async fn call_hierarchy(
                 }
 
                 let follow_params = serde_json::json!({ "item": items.first().unwrap() });
+
+                // Caller/callee positions arrive in the negotiated wire
+                // encoding; decode them to native scalar columns, caching each
+                // target file's lines (the anchor file is seeded).
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
 
                 if incoming {
                     let calls: Option<Vec<CallHierarchyIncomingCall>> = client
@@ -94,11 +101,12 @@ async fn call_hierarchy(
                                 location: uri_range_to_location(
                                     &c.from.uri,
                                     &c.from.selection_range,
+                                    &mut conv,
                                 ),
                                 call_site: c
                                     .from_ranges
                                     .first()
-                                    .map(|r| uri_range_to_location(&c.from.uri, r)),
+                                    .map(|r| uri_range_to_location(&c.from.uri, r, &mut conv)),
                             })
                             .collect(),
                         ran_under,
@@ -115,11 +123,15 @@ async fn call_hierarchy(
                             .map(|c| CallHierarchyItem {
                                 name: c.to.name,
                                 kind: convert_symbol_kind(c.to.kind),
-                                location: uri_range_to_location(&c.to.uri, &c.to.selection_range),
+                                location: uri_range_to_location(
+                                    &c.to.uri,
+                                    &c.to.selection_range,
+                                    &mut conv,
+                                ),
                                 call_site: c
                                     .from_ranges
                                     .first()
-                                    .map(|r| uri_range_to_location(&uri, r)),
+                                    .map(|r| uri_range_to_location(&uri, r, &mut conv)),
                             })
                             .collect(),
                         ran_under,
@@ -177,7 +189,7 @@ async fn type_hierarchy(
 
                 let prepare_params = serde_json::json!({
                     "textDocument": { "uri": uri },
-                    "position": to_lsp_position(line, column)
+                    "position": to_lsp_position(line, column, &content, client.position_encoding().await)
                 });
 
                 let items: Option<Vec<serde_json::Value>> = client
@@ -194,11 +206,13 @@ async fn type_hierarchy(
                 let results: Option<Vec<serde_json::Value>> =
                     client.request(&method, Some(follow_params)).await?;
 
+                let mut conv = PositionConverter::new(client.position_encoding().await)
+                    .with_content(&file, &content);
                 Ok(Indexed::new(
                     results
                         .unwrap_or_default()
                         .into_iter()
-                        .filter_map(|item| parse_type_hierarchy_item(&item))
+                        .filter_map(|item| parse_type_hierarchy_item(&item, &mut conv))
                         .collect(),
                     ran_under,
                 ))

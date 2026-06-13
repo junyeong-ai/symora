@@ -382,6 +382,43 @@ pub struct ServerCapabilities {
     pub call_hierarchy_provider: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_hierarchy_provider: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementation_provider: Option<Value>,
+    /// The position encoding the server picked from the client's offered set
+    /// (LSP 3.17). Absent means the spec default, utf-16.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_encoding: Option<String>,
+}
+
+/// The position encoding negotiated with a language server. Two-state by
+/// design: `utf-16` is the LSP-mandatory floor, `utf-8` the preferred wire (its
+/// `character` is already a byte offset). `utf-32` is never offered, so a
+/// conformant server can never select it; were one to, a utf-32 character
+/// equals a Unicode scalar and is served by the scalar path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PositionEncoding {
+    Utf8,
+    #[default]
+    Utf16,
+}
+
+impl PositionEncoding {
+    /// The encoding the server echoed in its `InitializeResult`. Absent or
+    /// unrecognized resolves to the LSP 3.17 default, utf-16 — a conformant
+    /// path always exists, so an odd value never blocks a working flow.
+    pub fn from_capabilities(caps: &ServerCapabilities) -> Self {
+        match caps.position_encoding.as_deref() {
+            Some("utf-8") => Self::Utf8,
+            Some("utf-16") | None => Self::Utf16,
+            Some(other) => {
+                tracing::warn!(
+                    "language server negotiated unsupported positionEncoding {other:?}; \
+                     interpreting positions as utf-16"
+                );
+                Self::Utf16
+            }
+        }
+    }
 }
 
 /// Initialize result
@@ -609,6 +646,31 @@ pub struct CallHierarchyOutgoingCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_encoding_omitted_or_unrecognized_defaults_to_utf16() {
+        let caps = |enc: Option<&str>| ServerCapabilities {
+            position_encoding: enc.map(String::from),
+            ..Default::default()
+        };
+        assert_eq!(
+            PositionEncoding::from_capabilities(&caps(None)),
+            PositionEncoding::Utf16
+        );
+        assert_eq!(
+            PositionEncoding::from_capabilities(&caps(Some("utf-16"))),
+            PositionEncoding::Utf16
+        );
+        assert_eq!(
+            PositionEncoding::from_capabilities(&caps(Some("utf-8"))),
+            PositionEncoding::Utf8
+        );
+        // A non-conformant value never blocks: it is read as the utf-16 floor.
+        assert_eq!(
+            PositionEncoding::from_capabilities(&caps(Some("utf-7"))),
+            PositionEncoding::Utf16
+        );
+    }
 
     #[test]
     fn test_request_serialization() {

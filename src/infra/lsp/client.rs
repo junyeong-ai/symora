@@ -13,10 +13,10 @@ use tokio::time::timeout;
 use super::init_options::init_options;
 use super::protocol::{
     ClientCapabilities, ClientInfo, GeneralClientCapabilities, InitializeParams, InitializeResult,
-    LspDiagnostic, Message, Notification, Position, RegularExpressionsCapability, Request,
-    RequestId, Response, ResponseError, StaleRequestSupport, TextDocumentClientCapabilities,
-    TextDocumentIdentifier, TextDocumentPositionParams, WindowClientCapabilities,
-    WorkspaceClientCapabilities, error_codes,
+    LspDiagnostic, Message, Notification, Position, PositionEncoding, RegularExpressionsCapability,
+    Request, RequestId, Response, ResponseError, StaleRequestSupport,
+    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentPositionParams,
+    WindowClientCapabilities, WorkspaceClientCapabilities, error_codes,
 };
 use super::transport::{Transport, write_notification, write_request, write_response};
 use crate::error::LspError;
@@ -295,6 +295,9 @@ pub struct LspClient {
     root: PathBuf,
     config: Arc<crate::config::LspRuntimeConfig>,
     capabilities: RwLock<Option<InitializeResult>>,
+    /// The negotiated position encoding, parsed once from the initialize
+    /// response. Every inbound/outbound position conversion reads this.
+    position_encoding: RwLock<PositionEncoding>,
     shutdown: RwLock<bool>,
     indexing_state: AtomicU8,
     indexing_notify: Notify,
@@ -350,6 +353,7 @@ impl LspClient {
             root,
             config,
             capabilities: RwLock::new(None),
+            position_encoding: RwLock::new(PositionEncoding::default()),
             shutdown: RwLock::new(false),
             indexing_state: AtomicU8::new(IndexingState::NotStarted.to_u8()),
             indexing_notify: Notify::new(),
@@ -498,6 +502,10 @@ impl LspClient {
             .request("initialize", Some(serde_json::to_value(params)?))
             .await?;
 
+        // Close the encoding negotiation: record the server's choice once.
+        *self.position_encoding.write().await =
+            PositionEncoding::from_capabilities(&result.capabilities);
+
         // Store capabilities
         *self.capabilities.write().await = Some(result);
 
@@ -511,7 +519,7 @@ impl LspClient {
     /// Build client capabilities optimized for the target language server (LSP 3.17 complete)
     fn client_capabilities(language: Language) -> ClientCapabilities {
         let general = GeneralClientCapabilities {
-            position_encodings: Some(vec!["utf-16".to_string(), "utf-8".to_string()]),
+            position_encodings: Some(vec!["utf-8".to_string(), "utf-16".to_string()]),
             stale_request_support: Some(StaleRequestSupport {
                 cancel: true,
                 retry_on_content_modified: Some(vec![
@@ -1734,8 +1742,9 @@ impl LspClient {
         self.language
     }
 
-    pub async fn capabilities(&self) -> Option<InitializeResult> {
-        self.capabilities.read().await.clone()
+    /// The position encoding negotiated at initialize (utf-16 until then).
+    pub async fn position_encoding(&self) -> PositionEncoding {
+        *self.position_encoding.read().await
     }
 
     /// Latest `publishDiagnostics` for `uri`, or `None` when the server
