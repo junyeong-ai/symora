@@ -520,6 +520,10 @@ struct GetDiagnosticsInput {
     file: String,
     severity: Option<String>,
     source: Option<String>,
+    #[serde(default)]
+    with_context: bool,
+    #[serde(default)]
+    with_suggestions: bool,
 }
 
 async fn run_get_diagnostics(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -532,11 +536,13 @@ async fn run_get_diagnostics(args: Value, app: &App) -> Result<CapturedOutput> {
                     .severity
                     .map(|s| s.split(',').map(str::to_string).collect()),
                 source: input.source,
-                // Pinned off: per-diagnostic definition/type-definition and
-                // quickfix probes multiply LSP round-trips; the catalog's
-                // navigation and code-action tools cover the follow-up.
-                with_context: false,
-                with_suggestions: false,
+                // Opt-in and off by default: the per-diagnostic
+                // definition/type-definition and quickfix probes multiply LSP
+                // round-trips, so an agent batches them only when fixing a
+                // multi-error file is worth it; the navigation and code-action
+                // tools remain the targeted follow-up.
+                with_context: input.with_context,
+                with_suggestions: input.with_suggestions,
             },
             &a,
         )
@@ -798,7 +804,13 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "body_tokens",
         ],
         "get_impact" => &["file", "line", "column", "limit", "depth"],
-        "get_diagnostics" => &["file", "severity", "source"],
+        "get_diagnostics" => &[
+            "file",
+            "severity",
+            "source",
+            "with_context",
+            "with_suggestions",
+        ],
         "build_context_pack" => &["tokens", "focus", "per_file", "shape"],
         "rename_symbol" => &["file", "line", "column", "new_name", "dry_run"],
         "list_code_actions" => &["file", "line", "column", "kind", "preferred"],
