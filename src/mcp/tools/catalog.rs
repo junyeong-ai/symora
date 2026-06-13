@@ -143,7 +143,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Outgoing-call hierarchy for a function at a precise file:line:column.",
             with_extra(
                 location_schema(),
-                &[("limit", "integer", "Maximum results")],
+                &[
+                    ("limit", "integer", "Maximum results"),
+                    (
+                        "depth",
+                        "integer",
+                        "Transitive callee depth, 1-3 (default 1; >1 returns the downward \
+                         reachable set instead of direct callees, with honest lower-bound markers)",
+                    ),
+                ],
             ),
         )
         .with_output_schema(section_output_schema(
