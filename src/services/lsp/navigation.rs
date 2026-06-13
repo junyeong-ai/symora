@@ -178,8 +178,6 @@ pub(super) async fn find_implementations(
     line: u32,
     column: u32,
 ) -> Result<Indexed<Vec<Location>>, LspError> {
-    check_feature_support(file, LspFeature::FindImplementations)?;
-
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -189,6 +187,7 @@ pub(super) async fn find_implementations(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
+                check_feature_support_live(&client, &file, LspFeature::FindImplementations).await?;
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
                 let ran_under = degradation_of(client.indexing_state());
@@ -214,16 +213,24 @@ pub(super) async fn find_implementations(
                     )
                     .await?;
 
+                let locs = parse_location_response(&result).unwrap_or_default();
+                // Post-flight null-gap: an empty implementation result from a
+                // server that doesn't advertise the provider is unsupported, not
+                // "no implementations".
+                if locs.is_empty()
+                    && !client
+                        .feature_advertised(LspFeature::FindImplementations)
+                        .await
+                {
+                    return Err(unsupported_error(&file, LspFeature::FindImplementations));
+                }
+
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
                 Ok(Indexed::new(
-                    parse_location_response(&result)
-                        .map(|locs| {
-                            locs.iter()
-                                .map(|l| convert_location(l, &mut conv))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    locs.iter()
+                        .map(|l| convert_location(l, &mut conv))
+                        .collect(),
                     ran_under,
                 ))
             }

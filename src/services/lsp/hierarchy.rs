@@ -43,7 +43,6 @@ async fn call_hierarchy(
     } else {
         LspFeature::OutgoingCalls
     };
-    check_feature_support(file, feature)?;
 
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
@@ -54,6 +53,9 @@ async fn call_hierarchy(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
+                // Pre-flight: the static table only hints; if it says None but
+                // this server advertises call hierarchy, attempt the request.
+                check_feature_support_live(&client, &file, feature).await?;
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
                 // Computation-time snapshot — the output marker derives
@@ -75,6 +77,14 @@ async fn call_hierarchy(
 
                 let items = items.unwrap_or_default();
                 if items.is_empty() {
+                    // Post-flight: an empty prepare from a server that does NOT
+                    // advertise the provider is a null-gap, not a real "no
+                    // callers" — surface unsupported so callers fall back to
+                    // references-derived. If it IS advertised, the empty is
+                    // genuine and returned as-is.
+                    if !client.feature_advertised(feature).await {
+                        return Err(unsupported_error(&file, feature));
+                    }
                     return Ok(Indexed::new(vec![], ran_under));
                 }
 
@@ -167,8 +177,6 @@ async fn type_hierarchy(
     column: u32,
     method: &str,
 ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-    check_feature_support(file, LspFeature::TypeHierarchy)?;
-
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -180,6 +188,7 @@ async fn type_hierarchy(
             let manager = Arc::clone(&manager);
             let method = method.clone();
             async move {
+                check_feature_support_live(&client, &file, LspFeature::TypeHierarchy).await?;
                 ensure_indexed(&client, &file, manager.root()).await;
                 let ran_under = degradation_of(client.indexing_state());
 
@@ -198,6 +207,11 @@ async fn type_hierarchy(
 
                 let items = items.unwrap_or_default();
                 if items.is_empty() {
+                    // Post-flight null-gap: a server that doesn't advertise type
+                    // hierarchy returning empty is unsupported, not "no types".
+                    if !client.feature_advertised(LspFeature::TypeHierarchy).await {
+                        return Err(unsupported_error(&file, LspFeature::TypeHierarchy));
+                    }
                     return Ok(Indexed::new(vec![], ran_under));
                 }
 

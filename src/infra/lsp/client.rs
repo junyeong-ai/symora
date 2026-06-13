@@ -1747,6 +1747,17 @@ impl LspClient {
         *self.position_encoding.read().await
     }
 
+    /// Whether the server's advertised capabilities affirmatively offer
+    /// `feature`. False before initialize and when the provider is absent or
+    /// `false` — the single binary capability signal the gating uses.
+    pub async fn feature_advertised(&self, feature: crate::infra::lsp::LspFeature) -> bool {
+        self.capabilities
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|init| init.capabilities.advertises(feature))
+    }
+
     /// Latest `publishDiagnostics` for `uri`, or `None` when the server
     /// has never published for it — callers judge freshness against the
     /// version returned by `sync_document` (and `publish_seq_snapshot`
