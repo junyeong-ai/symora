@@ -417,6 +417,16 @@ async fn symbol_edit(
     let mut output = doc.commit(app, operation, splice, span, target, dry_run)?;
     output.diagnostics = pull_diagnostics(app, file, dry_run, with_diagnostics).await;
     if let Some(callers) = caller_files {
+        // Caller diagnostics must judge the edit's NEW signature. Sync the
+        // edited file to the language server before pulling them. `finish`
+        // re-syncs after this returns, but that later note is a no-op (the
+        // content is already current), so there is no real double work. Without
+        // this pre-sync the caller files are analysed against the server's stale
+        // pre-edit view of the edited file (its overlay was opened at the old
+        // content during the reference lookup), so a freshly introduced caller
+        // break reads as clean — a false negative independent of --with-diagnostics.
+        let edited = [file.to_path_buf()];
+        app.lsp.note_files_edited(&edited).await;
         output.caller_verification = Some(verify_caller_files(app, callers).await);
     }
     app.output.print_success(output);
@@ -761,12 +771,20 @@ async fn collect_caller_files(app: &App, file: &Path, symbol: &Symbol) -> Caller
         }
     };
     let indexing = refs.indexing;
+    // Compare candidates by canonical form: the edited file's path is canonical,
+    // but a server-returned reference URI may be spelled differently (symlinked
+    // root, case-folded FS), and an exact-string compare would then list the
+    // edited file as its own caller. Dedup on the same canonical key.
+    let canonical_edited = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     let mut seen = std::collections::HashSet::new();
     let mut files: Vec<PathBuf> = refs
         .data
         .iter()
         .map(|r| r.file.clone())
-        .filter(|f| f.as_path() != file && seen.insert(f.clone()))
+        .filter(|f| {
+            let canon = f.canonicalize().unwrap_or_else(|_| f.clone());
+            canon != canonical_edited && seen.insert(canon)
+        })
         .collect();
     files.sort();
     let total = files.len();

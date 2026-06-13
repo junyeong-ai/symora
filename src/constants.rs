@@ -37,9 +37,10 @@ pub mod defaults {
     /// Hard cap on impact's BFS depth, regardless of user input.
     pub const IMPACT_MAX_DEPTH: u32 = 3;
 
-    /// Cap on callers fanned out per BFS frontier node. Stops a single
-    /// hot spot (e.g., logger) from exploding the graph.
-    pub const BLAST_RADIUS_MAX_CALLERS_PER_NODE: usize = 100;
+    /// Cap on neighbours (callers or callees) fanned out per BFS frontier node,
+    /// shared by the incoming (impact/blast-radius) and outgoing (callees)
+    /// walks. Stops a single hot spot (e.g., a logger) from exploding the graph.
+    pub const CALL_GRAPH_MAX_NEIGHBORS_PER_NODE: usize = 100;
 
     /// Concurrent file fan-out for `Store::index` (SQLite write contention
     /// + open file descriptors trade off here).

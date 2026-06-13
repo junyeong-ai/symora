@@ -138,6 +138,26 @@ impl PositionConverter {
     pub fn scalar_column(&mut self, file: &Path, line0: u32, wire_char: u32) -> u32 {
         self.scalar_offset(file, line0, wire_char) + 1
     }
+
+    /// Like `scalar_offset` but FAILS CLOSED instead of degrading: returns
+    /// `None` when the target line cannot be read and `wire_char > 0`. The
+    /// edit-apply path uses this so an edit is never sliced at a guessed byte
+    /// offset on a multibyte line. A `wire_char` of 0 needs no line (it maps to
+    /// scalar 0 in every encoding), so a line-start or end-of-file insertion
+    /// still succeeds.
+    pub fn scalar_offset_checked(
+        &mut self,
+        file: &Path,
+        line0: u32,
+        wire_char: u32,
+    ) -> Option<u32> {
+        if wire_char == 0 {
+            return Some(0);
+        }
+        let encoding = self.encoding;
+        self.line(file, line0)
+            .map(|line| encoded_offset_to_scalar(encoding, line, wire_char))
+    }
 }
 
 fn split_lines(content: &str) -> Vec<String> {

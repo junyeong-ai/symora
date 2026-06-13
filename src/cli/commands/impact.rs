@@ -210,6 +210,7 @@ mod tests {
             max_depth_reached,
             callers_truncated: false,
             indexing: None,
+            incomplete: false,
             dynamic_dispatch: dispatch.map(|status| DynamicDispatch {
                 status,
                 implementations: if status == DispatchStatus::Incomplete {

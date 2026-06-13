@@ -20,7 +20,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig};
+use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
 use crate::cli::commands::common::{execute_list, snap_to_symbol_anchor};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput, Section};
 use crate::cli::{LocationArg, ParsedLocation};
@@ -65,6 +65,15 @@ struct CalleesReachOutput {
     /// set is a lower bound.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     callees_truncated: bool,
+    /// At least one hop's callee query failed and was treated as empty, so the
+    /// reachable set is a lower bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+    /// The anchor (the queried from-position) did not resolve to a symbol, so
+    /// the reachable set is from a phantom position — an empty result here means
+    /// "not a symbol", not "no callees".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    anchor_unresolved: bool,
 }
 
 /// Whether the anchor reaches the target through resolved outgoing calls.
@@ -100,6 +109,20 @@ struct CalleesPathOutput {
     max_depth_reached: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     callees_truncated: bool,
+    /// A hop's callee query failed and was treated as empty, so a would-be
+    /// `no_static_path` is a possible missed path: the verdict degrades to
+    /// `not_reached_within_bound` and this flag discloses why.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+    /// The `--to` target never resolved to a symbol (typo'd/blank/EOF line), so
+    /// the verdict is about a phantom position — never an authoritative negative.
+    /// The verdict is forced to the non-absolute `not_reached_within_bound`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    target_unresolved: bool,
+    /// The anchor (from-position) did not resolve to a symbol, so the verdict is
+    /// about a phantom start — never an authoritative negative.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    anchor_unresolved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexing: Option<IndexingDegradation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -133,14 +156,6 @@ pub async fn execute(args: CalleesArgs, app: &App) -> Result<()> {
             .await
         }
     }
-}
-
-fn key_of(item: &CallHierarchyItem) -> NodeKey {
-    (
-        item.location.file.clone(),
-        item.location.line,
-        item.location.column,
-    )
 }
 
 /// Probe the anchor's outgoing calls once so a capability gap (the server
@@ -192,13 +207,27 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
 
+    let anchor_unresolved = !anchor.resolved;
+    let mut hints: Vec<String> = anchor.hint.into_iter().collect();
+    if anchor_unresolved {
+        hints.push(format!(
+            "from-position {}:{} did not resolve to a symbol; an empty reachable set here \
+             means the anchor is not a symbol, not that it has no callees — anchor at a \
+             declaration (e.g. a search_symbols result)",
+            ctx.relative_path(&loc.file),
+            loc.line,
+        ));
+    }
+
     ctx.print_success(CalleesReachOutput {
         section: Section::with_total(items, total)
-            .with_hints(anchor.hint.into_iter().collect())
+            .with_hints(hints)
             .with_indexing(walk.indexing),
         depth: walk.depth_reached(),
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,
+        incomplete: walk.incomplete,
+        anchor_unresolved,
     });
 
     Ok(())
@@ -245,7 +274,15 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     )
     .await;
 
-    let chain_keys = walk.path_to(&anchor_key, &target_key);
+    // A --to target that never resolved to a symbol (typo'd/blank/EOF line) has a
+    // phantom key: skip the lookup so it can never coincidentally read as `found`,
+    // and the `!target.resolved` term below keeps the verdict off the absolute
+    // `no_static_path`.
+    let chain_keys = if target.resolved && anchor.resolved {
+        walk.path_to(&anchor_key, &target_key)
+    } else {
+        None
+    };
 
     let (reachability, chain) = match chain_keys {
         Some(keys) => {
@@ -256,17 +293,30 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
                 .flatten()
                 .map(|it| (key_of(it), it))
                 .collect();
+            // Every path key is a discovered node, so it must resolve in
+            // item_by_key. Use map + expect (not filter_map) so a future drift
+            // in the levels/predecessor invariant fails loudly instead of
+            // emitting a silently-gapped `found` chain.
             let frames: Vec<CallHierarchyOutput> = keys
                 .iter()
-                .filter_map(|k| item_by_key.get(k))
-                .map(|it| CallHierarchyOutput::from_item(it, ctx.root()))
+                .map(|k| {
+                    let it = item_by_key
+                        .get(k)
+                        .expect("path key must resolve to a discovered call-graph item");
+                    CallHierarchyOutput::from_item(it, ctx.root())
+                })
                 .collect();
             (Reachability::Found, Some(frames))
         }
         None => {
             // Bounded (a deeper/wider search might find a path) versus a clean
             // exhaustion of the statically-resolved reachable set.
-            let bounded = walk.max_depth_reached || walk.truncated || walk.indexing.is_some();
+            let bounded = walk.max_depth_reached
+                || walk.truncated
+                || walk.indexing.is_some()
+                || walk.incomplete
+                || !target.resolved
+                || !anchor.resolved;
             let verdict = if bounded {
                 Reachability::NotReachedWithinBound
             } else {
@@ -276,9 +326,27 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         }
     };
 
+    let target_unresolved = !target.resolved;
+    let anchor_unresolved = !anchor.resolved;
     let mut hints = Vec::new();
     hints.extend(anchor.hint);
     hints.extend(target.hint);
+    if anchor_unresolved {
+        hints.push(format!(
+            "from-position {}:{} did not resolve to a symbol; the reachability verdict is \
+             not authoritative — anchor at a declaration (e.g. a search_symbols result)",
+            ctx.relative_path(&loc.file),
+            loc.line,
+        ));
+    }
+    if target_unresolved {
+        hints.push(format!(
+            "--to target {}:{} did not resolve to a symbol; the reachability verdict is \
+             not authoritative — point --to at a declaration (e.g. a search_symbols result)",
+            ctx.relative_path(&target_loc.file),
+            target_loc.line,
+        ));
+    }
 
     ctx.print_success(CalleesPathOutput {
         target: LocationOutput::from_path(&target_loc.file, target.line, target.column, ctx.root()),
@@ -287,6 +355,9 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         depth: walk.depth_reached(),
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,
+        incomplete: walk.incomplete,
+        target_unresolved,
+        anchor_unresolved,
         indexing: walk.indexing,
         hints,
     });
@@ -333,6 +404,9 @@ mod tests {
             depth: 3,
             max_depth_reached: false,
             callees_truncated: false,
+            incomplete: false,
+            target_unresolved: false,
+            anchor_unresolved: false,
             indexing: None,
             hints: vec![],
         };
@@ -356,6 +430,9 @@ mod tests {
             depth: 2,
             max_depth_reached: true,
             callees_truncated: false,
+            incomplete: false,
+            target_unresolved: false,
+            anchor_unresolved: false,
             indexing: None,
             hints: vec![],
         };
@@ -374,6 +451,9 @@ mod tests {
             depth: 3,
             max_depth_reached: false,
             callees_truncated: false,
+            incomplete: false,
+            target_unresolved: false,
+            anchor_unresolved: false,
             indexing: None,
             hints: vec![],
         };
@@ -382,6 +462,31 @@ mod tests {
         assert!(v.get("chain").is_none());
         assert!(v.get("max_depth_reached").is_none());
         assert!(v.get("callees_truncated").is_none());
+        // A clean negative carries no incomplete marker — that flag is what
+        // separates a true `no_static_path` from a hop-error lower bound.
+        assert!(v.get("incomplete").is_none());
+    }
+
+    #[test]
+    fn target_unresolved_is_disclosed_and_never_an_absolute_negative() {
+        let out = CalleesPathOutput {
+            target: target(),
+            reachability: Reachability::NotReachedWithinBound,
+            chain: None,
+            depth: 3,
+            max_depth_reached: false,
+            callees_truncated: false,
+            incomplete: false,
+            target_unresolved: true,
+            anchor_unresolved: false,
+            indexing: None,
+            hints: vec!["did not resolve to a symbol".to_string()],
+        };
+        let v = serde_json::to_value(out).unwrap();
+        assert_eq!(v["target_unresolved"], true);
+        // A target that was never a symbol must never read as the absolute
+        // no_static_path — the verdict stays non-absolute.
+        assert_eq!(v["reachability"], "not_reached_within_bound");
     }
 
     #[test]
@@ -391,6 +496,8 @@ mod tests {
             depth: 2,
             max_depth_reached: false,
             callees_truncated: false,
+            incomplete: false,
+            anchor_unresolved: false,
         };
         let v = serde_json::to_value(out).unwrap();
         // Section fields are flattened beside the reach-specific ones.
@@ -409,6 +516,8 @@ mod tests {
             depth: 3,
             max_depth_reached: true,
             callees_truncated: true,
+            incomplete: false,
+            anchor_unresolved: false,
         };
         let v = serde_json::to_value(out).unwrap();
         assert_eq!(v["max_depth_reached"], true);

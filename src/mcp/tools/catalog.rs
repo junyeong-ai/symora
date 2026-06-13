@@ -1,7 +1,8 @@
 use crate::mcp::protocol::ToolDefinition;
 
 use super::schema::{
-    edit_target_schema, location_schema, schema_object, section_output_schema, with_extra,
+    edit_target_schema, location_schema, output_schema, schema_object, section_output_schema,
+    with_extra,
 };
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
@@ -177,7 +178,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         )
-        .with_output_schema(schema_object(
+        .with_output_schema(output_schema(
             &[
                 (
                     "target",
@@ -206,8 +207,35 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "boolean",
                     "A node's fan-out hit the per-node cap (lower bound)",
                 ),
+                (
+                    "incomplete",
+                    "boolean",
+                    "A hop's call query failed and was treated as empty, so the \
+                     verdict is a lower bound — never an exhaustive negative",
+                ),
+                (
+                    "target_unresolved",
+                    "boolean",
+                    "The `to` target did not resolve to a symbol; the verdict is not \
+                     authoritative (forced to not_reached_within_bound)",
+                ),
+                (
+                    "anchor_unresolved",
+                    "boolean",
+                    "The from-position did not resolve to a symbol; the verdict is about a \
+                     phantom start and is not authoritative",
+                ),
+                (
+                    "indexing",
+                    "string",
+                    "Present when a hop ran under degraded workspace indexing (lower bound)",
+                ),
+                (
+                    "hints",
+                    "array",
+                    "Optional next-step suggestions for the agent",
+                ),
             ],
-            &["target", "reachability", "depth"],
         )),
         ToolDefinition::read_only(
             "find_implementations",

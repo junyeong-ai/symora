@@ -216,7 +216,9 @@ impl From<StoreError> for OutputError {
             StoreError::AlreadyIndexing => {
                 Self::new(ErrorCode::Internal, message).with_hint("Wait a moment and retry.")
             }
-            StoreError::Database(_) => Self::new(ErrorCode::Internal, message),
+            StoreError::Database(_) | StoreError::SchemaMismatch { .. } => {
+                Self::new(ErrorCode::Internal, message)
+            }
             StoreError::Io(_) => Self::new(ErrorCode::Io, message),
         }
     }

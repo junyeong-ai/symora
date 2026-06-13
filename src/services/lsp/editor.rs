@@ -39,6 +39,9 @@ pub(super) async fn inlay_hints(
                     }
                 });
 
+                let encoding = client.position_encoding().await;
+                let mut conv = PositionConverter::new(encoding).with_content(&file, &content);
+
                 let hints: Option<Vec<serde_json::Value>> = client
                     .request("textDocument/inlayHint", Some(params))
                     .await?;
@@ -47,7 +50,10 @@ pub(super) async fn inlay_hints(
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|h| {
-                        let pos = parse_position(h.get("position")?)?;
+                        let mut pos = parse_position(h.get("position")?)?;
+                        // Decode the wire column to a 0-indexed Unicode scalar at
+                        // the boundary; the CLI applies +1 for display.
+                        pos.character = conv.scalar_offset(&file, pos.line, pos.character);
 
                         let label = match h.get("label")? {
                             serde_json::Value::String(s) => s.clone(),
@@ -104,6 +110,9 @@ pub(super) async fn folding_ranges(
                     "textDocument": { "uri": uri }
                 });
 
+                let encoding = client.position_encoding().await;
+                let mut conv = PositionConverter::new(encoding).with_content(&file, &content);
+
                 let ranges: Option<Vec<serde_json::Value>> = client
                     .request("textDocument/foldingRange", Some(params))
                     .await?;
@@ -114,14 +123,16 @@ pub(super) async fn folding_ranges(
                     .filter_map(|r| {
                         let start_line = r.get("startLine")?.as_u64()? as u32;
                         let end_line = r.get("endLine")?.as_u64()? as u32;
+                        // Decode wire columns to 0-indexed Unicode scalar at the
+                        // boundary; the CLI applies +1 for display.
                         let start_character = r
                             .get("startCharacter")
                             .and_then(|v| v.as_u64())
-                            .map(|v| v as u32);
+                            .map(|v| conv.scalar_offset(&file, start_line, v as u32));
                         let end_character = r
                             .get("endCharacter")
                             .and_then(|v| v.as_u64())
-                            .map(|v| v as u32);
+                            .map(|v| conv.scalar_offset(&file, end_line, v as u32));
                         let kind =
                             FoldingRangeKind::from_lsp(r.get("kind").and_then(|k| k.as_str()));
                         let collapsed_text = r
@@ -176,12 +187,25 @@ pub(super) async fn selection_ranges(
                     .request("textDocument/selectionRange", Some(params))
                     .await?;
 
-                fn parse_selection_range(value: &serde_json::Value) -> Option<SelectionRange> {
-                    let range = parse_range(value.get("range")?)?;
+                let mut conv = PositionConverter::new(encoding).with_content(&file, &content);
+
+                fn parse_selection_range(
+                    value: &serde_json::Value,
+                    conv: &mut PositionConverter,
+                    file: &Path,
+                ) -> Option<SelectionRange> {
+                    let mut range = parse_range(value.get("range")?)?;
+                    // Decode wire columns to 0-indexed Unicode scalar at the
+                    // boundary, recursively through parent ranges; the CLI
+                    // applies +1 for display.
+                    range.start.character =
+                        conv.scalar_offset(file, range.start.line, range.start.character);
+                    range.end.character =
+                        conv.scalar_offset(file, range.end.line, range.end.character);
 
                     let parent = value
                         .get("parent")
-                        .and_then(|p| parse_selection_range(p).map(Box::new));
+                        .and_then(|p| parse_selection_range(p, conv, file).map(Box::new));
 
                     Some(SelectionRange { range, parent })
                 }
@@ -189,7 +213,7 @@ pub(super) async fn selection_ranges(
                 Ok(ranges
                     .unwrap_or_default()
                     .iter()
-                    .filter_map(parse_selection_range)
+                    .filter_map(|v| parse_selection_range(v, &mut conv, &file))
                     .collect())
             }
         })
@@ -219,11 +243,20 @@ pub(super) async fn code_lenses(
                     .request("textDocument/codeLens", Some(params))
                     .await?;
 
+                let encoding = client.position_encoding().await;
+                let mut conv = PositionConverter::new(encoding).with_content(&file, &content);
+
                 Ok(lenses
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|lens| {
-                        let range = parse_range(lens.get("range")?)?;
+                        let mut range = parse_range(lens.get("range")?)?;
+                        // Decode wire columns to 0-indexed Unicode scalar at the
+                        // boundary; the CLI applies +1 for display.
+                        range.start.character =
+                            conv.scalar_offset(&file, range.start.line, range.start.character);
+                        range.end.character =
+                            conv.scalar_offset(&file, range.end.line, range.end.character);
 
                         let command = lens.get("command").and_then(|cmd| {
                             Some(CodeLensCommand {
@@ -257,8 +290,10 @@ pub(super) async fn code_actions(
     line: u32,
     column: u32,
 ) -> Result<Vec<CodeAction>, LspError> {
-    check_feature_support(file, LspFeature::CodeActions)?;
-
+    // No static capability gate: code actions are near-universal and
+    // get_support_level never yields None for CodeActions, so a gate here would
+    // be inert dead code. A server that lacks them returns -32601 (mapped to
+    // honest Unsupported) or an empty set (an honest "no actions here").
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -274,13 +309,19 @@ pub(super) async fn code_actions(
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
-                let position = to_lsp_position(line, column, &content, client.position_encoding().await);
+                let encoding = client.position_encoding().await;
+                // Both ends are derived from scalar columns: a 1-scalar-wide
+                // range over the token at the cursor. Advancing the wire offset
+                // by 1 instead would split a multibyte char or UTF-16 surrogate
+                // pair on a non-ASCII line.
+                let start = to_lsp_position(line, column, &content, encoding);
+                let end = to_lsp_position(line, column + 1, &content, encoding);
 
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
                     "range": {
-                        "start": { "line": position.line, "character": position.character },
-                        "end": { "line": position.line, "character": position.character.saturating_add(1) }
+                        "start": { "line": start.line, "character": start.character },
+                        "end": { "line": end.line, "character": end.character }
                     },
                     "context": { "diagnostics": [] }
                 });
@@ -387,9 +428,8 @@ pub(super) async fn apply_code_action(
                     )));
                 }
 
-                Ok(ApplyActionResult {
-                    changes: parse_workspace_edit(&edit, client.position_encoding().await),
-                })
+                let changes = parse_workspace_edit(&edit, client.position_encoding().await)?;
+                Ok(ApplyActionResult { changes })
             }
         })
         .await
@@ -431,7 +471,7 @@ pub(super) async fn format(
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
-                let edits = parse_text_edits(&result, &file, &mut conv);
+                let edits = parse_text_edits(&result, &file, &mut conv)?;
                 Ok(edits)
             }
         })

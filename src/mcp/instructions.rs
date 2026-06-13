@@ -15,7 +15,7 @@ Exploration flow:
 1. Orient: `build_context_pack` (token-budgeted repo brief) or `get_project_overview`.
 2. Locate: `search_symbols` when you only know a rough name; `search_content` for keywords and strings.
 3. Inspect: `get_file_overview` before reading any file in full; `list_file_symbols` for one file's exact symbol tree; `inspect_symbol` to resolve a path like Class/method from a search hit.
-4. Navigate from an exact file:line:column: `find_definition`, `find_references`, `find_callers`, `find_callees`, `find_implementations`, `get_hover`.
+4. Navigate from an exact file:line:column: `find_definition`, `find_references`, `find_callers`, `find_callees`, `find_implementations`, `get_hover`. `find_call_path` answers \"how does function A reach function B\" with the ordered call chain, or an honest reachability verdict that never overclaims.
 5. Aggregate: `get_context` returns callers, callees, types, and tests in one call — prefer it over four separate queries. For flow questions, set with_bodies=true: complete target, callee, and type bodies arrive in the same response — the target's whole body unbudgeted, callee and type bodies under a body_tokens budget; bodies_included on a section says how many items carry one — fetch any missing body with `inspect_symbol` instead of reading the file.
 6. Before changing a symbol: `get_impact` reports test/prod reference counts, affected files, and a risk-ranked caller graph.
 

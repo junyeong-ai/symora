@@ -241,6 +241,9 @@ pub enum StoreError {
     #[error("Database error: {0}")]
     Database(String),
 
+    #[error("schema version mismatch: db={found}, expected={expected}")]
+    SchemaMismatch { found: i32, expected: i32 },
+
     #[error("Store not initialized. Run: symora search index build")]
     NotInitialized,
 

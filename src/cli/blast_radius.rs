@@ -28,6 +28,10 @@ use crate::services::lsp::LspService;
 /// how deep the walk reached.
 const DYNAMIC_DISPATCH_CONFIDENCE_CAP: f32 = 0.7;
 
+/// A walk that swallowed a hop error (an LSP failure mid-traversal) is a known
+/// lower bound, so its caller graph can never be presented as high confidence.
+const INCOMPLETE_WALK_CONFIDENCE_CAP: f32 = 0.5;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BlastRadius {
     pub direct_callers: usize,
@@ -44,6 +48,10 @@ pub struct BlastRadius {
     /// workspace indexing — every count is then a lower bound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// True when at least one hop's call-hierarchy request failed and was
+    /// treated as an empty caller set — the counts are then a lower bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
     /// Present only when the anchor is dynamically dispatched (a
     /// trait/interface method, or the interface itself). The call-hierarchy
     /// counts then exclude callers reached through implementations, so they
@@ -158,6 +166,7 @@ pub async fn compute(
         max_depth_reached: walk.max_depth_reached,
         callers_truncated: walk.truncated,
         indexing: walk.indexing,
+        incomplete: walk.incomplete,
         dynamic_dispatch,
         callers_by_depth: buckets,
         test_coverage_ratio: test_ratio,
@@ -166,7 +175,17 @@ pub async fn compute(
         // + a capped `confidence`, never by inflating the risk label off a
         // graph we know is a lower bound.
         risk: compute_risk(transitive_callers, is_exported, test_ratio),
-        confidence: compute_confidence(direct_callers, depth_reached, dynamic_dispatch.as_ref()),
+        // A swallowed hop error makes the graph a lower bound, so — like
+        // dynamic dispatch — it caps confidence rather than being presented
+        // as an authoritative count.
+        confidence: {
+            let c = compute_confidence(direct_callers, depth_reached, dynamic_dispatch.as_ref());
+            if walk.incomplete {
+                c.min(INCOMPLETE_WALK_CONFIDENCE_CAP)
+            } else {
+                c
+            }
+        },
     })
 }
 
@@ -292,6 +311,7 @@ mod tests {
             incoming,
             outgoing: HashMap::new(),
             implementations,
+            errors: std::collections::HashSet::new(),
         };
         let matcher = TestMatcher::default();
         tokio_test::block_on(compute(

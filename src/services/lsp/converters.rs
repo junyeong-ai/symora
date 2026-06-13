@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::error::LspError;
 use crate::infra::lsp::protocol::{
     DocumentSymbol, HoverContents, LspLocation, LspSymbolKind, Range,
 };
@@ -213,7 +214,7 @@ pub(super) fn parse_range(value: &serde_json::Value) -> Option<crate::models::ls
 pub(super) fn parse_workspace_edit(
     edit: &serde_json::Value,
     encoding: PositionEncoding,
-) -> Vec<FileChangeWithEdits> {
+) -> Result<Vec<FileChangeWithEdits>, LspError> {
     // Each edit's range arrives in the negotiated wire encoding; it is decoded
     // to a native scalar column HERE (against the edit's own target file) so the
     // edit applier in edit.rs receives native coordinates and never has to know
@@ -224,41 +225,86 @@ pub(super) fn parse_workspace_edit(
     // support for) must be read from there with `changes` ignored — reading
     // both would apply every edit twice. Fall back to `changes` only when
     // `documentChanges` is absent.
-    if let Some(doc_changes) = edit.get("documentChanges").and_then(|c| c.as_array()) {
-        let mut changes = Vec::new();
-        for change in doc_changes {
-            if let Some(text_doc) = change.get("textDocument") {
-                let uri = text_doc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+    // FAIL CLOSED on a malformed TOP-LEVEL shape too: a present-but-wrong-typed
+    // `documentChanges`/`changes` is a malformed edit, never silently treated as
+    // absent (which would drop edits or fall through to the other key).
+    match edit.get("documentChanges") {
+        Some(serde_json::Value::Array(doc_changes)) => {
+            let mut changes = Vec::new();
+            for change in doc_changes {
+                // Resource ops (create/rename/delete) are refused by the caller
+                // via find_resource_operation before we get here, so every
+                // remaining documentChange must be a well-formed TextDocumentEdit.
+                // FAIL CLOSED on a malformed one rather than silently dropping its
+                // edit group while still applying the others.
+                let Some(text_doc) = change.get("textDocument") else {
+                    return Err(LspError::Protocol(
+                        "malformed workspace edit: a documentChange has no textDocument"
+                            .to_string(),
+                    ));
+                };
+                let Some(uri) = text_doc
+                    .get("uri")
+                    .and_then(|u| u.as_str())
+                    .filter(|u| !u.is_empty())
+                else {
+                    return Err(LspError::Protocol(
+                        "malformed workspace edit: a documentChange textDocument has no uri"
+                            .to_string(),
+                    ));
+                };
                 let file = uri_to_path(uri);
-
-                if let Some(edits) = change.get("edits") {
-                    let text_edits = parse_text_edits(edits, &file, &mut conv);
-                    if !text_edits.is_empty() {
-                        changes.push(FileChangeWithEdits {
-                            file,
-                            edits: text_edits,
-                        });
-                    }
+                let Some(edits) = change.get("edits") else {
+                    return Err(LspError::Protocol(format!(
+                        "malformed workspace edit: documentChange for {} has no edits",
+                        file.display(),
+                    )));
+                };
+                let text_edits = parse_text_edits(edits, &file, &mut conv)?;
+                if !text_edits.is_empty() {
+                    changes.push(FileChangeWithEdits {
+                        file,
+                        edits: text_edits,
+                    });
                 }
             }
+            return Ok(changes);
         }
-        return changes;
+        Some(_) => {
+            return Err(LspError::Protocol(
+                "malformed workspace edit: documentChanges must be an array".to_string(),
+            ));
+        }
+        None => {}
     }
 
     let mut changes = Vec::new();
-    if let Some(file_changes) = edit.get("changes").and_then(|c| c.as_object()) {
-        for (uri, edits) in file_changes {
-            let file = uri_to_path(uri);
-            let text_edits = parse_text_edits(edits, &file, &mut conv);
-            if !text_edits.is_empty() {
-                changes.push(FileChangeWithEdits {
-                    file,
-                    edits: text_edits,
-                });
+    match edit.get("changes") {
+        Some(serde_json::Value::Object(file_changes)) => {
+            for (uri, edits) in file_changes {
+                if uri.is_empty() {
+                    return Err(LspError::Protocol(
+                        "malformed workspace edit: changes contains an empty uri".to_string(),
+                    ));
+                }
+                let file = uri_to_path(uri);
+                let text_edits = parse_text_edits(edits, &file, &mut conv)?;
+                if !text_edits.is_empty() {
+                    changes.push(FileChangeWithEdits {
+                        file,
+                        edits: text_edits,
+                    });
+                }
             }
         }
+        Some(_) => {
+            return Err(LspError::Protocol(
+                "malformed workspace edit: changes must be an object".to_string(),
+            ));
+        }
+        None => {}
     }
-    changes
+    Ok(changes)
 }
 
 /// The first file create/rename/delete resource operation in a
@@ -279,34 +325,58 @@ pub(super) fn parse_text_edits(
     edits: &serde_json::Value,
     file: &Path,
     conv: &mut PositionConverter,
-) -> Vec<crate::models::lsp::TextEdit> {
+) -> Result<Vec<crate::models::lsp::TextEdit>, LspError> {
     use crate::models::lsp::TextEdit as LspTextEdit;
 
     let arr = match edits.as_array() {
         Some(a) => a,
-        None => return Vec::new(),
+        None => {
+            return Err(LspError::Protocol(format!(
+                "malformed text edits in {}: expected an array, refusing to apply",
+                file.display(),
+            )));
+        }
     };
 
-    arr.iter()
-        .filter_map(|edit| {
-            let mut range = parse_range(edit.get("range")?)?;
-            // Decode the wire columns to native scalar offsets against the
-            // target file, so apply_text_edits slices the correct bytes — the
-            // close of the non-BMP corruption hole.
-            range.start.character =
-                conv.scalar_offset(file, range.start.line, range.start.character);
-            range.end.character = conv.scalar_offset(file, range.end.line, range.end.character);
-
-            Some(LspTextEdit {
-                range,
-                new_text: edit
-                    .get("newText")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    for edit in arr {
+        // FAIL CLOSED on a malformed element: a missing/invalid range or a
+        // missing newText is never silently skipped or coerced to an empty
+        // deletion — half-applying a workspace edit corrupts the file.
+        let Some(mut range) = edit.get("range").and_then(parse_range) else {
+            return Err(LspError::Protocol(format!(
+                "malformed text edit in {}: missing or invalid range, refusing to apply",
+                file.display(),
+            )));
+        };
+        let Some(new_text) = edit.get("newText").and_then(|t| t.as_str()) else {
+            return Err(LspError::Protocol(format!(
+                "malformed text edit in {}: missing newText, refusing to apply",
+                file.display(),
+            )));
+        };
+        // Decode the wire columns to native scalar offsets against the target
+        // file so apply_text_edits slices the correct bytes. FAIL CLOSED if the
+        // target line cannot be read: an edit must never be applied at a guessed
+        // byte offset (silent corruption on a multibyte line).
+        let (Some(start_char), Some(end_char)) = (
+            conv.scalar_offset_checked(file, range.start.line, range.start.character),
+            conv.scalar_offset_checked(file, range.end.line, range.end.character),
+        ) else {
+            return Err(LspError::Protocol(format!(
+                "cannot decode edit range in {}: target line unreadable, refusing to \
+                 apply at a guessed offset",
+                file.display(),
+            )));
+        };
+        range.start.character = start_char;
+        range.end.character = end_char;
+        out.push(LspTextEdit {
+            range,
+            new_text: new_text.to_string(),
+        });
+    }
+    Ok(out)
 }
 
 pub(super) fn parse_signature_help(
@@ -427,7 +497,7 @@ mod tests {
             },
             "newText": "Z"
         }]);
-        let parsed = super::parse_text_edits(&edits, file, &mut conv);
+        let parsed = super::parse_text_edits(&edits, file, &mut conv).unwrap();
         assert_eq!(parsed.len(), 1);
         // utf-16 character 11 -> scalar 10 (the emoji counts as 1 scalar).
         assert_eq!(parsed[0].range.start.character, 10);
@@ -442,8 +512,105 @@ mod tests {
             },
             "newText": "Z"
         }]);
-        let parsed8 = super::parse_text_edits(&edits8, file, &mut conv8);
+        let parsed8 = super::parse_text_edits(&edits8, file, &mut conv8).unwrap();
         assert_eq!(parsed8[0].range.start.character, 10);
+    }
+
+    /// An edit whose target line cannot be read fails closed — refused, never
+    /// applied at a guessed byte offset (the non-zero column is the risk; a
+    /// column-0 position needs no line and still succeeds).
+    #[test]
+    fn unreadable_edit_line_fails_closed() {
+        use crate::services::lsp::position::PositionConverter;
+        use std::path::Path;
+        let mut conv = PositionConverter::new(PositionEncoding::Utf16);
+        let edits = serde_json::json!([{
+            "range": { "start": { "line": 0, "character": 3 },
+                       "end": { "line": 0, "character": 5 } },
+            "newText": "x"
+        }]);
+        let r = super::parse_text_edits(&edits, Path::new("/nonexistent/zzz.rs"), &mut conv);
+        assert!(
+            r.is_err(),
+            "a non-zero column on an unreadable line must fail closed"
+        );
+    }
+
+    #[test]
+    fn malformed_edits_fail_closed() {
+        use crate::services::lsp::position::PositionConverter;
+        use std::path::Path;
+        let file = Path::new("/x.rs");
+
+        // A non-array edits payload is malformed — never silently empty.
+        let mut conv = PositionConverter::new(PositionEncoding::Utf16);
+        assert!(
+            super::parse_text_edits(&serde_json::json!({"not": "an array"}), file, &mut conv)
+                .is_err()
+        );
+
+        // A missing newText is malformed — never coerced to an empty deletion.
+        let no_newtext = serde_json::json!([{
+            "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0} }
+        }]);
+        assert!(super::parse_text_edits(&no_newtext, file, &mut conv).is_err());
+
+        // A documentChange without edits is malformed — never silently dropped.
+        let dc = serde_json::json!({
+            "documentChanges": [ { "textDocument": { "uri": "file:///a.rs" } } ]
+        });
+        assert!(parse_workspace_edit(&dc, PositionEncoding::Utf16).is_err());
+
+        // A missing range is malformed — never silently skipped.
+        let no_range = serde_json::json!([{ "newText": "x" }]);
+        assert!(super::parse_text_edits(&no_range, file, &mut conv).is_err());
+
+        // An explicit empty newText is a legitimate deletion — it succeeds.
+        let mut conv2 = PositionConverter::new(PositionEncoding::Utf16).with_content(file, "abc");
+        let deletion = serde_json::json!([{
+            "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0} },
+            "newText": ""
+        }]);
+        let parsed = super::parse_text_edits(&deletion, file, &mut conv2).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].new_text, "");
+
+        // A documentChange without textDocument, or with an empty uri, is
+        // malformed — never silently skipped.
+        let no_textdoc = serde_json::json!({ "documentChanges": [ { "edits": [] } ] });
+        assert!(parse_workspace_edit(&no_textdoc, PositionEncoding::Utf16).is_err());
+        let empty_uri = serde_json::json!({
+            "documentChanges": [ { "textDocument": { "uri": "" }, "edits": [] } ]
+        });
+        assert!(parse_workspace_edit(&empty_uri, PositionEncoding::Utf16).is_err());
+
+        // Top-level shape: documentChanges present but not an array is malformed.
+        assert!(
+            parse_workspace_edit(
+                &serde_json::json!({"documentChanges": {}}),
+                PositionEncoding::Utf16
+            )
+            .is_err()
+        );
+        // changes present but not an object is malformed.
+        assert!(
+            parse_workspace_edit(&serde_json::json!({"changes": []}), PositionEncoding::Utf16)
+                .is_err()
+        );
+        // A changes map with an empty uri key is malformed.
+        assert!(
+            parse_workspace_edit(
+                &serde_json::json!({"changes": {"": []}}),
+                PositionEncoding::Utf16
+            )
+            .is_err()
+        );
+        // An edit with neither key is an empty no-op edit, not an error.
+        assert!(
+            parse_workspace_edit(&serde_json::json!({}), PositionEncoding::Utf16)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Both arms of the LSP string-or-number union come out as the bare
@@ -470,12 +637,12 @@ mod tests {
                 { "textDocument": { "uri": "file:///a.rs" },
                   "edits": [
                     { "range": { "start": { "line": 0, "character": 0 },
-                                 "end": { "line": 0, "character": 1 } },
+                                 "end": { "line": 0, "character": 0 } },
                       "newText": "X" }
                   ] }
             ]
         });
-        let parsed = parse_workspace_edit(&both, PositionEncoding::Utf16);
+        let parsed = parse_workspace_edit(&both, PositionEncoding::Utf16).unwrap();
         assert_eq!(parsed.len(), 1, "the file appears once, not duplicated");
         assert_eq!(parsed[0].edits.len(), 1);
     }
@@ -487,13 +654,15 @@ mod tests {
             "changes": {
                 "file:///a.rs": [
                     { "range": { "start": { "line": 0, "character": 0 },
-                                 "end": { "line": 0, "character": 1 } },
+                                 "end": { "line": 0, "character": 0 } },
                       "newText": "X" }
                 ]
             }
         });
         assert_eq!(
-            parse_workspace_edit(&changes_only, PositionEncoding::Utf16).len(),
+            parse_workspace_edit(&changes_only, PositionEncoding::Utf16)
+                .unwrap()
+                .len(),
             1
         );
     }

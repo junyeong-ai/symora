@@ -389,7 +389,6 @@ pub struct SignatureResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PrepareRenameResponse {
     pub placeholder: Option<String>,
-    pub range: Option<Range>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
