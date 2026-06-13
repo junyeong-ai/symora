@@ -316,6 +316,18 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "string",
                         "Optional diagnostic source filter (e.g. rust-analyzer)",
                     ),
+                    (
+                        "with_context",
+                        "boolean",
+                        "Attach each diagnostic's related definition/type-definition in one \
+                         call (default false; multiplies LSP round-trips — batch only when \
+                         fixing a multi-error file)",
+                    ),
+                    (
+                        "with_suggestions",
+                        "boolean",
+                        "Attach LSP quickfix code actions per diagnostic (default false)",
+                    ),
                 ],
                 &["file"],
             ),
@@ -323,7 +335,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(with_extra(
             section_output_schema(
                 "Diagnostics: severity, message, line, column, end_line, end_column, \
-                 code?, source?, tags?",
+                 code?, source?, tags?, context? (with_context), suggestions? (with_suggestions)",
             ),
             &[
                 (
