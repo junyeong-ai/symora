@@ -4,7 +4,8 @@ use clap::Args;
 use crate::app::App;
 use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
-use crate::cli::blast_radius::{self, BlastRadius, BlastRadiusConfig, DispatchStatus};
+use crate::cli::blast_radius::{self, BlastRadius, DispatchStatus};
+use crate::cli::call_graph::WalkConfig;
 use crate::cli::response::{
     AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput,
 };
@@ -79,7 +80,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 exported,
                 anchor_kind,
                 test_matcher,
-                &BlastRadiusConfig {
+                &WalkConfig {
                     max_depth: depth,
                     ..Default::default()
                 },

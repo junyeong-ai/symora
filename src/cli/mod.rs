@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod blast_radius;
+pub mod call_graph;
 pub mod commands;
 pub mod errors;
 pub mod input_error;
@@ -11,7 +12,8 @@ pub mod utils;
 pub mod workspace;
 
 pub use analysis::{LocationAnalysis, detect_exported};
-pub use blast_radius::{BlastRadius, BlastRadiusConfig, RiskLevel};
+pub use blast_radius::{BlastRadius, RiskLevel};
+pub use call_graph::{CallGraphWalk, Direction, WalkConfig};
 pub use errors::{ErrorCode, OutputError};
 pub use input_error::CliInputError;
 pub use location::{LocationArg, ParsedLocation};

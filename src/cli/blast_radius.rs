@@ -11,14 +11,12 @@
 //! ML-tuned — Symora's CLAUDE.md anti-goal is "heuristic tweaks without
 //! repeated evidence", so this stays simple and predictable.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use futures::future::join_all;
 use serde::Serialize;
 
+use crate::cli::call_graph::{self, Direction, WalkConfig};
 use crate::cli::utils::TestMatcher;
-use crate::constants::defaults::{BLAST_RADIUS_MAX_CALLERS_PER_NODE, IMPACT_DEFAULT_DEPTH};
 use crate::error::LspError;
 use crate::models::symbol::SymbolKind;
 use crate::services::lsp::LspService;
@@ -30,21 +28,6 @@ use crate::services::lsp::LspService;
 /// how deep the walk reached.
 const DYNAMIC_DISPATCH_CONFIDENCE_CAP: f32 = 0.7;
 
-#[derive(Debug, Clone, Copy)]
-pub struct BlastRadiusConfig {
-    pub max_depth: u32,
-    pub max_callers_per_node: usize,
-}
-
-impl Default for BlastRadiusConfig {
-    fn default() -> Self {
-        Self {
-            max_depth: IMPACT_DEFAULT_DEPTH,
-            max_callers_per_node: BLAST_RADIUS_MAX_CALLERS_PER_NODE,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct BlastRadius {
     pub direct_callers: usize,
@@ -53,7 +36,7 @@ pub struct BlastRadius {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub max_depth_reached: bool,
     /// True when at least one node's caller list was cut at
-    /// `max_callers_per_node` — the counts below are then a lower bound,
+    /// `max_neighbors_per_node` — the counts below are then a lower bound,
     /// not a complete enumeration.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub callers_truncated: bool,
@@ -115,8 +98,6 @@ pub struct DynamicDispatch {
     pub implementations: usize,
 }
 
-type CallerKey = (PathBuf, u32, u32);
-
 pub async fn compute(
     lsp: &dyn LspService,
     file: &Path,
@@ -125,89 +106,38 @@ pub async fn compute(
     is_exported: Option<bool>,
     anchor_kind: Option<SymbolKind>,
     test_matcher: &TestMatcher,
-    cfg: &BlastRadiusConfig,
+    cfg: &WalkConfig,
 ) -> Result<BlastRadius, LspError> {
-    let max_depth = cfg.max_depth.max(1);
-    let mut visited: HashSet<CallerKey> = HashSet::new();
-    visited.insert((file.to_path_buf(), line, column));
+    // Blast radius is the upward (incoming) call graph. The traversal,
+    // fan-out cap, depth/exhaustion markers, and degradation aggregation all
+    // live in the shared `call_graph::walk` core; this function adds only the
+    // risk-specific projection (test/prod classification, risk, confidence,
+    // dynamic-dispatch disclosure).
+    let walk = call_graph::walk(
+        lsp,
+        (file.to_path_buf(), line, column),
+        Direction::Incoming,
+        cfg,
+    )
+    .await;
 
-    let mut frontier: Vec<CallerKey> = vec![(file.to_path_buf(), line, column)];
-    let mut buckets: Vec<DepthBucket> = Vec::with_capacity(max_depth as usize);
-    let mut max_depth_reached = false;
-    let mut callers_truncated = false;
-    // The walk's degradation marker aggregates the computation-time
-    // snapshots of every `incoming_calls` round-trip: if ANY hop of the
-    // graph was computed under degraded indexing, the whole count is a
-    // lower bound — and quiescence landing mid-walk must not strip that.
-    let mut indexing: Option<crate::models::lsp::IndexingDegradation> = None;
-
-    for depth in 1..=max_depth {
-        let results_per_node = join_all(
-            frontier
+    let buckets: Vec<DepthBucket> = walk
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(i, items)| {
+            let test = items
                 .iter()
-                .map(|(f, l, c)| async move { lsp.incoming_calls(f, *l, *c).await.ok() }),
-        )
-        .await;
-        let calls_per_node: Vec<Vec<crate::models::lsp::CallHierarchyItem>> = results_per_node
-            .into_iter()
-            .map(|result| match result {
-                Some(indexed) => {
-                    if indexing.is_none() {
-                        indexing = indexed.indexing;
-                    }
-                    indexed.data
-                }
-                None => Vec::new(),
-            })
-            .collect();
-
-        let mut next_frontier: Vec<CallerKey> = Vec::new();
-        let mut depth_total = 0usize;
-        let mut depth_test = 0usize;
-
-        for calls in calls_per_node {
-            if calls.len() > cfg.max_callers_per_node {
-                callers_truncated = true;
+                .filter(|c| test_matcher.is_test_file(&c.location.file))
+                .count();
+            DepthBucket {
+                depth: (i + 1) as u32,
+                count: items.len(),
+                test,
+                prod: items.len() - test,
             }
-            for call in calls.into_iter().take(cfg.max_callers_per_node) {
-                let key = (
-                    call.location.file.clone(),
-                    call.location.line,
-                    call.location.column,
-                );
-                if !visited.insert(key.clone()) {
-                    continue;
-                }
-                depth_total += 1;
-                if test_matcher.is_test_file(&call.location.file) {
-                    depth_test += 1;
-                }
-                if depth < max_depth {
-                    next_frontier.push(key);
-                }
-            }
-        }
-
-        buckets.push(DepthBucket {
-            depth,
-            count: depth_total,
-            test: depth_test,
-            prod: depth_total - depth_test,
-        });
-
-        // Nodes found at the final depth still have unexplored callers —
-        // the walk stopped because of the cap, not exhaustion. (The
-        // frontier guard above never queues nodes at `max_depth`, so this
-        // must be decided from `depth_total`, not from the frontier.)
-        if depth == max_depth {
-            max_depth_reached = depth_total > 0;
-            break;
-        }
-        if next_frontier.is_empty() {
-            break;
-        }
-        frontier = next_frontier;
-    }
+        })
+        .collect();
 
     let dynamic_dispatch = detect_dynamic_dispatch(lsp, file, line, column, anchor_kind).await;
 
@@ -225,9 +155,9 @@ pub async fn compute(
         direct_callers,
         transitive_callers,
         depth: depth_reached,
-        max_depth_reached,
-        callers_truncated,
-        indexing,
+        max_depth_reached: walk.max_depth_reached,
+        callers_truncated: walk.truncated,
+        indexing: walk.indexing,
         dynamic_dispatch,
         callers_by_depth: buckets,
         test_coverage_ratio: test_ratio,
@@ -338,212 +268,16 @@ fn compute_confidence(
 mod tests {
     use super::*;
 
-    use async_trait::async_trait;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
-    use crate::models::lsp::{
-        ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions,
-        FoldingRange, HoverInfo, Indexed, InlayHint, PrepareRenameResult, Range, RenameResult,
-        SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
-    };
-    use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
-
-    /// Call-graph stub: maps a (line, column) position to its incoming
-    /// callers, and answers the dynamic-dispatch probe with a fixed
-    /// implementation set or a synthesized JSON-RPC error (`Err(code)`).
-    /// Every other `LspService` method is unreachable from `compute` and
-    /// panics loudly if that ever changes.
-    struct CallGraphStub {
-        incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
-        implementations: Result<Vec<Location>, i32>,
-    }
-
-    fn caller(line: u32) -> CallHierarchyItem {
-        CallHierarchyItem {
-            name: format!("caller_{line}"),
-            kind: SymbolKind::Function,
-            location: Location::point(PathBuf::from("src/lib.rs"), line, 1),
-            call_site: None,
-        }
-    }
-
-    #[async_trait]
-    impl LspService for CallGraphStub {
-        async fn incoming_calls(
-            &self,
-            _file: &Path,
-            line: u32,
-            column: u32,
-        ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
-            Ok(Indexed::complete(
-                self.incoming
-                    .get(&(line, column))
-                    .cloned()
-                    .unwrap_or_default(),
-            ))
-        }
-
-        async fn find_symbols(
-            &self,
-            _file: &Path,
-            _options: FindSymbolsOptions,
-        ) -> Result<Vec<Symbol>, LspError> {
-            unreachable!()
-        }
-        async fn workspace_symbols(
-            &self,
-            _query: &str,
-            _language: Language,
-        ) -> Result<Indexed<Vec<Symbol>>, LspError> {
-            unreachable!()
-        }
-        async fn find_references(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<Location>>, LspError> {
-            unreachable!()
-        }
-        async fn goto_definition(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Option<Location>, LspError> {
-            unreachable!()
-        }
-        async fn goto_type_definition(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Option<Location>, LspError> {
-            unreachable!()
-        }
-        async fn find_implementations(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<Location>>, LspError> {
-            self.implementations
-                .clone()
-                .map(Indexed::complete)
-                .map_err(|code| LspError::server_error_friendly(code, "stub error".to_string()))
-        }
-        async fn hover(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Option<HoverInfo>, LspError> {
-            unreachable!()
-        }
-        async fn signature_help(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Option<SignatureHelp>, LspError> {
-            unreachable!()
-        }
-        async fn diagnostics(
-            &self,
-            _file: &Path,
-        ) -> Result<crate::models::diagnostic::DiagnosticsReport, LspError> {
-            unreachable!()
-        }
-        async fn prepare_rename(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Option<PrepareRenameResult>, LspError> {
-            unreachable!()
-        }
-        async fn rename(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-            _new_name: &str,
-        ) -> Result<RenameResult, LspError> {
-            unreachable!()
-        }
-        async fn outgoing_calls(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<CallHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn supertypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn subtypes(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError> {
-            unreachable!()
-        }
-        async fn inlay_hints(
-            &self,
-            _file: &Path,
-            _range: Range,
-        ) -> Result<Vec<InlayHint>, LspError> {
-            unreachable!()
-        }
-        async fn folding_ranges(&self, _file: &Path) -> Result<Vec<FoldingRange>, LspError> {
-            unreachable!()
-        }
-        async fn selection_ranges(
-            &self,
-            _file: &Path,
-            _positions: Vec<(u32, u32)>,
-        ) -> Result<Vec<SelectionRange>, LspError> {
-            unreachable!()
-        }
-        async fn code_lenses(&self, _file: &Path) -> Result<Vec<CodeLens>, LspError> {
-            unreachable!()
-        }
-        async fn code_actions(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Vec<CodeAction>, LspError> {
-            unreachable!()
-        }
-        async fn apply_code_action(
-            &self,
-            _file: &Path,
-            _action: &CodeAction,
-        ) -> Result<ApplyActionResult, LspError> {
-            unreachable!()
-        }
-        async fn format(&self, _file: &Path) -> Result<Vec<TextEdit>, LspError> {
-            unreachable!()
-        }
-        async fn is_available(&self, _language: Language) -> bool {
-            unreachable!()
-        }
-        async fn server_status(&self, _language: Language) -> ServerStatus {
-            unreachable!()
-        }
-    }
+    use crate::cli::call_graph::test_support::{CallGraphStub, node as caller};
+    use crate::models::lsp::CallHierarchyItem;
+    use crate::models::symbol::Location;
 
     fn compute_with(
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
-        cfg: BlastRadiusConfig,
+        cfg: WalkConfig,
     ) -> BlastRadius {
         compute_for(incoming, Ok(vec![]), None, cfg)
     }
@@ -552,10 +286,11 @@ mod tests {
         incoming: HashMap<(u32, u32), Vec<CallHierarchyItem>>,
         implementations: Result<Vec<Location>, i32>,
         anchor_kind: Option<SymbolKind>,
-        cfg: BlastRadiusConfig,
+        cfg: WalkConfig,
     ) -> BlastRadius {
         let stub = CallGraphStub {
             incoming,
+            outgoing: HashMap::new(),
             implementations,
         };
         let matcher = TestMatcher::default();
@@ -578,9 +313,9 @@ mod tests {
         incoming.insert((10, 5), vec![caller(20), caller(30)]);
         let radius = compute_with(
             incoming,
-            BlastRadiusConfig {
+            WalkConfig {
                 max_depth: 1,
-                max_callers_per_node: 2,
+                max_neighbors_per_node: 2,
             },
         );
         assert_eq!(radius.direct_callers, 2);
@@ -593,9 +328,9 @@ mod tests {
         incoming.insert((10, 5), vec![caller(20), caller(30), caller(40)]);
         let radius = compute_with(
             incoming,
-            BlastRadiusConfig {
+            WalkConfig {
                 max_depth: 1,
-                max_callers_per_node: 2,
+                max_neighbors_per_node: 2,
             },
         );
         assert_eq!(radius.direct_callers, 2);
@@ -679,9 +414,9 @@ mod tests {
             incoming,
             Ok(vec![impl_at(40), impl_at(50)]),
             Some(SymbolKind::Method),
-            BlastRadiusConfig {
+            WalkConfig {
                 max_depth: 1,
-                max_callers_per_node: 8,
+                max_neighbors_per_node: 8,
             },
         );
         let dispatch = radius
@@ -701,7 +436,7 @@ mod tests {
             HashMap::new(),
             Ok(vec![impl_at(40)]),
             Some(SymbolKind::Struct),
-            BlastRadiusConfig::default(),
+            WalkConfig::default(),
         );
         assert!(radius.dynamic_dispatch.is_none());
 
@@ -710,7 +445,7 @@ mod tests {
             HashMap::new(),
             Ok(vec![]),
             Some(SymbolKind::Method),
-            BlastRadiusConfig::default(),
+            WalkConfig::default(),
         );
         assert!(radius.dynamic_dispatch.is_none());
     }
@@ -725,7 +460,7 @@ mod tests {
             HashMap::new(),
             Err(-32601),
             Some(SymbolKind::Interface),
-            BlastRadiusConfig::default(),
+            WalkConfig::default(),
         );
         let dispatch = radius
             .dynamic_dispatch
@@ -739,7 +474,7 @@ mod tests {
             HashMap::new(),
             Err(-32603),
             Some(SymbolKind::Interface),
-            BlastRadiusConfig::default(),
+            WalkConfig::default(),
         );
         assert!(radius.dynamic_dispatch.is_none());
 
@@ -748,7 +483,7 @@ mod tests {
             HashMap::new(),
             Err(-32601),
             Some(SymbolKind::Method),
-            BlastRadiusConfig::default(),
+            WalkConfig::default(),
         );
         assert!(radius.dynamic_dispatch.is_none());
     }

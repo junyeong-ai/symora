@@ -342,6 +342,10 @@ async fn run_find_callees(args: Value, app: &App) -> Result<CapturedOutput> {
             CalleesArgs {
                 loc: input.loc.into_arg(),
                 limit: input.limit,
+                // MCP exposes direct callees only; the depth/path traversal
+                // surface settles on the CLI first.
+                depth: None,
+                to: None,
             },
             &a,
         )
