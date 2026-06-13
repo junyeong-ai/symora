@@ -23,6 +23,7 @@ pub async fn execute(args: SupertypesArgs, app: &App) -> Result<()> {
         app,
         args.loc,
         limit,
+        "supertypes",
         |file, line, col| async move { app.lsp.supertypes(&file, line, col).await },
         |t, root| TypeInfoOutput::from_item(&t, root),
     )

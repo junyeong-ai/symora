@@ -8,8 +8,8 @@
 //!
 //! The cache is a rebuildable optimization: if it can't be opened the
 //! search still runs by embedding in memory, producing identical results
-//! at the old cost. Builds without `--features embeddings` print an
-//! actionable error instead of compiling out the subcommand.
+//! at the full un-amortized cost. Builds without `--features embeddings`
+//! print an actionable error instead of compiling out the subcommand.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

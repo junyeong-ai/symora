@@ -244,7 +244,8 @@ fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f32) -> R
         return RiskLevel::High;
     }
     // For internal symbols, high test coverage genuinely lowers risk:
-    // tests catch the regression before it ships.
+    // well-exercised paths guard behavior, so a breaking change is more likely
+    // to surface as a failing test.
     if test_ratio > 0.8 {
         return RiskLevel::Low;
     }

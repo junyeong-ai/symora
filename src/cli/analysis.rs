@@ -1,9 +1,9 @@
 //! Bundled LSP analysis at a precise location.
 //!
-//! Replaces the inline `find_symbols + resolve target + find_references +
-//! classify` sequence that `impact`, `context`, and `diff_impact` all
-//! repeated. Exposes one `classify()` helper and an `is_exported()`
-//! predicate, so each command focuses on shaping its own response shape.
+//! The single home for the `find_symbols + resolve target + find_references +
+//! classify` sequence that `impact`, `context`, and `diff_impact` share.
+//! Exposes one `classify()` helper and an `is_exported()` predicate, so each
+//! command focuses on shaping its own response shape.
 
 use std::path::Path;
 
@@ -28,8 +28,8 @@ pub struct LocationAnalysis {
     pub(crate) indexing: Option<IndexingDegradation>,
     /// Disclosure for a line-only anchor that hit a multi-declaration
     /// line: the first declaration was analyzed, and this hint names the
-    /// alternatives (picking silently would violate invariant 4; failing
-    /// a read that used to succeed helps nobody).
+    /// alternatives (picking silently would violate invariant 4; erroring
+    /// on the ambiguity instead of disclosing it helps nobody).
     pub(crate) ambiguity: Option<String>,
 }
 

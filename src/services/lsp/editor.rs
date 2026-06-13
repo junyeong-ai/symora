@@ -5,7 +5,7 @@ use crate::error::LspError;
 use crate::infra::lsp::LspFeature;
 use crate::models::lsp::{
     ApplyActionResult, CodeAction, CodeActionKind, CodeLens, CodeLensCommand, FoldingRange,
-    FoldingRangeKind, InlayHint, InlayHintKind, Range, SelectionRange, TextEdit, path_to_uri,
+    FoldingRangeKind, InlayHint, InlayHintKind, SelectionRange, TextEdit, path_to_uri,
 };
 
 use super::converters::*;
@@ -16,7 +16,8 @@ use super::service::{DefaultLspService, ensure_indexed};
 pub(super) async fn inlay_hints(
     service: &DefaultLspService,
     file: &Path,
-    range: Range,
+    start_line: u32,
+    end_line: u32,
 ) -> Result<Vec<InlayHint>, LspError> {
     check_feature_support(file, LspFeature::InlayHints)?;
 
@@ -31,11 +32,16 @@ pub(super) async fn inlay_hints(
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
+                // The surface is line-granular, so the wire range spans whole
+                // lines: column 0 through the saturating end-of-line sentinel the
+                // server clamps to the line. Both bounds are encoding-invariant,
+                // so unlike the response positions (decoded at the boundary
+                // below) the request range needs no scalar→wire conversion.
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
                     "range": {
-                        "start": { "line": range.start.line, "character": range.start.character },
-                        "end": { "line": range.end.line, "character": range.end.character }
+                        "start": { "line": start_line, "character": 0 },
+                        "end": { "line": end_line, "character": u32::MAX }
                     }
                 });
 

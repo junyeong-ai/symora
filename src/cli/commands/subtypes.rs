@@ -23,6 +23,7 @@ pub async fn execute(args: SubtypesArgs, app: &App) -> Result<()> {
         app,
         args.loc,
         limit,
+        "subtypes",
         |file, line, col| async move { app.lsp.subtypes(&file, line, col).await },
         |t, root| TypeInfoOutput::from_item(&t, root),
     )

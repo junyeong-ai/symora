@@ -5,8 +5,8 @@
 //! Current hosts both launch the MCP server at the active project's working
 //! directory, so the entry needs no path override. Hosts that don't (e.g.
 //! editors that spawn MCP subprocesses with a detached cwd) are deferred
-//! until that behavior is handled explicitly, rather than shipped with a
-//! workaround that could silently index the wrong tree.
+//! until that behavior is modeled explicitly, rather than inferring a cwd that
+//! could silently index the wrong tree.
 
 use std::path::Path;
 

@@ -397,17 +397,13 @@ impl DaemonClient {
         &self,
         file: &Path,
         start_line: u32,
-        start_column: u32,
         end_line: u32,
-        end_column: u32,
     ) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
         let params = serde_json::json!({
             "file": file.display().to_string(),
             "start_line": start_line,
-            "start_column": start_column,
-            "end_line": end_line,
-            "end_column": end_column
+            "end_line": end_line
         });
         self.request_with_project(methods::INLAY_HINTS, params, Some(file))
             .await

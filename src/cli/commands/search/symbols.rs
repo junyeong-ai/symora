@@ -946,9 +946,9 @@ mod tests {
         )
     }
 
-    /// The reviewer's live scenario: built index covering rust + rust LSP
-    /// failing + path-like query. The index answered in this same call,
-    /// so its zero covers rust — no coverage claim, no index-build no-op.
+    /// A built index covering rust + the rust LSP failing + a path-like query:
+    /// the index answered in this same call, so its zero covers rust — no
+    /// coverage claim, no index-build no-op.
     #[test]
     fn index_answered_route_stays_bare_for_extractor_covered_failure() {
         let failures = vec![server_failure(Language::Rust)];

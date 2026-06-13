@@ -63,8 +63,8 @@ pub fn resolve_symbol_anchor(
 /// one of these; what differs per surface is only the *handling* of
 /// `Ambiguous` — the edit path refuses (a guessed write is destructive),
 /// the navigation path picks the first declaration and disclosing hints
-/// name the alternatives (a failed read that used to succeed helps
-/// nobody, a silent guess violates invariant 4).
+/// name the alternatives (erroring on the ambiguity helps nobody, a silent
+/// guess violates invariant 4).
 pub enum SymbolResolution<'a> {
     Match(&'a Symbol),
     /// Several symbols are declared on the target line and the input

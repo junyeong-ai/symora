@@ -386,9 +386,9 @@ mod tests {
         assert_eq!(doc["other"]["k"].as_integer(), Some(1));
     }
 
-    /// The bug all three reviewers flagged: a non-canonical existing header
-    /// (trailing comment, here) must be UPDATED in place, never duplicated
-    /// into a second `[mcp_servers.symora]` that would make the file invalid.
+    /// A non-canonical existing header (a trailing comment, here) must be
+    /// UPDATED in place, never duplicated into a second `[mcp_servers.symora]`
+    /// that would make the file invalid.
     #[test]
     fn toml_updates_non_canonical_existing_entry_without_duplicating() {
         let existing = "[mcp_servers.symora] # mine\ncommand = \"old\"\nargs = []\n";

@@ -21,14 +21,40 @@ pub fn schema_object(fields: &[(&str, &str, &str)], required: &[&str]) -> Value 
     })
 }
 
-pub fn location_schema() -> Value {
+/// `file`/`line`/`column` location schema. The omitted-column semantics differ
+/// by tool family, so the `column` description is supplied by the caller:
+/// symbol-level tools snap to the symbol on the line, position-exact tools
+/// resolve at the literal column — see [`location_schema`] and
+/// [`position_exact_location_schema`].
+fn location_schema_with(column_desc: &str) -> Value {
     schema_object(
         &[
             ("file", "string", "Project-relative file path"),
             ("line", "integer", "1-indexed line number"),
-            ("column", "integer", "1-indexed column number (default 1)"),
+            ("column", "integer", column_desc),
         ],
         &["file", "line"],
+    )
+}
+
+/// Location schema for the symbol-level tools — those that snap an omitted
+/// column to the symbol declared on the line (the inverse of
+/// [`position_exact_location_schema`]).
+pub fn location_schema() -> Value {
+    location_schema_with(
+        "1-indexed column for position-precise targeting; omit to address \
+         the symbol on the line",
+    )
+}
+
+/// Location schema for the position-exact tools — those whose handler sends the
+/// literal column straight to the LSP request without snapping to a symbol, so
+/// an omitted column resolves at the line start rather than the symbol.
+pub fn position_exact_location_schema() -> Value {
+    location_schema_with(
+        "1-indexed column (default: 1, the line start). Resolution is \
+         position-exact and does not snap to a symbol — pass the symbol's \
+         column, since the line start is often whitespace",
     )
 }
 
@@ -144,12 +170,11 @@ pub fn with_extra(mut base: Value, extras: &[(&str, &str, &str)]) -> Value {
 pub struct LocationInput {
     pub file: String,
     pub line: u32,
-    #[serde(default = "default_column")]
-    pub column: u32,
-}
-
-fn default_column() -> u32 {
-    1
+    /// Omitted addresses the symbol on the line; present targets a precise
+    /// column. Kept optional so symbol-level tools (callers/callees/…) keep the
+    /// CLI's line-addressed snapping instead of being pinned to column 1.
+    #[serde(default)]
+    pub column: Option<u32>,
 }
 
 impl LocationInput {
@@ -162,7 +187,10 @@ impl LocationInput {
 
 impl fmt::Display for LocationInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+        match self.column {
+            Some(column) => write!(f, "{}:{}:{}", self.file, self.line, column),
+            None => write!(f, "{}:{}", self.file, self.line),
+        }
     }
 }
 
@@ -257,12 +285,21 @@ mod tests {
         assert!(props.contains_key("limit"));
     }
 
+    /// An omitted column stays omitted so the shared resolution path keeps its
+    /// line-addressed semantics (the symbol on the line); an explicit column is
+    /// carried through for position-precise targeting.
     #[test]
-    fn location_input_defaults_column_to_one() {
-        let input: LocationInput =
+    fn location_input_omits_column_for_line_addressed_targeting() {
+        let line_only: LocationInput =
             serde_json::from_value(json!({"file": "src/main.rs", "line": 10})).unwrap();
-        assert_eq!(input.column, 1);
-        assert_eq!(input.into_arg().location, "src/main.rs:10:1");
+        assert_eq!(line_only.column, None);
+        assert_eq!(line_only.into_arg().location, "src/main.rs:10");
+
+        let with_column: LocationInput =
+            serde_json::from_value(json!({"file": "src/main.rs", "line": 10, "column": 3}))
+                .unwrap();
+        assert_eq!(with_column.column, Some(3));
+        assert_eq!(with_column.into_arg().location, "src/main.rs:10:3");
     }
 
     #[test]

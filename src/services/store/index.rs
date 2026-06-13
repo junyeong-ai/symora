@@ -541,12 +541,11 @@ impl Store {
             self.prune_deleted_files(&discovered_paths).await?;
         }
 
-        // The previous design called `Semaphore::acquire_owned().await`
-        // inside the for-loop *before* pushing the future, which grabbed
-        // every permit up-front and deadlocked once `files.len()` crossed
-        // the concurrency cap. Push the acquire into each future so the
-        // semaphore actually gates the fan-out: futures created up-front,
-        // permits taken/released as `join_all` polls them.
+        // Each future acquires its own permit when polled, so the semaphore
+        // gates the fan-out: futures are created up-front, permits taken and
+        // released as `join_all` drives them. Acquiring before the future is
+        // built would instead reserve every permit eagerly and stall once the
+        // file count crossed the concurrency cap.
         let concurrency = self.config.index_concurrency.max(1);
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
         let tasks: Vec<_> = files
@@ -858,11 +857,11 @@ mod tests {
             .unwrap()
     }
 
-    /// SHIP-BLOCKER: the FTS trigram pre-filter must return exactly the same
-    /// rows, scores, and order as the LIKE-only scan for every >= 3-char query,
-    /// including FTS-syntax characters, mixed case, and non-ASCII text. Any
-    /// divergence means the index path silently disagrees with its own
-    /// authority — fail the build.
+    /// The FTS trigram pre-filter must return exactly the same rows, scores, and
+    /// order as the LIKE-only scan for every >= 3-char query, including
+    /// FTS-syntax characters, mixed case, and non-ASCII text. Any divergence
+    /// means the index path silently disagrees with its own authority, so the
+    /// set-equality check below is the gate that keeps them honest.
     #[tokio::test]
     async fn fts_prefilter_is_set_identical_to_like_only() {
         let dir = tempfile::tempdir().unwrap();

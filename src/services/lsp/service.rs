@@ -11,7 +11,7 @@ use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, Indexed, IndexingDegradation, InlayHint, PrepareRenameResult, Range, RenameResult,
+    HoverInfo, Indexed, IndexingDegradation, InlayHint, PrepareRenameResult, RenameResult,
     SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem, path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
@@ -232,8 +232,13 @@ impl LspService for DefaultLspService {
         hierarchy::subtypes(self, file, line, column).await
     }
 
-    async fn inlay_hints(&self, file: &Path, range: Range) -> Result<Vec<InlayHint>, LspError> {
-        editor::inlay_hints(self, file, range).await
+    async fn inlay_hints(
+        &self,
+        file: &Path,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<InlayHint>, LspError> {
+        editor::inlay_hints(self, file, start_line, end_line).await
     }
 
     async fn folding_ranges(&self, file: &Path) -> Result<Vec<FoldingRange>, LspError> {

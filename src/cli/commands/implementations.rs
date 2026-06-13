@@ -23,6 +23,7 @@ pub async fn execute(args: ImplementationsArgs, app: &App) -> Result<()> {
         app,
         args.loc,
         limit,
+        "implementations",
         |file, line, col| async move { app.lsp.find_implementations(&file, line, col).await },
         |l, root| LocationOutput::from_path(&l.file, l.line, l.column, root),
     )

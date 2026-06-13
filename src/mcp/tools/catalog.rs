@@ -1,8 +1,8 @@
 use crate::mcp::protocol::ToolDefinition;
 
 use super::schema::{
-    edit_target_schema, location_schema, output_schema, schema_object, section_output_schema,
-    with_extra,
+    edit_target_schema, location_schema, output_schema, position_exact_location_schema,
+    schema_object, section_output_schema, with_extra,
 };
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
@@ -101,11 +101,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "find_definition",
             "LSP go-to-definition for the symbol at a precise file:line:column.",
-            location_schema(),
+            position_exact_location_schema(),
         ),
         ToolDefinition::read_only(
             "find_references",
-            "All references to the symbol at a precise file:line:column.",
+            "All references to the symbol at file:line[:column].",
             with_extra(
                 location_schema(),
                 &[
@@ -124,7 +124,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )),
         ToolDefinition::read_only(
             "find_callers",
-            "Incoming-call hierarchy for a function at a precise file:line:column.",
+            "Incoming-call hierarchy for a function at file:line[:column].",
             with_extra(
                 location_schema(),
                 &[("limit", "integer", "Maximum results")],
@@ -141,7 +141,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )),
         ToolDefinition::read_only(
             "find_callees",
-            "Outgoing-call hierarchy for a function at a precise file:line:column.",
+            "Outgoing-call hierarchy for a function at file:line[:column].",
             with_extra(
                 location_schema(),
                 &[
@@ -155,12 +155,44 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         )
-        .with_output_schema(section_output_schema(
-            "Outgoing calls with callee locations",
+        .with_output_schema(with_extra(
+            section_output_schema("Outgoing calls with callee locations"),
+            &[
+                (
+                    "depth",
+                    "integer",
+                    "Depth actually reached (present only with depth>1, the reachable-set mode)",
+                ),
+                (
+                    "max_depth_reached",
+                    "boolean",
+                    "Walk stopped at the depth cap with callees unexplored — the set is a \
+                     lower bound (depth>1 only)",
+                ),
+                (
+                    "callees_truncated",
+                    "boolean",
+                    "A node's fan-out hit the per-node cap, so the set is a lower bound \
+                     (depth>1 only)",
+                ),
+                (
+                    "incomplete",
+                    "boolean",
+                    "A hop's callee query failed and was treated as empty, so the set is a \
+                     lower bound (depth>1 only)",
+                ),
+                (
+                    "anchor_unresolved",
+                    "boolean",
+                    "The from-position did not resolve to a verified symbol (not a symbol, or \
+                     its symbols could not be read); an empty set is then not authoritative \
+                     (depth>1 only)",
+                ),
+            ],
         )),
         ToolDefinition::read_only(
             "find_call_path",
-            "Shortest call path FROM a function (file:line:column) TO a target (`to`): \
+            "Shortest call path FROM a function (file:line[:column]) TO a target (`to`): \
                           how does the anchor reach that function? Returns the ordered call \
                           chain when reachable, or an honest 3-state verdict (found / \
                           not_reached_within_bound / no_static_path) that never overclaims — \
@@ -196,7 +228,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     "Ordered call frames from the first hop through the target; present \
                      only when reachability is found",
                 ),
-                ("depth", "integer", "Depth searched"),
+                ("depth", "integer", "Depth actually reached"),
                 (
                     "max_depth_reached",
                     "boolean",
@@ -216,14 +248,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 (
                     "target_unresolved",
                     "boolean",
-                    "The `to` target did not resolve to a symbol; the verdict is not \
-                     authoritative (forced to not_reached_within_bound)",
+                    "The `to` target did not resolve to a verified symbol (not a symbol, or \
+                     its symbols could not be read); the verdict is not authoritative (forced \
+                     to not_reached_within_bound)",
                 ),
                 (
                     "anchor_unresolved",
                     "boolean",
-                    "The from-position did not resolve to a symbol; the verdict is about a \
-                     phantom start and is not authoritative",
+                    "The from-position did not resolve to a verified symbol (not a symbol, or \
+                     its symbols could not be read); the verdict is not authoritative",
                 ),
                 (
                     "indexing",
@@ -239,8 +272,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )),
         ToolDefinition::read_only(
             "find_implementations",
-            "All concrete implementations of a trait/interface at a precise \
-                          file:line:column.",
+            "All concrete implementations of a trait/interface at \
+                          file:line[:column].",
             with_extra(
                 location_schema(),
                 &[("limit", "integer", "Maximum results")],
@@ -252,11 +285,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "get_hover",
             "Hover documentation/type for the symbol at a precise file:line:column.",
-            location_schema(),
+            position_exact_location_schema(),
         ),
         ToolDefinition::read_only(
             "get_context",
-            "Aggregated context for a symbol at file:line:column — by default \
+            "Aggregated context for a symbol at file:line[:column] — by default \
                           callers, callees, related types, and tests in one response. Set \
                           with_bodies=true to also receive complete verbatim source bodies: \
                           the target's whole body attaches unbudgeted; callee bodies (in \
@@ -307,7 +340,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_impact",
-            "Change-impact analysis at file:line:column: reference counts split by \
+            "Change-impact analysis at file:line[:column]: reference counts split by \
                           test vs prod, affected files, exported-API signal, and a transitive \
                           caller graph with risk + confidence (`blast_radius`). Use depth=1 for \
                           quick surveys, depth=2-3 when ranking blast radius matters.",
@@ -419,7 +452,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           file list and per-file edit count. Set dry_run=true to preview \
                           without writing. ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                position_exact_location_schema(),
                 &[
                     ("new_name", "string", "Replacement identifier"),
                     (
@@ -435,7 +468,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "List LSP code actions available at file:line:column \
                           (refactor/quickfix/source). Filter with `kind` or `preferred=true`.",
             with_extra(
-                location_schema(),
+                position_exact_location_schema(),
                 &[
                     ("kind", "string", "Filter by action kind"),
                     ("preferred", "boolean", "Only preferred actions"),
@@ -449,7 +482,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           `list_code_actions` first to discover titles. Set dry_run=true to \
                           preview. ⚠ Mutates source files when dry_run is false.",
             with_extra(
-                location_schema(),
+                position_exact_location_schema(),
                 &[
                     ("title", "string", "Exact action title to apply"),
                     (

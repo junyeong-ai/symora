@@ -320,17 +320,13 @@ impl LspService for DaemonLspService {
         ))
     }
 
-    async fn inlay_hints(&self, file: &Path, range: Range) -> Result<Vec<InlayHint>, LspError> {
-        let result = self
-            .client
-            .inlay_hints(
-                file,
-                range.start.line,
-                range.start.character,
-                range.end.line,
-                range.end.character,
-            )
-            .await?;
+    async fn inlay_hints(
+        &self,
+        file: &Path,
+        start_line: u32,
+        end_line: u32,
+    ) -> Result<Vec<InlayHint>, LspError> {
+        let result = self.client.inlay_hints(file, start_line, end_line).await?;
         let response: InlayHintsResponse = parse(result)?;
         Ok(response.hints.into_iter().map(Into::into).collect())
     }
