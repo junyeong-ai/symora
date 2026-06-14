@@ -180,38 +180,63 @@ impl Symbol {
         true
     }
 
+    /// Glob-match one path segment. `*` matches zero or more characters and
+    /// may appear any number of times: the segments between stars must occur
+    /// in order, with the first and last anchored to the ends.
     fn matches_glob_part(value: &str, pattern: &str) -> bool {
-        if pattern == "*" {
-            return true;
+        if !pattern.contains('*') {
+            return value == pattern;
         }
 
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return value.starts_with(prefix);
+        let parts: Vec<&str> = pattern.split('*').collect();
+        let first = parts[0];
+        let last = parts[parts.len() - 1];
+
+        // The two end anchors must fit without overlapping.
+        if !value.starts_with(first)
+            || !value.ends_with(last)
+            || value.len() < first.len() + last.len()
+        {
+            return false;
         }
 
-        if let Some(suffix) = pattern.strip_prefix('*') {
-            return value.ends_with(suffix);
-        }
-
-        if let Some((prefix, suffix)) = pattern.split_once('*') {
-            return value.starts_with(prefix) && value.ends_with(suffix);
-        }
-
-        value == pattern
-    }
-
-    pub fn filter_by_path(symbols: &[Symbol], pattern: &str) -> Vec<Symbol> {
-        let mut results = Vec::new();
-        Self::collect_matching(symbols, pattern, &mut results);
-        results
-    }
-
-    fn collect_matching(symbols: &[Symbol], pattern: &str, results: &mut Vec<Symbol>) {
-        for symbol in symbols {
-            if symbol.matches_path(pattern) {
-                results.push(symbol.clone());
+        // Middle literals must appear in order inside the gap between anchors.
+        let mut cursor = first.len();
+        let end = value.len() - last.len();
+        for mid in &parts[1..parts.len() - 1] {
+            if mid.is_empty() {
+                continue;
             }
-            Self::collect_matching(&symbol.children, pattern, results);
+            match value[cursor..end].find(mid) {
+                Some(pos) => cursor += pos + mid.len(),
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// References to every symbol whose path matches `pattern`, in tree order.
+    /// Borrows rather than clones so a selecting caller (e.g. a destructive
+    /// edit) clones only the one it keeps.
+    pub fn filter_by_path<'a>(symbols: &'a [Symbol], pattern: &str) -> Vec<&'a Symbol> {
+        let mut out = Vec::new();
+        Self::collect_by(symbols, &|s| s.matches_path(pattern), &mut out);
+        out
+    }
+
+    /// The single depth-first traversal behind every symbol filter: visit
+    /// every node (always recursing into children) and collect the ones the
+    /// predicate selects.
+    fn collect_by<'a>(
+        symbols: &'a [Symbol],
+        predicate: &impl Fn(&Symbol) -> bool,
+        out: &mut Vec<&'a Symbol>,
+    ) {
+        for symbol in symbols {
+            if predicate(symbol) {
+                out.push(symbol);
+            }
+            Self::collect_by(&symbol.children, predicate, out);
         }
     }
 
@@ -227,66 +252,25 @@ impl Symbol {
         exclude_kinds: Option<&[SymbolKind]>,
         exclude_low_level: bool,
     ) -> Vec<Symbol> {
-        let mut results = Vec::new();
-        Self::collect_advanced(
+        let mut out = Vec::new();
+        Self::collect_by(
             symbols,
-            pattern,
-            substring,
-            include_kinds,
-            exclude_kinds,
-            exclude_low_level,
-            &mut results,
+            &|symbol| {
+                let excluded = exclude_kinds.is_some_and(|k| k.contains(&symbol.kind))
+                    || include_kinds.is_some_and(|k| !k.contains(&symbol.kind))
+                    || (exclude_low_level && symbol.kind.is_low_level());
+                if excluded {
+                    return false;
+                }
+                match pattern {
+                    None => true,
+                    Some(p) if substring => symbol.matches_substring(p),
+                    Some(p) => symbol.matches_path(p),
+                }
+            },
+            &mut out,
         );
-        results
-    }
-
-    fn collect_advanced(
-        symbols: &[Symbol],
-        pattern: Option<&str>,
-        substring: bool,
-        include_kinds: Option<&[SymbolKind]>,
-        exclude_kinds: Option<&[SymbolKind]>,
-        exclude_low_level: bool,
-        results: &mut Vec<Symbol>,
-    ) {
-        for symbol in symbols {
-            let excluded = exclude_kinds.is_some_and(|k| k.contains(&symbol.kind))
-                || include_kinds.is_some_and(|k| !k.contains(&symbol.kind))
-                || (exclude_low_level && symbol.kind.is_low_level());
-
-            if excluded {
-                Self::collect_advanced(
-                    &symbol.children,
-                    pattern,
-                    substring,
-                    include_kinds,
-                    exclude_kinds,
-                    exclude_low_level,
-                    results,
-                );
-                continue;
-            }
-
-            let matches = match pattern {
-                None => true,
-                Some(p) if substring => symbol.matches_substring(p),
-                Some(p) => symbol.matches_path(p),
-            };
-
-            if matches {
-                results.push(symbol.clone());
-            }
-
-            Self::collect_advanced(
-                &symbol.children,
-                pattern,
-                substring,
-                include_kinds,
-                exclude_kinds,
-                exclude_low_level,
-                results,
-            );
-        }
+        out.into_iter().cloned().collect()
     }
 
     pub fn normalize_name(name: &str, file: &std::path::Path, kind: SymbolKind) -> String {
@@ -389,6 +373,41 @@ mod tests {
         assert!(!sym.matches_path("*/reset"));
     }
 
+    /// A segment may carry any number of `*`: the between-star literals must
+    /// occur in order, anchored at the ends. A single `split_once` matcher
+    /// silently fails these, so they are explicit.
+    #[test]
+    fn matches_path_handles_multiple_stars_in_a_segment() {
+        let mut sym = build_symbol("getUserName", SymbolKind::Method);
+        sym.name_path = Some("Service/getUserName".to_string());
+
+        // contains-style and interior multi-star
+        assert!(sym.matches_path("*User*"));
+        assert!(sym.matches_path("get*User*Name"));
+        assert!(sym.matches_path("*/get*Name"));
+        // order matters and end anchors hold
+        assert!(!sym.matches_path("*Name*User*"));
+        assert!(!sym.matches_path("get*Xyz*Name"));
+        // a star matches the empty string
+        assert!(sym.matches_path("getUserName*"));
+
+        // leading-`/` exact mode still enforces full-path segment count
+        assert!(sym.matches_path("/Service/get*Name"));
+        assert!(!sym.matches_path("/get*Name"));
+    }
+
+    /// Malformed overload indices degrade to literal names (no match against
+    /// real symbols), never a parse panic or a wrong match.
+    #[test]
+    fn matches_path_treats_malformed_overload_index_as_literal() {
+        let mut sym = build_symbol("bar", SymbolKind::Method);
+        sym.name_path = Some("Foo/bar".to_string());
+
+        assert!(!sym.matches_path("bar[abc]"));
+        assert!(!sym.matches_path("bar["));
+        assert!(!sym.matches_path("bar[]"));
+    }
+
     #[test]
     fn filter_by_path_recurses_into_children() {
         let mut class = build_symbol("MyClass", SymbolKind::Class);
@@ -397,16 +416,17 @@ mod tests {
             build_symbol("reset", SymbolKind::Method),
         ];
         class.compute_paths(None);
+        let symbols = [class];
 
-        let results = Symbol::filter_by_path(&[class.clone()], "MyClass/update");
+        let results = Symbol::filter_by_path(&symbols, "MyClass/update");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "update");
 
-        let results = Symbol::filter_by_path(&[class.clone()], "*/reset");
+        let results = Symbol::filter_by_path(&symbols, "*/reset");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "reset");
 
-        let results = Symbol::filter_by_path(&[class], "MyClass/*");
+        let results = Symbol::filter_by_path(&symbols, "MyClass/*");
         assert_eq!(results.len(), 2);
     }
 

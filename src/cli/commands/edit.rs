@@ -1322,8 +1322,8 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
 }
 
 /// Resolve a `--symbol` path pattern in a file to the one symbol it names,
-/// through the same flexible matcher every `--symbol` surface uses
-/// (`matches_path`: bare last-component, `/`-anchored suffix, `*` wildcard,
+/// through the same `matches_path` predicate every `--symbol` surface
+/// resolves through (bare last-component, `/`-anchored suffix, `*` wildcard,
 /// or a leading-`/` exact path). The async wrapper fetches the file's
 /// symbols; `unique_symbol_by_path` owns the dispatch, so the destructive
 /// resolution stays unit-tested without an LSP round-trip.
@@ -1344,12 +1344,8 @@ async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Sy
 fn unique_symbol_by_path(symbols: &[Symbol], pattern: &str, file_display: &str) -> Result<Symbol> {
     match Symbol::filter_by_path(symbols, pattern).as_slice() {
         [] => Err(symbol_not_found(pattern, file_display)),
-        [only] => Ok(only.clone()),
-        many => Err(ambiguous_symbol_path(
-            pattern,
-            &many.iter().collect::<Vec<_>>(),
-            file_display,
-        )),
+        [only] => Ok((*only).clone()),
+        many => Err(ambiguous_symbol_path(pattern, many, file_display)),
     }
 }
 
