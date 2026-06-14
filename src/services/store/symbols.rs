@@ -250,6 +250,16 @@ fn extract_name_and_kind(
 }
 
 fn find_name_node(node: Node, language: Language) -> Option<Node> {
+    // An impl block's container name is its implementing TYPE — the `type`
+    // field, never the trait it implements — so a method's path reads
+    // `Type/method` regardless of whether the trait is written with a module
+    // path, matching the LSP self-type normalization.
+    if node.kind() == "impl_item" {
+        return node
+            .child_by_field_name("type")
+            .and_then(first_type_identifier);
+    }
+
     let name_field = match language {
         Language::Kotlin => node
             .child_by_field_name("name")
@@ -280,6 +290,23 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         }
         None
     })
+}
+
+/// The first `type_identifier` in a type node's subtree — the bare type name
+/// of a self type, descending through `generic_type`/`reference_type`/
+/// `scoped_type_identifier`/`dynamic_type` wrappers (`Foo<T>`→Foo,
+/// `crate::Foo`→Foo, `&Foo`→Foo).
+fn first_type_identifier(node: Node) -> Option<Node> {
+    if node.kind() == "type_identifier" {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = first_type_identifier(child) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Map a captured declaration node to a [`SymbolKind`]. Every node kind the

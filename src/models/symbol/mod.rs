@@ -311,7 +311,7 @@ impl Symbol {
     /// generics; an `impl` block collapses to its bare implementing type, so
     /// a method reads `Type/method` on every surface — `impl Foo`,
     /// `impl Trait for Foo`, and `impl<T> Foo<T>` all yield `Foo`, matching
-    /// the index extractor.
+    /// the index extractor (which keys on the impl's self type, not the trait).
     pub fn normalize_symbol_name(name: &str) -> String {
         let name = name.trim();
         if let Some(rest) = name.strip_prefix("impl")
@@ -323,12 +323,30 @@ impl Symbol {
     }
 
     /// The implementing type from an impl header (the text after `impl`): the
-    /// type after ` for ` for a trait impl, otherwise the head type, with the
-    /// impl generics, the type's own generics, and any module path stripped.
+    /// type after ` for ` for a trait impl, otherwise the head type, reduced to
+    /// the bare type name — the where-clause, the impl and type generics, a
+    /// leading `&`/`&mut`/`dyn`/lifetime, and any module path all stripped.
     fn impl_self_type(after_impl: &str) -> String {
         let head = after_impl.rsplit(" for ").next().unwrap_or(after_impl);
-        let head = Self::strip_leading_generics(head.trim_start());
-        let ty = head.split('<').next().unwrap_or(head).trim();
+        let head = head.split(" where ").next().unwrap_or(head).trim();
+        let head = Self::strip_leading_generics(head);
+        let mut ty = head.split('<').next().unwrap_or(head).trim();
+        // Peel reference / mut / dyn / lifetime prefixes down to the type name.
+        loop {
+            let start = ty;
+            ty = ty.trim_start_matches('&').trim_start();
+            ty = ty.strip_prefix("mut ").unwrap_or(ty).trim_start();
+            ty = ty.strip_prefix("dyn ").unwrap_or(ty).trim_start();
+            if let Some(rest) = ty.strip_prefix('\'') {
+                ty = rest
+                    .split_once(char::is_whitespace)
+                    .map(|(_, t)| t.trim_start())
+                    .unwrap_or("");
+            }
+            if ty == start {
+                break;
+            }
+        }
         ty.rsplit("::").next().unwrap_or(ty).trim().to_string()
     }
 
@@ -466,6 +484,29 @@ mod tests {
         assert_eq!(Symbol::normalize_symbol_name("impl<T> Foo<T>"), "Foo");
         assert_eq!(
             Symbol::normalize_symbol_name("impl<T> Bar<T> for crate::Foo<T>"),
+            "Foo"
+        );
+        // an unscoped trait still resolves to the self type, never the trait
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl FromStr for Language"),
+            "Language"
+        );
+        // where-clause, reference, dyn, and lifetime targets reduce to the type
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Foo for Bar where Bar: Send"),
+            "Bar"
+        );
+        assert_eq!(Symbol::normalize_symbol_name("impl Trait for &Foo"), "Foo");
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Trait for &mut Foo"),
+            "Foo"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Display for dyn Error"),
+            "Error"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl<'a> Trait for &'a Foo"),
             "Foo"
         );
         // non-impl names keep the plain parameter/generic stripping
