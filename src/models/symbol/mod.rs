@@ -379,13 +379,12 @@ impl Symbol {
             return Self::first_nominal_ident(head);
         }
 
-        // Plain nominal or module path: a leading `<…>` here is the generic
+        // Plain nominal or module path. A leading `<…>` here is the generic
         // params of an inherent `impl<T> Foo<T>` (the trait side, if any, was
-        // already split off at ` for `). Drop them, then drop the type's own
-        // generics, peel a leading reference/mut/dyn/lifetime, and take the
-        // bare type name (last path segment).
+        // already split off at ` for `); drop them, then peel a leading
+        // reference/mut/dyn/lifetime.
         let head = Self::strip_leading_generics(head);
-        let mut ty = head.split('<').next().unwrap_or(head).trim();
+        let mut ty = head;
         loop {
             let start = ty;
             ty = ty.trim_start_matches('&').trim_start();
@@ -401,7 +400,11 @@ impl Symbol {
                 break;
             }
         }
-        ty.rsplit("::").next().unwrap_or(ty).trim().to_string()
+        // Take the last path segment (the leaf type), THEN drop its own
+        // generics — in that order, so generics on an OUTER segment
+        // (`Outer<T>::Inner`) don't truncate the path before the leaf is taken.
+        let ty = ty.rsplit("::").next().unwrap_or(ty).trim();
+        ty.split('<').next().unwrap_or(ty).trim().to_string()
     }
 
     /// A structural self type — tuple, array/slice, raw pointer, fn-pointer, or
@@ -709,6 +712,16 @@ mod tests {
         assert_eq!(
             Symbol::normalize_symbol_name("impl Bar for <Foo as Baz>::Out"),
             "Foo"
+        );
+        // generics on an OUTER path segment must not truncate before the leaf:
+        // the nearest type is taken first, then its own generics are dropped
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Tr for ns::Outer<T>::Inner"),
+            "Inner"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Tr for Outer<T>::Inner<U>"),
+            "Inner"
         );
         // a self type with no nominal name at all yields the empty (transparent) segment
         assert_eq!(Symbol::normalize_symbol_name("impl Trait for fn()"), "");
