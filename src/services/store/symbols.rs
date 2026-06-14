@@ -533,6 +533,75 @@ type Alias = Foo;
         assert_eq!(kind("Alias"), Some(SymbolKind::Class));
     }
 
+    /// The cross-surface invariant: the tree-sitter index extractor and the
+    /// LSP self-type normalizer (`Symbol::normalize_symbol_name`) must key an
+    /// impl method under the SAME container, or a `name_path` copied from
+    /// `search` would fail against `symbols`/`edit`. This pins both to the same
+    /// "first nominal type identifier" rule across nominal, generic, scoped,
+    /// reference, trait, and structural (tuple/array/pointer/qualified) self
+    /// types. `($display)` is the matching rust-analyzer impl label.
+    #[test]
+    fn impl_method_container_agrees_with_lsp_normalizer() {
+        use crate::models::symbol::Symbol;
+        let extractor = SymbolExtractor::new();
+        let cases = [
+            ("impl Foo { fn m(&self) {} }", "impl Foo", "Foo"),
+            (
+                "impl<T> Wrap<T> { fn m(&self) {} }",
+                "impl<T> Wrap<T>",
+                "Wrap",
+            ),
+            (
+                "impl std::fmt::Display for Foo { fn m(&self) {} }",
+                "impl std::fmt::Display for Foo",
+                "Foo",
+            ),
+            (
+                "impl FromStr for Foo { fn m(&self) {} }",
+                "impl FromStr for Foo",
+                "Foo",
+            ),
+            (
+                "impl Tr for (A, B) { fn m(&self) {} }",
+                "impl Tr for (A, B)",
+                "A",
+            ),
+            (
+                "impl Tr for [Elem; 4] { fn m(&self) {} }",
+                "impl Tr for [Elem; 4]",
+                "Elem",
+            ),
+            (
+                "impl Tr for *const Ptr { fn m(&self) {} }",
+                "impl Tr for *const Ptr",
+                "Ptr",
+            ),
+            (
+                "impl Tr for <Qual as Baz>::Out { fn m(&self) {} }",
+                "impl Tr for <Qual as Baz>::Out",
+                "Qual",
+            ),
+        ];
+        for (src, ra_label, expected) in cases {
+            let symbols = extractor.extract(src, Language::Rust);
+            let method = symbols
+                .iter()
+                .find(|s| s.name == "m")
+                .unwrap_or_else(|| panic!("method not extracted from {src:?}"));
+            let index_container = method.container.as_deref();
+            assert_eq!(
+                index_container,
+                Some(expected),
+                "index container for {src:?}"
+            );
+            assert_eq!(
+                Symbol::normalize_symbol_name(ra_label),
+                expected,
+                "LSP normalizer for {ra_label:?}"
+            );
+        }
+    }
+
     #[test]
     fn go_type_declaration_classifies_by_underlying_type() {
         let extractor = SymbolExtractor::new();

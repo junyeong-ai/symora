@@ -315,7 +315,7 @@ symora usage processOrder --lang typescript         # usage sites by name or loc
 symora impact src/services/checkout.ts:48           # change blast radius
 symora diff-impact                                  # impact of the current git diff
 
-# Edit & refactor (every one supports --dry-run)
+# Edit & refactor (mutations preview with --dry-run)
 symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
 symora edit insert-before / insert-after / delete / replace / pattern
 symora rename src/services/checkout.ts:48:9 settleOrder --dry-run

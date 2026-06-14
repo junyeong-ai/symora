@@ -60,6 +60,17 @@ impl Symbol {
     }
 
     pub fn compute_paths(&mut self, parent_path: Option<&str>) {
+        // A nameless container (e.g. an impl whose self type has no nominal
+        // name) is transparent: it contributes no path segment, so its children
+        // attach to the enclosing path and never inherit a stray leading `/`.
+        if self.name.is_empty() {
+            self.name_path = parent_path.map(str::to_string);
+            for child in &mut self.children {
+                child.compute_paths(parent_path);
+            }
+            return;
+        }
+
         let base_path = match parent_path {
             Some(parent) => format!("{}/{}", parent, self.name),
             None => self.name.clone(),
@@ -70,6 +81,8 @@ impl Symbol {
             None => base_path.clone(),
         });
 
+        // Children hang off the index-free base so same-named sibling parents
+        // (`Foo[0]`, `Foo[1]`) still share a child path (`Foo/bar`).
         for child in &mut self.children {
             child.compute_paths(Some(&base_path));
         }
@@ -329,9 +342,28 @@ impl Symbol {
     fn impl_self_type(after_impl: &str) -> String {
         let head = after_impl.rsplit(" for ").next().unwrap_or(after_impl);
         let head = head.split(" where ").next().unwrap_or(head).trim();
+
+        // Structural self types — tuple `(A, B)`, array/slice `[T; N]`,
+        // pointer `*const T`, fn-pointer `fn(..)`, qualified `<T as Tr>::X` —
+        // have no outer nominal name. Take the first nominal type identifier
+        // within (an empty string for a truly nameless one like `fn()`),
+        // matching the index extractor's first-`type_identifier` rule so the
+        // two surfaces agree on the path. Checked before stripping leading
+        // generics so a qualified type's `<…>` isn't mistaken for impl params.
+        if head.starts_with(['(', '[', '*'])
+            || head.starts_with("fn")
+            || (head.starts_with('<') && head.contains(" as "))
+        {
+            return Self::first_nominal_ident(head);
+        }
+
+        // Plain nominal or module path: a leading `<…>` here is the generic
+        // params of an inherent `impl<T> Foo<T>` (the trait side, if any, was
+        // already split off at ` for `). Drop them, then drop the type's own
+        // generics, peel a leading reference/mut/dyn/lifetime, and take the
+        // bare type name (last path segment).
         let head = Self::strip_leading_generics(head);
         let mut ty = head.split('<').next().unwrap_or(head).trim();
-        // Peel reference / mut / dyn / lifetime prefixes down to the type name.
         loop {
             let start = ty;
             ty = ty.trim_start_matches('&').trim_start();
@@ -348,6 +380,28 @@ impl Symbol {
             }
         }
         ty.rsplit("::").next().unwrap_or(ty).trim().to_string()
+    }
+
+    /// The first nominal type identifier in a structural type string, skipping
+    /// punctuation and type-position keywords. Empty when there is none (e.g.
+    /// `fn()`), which the path builder treats as a transparent container.
+    fn first_nominal_ident(s: &str) -> String {
+        let mut rest = s;
+        while let Some(start) = rest.find(|c: char| c.is_alphabetic() || c == '_') {
+            let after = &rest[start..];
+            let end = after
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(after.len());
+            let word = &after[..end];
+            if !matches!(
+                word,
+                "const" | "mut" | "dyn" | "fn" | "as" | "where" | "impl" | "for"
+            ) {
+                return word.to_string();
+            }
+            rest = &after[end..];
+        }
+        String::new()
     }
 
     /// Drop a single balanced leading `<...>` (the generic params of an
@@ -509,6 +563,26 @@ mod tests {
             Symbol::normalize_symbol_name("impl<'a> Trait for &'a Foo"),
             "Foo"
         );
+        // structural self types reduce to their first nominal type identifier,
+        // matching the index extractor (so search↔symbols↔edit agree)
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Trait for (Foo, Bar)"),
+            "Foo"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Trait for [Foo; 4]"),
+            "Foo"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Trait for *const Foo"),
+            "Foo"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Bar for <Foo as Baz>::Out"),
+            "Foo"
+        );
+        // a self type with no nominal name at all yields the empty (transparent) segment
+        assert_eq!(Symbol::normalize_symbol_name("impl Trait for fn()"), "");
         // non-impl names keep the plain parameter/generic stripping
         assert_eq!(Symbol::normalize_symbol_name("execute(args)"), "execute");
         assert_eq!(Symbol::normalize_symbol_name("Vec<T>"), "Vec");

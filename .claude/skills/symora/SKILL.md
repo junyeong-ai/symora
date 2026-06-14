@@ -38,7 +38,7 @@ symora search content "async fn"
 symora map summary
 ```
 
-Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` matches flat names, `Class/method` paths, and `*` wildcards against the index; `symbols --symbol` resolves the same forms precisely within a file you already know.
+Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` matches flat names, `Class/method` paths, and `*` wildcards; `symbols --symbol` resolves the same forms precisely within a file you already know.
 
 ### Exact inspection (file/symbol known)
 
