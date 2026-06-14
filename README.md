@@ -155,6 +155,7 @@ symora search symbols processOrder
       "file": "src/services/checkout.ts",
       "line": 48,
       "column": 9,
+      "container": "CheckoutService",
       "backend": "index",
       "score": 1.0
     }
@@ -296,6 +297,8 @@ symora map related src/services/checkout.ts # 휴리스틱 "다음에 읽을 것
 symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
 symora symbols src/services/checkout.ts --body      # 트리 + 소스 본문
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
+symora symbols --symbol 'CheckoutService/processOrder' --body   # 파일 없이 워크스페이스 전역(인덱스 기반)
+symora symbols --name processOrder --lang ts        # 워크스페이스에서 메서드 찾기 (단일 언어)
 symora def src/services/checkout.ts:48:9            # 정의로 이동
 symora hover src/services/checkout.ts:48:9          # 타입 / 시그니처
 symora signature src/services/checkout.ts:55:20     # 호출 지점 시그니처 도움말
