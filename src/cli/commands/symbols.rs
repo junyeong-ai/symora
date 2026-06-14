@@ -214,7 +214,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         };
         let mut batch = batch.data;
         for symbol in &mut batch {
-            if let Some(path) = synthesized_symbol_path(symbol) {
+            if let Some(path) = symbol.workspace_name_path() {
                 symbol.name_path = Some(path);
             }
         }
@@ -397,27 +397,6 @@ fn effective_workspace_query(name_query: Option<&str>, symbol_query: Option<&str
             (!candidate.is_empty()).then(|| candidate.to_string())
         })
         .unwrap_or_default()
-}
-
-fn synthesized_symbol_path(symbol: &Symbol) -> Option<String> {
-    let name = symbol.name.trim();
-    if name.is_empty() {
-        return None;
-    }
-
-    let container = symbol
-        .container
-        .as_deref()
-        .unwrap_or_default()
-        .replace("::", "/")
-        .replace(['.', '#', '\\'], "/");
-    let container = container.trim_matches('/');
-
-    if container.is_empty() {
-        Some(name.to_string())
-    } else {
-        Some(format!("{}/{}", container, name))
-    }
 }
 
 fn parse_kind_list(kind_str: &Option<String>) -> Result<Option<Vec<SymbolKind>>> {
