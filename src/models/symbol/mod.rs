@@ -351,7 +351,7 @@ impl Symbol {
         // two surfaces agree on the path. Checked before stripping leading
         // generics so a qualified type's `<…>` isn't mistaken for impl params.
         if head.starts_with(['(', '[', '*'])
-            || head.starts_with("fn")
+            || head.starts_with("fn(")
             || (head.starts_with('<') && head.contains(" as "))
         {
             return Self::first_nominal_ident(head);
@@ -583,6 +583,15 @@ mod tests {
         );
         // a self type with no nominal name at all yields the empty (transparent) segment
         assert_eq!(Symbol::normalize_symbol_name("impl Trait for fn()"), "");
+        // a nominal type whose name merely starts with "fn" is NOT a fn-pointer
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Trait for fn_mod::Named"),
+            "Named"
+        );
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl Trait for Fnable"),
+            "Fnable"
+        );
         // non-impl names keep the plain parameter/generic stripping
         assert_eq!(Symbol::normalize_symbol_name("execute(args)"), "execute");
         assert_eq!(Symbol::normalize_symbol_name("Vec<T>"), "Vec");
