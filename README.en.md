@@ -155,6 +155,7 @@ symora search symbols processOrder
       "file": "src/services/checkout.ts",
       "line": 48,
       "column": 9,
+      "container": "CheckoutService",
       "backend": "index",
       "score": 1.0
     }
@@ -296,6 +297,8 @@ symora map related src/services/checkout.ts # heuristic "what to read next"
 symora symbols src/services/checkout.ts --depth 2   # full symbol tree
 symora symbols src/services/checkout.ts --body      # tree + source bodies
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
+symora symbols --symbol 'CheckoutService/processOrder' --body   # workspace-wide (index-backed), no file needed
+symora symbols --name processOrder --lang ts        # find a method across the workspace, one language
 symora def src/services/checkout.ts:48:9            # go to definition
 symora hover src/services/checkout.ts:48:9          # type / signature
 symora signature src/services/checkout.ts:55:20     # signature help at a call

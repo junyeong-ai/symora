@@ -1,6 +1,6 @@
 ---
 name: symora
-version: 0.13.1
+version: 0.13.2
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
 when_to_use: User asks "where is this defined", "who calls this", "how does this function reach that one", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
@@ -23,7 +23,7 @@ Failures are structured: `{"error": {"code": "server_not_installed", "message": 
 2. `symora pack --tokens 4000` — token-budgeted repo brief (PageRank-ranked files with top-level signatures) — or `symora map summary` for a lighter entrypoint list. Either is the orientation step for a new task.
 3. `symora search symbols <query>` — rough workspace discovery (index-backed).
 4. `symora map file <path>` — compact file overview. Outer fields (`siblings`, `related_files`, `counterpart_files`, `language`) are always valid; the embedded `symbols` field carries `{"error": {"code": "server_not_installed", ...}}` when the LSP is absent — parse the outer shape and ignore `symbols` in that case.
-5. `symora symbols <file>` or `symora symbols --symbol <path>` — full semantic tree (LSP-backed).
+5. `symora symbols <file>` — full semantic tree (LSP-backed) — or `symora symbols --symbol <path>`/`--name <name>` with no file: index-backed workspace resolution that finds methods too, with `--body`/`--signature`.
 6. `symora context | refs | usage` — exact follow-up from a location (LSP-backed).
 
 ## Command selection
@@ -38,7 +38,7 @@ symora search content "async fn"
 symora map summary
 ```
 
-Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` matches flat names, `Class/method` paths, and `*` wildcards; `symbols --symbol` resolves the same forms precisely within a file you already know.
+Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` matches flat names, `Class/method` paths, and `*` wildcards; `symbols --symbol`/`--name` resolves the same forms — workspace-wide from the index (methods included, with `--body`/`--signature`) when you give no file, or precisely within a file you name.
 
 ### Exact inspection (file/symbol known)
 
@@ -49,7 +49,7 @@ symora hover src/cli/commands/search/mod.rs:141:14
 symora def src/cli/commands/search/mod.rs:141:14
 ```
 
-`symbols <file>` returns the full LSP tree. `symbols --symbol <path>` resolves a specific symbol path (bare name, `Class/method` suffix, or `*` wildcard). Use `search symbols` for broad lookup, not `--name`.
+`symbols <file>` returns the full LSP tree. `symbols --symbol <path>`/`--name <name>` resolves a specific symbol path (bare name, `Class/method` suffix, or `*` wildcard) — workspace-wide from the index when no file is given (methods included, `--body`/`--signature` populated), or within a named file. Use `search symbols` while the query is still broad; reach for `--symbol`/`--name` once the name is fairly specific.
 
 ### File and project overview
 
@@ -82,7 +82,7 @@ The location commands here and above — `refs`, `callers`, `callees`, `context`
 - `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line[:col]>` location, both LSP-backed, and auto-detects languages by file count when `--lang` is omitted. If no detected language has an installed server it returns a structured `server_not_installed` error — not a silent `count: 0`.
 - When some languages were searched but others were missing, failed, or skipped once enough candidates were found, the `usage` result carries a `coverage_gaps` array of `{language, reason}` objects (`reason`: `server_not_installed | timed_out | unsupported | unavailable | not_searched`); a non-empty `coverage_gaps` means `count` is a lower bound — install the named server or narrow with `--lang`. An empty `usage` with neither an error nor `coverage_gaps` is a genuine zero.
 - `context --with-bodies` additionally attaches complete verbatim bodies: the target's body always attaches whole and unbudgeted; callee bodies (in listed order) and type bodies draw on the `--body-tokens` budget (default 2000), whole-body-or-nothing per item. `--with-bodies` is a `context` flag only — the standalone `callers`/`callees` commands do not accept it.
-- Body-bearing sections report `bodies_included`; an item without `body` there was omitted for one of three causes: the token budget ran out, the symbol was unresolvable at its position, or it genuinely has no body (prototypes, interface methods). Only the first is cured by raising `--body-tokens` — an omission that persists after a large raise is not budget-caused; fetch a specific body with `symora symbols <file> --body`.
+- Body-bearing sections report `bodies_included`; an item without `body` there was omitted for one of three causes: the token budget ran out, the symbol was unresolvable at its position, or it genuinely has no body (prototypes, interface methods). Only the first is cured by raising `--body-tokens` — an omission that persists after a large raise is not budget-caused; fetch a specific body with `symora symbols <file> --symbol 'Type/method' --body` (or with no file at all).
 - `refs`, `context` (callers/callees sections), and `impact` emit gated `next_commands` — ready-to-run follow-ups — only when a condition holds (declaration-only result, truncation, single-file concentration, or an incomplete caller graph), so their presence is signal, never boilerplate.
 - `callees` has three modes: direct (single hop, default), `--depth N` (the downward *reachable set* to depth N, carrying `max_depth_reached`/`callees_truncated` lower-bound markers), and `--to <file:line[:col]>` (the shortest call *chain* to a target). `--to` reports `reachability`: `found` (the ordered `chain` follows), `not_reached_within_bound` (raise `--depth`), or `no_static_path` (no chain through statically-resolved calls — still a lower bound; dynamic dispatch is not folded in).
 
