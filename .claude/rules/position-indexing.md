@@ -27,7 +27,7 @@ For pure ASCII the two collapse (scalar == byte == UTF-16 unit), which is why a 
 
 ## Where conversions live
 
-- `src/cli/location.rs` — parses `file:line:column` inputs (1-indexed scalar).
+- `src/cli/location.rs` — parses `file:line[:column]` inputs (1-indexed scalar; an omitted column is tracked by `column_explicit`).
 - `src/services/lsp/position.rs` — the boundary converter `PositionConverter`: `scalar_to_wire` (outbound scalar column → wire offset), `scalar_column` / `encoded_offset_to_scalar` (inbound wire offset → scalar column), `encoded_offset_to_byte` (wire offset → byte index for slicing), `floor_char_boundary` (clamp a stray offset to a char edge), seeded per file with `with_content`.
 - `src/services/lsp/helpers.rs` — `to_lsp_position(line, column, content, encoding)` builds an outbound `Position`: `line - 1` plus `scalar_to_wire`.
 - `src/services/lsp/converters.rs` — inbound LSP range → model `Location`: every returned offset is decoded through `PositionConverter` (`scalar_column`), then `+1` to scalar 1-indexed. Every new inbound reader follows this; an undecoded range is the bug below.

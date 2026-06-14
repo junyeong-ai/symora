@@ -160,10 +160,10 @@ pub enum EditCommand {
     /// Replace a raw character range (no symbol resolution). For whole
     /// symbols use `replace-body`.
     Replace {
-        /// Start location (file:line:column)
+        /// Start location (file:line[:column]; an omitted column means column 1)
         start: String,
 
-        /// End location (file:line:column), exclusive. Defaults to the
+        /// End location (file:line[:column]), exclusive. Defaults to the
         /// end of the start line.
         #[arg(short, long)]
         end: Option<String>,

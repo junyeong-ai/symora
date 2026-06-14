@@ -6,7 +6,7 @@ use super::input_error::CliInputError;
 
 #[derive(clap::Args, Debug)]
 pub struct LocationArg {
-    /// File path with position (file:line:column)
+    /// File path with position (file:line[:column]; omit the column to address the symbol on the line)
     pub location: String,
 }
 

@@ -23,7 +23,7 @@ Editing tools — `rename_symbol`, `apply_code_action`, `replace_symbol_body`, `
 
 Conventions: positions are 1-indexed lines and columns. List responses share one shape (count, showing, items, truncated, hints, next_commands). Errors carry {code, message, hint}; the hint names a working alternative. A conflict code from an editing tool means the file changed since it was analyzed — re-read it and retry. A precondition_failed code means an asserted precondition (e.g. expect_no_references) is unmet or could not be verified — re-reading and retrying will not clear it; follow the hint: fix the listed references, wait out indexing, or drop the assertion. A response that would exceed the size ceiling has whole items dropped from its largest list: count stays the true total, truncated is set, and a hint names the remedy.
 
-Anti-patterns: don't address an edit by file:line:column when you hold a symbol path — line numbers go stale after every edit; don't guess a file:line:column — take it from a search or list result; don't read full file bodies to find one symbol; don't retry a capability the server reported as unsupported — follow the error's hint instead.";
+Anti-patterns: don't address an edit by line when you hold a symbol path — line numbers go stale after every edit; don't guess a file:line:column — take it from a search or list result; don't read full file bodies to find one symbol; don't retry a capability the server reported as unsupported — follow the error's hint instead.";
 
 #[cfg(test)]
 mod tests {
