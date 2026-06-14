@@ -81,8 +81,19 @@ CREATE TRIGGER IF NOT EXISTS content_lines_au AFTER UPDATE ON content_lines BEGI
 END;
 "#;
 
-pub fn build_symbol_search_query(with_kind: bool) -> String {
+pub fn build_symbol_search_query(with_kind: bool, with_lang: bool) -> String {
     let kind_filter = if with_kind { " AND s.kind = ?3" } else { "" };
+    // Bind order is query(?1), limit(?2), then kind and language in that order,
+    // so the language slot is ?4 when a kind filter precedes it, else ?3.
+    let lang_filter = if with_lang {
+        if with_kind {
+            " AND f.language = ?4"
+        } else {
+            " AND f.language = ?3"
+        }
+    } else {
+        ""
+    };
     // Substring matching is for a LITERAL query: `_`/`%` in an identifier are
     // content, not LIKE wildcards. Escape them (and the escape char) so each
     // `ESCAPE '\'` LIKE matches ?1 verbatim; the exact-match ladder rungs use
@@ -113,7 +124,7 @@ JOIN files f ON s.file_id = f.id
 WHERE (
     s.name LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE
     OR (s.name_path IS NOT NULL AND s.name_path LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE)
-){kind_filter}
+){kind_filter}{lang_filter}
 ORDER BY score DESC, LENGTH(COALESCE(s.name_path, s.name)) ASC
 LIMIT ?2"#
     )

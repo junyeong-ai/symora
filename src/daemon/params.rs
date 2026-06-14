@@ -79,6 +79,8 @@ pub(crate) struct SearchSymbolsParams {
     pub limit: Option<usize>,
     #[serde(default)]
     pub kind: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -42,10 +42,14 @@ pub(super) async fn handle_search_symbols(
     ctx.touch();
 
     let kind_filter = p.kind.as_ref().map(|k| SymbolKind::parse_or_default(k));
+    let lang_filter = p
+        .language
+        .as_ref()
+        .map(|l| crate::models::symbol::Language::parse_or_default(l));
 
     let page = ctx
         .store
-        .search_symbols(&p.query, p.limit.unwrap_or(100), kind_filter)
+        .search_symbols(&p.query, p.limit.unwrap_or(100), kind_filter, lang_filter)
         .await
         .map_err(RpcError::from)?;
 

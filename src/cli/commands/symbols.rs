@@ -225,9 +225,15 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     // path resolves here even when the live server omits it. The LSP pass below
     // then supplements languages the index does not extract and any edits made
     // since the last build.
+    // An explicit `--lang` scopes the index query to that language (the LSP
+    // pass below is already per-language); without it the index spans every
+    // indexed language, matching the workspace-wide intent of a bare query.
+    let index_lang = lang
+        .map(Language::parse_or_default)
+        .filter(|l| *l != Language::Unknown);
     if let Ok(page) = app
         .store
-        .search_symbols(&query, limit.saturating_mul(2), None)
+        .search_symbols(&query, limit.saturating_mul(2), None, index_lang)
         .await
     {
         for row in page.rows {
