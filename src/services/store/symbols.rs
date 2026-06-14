@@ -214,27 +214,24 @@ fn extract_from_match(
 }
 
 fn extract_container_path(mut node: Node, content: &str, language: Language) -> Option<String> {
-    let mut parts = Vec::new();
+    // A symbol is keyed by its IMMEDIATE container only — the nearest enclosing
+    // type/impl — so a method reads `Type/method`, an enclosing outer type or
+    // module never widens it to `Outer/Inner/method`, and a module-level item
+    // stays bare. This matches what the LSP workspace surface can report (a
+    // method's container is its nearest type; outer types and namespaces are
+    // flattened away there), so a name_path round-trips across the index,
+    // documentSymbol, and workspace surfaces. Modules/namespaces/packages
+    // qualify nothing and are skipped on the way up to that nearest type.
     while let Some(parent) = node.parent() {
         node = parent;
-        // A module/namespace/package organizes code but does not qualify a
-        // symbol's addressing path: a method is keyed `Type/method` and a
-        // module-level item bare, matching the LSP workspace-symbol container
-        // (which never reports an enclosing module) so a name_path round-trips
-        // across the index, documentSymbol, and workspace surfaces.
         if let Some((name, kind)) = extract_name_and_kind(node, content, language)
             && !name.is_empty()
             && !kind.is_namespace_like()
         {
-            parts.push(name);
+            return Some(name);
         }
     }
-    parts.reverse();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("/"))
-    }
+    None
 }
 
 fn extract_name_and_kind(
@@ -663,6 +660,39 @@ type Alias = Foo;
             assert!(
                 !np.starts_with("a/") && !np.contains("/a/") && !np.contains("/b/"),
                 "module leaked into name_path: {np:?}"
+            );
+        }
+    }
+
+    /// A member of a type nested inside another type (and a namespace) is keyed
+    /// by its IMMEDIATE container only — `Inner/method`, never
+    /// `ns/Outer/Inner/method` — matching what clangd's workspace surface
+    /// reports (`ns::Outer::Inner` → reduced to the nearest type `Inner`) so the
+    /// index path round-trips. The namespace drops out and the outer type does
+    /// not widen the path; the enclosing type still qualifies the inner type
+    /// itself (`Outer/Inner`).
+    #[test]
+    fn index_keys_nested_type_member_by_immediate_container() {
+        let extractor = SymbolExtractor::new();
+        let src = "namespace ns { class Outer { class Inner { void method(); }; void om(); }; }";
+        let symbols = extractor.extract(src, Language::Cpp);
+        let path = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} not extracted from {src:?}"))
+                .name_path
+                .clone()
+        };
+        assert_eq!(path("method"), Some("Inner/method".to_string()));
+        assert_eq!(path("om"), Some("Outer/om".to_string()));
+        assert_eq!(path("Inner"), Some("Outer/Inner".to_string()));
+        // The namespace never appears in any addressing path.
+        for s in &symbols {
+            let np = s.name_path.as_deref().unwrap_or_default();
+            assert!(
+                !np.contains("ns/"),
+                "namespace leaked into name_path: {np:?}"
             );
         }
     }

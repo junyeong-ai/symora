@@ -81,18 +81,21 @@ impl Symbol {
             None => base_path.clone(),
         });
 
-        // A module/namespace/package is self-named but does NOT qualify its
-        // descendants: they attach to its own parent path, so a method reads
-        // `Type/method` and a module-level item stays bare — matching the LSP
-        // workspace-symbol container (which never reports an enclosing module)
-        // so a path round-trips across the index, documentSymbol, and
-        // workspace surfaces. Every other container passes its index-free base
-        // down so same-named sibling parents (`Foo[0]`, `Foo[1]`) still share a
-        // child path (`Foo/bar`).
+        // A member is keyed by its IMMEDIATE container only — `Type/method`,
+        // not `Outer/Inner/method` — because that is all the LSP workspace
+        // surface can report (rust-analyzer/clangd give a method's container as
+        // its nearest enclosing type; the surrounding namespaces and outer
+        // types are flattened away and cannot be recovered from the container
+        // string). Passing this node's own NAME (not its accumulated path) down
+        // makes every producer agree, so a copied path round-trips. A
+        // namespace/module/package qualifies nothing: it passes its parent path
+        // straight through (a free item under it stays bare). The name is
+        // index-free, so same-named sibling parents (`Foo[0]`, `Foo[1]`) still
+        // share a child path (`Foo/bar`).
         let child_parent = if self.kind.is_namespace_like() {
             parent_path
         } else {
-            Some(base_path.as_str())
+            Some(self.name.as_str())
         };
         for child in &mut self.children {
             child.compute_paths(child_parent);
@@ -410,10 +413,15 @@ impl Symbol {
     }
 
     /// The path an unresolved workspace symbol is addressed by: its container
-    /// reduced via [`Self::self_type_segment`] — so an impl method matches the
-    /// index/documentSymbol name_path and a copied path round-trips to
-    /// `symbols`/`edit` — joined to the name, with language container
-    /// separators (`::`, `.`, `#`, `\`) normalized to `/`.
+    /// reduced via [`Self::self_type_segment`] and then to its IMMEDIATE
+    /// segment — so an impl method matches the index/documentSymbol name_path
+    /// (`Type/method`, never `Outer/Inner/method`) and a copied path
+    /// round-trips to `symbols`/`edit`. Language container separators (`::`,
+    /// `.`, `#`, `\`) normalize to `/`; only the last segment is kept, because
+    /// that is the nearest enclosing type — the outer types/namespaces the LSP
+    /// folds into the container string are not part of the addressing path on
+    /// any surface (a Rust self type is already a single segment, so this is a
+    /// no-op there).
     pub(crate) fn workspace_name_path(&self) -> Option<String> {
         let name = self.name.trim();
         if name.is_empty() {
@@ -422,7 +430,7 @@ impl Symbol {
         let container = Self::self_type_segment(self.container.as_deref().unwrap_or_default())
             .replace("::", "/")
             .replace(['.', '#', '\\'], "/");
-        let container = container.trim_matches('/');
+        let container = container.rsplit('/').next().unwrap_or(&container).trim();
         Some(if container.is_empty() {
             name.to_string()
         } else {
@@ -571,6 +579,33 @@ mod tests {
             Symbol::normalize_name("foo", f, SymbolKind::Function),
             "foo"
         );
+    }
+
+    #[test]
+    fn compute_paths_keys_by_immediate_container_for_nested_types() {
+        // namespace ns { class Outer { class Inner { void method } void om } }
+        let mut ns = build_symbol("ns", SymbolKind::Namespace);
+        let mut outer = build_symbol("Outer", SymbolKind::Class);
+        let mut inner = build_symbol("Inner", SymbolKind::Class);
+        inner.children = vec![build_symbol("method", SymbolKind::Method)];
+        outer.children = vec![inner, build_symbol("om", SymbolKind::Method)];
+        ns.children = vec![outer];
+
+        ns.compute_paths(None);
+
+        // The namespace is self-named but transparent; an enclosing type does
+        // NOT widen a member's path — every member is keyed by its IMMEDIATE
+        // container, matching what the LSP workspace surface can report.
+        let outer = &ns.children[0];
+        assert_eq!(outer.name_path, Some("Outer".to_string()));
+        let inner = &outer.children[0];
+        assert_eq!(inner.name_path, Some("Outer/Inner".to_string()));
+        // method is `Inner/method`, NOT `Outer/Inner/method`.
+        assert_eq!(
+            inner.children[0].name_path,
+            Some("Inner/method".to_string())
+        );
+        assert_eq!(outer.children[1].name_path, Some("Outer/om".to_string()));
     }
 
     #[test]
