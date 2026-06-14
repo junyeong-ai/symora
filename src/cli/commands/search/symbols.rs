@@ -145,12 +145,16 @@ async fn execute_glob_symbol_search(
         .max_by_key(|s| s.len())
         .unwrap_or("");
 
-    // Over-fetch the seed so the post-filter still has a full page to draw from.
+    // Scan a generous window of seed matches — independent of the display
+    // `limit` — so the glob `count` is the true total, not just the emitted
+    // page. A literal seed keeps this tight; only a bare `*` (empty seed)
+    // walks the whole index, which is exactly what `*` asks for.
+    const GLOB_SCAN_LIMIT: usize = 10_000;
     let page = match app
         .store
         .search_symbols(
             seed,
-            limit.saturating_mul(8),
+            GLOB_SCAN_LIMIT,
             kind.map(SymbolKind::parse_or_default),
         )
         .await
@@ -170,14 +174,15 @@ async fn execute_glob_symbol_search(
     };
 
     let stale = page.stale;
-    let mut matches: Vec<SymbolResultOutput> = page
+    // Keep every glob match for an accurate count; finish_symbol_search caps
+    // the emitted page at `limit` and sets `truncated`.
+    let matches: Vec<SymbolResultOutput> = page
         .rows
         .into_iter()
         .filter(|r| Symbol::path_matches(r.name_path.as_deref().unwrap_or(&r.name), query))
         .map(|r| index_result_output(r, ctx))
         .collect();
     let count = matches.len();
-    matches.truncate(limit);
 
     ctx.print_success(
         finish_symbol_search(matches, count, query, None, kind, limit).with_stale(stale),
