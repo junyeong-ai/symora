@@ -166,6 +166,21 @@ pub fn with_extra(mut base: Value, extras: &[(&str, &str, &str)]) -> Value {
     base
 }
 
+/// Mark `names` as required on `base` (appending to its `required` array). A
+/// property added via `with_extra` is optional by default; use this when the
+/// handler's input struct makes it mandatory (e.g. find_call_path's `to`), so
+/// the advertised schema stays in lockstep with deserialization.
+pub fn with_required(mut base: Value, names: &[&str]) -> Value {
+    let required = base
+        .get_mut("required")
+        .and_then(|v| v.as_array_mut())
+        .expect("base schema has a required array");
+    for name in names {
+        required.push(Value::String((*name).to_string()));
+    }
+    base
+}
+
 #[derive(Deserialize)]
 pub struct LocationInput {
     pub file: String,
