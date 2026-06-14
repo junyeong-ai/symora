@@ -10,14 +10,8 @@ use crate::models::lsp::{
 
 use super::converters::*;
 use super::helpers::*;
-use super::position::PositionConverter;
+use super::position::{PositionConverter, scalar_to_wire};
 use super::service::{DefaultLspService, ensure_indexed};
-
-/// The largest valid LSP position component: positions are `uinteger`
-/// (0 ..= 2^31-1). Used as the whole-line / whole-file end sentinel — the server
-/// clamps it to the real line and document end — instead of `u32::MAX`, which
-/// exceeds the LSP range.
-const LSP_POSITION_MAX: u32 = i32::MAX as u32;
 
 pub(super) async fn inlay_hints(
     service: &DefaultLspService,
@@ -38,26 +32,29 @@ pub(super) async fn inlay_hints(
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
+                let encoding = client.position_encoding().await;
+
                 // The surface is line-granular, so the wire range spans whole
-                // lines: column 0 through the max-LSP-uinteger end sentinel, which
-                // the server clamps to the real line and document end. The end
-                // bounds are capped to `LSP_POSITION_MAX` because LSP positions
-                // are `uinteger` (0 ..= 2^31-1); `u32::MAX` exceeds that and a
-                // strict server may reject it. Both bounds are encoding-invariant,
-                // so unlike the response positions (decoded at the boundary
-                // below) the request range needs no scalar→wire conversion.
+                // lines — but it must stay within the document: rust-analyzer
+                // rejects an inlayHint range whose position is past the file (it
+                // does not clamp out-of-bounds positions). Clamp to the real last
+                // line and end at that line's actual encoded end column.
+                let lines: Vec<&str> = content.lines().collect();
+                let last_line = lines.len().saturating_sub(1) as u32;
+                let start_line = start_line.min(last_line);
+                let end_line = end_line.min(last_line);
+                let end_char = lines
+                    .get(end_line as usize)
+                    .map(|line| scalar_to_wire(encoding, line, line.chars().count() as u32))
+                    .unwrap_or(0);
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
                     "range": {
-                        "start": { "line": start_line.min(LSP_POSITION_MAX), "character": 0 },
-                        "end": {
-                            "line": end_line.min(LSP_POSITION_MAX),
-                            "character": LSP_POSITION_MAX
-                        }
+                        "start": { "line": start_line, "character": 0 },
+                        "end": { "line": end_line, "character": end_char }
                     }
                 });
 
-                let encoding = client.position_encoding().await;
                 let mut conv = PositionConverter::new(encoding).with_content(&file, &content);
 
                 let hints: Option<Vec<serde_json::Value>> = client
