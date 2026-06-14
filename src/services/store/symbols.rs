@@ -617,8 +617,9 @@ function outer() {
         // anchor, so JS/TS indexing stays free of per-statement noise.
         assert_eq!(kind("inner"), None);
         assert_eq!(kind("i"), None);
-        // The const-arrow survives exclude_low_level — proof the kind fix
-        // restored callability, not just the label (a Variable is_low_level).
+        // A function-valued declarator is classified Function, which is callable
+        // (not is_low_level), so it survives exclude_low_level — a plain Variable
+        // would not.
         assert!(!SymbolKind::Function.is_low_level());
         assert!(kind("greet").is_some_and(|k| !k.is_low_level()));
     }

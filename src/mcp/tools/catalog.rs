@@ -119,7 +119,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             &[(
                 "target",
                 "object",
-                "The symbol the position resolved to: { name, kind, file, line, signature?, resolved }",
+                "The symbol the position resolved to: { name, kind, file, line, signature?, \
+                 anchor_status? } — anchor_status is \"not_a_symbol\" or \"unavailable\" only \
+                 when the position did not resolve to a symbol, omitted when resolved",
             )],
         )),
         ToolDefinition::read_only(
@@ -210,66 +212,64 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ],
             ),
         )
-        .with_output_schema(output_schema(
-            &[
-                (
-                    "target",
-                    "object",
-                    "The target the chain was sought to (file, line, column)",
-                ),
-                (
-                    "reachability",
-                    "string",
-                    "found | not_reached_within_bound | no_static_path",
-                ),
-                (
-                    "chain",
-                    "array",
-                    "Ordered call frames from the first hop through the target; present \
+        .with_output_schema(output_schema(&[
+            (
+                "target",
+                "object",
+                "The target the chain was sought to (file, line, column)",
+            ),
+            (
+                "reachability",
+                "string",
+                "found | not_reached_within_bound | no_static_path",
+            ),
+            (
+                "chain",
+                "array",
+                "Ordered call frames from the first hop through the target; present \
                      only when reachability is found",
-                ),
-                ("depth", "integer", "Depth actually reached"),
-                (
-                    "max_depth_reached",
-                    "boolean",
-                    "Search stopped at the depth cap (the negative is a lower bound)",
-                ),
-                (
-                    "callees_truncated",
-                    "boolean",
-                    "A node's fan-out hit the per-node cap (lower bound)",
-                ),
-                (
-                    "incomplete",
-                    "boolean",
-                    "A hop's call query failed and was treated as empty, so the \
+            ),
+            ("depth", "integer", "Depth actually reached"),
+            (
+                "max_depth_reached",
+                "boolean",
+                "Search stopped at the depth cap (the negative is a lower bound)",
+            ),
+            (
+                "callees_truncated",
+                "boolean",
+                "A node's fan-out hit the per-node cap (lower bound)",
+            ),
+            (
+                "incomplete",
+                "boolean",
+                "A hop's call query failed and was treated as empty, so the \
                      verdict is a lower bound — never an exhaustive negative",
-                ),
-                (
-                    "target_status",
-                    "string",
-                    "Present when the `to` target did not resolve to a verified symbol: \
+            ),
+            (
+                "target_status",
+                "string",
+                "Present when the `to` target did not resolve to a verified symbol: \
                      \"not_a_symbol\" or \"unavailable\"; the verdict is not authoritative \
                      (forced to not_reached_within_bound)",
-                ),
-                (
-                    "anchor_status",
-                    "string",
-                    "Present when the from-position did not resolve to a verified symbol: \
+            ),
+            (
+                "anchor_status",
+                "string",
+                "Present when the from-position did not resolve to a verified symbol: \
                      \"not_a_symbol\" or \"unavailable\"; the verdict is not authoritative",
-                ),
-                (
-                    "indexing",
-                    "string",
-                    "Present when a hop ran under degraded workspace indexing (lower bound)",
-                ),
-                (
-                    "hints",
-                    "array",
-                    "Optional next-step suggestions for the agent",
-                ),
-            ],
-        )),
+            ),
+            (
+                "indexing",
+                "string",
+                "Present when a hop ran under degraded workspace indexing (lower bound)",
+            ),
+            (
+                "hints",
+                "array",
+                "Optional next-step suggestions for the agent",
+            ),
+        ])),
         ToolDefinition::read_only(
             "find_implementations",
             "All concrete implementations of a trait/interface at \

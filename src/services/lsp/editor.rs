@@ -13,6 +13,12 @@ use super::helpers::*;
 use super::position::PositionConverter;
 use super::service::{DefaultLspService, ensure_indexed};
 
+/// The largest valid LSP position component: positions are `uinteger`
+/// (0 ..= 2^31-1). Used as the whole-line / whole-file end sentinel — the server
+/// clamps it to the real line and document end — instead of `u32::MAX`, which
+/// exceeds the LSP range.
+const LSP_POSITION_MAX: u32 = i32::MAX as u32;
+
 pub(super) async fn inlay_hints(
     service: &DefaultLspService,
     file: &Path,
@@ -33,15 +39,21 @@ pub(super) async fn inlay_hints(
                 client.sync_document(&uri, &content).await?;
 
                 // The surface is line-granular, so the wire range spans whole
-                // lines: column 0 through the saturating end-of-line sentinel the
-                // server clamps to the line. Both bounds are encoding-invariant,
+                // lines: column 0 through the max-LSP-uinteger end sentinel, which
+                // the server clamps to the real line and document end. The end
+                // bounds are capped to `LSP_POSITION_MAX` because LSP positions
+                // are `uinteger` (0 ..= 2^31-1); `u32::MAX` exceeds that and a
+                // strict server may reject it. Both bounds are encoding-invariant,
                 // so unlike the response positions (decoded at the boundary
                 // below) the request range needs no scalar→wire conversion.
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
                     "range": {
                         "start": { "line": start_line, "character": 0 },
-                        "end": { "line": end_line, "character": u32::MAX }
+                        "end": {
+                            "line": end_line.min(LSP_POSITION_MAX),
+                            "character": LSP_POSITION_MAX
+                        }
                     }
                 });
 
