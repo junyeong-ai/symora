@@ -124,8 +124,9 @@ pub(super) fn convert_document_symbols(
                 conv.scalar_column(file, range.end.line, range.end.character),
             );
 
+            let display_name = Symbol::normalize_symbol_name(&doc_sym.name);
             let mut symbol = Symbol::new(
-                Symbol::strip_type_parameters(&doc_sym.name),
+                display_name.clone(),
                 convert_symbol_kind(doc_sym.kind),
                 location,
             );
@@ -148,7 +149,7 @@ pub(super) fn convert_document_symbols(
                     file,
                     options,
                     content,
-                    Some(&doc_sym.name),
+                    Some(&display_name),
                     current_depth + 1,
                     conv,
                 );
