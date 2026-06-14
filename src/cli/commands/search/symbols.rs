@@ -692,10 +692,10 @@ fn synthesized_symbol_path(symbol: &crate::models::symbol::Symbol) -> Option<Str
         return None;
     }
 
-    let container = symbol
-        .container
-        .as_deref()
-        .unwrap_or_default()
+    // Collapse a structural impl self type (tuple/array/pointer/qualified) to
+    // its nominal head before separator translation, so a workspace-symbol row
+    // carries the same name_path as the index and documentSymbol surfaces.
+    let container = Symbol::container_segment(symbol.container.as_deref().unwrap_or_default())
         .replace("::", "/")
         .replace(['.', '#', '\\'], "/");
     let container = container.trim_matches('/');
@@ -1150,5 +1150,32 @@ mod tests {
         );
         assert!(section.hints.is_empty());
         assert!(section.next_commands.is_empty());
+    }
+
+    /// A workspace-symbol row must carry the same `name_path` the index and
+    /// documentSymbol surfaces emit: a structural impl self type collapses to
+    /// its nominal head (so a path copied from `search` resolves under
+    /// `symbols`/`edit`), while plain and module-qualified containers keep
+    /// their path.
+    #[test]
+    fn synthesized_path_collapses_structural_self_type_containers() {
+        use crate::models::symbol::Location;
+        use std::path::PathBuf;
+        let m = |container: &str| {
+            let sym = Symbol::new(
+                "tm".to_string(),
+                SymbolKind::Method,
+                Location::point(PathBuf::from("a.rs"), 1, 1),
+            )
+            .with_container(container);
+            synthesized_symbol_path(&sym)
+        };
+        assert_eq!(m("(Foo, Bar)").as_deref(), Some("Foo/tm"));
+        assert_eq!(m("[Elem; 4]").as_deref(), Some("Elem/tm"));
+        assert_eq!(m("*const Ptr").as_deref(), Some("Ptr/tm"));
+        assert_eq!(m("<Qual as Baz>::Out").as_deref(), Some("Qual/tm"));
+        // nominal and module-qualified containers keep their path
+        assert_eq!(m("Language").as_deref(), Some("Language/tm"));
+        assert_eq!(m("outer::Inner").as_deref(), Some("outer/Inner/tm"));
     }
 }
