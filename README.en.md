@@ -67,7 +67,7 @@ symora usage src/main.rs:42:10
 - **Edit and refactor** — `rename`, `actions`, the `edit` subcommands (symbol- or line-addressed splices with exact dry-run previews and a reference-guarded `delete`), `format`
 - **Health checks** — `diagnostics`, `doctor`, `status`
 
-Every command prints JSON; `--help` on any of them shows its flags and output shape.
+Output is JSON by default (`pack` also offers paste-ready plain text via `--shape markdown`); `--help` on any command shows its flags and options.
 
 ---
 

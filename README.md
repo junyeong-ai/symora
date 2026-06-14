@@ -67,7 +67,7 @@ symora usage src/main.rs:42:10
 - **편집 및 리팩터링** — `rename`, `actions`, `edit` 서브커맨드(심볼 또는 라인 지정 splice, 정확한 dry-run 미리보기, 참조 검증이 붙은 `delete`), `format`
 - **상태 점검** — `diagnostics`, `doctor`, `status`
 
-모든 명령은 JSON을 출력하며, 각 명령의 `--help`에서 플래그와 출력 형태를 확인할 수 있습니다.
+출력은 기본적으로 JSON이며(`pack`은 `--shape markdown`으로 붙여넣기용 플레인 텍스트도 지원), 각 명령의 `--help`에서 플래그와 옵션을 확인할 수 있습니다.
 
 ---
 
