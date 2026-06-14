@@ -15,7 +15,7 @@ pub use analysis::{LocationAnalysis, detect_exported};
 pub use blast_radius::{BlastRadius, RiskLevel};
 pub use call_graph::{CallGraphWalk, Direction, WalkConfig};
 pub use errors::{ErrorCode, OutputError};
-pub use input_error::CliInputError;
+pub use input_error::{CliInputError, resolve_project_file};
 pub use location::{LocationArg, ParsedLocation};
 pub use output::{OutputContext, OutputFormat, OutputOptions};
 pub use workspace::WorkspaceConfig;

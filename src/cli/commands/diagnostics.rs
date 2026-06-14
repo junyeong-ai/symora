@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::resolve_project_file;
 use crate::cli::response::{DiagnosticOutput, Section};
 use crate::models::diagnostic::{DiagnosticSeverity, DiagnosticsStatus};
 
@@ -107,10 +108,12 @@ fn parse_severity_filter(
 pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
 
-    let abs_file = if args.file.is_absolute() {
-        args.file.clone()
-    } else {
-        app.root().join(&args.file)
+    let abs_file = match resolve_project_file(&args.file, app.root()) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
     };
 
     let severity_filter = match parse_severity_filter(args.severity.as_deref()) {

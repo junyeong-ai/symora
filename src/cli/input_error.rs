@@ -1,8 +1,29 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use super::errors::{ErrorCode, OutputError};
+
+/// Resolve a bare file argument against the project root and confirm it is a
+/// real file before any language-server call. File-only commands (`symbols`,
+/// `map file`, `inlay-hints`, `folding`, `selection`, `code-lens`, `format`,
+/// `diagnostics`, `edit`) otherwise hand a mistyped path straight to the
+/// server, which surfaces it as an opaque `internal` "Protocol error: No such
+/// file" — indistinguishable from a real tool failure. This is the file-only
+/// counterpart to `LocationArg`'s position validation, mapping a bad path to
+/// the actionable `not_found` an agent can branch on.
+pub fn resolve_project_file(file: &Path, root: &Path) -> Result<PathBuf, CliInputError> {
+    let resolved = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        root.join(file)
+    };
+    if resolved.is_file() {
+        Ok(resolved)
+    } else {
+        Err(CliInputError::FileNotFound(resolved))
+    }
+}
 
 /// User-input validation errors raised by the CLI front-end. Every variant
 /// carries the structured information needed to render a stable
@@ -65,6 +86,28 @@ impl From<CliInputError> for OutputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_project_file_rejects_missing_and_accepts_real() {
+        let root = std::path::Path::new("/");
+        // A missing path is a typed not-found, never an opaque internal error.
+        let err = resolve_project_file(
+            std::path::Path::new("nonexistent_symora_probe_xyz.rs"),
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CliInputError::FileNotFound(_)));
+        let out: OutputError = err.into();
+        assert!(matches!(out.code, ErrorCode::NotFound));
+        // A directory is not a usable file either.
+        assert!(matches!(
+            resolve_project_file(std::path::Path::new("tmp"), root),
+            Err(CliInputError::FileNotFound(_))
+        ));
+        // An existing absolute file resolves through unchanged.
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(resolve_project_file(&exe, root).unwrap(), exe);
+    }
 
     #[test]
     fn file_not_found_maps_to_not_found_code() {

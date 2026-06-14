@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::resolve_project_file;
 use crate::cli::response::{Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
     broad_symbol_kind_bonus, generic_exact_identifier_penalty, is_probably_test_path,
@@ -103,11 +104,12 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
         }
     };
 
-    let path = std::path::Path::new(&file);
-    let abs_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        app.root().join(path)
+    let abs_path = match resolve_project_file(std::path::Path::new(&file), app.root()) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
     };
 
     let effective_depth = if args.symbol.is_some() && args.depth == 0 {

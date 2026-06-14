@@ -5,6 +5,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::resolve_project_file;
 use crate::cli::response::Section;
 
 #[derive(Args, Debug)]
@@ -25,10 +26,12 @@ pub struct CodeLensOutput {
 
 pub async fn execute(args: CodeLensArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let file = if args.file.is_absolute() {
-        args.file.clone()
-    } else {
-        app.root().join(&args.file)
+    let file = match resolve_project_file(&args.file, app.root()) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
     };
 
     match app.lsp.code_lenses(&file).await {

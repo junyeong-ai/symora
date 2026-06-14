@@ -5,6 +5,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
+use crate::cli::resolve_project_file;
 use crate::cli::response::Section;
 
 #[derive(Args, Debug)]
@@ -40,10 +41,12 @@ fn is_false(v: &bool) -> bool {
 
 pub async fn execute(args: InlayHintsArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
-    let file = if args.file.is_absolute() {
-        args.file.clone()
-    } else {
-        app.root().join(&args.file)
+    let file = match resolve_project_file(&args.file, app.root()) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
     };
     // The surface is line-granular and 1-indexed; the LSP wire is 0-indexed.
     let start_line = args.start_line.saturating_sub(1);

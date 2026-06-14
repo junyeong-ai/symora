@@ -1308,6 +1308,12 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
     } else {
         app.root().join(path)
     };
+    // Validate existence before canonicalizing: a missing path makes
+    // `canonicalize` fail with an opaque io error that reads as an internal
+    // fault, when it is really a `not_found` the caller can act on.
+    if !resolved.is_file() {
+        anyhow::bail!(crate::cli::CliInputError::FileNotFound(resolved));
+    }
     let canonical = resolved
         .canonicalize()
         .with_context(|| format!("Cannot resolve path: {}", resolved.display()))?;
