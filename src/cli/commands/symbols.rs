@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::cli::OutputError;
@@ -13,7 +14,8 @@ use crate::cli::symbol_discovery::{
 use crate::cli::utils::extract_signature;
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{Language, Symbol, SymbolKind};
+use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
+use crate::services::store::SymbolSearchResult;
 
 #[derive(Args, Debug)]
 #[command(
@@ -87,6 +89,8 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 exclude_kinds,
                 substring: args.substring,
                 structural: args.structural,
+                body: args.body,
+                signature: args.signature,
                 limit,
             },
             app,
@@ -170,6 +174,8 @@ struct WorkspaceParams<'a> {
     exclude_kinds: Option<Vec<SymbolKind>>,
     substring: bool,
     structural: bool,
+    body: bool,
+    signature: bool,
     limit: usize,
 }
 
@@ -182,6 +188,8 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         exclude_kinds,
         substring,
         structural,
+        body,
+        signature,
         limit,
     } = params;
     let ctx = &app.output;
@@ -210,6 +218,26 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
 
     let mut symbols = Vec::new();
     let mut seen = HashSet::new();
+
+    // Index-primary: the tree-sitter index carries every symbol — including the
+    // methods rust-analyzer's workspace/symbol recall routinely drops — under
+    // the same canonical name_path the other surfaces use, so a `Type/method`
+    // path resolves here even when the live server omits it. The LSP pass below
+    // then supplements languages the index does not extract and any edits made
+    // since the last build.
+    if let Ok(page) = app
+        .store
+        .search_symbols(&query, limit.saturating_mul(2), None)
+        .await
+    {
+        for row in page.rows {
+            let symbol = symbol_from_index_row(row);
+            if seen.insert(workspace_dedup_key(&symbol)) {
+                symbols.push(symbol);
+            }
+        }
+    }
+
     for language in &languages {
         let Ok(batch) = app.lsp.workspace_symbols(&query, *language).await else {
             continue;
@@ -221,14 +249,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
             }
         }
         for symbol in batch {
-            let key = format!(
-                "{}:{}:{}:{}",
-                symbol.location.file.display(),
-                symbol.location.line,
-                symbol.location.column,
-                symbol.path()
-            );
-            if seen.insert(key) {
+            if seen.insert(workspace_dedup_key(&symbol)) {
                 symbols.push(symbol);
             }
         }
@@ -257,10 +278,14 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let total = filtered.len();
     let limited: Vec<_> = filtered.into_iter().take(limit).collect();
 
-    let items: Vec<SymbolOutput> = limited
-        .iter()
-        .map(|s| SymbolOutput::from_symbol(s, ctx.root()))
-        .collect();
+    let items: Vec<SymbolOutput> = if body || signature {
+        workspace_symbol_bodies(app, &limited, signature).await
+    } else {
+        limited
+            .iter()
+            .map(|s| SymbolOutput::from_symbol(s, ctx.root()))
+            .collect()
+    };
     let item_count = items.len();
     let truncated = item_count < total;
     let hints = workspace_symbol_hints(
@@ -275,6 +300,91 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     ctx.print_success(Section::with_total(items, total).with_hints(hints));
 
     Ok(())
+}
+
+/// Build a `Symbol` from an index search row. The index records the symbol's
+/// start position; a workspace result is addressed and navigated by that point,
+/// exactly as rust-analyzer's own workspace symbols are (their location is the
+/// name span too), so this is the same shape the LSP pass produces.
+fn symbol_from_index_row(row: SymbolSearchResult) -> Symbol {
+    let mut symbol = Symbol::new(
+        row.name,
+        row.kind,
+        Location::point(row.file, row.line, row.column),
+    );
+    symbol.name_path = row.name_path;
+    symbol.container = row.container;
+    symbol
+}
+
+/// Dedup key for merging the index and LSP workspace passes: the same symbol is
+/// reported at the same file, position, and path regardless of its source.
+fn workspace_dedup_key(symbol: &Symbol) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        symbol.location.file.display(),
+        symbol.location.line,
+        symbol.location.column,
+        symbol.path()
+    )
+}
+
+/// Attach bodies to resolved workspace symbols. The index and `workspace/symbol`
+/// surfaces carry only a name-span location, so the body is read from each
+/// file's documentSymbol tree (which has the full range) — one request per
+/// distinct file, matched back by the canonical `name_path` every producer
+/// agrees on. A symbol the document tree does not surface keeps its bodiless
+/// row rather than a wrong slice.
+async fn workspace_symbol_bodies(
+    app: &App,
+    resolved: &[Symbol],
+    signature: bool,
+) -> Vec<SymbolOutput> {
+    let ctx = &app.output;
+    let options = FindSymbolsOptions::default()
+        .with_depth(u32::MAX)
+        .with_body();
+
+    let mut bodied: HashMap<(PathBuf, String), Symbol> = HashMap::new();
+    let mut fetched: HashSet<PathBuf> = HashSet::new();
+    for symbol in resolved {
+        let file = symbol.location.file.clone();
+        if !fetched.insert(file.clone()) {
+            continue;
+        }
+        if let Ok(mut tree) = app.lsp.find_symbols(&file, options.clone()).await {
+            Symbol::compute_paths_for_all(&mut tree);
+            collect_bodied(&tree, &file, &mut bodied);
+        }
+    }
+
+    resolved
+        .iter()
+        .map(|symbol| {
+            let key = (symbol.location.file.clone(), symbol.path().to_string());
+            let source = bodied.get(&key).unwrap_or(symbol);
+            let mut output = SymbolOutput::from_symbol(source, ctx.root());
+            if signature {
+                let sig = extract_signature(source.body.as_deref());
+                output = output.with_signature(sig).without_body();
+            }
+            output
+        })
+        .collect()
+}
+
+/// Index a file's documentSymbol tree by `(file, name_path)` so a resolved
+/// workspace symbol can claim its full body.
+fn collect_bodied(symbols: &[Symbol], file: &Path, out: &mut HashMap<(PathBuf, String), Symbol>) {
+    for symbol in symbols {
+        out.insert(
+            (file.to_path_buf(), symbol.path().to_string()),
+            symbol.clone(),
+        );
+        if !symbol.children.is_empty() {
+            collect_bodied(&symbol.children, file, out);
+        }
+    }
 }
 
 fn resolve_workspace_languages(app: &App, lang: Option<&str>) -> Vec<Language> {
