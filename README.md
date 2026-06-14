@@ -315,7 +315,7 @@ symora usage processOrder --lang typescript         # 이름 또는 위치로 �
 symora impact src/services/checkout.ts:48           # 변경 영향 범위
 symora diff-impact                                  # 현재 git diff의 영향
 
-# 편집 & 리팩터링 (모두 --dry-run 지원)
+# 편집 & 리팩터링 (변경 작업은 --dry-run으로 미리보기)
 symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
 symora edit insert-before / insert-after / delete / replace / pattern
 symora rename src/services/checkout.ts:48:9 settleOrder --dry-run
