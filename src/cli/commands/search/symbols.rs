@@ -73,7 +73,7 @@ pub async fn execute_symbol_search(
 
     match app
         .store
-        .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default))
+        .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default), None)
         .await
     {
         Ok(page) => {
@@ -157,7 +157,12 @@ async fn execute_glob_symbol_search(
     // for. `finish_symbol_search` caps the emitted page at the display `limit`.
     let page = match app
         .store
-        .search_symbols(seed, usize::MAX, kind.map(SymbolKind::parse_or_default))
+        .search_symbols(
+            seed,
+            usize::MAX,
+            kind.map(SymbolKind::parse_or_default),
+            None,
+        )
         .await
     {
         Ok(page) => page,
@@ -255,7 +260,7 @@ async fn execute_workspace_symbol_search(
     if looks_like_symbol_path(query)
         && let Ok(page) = app
             .store
-            .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default))
+            .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default), None)
             .await
     {
         index_answered = true;

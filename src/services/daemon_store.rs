@@ -38,11 +38,13 @@ impl StoreService for DaemonStoreService {
         query: &str,
         limit: usize,
         kind: Option<SymbolKind>,
+        language: Option<Language>,
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
         let kind = kind.map(|k| k.to_string());
+        let language = language.map(|l| l.lsp_id().to_string());
         let response = self
             .client
-            .search_symbols(query, Some(limit), kind.as_deref())
+            .search_symbols(query, Some(limit), kind.as_deref(), language.as_deref())
             .await
             .map_err(store_error)?;
         let section: Section<SymbolSearchResult> =

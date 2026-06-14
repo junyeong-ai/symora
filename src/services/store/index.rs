@@ -195,6 +195,7 @@ impl Store {
         query: &str,
         limit: usize,
         kind_filter: Option<SymbolKind>,
+        language: Option<Language>,
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
         if !self.index_ready.load(Ordering::SeqCst) {
             return Err(StoreError::NotInitialized);
@@ -203,16 +204,23 @@ impl Store {
         let query = query.to_string();
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
+        let lang_str = language.map(|l| l.lsp_id().to_string());
 
         let (mut page, snapshot) = self
             .db
             .call(move |conn| {
-                let sql = build_symbol_search_query(kind_str.is_some());
+                let sql = build_symbol_search_query(kind_str.is_some(), lang_str.is_some());
                 let mut stmt = conn.prepare(&sql)?;
-                let rows = match &kind_str {
-                    Some(k) => stmt.query(rusqlite::params![query, limit, k])?,
-                    None => stmt.query(rusqlite::params![query, limit])?,
-                };
+                // Bind in the order the SQL numbers them: query, limit, then the
+                // optional kind and language filters.
+                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&query, &limit];
+                if let Some(kind) = &kind_str {
+                    params.push(kind);
+                }
+                if let Some(lang) = &lang_str {
+                    params.push(lang);
+                }
+                let rows = stmt.query(params.as_slice())?;
 
                 let mut total = 0usize;
                 let rows: Vec<SymbolSearchResult> = rows
@@ -813,7 +821,11 @@ mod tests {
     use super::*;
 
     async fn total_matches(store: &Store, query: &str) -> usize {
-        store.search_symbols(query, 50, None).await.unwrap().total
+        store
+            .search_symbols(query, 50, None, None)
+            .await
+            .unwrap()
+            .total
     }
 
     /// Run the content-search SQL directly with a chosen `use_fts`, returning
@@ -1046,9 +1058,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(total_matches(&store, "alpha").await, 0);
-        let page = store.search_symbols("beta", 50, None).await.unwrap();
+        let page = store.search_symbols("beta", 50, None, None).await.unwrap();
         assert_eq!(page.total, 1);
         assert!(!page.stale);
+    }
+
+    #[tokio::test]
+    async fn search_symbols_language_filter_scopes_to_one_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "pub fn shared() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("mod.py"), "def shared():\n    pass\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        // Unfiltered, the name spans both languages.
+        let all = store
+            .search_symbols("shared", 50, None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.rows.len(), 2);
+
+        // A language filter scopes the index to exactly that language — no
+        // cross-language leakage.
+        let rust = store
+            .search_symbols("shared", 50, None, Some(Language::Rust))
+            .await
+            .unwrap();
+        assert_eq!(rust.rows.len(), 1);
+        assert!(rust.rows[0].file.ends_with("lib.rs"));
+
+        let py = store
+            .search_symbols("shared", 50, None, Some(Language::Python))
+            .await
+            .unwrap();
+        assert_eq!(py.rows.len(), 1);
+        assert!(py.rows[0].file.ends_with("mod.py"));
     }
 
     #[tokio::test]
@@ -1219,20 +1268,32 @@ mod tests {
         tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
         store.index(IndexOptions::default()).await.unwrap();
-        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+        assert!(
+            !store
+                .search_symbols("alpha", 50, None, None)
+                .await
+                .unwrap()
+                .stale
+        );
 
         // An edit the store never saw (external tool, git checkout): the old
         // rows still match the query but must carry the stale marker…
         tokio::fs::write(&file, "fn alpha() { changed() }\n")
             .await
             .unwrap();
-        let page = store.search_symbols("alpha", 50, None).await.unwrap();
+        let page = store.search_symbols("alpha", 50, None, None).await.unwrap();
         assert_eq!(page.total, 1);
         assert!(page.stale);
 
         // …until the next index pass clears it.
         store.index(IndexOptions::default()).await.unwrap();
-        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+        assert!(
+            !store
+                .search_symbols("alpha", 50, None, None)
+                .await
+                .unwrap()
+                .stale
+        );
     }
 
     #[tokio::test]
@@ -1246,7 +1307,13 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
 
         tokio::fs::remove_file(&file).await.unwrap();
-        assert!(store.search_symbols("alpha", 50, None).await.unwrap().stale);
+        assert!(
+            store
+                .search_symbols("alpha", 50, None, None)
+                .await
+                .unwrap()
+                .stale
+        );
     }
 
     #[tokio::test]
@@ -1269,10 +1336,22 @@ mod tests {
         tokio::fs::write(root.join("b.rs"), "fn beta_v2() {}\n")
             .await
             .unwrap();
-        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+        assert!(
+            !store
+                .search_symbols("alpha", 50, None, None)
+                .await
+                .unwrap()
+                .stale
+        );
         tokio::fs::write(root.join("a.rs"), "fn alpha() {}\n")
             .await
             .unwrap();
-        assert!(!store.search_symbols("alpha", 50, None).await.unwrap().stale);
+        assert!(
+            !store
+                .search_symbols("alpha", 50, None, None)
+                .await
+                .unwrap()
+                .stale
+        );
     }
 }

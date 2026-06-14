@@ -499,12 +499,14 @@ impl DaemonClient {
         query: &str,
         limit: Option<usize>,
         kind: Option<&str>,
+        language: Option<&str>,
     ) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
         let params = serde_json::json!({
             "query": query,
             "limit": limit,
             "kind": kind,
+            "language": language,
         });
         self.request_with_project(methods::SEARCH_SYMBOLS, params, None)
             .await

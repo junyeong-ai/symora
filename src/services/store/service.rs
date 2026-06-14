@@ -27,6 +27,7 @@ pub trait StoreService: Send + Sync {
         query: &str,
         limit: usize,
         kind: Option<SymbolKind>,
+        language: Option<Language>,
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError>;
 
     async fn search_content(
@@ -121,10 +122,11 @@ impl StoreService for DefaultStoreService {
         query: &str,
         limit: usize,
         kind: Option<SymbolKind>,
+        language: Option<Language>,
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
         self.store_for_read()
             .await?
-            .search_symbols(query, limit, kind)
+            .search_symbols(query, limit, kind, language)
             .await
     }
 
@@ -209,7 +211,7 @@ mod tests {
 
         // A read on a never-built project: NotInitialized, but the DB file
         // now exists on disk.
-        let read = service.search_symbols("alpha", 10, None).await;
+        let read = service.search_symbols("alpha", 10, None, None).await;
         assert!(matches!(read, Err(StoreError::NotInitialized)));
         assert!(Store::db_path(root).exists());
 
@@ -221,7 +223,7 @@ mod tests {
             .await
             .unwrap();
 
-        let after = service.search_symbols("beta", 10, None).await;
+        let after = service.search_symbols("beta", 10, None, None).await;
         assert!(
             matches!(after, Err(StoreError::NotInitialized)),
             "a read-materialized store must stay never-built after an edit"
@@ -246,11 +248,14 @@ mod tests {
             .await
             .unwrap();
 
-        let page = service.search_symbols("beta", 10, None).await.unwrap();
+        let page = service
+            .search_symbols("beta", 10, None, None)
+            .await
+            .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(
             service
-                .search_symbols("alpha", 10, None)
+                .search_symbols("alpha", 10, None, None)
                 .await
                 .unwrap()
                 .total,
