@@ -415,7 +415,14 @@ async fn symbol_edit(
     };
     let target = Some((symbol.path().to_string(), symbol.kind.to_string()));
     let mut output = doc.commit(app, operation, splice, span, target, dry_run)?;
-    output.diagnostics = pull_diagnostics(app, file, dry_run, with_diagnostics).await;
+    // verify-callers must cover SAME-FILE callers too — they live in the edited
+    // file, which collect_caller_files deliberately excludes (to avoid
+    // double-diagnosis). So verify-callers implies the edited file's own
+    // diagnostics even without --with-diagnostics; otherwise a same-file
+    // call-site break would be silently dropped and the empty caller list would
+    // read as authoritative.
+    output.diagnostics =
+        pull_diagnostics(app, file, dry_run, with_diagnostics || verify_callers).await;
     if let Some(callers) = caller_files {
         // Caller diagnostics must judge the edit's NEW signature. Sync the
         // edited file to the language server before pulling them. `finish`
@@ -742,9 +749,11 @@ struct CallerFiles {
     status: Option<&'static str>,
 }
 
-/// Resolve the distinct files that reference `symbol` (excluding the edited
-/// file), capped and deterministic. `status` is set only when the reference
-/// lookup could not run — never paired with files.
+/// Resolve the distinct files that reference `symbol`, EXCLUDING the edited file
+/// — its same-file callers are covered by the edit's own edited-file diagnostics
+/// (which verify-callers forces on), so listing it here too would double-diagnose
+/// it. Capped and deterministic. `status` is set only when the reference lookup
+/// could not run — never paired with files.
 async fn collect_caller_files(app: &App, file: &Path, symbol: &Symbol) -> CallerFiles {
     use crate::infra::lsp::capabilities::{LspFeature, SupportLevel, get_support_level};
 

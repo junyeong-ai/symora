@@ -2,7 +2,7 @@ use crate::mcp::protocol::ToolDefinition;
 
 use super::schema::{
     edit_target_schema, location_schema, output_schema, position_exact_location_schema,
-    schema_object, section_output_schema, with_extra,
+    schema_object, section_output_schema, with_extra, with_required,
 };
 
 pub fn build_catalog() -> Vec<ToolDefinition> {
@@ -200,16 +200,19 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           not_reached_within_bound / no_static_path) that never overclaims — \
                           dynamic dispatch stays a disclosed lower bound, never an absolute \
                           'unreachable'.",
-            with_extra(
-                location_schema(),
-                &[
-                    (
-                        "to",
-                        "string",
-                        "Target location (file:line[:column]) the call chain is sought to",
-                    ),
-                    ("depth", "integer", "Max search depth, 1-3 (default 3)"),
-                ],
+            with_required(
+                with_extra(
+                    location_schema(),
+                    &[
+                        (
+                            "to",
+                            "string",
+                            "Target location (file:line[:column]) the call chain is sought to",
+                        ),
+                        ("depth", "integer", "Max search depth, 1-3 (default 3)"),
+                    ],
+                ),
+                &["to"],
             ),
         )
         .with_output_schema(output_schema(&[

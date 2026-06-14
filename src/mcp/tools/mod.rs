@@ -304,6 +304,18 @@ mod tests {
         }
     }
 
+    /// `find_call_path`'s handler requires a `to` target (a non-Option field), so
+    /// the advertised schema must mark it required — otherwise the schema and the
+    /// deserializer disagree and a client could omit `to` per the schema and hit
+    /// a runtime error.
+    #[test]
+    fn find_call_path_marks_the_to_target_required() {
+        assert!(
+            required_of(tool("find_call_path")).contains(&"to"),
+            "find_call_path must advertise `to` as required"
+        );
+    }
+
     #[test]
     fn unknown_arguments_are_rejected_structurally() {
         use serde_json::json;
