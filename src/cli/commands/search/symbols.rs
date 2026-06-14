@@ -145,18 +145,14 @@ async fn execute_glob_symbol_search(
         .max_by_key(|s| s.len())
         .unwrap_or("");
 
-    // Scan a generous window of seed matches — independent of the display
-    // `limit` — so the glob `count` is the true total, not just the emitted
-    // page. A literal seed keeps this tight; only a bare `*` (empty seed)
-    // walks the whole index, which is exactly what `*` asks for.
-    const GLOB_SCAN_LIMIT: usize = 10_000;
+    // Scan every seed match — `usize::MAX` lands as SQLite `LIMIT -1`
+    // (unlimited) — so the glob `count` is the exact total rather than a
+    // page-capped lower bound. A literal seed keeps the set small; only a bare
+    // `*` (empty seed) walks the whole index, which is exactly what `*` asks
+    // for. `finish_symbol_search` caps the emitted page at the display `limit`.
     let page = match app
         .store
-        .search_symbols(
-            seed,
-            GLOB_SCAN_LIMIT,
-            kind.map(SymbolKind::parse_or_default),
-        )
+        .search_symbols(seed, usize::MAX, kind.map(SymbolKind::parse_or_default))
         .await
     {
         Ok(page) => page,
