@@ -350,10 +350,7 @@ impl Symbol {
         // matching the index extractor's first-`type_identifier` rule so the
         // two surfaces agree on the path. Checked before stripping leading
         // generics so a qualified type's `<…>` isn't mistaken for impl params.
-        if head.starts_with(['(', '[', '*'])
-            || head.starts_with("fn(")
-            || (head.starts_with('<') && head.contains(" as "))
-        {
+        if Self::is_structural_self_type(head) {
             return Self::first_nominal_ident(head);
         }
 
@@ -380,6 +377,29 @@ impl Symbol {
             }
         }
         ty.rsplit("::").next().unwrap_or(ty).trim().to_string()
+    }
+
+    /// A structural self type — tuple, array/slice, raw pointer, fn-pointer, or
+    /// qualified `<T as Tr>::X` — carries no outer nominal name.
+    fn is_structural_self_type(head: &str) -> bool {
+        head.starts_with(['(', '[', '*'])
+            || head.starts_with("fn(")
+            || (head.starts_with('<') && head.contains(" as "))
+    }
+
+    /// Reduce a workspace-symbol container (the immediate enclosing type, as
+    /// rust-analyzer renders it) to the same segment the index and
+    /// documentSymbol surfaces use: a structural self type collapses to its
+    /// first nominal identifier, everything else is returned unchanged for the
+    /// caller's separator translation. Keeps the three name_path producers in
+    /// agreement so a path copied from `search` resolves under `symbols`/`edit`.
+    pub(crate) fn container_segment(container: &str) -> String {
+        let head = container.trim();
+        if Self::is_structural_self_type(head) {
+            Self::first_nominal_ident(head)
+        } else {
+            head.to_string()
+        }
     }
 
     /// The first nominal type identifier in a structural type string, skipping
