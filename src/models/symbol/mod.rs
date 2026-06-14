@@ -330,17 +330,21 @@ impl Symbol {
         if let Some(rest) = name.strip_prefix("impl")
             && rest.starts_with(|c: char| c.is_whitespace() || c == '<')
         {
-            return Self::impl_self_type(rest);
+            return Self::self_type_segment(rest);
         }
         Self::strip_type_parameters(name)
     }
 
-    /// The implementing type from an impl header (the text after `impl`): the
-    /// type after ` for ` for a trait impl, otherwise the head type, reduced to
-    /// the bare type name — the where-clause, the impl and type generics, a
-    /// leading `&`/`&mut`/`dyn`/lifetime, and any module path all stripped.
-    fn impl_self_type(after_impl: &str) -> String {
-        let head = after_impl.rsplit(" for ").next().unwrap_or(after_impl);
+    /// Reduce a self-type expression to its path segment — the one rule every
+    /// name_path producer (the index extractor, the documentSymbol converter,
+    /// and the workspace-symbol path) applies to an impl's self type so they
+    /// agree. From an impl header it is the type after ` for ` (trait impl)
+    /// else the head type; a structural type (tuple/array/pointer/fn-ptr/
+    /// qualified) collapses to its first nominal identifier, and a nominal one
+    /// drops the where-clause, the impl and type generics, a leading
+    /// `&`/`&mut`/`dyn`/lifetime, and any module path.
+    pub(crate) fn self_type_segment(self_type: &str) -> String {
+        let head = self_type.rsplit(" for ").next().unwrap_or(self_type);
         let head = head.split(" where ").next().unwrap_or(head).trim();
 
         // Structural self types — tuple `(A, B)`, array/slice `[T; N]`,
@@ -387,19 +391,25 @@ impl Symbol {
             || (head.starts_with('<') && head.contains(" as "))
     }
 
-    /// Reduce a workspace-symbol container (the immediate enclosing type, as
-    /// rust-analyzer renders it) to the same segment the index and
-    /// documentSymbol surfaces use: a structural self type collapses to its
-    /// first nominal identifier, everything else is returned unchanged for the
-    /// caller's separator translation. Keeps the three name_path producers in
-    /// agreement so a path copied from `search` resolves under `symbols`/`edit`.
-    pub(crate) fn container_segment(container: &str) -> String {
-        let head = container.trim();
-        if Self::is_structural_self_type(head) {
-            Self::first_nominal_ident(head)
-        } else {
-            head.to_string()
+    /// The path an unresolved workspace symbol is addressed by: its container
+    /// reduced via [`Self::self_type_segment`] — so an impl method matches the
+    /// index/documentSymbol name_path and a copied path round-trips to
+    /// `symbols`/`edit` — joined to the name, with language container
+    /// separators (`::`, `.`, `#`, `\`) normalized to `/`.
+    pub(crate) fn workspace_name_path(&self) -> Option<String> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return None;
         }
+        let container = Self::self_type_segment(self.container.as_deref().unwrap_or_default())
+            .replace("::", "/")
+            .replace(['.', '#', '\\'], "/");
+        let container = container.trim_matches('/');
+        Some(if container.is_empty() {
+            name.to_string()
+        } else {
+            format!("{container}/{name}")
+        })
     }
 
     /// The first nominal type identifier in a structural type string, skipping

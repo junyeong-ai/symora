@@ -391,7 +391,7 @@ async fn collect_workspace_symbol_results(
         };
 
         for symbol in &mut symbols {
-            if let Some(path) = synthesized_symbol_path(symbol) {
+            if let Some(path) = symbol.workspace_name_path() {
                 symbol.name_path = Some(path);
             }
         }
@@ -684,26 +684,6 @@ fn workspace_query_from_pattern(pattern: &str) -> String {
     let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
     let base = last.split('[').next().unwrap_or(last);
     base.trim_matches('*').to_string()
-}
-
-fn synthesized_symbol_path(symbol: &crate::models::symbol::Symbol) -> Option<String> {
-    let name = symbol.name.trim();
-    if name.is_empty() {
-        return None;
-    }
-
-    // Collapse a structural impl self type (tuple/array/pointer/qualified) to
-    // its nominal head before separator translation, so a workspace-symbol row
-    // carries the same name_path as the index and documentSymbol surfaces.
-    let container = Symbol::container_segment(symbol.container.as_deref().unwrap_or_default())
-        .replace("::", "/")
-        .replace(['.', '#', '\\'], "/");
-    let container = container.trim_matches('/');
-    if container.is_empty() {
-        Some(name.to_string())
-    } else {
-        Some(format!("{}/{}", container, name))
-    }
 }
 
 fn kind_matches(
@@ -1158,24 +1138,26 @@ mod tests {
     /// `symbols`/`edit`), while plain and module-qualified containers keep
     /// their path.
     #[test]
-    fn synthesized_path_collapses_structural_self_type_containers() {
+    fn workspace_name_path_matches_the_index_self_type_segment() {
         use crate::models::symbol::Location;
         use std::path::PathBuf;
         let m = |container: &str| {
-            let sym = Symbol::new(
+            Symbol::new(
                 "tm".to_string(),
                 SymbolKind::Method,
                 Location::point(PathBuf::from("a.rs"), 1, 1),
             )
-            .with_container(container);
-            synthesized_symbol_path(&sym)
+            .with_container(container)
+            .workspace_name_path()
         };
+        // structural self types collapse to their first nominal head
         assert_eq!(m("(Foo, Bar)").as_deref(), Some("Foo/tm"));
         assert_eq!(m("[Elem; 4]").as_deref(), Some("Elem/tm"));
         assert_eq!(m("*const Ptr").as_deref(), Some("Ptr/tm"));
         assert_eq!(m("<Qual as Baz>::Out").as_deref(), Some("Qual/tm"));
-        // nominal and module-qualified containers keep their path
+        // a module-qualified self type reduces to the bare type, exactly as the
+        // index's first-type_identifier does (`fn_mod::Named` → `Named`)
         assert_eq!(m("Language").as_deref(), Some("Language/tm"));
-        assert_eq!(m("outer::Inner").as_deref(), Some("outer/Inner/tm"));
+        assert_eq!(m("fn_mod::Named").as_deref(), Some("Named/tm"));
     }
 }
