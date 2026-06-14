@@ -1330,12 +1330,16 @@ async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Sy
         .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
         .await?;
     Symbol::compute_paths_for_all(&mut symbols);
-    let matches = Symbol::find_all_by_path(&symbols, pattern);
+    let matches = Symbol::filter_by_path(&symbols, pattern);
     let file_display = app.output.relative_path(file);
     match matches.as_slice() {
         [] => Err(symbol_not_found(pattern, &file_display)),
-        [only] => Ok((*only).clone()),
-        many => Err(ambiguous_symbol_path(pattern, many, &file_display)),
+        [only] => Ok(only.clone()),
+        many => Err(ambiguous_symbol_path(
+            pattern,
+            &many.iter().collect::<Vec<_>>(),
+            &file_display,
+        )),
     }
 }
 
