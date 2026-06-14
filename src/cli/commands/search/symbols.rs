@@ -13,7 +13,7 @@ use crate::cli::symbol_discovery::{
 };
 use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{Language, SymbolKind};
+use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::store::{SymbolExtractor, SymbolSearchResult};
 
 use super::common::{looks_like_symbol_path, resolve_search_languages};
@@ -48,6 +48,14 @@ pub async fn execute_symbol_search(
     if query.is_empty() {
         ctx.print_error(OutputError::invalid("Search query cannot be empty"));
         return Ok(());
+    }
+
+    // `*` wildcards are the file-tree matcher's syntax; neither the LIKE index
+    // nor the LSP workspace search honors them (they would fuzzy-strip the star
+    // and surface unrelated crates), so resolve a glob against the index with
+    // our own matcher instead of routing it to either.
+    if query.contains('*') {
+        return execute_glob_symbol_search(app, query, kind, limit).await;
     }
 
     let search_languages = resolve_search_languages(app, language);
@@ -115,6 +123,65 @@ pub async fn execute_symbol_search(
         Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
     }
 
+    Ok(())
+}
+
+/// Resolve a `*`-glob query against the index: seed the substring search with
+/// the pattern's longest literal run, then keep only the rows whose path the
+/// shared matcher accepts. The index can't `LIKE`-glob and the LSP workspace
+/// search can't honor `*` at all, so this is the one path that globs against
+/// real project symbols without fuzzy-stripped noise.
+async fn execute_glob_symbol_search(
+    app: &App,
+    query: &str,
+    kind: Option<&str>,
+    limit: usize,
+) -> Result<()> {
+    let ctx = &app.output;
+
+    let seed = query
+        .split(['*', '/', '[', ']'])
+        .filter(|s| !s.is_empty())
+        .max_by_key(|s| s.len())
+        .unwrap_or("");
+
+    // Over-fetch the seed so the post-filter still has a full page to draw from.
+    let page = match app
+        .store
+        .search_symbols(
+            seed,
+            limit.saturating_mul(8),
+            kind.map(SymbolKind::parse_or_default),
+        )
+        .await
+    {
+        Ok(page) => page,
+        Err(StoreError::NotInitialized) => {
+            ctx.print_error(
+                OutputError::not_found("Search index not built")
+                    .with_hint("Run 'symora search index build', then retry the wildcard query"),
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            ctx.print_error(OutputError::internal(e.to_string()));
+            return Ok(());
+        }
+    };
+
+    let stale = page.stale;
+    let mut matches: Vec<SymbolResultOutput> = page
+        .rows
+        .into_iter()
+        .filter(|r| Symbol::path_matches(r.name_path.as_deref().unwrap_or(&r.name), query))
+        .map(|r| index_result_output(r, ctx))
+        .collect();
+    let count = matches.len();
+    matches.truncate(limit);
+
+    ctx.print_success(
+        finish_symbol_search(matches, count, query, None, kind, limit).with_stale(stale),
+    );
     Ok(())
 }
 

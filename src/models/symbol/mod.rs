@@ -110,12 +110,18 @@ impl Symbol {
     }
 
     pub fn matches_path(&self, pattern: &str) -> bool {
-        let path = self.path();
+        Self::path_matches(self.path(), pattern)
+    }
 
+    /// Match a precomputed path string against a `--symbol`-style pattern: a
+    /// leading `/` forces a full-path exact match, otherwise bare
+    /// last-component / `/`-anchored suffix / `*` wildcard matching. Shared by
+    /// the symbol method and the index-row glob filter so every surface
+    /// resolves a pattern the same way.
+    pub fn path_matches(path: &str, pattern: &str) -> bool {
         if let Some(abs_pattern) = pattern.strip_prefix('/') {
             return Self::matches_pattern(path, abs_pattern, true);
         }
-
         Self::matches_pattern(path, pattern, false)
     }
 
