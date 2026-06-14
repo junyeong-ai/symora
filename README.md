@@ -217,7 +217,7 @@ symora callers src/services/checkout.ts:48
 ### ⑤ 바꾸면 뭐가 깨지지?
 
 ```bash
-symora impact src/services/checkout.ts:48
+symora impact src/services/checkout.ts:48 --depth 2
 ```
 ```json
 {
@@ -337,12 +337,12 @@ symora status                # 프로젝트 + daemon 상태
 모든 명령은 기계 파싱을 위해 설계됐고, 규칙은 안정적입니다.
 
 - **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `hints`, `next_commands`, `indexing`.
-- **실패**는 구조화되며(맨 stderr 문자열이 아님), 프로세스는 0이 아닌 코드로 종료합니다.
+- **명령 실패**는 구조화 JSON이고 0이 아닌 코드로 종료합니다.
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
-  `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`.
-- **위치는 1-indexed** — 입력과 출력 모두. 입력은 `file:line:column`, 또는 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정)을 받고, 출력 위치는 항상 line과 column을 함께 담습니다.
+  `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 두 가지는 예외입니다: 잘못된 CLI 인자는 평문 usage 에러를 출력하고 exit 2로, "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
+- **위치는 1-indexed** — 입력과 출력 모두. snapping 명령(`refs`, `callers`, `callees`, `context`, `impact`, `usage`, `edit`)은 `file:line:column` 또는 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정)을 받고, position-exact 명령(`def`, `hover`, `typedef`, `rename`, `actions`)은 컬럼을 그대로 사용합니다. 출력 위치는 항상 line과 column을 함께 담습니다.
 - **격하는 숨기지 않고 공개됩니다.** `indexing: "timed_out"`는 count가 하한임을 뜻하고, `coverage_gaps`는 검색하지 못한 언어를 나열하며, `unsupported` 에러는 빠진 LSP 기능을 지목하고 대안을 알려줍니다.
 - **`--format compact`**는 단일 라인 JSON을 출력합니다. 비-TTY로 파이프하면 전체 JSON이 유지됩니다.
 

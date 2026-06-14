@@ -38,15 +38,15 @@ symora search content "async fn"
 symora map summary
 ```
 
-Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` matches flat names; a `Class/method` path resolves through `symbols --symbol` (below), not `search`.
+Narrow noisy results with `--kind`, `--lang`, or a more specific name. `search symbols` is best for flat names; a `Class/method` or `*/method` path also works there (it switches to a live workspace-symbol lookup), while `symbols --symbol` resolves a path precisely within a file you already know.
 
 ### Exact inspection (file/symbol known)
 
 ```bash
 symora symbols src/cli/commands/search/mod.rs --depth 2
 symora symbols src/cli/commands/search/mod.rs --symbol 'SearchCommand/Content' --depth 2
-symora hover src/cli/commands/search/mod.rs:30:10
-symora def src/cli/commands/search/mod.rs:30:10
+symora hover src/cli/commands/search/mod.rs:141:14
+symora def src/cli/commands/search/mod.rs:141:14
 ```
 
 `symbols <file>` returns the full LSP tree. `symbols --symbol <path>` resolves a specific symbol path (bare name, `Class/method` suffix, or `*` wildcard). Use `search symbols` for broad lookup, not `--name`.
@@ -65,13 +65,13 @@ symora map related src/cli/commands/search/mod.rs --limit 5
 ### Exact follow-up from a location
 
 ```bash
-symora context src/cli/commands/search/mod.rs:30 --all
-symora context src/cli/commands/search/mod.rs:30 --callees --with-bodies   # callee list + complete bodies in one call
-symora refs src/cli/commands/search/mod.rs:30
-symora usage src/cli/commands/search/mod.rs:30:10 --max-symbols 10 --limit 5
-symora callees src/cli/commands/search/mod.rs:30                  # direct callees (single hop)
-symora callees src/cli/commands/search/mod.rs:30 --depth 3        # downward reachable set to depth 3
-symora callees src/cli/commands/search/mod.rs:30 --to src/services/store/index.rs:42   # shortest call chain to a target
+symora context src/cli/commands/search/mod.rs:141 --all
+symora context src/cli/commands/search/mod.rs:141 --callees --with-bodies   # callee list + complete bodies in one call
+symora refs src/cli/commands/search/mod.rs:141
+symora usage src/cli/commands/search/mod.rs:141:14 --max-symbols 10 --limit 5
+symora callees src/cli/commands/search/mod.rs:141                  # direct callees (single hop)
+symora callees src/cli/commands/search/mod.rs:141 --depth 3        # downward reachable set to depth 3
+symora callees src/cli/commands/search/mod.rs:141 --to src/services/store/index.rs:42   # shortest call chain to a target
 ```
 
 The location commands here and above — `refs`, `callers`, `callees`, `context`, `impact`, `usage` — accept a `file:line` (column optional) and resolve it by the same addressing rules as `edit`: a column-less `file:line` targets the symbol *declared* on that line (a method's declaration line means the method, never the impl/class spanning it), and a body line falls back to the enclosing symbol — so a `search symbols` result row can be passed straight through without pinning the exact name column. When a line declares several symbols, these read commands analyze the first declaration and say so in `hints` (the resolved `target` is always echoed); only `edit` refuses with an ambiguity error, because a guessed write is destructive.
