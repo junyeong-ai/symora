@@ -79,7 +79,7 @@ The location commands here and above — `refs`, `callers`, `callees`, `context`
 - `refs`, `context`, and `impact` echo what they resolved as a top-level `target`; when the position did not resolve to a symbol the placeholder carries `anchor_status` (`not_a_symbol`, or `unavailable` if the symbol read failed), omitted when it resolved — so a snapped query is never silently mistaken for a different symbol. (`def`, `hover`, `typedef` stay position-exact, since you may target a specific token mid-line.)
 - `context` on a non-declaration line (e.g. a `use` statement) returns a placeholder `target` with `anchor_status: "not_a_symbol"` — re-anchor to a declaration line instead of retrying the same position.
 - `context` reports unsupported features and points to a working alternative when the LSP lacks call hierarchy or type definition.
-- `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line:col>` location, both LSP-backed, and auto-detects languages by file count when `--lang` is omitted. If no detected language has an installed server it returns a structured `server_not_installed` error — not a silent `count: 0`.
+- `usage` accepts either a `<pattern>` (regex/symbol name) or a `<file:line[:col]>` location, both LSP-backed, and auto-detects languages by file count when `--lang` is omitted. If no detected language has an installed server it returns a structured `server_not_installed` error — not a silent `count: 0`.
 - When some languages were searched but others were missing, failed, or skipped once enough candidates were found, the `usage` result carries a `coverage_gaps` array of `{language, reason}` objects (`reason`: `server_not_installed | timed_out | unsupported | unavailable | not_searched`); a non-empty `coverage_gaps` means `count` is a lower bound — install the named server or narrow with `--lang`. An empty `usage` with neither an error nor `coverage_gaps` is a genuine zero.
 - `context --with-bodies` additionally attaches complete verbatim bodies: the target's body always attaches whole and unbudgeted; callee bodies (in listed order) and type bodies draw on the `--body-tokens` budget (default 2000), whole-body-or-nothing per item. `--with-bodies` is a `context` flag only — the standalone `callers`/`callees` commands do not accept it.
 - Body-bearing sections report `bodies_included`; an item without `body` there was omitted for one of three causes: the token budget ran out, the symbol was unresolvable at its position, or it genuinely has no body (prototypes, interface methods). Only the first is cured by raising `--body-tokens` — an omission that persists after a large raise is not budget-caused; fetch a specific body with `symora symbols <file> --body`.
@@ -157,7 +157,7 @@ Use these when search results are unexpectedly empty, a language server is unres
 ## Anti-patterns
 
 - Using `-c` (does not exist) — use `--format compact` placed before the subcommand.
-- Addressing an `edit` by `file:line:col` when you already hold a symbol path → pass `--symbol 'Class/method'`; line numbers go stale after every edit.
+- Addressing an `edit` by line when you already hold a symbol path → pass `--symbol 'Class/method'`; line numbers go stale after every edit.
 - `map file` when you actually need the full semantic tree → use `symbols <file>`.
 - `symbols --name` for very broad discovery → use `search symbols`.
 - Treating `map related` as a precise dependency graph.
