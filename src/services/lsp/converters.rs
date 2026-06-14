@@ -479,11 +479,10 @@ mod tests {
         PositionEncoding, diagnostic_code_string, find_resource_operation, parse_workspace_edit,
     };
 
-    /// Regression guard for the I5 non-BMP corruption class: an edit range's
-    /// wire column is decoded to a native scalar offset against the target
-    /// file BEFORE it reaches the edit applier. `let x = "😀";` — the closing
-    /// quote is utf-16 unit 11 but scalar 10; a missing conversion would slice
-    /// the wrong byte.
+    /// An edit range's wire column is decoded to a native scalar offset against
+    /// the target file BEFORE it reaches the edit applier, so a non-BMP line
+    /// cannot be sliced at the wrong byte. `let x = "😀";` — the closing quote is
+    /// utf-16 unit 11 but scalar 10; a missing conversion would slice wrong.
     #[test]
     fn parse_text_edits_decodes_wire_columns_to_native_scalars() {
         use crate::services::lsp::position::PositionConverter;

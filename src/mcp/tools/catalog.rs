@@ -396,7 +396,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(with_extra(
             section_output_schema(
                 "Diagnostics: severity, message, line, column, end_line, end_column, \
-                 code?, source?, tags?, context? (with_context), suggestions? (with_suggestions)",
+                 code?, source?, tags?, context? (with_context), suggestions? + \
+                 suggestions_status? (with_suggestions; status 'unavailable' = the \
+                 quickfix lookup failed, so empty means unknown)",
             ),
             &[
                 (

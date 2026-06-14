@@ -341,12 +341,14 @@ fn go_type_kind(node: Node) -> SymbolKind {
 }
 
 /// Classify a JS/TS `variable_declarator` by its initializer: a function value
-/// (arrow function or function expression) is a callable Function; anything
-/// else is a plain Variable. Mirrors `go_type_kind`'s value-field dispatch and
-/// keeps the decision structural — no name heuristics.
+/// (arrow function, function expression, or generator function) is a callable
+/// Function; anything else is a plain Variable. Mirrors `go_type_kind`'s
+/// value-field dispatch and keeps the decision structural — no name heuristics.
 fn declarator_kind(node: Node) -> SymbolKind {
     match node.child_by_field_name("value").map(|v| v.kind()) {
-        Some("arrow_function") | Some("function_expression") => SymbolKind::Function,
+        Some("arrow_function") | Some("function_expression") | Some("generator_function") => {
+            SymbolKind::Function
+        }
         _ => SymbolKind::Variable,
     }
 }
@@ -391,20 +393,20 @@ const TYPESCRIPT_QUERY: &str = r#"
 (type_alias_declaration) @symbol
 (enum_declaration) @symbol
 (method_definition) @symbol
-(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
-(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
-(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
-(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
+(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
+(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
+(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
+(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
 (class_declaration) @symbol
 (method_definition) @symbol
-(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
-(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol))
-(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
-(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression)]) @symbol)))
+(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
+(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
+(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
+(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -572,6 +574,7 @@ const greet = (x: number) => x;
 export const handler = async () => {};
 const fexpr = function named() {};
 var legacy = () => {};
+const gen = function* () {};
 const config = makeConfig();
 const VERSION = "1.0";
 const klass = class {};
@@ -590,6 +593,9 @@ function outer() {
         assert_eq!(kind("handler"), Some(SymbolKind::Function));
         assert_eq!(kind("fexpr"), Some(SymbolKind::Function));
         assert_eq!(kind("legacy"), Some(SymbolKind::Function));
+        // A generator expression is a callable function value, indexed like the
+        // arrow and function-expression forms.
+        assert_eq!(kind("gen"), Some(SymbolKind::Function));
         // Non-function initializers are never captured by the value-filtered
         // query (they would only ever be Variables, which are not indexed here).
         assert_eq!(kind("config"), None);
@@ -599,7 +605,7 @@ function outer() {
         assert_eq!(kind("a"), None);
         assert_eq!(kind("b"), None);
         // Nested locals and loop counters are excluded by the module-scope
-        // anchor — the regression guard against re-introducing JS's noise.
+        // anchor, so JS/TS indexing stays free of per-statement noise.
         assert_eq!(kind("inner"), None);
         assert_eq!(kind("i"), None);
         // The const-arrow survives exclude_low_level — proof the kind fix

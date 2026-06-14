@@ -876,7 +876,10 @@ mod tests {
              fn 안녕하세요() {}\n\
              // punctuation a:b and x-y and (z) here\n\
              match thing { OR_AND_NOT => 0 }\n\
-             let repeated = foo_bar_foo();\n",
+             let repeated = foo_bar_foo();\n\
+             let near_miss = fooXbar();\n\
+             let pct = \"100%off\";\n\
+             let pct_miss = \"100Xoff\";\n",
         )
         .await
         .unwrap();
@@ -900,6 +903,7 @@ mod tests {
             "x-y",
             "(z)",
             "OR_",
+            "100%off",
             "zzz_nomatch",
         ];
         for q in probes {
@@ -908,6 +912,36 @@ mod tests {
             assert_eq!(
                 fts, like,
                 "FTS pre-filter diverged from LIKE-only for {q:?}"
+            );
+        }
+
+        // Literal-substring correctness: `_` and `%` are content, never LIKE
+        // wildcards, so a query must NOT match a line where the metachar
+        // position holds a different character. The corpus seeds near-misses
+        // (`fooXbar`, `100Xoff`) that an unescaped wildcard LIKE would wrongly
+        // catch — this proves the ESCAPE on both the FTS and LIKE-only paths.
+        let has = |rows: &[(String, i64, f64)], needle: &str| {
+            rows.iter().any(|(c, _, _)| c.contains(needle))
+        };
+        for use_fts in [true, false] {
+            let underscore = content_rows(&store, "foo_bar", use_fts).await;
+            assert!(
+                has(&underscore, "foo_bar"),
+                "literal foo_bar must match (use_fts={use_fts})"
+            );
+            assert!(
+                !has(&underscore, "fooXbar"),
+                "`_` must not act as a wildcard (use_fts={use_fts})"
+            );
+
+            let percent = content_rows(&store, "100%off", use_fts).await;
+            assert!(
+                has(&percent, "100%off"),
+                "literal 100%off must match (use_fts={use_fts})"
+            );
+            assert!(
+                !has(&percent, "100Xoff"),
+                "`%` must not act as a wildcard (use_fts={use_fts})"
             );
         }
     }

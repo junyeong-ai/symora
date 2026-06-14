@@ -53,6 +53,11 @@ pub struct EnhancedDiagnostic {
     pub context: Vec<DiagnosticContextItem>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<DiagnosticSuggestion>,
+    /// Present only when suggestions were requested but the quickfix lookup
+    /// failed ("unavailable") — an empty `suggestions` then means "unknown",
+    /// never an authoritative "no fixes available".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestions_status: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,7 +147,7 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
             for d in &filtered {
                 let base = DiagnosticOutput::from(d);
 
-                let (context, suggestions) = tokio::join!(
+                let (context, (suggestions, suggestions_status)) = tokio::join!(
                     async {
                         if args.with_context {
                             fetch_diagnostic_context(
@@ -162,7 +167,7 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
                             fetch_suggestions(app, &abs_file, d.display_line(), d.display_column())
                                 .await
                         } else {
-                            vec![]
+                            (vec![], None)
                         }
                     },
                 );
@@ -171,6 +176,7 @@ pub async fn execute(args: DiagnosticsArgs, app: &App) -> Result<()> {
                     base,
                     context,
                     suggestions,
+                    suggestions_status,
                 });
             }
 
@@ -250,13 +256,15 @@ async fn fetch_suggestions(
     file: &std::path::Path,
     line: u32,
     column: u32,
-) -> Vec<DiagnosticSuggestion> {
+) -> (Vec<DiagnosticSuggestion>, Option<&'static str>) {
     let actions = match app.lsp.code_actions(file, line, column).await {
         Ok(a) => a,
-        Err(_) => return vec![],
+        // The quickfix lookup failed — disclose it so an empty suggestion list
+        // reads as "unknown", never an authoritative "no fixes available".
+        Err(_) => return (vec![], Some("unavailable")),
     };
 
-    actions
+    let suggestions = actions
         .into_iter()
         .filter(|a| a.kind.to_string().contains("quickfix"))
         .take(3)
@@ -264,7 +272,8 @@ async fn fetch_suggestions(
             title: a.title,
             code: None,
         })
-        .collect()
+        .collect();
+    (suggestions, None)
 }
 
 fn extract_snippet(content: &str, line: u32) -> String {

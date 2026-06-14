@@ -76,8 +76,10 @@ pub struct OutputContext {
     /// Set once when a handler reports a handled failure via `print_error`.
     /// Lifted here (above the sink) so the bare CLI and the MCP adapter read
     /// the SAME failure signal — the one that drives both the process exit
-    /// code and the MCP `isError` flag. The `Arc` is shared across clones so a
-    /// scoped context's failure is visible to whoever built it.
+    /// code and the MCP `isError` flag. The production read path is the
+    /// `errored_flag()` handle (an `Arc::clone`), checked after the owning `App`
+    /// has moved into the command future; the derived `Clone` sharing the same
+    /// `Arc` is a consistency property, not that read path.
     errored: Arc<std::sync::atomic::AtomicBool>,
 }
 

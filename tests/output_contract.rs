@@ -298,6 +298,7 @@ fn diagnostics_output_flattened_section_with_status() {
             },
             context: vec![],
             suggestions: vec![],
+            suggestions_status: None,
         }]),
     };
     assert_json_snapshot!(out);
@@ -348,8 +349,14 @@ fn target_output_from_symbol() {
 
 #[test]
 fn target_output_fallback_for_unknown_symbol() {
-    let out =
-        TargetOutput::from_symbol_or_fallback(None, &root().join("src/main.rs"), 50, 4, &root());
+    let out = TargetOutput::from_symbol_or_fallback(
+        None,
+        &root().join("src/main.rs"),
+        50,
+        4,
+        &root(),
+        false,
+    );
     assert_json_snapshot!(out);
 }
 

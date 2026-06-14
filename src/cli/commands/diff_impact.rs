@@ -88,6 +88,12 @@ pub struct ChangedSymbolImpact {
     pub prod_refs: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<CallHierarchyOutput>,
+    /// Present only when callers were requested but the list is not authoritative:
+    /// "unavailable" (the incoming-call query failed) or "indexing_degraded" (it
+    /// ran under degraded workspace indexing, so the list is a lower bound). An
+    /// empty `callers` then means "unknown", not a verified "no callers".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callers_status: Option<&'static str>,
     /// Present only on Deleted rows: whether the deleted symbol was identified
     /// from the pre-image. The disclosure that the row is a deletion fact, not
     /// a live-symbol measurement.
@@ -105,16 +111,24 @@ pub enum ChangeType {
 
 /// How a Deleted row's symbol was resolved. Mirrors the `DispatchStatus` /
 /// `IndexingDegradation` disclosure idiom: a typed enum naming the state,
-/// omitted when not applicable.
+/// omitted when not applicable. The two non-`Resolved` states are kept distinct
+/// because they license different claims: `NoSymbolInRange` was checked against
+/// the pre-image (only body lines were removed), so the enclosing current symbol
+/// can be reclassified to `Modified`; `PreimageUnavailable` could not be checked
+/// at all, so what was deleted is unknown and the row stays a disclosed deletion.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeletionResolution {
     /// The deleted symbol was identified from the pre-image (old git tree); its
     /// references are not recomputed (it no longer exists).
     Resolved,
-    /// The deleted symbol could not be identified — name/location omitted
-    /// rather than guessed from diff text or a live neighbour.
-    Unresolved,
+    /// The pre-image was read but declared no symbol in the deleted range — only
+    /// body lines were removed, not a declaration.
+    NoSymbolInRange,
+    /// The pre-image itself could not be read (the `git show` of the old tree
+    /// failed), so what was deleted is unknown — never guessed from diff text or
+    /// a live neighbour, and never reclassified to a live `Modified`.
+    PreimageUnavailable,
 }
 
 struct DiffHunk {
@@ -303,8 +317,8 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
     let old_range = parts[1].trim_start_matches('-');
     let new_range = parts[2].trim_start_matches('+');
 
-    let (old_start, old_count) = parse_range(old_range);
-    let (new_start, new_count) = parse_range(new_range);
+    let (old_start, old_count) = parse_range(old_range)?;
+    let (new_start, new_count) = parse_range(new_range)?;
 
     let change_type = if old_count == 0 {
         ChangeType::Added
@@ -329,15 +343,39 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
     })
 }
 
-fn parse_range(range: &str) -> (u32, u32) {
-    let parts: Vec<&str> = range.split(',').collect();
-    let start = parts[0].parse().unwrap_or(1);
-    let count = if parts.len() > 1 {
-        parts[1].parse().unwrap_or(1)
+/// Symbol-level change type for a live hunk. An Added HUNK only makes the SYMBOL
+/// Added when the symbol's declaration line falls inside the added range;
+/// otherwise the symbol pre-existed and merely received inserted body lines, so
+/// it was Modified. (With `git diff --unified=0`, an in-body insertion is an
+/// Added hunk, `old_count==0`, whose lines sit inside a pre-existing symbol.)
+/// Modified/Deleted hunks pass through. This mirrors the deletion path's
+/// body-line reclassification, keeping addition and deletion symmetric.
+fn symbol_change_type(
+    hunk_type: &ChangeType,
+    decl_line: u32,
+    hunk_start: u32,
+    hunk_count: u32,
+) -> ChangeType {
+    let decl_in_added_range = decl_line >= hunk_start && decl_line < hunk_start + hunk_count.max(1);
+    if matches!(hunk_type, ChangeType::Added) && !decl_in_added_range {
+        ChangeType::Modified
     } else {
-        1
+        hunk_type.clone()
+    }
+}
+
+/// Parse a hunk range `start[,count]` into `(start, count)`. Returns `None` on
+/// malformed digits rather than defaulting to 1 — a guessed coordinate would
+/// silently mis-attribute the hunk; the caller drops the whole hunk instead. An
+/// absent count is the git shorthand for 1.
+fn parse_range(range: &str) -> Option<(u32, u32)> {
+    let mut parts = range.split(',');
+    let start = parts.next()?.parse().ok()?;
+    let count = match parts.next() {
+        Some(c) => c.parse().ok()?,
+        None => 1,
     };
-    (start, count)
+    Some((start, count))
 }
 
 /// Whether a changed line at `line` meaningfully attributes to `sym`. A callable
@@ -411,18 +449,23 @@ async fn analyze_hunks(
                 break;
             }
             let deleted_rows = resolve_deleted_hunk(root, preimage_ref, file, hunk);
-            let no_declaration_deleted = deleted_rows.len() == 1
-                && deleted_rows[0].deletion == Some(DeletionResolution::Unresolved);
+            // Reclassify ONLY a verified body-line deletion: the pre-image was
+            // read and declared no symbol in the deleted range, so a surviving
+            // symbol was Modified. A `PreimageUnavailable` row is NOT eligible —
+            // we could not check what was deleted, so guessing a live Modified
+            // would paper over the gap; it stays a disclosed deletion.
+            let body_only_deletion = deleted_rows.len() == 1
+                && deleted_rows[0].deletion == Some(DeletionResolution::NoSymbolInRange);
 
-            // Reclassify a body-line deletion (no declaration removed) as a
-            // Modified of the enclosing CURRENT symbol, using the shared
-            // `line_attributes_to_symbol` rule (callable body / leaf / own
-            // declaration line — never a container's inter-member gap) plus a
-            // strict-interior check: the deletion point must be before the
-            // symbol's last line, so a blank line AFTER it (new_start == f_end)
-            // is not attributed. Both guard against a false `Modified <container>`
-            // row that would carry the container's irrelevant references.
-            let enclosing = if no_declaration_deleted {
+            // Reclassify a body-line deletion as a Modified of the enclosing
+            // CURRENT symbol, using the shared `line_attributes_to_symbol` rule
+            // (callable body / leaf / own declaration line — never a container's
+            // inter-member gap) plus a strict-interior check: the deletion point
+            // must be before the symbol's last line, so a blank line AFTER it
+            // (new_start == f_end) is not attributed. Both guard against a false
+            // `Modified <container>` row that would carry the container's
+            // irrelevant references.
+            let enclosing = if body_only_deletion {
                 current_symbols.as_ref().and_then(|s| {
                     let f = find_symbol_at_position(s, hunk.start_line, None)?;
                     let f_end = f.location.end_line.unwrap_or(f.location.line);
@@ -511,11 +554,18 @@ async fn analyze_hunks(
                     break;
                 }
 
+                let change_type = symbol_change_type(
+                    &hunk.change_type,
+                    sym.location.line,
+                    hunk.start_line,
+                    hunk.line_count,
+                );
+
                 let impact = analyze_symbol_impact(
                     lsp,
                     file,
                     sym.clone(),
-                    hunk.change_type.clone(),
+                    change_type,
                     root,
                     test_matcher,
                     include_callers,
@@ -562,6 +612,7 @@ async fn analyze_symbol_impact(
                 test_refs: None,
                 prod_refs: None,
                 callers: vec![],
+                callers_status: None,
                 deletion: None,
             };
         }
@@ -569,20 +620,25 @@ async fn analyze_symbol_impact(
 
     let classified = analysis.classify(root, test_matcher, true);
 
-    let callers = if include_callers {
-        lsp.incoming_calls(file, line, column)
-            .await
-            .map(|calls| {
-                calls
+    // A failed incoming-call query, or one run under degraded indexing, must not
+    // pass as a verified caller set: disclose it so an empty list is read as
+    // "unknown"/"lower bound", never an authoritative "no callers".
+    let (callers, callers_status) = if include_callers {
+        match lsp.incoming_calls(file, line, column).await {
+            Ok(calls) => {
+                let status = calls.indexing.is_some().then_some("indexing_degraded");
+                let items = calls
                     .data
                     .iter()
                     .take(calls_limit)
                     .map(|c| CallHierarchyOutput::from_item(c, root))
-                    .collect()
-            })
-            .unwrap_or_default()
+                    .collect();
+                (items, status)
+            }
+            Err(_) => (vec![], Some("unavailable")),
+        }
     } else {
-        vec![]
+        (vec![], None)
     };
 
     ChangedSymbolImpact {
@@ -594,6 +650,7 @@ async fn analyze_symbol_impact(
         test_refs: Some(classified.test),
         prod_refs: Some(classified.prod),
         callers,
+        callers_status,
         deletion: None,
     }
 }
@@ -608,7 +665,7 @@ fn resolve_deleted_hunk(
     file: &Path,
     hunk: &DiffHunk,
 ) -> Vec<ChangedSymbolImpact> {
-    let unresolved = || ChangedSymbolImpact {
+    let deletion_row = |resolution| ChangedSymbolImpact {
         name: None,
         kind: None,
         location: None,
@@ -617,12 +674,13 @@ fn resolve_deleted_hunk(
         test_refs: None,
         prod_refs: None,
         callers: vec![],
-        deletion: Some(DeletionResolution::Unresolved),
+        callers_status: None,
+        deletion: Some(resolution),
     };
 
     let relpath = file.strip_prefix(root).unwrap_or(file);
     let Some(content) = git_show(root, preimage_ref, relpath) else {
-        return vec![unresolved()];
+        return vec![deletion_row(DeletionResolution::PreimageUnavailable)];
     };
 
     let language = crate::models::symbol::Language::from_path(file);
@@ -643,12 +701,13 @@ fn resolve_deleted_hunk(
             test_refs: None,
             prod_refs: None,
             callers: vec![],
+            callers_status: None,
             deletion: Some(DeletionResolution::Resolved),
         })
         .collect();
 
     if matched.is_empty() {
-        vec![unresolved()]
+        vec![deletion_row(DeletionResolution::NoSymbolInRange)]
     } else {
         matched
     }
@@ -684,37 +743,56 @@ mod tests {
 
     #[test]
     fn parse_range_with_start_and_count() {
-        assert_eq!(parse_range("10,5"), (10, 5));
-    }
-
-    #[test]
-    fn parse_range_single_value_defaults_count_to_one() {
-        assert_eq!(parse_range("42"), (42, 1));
+        assert_eq!(parse_range("10,5"), Some((10, 5)));
     }
 
     #[test]
     fn parse_range_zero_count() {
-        assert_eq!(parse_range("7,0"), (7, 0));
+        assert_eq!(parse_range("7,0"), Some((7, 0)));
     }
 
     #[test]
     fn parse_range_large_numbers() {
-        assert_eq!(parse_range("99999,500"), (99999, 500));
+        assert_eq!(parse_range("99999,500"), Some((99999, 500)));
     }
 
     #[test]
-    fn parse_range_invalid_start_defaults_to_one() {
-        assert_eq!(parse_range("abc,3"), (1, 3));
+    fn parse_range_absent_count_is_one() {
+        assert_eq!(parse_range("5"), Some((5, 1)));
     }
 
+    /// Malformed digits FAIL the parse (None) rather than defaulting to 1 — a
+    /// guessed coordinate would silently mis-attribute the hunk; the caller
+    /// drops it instead.
     #[test]
-    fn parse_range_invalid_count_defaults_to_one() {
-        assert_eq!(parse_range("5,abc"), (5, 1));
+    fn parse_range_malformed_fails_closed() {
+        assert_eq!(parse_range("abc,3"), None);
+        assert_eq!(parse_range("5,abc"), None);
+        assert_eq!(parse_range("xyz"), None);
+        assert_eq!(parse_range(""), None);
     }
 
+    /// An Added HUNK only makes the SYMBOL Added when its declaration is inside
+    /// the added range; an in-body insertion into a pre-existing symbol is
+    /// Modified — symmetric with the deletion path's body-line reclassification.
     #[test]
-    fn parse_range_completely_invalid_defaults_both() {
-        assert_eq!(parse_range("xyz"), (1, 1));
+    fn symbol_change_type_reclassifies_in_body_insertion() {
+        // New function: declaration (line 5) inside the added range [5, 9).
+        assert!(matches!(
+            symbol_change_type(&ChangeType::Added, 5, 5, 4),
+            ChangeType::Added
+        ));
+        // In-body insertion: enclosing symbol declared at line 1, added range
+        // [3, 4) — declaration outside, so Modified, not Added.
+        assert!(matches!(
+            symbol_change_type(&ChangeType::Added, 1, 3, 1),
+            ChangeType::Modified
+        ));
+        // Modified/Deleted hunks pass through unchanged.
+        assert!(matches!(
+            symbol_change_type(&ChangeType::Modified, 1, 3, 1),
+            ChangeType::Modified
+        ));
     }
 
     // ---------------------------------------------------------------
@@ -812,6 +890,7 @@ mod tests {
             test_refs: None,
             prod_refs: None,
             callers: vec![],
+            callers_status: None,
             deletion: Some(DeletionResolution::Resolved),
         };
         let v = serde_json::to_value(row).unwrap();
@@ -825,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_unresolved_row_omits_identity() {
+    fn deleted_preimage_unavailable_row_omits_identity() {
         let row = ChangedSymbolImpact {
             name: None,
             kind: None,
@@ -835,10 +914,11 @@ mod tests {
             test_refs: None,
             prod_refs: None,
             callers: vec![],
-            deletion: Some(DeletionResolution::Unresolved),
+            callers_status: None,
+            deletion: Some(DeletionResolution::PreimageUnavailable),
         };
         let v = serde_json::to_value(row).unwrap();
-        assert_eq!(v["deletion"], "unresolved");
+        assert_eq!(v["deletion"], "preimage_unavailable");
         // Never a guessed name or a live neighbour's location.
         assert!(v.get("name").is_none());
         assert!(v.get("location").is_none());
@@ -857,6 +937,7 @@ mod tests {
             test_refs: Some(1),
             prod_refs: Some(2),
             callers: vec![],
+            callers_status: None,
             deletion: None,
         };
         let v = serde_json::to_value(row).unwrap();

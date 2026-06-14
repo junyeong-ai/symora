@@ -121,9 +121,20 @@ impl PositionConverter {
             .map(String::as_str)
     }
 
-    /// 0-indexed Unicode-scalar offset for a wire `(line0, character)` on
-    /// `file` — for an edit range, whose column edit.rs later slices by char.
-    /// Identity-degrades to `character` if the line is unreadable.
+    /// 0-indexed Unicode-scalar offset for an inbound wire `(line0, character)`
+    /// on `file` — decodes a RESULT position (hover/def/refs/folding/selection/
+    /// code-action/inlay) for display.
+    ///
+    /// When the line is unreadable it degrades to `wire_char`. This is exact for
+    /// a single-byte (ASCII) line and the request's own file is always seeded, so
+    /// a degrade can only affect a CROSS-FILE result whose file became unreadable
+    /// mid-request — and even then the result's file and line stay correct, only
+    /// the column may be off on a multibyte line. The degrade is deliberately
+    /// best-effort: a display column is a recoverable hint, so dropping an
+    /// otherwise-valid navigation result would be the worse failure. The
+    /// edit-APPLY path makes the opposite, equally deliberate choice via
+    /// [`scalar_offset_checked`](Self::scalar_offset_checked) — it FAILS CLOSED,
+    /// because a guessed offset there would corrupt the file unrecoverably.
     pub fn scalar_offset(&mut self, file: &Path, line0: u32, wire_char: u32) -> u32 {
         let encoding = self.encoding;
         match self.line(file, line0) {
@@ -132,9 +143,9 @@ impl PositionConverter {
         }
     }
 
-    /// 1-indexed Unicode-scalar column for a wire `(line0, character)` on
-    /// `file` — for a public JSON `column`. Identity-degrades to
-    /// `character + 1` if the line is unreadable.
+    /// 1-indexed Unicode-scalar column for a wire `(line0, character)` on `file`
+    /// — for a public JSON `column`. Same best-effort degrade as
+    /// [`scalar_offset`](Self::scalar_offset).
     pub fn scalar_column(&mut self, file: &Path, line0: u32, wire_char: u32) -> u32 {
         self.scalar_offset(file, line0, wire_char) + 1
     }
