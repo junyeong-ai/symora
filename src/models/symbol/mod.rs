@@ -81,10 +81,21 @@ impl Symbol {
             None => base_path.clone(),
         });
 
-        // Children hang off the index-free base so same-named sibling parents
-        // (`Foo[0]`, `Foo[1]`) still share a child path (`Foo/bar`).
+        // A module/namespace/package is self-named but does NOT qualify its
+        // descendants: they attach to its own parent path, so a method reads
+        // `Type/method` and a module-level item stays bare — matching the LSP
+        // workspace-symbol container (which never reports an enclosing module)
+        // so a path round-trips across the index, documentSymbol, and
+        // workspace surfaces. Every other container passes its index-free base
+        // down so same-named sibling parents (`Foo[0]`, `Foo[1]`) still share a
+        // child path (`Foo/bar`).
+        let child_parent = if self.kind.is_namespace_like() {
+            parent_path
+        } else {
+            Some(base_path.as_str())
+        };
         for child in &mut self.children {
-            child.compute_paths(Some(&base_path));
+            child.compute_paths(child_parent);
         }
     }
 
@@ -507,6 +518,30 @@ mod tests {
             class.children[1].name_path,
             Some("MyClass/reset".to_string())
         );
+    }
+
+    #[test]
+    fn compute_paths_treats_modules_as_path_transparent() {
+        // mod a { mod b { struct Deep { fn m }  fn free } }
+        let mut a = build_symbol("a", SymbolKind::Module);
+        let mut b = build_symbol("b", SymbolKind::Module);
+        let mut deep = build_symbol("Deep", SymbolKind::Struct);
+        deep.children = vec![build_symbol("m", SymbolKind::Method)];
+        b.children = vec![deep, build_symbol("free", SymbolKind::Function)];
+        a.children = vec![b];
+
+        a.compute_paths(None);
+
+        // Modules are self-named but never qualify descendants — a method is
+        // `Type/method`, a module-level item bare — matching the workspace
+        // producer so a copied path round-trips.
+        assert_eq!(a.name_path, Some("a".to_string()));
+        let b = &a.children[0];
+        assert_eq!(b.name_path, Some("b".to_string()));
+        let deep = &b.children[0];
+        assert_eq!(deep.name_path, Some("Deep".to_string()));
+        assert_eq!(deep.children[0].name_path, Some("Deep/m".to_string()));
+        assert_eq!(b.children[1].name_path, Some("free".to_string()));
     }
 
     #[test]
