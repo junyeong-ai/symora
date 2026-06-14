@@ -449,7 +449,7 @@ The agent-facing playbook ships *with the tool*, not in this README, so it stays
 - `symora setup skill` installs the Claude Code skill (the full CLI playbook).
 - `symora mcp serve` returns the same guidance through the MCP `initialize` instructions.
 
-The short version: discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`); list responses share one shape; positions are 1-indexed; failures are structured `{code, message, hint}`.
+The short version: discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`); list responses share one shape; positions are 1-indexed; command failures are structured `{code, message, hint}` at non-zero exit (a bad CLI argument is a plain usage error).
 
 ---
 
