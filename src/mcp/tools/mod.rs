@@ -213,9 +213,12 @@ mod tests {
             .collect()
     }
 
-    /// The four edit tools require only `file` and advertise both
-    /// addressing modes; the location-taking tools keep their pinned
-    /// required-line contract — the relaxation is local to the edit tools.
+    /// The edit tools advertise both addressing modes, so neither `symbol` nor
+    /// `line` is individually required — `file` is the only required BASE field
+    /// (exactly-one-of is enforced in the handler). The writing tools also
+    /// require their mandatory payload field (body/code), pinned separately in
+    /// `mandatory_handler_fields_are_advertised_required`; `delete_symbol` has no
+    /// extra mandatory field, so its required set is exactly `[file]`.
     #[test]
     fn edit_tools_advertise_symbol_addressing() {
         for name in [
@@ -225,16 +228,22 @@ mod tests {
             "delete_symbol",
         ] {
             let tool = tool(name);
-            assert_eq!(
-                required_of(tool),
-                ["file"],
-                "{name}: required must be [file]"
+            let required = required_of(tool);
+            assert!(required.contains(&"file"), "{name}: must require file");
+            assert!(
+                !required.contains(&"symbol") && !required.contains(&"line"),
+                "{name}: neither symbol nor line is individually required (exactly-one-of)"
             );
             let props = tool.input_schema["properties"].as_object().unwrap();
             for prop in ["symbol", "line", "column"] {
                 assert!(props.contains_key(prop), "{name}: missing property {prop}");
             }
         }
+        assert_eq!(
+            required_of(tool("delete_symbol")),
+            ["file"],
+            "delete_symbol has no extra mandatory field, so required is exactly [file]"
+        );
         for name in [
             "find_definition",
             "find_references",
@@ -304,16 +313,26 @@ mod tests {
         }
     }
 
-    /// `find_call_path`'s handler requires a `to` target (a non-Option field), so
-    /// the advertised schema must mark it required — otherwise the schema and the
-    /// deserializer disagree and a client could omit `to` per the schema and hit
-    /// a runtime error.
+    /// Every tool whose handler input has a mandatory (non-Option, no-default)
+    /// field beyond the base file/line must advertise it as required — otherwise
+    /// a schema-conformant client omits it and hits a runtime "missing field"
+    /// error from deserialization. Pins the whole class so a new `with_extra`
+    /// mandatory field cannot silently regress to optional.
     #[test]
-    fn find_call_path_marks_the_to_target_required() {
-        assert!(
-            required_of(tool("find_call_path")).contains(&"to"),
-            "find_call_path must advertise `to` as required"
-        );
+    fn mandatory_handler_fields_are_advertised_required() {
+        for (name, field) in [
+            ("find_call_path", "to"),
+            ("rename_symbol", "new_name"),
+            ("apply_code_action", "title"),
+            ("replace_symbol_body", "body"),
+            ("insert_before_symbol", "code"),
+            ("insert_after_symbol", "code"),
+        ] {
+            assert!(
+                required_of(tool(name)).contains(&field),
+                "{name}: handler field `{field}` is non-Option but the schema does not mark it required"
+            );
+        }
     }
 
     #[test]

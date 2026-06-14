@@ -456,16 +456,19 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "LSP rename for the symbol at file:line:column. Returns the affected \
                           file list and per-file edit count. Set dry_run=true to preview \
                           without writing. ⚠ Mutates source files when dry_run is false.",
-            with_extra(
-                position_exact_location_schema(),
-                &[
-                    ("new_name", "string", "Replacement identifier"),
-                    (
-                        "dry_run",
-                        "boolean",
-                        "Preview the rename without writing (default false)",
-                    ),
-                ],
+            with_required(
+                with_extra(
+                    position_exact_location_schema(),
+                    &[
+                        ("new_name", "string", "Replacement identifier"),
+                        (
+                            "dry_run",
+                            "boolean",
+                            "Preview the rename without writing (default false)",
+                        ),
+                    ],
+                ),
+                &["new_name"],
             ),
         ),
         ToolDefinition::read_only(
@@ -486,16 +489,19 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Apply a code action by exact title at file:line:column. Use \
                           `list_code_actions` first to discover titles. Set dry_run=true to \
                           preview. ⚠ Mutates source files when dry_run is false.",
-            with_extra(
-                position_exact_location_schema(),
-                &[
-                    ("title", "string", "Exact action title to apply"),
-                    (
-                        "dry_run",
-                        "boolean",
-                        "Preview the change without writing (default false)",
-                    ),
-                ],
+            with_required(
+                with_extra(
+                    position_exact_location_schema(),
+                    &[
+                        ("title", "string", "Exact action title to apply"),
+                        (
+                            "dry_run",
+                            "boolean",
+                            "Preview the change without writing (default false)",
+                        ),
+                    ],
+                ),
+                &["title"],
             ),
         ),
         ToolDefinition::mutating(
@@ -506,33 +512,36 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           (e.g. 'Class/method') or by file:line[:column] — exactly one of \
                           symbol or line. \
                           ⚠ Mutates source files when dry_run is false.",
-            with_extra(
-                edit_target_schema(),
-                &[
-                    (
-                        "body",
-                        "string",
-                        "Complete replacement for the symbol's definition \
-                         (signature + braces + body)",
-                    ),
-                    (
-                        "dry_run",
-                        "boolean",
-                        "Preview the change without writing (default false)",
-                    ),
-                    (
-                        "with_diagnostics",
-                        "boolean",
-                        "Attach post-edit LSP diagnostics (default false)",
-                    ),
-                    (
-                        "verify_callers",
-                        "boolean",
-                        "Also attach diagnostics for the edited symbol's caller files \
-                         (its one-hop references), closing read->edit->verify across \
-                         callers (default false)",
-                    ),
-                ],
+            with_required(
+                with_extra(
+                    edit_target_schema(),
+                    &[
+                        (
+                            "body",
+                            "string",
+                            "Complete replacement for the symbol's definition \
+                             (signature + braces + body)",
+                        ),
+                        (
+                            "dry_run",
+                            "boolean",
+                            "Preview the change without writing (default false)",
+                        ),
+                        (
+                            "with_diagnostics",
+                            "boolean",
+                            "Attach post-edit LSP diagnostics (default false)",
+                        ),
+                        (
+                            "verify_callers",
+                            "boolean",
+                            "Also attach diagnostics for the edited symbol's caller files \
+                             (its one-hop references), closing read->edit->verify across \
+                             callers (default false)",
+                        ),
+                    ],
+                ),
+                &["body"],
             ),
         ),
         ToolDefinition::mutating(
@@ -540,28 +549,31 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Insert source code immediately before the symbol, targeted by \
                           file + symbol path or file:line:column — exactly one of symbol or \
                           line. ⚠ Mutates source files when dry_run is false.",
-            with_extra(
-                edit_target_schema(),
-                &[
-                    ("code", "string", "Source code to insert"),
-                    (
-                        "dry_run",
-                        "boolean",
-                        "Preview without writing (default false)",
-                    ),
-                    (
-                        "with_diagnostics",
-                        "boolean",
-                        "Attach post-edit LSP diagnostics (default false)",
-                    ),
-                    (
-                        "verify_callers",
-                        "boolean",
-                        "Also attach diagnostics for the edited symbol's caller files \
-                         (its one-hop references), closing read->edit->verify across \
-                         callers (default false)",
-                    ),
-                ],
+            with_required(
+                with_extra(
+                    edit_target_schema(),
+                    &[
+                        ("code", "string", "Source code to insert"),
+                        (
+                            "dry_run",
+                            "boolean",
+                            "Preview without writing (default false)",
+                        ),
+                        (
+                            "with_diagnostics",
+                            "boolean",
+                            "Attach post-edit LSP diagnostics (default false)",
+                        ),
+                        (
+                            "verify_callers",
+                            "boolean",
+                            "Also attach diagnostics for the edited symbol's caller files \
+                             (its one-hop references), closing read->edit->verify across \
+                             callers (default false)",
+                        ),
+                    ],
+                ),
+                &["code"],
             ),
         ),
         ToolDefinition::mutating(
@@ -569,28 +581,31 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Insert source code immediately after the symbol, targeted by \
                           file + symbol path or file:line:column — exactly one of symbol or \
                           line. ⚠ Mutates source files when dry_run is false.",
-            with_extra(
-                edit_target_schema(),
-                &[
-                    ("code", "string", "Source code to insert"),
-                    (
-                        "dry_run",
-                        "boolean",
-                        "Preview without writing (default false)",
-                    ),
-                    (
-                        "with_diagnostics",
-                        "boolean",
-                        "Attach post-edit LSP diagnostics (default false)",
-                    ),
-                    (
-                        "verify_callers",
-                        "boolean",
-                        "Also attach diagnostics for the edited symbol's caller files \
-                         (its one-hop references), closing read->edit->verify across \
-                         callers (default false)",
-                    ),
-                ],
+            with_required(
+                with_extra(
+                    edit_target_schema(),
+                    &[
+                        ("code", "string", "Source code to insert"),
+                        (
+                            "dry_run",
+                            "boolean",
+                            "Preview without writing (default false)",
+                        ),
+                        (
+                            "with_diagnostics",
+                            "boolean",
+                            "Attach post-edit LSP diagnostics (default false)",
+                        ),
+                        (
+                            "verify_callers",
+                            "boolean",
+                            "Also attach diagnostics for the edited symbol's caller files \
+                             (its one-hop references), closing read->edit->verify across \
+                             callers (default false)",
+                        ),
+                    ],
+                ),
+                &["code"],
             ),
         ),
         ToolDefinition::mutating(
