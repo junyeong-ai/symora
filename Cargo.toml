@@ -45,7 +45,7 @@ serde_repr = "0.1.20"
 toml = "1.1"
 # Format-preserving TOML edits (comments, ordering, all table forms) for the
 # MCP installer's Codex config — the canonical crate for surgical TOML editing.
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 # Error Handling
 thiserror = "2.0.18"
