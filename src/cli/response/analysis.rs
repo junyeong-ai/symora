@@ -176,7 +176,7 @@ mod tests {
     use crate::models::symbol::{Location, SymbolKind};
 
     #[test]
-    fn resolved_is_omitted_for_a_real_symbol() {
+    fn anchor_status_is_omitted_for_a_real_symbol() {
         let symbol = Symbol::new(
             "process".to_string(),
             SymbolKind::Function,

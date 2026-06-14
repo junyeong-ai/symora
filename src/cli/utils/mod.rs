@@ -18,7 +18,6 @@ pub use refs::{RefsClassification, classify_refs, extract_module};
 pub use signature::extract_signature;
 pub use symbol_nav::{
     AnchorResolution, SymbolResolution, ambiguity_hint, column_addressed_symbol,
-    find_symbol_at_position, line_addressed_symbol, resolve_symbol_anchor,
-    symbols_declared_on_line,
+    find_symbol_at_position, line_addressed_symbol, symbols_declared_on_line,
 };
 pub use test_matcher::TestMatcher;

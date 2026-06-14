@@ -45,19 +45,6 @@ pub fn find_symbol_at_position(
     search(symbols, line, column)
 }
 
-/// Resolve `(line, column)` to the most specific symbol available, falling
-/// back from column-precise to line-only matching, and surfacing the
-/// symbol's authoritative anchor position alongside it.
-pub fn resolve_symbol_anchor(
-    symbols: &[Symbol],
-    line: u32,
-    column: u32,
-) -> Option<(u32, u32, &Symbol)> {
-    find_symbol_at_position(symbols, line, Some(column))
-        .or_else(|| find_symbol_at_position(symbols, line, None))
-        .map(|symbol| (symbol.location.line, symbol.location.column, symbol))
-}
-
 /// How a target position resolved against the symbol tree. Both
 /// addressing modes (`file:line:col` and column-less `file:line`) produce
 /// one of these; what differs per surface is only the *handling* of
@@ -204,33 +191,39 @@ mod tests {
     }
 
     #[test]
-    fn anchor_snaps_declaration_start_column_to_the_name() {
+    fn column_addressing_snaps_declaration_start_column_to_the_name() {
         // The function name is at column 8 (after `fn `), but the declaration
         // starts at column 1 (`pub`) — the column `search symbols` reports.
-        // Resolving from column 1 must still land on the name anchor so
+        // Column-addressing from column 1 must still land on the name anchor so
         // callers/refs/impact agree with an exact name position.
         let symbols = vec![func("load_config", 41, 8, 50)];
-        let (line, column, sym) = resolve_symbol_anchor(&symbols, 41, 1).unwrap();
-        assert_eq!((line, column), (41, 8));
+        let SymbolResolution::Match(sym) = column_addressed_symbol(&symbols, 41, 1) else {
+            panic!("expected a Match");
+        };
+        assert_eq!((sym.location.line, sym.location.column), (41, 8));
         assert_eq!(sym.name, "load_config");
     }
 
     #[test]
-    fn anchor_resolves_line_only_input_to_the_symbol() {
-        // A line in the body (no meaningful column) resolves to the symbol's
-        // own name anchor, not the body line.
+    fn line_addressing_resolves_a_body_line_to_the_enclosing_symbol() {
+        // A body line (no column) resolves to the enclosing symbol's own name
+        // anchor, not the body line.
         let symbols = vec![func("load_config", 41, 8, 50)];
-        let (line, column, _) = resolve_symbol_anchor(&symbols, 45, 1).unwrap();
-        assert_eq!((line, column), (41, 8));
+        let SymbolResolution::Match(sym) = line_addressed_symbol(&symbols, 45) else {
+            panic!("expected a Match");
+        };
+        assert_eq!((sym.location.line, sym.location.column), (41, 8));
     }
 
     #[test]
-    fn anchor_prefers_the_innermost_symbol_at_an_exact_column() {
+    fn column_addressing_prefers_the_innermost_symbol_at_an_exact_column() {
         let mut outer = func("outer", 10, 8, 30);
         outer.children = vec![func("inner", 15, 12, 20)];
         let symbols = vec![outer];
-        let (line, column, sym) = resolve_symbol_anchor(&symbols, 15, 12).unwrap();
-        assert_eq!((line, column), (15, 12));
+        let SymbolResolution::Match(sym) = column_addressed_symbol(&symbols, 15, 12) else {
+            panic!("expected a Match");
+        };
+        assert_eq!((sym.location.line, sym.location.column), (15, 12));
         assert_eq!(sym.name, "inner");
     }
 

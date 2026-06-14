@@ -49,7 +49,7 @@ pub(super) async fn inlay_hints(
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
                     "range": {
-                        "start": { "line": start_line, "character": 0 },
+                        "start": { "line": start_line.min(LSP_POSITION_MAX), "character": 0 },
                         "end": {
                             "line": end_line.min(LSP_POSITION_MAX),
                             "character": LSP_POSITION_MAX
