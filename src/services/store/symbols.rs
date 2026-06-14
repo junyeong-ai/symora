@@ -581,6 +581,12 @@ type Alias = Foo;
                 "impl Tr for <Qual as Baz>::Out",
                 "Qual",
             ),
+            // a nominal path whose head merely starts with "fn" is not a fn-pointer
+            (
+                "impl Tr for fn_mod::Named { fn m(&self) {} }",
+                "impl Tr for fn_mod::Named",
+                "Named",
+            ),
         ];
         for (src, ra_label, expected) in cases {
             let symbols = extractor.extract(src, Language::Rust);
