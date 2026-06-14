@@ -300,7 +300,55 @@ impl Symbol {
         format!("{}_{}", stem, suffix)
     }
 
-    pub fn strip_type_parameters(name: &str) -> String {
+    /// Normalize a raw LSP documentSymbol name into the segment used for
+    /// symbol paths. Functions/methods drop their parameter list and
+    /// generics; an `impl` block collapses to its bare implementing type, so
+    /// a method reads `Type/method` on every surface — `impl Foo`,
+    /// `impl Trait for Foo`, and `impl<T> Foo<T>` all yield `Foo`, matching
+    /// the index extractor.
+    pub fn normalize_symbol_name(name: &str) -> String {
+        let name = name.trim();
+        if let Some(rest) = name.strip_prefix("impl")
+            && rest.starts_with(|c: char| c.is_whitespace() || c == '<')
+        {
+            return Self::impl_self_type(rest);
+        }
+        Self::strip_type_parameters(name)
+    }
+
+    /// The implementing type from an impl header (the text after `impl`): the
+    /// type after ` for ` for a trait impl, otherwise the head type, with the
+    /// impl generics, the type's own generics, and any module path stripped.
+    fn impl_self_type(after_impl: &str) -> String {
+        let head = after_impl.rsplit(" for ").next().unwrap_or(after_impl);
+        let head = Self::strip_leading_generics(head.trim_start());
+        let ty = head.split('<').next().unwrap_or(head).trim();
+        ty.rsplit("::").next().unwrap_or(ty).trim().to_string()
+    }
+
+    /// Drop a single balanced leading `<...>` (the generic params of an
+    /// `impl<...>` header), returning the remainder trimmed.
+    fn strip_leading_generics(s: &str) -> &str {
+        if !s.starts_with('<') {
+            return s;
+        }
+        let mut depth = 0usize;
+        for (i, c) in s.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return s[i + 1..].trim_start();
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
+    }
+
+    fn strip_type_parameters(name: &str) -> String {
         let name = name.trim();
 
         let name = if let Some(paren_pos) = name.find('(') {
@@ -397,6 +445,28 @@ mod tests {
         // leading-`/` exact mode still enforces full-path segment count
         assert!(sym.matches_path("/Service/get*Name"));
         assert!(!sym.matches_path("/get*Name"));
+    }
+
+    /// An LSP `impl` block collapses to its bare implementing type so a
+    /// method's path reads `Type/method` on every surface (matching the index
+    /// extractor) — inherent, trait, generic, and module-qualified alike.
+    #[test]
+    fn normalize_symbol_name_collapses_impl_to_the_self_type() {
+        assert_eq!(Symbol::normalize_symbol_name("impl Symbol"), "Symbol");
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl fmt::Display for Language"),
+            "Language"
+        );
+        assert_eq!(Symbol::normalize_symbol_name("impl<T> Foo<T>"), "Foo");
+        assert_eq!(
+            Symbol::normalize_symbol_name("impl<T> Bar<T> for crate::Foo<T>"),
+            "Foo"
+        );
+        // non-impl names keep the plain parameter/generic stripping
+        assert_eq!(Symbol::normalize_symbol_name("execute(args)"), "execute");
+        assert_eq!(Symbol::normalize_symbol_name("Vec<T>"), "Vec");
+        // a type that merely starts with the letters "impl" is not an impl
+        assert_eq!(Symbol::normalize_symbol_name("implicit"), "implicit");
     }
 
     /// Malformed overload indices degrade to literal names (no match against
