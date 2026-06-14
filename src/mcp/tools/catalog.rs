@@ -182,11 +182,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                      lower bound (depth>1 only)",
                 ),
                 (
-                    "anchor_unresolved",
-                    "boolean",
-                    "The from-position did not resolve to a verified symbol (not a symbol, or \
-                     its symbols could not be read); an empty set is then not authoritative \
-                     (depth>1 only)",
+                    "anchor_status",
+                    "string",
+                    "Present when the from-position did not resolve to a verified symbol: \
+                     \"not_a_symbol\" (read OK, not a symbol) or \"unavailable\" (the symbol \
+                     read failed); an empty set is then not authoritative (depth>1 only)",
                 ),
             ],
         )),
@@ -246,17 +246,17 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                      verdict is a lower bound — never an exhaustive negative",
                 ),
                 (
-                    "target_unresolved",
-                    "boolean",
-                    "The `to` target did not resolve to a verified symbol (not a symbol, or \
-                     its symbols could not be read); the verdict is not authoritative (forced \
-                     to not_reached_within_bound)",
+                    "target_status",
+                    "string",
+                    "Present when the `to` target did not resolve to a verified symbol: \
+                     \"not_a_symbol\" or \"unavailable\"; the verdict is not authoritative \
+                     (forced to not_reached_within_bound)",
                 ),
                 (
-                    "anchor_unresolved",
-                    "boolean",
-                    "The from-position did not resolve to a verified symbol (not a symbol, or \
-                     its symbols could not be read); the verdict is not authoritative",
+                    "anchor_status",
+                    "string",
+                    "Present when the from-position did not resolve to a verified symbol: \
+                     \"not_a_symbol\" or \"unavailable\"; the verdict is not authoritative",
                 ),
                 (
                     "indexing",

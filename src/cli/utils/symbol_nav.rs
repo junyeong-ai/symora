@@ -74,6 +74,65 @@ pub enum SymbolResolution<'a> {
     NotFound,
 }
 
+/// Whether a snapped/analyzed anchor resolved to a symbol, and if not, why. The
+/// two failure cases are kept distinct because they license different claims:
+/// `NotASymbol` was checked and is genuinely not a symbol; `Unavailable` could
+/// not be checked (the symbol read failed), so neither "is" nor "is not a
+/// symbol" may be claimed. Collapsing them would let a mere read failure be
+/// reported as a false "not a symbol".
+///
+/// This is the single source of the anchor-resolution disclosure: every surface
+/// (callers/callees/implementations/refs/impact/context) renders it through
+/// [`as_status`](AnchorResolution::as_status) so the JSON marker is one
+/// consistent `*_status` string, never a per-surface bool/shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorResolution {
+    /// Snapped to a symbol's name anchor (possibly after disambiguating a
+    /// multi-declaration line).
+    Resolved,
+    /// Symbols were read but none is addressed by this position.
+    NotASymbol,
+    /// The symbol read failed, so the position could not be snapped; whether it
+    /// is a symbol is unknown.
+    Unavailable,
+}
+
+impl AnchorResolution {
+    /// Whether the input snapped cleanly to a symbol.
+    pub fn is_resolved(self) -> bool {
+        matches!(self, AnchorResolution::Resolved)
+    }
+
+    /// The public disclosure marker for an unresolved anchor, or `None` when
+    /// resolved (the field is then omitted). One shared vocabulary across every
+    /// surface: `"not_a_symbol"` vs `"unavailable"` — never collapsed to a bool.
+    pub fn as_status(self) -> Option<&'static str> {
+        match self {
+            AnchorResolution::Resolved => None,
+            AnchorResolution::NotASymbol => Some("not_a_symbol"),
+            AnchorResolution::Unavailable => Some("unavailable"),
+        }
+    }
+}
+
+/// The navigation disclosure for a multi-declaration line resolved to its first
+/// declaration: names the alternatives and how to target another. The single
+/// home for this wording, shared by `snap_to_symbol_anchor` and
+/// `resolve_navigation_target` so the two cannot drift. `declared` is ordered by
+/// declaration column, so `[0]` is the chosen first declaration.
+pub fn ambiguity_hint(line: u32, declared: &[&Symbol]) -> String {
+    let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
+    let first = declared
+        .first()
+        .map(|s| s.name.as_str())
+        .unwrap_or_default();
+    format!(
+        "Line {line} declares multiple symbols ({}); resolved to '{first}' — pass an explicit \
+         column (file:line:column) to target another",
+        names.join(", "),
+    )
+}
+
 /// Resolution for a column-addressed target (`file:line:col`): the
 /// innermost symbol whose range contains the exact position. When the
 /// column matches nothing, fall back to the line's declarations while

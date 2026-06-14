@@ -355,7 +355,7 @@ fn target_output_fallback_for_unknown_symbol() {
         50,
         4,
         &root(),
-        false,
+        Some("not_a_symbol"),
     );
     assert_json_snapshot!(out);
 }

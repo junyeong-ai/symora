@@ -1,6 +1,5 @@
 ---
 source: tests/output_contract.rs
-assertion_line: 263
 expression: out
 ---
 {
@@ -8,5 +7,5 @@ expression: out
   "kind": "unknown",
   "file": "src/main.rs",
   "line": 50,
-  "resolved": false
+  "anchor_status": "not_a_symbol"
 }

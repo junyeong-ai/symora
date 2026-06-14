@@ -287,7 +287,10 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
 /// ever serves nameless container parents whose kind is discarded.
 fn node_kind(node: Node) -> SymbolKind {
     match node.kind() {
-        "function_item" | "function_definition" | "function_declaration" => SymbolKind::Function,
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "generator_function_declaration" => SymbolKind::Function,
 
         "method_item" | "method_declaration" | "method_definition" => SymbolKind::Method,
 
@@ -388,6 +391,7 @@ const PYTHON_QUERY: &str = r#"
 // (const/let) and variable_declaration (var), bare and export-wrapped.
 const TYPESCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
+(generator_function_declaration) @symbol
 (class_declaration) @symbol
 (interface_declaration) @symbol
 (type_alias_declaration) @symbol
@@ -401,6 +405,7 @@ const TYPESCRIPT_QUERY: &str = r#"
 
 const JAVASCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
+(generator_function_declaration) @symbol
 (class_declaration) @symbol
 (method_definition) @symbol
 (program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
@@ -575,6 +580,7 @@ export const handler = async () => {};
 const fexpr = function named() {};
 var legacy = () => {};
 const gen = function* () {};
+function* topgen() {}
 const config = makeConfig();
 const VERSION = "1.0";
 const klass = class {};
@@ -596,6 +602,9 @@ function outer() {
         // A generator expression is a callable function value, indexed like the
         // arrow and function-expression forms.
         assert_eq!(kind("gen"), Some(SymbolKind::Function));
+        // A top-level generator declaration (`function* g(){}`) is a distinct
+        // node kind from `function_declaration` — indexed as a Function too.
+        assert_eq!(kind("topgen"), Some(SymbolKind::Function));
         // Non-function initializers are never captured by the value-filtered
         // query (they would only ever be Variables, which are not indexed here).
         assert_eq!(kind("config"), None);

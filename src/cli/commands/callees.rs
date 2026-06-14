@@ -69,12 +69,13 @@ struct CalleesReachOutput {
     /// reachable set is a lower bound.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
-    /// The anchor (the queried from-position) did not resolve to a verified
-    /// symbol — either it is not a symbol, or its symbols could not be read to
-    /// snap it. An empty reachable set here is therefore not authoritatively
-    /// "no callees"; the hints distinguish the two causes.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    anchor_unresolved: bool,
+    /// The anchor (from-position) did not resolve to a verified symbol:
+    /// "not_a_symbol" (read OK, not a symbol) or "unavailable" (the symbol read
+    /// failed). Omitted when resolved. The reachable set is then not
+    /// authoritatively "no callees". One shared `*_status` vocabulary across
+    /// every surface (`AnchorResolution::as_status`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_status: Option<&'static str>,
 }
 
 /// Whether the anchor reaches the target through resolved outgoing calls.
@@ -115,17 +116,17 @@ struct CalleesPathOutput {
     /// `not_reached_within_bound` and this flag discloses why.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
-    /// The `--to` target did not resolve to a verified symbol (not a symbol, or
-    /// its symbols could not be read), so the verdict about it is never an
-    /// authoritative negative — it is forced to the non-absolute
-    /// `not_reached_within_bound`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    target_unresolved: bool,
-    /// The anchor (from-position) did not resolve to a verified symbol (not a
-    /// symbol, or its symbols could not be read), so the verdict is never an
-    /// authoritative negative.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    anchor_unresolved: bool,
+    /// The `--to` target did not resolve to a verified symbol: "not_a_symbol" or
+    /// "unavailable" (omitted when resolved). The verdict about it is then never
+    /// an authoritative negative — it is forced to the non-absolute
+    /// `not_reached_within_bound`. Same `*_status` vocabulary as `anchor_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_status: Option<&'static str>,
+    /// The anchor (from-position) did not resolve to a verified symbol:
+    /// "not_a_symbol" or "unavailable" (omitted when resolved), so the verdict
+    /// is never an authoritative negative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexing: Option<IndexingDegradation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -211,8 +212,7 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
 
-    let anchor_unresolved = !anchor.is_resolved();
-    let hints = anchor.anchor_hints(&ctx.relative_path(&loc.file), "callees", total == 0);
+    let hints = anchor.anchor_hints(&ctx.relative_path(&loc.file), "callees");
 
     ctx.print_success(CalleesReachOutput {
         section: Section::with_total(items, total)
@@ -222,7 +222,7 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,
         incomplete: walk.incomplete,
-        anchor_unresolved,
+        anchor_status: anchor.resolution.as_status(),
     });
 
     Ok(())
@@ -323,8 +323,6 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         }
     };
 
-    let target_unresolved = !target.is_resolved();
-    let anchor_unresolved = !anchor.is_resolved();
     let mut hints = anchor.verdict_hints(
         "from-position",
         &ctx.relative_path(&loc.file),
@@ -344,8 +342,8 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         max_depth_reached: walk.max_depth_reached,
         callees_truncated: walk.truncated,
         incomplete: walk.incomplete,
-        target_unresolved,
-        anchor_unresolved,
+        target_status: target.resolution.as_status(),
+        anchor_status: anchor.resolution.as_status(),
         indexing: walk.indexing,
         hints,
     });
@@ -393,8 +391,8 @@ mod tests {
             max_depth_reached: false,
             callees_truncated: false,
             incomplete: false,
-            target_unresolved: false,
-            anchor_unresolved: false,
+            target_status: None,
+            anchor_status: None,
             indexing: None,
             hints: vec![],
         };
@@ -419,8 +417,8 @@ mod tests {
             max_depth_reached: true,
             callees_truncated: false,
             incomplete: false,
-            target_unresolved: false,
-            anchor_unresolved: false,
+            target_status: None,
+            anchor_status: None,
             indexing: None,
             hints: vec![],
         };
@@ -440,8 +438,8 @@ mod tests {
             max_depth_reached: false,
             callees_truncated: false,
             incomplete: false,
-            target_unresolved: false,
-            anchor_unresolved: false,
+            target_status: None,
+            anchor_status: None,
             indexing: None,
             hints: vec![],
         };
@@ -465,13 +463,13 @@ mod tests {
             max_depth_reached: false,
             callees_truncated: false,
             incomplete: false,
-            target_unresolved: true,
-            anchor_unresolved: false,
+            target_status: Some("not_a_symbol"),
+            anchor_status: None,
             indexing: None,
             hints: vec!["did not resolve to a symbol".to_string()],
         };
         let v = serde_json::to_value(out).unwrap();
-        assert_eq!(v["target_unresolved"], true);
+        assert_eq!(v["target_status"], "not_a_symbol");
         // A target that was never a symbol must never read as the absolute
         // no_static_path — the verdict stays non-absolute.
         assert_eq!(v["reachability"], "not_reached_within_bound");
@@ -485,7 +483,7 @@ mod tests {
             max_depth_reached: false,
             callees_truncated: false,
             incomplete: false,
-            anchor_unresolved: false,
+            anchor_status: None,
         };
         let v = serde_json::to_value(out).unwrap();
         // Section fields are flattened beside the reach-specific ones.
@@ -505,7 +503,7 @@ mod tests {
             max_depth_reached: true,
             callees_truncated: true,
             incomplete: false,
-            anchor_unresolved: false,
+            anchor_status: None,
         };
         let v = serde_json::to_value(out).unwrap();
         assert_eq!(v["max_depth_reached"], true);

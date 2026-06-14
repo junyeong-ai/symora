@@ -86,6 +86,13 @@ pub struct ChangedSymbolImpact {
     /// Production code references (Added/Modified only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
+    /// Present only when an Added/Modified symbol's reference measurement could
+    /// not be taken ("unavailable" — the reference query failed). The `refs`
+    /// counts are then absent because they are UNKNOWN, not zero — the same
+    /// `*_status` disclosure idiom as `callers_status`, so a total measurement
+    /// failure is at least as disclosed as a partial (callers-only) one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refs_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<CallHierarchyOutput>,
     /// Present only when callers were requested but the list is not authoritative:
@@ -611,6 +618,7 @@ async fn analyze_symbol_impact(
                 refs: None,
                 test_refs: None,
                 prod_refs: None,
+                refs_status: Some("unavailable"),
                 callers: vec![],
                 callers_status: None,
                 deletion: None,
@@ -649,6 +657,7 @@ async fn analyze_symbol_impact(
         refs: Some(classified.total),
         test_refs: Some(classified.test),
         prod_refs: Some(classified.prod),
+        refs_status: None,
         callers,
         callers_status,
         deletion: None,
@@ -673,6 +682,7 @@ fn resolve_deleted_hunk(
         refs: None,
         test_refs: None,
         prod_refs: None,
+        refs_status: None,
         callers: vec![],
         callers_status: None,
         deletion: Some(resolution),
@@ -700,6 +710,7 @@ fn resolve_deleted_hunk(
             refs: None,
             test_refs: None,
             prod_refs: None,
+            refs_status: None,
             callers: vec![],
             callers_status: None,
             deletion: Some(DeletionResolution::Resolved),
@@ -889,6 +900,7 @@ mod tests {
             refs: None,
             test_refs: None,
             prod_refs: None,
+            refs_status: None,
             callers: vec![],
             callers_status: None,
             deletion: Some(DeletionResolution::Resolved),
@@ -913,6 +925,7 @@ mod tests {
             refs: None,
             test_refs: None,
             prod_refs: None,
+            refs_status: None,
             callers: vec![],
             callers_status: None,
             deletion: Some(DeletionResolution::PreimageUnavailable),
@@ -936,6 +949,7 @@ mod tests {
             refs: Some(3),
             test_refs: Some(1),
             prod_refs: Some(2),
+            refs_status: None,
             callers: vec![],
             callers_status: None,
             deletion: None,
