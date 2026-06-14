@@ -403,7 +403,23 @@ mod tests {
     /// index isn't built, so no language server is needed.
     #[tokio::test]
     async fn tool_call_response_is_fitted_to_the_size_ceiling() {
-        let mut app = dummy_app().await;
+        // Hermetic: root the app at a fixture tree with many `fn` matches so
+        // the ceiling deterministically truncates, independent of the cwd the
+        // test happens to run in.
+        let dir = tempfile::tempdir().unwrap();
+        let fixture: String = (0..40)
+            .map(|i| format!("fn handler_number_{i}() {{ let _ = {i}; }}\n"))
+            .collect();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("lib.rs"), fixture).unwrap();
+
+        let mut app = App::new_at(
+            dir.path().to_path_buf(),
+            crate::cli::OutputOptions::default(),
+            false,
+        )
+        .await
+        .expect("app init");
         app.config.output.max_response_chars = 700;
         let response = handle_line(
             r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_content","arguments":{"query":"fn"}}}"#,
