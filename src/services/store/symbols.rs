@@ -217,8 +217,14 @@ fn extract_container_path(mut node: Node, content: &str, language: Language) -> 
     let mut parts = Vec::new();
     while let Some(parent) = node.parent() {
         node = parent;
-        if let Some((name, _)) = extract_name_and_kind(node, content, language)
+        // A module/namespace/package organizes code but does not qualify a
+        // symbol's addressing path: a method is keyed `Type/method` and a
+        // module-level item bare, matching the LSP workspace-symbol container
+        // (which never reports an enclosing module) so a name_path round-trips
+        // across the index, documentSymbol, and workspace surfaces.
+        if let Some((name, kind)) = extract_name_and_kind(node, content, language)
             && !name.is_empty()
+            && !kind.is_namespace_like()
         {
             parts.push(name);
         }
@@ -627,6 +633,36 @@ type Alias = Foo;
                 method.name_path.as_deref(),
                 Some(expected_path.as_str()),
                 "index name_path for {src:?}"
+            );
+        }
+    }
+
+    /// Modules organize but never qualify the addressing path: a method of a
+    /// type nested in modules is keyed `Type/method` and a module-level free
+    /// function bare — matching rust-analyzer's workspace-symbol container
+    /// (which omits the enclosing module) so the index path round-trips against
+    /// `symbols`/`edit`. The module prefix the AST carries is dropped here.
+    #[test]
+    fn index_drops_enclosing_module_from_name_path() {
+        let extractor = SymbolExtractor::new();
+        let src = "mod a { mod b { struct Deep; impl Deep { fn m(&self) {} } fn free() {} } }";
+        let symbols = extractor.extract(src, Language::Rust);
+        let path = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} not extracted from {src:?}"))
+                .name_path
+                .clone()
+        };
+        assert_eq!(path("m"), Some("Deep/m".to_string()));
+        assert_eq!(path("free"), Some("free".to_string()));
+        // No producer keeps the enclosing module in the addressing path.
+        for s in &symbols {
+            let np = s.name_path.as_deref().unwrap_or_default();
+            assert!(
+                !np.starts_with("a/") && !np.contains("/a/") && !np.contains("/b/"),
+                "module leaked into name_path: {np:?}"
             );
         }
     }

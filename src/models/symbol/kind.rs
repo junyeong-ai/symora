@@ -108,6 +108,15 @@ impl SymbolKind {
         )
     }
 
+    /// A module, namespace, or package: it organizes code but does not qualify
+    /// a symbol's addressing path. A method is keyed `Type/method` and a
+    /// module-level item bare, matching the LSP workspace-symbol container
+    /// (which never reports an enclosing module), so a `name_path` round-trips
+    /// across the index, documentSymbol, and workspace surfaces.
+    pub fn is_namespace_like(&self) -> bool {
+        matches!(self, Self::Module | Self::Namespace | Self::Package)
+    }
+
     pub fn parse_or_default(s: &str) -> Self {
         s.parse().unwrap_or(Self::Variable)
     }
