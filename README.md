@@ -449,7 +449,7 @@ symora mcp serve --transport http --port 7700    # HTTP
 - `symora setup skill`은 Claude Code 스킬(전체 CLI 플레이북)을 설치합니다.
 - `symora mcp serve`는 동일한 가이드를 MCP `initialize` instructions로 반환합니다.
 
-요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 실패는 구조화된 `{code, message, hint}`입니다.
+요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 명령 실패는 0이 아닌 코드로 종료하는 구조화된 `{code, message, hint}`입니다(잘못된 CLI 인자는 평문 usage 에러).
 
 ---
 

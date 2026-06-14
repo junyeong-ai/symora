@@ -385,6 +385,9 @@ mod tests {
         assert!(sym.matches_path("*User*"));
         assert!(sym.matches_path("get*User*Name"));
         assert!(sym.matches_path("*/get*Name"));
+        // explicit a*b*c shape: two stars, three ordered anchored literals
+        assert!(sym.matches_path("g*User*e"));
+        assert!(!sym.matches_path("g*Zzz*e"));
         // order matters and end anchors hold
         assert!(!sym.matches_path("*Name*User*"));
         assert!(!sym.matches_path("get*Xyz*Name"));
