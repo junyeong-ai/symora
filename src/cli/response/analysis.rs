@@ -24,6 +24,12 @@ pub struct TargetOutput {
     /// mistaken for a resolved symbol.
     #[serde(skip_serializing_if = "is_true")]
     pub resolved: bool,
+    /// Present only when `resolved` is false BECAUSE the symbol read was
+    /// unavailable ("unavailable") — as distinct from a position verifiably not
+    /// a symbol. Mirrors the three-state `AnchorResolution` the list surfaces
+    /// use, so a read failure is never read as an authoritative "not a symbol".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_status: Option<&'static str>,
 }
 
 fn is_true(b: &bool) -> bool {
@@ -40,6 +46,7 @@ impl TargetOutput {
             signature: None,
             body: None,
             resolved: true,
+            anchor_status: None,
         }
     }
 
@@ -59,6 +66,7 @@ impl TargetOutput {
             signature: None,
             body: None,
             resolved: true,
+            anchor_status: None,
         }
     }
 
@@ -72,12 +80,17 @@ impl TargetOutput {
         self
     }
 
+    /// `unavailable` distinguishes the two unresolved causes: `true` when the
+    /// symbol read failed (the position may or may not be a symbol — unknown),
+    /// `false` when the read succeeded but the position is verifiably not a
+    /// symbol. It is recorded only on the unresolved (placeholder) branch.
     pub fn from_symbol_or_fallback(
         symbol: Option<&Symbol>,
         file: &Path,
         line: u32,
         column: u32,
         root: &Path,
+        unavailable: bool,
     ) -> Self {
         match symbol {
             Some(sym) => Self::from_symbol(sym, root),
@@ -88,6 +101,7 @@ impl TargetOutput {
                     .unwrap_or_else(|_| file.display().to_string());
                 Self {
                     resolved: false,
+                    anchor_status: unavailable.then_some("unavailable"),
                     ..Self::new(
                         format!("symbol@{}:{}", line, column),
                         "unknown".to_string(),
@@ -185,6 +199,7 @@ mod tests {
             0,
             0,
             Path::new("/proj"),
+            false,
         );
         let value = serde_json::to_value(&target).unwrap();
 
@@ -192,6 +207,8 @@ mod tests {
         assert!(value.get("resolved").is_none());
     }
 
+    /// A position checked and found NOT to be a symbol: `resolved:false`, no
+    /// `anchor_status` — the empty answer is authoritative.
     #[test]
     fn fallback_target_discloses_resolved_false() {
         let target = TargetOutput::from_symbol_or_fallback(
@@ -200,12 +217,33 @@ mod tests {
             42,
             7,
             Path::new("/proj"),
+            false,
         );
         let value = serde_json::to_value(&target).unwrap();
 
         assert_eq!(value["name"], "symbol@42:7");
         assert_eq!(value["kind"], "unknown");
         assert_eq!(value["resolved"], false);
+        assert!(value.get("anchor_status").is_none());
+    }
+
+    /// A symbol read that was unavailable: `resolved:false` PLUS
+    /// `anchor_status:"unavailable"` — the empty answer is "unknown", not an
+    /// authoritative "not a symbol".
+    #[test]
+    fn fallback_target_discloses_unavailable_distinctly() {
+        let target = TargetOutput::from_symbol_or_fallback(
+            None,
+            Path::new("/proj/src/lib.rs"),
+            42,
+            7,
+            Path::new("/proj"),
+            true,
+        );
+        let value = serde_json::to_value(&target).unwrap();
+
+        assert_eq!(value["resolved"], false);
+        assert_eq!(value["anchor_status"], "unavailable");
     }
 
     #[test]

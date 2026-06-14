@@ -83,6 +83,11 @@ END;
 
 pub fn build_symbol_search_query(with_kind: bool) -> String {
     let kind_filter = if with_kind { " AND s.kind = ?3" } else { "" };
+    // Substring matching is for a LITERAL query: `_`/`%` in an identifier are
+    // content, not LIKE wildcards. Escape them (and the escape char) so each
+    // `ESCAPE '\'` LIKE matches ?1 verbatim; the exact-match ladder rungs use
+    // `=` and need no escaping.
+    let like_q = r#"REPLACE(REPLACE(REPLACE(?1, '\', '\\'), '_', '\_'), '%', '\%')"#;
     // `COUNT(*) OVER ()` yields the total match count in the same scan the
     // ORDER BY already pays for, so `count` in list output is exact rather
     // than a limit-saturation guess.
@@ -97,17 +102,17 @@ pub fn build_symbol_search_query(with_kind: bool) -> String {
     CASE
         WHEN LOWER(s.name) = LOWER(?1) THEN 1.0
         WHEN s.name_path IS NOT NULL AND LOWER(s.name_path) = LOWER(?1) THEN 1.0
-        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || ?1 COLLATE NOCASE THEN 0.9
-        WHEN s.name LIKE ?1 || '%' COLLATE NOCASE THEN 0.8
-        WHEN s.name LIKE '%' || ?1 || '%' COLLATE NOCASE THEN 0.6
-        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%' || ?1 || '%' COLLATE NOCASE THEN 0.6
+        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || {like_q} ESCAPE '\' COLLATE NOCASE THEN 0.9
+        WHEN s.name LIKE {like_q} || '%' ESCAPE '\' COLLATE NOCASE THEN 0.8
+        WHEN s.name LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE THEN 0.6
+        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE THEN 0.6
         ELSE 0.5
     END AS score
 FROM symbols s
 JOIN files f ON s.file_id = f.id
 WHERE (
-    s.name LIKE '%' || ?1 || '%' COLLATE NOCASE
-    OR (s.name_path IS NOT NULL AND s.name_path LIKE '%' || ?1 || '%' COLLATE NOCASE)
+    s.name LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE
+    OR (s.name_path IS NOT NULL AND s.name_path LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE)
 ){kind_filter}
 ORDER BY score DESC, LENGTH(COALESCE(s.name_path, s.name)) ASC
 LIMIT ?2"#
@@ -125,14 +130,22 @@ pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
     // so a trigram coincidence that is not a real substring is still rejected,
     // and the result SET, the relevance ladder, and COUNT(*) OVER() are
     // byte-identical to the LIKE-only scan (proven by a set-identity test). The
-    // query text is wrapped as a single FTS5 string literal — doubling any
-    // embedded quote — so FTS syntax characters in user input never error or
-    // change the match. Shorter queries have no trigrams and skip FTS.
+    // LIKE is a LITERAL substring test (see `like_q`), so the literal trigram
+    // MATCH is a genuine necessary condition for it; the two paths cannot
+    // disagree. The query text is wrapped as a single FTS5 string literal —
+    // doubling any embedded quote — so FTS syntax characters in user input never
+    // error or change the match. Shorter queries have no trigrams and skip FTS.
     let fts_prefilter = if use_fts {
         r#"c.id IN (SELECT rowid FROM content_lines_fts WHERE content_lines_fts MATCH '"' || REPLACE(?1, '"', '""') || '"') AND "#
     } else {
         ""
     };
+    // The search is for a LITERAL substring: `_` and `%` are content (snake_case
+    // identifiers, format strings), not LIKE wildcards. Escape them — and the
+    // escape char itself — so an `ESCAPE '\'` LIKE matches ?1 verbatim. INSTR
+    // (scoring) and the trigram MATCH are already literal, so this aligns the
+    // LIKE with both.
+    let like_q = r#"REPLACE(REPLACE(REPLACE(?1, '\', '\\'), '_', '\_'), '%', '\%')"#;
     // Relevance is the match's position within the trimmed line — an
     // earlier hit is more relevant. Line length is the ORDER BY tiebreaker
     // only; it carries no relevance signal and must not enter the score.
@@ -147,7 +160,7 @@ pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
     END AS score
 FROM content_lines c
 JOIN files f ON c.file_id = f.id
-WHERE {fts_prefilter}c.content LIKE '%' || ?1 || '%' COLLATE NOCASE{lang_filter}
+WHERE {fts_prefilter}c.content LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE{lang_filter}
 ORDER BY score DESC, LENGTH(c.content) ASC
 LIMIT ?2"#
     )

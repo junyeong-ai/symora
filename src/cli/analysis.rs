@@ -31,6 +31,12 @@ pub struct LocationAnalysis {
     /// alternatives (picking silently would violate invariant 4; erroring
     /// on the ambiguity instead of disclosing it helps nobody).
     pub(crate) ambiguity: Option<String>,
+    /// The symbol read itself failed, so the target could not be resolved — as
+    /// distinct from a position that is verifiably not a symbol. Lets a surface
+    /// disclose "unavailable" rather than collapsing both into a bare
+    /// unresolved, matching the three-state `AnchorResolution` the list surfaces
+    /// use.
+    pub(crate) anchor_unavailable: bool,
 }
 
 impl LocationAnalysis {
@@ -57,6 +63,12 @@ impl LocationAnalysis {
     pub fn ambiguity_hint(&self) -> Option<&str> {
         self.ambiguity.as_deref()
     }
+
+    /// Whether the symbol read failed (target unresolved because the read was
+    /// unavailable, not because the position is not a symbol).
+    pub fn anchor_unavailable(&self) -> bool {
+        self.anchor_unavailable
+    }
 }
 
 impl LocationAnalysis {
@@ -72,13 +84,17 @@ impl LocationAnalysis {
         // place, which keeps a line-only or declaration-start input from
         // silently under-counting. Serialized on purpose — the snap must
         // precede the reference lookup.
-        let symbols = lsp
+        // Keep the read outcome: a failed read (Unavailable) is not the same as
+        // a position that is verifiably not a symbol (NotASymbol) — surfaces
+        // disclose the difference rather than collapsing both into "unresolved".
+        let symbols_result = lsp
             .find_symbols(
                 &anchor.file,
                 FindSymbolsOptions::default().with_body().with_depth(10),
             )
-            .await
-            .ok();
+            .await;
+        let anchor_unavailable = symbols_result.is_err();
+        let symbols = symbols_result.ok();
         let (target, ambiguity) = match symbols.as_ref() {
             Some(symbols) => resolve_navigation_target(symbols, &anchor),
             None => (None, None),
@@ -102,6 +118,7 @@ impl LocationAnalysis {
             references: references.data,
             indexing: references.indexing,
             ambiguity,
+            anchor_unavailable,
         })
     }
 
@@ -130,6 +147,7 @@ impl LocationAnalysis {
             references: references.data,
             indexing: references.indexing,
             ambiguity: None,
+            anchor_unavailable: false,
         })
     }
 

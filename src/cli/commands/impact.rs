@@ -67,6 +67,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 analysis.anchor.line,
                 analysis.anchor.column,
                 root,
+                analysis.anchor_unavailable(),
             );
 
             let exported = analysis.is_exported();

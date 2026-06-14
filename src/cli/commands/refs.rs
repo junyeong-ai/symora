@@ -74,6 +74,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 analysis.anchor().line,
                 analysis.anchor().column,
                 root,
+                analysis.anchor_unavailable(),
             )
             .with_signature(
                 analysis
