@@ -1156,7 +1156,7 @@ mod tests {
         assert_eq!(m("*const Ptr").as_deref(), Some("Ptr/tm"));
         assert_eq!(m("<Qual as Baz>::Out").as_deref(), Some("Qual/tm"));
         // a module-qualified self type reduces to the bare type, exactly as the
-        // index's first-type_identifier does (`fn_mod::Named` → `Named`)
+        // index does — both call `self_type_segment` (`fn_mod::Named` → `Named`)
         assert_eq!(m("Language").as_deref(), Some("Language/tm"));
         assert_eq!(m("fn_mod::Named").as_deref(), Some("Named/tm"));
     }
