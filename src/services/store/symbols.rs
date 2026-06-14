@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
-use crate::models::symbol::{Language, SymbolKind};
+use crate::models::symbol::{Language, Symbol, SymbolKind};
 
 pub struct ExtractedSymbol {
     pub name: String,
@@ -236,6 +236,21 @@ fn extract_name_and_kind(
     content: &str,
     language: Language,
 ) -> Option<(String, SymbolKind)> {
+    // An impl block is named by its self type, reduced by the one shared rule
+    // (`Symbol::self_type_segment`) the documentSymbol and workspace-symbol
+    // producers also apply — so a method keyed under it gets the same
+    // `Type/method` name_path on every surface (index, documentSymbol,
+    // workspace), structural and primitive self types included. A self type
+    // with no nominal name (e.g. `fn()`) reduces to an empty segment: the impl
+    // is then a transparent container whose methods attach to the enclosing
+    // path, never carrying a stray name.
+    if node.kind() == "impl_item" {
+        let type_node = node.child_by_field_name("type")?;
+        let self_type = content.get(type_node.start_byte()..type_node.end_byte())?;
+        let name = Symbol::self_type_segment(self_type);
+        return (!name.is_empty()).then(|| (name, node_kind(node)));
+    }
+
     // Resolve the name first: nameless parents (blocks, lists, the source
     // root) are walked during container resolution and must be skipped
     // before a kind is ever assigned to them.
@@ -250,16 +265,6 @@ fn extract_name_and_kind(
 }
 
 fn find_name_node(node: Node, language: Language) -> Option<Node> {
-    // An impl block's container name is its implementing TYPE — the `type`
-    // field, never the trait it implements — so a method's path reads
-    // `Type/method` regardless of whether the trait is written with a module
-    // path, matching the LSP self-type normalization.
-    if node.kind() == "impl_item" {
-        return node
-            .child_by_field_name("type")
-            .and_then(first_type_identifier);
-    }
-
     let name_field = match language {
         Language::Kotlin => node
             .child_by_field_name("name")
@@ -290,23 +295,6 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         }
         None
     })
-}
-
-/// The first `type_identifier` in a type node's subtree — the bare type name
-/// of a self type, descending through `generic_type`/`reference_type`/
-/// `scoped_type_identifier`/`dynamic_type` wrappers (`Foo<T>`→Foo,
-/// `crate::Foo`→Foo, `&Foo`→Foo).
-fn first_type_identifier(node: Node) -> Option<Node> {
-    if node.kind() == "type_identifier" {
-        return Some(node);
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(found) = first_type_identifier(child) {
-            return Some(found);
-        }
-    }
-    None
 }
 
 /// Map a captured declaration node to a [`SymbolKind`]. Every node kind the
@@ -533,60 +521,85 @@ type Alias = Foo;
         assert_eq!(kind("Alias"), Some(SymbolKind::Class));
     }
 
-    /// The cross-surface invariant: the tree-sitter index extractor and the
-    /// LSP self-type normalizer (`Symbol::normalize_symbol_name`) must key an
-    /// impl method under the SAME container, or a `name_path` copied from
-    /// `search` would fail against `symbols`/`edit`. This pins both to the same
-    /// "first nominal type identifier" rule across nominal, generic, scoped,
-    /// reference, trait, and structural (tuple/array/pointer/qualified) self
-    /// types. `($display)` is the matching rust-analyzer impl label.
+    /// The cross-surface invariant: the tree-sitter index extractor, the LSP
+    /// self-type normalizer (`Symbol::normalize_symbol_name`), and the
+    /// workspace-symbol path all key an impl method under the SAME container —
+    /// the single `Symbol::self_type_segment` rule the index now calls too — or
+    /// a `name_path` copied from one surface fails against another
+    /// (`symbols`/`edit`). Pins every self-type shape: nominal, generic,
+    /// scoped/unscoped trait, structural (tuple/array/pointer/qualified),
+    /// primitive-element structural (no separate AST descent to diverge on
+    /// anymore), a nominal path that merely starts with `fn`, and a truly
+    /// nameless self type (`fn()`/`()`) that reduces to a transparent container
+    /// so the method is keyed bare. `ra_label` is the matching rust-analyzer
+    /// impl label; `expected` is the shared container segment, `None` for the
+    /// transparent case.
     #[test]
     fn impl_method_container_agrees_with_lsp_normalizer() {
-        use crate::models::symbol::Symbol;
         let extractor = SymbolExtractor::new();
-        let cases = [
-            ("impl Foo { fn m(&self) {} }", "impl Foo", "Foo"),
+        let cases: [(&str, &str, Option<&str>); 13] = [
+            ("impl Foo { fn m(&self) {} }", "impl Foo", Some("Foo")),
             (
                 "impl<T> Wrap<T> { fn m(&self) {} }",
                 "impl<T> Wrap<T>",
-                "Wrap",
+                Some("Wrap"),
             ),
             (
                 "impl std::fmt::Display for Foo { fn m(&self) {} }",
                 "impl std::fmt::Display for Foo",
-                "Foo",
+                Some("Foo"),
             ),
             (
                 "impl FromStr for Foo { fn m(&self) {} }",
                 "impl FromStr for Foo",
-                "Foo",
+                Some("Foo"),
             ),
             (
                 "impl Tr for (A, B) { fn m(&self) {} }",
                 "impl Tr for (A, B)",
-                "A",
+                Some("A"),
             ),
             (
                 "impl Tr for [Elem; 4] { fn m(&self) {} }",
                 "impl Tr for [Elem; 4]",
-                "Elem",
+                Some("Elem"),
             ),
             (
                 "impl Tr for *const Ptr { fn m(&self) {} }",
                 "impl Tr for *const Ptr",
-                "Ptr",
+                Some("Ptr"),
             ),
             (
                 "impl Tr for <Qual as Baz>::Out { fn m(&self) {} }",
                 "impl Tr for <Qual as Baz>::Out",
-                "Qual",
+                Some("Qual"),
             ),
             // a nominal path whose head merely starts with "fn" is not a fn-pointer
             (
                 "impl Tr for fn_mod::Named { fn m(&self) {} }",
                 "impl Tr for fn_mod::Named",
-                "Named",
+                Some("Named"),
             ),
+            // primitive-element structural types: the one rule keeps the first
+            // nominal word — the AST `type_identifier`-only descent that used to
+            // skip primitives (and diverge here) is gone.
+            (
+                "impl Tr for [u8; 4] { fn m(&self) {} }",
+                "impl Tr for [u8; 4]",
+                Some("u8"),
+            ),
+            (
+                "impl Tr for fn(u8) -> u8 { fn m(&self) {} }",
+                "impl Tr for fn(u8) -> u8",
+                Some("u8"),
+            ),
+            // truly nameless self types — transparent container, method keyed bare
+            (
+                "impl Tr for fn() { fn m(&self) {} }",
+                "impl Tr for fn()",
+                None,
+            ),
+            ("impl Tr for () { fn m(&self) {} }", "impl Tr for ()", None),
         ];
         for (src, ra_label, expected) in cases {
             let symbols = extractor.extract(src, Language::Rust);
@@ -594,16 +607,26 @@ type Alias = Foo;
                 .iter()
                 .find(|s| s.name == "m")
                 .unwrap_or_else(|| panic!("method not extracted from {src:?}"));
-            let index_container = method.container.as_deref();
             assert_eq!(
-                index_container,
-                Some(expected),
+                method.container.as_deref(),
+                expected,
                 "index container for {src:?}"
             );
+            // The LSP normalizer reduces the same self type; an empty segment is
+            // the transparent (no-container) case the index represents as `None`.
+            let norm = Symbol::normalize_symbol_name(ra_label);
+            let lsp_container = (!norm.is_empty()).then_some(norm.as_str());
+            assert_eq!(lsp_container, expected, "LSP normalizer for {ra_label:?}");
+            // The stored name_path is the round-trip key the workspace producer
+            // rebuilds from the same container segment.
+            let expected_path = match expected {
+                Some(c) => format!("{c}/m"),
+                None => "m".to_string(),
+            };
             assert_eq!(
-                Symbol::normalize_symbol_name(ra_label),
-                expected,
-                "LSP normalizer for {ra_label:?}"
+                method.name_path.as_deref(),
+                Some(expected_path.as_str()),
+                "index name_path for {src:?}"
             );
         }
     }
