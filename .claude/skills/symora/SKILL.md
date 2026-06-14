@@ -8,11 +8,11 @@ allowed-tools: Bash(symora *)
 
 # Symora
 
-Use `symora` when semantic code navigation is more useful than text search. Output is JSON — treat it as structured data.
+Use `symora` when semantic code navigation is more useful than text search. Output is JSON by default — treat it as structured data.
 
 ## Two backends, different requirements
 
-- **Index & structural search**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search ast` uses tree-sitter directly, and the `map` family reads the file tree for structure (summary, siblings, related files, directory layout) — no index, no language server. `search content` ranks the SQLite index and scans the filesystem when it isn't built. Two cases in this group still reach the language server: `search symbols` falls back to **LSP workspace symbols** when the index isn't built, and `map file`'s embedded `symbols` field is LSP-backed (its outer shape is not — see step 4).
+- **Index & structural search**: `search symbols`, `search content`, `search ast`, `map summary`, `map file`, `map dir`, `map related`. `search ast` uses tree-sitter directly, and the `map` family reads the file tree for structure (summary, siblings, directory layout) — no index, no language server. `search content` ranks the SQLite index and scans the filesystem when it isn't built. Three cases in this group reach the language server opportunistically (and degrade cleanly without it): `search symbols` is index-first but reaches **LSP workspace symbols** whenever the index can't fully satisfy the query (not built, or fewer hits than the limit) or when `--workspace-symbols` forces it; `map file`'s embedded `symbols` field is LSP-backed (its outer shape is not — see step 4); and related-file *ranking* (`map related`, and `map file`'s `related_files`) sharpens a filename/path heuristic with LSP symbol profiles — the file *set* needs no server, only its ordering.
 - **LSP-backed** (needs the language server installed for the target language) — the main ones: `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`, `rename`, `actions`, `signature`, `diagnostics`, `usage`, `context`, `impact`. Run `symora doctor <lang>` to confirm; install with the command in the doctor output or point `[lsp.servers.<lang>]` at an existing binary. Each `doctor` row also carries `symbol_extraction` and `ast_search` booleans — whether the index and `search ast` cover that language with no server installed.
 
 Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
