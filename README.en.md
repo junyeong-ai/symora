@@ -342,7 +342,7 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` is added only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`.
-- **Positions are 1-indexed** (`file:line:column`) on both input and output.
+- **Positions are 1-indexed** on both input and output. Inputs take `file:line:column`, or `file:line` with the column omitted (which addresses the symbol declared on that line); emitted locations always carry line and column.
 - **Degradation is disclosed, never hidden.** `indexing: "timed_out"` means a count is a lower bound; `coverage_gaps` lists languages that couldn't be searched; an `unsupported` error names the missing LSP capability and points to an alternative.
 - **`--format compact`** emits single-line JSON; piping to a non-TTY keeps full JSON.
 

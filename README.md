@@ -342,7 +342,7 @@ symora status                # 프로젝트 + daemon 상태
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`.
-- **위치는 1-indexed** (`file:line:column`) — 입력과 출력 모두.
+- **위치는 1-indexed** — 입력과 출력 모두. 입력은 `file:line:column`, 또는 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정)을 받고, 출력 위치는 항상 line과 column을 함께 담습니다.
 - **격하는 숨기지 않고 공개됩니다.** `indexing: "timed_out"`는 count가 하한임을 뜻하고, `coverage_gaps`는 검색하지 못한 언어를 나열하며, `unsupported` 에러는 빠진 LSP 기능을 지목하고 대안을 알려줍니다.
 - **`--format compact`**는 단일 라인 JSON을 출력합니다. 비-TTY로 파이프하면 전체 JSON이 유지됩니다.
 
