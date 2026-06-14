@@ -192,14 +192,19 @@ fn extract_from_match(
         None => name.clone(),
     });
 
-    // tree-sitter reports the column as a byte offset within the line, but
-    // CLI/JSON positions are character columns (matching the LSP side). Count
-    // characters across the line prefix so multibyte text before a symbol
-    // doesn't misplace follow-up `file:line:col` navigation.
-    let start = node.start_position();
-    let line_start = node.start_byte() - start.column;
+    // Anchor the symbol at its NAME, not the item start: `refs`/`def` on a
+    // leading keyword (`pub`, `fn`, an attribute line) resolve to the wrong
+    // symbol or nothing, and a name-span position also lets the index and the
+    // LSP workspace pass dedup to a single row (both then point at the same
+    // identifier). tree-sitter reports the column as a byte offset within the
+    // line, but CLI/JSON positions are character columns (matching the LSP
+    // side); count characters across the line prefix so multibyte text before a
+    // symbol doesn't misplace follow-up `file:line:col` navigation.
+    let anchor = name_position_node(node, language).unwrap_or(node);
+    let start = anchor.start_position();
+    let line_start = anchor.start_byte() - start.column;
     let column = content
-        .get(line_start..node.start_byte())
+        .get(line_start..anchor.start_byte())
         .map(|prefix| prefix.chars().count() as u32)
         .unwrap_or(start.column as u32)
         + 1;
@@ -211,6 +216,16 @@ fn extract_from_match(
         line: start.row as u32 + 1,
         column,
     })
+}
+
+/// The node whose start position the symbol should be addressed by — its name
+/// identifier, so `file:line:col` lands on the thing `refs`/`def` resolve. An
+/// impl is anchored at its self type (it has no name identifier of its own).
+fn name_position_node<'a>(node: Node<'a>, language: Language) -> Option<Node<'a>> {
+    if node.kind() == "impl_item" {
+        return node.child_by_field_name("type");
+    }
+    find_name_node(node, language)
 }
 
 fn extract_container_path(mut node: Node, content: &str, language: Language) -> Option<String> {
@@ -755,6 +770,29 @@ type Alias = Foo;
                 "namespace leaked into name_path: {np:?}"
             );
         }
+    }
+
+    /// A symbol's recorded position must land on its NAME identifier, not the
+    /// item's leading keyword — otherwise `refs`/`def` on the indexed position
+    /// resolve to the wrong symbol (or nothing), and the index/LSP workspace
+    /// passes can't dedup to one row.
+    #[test]
+    fn index_anchors_symbols_at_their_name() {
+        let extractor = SymbolExtractor::new();
+        let src = "pub fn alpha() {}\nstruct Bravo;\nimpl Bravo { pub fn charlie(&self) {} }\n";
+        let syms = extractor.extract(src, Language::Rust);
+        let on_name = |name: &str| {
+            let s = syms
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} not extracted"));
+            let line = src.lines().nth((s.line - 1) as usize).unwrap();
+            let col0 = (s.column - 1) as usize;
+            line[col0..].starts_with(name)
+        };
+        assert!(on_name("alpha"), "function anchored off its name");
+        assert!(on_name("Bravo"), "struct anchored off its name");
+        assert!(on_name("charlie"), "method anchored off its name");
     }
 
     #[test]
