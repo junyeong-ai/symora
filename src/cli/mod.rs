@@ -52,7 +52,7 @@ EXPLORATION FLOW:
   1. `symora map summary` for project entrypoints and major areas
   2. `symora search symbols <query>` when you know only a rough name/path
   3. `symora map file <path>` to inspect one file before reading full code
-  4. `symora symbols <file>` or `symora symbols --symbol <path>` for exact semantic follow-up
+  4. `symora symbols <file>` or `symora symbols --symbol <path>` for precise semantic follow-up
   5. `symora refs <loc>` once you have the exact symbol location
 
 EXAMPLES:
@@ -108,7 +108,7 @@ pub enum Commands {
     Doctor(DoctorArgs),
 
     // Navigation
-    /// Inspect exact file symbols or exact workspace symbol trees
+    /// Inspect a file's symbols, or resolve a symbol tree by path
     Symbols(SymbolsArgs),
     /// Go to definition
     Def(DefArgs),

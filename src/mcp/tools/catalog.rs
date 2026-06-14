@@ -87,8 +87,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         .with_output_schema(section_output_schema("Symbols defined in the file")),
         ToolDefinition::read_only(
             "inspect_symbol",
-            "Resolve an exact symbol path (e.g., 'Handler/process') and return its \
-                          definition info. Use after search_symbols to follow up precisely.",
+            "Resolve a symbol path (e.g., 'Handler/process', a bare name, or a '*/method' \
+                          wildcard) and return its definition info. Use after search_symbols to \
+                          follow up precisely.",
             schema_object(
                 &[
                     ("symbol_path", "string", "Symbol path like 'Class/method'"),
