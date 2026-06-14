@@ -6,157 +6,388 @@
 
 # Symora
 
-**Symbol-centric code intelligence CLI for AI coding agents**
+**Read a codebase the way a compiler does — by symbol, not by string.** Symora is a CLI that answers "where is this defined", "who calls this", and "what breaks if I change this" with precise, structured JSON, built for AI coding agents and scripts.
 
+[![CI](https://github.com/junyeong-ai/symora/workflows/CI/badge.svg)](https://github.com/junyeong-ai/symora/actions)
 [![Rust](https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/junyeong-ai/symora)
 
 **English** | [한국어](README.md)
 
 ---
 
-## What Symora Is
+## What is Symora?
 
-Symora is a CLI-first code intelligence tool built for AI coding agents.
+Grep finds *text*. Symora finds *meaning*. It combines four engines behind one CLI:
 
-It combines:
+- **LSP semantics** — real definitions, references, and call hierarchy from the same language servers your editor uses (rust-analyzer, pyright, typescript-language-server, gopls, and more).
+- **SQLite symbol/content index** — millisecond fuzzy search across the whole repo, persistent on disk.
+- **tree-sitter AST search** — structural pattern matching, no language server required.
+- **A reusable daemon** — keeps language-server sessions warm so repeated calls stay fast.
 
-- LSP-based semantic navigation
-- SQLite-backed symbol and content search
-- tree-sitter AST search
-- a Unix daemon for reusable language-server sessions
-
-Symora is designed for shell-driven workflows, structured JSON output, and exact follow-up from a symbol or location.
+Every command prints JSON by default, so an agent or a shell script can parse the answer instead of re-reading files.
 
 ---
 
-## Why Symora
+## Why Symora?
 
-Text search is useful, but agents often need semantic answers:
+A coding agent (or a new teammate) constantly asks the same questions. Text search answers them slowly and noisily. Symora answers them exactly:
 
-- what symbol is here?
-- where is it referenced?
-- what calls it?
-- what file should I inspect next?
-- what changed impact-wise?
+| Question | Command |
+| --- | --- |
+| What's the shape of this repo? | `symora map summary` |
+| Where is `processOrder` defined? | `symora search symbols processOrder` |
+| What does this symbol do, in context? | `symora context <file:line> --all` |
+| Who calls it? | `symora callers <file:line>` |
+| What breaks if I change it? | `symora impact <file:line>` |
+| Change it safely (preview first) | `symora edit replace-body … --dry-run` |
 
-Symora is built around those workflows.
+---
+
+## Quick start
 
 ```bash
-# rough discovery
-symora search symbols AuthUser
+# 1. Install (prebuilt binary, SHA-256 verified)
+curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 
-# inspect one file semantically
-symora map file src/main.rs
-symora symbols src/main.rs
+# 2. Build the search index for the current project (once)
+cd your-project && symora search index build
 
-# exact follow-up from a location
-symora context src/main.rs:42 --all
-symora refs src/main.rs:42
-symora usage src/main.rs:42:10
+# 3. Ask questions
+symora map summary                          # repo overview
+symora search symbols AuthService           # find a symbol
+symora context src/auth/service.ts:42 --all # everything about it
+symora impact src/auth/service.ts:42        # blast radius of a change
 ```
 
----
-
-## Core Capabilities
-
-- **Semantic navigation** — `symbols`, `def`, `refs`, `hover`, `callers`, `callees`, `typedef`, `implementations`
-- **Search and discovery** — `search symbols`, `search content`, `search ast`, plus `pack` for a token-budgeted repo brief
-- **Project and file exploration** — `map summary`, `map file`, `map dir`, `map related`
-- **Context and impact analysis** — `context`, `usage`, `impact`, `diff-impact`
-- **Edit and refactor** — `rename`, `actions`, the `edit` subcommands (symbol- or line-addressed splices with exact dry-run previews and a reference-guarded `delete`), `format`
-- **Health checks** — `diagnostics`, `doctor`, `status`
-
-Output is JSON by default (`pack` also offers paste-ready plain text via `--shape markdown`); `--help` on any command shows its flags and options.
+LSP-backed commands also need the matching language server. Check with `symora doctor <lang>` and install with the command it prints.
 
 ---
 
-## For AI Agents
+## How it works
 
-The agent-facing playbook — workflow order, command selection, the output contract, failure handling — ships with the tool rather than this README, so it stays in lockstep with the binary:
+One command layer serves two surfaces (CLI and MCP) and runs against either a warm daemon or in-process — the result is identical either way.
 
-- `symora setup skill` installs the Claude Code skill (the full CLI playbook).
-- `symora mcp serve` returns the same guidance through the MCP `initialize` instructions.
+```mermaid
+flowchart TD
+    A["symora CLI"] --> C["Shared command layer<br/>(written once)"]
+    B["symora mcp serve<br/>(MCP tools for agents)"] --> C
+    C --> D{"daemon running?"}
+    D -->|"yes (default on Unix)"| E["symora daemon<br/>reuses warm LSP sessions"]
+    D -->|"no — SYMORA_NO_DAEMON=1"| F["in-process"]
+    E --> G
+    F --> G["LSP servers · SQLite index · tree-sitter"]
+    G --> H[("Structured JSON")]
+```
 
-The short version: list responses share one stable shape (`count`, `showing`, `items`, with disclosed `truncated`/`hints`/`next_commands`), positions are 1-indexed, failures are structured `{code, message, hint}`, and discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`). Global flags such as `--format compact` (single-line JSON) and `-q` (errors only) may be placed before the subcommand.
+- **Two backends, different needs.** Index and `search ast`/`map` work with no language server. The LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language — and degrade *honestly* (a structured `unsupported` response) when a server lacks a capability, never a silently-wrong answer.
+- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process.
 
 ---
 
-## Search Index
+## The exploration flow
 
-Symora includes a persistent SQLite-backed search index.
+Symora is designed to move from a *rough* idea to an *exact* answer:
+
+```mermaid
+flowchart LR
+    O["① Orient<br/>pack · map summary"] --> D["② Discover<br/>search symbols / content / ast"]
+    D --> I["③ Inspect<br/>symbols · map file"]
+    I --> X["④ Exact follow-up<br/>refs · callers · callees<br/>context · impact · usage"]
+```
+
+The walkthrough below follows exactly this path.
+
+---
+
+## Walkthrough — landing in an unfamiliar codebase
+
+Say you just cloned **`shopflow`**, a TypeScript e-commerce backend you've never seen, and your task is *"add an empty-cart guard to checkout."* Here's the whole loop. (Examples use a fictional project; the JSON shapes are exactly what Symora emits.)
+
+### ① Orient — what is this repo?
 
 ```bash
-symora search index build
+symora map summary
+```
+```json
+{
+  "root": "/home/dev/shopflow",
+  "total_files": 84,
+  "code_files": 71,
+  "support_files": 13,
+  "test_files": 18,
+  "directories": 12,
+  "languages": [
+    { "language": "typescript", "file_count": 67, "test_files": 18 },
+    { "language": "json", "file_count": 4, "test_files": 0 }
+  ],
+  "top_directories": [
+    { "path": "src/services", "file_count": 14, "test_files": 0 },
+    { "path": "src/routes", "file_count": 9, "test_files": 0 },
+    { "path": "tests", "file_count": 18, "test_files": 18 }
+  ],
+  "entrypoints": [
+    { "file": "src/server.ts", "reason": "main entry file" },
+    { "file": "src/app.ts", "reason": "application bootstrap candidate" }
+  ],
+  "next_commands": [
+    "symora map file src/server.ts --related-limit 5",
+    "symora symbols src/server.ts --depth 1"
+  ]
+}
+```
+> 67 TypeScript files, most logic under `src/services`, and `entrypoints` already points at where execution starts. `symora pack --tokens 4000` gives a deeper, PageRank-ranked brief when you want one.
+
+### ② Discover — where is checkout handled?
+
+```bash
+symora search symbols processOrder
+```
+```json
+{
+  "count": 1,
+  "showing": 1,
+  "items": [
+    {
+      "name": "processOrder",
+      "name_path": "CheckoutService/processOrder",
+      "kind": "method",
+      "file": "src/services/checkout.ts",
+      "line": 48,
+      "column": 9,
+      "backend": "index",
+      "score": 1.0
+    }
+  ]
+}
+```
+> Found it: `CheckoutService/processOrder` at `src/services/checkout.ts:48`. Every list response shares the same shape — `count` (total), `showing` (emitted), `items`.
+
+### ③ Understand it in context
+
+One call gathers the body, references, callers, callees, related types, and tests:
+
+```bash
+symora context src/services/checkout.ts:48 --all
+```
+```json
+{
+  "target": {
+    "name": "processOrder",
+    "kind": "method",
+    "file": "src/services/checkout.ts",
+    "line": 48,
+    "signature": "async processOrder(cart: Cart, user: User): Promise<Order>",
+    "body": "async processOrder(cart: Cart, user: User): Promise<Order> {\n    const reserved = await this.inventory.reserve(cart.items);\n    const order = await this.payment.charge(user, cart.total);\n    return this.orders.create(order, reserved);\n  }"
+  },
+  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": true },
+  "callers": { "count": 2, "showing": 2, "items": [ /* handleCheckout, runOrderQueue */ ] },
+  "callees": { "count": 3, "showing": 3, "items": [ /* reserve, charge, create */ ] },
+  "types":   { "count": 3, "showing": 3, "items": [ /* Cart, User, Order */ ] },
+  "tests":   { "count": 1, "showing": 1, "items": [ /* checkout.test.ts */ ] }
+}
+```
+> You now see the implementation, that it's exported, hit from 3 files, and covered by 1 test — without opening a single file.
+
+### ④ Who calls it?
+
+```bash
+symora callers src/services/checkout.ts:48
+```
+```json
+{
+  "count": 2,
+  "showing": 2,
+  "items": [
+    {
+      "name": "handleCheckout",
+      "location":  { "file": "src/routes/checkout.ts", "line": 23, "column": 14 },
+      "call_site": { "file": "src/routes/checkout.ts", "line": 31, "column": 28 }
+    },
+    {
+      "name": "runOrderQueue",
+      "location":  { "file": "src/jobs/orderWorker.ts", "line": 67, "column": 16 },
+      "call_site": { "file": "src/jobs/orderWorker.ts", "line": 72, "column": 30 }
+    }
+  ]
+}
+```
+> Two entry points: the HTTP route and a background job. `location` is where the caller is declared; `call_site` is the exact line that calls your symbol.
+
+### ⑤ What breaks if I change it?
+
+```bash
+symora impact src/services/checkout.ts:48
+```
+```json
+{
+  "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48 },
+  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": true },
+  "coverage": { "count": 1, "files": ["tests/checkout.test.ts"] },
+  "files": [
+    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 },
+    { "file": "src/jobs/orderWorker.ts", "is_test": false, "refs": 1 },
+    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 }
+  ],
+  "blast_radius": {
+    "direct_callers": 2,
+    "transitive_callers": 4,
+    "depth": 2,
+    "max_depth_reached": true,
+    "callers_by_depth": [
+      { "depth": 1, "count": 2, "test": 0, "prod": 2 },
+      { "depth": 2, "count": 2, "test": 0, "prod": 2 }
+    ],
+    "test_coverage_ratio": 0.5,
+    "risk": "high",
+    "confidence": 0.8
+  },
+  "next_commands": ["symora impact src/services/checkout.ts:48 --depth 3"]
+}
+```
+> `risk: "high"` with only half the call sites under test — change carefully. `next_commands` are ready-to-run follow-ups, emitted only when they'd help.
+
+### ⑥ Make the change — preview before you write
+
+```bash
+symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/processOrder' \
+  --body "$(cat new_processOrder.ts)" --dry-run
+```
+```json
+{
+  "operation": "replace_body",
+  "file": "src/services/checkout.ts",
+  "target_symbol": "CheckoutService/processOrder",
+  "target_kind": "method",
+  "lines": { "start": 48, "end": 71 },
+  "bytes_changed": 84,
+  "dry_run": true,
+  "preview": "@@ -48,6 +48,8 @@\n   async processOrder(cart: Cart, user: User): Promise<Order> {\n+    if (cart.items.length === 0) throw new EmptyCartError();\n     const reserved = await this.inventory.reserve(cart.items);\n     ..."
+}
+```
+> `--dry-run` shows the exact hunk and writes nothing. Drop it to apply, or add `--verify-callers` to pull diagnostics on the two call sites afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
+
+> **Addressing is forgiving but safe.** `--symbol` matches a bare name, a `Class/method` suffix, a `*/method` wildcard, or the exact `name_path`. When a name is ambiguous, `edit` refuses rather than guess:
+> ```json
+> { "error": { "code": "invalid_argument",
+>   "message": "Symbol path 'reserve' matches 2 symbols in src/services/inventory.ts",
+>   "hint": "Candidates: InventoryService/reserve (method) line 34, ReservationPool/reserve (method) line 88. Target one by file:line instead." } }
+> ```
+
+---
+
+## Command groups
+
+```bash
+# Discovery (index + tree-sitter; no language server needed)
+symora search symbols AuthUser              # fuzzy symbol search
+symora search symbols AuthUser --workspace-symbols   # force live LSP, skip the index
+symora search content "async function"      # ranked full-text search
+symora search ast '(class_declaration) @c' --lang typescript   # structural AST match
+symora pack --tokens 4000                   # token-budgeted, PageRank-ranked repo brief
+
+# Project & file overview
+symora map summary                          # repo shape
+symora map file src/services/checkout.ts    # one file: symbols, siblings, related files
+symora map dir src/services                 # directory listing
+symora map related src/services/checkout.ts # heuristic "what to read next"
+
+# Symbols & inspection (LSP)
+symora symbols src/services/checkout.ts --depth 2   # full symbol tree
+symora symbols src/services/checkout.ts --body      # tree + source bodies
+symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
+symora def src/services/checkout.ts:48:9            # go to definition
+symora hover src/services/checkout.ts:48:9          # type / signature
+symora signature src/services/checkout.ts:55:20     # signature help at a call
+
+# Navigation (LSP)
+symora refs src/services/checkout.ts:48             # all references
+symora callers src/services/checkout.ts:48          # incoming calls
+symora callees src/services/checkout.ts:48          # outgoing calls
+symora callees src/services/checkout.ts:48 --depth 3            # reachable set
+symora callees src/services/checkout.ts:48 --to src/db/orders.ts:12   # shortest call chain
+symora typedef … / implementations … / supertypes … / subtypes …
+
+# Context & impact (LSP)
+symora context src/services/checkout.ts:48 --all    # body + refs + callers + callees + types + tests
+symora context src/services/checkout.ts:48 --with-bodies   # also attach callee/type bodies
+symora usage processOrder --lang typescript         # usage sites by name or location
+symora impact src/services/checkout.ts:48           # change blast radius
+symora diff-impact                                  # impact of the current git diff
+
+# Edit & refactor (every one supports --dry-run)
+symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
+symora edit insert-before / insert-after / delete / replace / pattern
+symora rename src/services/checkout.ts:48:9 settleOrder --dry-run
+symora actions list src/services/checkout.ts:48:9   # available code actions
+symora format src/services/checkout.ts              # LSP format
+
+# Health & diagnostics
+symora doctor                # language servers: installed / missing + install commands
+symora diagnostics src/services/checkout.ts --with-context --with-suggestions
+symora status                # project + daemon state
+```
+
+Global flags go *before* the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose).
+
+---
+
+## The output contract
+
+Every command is built for machine parsing, and the rules are stable:
+
+- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — `truncated`, `stale`, `hints`, `next_commands`, and `indexing`.
+- **Failures** are structured, never a bare stderr string, and the process exits non-zero:
+  ```json
+  { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
+  ```
+  `code` and `message` are always present; `hint` is added only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`.
+- **Positions are 1-indexed** (`file:line:column`) on both input and output.
+- **Degradation is disclosed, never hidden.** `indexing: "timed_out"` means a count is a lower bound; `coverage_gaps` lists languages that couldn't be searched; an `unsupported` error names the missing LSP capability and points to an alternative.
+- **`--format compact`** emits single-line JSON; piping to a non-TTY keeps full JSON.
+
+---
+
+## Search index
+
+Symora keeps a persistent SQLite index at `.symora/store.db` in each project.
+
+```bash
+symora search index build               # incremental: only changed files, prunes deleted
 symora search index build --force --lang rust
-symora search index status
+symora search index status              # symbol_count, file_count, last_indexed
 symora search index clear
 ```
 
-The index is stored under `.symora/store.db` in the current project.
-
-Search commands also include fallback behavior when indexed or semantic features are unavailable, but the index is the most reliable path for repeated local use.
-
-A normal `search index build` refreshes changed files and prunes files that no longer exist. Use `--force` only when you want a full rebuild.
+Search degrades gracefully without an index (it falls back to a filesystem scan or live LSP), but a built index is the fastest, most reliable path for repeated use. `--force` is only for a full rebuild.
 
 ---
 
 ## Configuration
 
-Config precedence:
-
-1. `.symora/config.toml`
-2. `~/.config/symora/config.toml`
-3. built-in defaults
-
-Initialize config:
+Precedence: `.symora/config.toml` → `~/.config/symora/config.toml` → built-in defaults.
 
 ```bash
-symora config init
-symora config init --global
+symora config init            # write a local config
+symora config init --global   # write the user config
 ```
 
-Common settings include:
-
-- LSP timeouts and limits
-- daemon behavior
-- test file patterns
-- ignored paths
-- language-server launch overrides (`[lsp.servers.<lang>]`: command/args/tier)
+Common settings: LSP timeouts and limits, daemon behavior, test-file patterns, ignored paths, and per-language server overrides:
 
 ```toml
 [lsp.servers.typescript]
 command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
-args = ["--stdio"]   # optional; absent = inherit builtin args
-tier = "slow"        # optional; one of fast|standard|slow
+args = ["--stdio"]   # optional; absent = inherit built-in args
+tier = "slow"        # optional; one of fast | standard | slow
 ```
 
-Keys are the `language` ids printed by `symora doctor` — a rejected key is reported in doctor's `config_errors` and never applied. The daemon reads config at start; run `symora daemon restart` after changing it.
-
----
-
-## Platform and Runtime Notes
-
-- Linux: supported
-- macOS: supported
-- Windows: not supported for daemon-based workflow because Symora uses Unix domain sockets
-
-On Unix, Symora uses a daemon by default (set `SYMORA_NO_DAEMON=1` for in-process direct execution). The mode is chosen once at startup; there is no runtime fallback. `daemon start` and `daemon restart` launch the daemon in the background and return immediately.
-
-Daemon commands:
-
-```bash
-symora daemon start
-symora daemon stop
-symora daemon restart
-symora daemon status
-```
+The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads config at startup, so run `symora daemon restart` after editing it.
 
 ---
 
 ## Installation
 
-One-shot install (prebuilt binary, SHA-256 verified; prompts let you pick a source build and install the Claude Code skill — defaults apply without a TTY):
+One-shot install (prebuilt binary, SHA-256 verified; prompts let you also install the Claude Code skill — defaults apply without a TTY):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
@@ -165,72 +396,117 @@ curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/ins
 Useful variants:
 
 ```bash
-# Pin a release / verify GitHub build provenance (needs gh CLI)
+# Pin a release / verify GitHub build provenance (needs the gh CLI)
 curl -fsSL .../install.sh | bash -s -- --version <version> --verify-attestations
 
-# Source build + skill, no prompts (no checkout needed — builds the release tag from git)
+# Source build + skill, no prompts (builds the release tag from git; no checkout needed)
 curl -fsSL .../install.sh | bash -s -- --source --skill
 
 # Non-interactive (CI): defaults to prebuilt, skill skipped
 curl -fsSL .../install.sh | bash -s -- --prebuilt --no-skill
-```
 
-Platforms without a prebuilt (Intel Macs, etc.) fall back to a source build automatically (requires Rust). Inside a checkout, `./scripts/install.sh --source` builds the working tree, or:
-
-```bash
-cargo install --path .
-```
-
-```bash
 # Change install location
 curl -fsSL .../install.sh | SYMORA_INSTALL_DIR=/usr/local/bin bash
 ```
+
+Prebuilt targets: macOS Apple Silicon, Linux x86_64 (gnu), Linux aarch64 (gnu). Platforms without a prebuilt (Intel Macs, etc.) fall back to a source build automatically (requires Rust). Inside a checkout, `cargo install --path .` works too.
 
 The binary owns the rest of its lifecycle:
 
 ```bash
 symora setup                          # interactive: skill + language servers
 symora setup skill                    # skill only
-symora setup deps --group core       # dependencies only (core / core-jvm / core-web / core-systems / all)
+symora setup deps --group core        # dependencies only (core / core-jvm / core-web / core-systems / all)
 symora self update                    # in-place upgrade to the latest release
-symora self update --version <version>   # pin a version
+symora self update --version <version>
 symora self uninstall                 # remove binary + skill + config + daemon data
-symora self uninstall --keep-skill --keep-config
-```
-
-Check environment and language servers:
-
-```bash
-symora doctor
 ```
 
 ---
 
-## MCP Server
+## MCP server
 
-Symora also runs as a Model Context Protocol server. Its main navigation, analysis, and edit commands are exposed as MCP tools (a curated subset, not the whole CLI) that share the in-process command layer, so both surfaces produce identical results.
-
-Wire the MCP server into every installed agent host in one step (idempotent; reverse with `--uninstall`):
+Symora also runs as a Model Context Protocol server. A curated subset of commands — navigation, analysis, and edit tools — is exposed as MCP tools that share the same in-process command layer, so the MCP and CLI results match.
 
 ```bash
-symora setup mcp                          # auto-detect and wire installed hosts (Claude Code, Codex)
-symora setup mcp --dry-run               # show the plan without writing
-symora setup mcp --host claude_code      # a specific host only
-symora setup mcp --uninstall             # disconnect (removes only the entry it wrote)
+symora setup mcp                     # auto-detect and wire installed hosts (Claude Code, Codex)
+symora setup mcp --dry-run           # show the plan without writing
+symora setup mcp --host claude_code  # a specific host only
+symora setup mcp --uninstall         # disconnect (removes only the entry it wrote)
+
+symora mcp serve                                 # stdio (Claude Code, Cursor, etc.)
+symora mcp serve --transport http --port 7700    # HTTP
 ```
 
-Or run it directly:
-
-```bash
-symora mcp serve                          # stdio (Claude Code, Cursor, etc. use this by default)
-symora mcp serve --transport http --port 8765
-```
-
-The tool list and input schemas are returned by `tools/list`; mutating tools are marked twice (`Mutates` in the description, `annotations.readOnlyHint: false`) and all support `dry_run`. The server's `initialize` response carries the full usage playbook — tool sequencing, edit addressing, error recovery — so a connected agent needs no further setup.
+Mutating tools are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and all support `dry_run`. The server's `initialize` response carries the full usage playbook (tool sequencing, edit addressing, error recovery), so a connected agent needs no extra setup.
 
 ---
 
-## Repository Links
+## For AI agents
+
+The agent-facing playbook ships *with the tool*, not in this README, so it stays in lockstep with the binary:
+
+- `symora setup skill` installs the Claude Code skill (the full CLI playbook).
+- `symora mcp serve` returns the same guidance through the MCP `initialize` instructions.
+
+The short version: discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`); list responses share one shape; positions are 1-indexed; failures are structured `{code, message, hint}`.
+
+---
+
+## Platform notes
+
+- **Linux** and **macOS**: supported.
+- **Windows**: the daemon workflow is unsupported (Symora uses Unix domain sockets).
+
+On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` launch in the background and return immediately.
+
+```bash
+symora daemon start | stop | restart | status
+```
+
+---
+
+## Command reference
+
+| Group | Commands |
+| --- | --- |
+| **Discover** | `search symbols`, `search content`, `search ast`, `search nodes`, `pack` |
+| **Map** | `map summary`, `map file`, `map dir`, `map related` |
+| **Inspect** | `symbols`, `def`, `hover`, `signature` |
+| **Navigate** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
+| **Analyze** | `context`, `usage`, `impact`, `diff-impact` |
+| **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions`, `format` |
+| **Diagnose** | `diagnostics`, `inlay-hints`, `folding`, `selection`, `code-lens` |
+| **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
+
+Run `symora <command> --help` for flags and the full output shape of any command.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `count: 0` from `search …` | `symora search index status`; if `symbol_count: 0`, run `symora search index build`. |
+| `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. |
+| `indexing: "timed_out"` | The language server is still warming up — the count is a lower bound. Retry once it's warm. |
+| `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
+| Stale results after edits | `symora search index build` (incremental), or `symora daemon restart`. |
+| Debugging | `symora -v <command>` for verbose logs. |
+
+---
+
+## Links
 
 - [Developer guide](CLAUDE.md)
 - [GitHub repository](https://github.com/junyeong-ai/symora)
+
+---
+
+<div align="center">
+
+**English** | [한국어](README.md)
+
+Made with Rust 🦀
+
+</div>
