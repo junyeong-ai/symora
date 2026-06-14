@@ -327,7 +327,19 @@ fn node_kind(node: Node) -> SymbolKind {
         | "trait_declaration"
         | "protocol_declaration" => SymbolKind::Interface,
 
-        "mod_item" | "namespace_definition" | "package_declaration" => SymbolKind::Module,
+        // Every grammar's namespace/module/package container. These organize
+        // code but must NOT widen a member's name_path (see `is_namespace_like`
+        // and `extract_container_path`): Rust `mod`, C/C++ `namespace`, Java
+        // `package`, TS/JS `namespace`/`module` (both parse as `internal_module`,
+        // plus ambient `module "x"`), C# block- and file-scoped `namespace`, and
+        // PHP `namespace`.
+        "mod_item"
+        | "namespace_definition"
+        | "package_declaration"
+        | "internal_module"
+        | "module"
+        | "namespace_declaration"
+        | "file_scoped_namespace_declaration" => SymbolKind::Module,
 
         // Go `type X = ...`: classify by the spec's underlying type.
         "type_spec" => go_type_kind(node),
@@ -692,6 +704,54 @@ type Alias = Foo;
             let np = s.name_path.as_deref().unwrap_or_default();
             assert!(
                 !np.contains("ns/"),
+                "namespace leaked into name_path: {np:?}"
+            );
+        }
+    }
+
+    /// A `namespace`/`module` in every grammar must be path-transparent, like a
+    /// Rust `mod` — a class directly inside it stays bare on the index just as it
+    /// does on the workspace/documentSymbol surfaces (which never report the
+    /// namespace), so a copied path round-trips. Covers the node kinds beyond
+    /// Rust/C++/Java: TS/JS `internal_module` (`namespace`/`module`) and C#
+    /// `namespace_declaration`.
+    #[test]
+    fn index_keeps_namespace_path_transparent_across_languages() {
+        let extractor = SymbolExtractor::new();
+        let path = |symbols: &[ExtractedSymbol], name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.name_path.clone())
+        };
+
+        // TypeScript: `namespace` and `module` both parse as `internal_module`.
+        let ts = "namespace NS { export class Outer { method(): void {} } \
+                  export function freeFn(): void {} } \
+                  module Ambient { export class Thing { go(): void {} } }";
+        let ts_syms = extractor.extract(ts, Language::TypeScript);
+        assert_eq!(path(&ts_syms, "Outer"), Some("Outer".to_string()));
+        assert_eq!(path(&ts_syms, "method"), Some("Outer/method".to_string()));
+        assert_eq!(path(&ts_syms, "freeFn"), Some("freeFn".to_string()));
+        assert_eq!(path(&ts_syms, "Thing"), Some("Thing".to_string()));
+
+        // C#: block-scoped `namespace`. An enclosing type still qualifies the
+        // inner type, but the namespace never does.
+        let cs = "namespace MyApp { public class Outer { public void Method() {} \
+                  public class Inner { public void InnerMethod() {} } } }";
+        let cs_syms = extractor.extract(cs, Language::CSharp);
+        assert_eq!(path(&cs_syms, "Outer"), Some("Outer".to_string()));
+        assert_eq!(path(&cs_syms, "Method"), Some("Outer/Method".to_string()));
+        assert_eq!(path(&cs_syms, "Inner"), Some("Outer/Inner".to_string()));
+        assert_eq!(
+            path(&cs_syms, "InnerMethod"),
+            Some("Inner/InnerMethod".to_string())
+        );
+
+        for s in ts_syms.iter().chain(cs_syms.iter()) {
+            let np = s.name_path.as_deref().unwrap_or_default();
+            assert!(
+                !np.starts_with("NS/") && !np.starts_with("Ambient/") && !np.starts_with("MyApp/"),
                 "namespace leaked into name_path: {np:?}"
             );
         }
