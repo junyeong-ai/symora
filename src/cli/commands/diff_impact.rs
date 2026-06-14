@@ -382,6 +382,11 @@ fn parse_range(range: &str) -> Option<(u32, u32)> {
         Some(c) => c.parse().ok()?,
         None => 1,
     };
+    // A hunk range is `start[,count]` and nothing more — a third field means the
+    // header is malformed, so fail closed rather than silently ignore it.
+    if parts.next().is_some() {
+        return None;
+    }
     Some((start, count))
 }
 
@@ -781,6 +786,9 @@ mod tests {
         assert_eq!(parse_range("5,abc"), None);
         assert_eq!(parse_range("xyz"), None);
         assert_eq!(parse_range(""), None);
+        // A third comma-separated field is malformed — rejected, not ignored.
+        assert_eq!(parse_range("10,5,garbage"), None);
+        assert_eq!(parse_range("10,5,7"), None);
     }
 
     /// An Added HUNK only makes the SYMBOL Added when its declaration is inside
