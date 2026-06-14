@@ -306,11 +306,18 @@ impl Symbol {
     pub fn normalize_name(name: &str, file: &std::path::Path, kind: SymbolKind) -> String {
         let name = name.trim();
 
-        if !name.is_empty()
-            && name != "<unknown>"
-            && name != "<anonymous>"
-            && !name.starts_with('<')
-        {
+        // An empty name is an intentionally transparent container — e.g. a
+        // nameless-self-type impl (`impl Tr for fn()`) already reduced to an
+        // empty segment by `normalize_symbol_name`. Keep it empty so
+        // `compute_paths` lets its members attach to the enclosing path; minting
+        // a `<stem>_<suffix>` segment here would re-qualify them (`lib_config/m`)
+        // and break the cross-surface name_path. Only the LSP's anonymous
+        // markers below earn a synthesized, addressable name.
+        if name.is_empty() {
+            return String::new();
+        }
+
+        if name != "<unknown>" && name != "<anonymous>" && !name.starts_with('<') {
             return name.to_string();
         }
 
@@ -542,6 +549,28 @@ mod tests {
         assert_eq!(deep.name_path, Some("Deep".to_string()));
         assert_eq!(deep.children[0].name_path, Some("Deep/m".to_string()));
         assert_eq!(b.children[1].name_path, Some("free".to_string()));
+    }
+
+    #[test]
+    fn normalize_name_keeps_empty_transparent_but_names_anonymous_markers() {
+        let f = std::path::Path::new("src/lib.rs");
+        // An intentionally-empty container stays transparent (no stray segment).
+        assert_eq!(Symbol::normalize_name("", f, SymbolKind::Object), "");
+        assert_eq!(Symbol::normalize_name("   ", f, SymbolKind::Class), "");
+        // The LSP's anonymous markers still earn an addressable file-stem name.
+        assert_eq!(
+            Symbol::normalize_name("<anonymous>", f, SymbolKind::Object),
+            "lib_config"
+        );
+        assert_eq!(
+            Symbol::normalize_name("<unknown>", f, SymbolKind::Function),
+            "lib_fn"
+        );
+        // A real identifier passes through untouched.
+        assert_eq!(
+            Symbol::normalize_name("foo", f, SymbolKind::Function),
+            "foo"
+        );
     }
 
     #[test]
