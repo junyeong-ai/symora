@@ -350,10 +350,10 @@ impl Symbol {
         // Structural self types — tuple `(A, B)`, array/slice `[T; N]`,
         // pointer `*const T`, fn-pointer `fn(..)`, qualified `<T as Tr>::X` —
         // have no outer nominal name. Take the first nominal type identifier
-        // within (an empty string for a truly nameless one like `fn()`),
-        // matching the index extractor's first-`type_identifier` rule so the
-        // two surfaces agree on the path. Checked before stripping leading
-        // generics so a qualified type's `<…>` isn't mistaken for impl params.
+        // within, or an empty string for a truly nameless one like `fn()` (the
+        // path builder then treats the impl as a transparent container).
+        // Checked before stripping leading generics so a qualified type's
+        // `<…>` isn't mistaken for impl params.
         if Self::is_structural_self_type(head) {
             return Self::first_nominal_ident(head);
         }
