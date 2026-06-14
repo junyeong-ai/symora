@@ -23,7 +23,7 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 ## Location input convention
 
-Tools that accept a `file:line:column` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the three fields. New location-taking tools follow the same pattern. The edit tools embed `EditTargetInput` instead (file plus exactly one of symbol or line); navigation/analysis tools keep `LocationInput`.
+Tools that accept a `file:line[:column]` target embed `LocationInput` via `#[serde(flatten)]` rather than redeclaring the fields (its `column` is optional). New location-taking tools follow the same pattern. The edit tools embed `EditTargetInput` instead (file plus exactly one of symbol or line); navigation/analysis tools keep `LocationInput`.
 
 ## Output discipline
 
