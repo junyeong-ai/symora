@@ -548,7 +548,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::mutating(
             "insert_before_symbol",
             "Insert source code immediately before the symbol, targeted by \
-                          file + symbol path or file:line:column — exactly one of symbol or \
+                          file + symbol path or file:line[:column] — exactly one of symbol or \
                           line. ⚠ Mutates source files when dry_run is false.",
             with_required(
                 with_extra(
@@ -580,7 +580,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::mutating(
             "insert_after_symbol",
             "Insert source code immediately after the symbol, targeted by \
-                          file + symbol path or file:line:column — exactly one of symbol or \
+                          file + symbol path or file:line[:column] — exactly one of symbol or \
                           line. ⚠ Mutates source files when dry_run is false.",
             with_required(
                 with_extra(
@@ -612,7 +612,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::mutating(
             "delete_symbol",
             "Delete the symbol's full definition. Target by file + symbol \
-                          path (e.g. 'Class/method') or by file:line:column — exactly one of \
+                          path (e.g. 'Class/method') or by file:line[:column] — exactly one of \
                           symbol or line. Always reports references outside the deleted span \
                           that would dangle; set expect_no_references=true to refuse the \
                           delete unless verified reference-free (fail-closed when \

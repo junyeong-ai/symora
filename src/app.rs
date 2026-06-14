@@ -29,8 +29,17 @@ pub struct App {
 
 impl App {
     pub async fn new(output_options: OutputOptions, use_daemon: bool) -> anyhow::Result<Self> {
-        let root = std::env::current_dir()?;
+        Self::new_at(std::env::current_dir()?, output_options, use_daemon).await
+    }
 
+    /// Build an `App` rooted at an explicit path. `new` is this seeded with
+    /// the current directory; rooting elsewhere lets a caller drive a
+    /// specific tree without mutating process-global cwd.
+    pub(crate) async fn new_at(
+        root: std::path::PathBuf,
+        output_options: OutputOptions,
+        use_daemon: bool,
+    ) -> anyhow::Result<Self> {
         tracing::debug!("Initializing Symora at {:?}", root);
 
         let config_service = Arc::new(DefaultConfigService::new(&root));
