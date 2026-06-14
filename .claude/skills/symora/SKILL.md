@@ -49,7 +49,7 @@ symora hover src/cli/commands/search/mod.rs:30:10
 symora def src/cli/commands/search/mod.rs:30:10
 ```
 
-`symbols <file>` returns the full LSP tree. `symbols --symbol <path>` resolves an exact symbol path. Use `search symbols` for broad lookup, not `--name`.
+`symbols <file>` returns the full LSP tree. `symbols --symbol <path>` resolves a specific symbol path (bare name, `Class/method` suffix, or `*` wildcard). Use `search symbols` for broad lookup, not `--name`.
 
 ### File and project overview
 
@@ -92,7 +92,7 @@ The location commands here and above — `refs`, `callers`, `callees`, `context`
 symora actions list src/main.rs:42:5
 symora actions apply src/main.rs:42:5 "Extract method"
 symora rename src/main.rs:10:5 new_name --dry-run
-symora edit replace-body src/main.rs --symbol 'Config/load' --body "$(cat new_fn.rs)" --dry-run
+symora edit replace-body src/main.rs --symbol 'load' --body "$(cat new_fn.rs)" --dry-run
 symora edit replace-body src/main.rs:42:4 --body "$(cat new_fn.rs)" --dry-run
 symora edit delete src/main.rs:42:4 --dry-run
 symora edit delete src/main.rs:42:4 --expect-no-references
@@ -104,7 +104,7 @@ symora diff-impact
 Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run`.
 
 - `edit replace-body` (and MCP `replace_symbol_body`) replaces the symbol's ENTIRE definition span — signature, braces, and body. Pass the complete definition as `--body`, not just the inner code.
-- The `edit` subcommands target by `<file> --symbol 'Class/method'` or by `file:line[:col]`. Prefer `--symbol`: the path re-resolves against the live file, so sequential edits in one file don't invalidate each other — line addressing goes stale after every edit.
+- The `edit` subcommands target by `<file> --symbol <path>` or by `file:line[:col]`. `<path>` matches like every `--symbol` surface — bare name, `Class/method` suffix, `*/method` wildcard, or the exact `name_path` from `symbols`; copy the `name_path` rather than hand-building it (a Rust `impl` reads as `impl App/new`, not `App/new`). Prefer `--symbol` over `file:line`: it re-resolves against the live file, so sequential edits in one file don't invalidate each other — line addressing goes stale after every edit.
 - A `file:line` target without a column addresses the symbol declared on that line (a method's declaration line edits the method, not its impl/class); a body line falls back to the enclosing symbol; several declarations on one line are an ambiguity error — pass the column.
 - For `edit`, the preview is an exact diff hunk; `rename` and `actions apply` instead report the files they would touch (`affected_files`/`files_changed` and a `changes` list), not a hunk.
 - `edit replace` additionally accepts `--expect <text>`: the splice is refused unless the live text at the range matches exactly (only `\r\n` vs `\n` is tolerated).

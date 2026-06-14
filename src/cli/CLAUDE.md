@@ -14,7 +14,7 @@ Shared discovery and steering heuristics are centralized in `src/cli/symbol_disc
 
 ## Symbol-path resolution
 
-`Symbol::compute_paths_for_all` (in `src/models/symbol/`) is the single source of truth for path strings like `Class/method`. Path matching (substring, suffix, exact) is what makes `--symbol` flows reliable — keep its semantics stable.
+`Symbol::compute_paths_for_all` (in `src/models/symbol/`) is the single source of truth for path strings like `Class/method`. Path matching (exact, `/`-anchored suffix, bare last-component, and `*` wildcard) is what makes `--symbol` flows reliable — keep its semantics stable.
 
 ## One call-graph traversal
 
