@@ -22,7 +22,7 @@ pub use symbols::execute_symbol_search;
 #[command(
     after_long_help = "Use `search` when you have a rough name or phrase but not an exact file.\n\
                        Use `search symbols` for approximate workspace discovery.\n\
-                       Use `symbols` once you already know the exact file or exact symbol path.\n\
+                       Use `symbols` once you already know the file or a symbol path.\n\
                        Typical flow:\n  \
                        1. `symora search symbols auth`\n  \
                        2. `symora map file <match>`\n  \

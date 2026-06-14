@@ -16,7 +16,7 @@ use crate::models::symbol::{Language, Symbol, SymbolKind};
 
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Use `symbols <file>` to inspect one file semantically.\nUse `symbols --symbol <path>` when you already know an exact symbol path or narrow path pattern.\nUse `symbols --name` only when the symbol name is already fairly specific.\nUse `search symbols` first when the query is still broad or approximate.\n"
+    after_long_help = "Use `symbols <file>` to inspect one file semantically.\nUse `symbols --symbol <path>` when you already know a symbol path or pattern (a name, Class/method, or */method).\nUse `symbols --name` only when the symbol name is already fairly specific.\nUse `search symbols` first when the query is still broad or approximate.\n"
 )]
 pub struct SymbolsArgs {
     /// File path (or use --name for workspace search)

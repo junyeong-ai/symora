@@ -42,7 +42,7 @@ pub enum EditCommand {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
-        /// Symbol path when target is a file (e.g., "Class/method")
+        /// Symbol path/pattern when target is a file (name, "Class/method", or "*/method")
         #[arg(short = 's', long)]
         symbol: Option<String>,
 
@@ -73,7 +73,7 @@ pub enum EditCommand {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
-        /// Symbol path when target is a file (e.g., "Class/method")
+        /// Symbol path/pattern when target is a file (name, "Class/method", or "*/method")
         #[arg(short = 's', long)]
         symbol: Option<String>,
 
@@ -102,7 +102,7 @@ pub enum EditCommand {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
-        /// Symbol path when target is a file (e.g., "Class/method")
+        /// Symbol path/pattern when target is a file (name, "Class/method", or "*/method")
         #[arg(short = 's', long)]
         symbol: Option<String>,
 
@@ -135,7 +135,7 @@ pub enum EditCommand {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
 
-        /// Symbol path when target is a file (e.g., "Class/method")
+        /// Symbol path/pattern when target is a file (name, "Class/method", or "*/method")
         #[arg(short = 's', long)]
         symbol: Option<String>,
 
@@ -1188,10 +1188,11 @@ fn symbol_not_found(pattern: &str, file: &str) -> anyhow::Error {
 /// set stays one `symora symbols <file>` call away.
 const AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT: usize = 5;
 
-/// Several symbols sharing one exact path (children of same-named
-/// parents render identical paths) is an under-specified target the
-/// agent fixes by re-addressing; the line number is the only honest
-/// disambiguator, so the hint routes to line addressing.
+/// A `--symbol` pattern matching several symbols — a bare name or wildcard
+/// hitting siblings, or same-named parents sharing a child path — is an
+/// under-specified target the agent fixes by re-addressing; a
+/// `file:line[:col]` target is the honest disambiguator, so the hint routes
+/// there.
 fn ambiguous_symbol_path(pattern: &str, candidates: &[&Symbol], file: &str) -> anyhow::Error {
     let mut listing = candidates
         .iter()
@@ -1211,7 +1212,7 @@ fn ambiguous_symbol_path(pattern: &str, candidates: &[&Symbol], file: &str) -> a
             candidates.len()
         ))
         .with_hint(format!(
-            "Candidates: {listing}. Target one by file:line instead."
+            "Candidates: {listing}. Target one by file:line[:col] instead."
         )),
     )
 }
@@ -1323,24 +1324,31 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
 /// Resolve a `--symbol` path pattern in a file to the one symbol it names,
 /// through the same flexible matcher every `--symbol` surface uses
 /// (`matches_path`: bare last-component, `/`-anchored suffix, `*` wildcard,
-/// or a leading-`/` exact path). Zero matches is a structured not-found;
-/// several is a structured ambiguity listing the candidates — silently
-/// editing an arbitrary match would be plausible-but-wrong.
+/// or a leading-`/` exact path). The async wrapper fetches the file's
+/// symbols; `unique_symbol_by_path` owns the dispatch, so the destructive
+/// resolution stays unit-tested without an LSP round-trip.
 async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
     let mut symbols = app
         .lsp
         .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
         .await?;
     Symbol::compute_paths_for_all(&mut symbols);
-    let matches = Symbol::filter_by_path(&symbols, pattern);
-    let file_display = app.output.relative_path(file);
-    match matches.as_slice() {
-        [] => Err(symbol_not_found(pattern, &file_display)),
+    unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(file))
+}
+
+/// Pick the one symbol a flexible `--symbol` pattern names: exactly one
+/// match resolves; zero is a structured not-found; several is a structured
+/// ambiguity listing the candidates — silently editing an arbitrary match
+/// would be plausible-but-wrong. Pure (paths pre-computed by the caller),
+/// so the destructive dispatch is directly testable.
+fn unique_symbol_by_path(symbols: &[Symbol], pattern: &str, file_display: &str) -> Result<Symbol> {
+    match Symbol::filter_by_path(symbols, pattern).as_slice() {
+        [] => Err(symbol_not_found(pattern, file_display)),
         [only] => Ok(only.clone()),
         many => Err(ambiguous_symbol_path(
             pattern,
             &many.iter().collect::<Vec<_>>(),
-            &file_display,
+            file_display,
         )),
     }
 }
@@ -2398,10 +2406,9 @@ mod tests {
         )
     }
 
-    /// Several symbols sharing one exact path is an under-specified
-    /// target the agent fixes by re-addressing — same code as the
-    /// multi-symbol-line case, with the candidates' lines as the honest
-    /// disambiguator.
+    /// A pattern matching several symbols is an under-specified target the
+    /// agent fixes by re-addressing — same code as the multi-symbol-line
+    /// case, with the candidates' lines as the honest disambiguator.
     #[test]
     fn ambiguous_symbol_path_is_invalid_argument_with_candidates() {
         use crate::cli::{ErrorCode, OutputError};
@@ -2434,6 +2441,87 @@ mod tests {
         assert!(matches!(out.code, ErrorCode::NotFound));
         assert!(out.message.contains("Foo/bar"));
         assert!(out.hint.unwrap().contains("symora symbols"));
+    }
+
+    /// Two structs in a file, each with an `area` method. Build the symbol
+    /// set both the unique and the ambiguous `--symbol` dispatch resolve
+    /// against (paths pre-computed, as the live caller does).
+    fn two_structs_with_area() -> Vec<Symbol> {
+        let make = |name: &str, line: u32| {
+            Symbol::new(
+                name.to_string(),
+                SymbolKind::Struct,
+                Location::full(PathBuf::from("/tmp/foo.rs"), line, 8, line, 1, line + 3, 2),
+            )
+            .with_children(vec![Symbol::new(
+                "area".to_string(),
+                SymbolKind::Function,
+                Location::full(
+                    PathBuf::from("/tmp/foo.rs"),
+                    line + 1,
+                    8,
+                    line + 1,
+                    5,
+                    line + 2,
+                    6,
+                ),
+            )])
+        };
+        let mut symbols = vec![make("Rect", 1), make("Circle", 10)];
+        Symbol::compute_paths_for_all(&mut symbols);
+        symbols
+    }
+
+    /// The destructive `--symbol` dispatch resolves a pattern that names
+    /// exactly one symbol — including the bare last-component and `*/method`
+    /// wildcard forms the flexible matcher accepts.
+    #[test]
+    fn unique_symbol_by_path_resolves_a_single_match() {
+        let mut symbols = impl_with_method();
+        Symbol::compute_paths_for_all(&mut symbols);
+        assert_eq!(
+            unique_symbol_by_path(&symbols, "new", "foo.rs")
+                .unwrap()
+                .name,
+            "new"
+        );
+        assert_eq!(
+            unique_symbol_by_path(&symbols, "*/new", "foo.rs")
+                .unwrap()
+                .name,
+            "new"
+        );
+        assert_eq!(
+            unique_symbol_by_path(&symbols, "Rect/new", "foo.rs")
+                .unwrap()
+                .name,
+            "new"
+        );
+    }
+
+    /// A bare name hitting the same method on two distinct parents is an
+    /// ambiguity the destructive edit refuses — never a silent arbitrary
+    /// pick.
+    #[test]
+    fn unique_symbol_by_path_refuses_an_ambiguous_pattern() {
+        use crate::cli::{ErrorCode, OutputError};
+        let symbols = two_structs_with_area();
+        let out: OutputError = unique_symbol_by_path(&symbols, "area", "foo.rs")
+            .unwrap_err()
+            .into();
+        assert!(matches!(out.code, ErrorCode::InvalidArgument));
+        assert!(out.message.contains("matches 2 symbols"));
+    }
+
+    /// A pattern that matches nothing is a structured not-found.
+    #[test]
+    fn unique_symbol_by_path_reports_a_miss_as_not_found() {
+        use crate::cli::{ErrorCode, OutputError};
+        let symbols = two_structs_with_area();
+        let out: OutputError = unique_symbol_by_path(&symbols, "nonexistent", "foo.rs")
+            .unwrap_err()
+            .into();
+        assert!(matches!(out.code, ErrorCode::NotFound));
     }
 
     #[test]
