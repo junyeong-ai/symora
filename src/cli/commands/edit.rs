@@ -1320,10 +1320,12 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Resolve an exact symbol path in a file to the one symbol it names.
-/// Zero matches is a structured not-found; several is a structured
-/// ambiguity listing the candidates — silently editing an arbitrary
-/// match would be plausible-but-wrong.
+/// Resolve a `--symbol` path pattern in a file to the one symbol it names,
+/// through the same flexible matcher every `--symbol` surface uses
+/// (`matches_path`: bare last-component, `/`-anchored suffix, `*` wildcard,
+/// or a leading-`/` exact path). Zero matches is a structured not-found;
+/// several is a structured ambiguity listing the candidates — silently
+/// editing an arbitrary match would be plausible-but-wrong.
 async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
     let mut symbols = app
         .lsp
