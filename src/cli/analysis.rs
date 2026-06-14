@@ -9,8 +9,8 @@ use std::path::Path;
 
 use crate::cli::ParsedLocation;
 use crate::cli::utils::{
-    RefsClassification, SymbolResolution, TestMatcher, classify_refs, column_addressed_symbol,
-    line_addressed_symbol,
+    AnchorResolution, RefsClassification, SymbolResolution, TestMatcher, ambiguity_hint,
+    classify_refs, column_addressed_symbol, line_addressed_symbol,
 };
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
@@ -31,12 +31,12 @@ pub struct LocationAnalysis {
     /// alternatives (picking silently would violate invariant 4; erroring
     /// on the ambiguity instead of disclosing it helps nobody).
     pub(crate) ambiguity: Option<String>,
-    /// The symbol read itself failed, so the target could not be resolved — as
-    /// distinct from a position that is verifiably not a symbol. Lets a surface
-    /// disclose "unavailable" rather than collapsing both into a bare
-    /// unresolved, matching the three-state `AnchorResolution` the list surfaces
-    /// use.
-    pub(crate) anchor_unavailable: bool,
+    /// How the anchor resolved: `Resolved`, `NotASymbol` (read OK, no symbol at
+    /// the position), or `Unavailable` (the symbol read failed). The single
+    /// source of the unresolved-anchor disclosure — surfaced via `as_status()`
+    /// so refs/impact/context emit the same `anchor_status` marker the other
+    /// surfaces do, never a bare two-state bool.
+    pub(crate) anchor_resolution: AnchorResolution,
 }
 
 impl LocationAnalysis {
@@ -64,10 +64,10 @@ impl LocationAnalysis {
         self.ambiguity.as_deref()
     }
 
-    /// Whether the symbol read failed (target unresolved because the read was
-    /// unavailable, not because the position is not a symbol).
-    pub fn anchor_unavailable(&self) -> bool {
-        self.anchor_unavailable
+    /// How the anchor resolved (Resolved / NotASymbol / Unavailable). Surfaces
+    /// render its `as_status()` as the `anchor_status` disclosure marker.
+    pub fn anchor_resolution(&self) -> AnchorResolution {
+        self.anchor_resolution
     }
 }
 
@@ -93,11 +93,17 @@ impl LocationAnalysis {
                 FindSymbolsOptions::default().with_body().with_depth(10),
             )
             .await;
-        let anchor_unavailable = symbols_result.is_err();
         let symbols = symbols_result.ok();
         let (target, ambiguity) = match symbols.as_ref() {
             Some(symbols) => resolve_navigation_target(symbols, &anchor),
             None => (None, None),
+        };
+        let anchor_resolution = if symbols.is_none() {
+            AnchorResolution::Unavailable
+        } else if target.is_some() {
+            AnchorResolution::Resolved
+        } else {
+            AnchorResolution::NotASymbol
         };
         let anchor = match &target {
             Some(symbol) => ParsedLocation {
@@ -118,7 +124,7 @@ impl LocationAnalysis {
             references: references.data,
             indexing: references.indexing,
             ambiguity,
-            anchor_unavailable,
+            anchor_resolution,
         })
     }
 
@@ -147,7 +153,7 @@ impl LocationAnalysis {
             references: references.data,
             indexing: references.indexing,
             ambiguity: None,
-            anchor_unavailable: false,
+            anchor_resolution: AnchorResolution::Resolved,
         })
     }
 
@@ -196,16 +202,8 @@ fn resolve_navigation_target(
         SymbolResolution::Match(symbol) => (Some(symbol.clone()), None),
         SymbolResolution::NotFound => (None, None),
         SymbolResolution::Ambiguous(declared) => {
-            let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
-            let first = declared[0];
-            let hint = format!(
-                "Line {} declares multiple symbols ({}); resolved to '{}' — pass an \
-                 explicit column (file:line:column) to target another",
-                anchor.line,
-                names.join(", "),
-                first.name,
-            );
-            (Some(first.clone()), Some(hint))
+            let hint = ambiguity_hint(anchor.line, &declared);
+            (Some(declared[0].clone()), Some(hint))
         }
     }
 }

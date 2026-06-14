@@ -151,7 +151,7 @@ async fn fetch_context(
             resolved_line,
             resolved_column,
             root,
-            analysis.anchor_unavailable(),
+            analysis.anchor_resolution().as_status(),
         );
         if let Some(sym) = analysis.target.as_ref() {
             t = t.with_signature(extract_signature(sym.body.as_deref()));
