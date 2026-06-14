@@ -85,19 +85,24 @@ pub async fn execute_symbol_search(
                 .map(|r| index_result_output(r, ctx))
                 .collect();
             let mut failures = Vec::new();
-            let mut indexing = None;
             if !search_languages.is_empty() && candidates.len() < limit {
                 let lookup =
                     collect_workspace_symbol_results(app, query, kind, limit, &search_languages)
                         .await;
                 candidates = merge_symbol_results(candidates, lookup.results, query);
                 failures = lookup.failures;
-                indexing = lookup.indexing;
+                // `lookup.indexing` (the LSP workspace-symbol warmup state) is
+                // deliberately NOT propagated onto this index-backed answer. The
+                // index is the authority here and the LSP pass is pure
+                // enrichment; stamping its `timed_out` would falsely report the
+                // result as a lower bound and drive endless retries that add
+                // nothing once the index is built. Index completeness is carried
+                // by `stale` (on-disk drift); an in-progress build surfaces
+                // through `search index status`.
                 count = count.max(candidates.len());
             }
             let mut section = finish_symbol_search(candidates, count, query, language, kind, limit)
-                .with_stale(stale)
-                .with_indexing(indexing);
+                .with_stale(stale);
             if section.count == 0 {
                 let hints = symbol_search_coverage_hints(&failures);
                 if !hints.is_empty() {
