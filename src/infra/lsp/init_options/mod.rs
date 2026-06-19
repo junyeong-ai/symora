@@ -13,6 +13,7 @@ use crate::models::symbol::Language;
 
 mod csharp;
 mod discovery;
+mod exclude;
 mod fsharp;
 mod go;
 mod java;

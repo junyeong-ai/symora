@@ -303,7 +303,7 @@ pub(crate) fn matches_default_pattern(name: &str) -> bool {
     })
 }
 
-const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
+pub(crate) const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     // Version control
     ".git",
     ".svn",
