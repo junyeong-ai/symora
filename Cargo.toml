@@ -1,6 +1,6 @@
 [package]
 name = "symora"
-version = "0.13.3"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.96"
 description = "Symbol-centric code intelligence CLI for AI coding agents"
