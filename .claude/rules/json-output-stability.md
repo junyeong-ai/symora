@@ -28,7 +28,9 @@ These files emit or shape the JSON that downstream agents parse. Treat any field
   - Items without `body` under it were omitted — token budget exhausted, symbol unresolvable at the item's position, or genuinely bodiless (prototypes, interface methods) — disclosed, never silent.
   - If the transport size ceiling drops items from the section, the fitter recounts this field against the remaining items (removing it when the section empties), so the equality holds in every emitted response.
 - `indexing` — degradation marker, present only when the answer was computed under degraded workspace indexing (e.g. `"timed_out"`)
+- `coverage_gaps` — array of `{language, reason}` pairs naming languages a search did not cover, so a short or empty result is never mistaken for "nothing exists"; omitted when empty. Emitted by symbol `search` (a `Section` field) when an explicit `--lang` falls outside the index's extractor set, and by `usage` (its own top-level field) when some languages failed or were skipped. Stable `reason` codes: `not_indexed`, `server_not_installed`, `timed_out`, `unsupported`, `unavailable`, `not_searched`.
 - `error` — structured `{code, message, hint}` failure, omitted on success
+- `config_errors` — array of whole-config load failures (a malformed `.symora/config.toml` the run fell back from to defaults), injected as a top-level field on *any* command's output by the output layer, omitted when empty. The command proceeds on defaults; this is how an agent learns its config never applied without having to run `doctor`. A command that emits its own `config_errors` (`doctor`, `config show` — which also report the softer rejected-`[lsp.servers]`-stanza class) owns the key and the output layer never overwrites it.
 
 If a new list response needs a different shape, that's a strong signal the underlying command should be reshaped instead.
 

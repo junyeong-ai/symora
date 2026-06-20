@@ -195,6 +195,9 @@ impl From<ServerStatusDetail> for ServerStatus {
                 hint: Some(install_hint),
             },
             ServerStatusDetail::NotSupported => ServerStatus::NotSupported,
+            ServerStatusDetail::CriticalFailure { reason, .. } => {
+                ServerStatus::CriticalFailure { reason }
+            }
         }
     }
 }
@@ -216,5 +219,19 @@ mod tests {
     fn test_uri_to_path() {
         let path = uri_to_path("file:///test/file.rs");
         assert_eq!(path, PathBuf::from("/test/file.rs"));
+    }
+
+    #[test]
+    fn critical_failure_detail_maps_to_status_carrying_its_reason() {
+        let detail = ServerStatusDetail::CriticalFailure {
+            name: "rust-analyzer".to_string(),
+            reason: "stayed unhealthy after 3 restart attempts".to_string(),
+        };
+        match ServerStatus::from(detail) {
+            ServerStatus::CriticalFailure { reason } => {
+                assert_eq!(reason, "stayed unhealthy after 3 restart attempts");
+            }
+            other => panic!("expected CriticalFailure, got {other:?}"),
+        }
     }
 }

@@ -50,8 +50,16 @@ fn location_from_range(
     range: &Range,
     conv: &mut PositionConverter,
 ) -> Location {
-    let column = conv.scalar_column(&file, range.start.line, range.start.character);
-    let end_column = conv.scalar_column(&file, range.end.line, range.end.character);
+    let (column, degraded) =
+        conv.scalar_column_disclosed(&file, range.start.line, range.start.character);
+    // The end column is decoded as the range bound, but its degradation is NOT
+    // folded into the flag: `degraded_column` discloses whether the EMITTED
+    // `column` (the start position) is a wire-offset guess. A stale or
+    // EOF-exclusive range whose end line is out of range must not mark an
+    // otherwise-cleanly-decoded start column as degraded. (When the file itself
+    // is unreadable both ends degrade together, so the start alone still
+    // discloses that case.)
+    let (end_column, _) = conv.scalar_column_disclosed(&file, range.end.line, range.end.character);
     Location {
         file,
         line: range.start.line + 1,
@@ -60,6 +68,7 @@ fn location_from_range(
         range_start_column: None,
         end_line: Some(range.end.line + 1),
         end_column: Some(end_column),
+        degraded_column: degraded.then_some(true),
     }
 }
 
@@ -114,15 +123,26 @@ pub(super) fn convert_document_symbols(
         .map(|doc_sym| {
             let sel = &doc_sym.selection_range;
             let range = &doc_sym.range;
+            let (name_col, name_degraded) =
+                conv.scalar_column_disclosed(file, sel.start.line, sel.start.character);
+            // Only the name/selection position backs the emitted `column`, so
+            // only its degradation sets the flag. The declaration-range endpoints
+            // are secondary bounds — an out-of-range end (stale/EOF-exclusive
+            // range) must not mark a cleanly-decoded name column as a guess.
+            let (start_col, _) =
+                conv.scalar_column_disclosed(file, range.start.line, range.start.character);
+            let (end_col, _) =
+                conv.scalar_column_disclosed(file, range.end.line, range.end.character);
             let location = Location::full(
                 file.to_path_buf(),
                 sel.start.line + 1,
-                conv.scalar_column(file, sel.start.line, sel.start.character),
+                name_col,
                 range.start.line + 1,
-                conv.scalar_column(file, range.start.line, range.start.character),
+                start_col,
                 range.end.line + 1,
-                conv.scalar_column(file, range.end.line, range.end.character),
-            );
+                end_col,
+            )
+            .with_degraded_column(name_degraded);
 
             let display_name = Symbol::normalize_symbol_name(&doc_sym.name);
             let mut symbol = Symbol::new(
@@ -534,6 +554,55 @@ mod tests {
             r.is_err(),
             "a non-zero column on an unreadable line must fail closed"
         );
+    }
+
+    /// `degraded_column` tracks the EMITTED `column` (the range start), not the
+    /// end bound: a clean start with an out-of-range end (a stale or
+    /// EOF-exclusive range) must NOT falsely flag the column as a guess.
+    #[test]
+    fn location_from_range_flags_only_the_emitted_start_column() {
+        use crate::infra::lsp::protocol::{Position, Range};
+        use crate::services::lsp::position::PositionConverter;
+        use std::path::Path;
+
+        let file = Path::new("seeded.rs");
+        let mut conv =
+            PositionConverter::new(PositionEncoding::Utf16).with_content(file, "fn x() {}");
+        // Start decodes on the readable first line; the end line is far past EOF.
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 3,
+            },
+            end: Position {
+                line: 999,
+                character: 0,
+            },
+        };
+        let loc = super::location_from_range(file.to_path_buf(), &range, &mut conv);
+        assert_eq!(
+            loc.degraded_column, None,
+            "a cleanly-decoded start must not be flagged because the end is out of range"
+        );
+
+        // A start on a genuinely unreadable line still degrades the column.
+        let mut conv2 = PositionConverter::new(PositionEncoding::Utf16);
+        let unreadable = Range {
+            start: Position {
+                line: 0,
+                character: 3,
+            },
+            end: Position {
+                line: 0,
+                character: 5,
+            },
+        };
+        let loc2 = super::location_from_range(
+            Path::new("/nonexistent/zzz.rs").to_path_buf(),
+            &unreadable,
+            &mut conv2,
+        );
+        assert_eq!(loc2.degraded_column, Some(true));
     }
 
     #[test]

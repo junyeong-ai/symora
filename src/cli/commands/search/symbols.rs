@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::app::App;
 use crate::cli::OutputContext;
 use crate::cli::OutputError;
-use crate::cli::response::Section;
+use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    broad_symbol_kind_bonus, coverage_reason, generic_exact_identifier_penalty,
-    is_probably_test_path, noisy_suffix_penalty, symbol_lookup_hints, symbol_match_priority,
+    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus, coverage_reason,
+    generic_exact_identifier_penalty, noisy_suffix_penalty, symbol_lookup_hints,
+    symbol_match_priority,
 };
+use crate::cli::utils::TestMatcher;
 use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
@@ -27,6 +29,11 @@ pub(super) struct SymbolResultOutput {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    /// Present (true) only when `column` is a degraded wire-offset guess — a
+    /// cross-file `workspace/symbol` result decoded against an unreadable line.
+    /// Index and same-file results never set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,7 +62,7 @@ pub async fn execute_symbol_search(
     // and surface unrelated crates), so resolve a glob against the index with
     // our own matcher instead of routing it to either.
     if query.contains('*') {
-        return execute_glob_symbol_search(app, query, kind, limit).await;
+        return execute_glob_symbol_search(app, query, language, kind, limit).await;
     }
 
     let search_languages = resolve_search_languages(app, language);
@@ -67,13 +74,26 @@ pub async fn execute_symbol_search(
         } else {
             WorkspaceSearchRoute::PathQuery
         };
-        return execute_workspace_symbol_search(app, query, kind, limit, &search_languages, route)
-            .await;
+        return execute_workspace_symbol_search(
+            app,
+            query,
+            language,
+            kind,
+            limit,
+            &search_languages,
+            route,
+        )
+        .await;
     }
 
     match app
         .store
-        .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default), None)
+        .search_symbols(
+            query,
+            limit,
+            kind.map(SymbolKind::parse_or_default),
+            explicit_index_language(language),
+        )
         .await
     {
         Ok(page) => {
@@ -85,24 +105,36 @@ pub async fn execute_symbol_search(
                 .map(|r| index_result_output(r, ctx))
                 .collect();
             let mut failures = Vec::new();
+            let mut workspace_indexing = None;
             if !search_languages.is_empty() && candidates.len() < limit {
                 let lookup =
                     collect_workspace_symbol_results(app, query, kind, limit, &search_languages)
                         .await;
-                candidates = merge_symbol_results(candidates, lookup.results, query);
+                // This is an index-primary answer, so authoritativeness is
+                // PER-LANGUAGE: an indexed language's LSP pass is pure enrichment
+                // over the authoritative index (its warmup `timed_out` is not a
+                // lower bound and is dropped — index completeness rides on
+                // `stale`), but an unindexed language's LSP is its sole source,
+                // so only THAT degradation is disclosed. A bare query spanning an
+                // indexed and an unindexed language still surfaces the unindexed
+                // one's timeout, which a global authoritativeness flag missed.
+                workspace_indexing = lookup.unindexed_indexing;
+                candidates =
+                    merge_symbol_results(candidates, lookup.results, query, app.test_matcher());
                 failures = lookup.failures;
-                // `lookup.indexing` (the LSP workspace-symbol warmup state) is
-                // deliberately NOT propagated onto this index-backed answer. The
-                // index is the authority here and the LSP pass is pure
-                // enrichment; stamping its `timed_out` would falsely report the
-                // result as a lower bound and drive endless retries that add
-                // nothing once the index is built. Index completeness is carried
-                // by `stale` (on-disk drift); an in-progress build surfaces
-                // through `search index status`.
                 count = count.max(candidates.len());
             }
-            let mut section = finish_symbol_search(candidates, count, query, language, kind, limit)
-                .with_stale(stale);
+            let mut section = finish_symbol_search(
+                candidates,
+                count,
+                query,
+                language,
+                kind,
+                limit,
+                app.test_matcher(),
+            )
+            .with_stale(stale)
+            .with_indexing(workspace_indexing);
             if section.count == 0 {
                 let hints = symbol_search_coverage_hints(&failures);
                 if !hints.is_empty() {
@@ -118,6 +150,7 @@ pub async fn execute_symbol_search(
             return execute_workspace_symbol_search(
                 app,
                 query,
+                language,
                 kind,
                 limit,
                 &search_languages,
@@ -139,6 +172,7 @@ pub async fn execute_symbol_search(
 async fn execute_glob_symbol_search(
     app: &App,
     query: &str,
+    language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
 ) -> Result<()> {
@@ -161,7 +195,7 @@ async fn execute_glob_symbol_search(
             seed,
             usize::MAX,
             kind.map(SymbolKind::parse_or_default),
-            None,
+            explicit_index_language(language),
         )
         .await
     {
@@ -191,7 +225,16 @@ async fn execute_glob_symbol_search(
     let count = matches.len();
 
     ctx.print_success(
-        finish_symbol_search(matches, count, query, None, kind, limit).with_stale(stale),
+        finish_symbol_search(
+            matches,
+            count,
+            query,
+            language,
+            kind,
+            limit,
+            app.test_matcher(),
+        )
+        .with_stale(stale),
     );
     Ok(())
 }
@@ -206,6 +249,8 @@ fn index_result_output(row: SymbolSearchResult, ctx: &OutputContext) -> SymbolRe
         file: ctx.relative_path(&row.file),
         line: row.line,
         column: row.column,
+        // Index rows are extracted exactly from source — never a decoded guess.
+        degraded_column: None,
         container: row.container,
         backend: Some("index".to_string()),
         score: row.score,
@@ -230,6 +275,7 @@ enum WorkspaceSearchRoute {
 async fn execute_workspace_symbol_search(
     app: &App,
     query: &str,
+    language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
     languages: &[Language],
@@ -254,13 +300,21 @@ async fn execute_workspace_symbol_search(
     if looks_like_symbol_path(query) && candidates.len() < limit {
         let expanded =
             collect_document_path_results(app, query, kind, limit, languages, &candidates).await;
-        candidates = merge_symbol_results(candidates, expanded, query);
+        candidates = merge_symbol_results(candidates, expanded, query, app.test_matcher());
     }
 
+    // Scope the index supplement to an EXPLICIT `--lang` only — never to an
+    // auto-detected single language (which the user did not request). Same rule
+    // and helper as every other index-query path.
     if looks_like_symbol_path(query)
         && let Ok(page) = app
             .store
-            .search_symbols(query, limit, kind.map(SymbolKind::parse_or_default), None)
+            .search_symbols(
+                query,
+                limit,
+                kind.map(SymbolKind::parse_or_default),
+                explicit_index_language(language),
+            )
             .await
     {
         index_answered = true;
@@ -273,12 +327,12 @@ async fn execute_workspace_symbol_search(
             .into_iter()
             .map(|r| index_result_output(r, ctx))
             .collect();
-        candidates = merge_symbol_results(candidates, index_results, query);
+        candidates = merge_symbol_results(candidates, index_results, query, app.test_matcher());
     }
 
     count = count.max(candidates.len());
     let section = with_workspace_failure_disclosure(
-        finish_symbol_search(candidates, count, query, None, kind, limit)
+        finish_symbol_search(candidates, count, query, language, kind, limit, app.test_matcher())
             .with_stale(stale)
             // Any emitted language having run timed-out makes the whole
             // list a lower bound — captured when each query ran.
@@ -335,16 +389,56 @@ fn finish_symbol_search(
     language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
+    test_matcher: &TestMatcher,
 ) -> Section<SymbolResultOutput> {
-    prune_low_value_symbol_results(&mut candidates, query, limit);
+    prune_low_value_symbol_results(&mut candidates, query, limit, test_matcher);
     candidates.truncate(limit);
 
     let truncated = candidates.len() < count;
     let hints = symbol_search_hints(query, language, kind, truncated, candidates.len());
     let next_commands = symbol_search_next_commands(&candidates, query, language);
+    // Disclose `not_indexed` only when the result is EMPTY: it explains a zero
+    // for an unindexed `--lang` ("not indexed here", not "no such symbol"). When
+    // results came back (the live LSP covered the language), the language WAS
+    // covered, so claiming a coverage gap would contradict the present items.
+    let coverage_gaps = if count == 0 {
+        index_coverage_gaps(language)
+    } else {
+        Vec::new()
+    };
     Section::with_total(candidates, count)
         .with_hints(hints)
         .with_next_commands(next_commands)
+        .with_coverage_gaps(coverage_gaps)
+}
+
+/// Disclose, as a structured signal, that an explicitly requested `--lang` is
+/// outside the index's extractor set — so an empty `items` reads as "this
+/// language is not indexed" (try `search ast` / `search content`) rather than
+/// "no such symbol". Gated to an explicit language: an auto-detected language
+/// that happens to be unindexed is not a gap the agent asked about.
+/// The single language to scope an index `search_symbols` query to: `Some` only
+/// for an explicit, recognized `--lang`. An absent or unknown `--lang` leaves
+/// the query unscoped, so `--lang rust` no longer returns indexed symbols from
+/// other languages.
+fn explicit_index_language(language: Option<&str>) -> Option<Language> {
+    let lang = Language::parse_or_default(language?);
+    (lang != Language::Unknown).then_some(lang)
+}
+
+fn index_coverage_gaps(language: Option<&str>) -> Vec<CoverageGap> {
+    let Some(lang_str) = language else {
+        return Vec::new();
+    };
+    let lang = Language::parse_or_default(lang_str);
+    if lang != Language::Unknown && !SymbolExtractor::is_supported(lang) {
+        vec![CoverageGap {
+            language: lang.lsp_id().to_string(),
+            reason: "not_indexed".to_string(),
+        }]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Workspace-symbol fan-out outcome: the ranked results plus each failed
@@ -355,7 +449,14 @@ fn finish_symbol_search(
 struct WorkspaceSymbolLookup {
     results: Vec<SymbolResultOutput>,
     failures: Vec<(Language, LspError)>,
+    /// Degradation merged across ALL queried languages — the lower-bound marker
+    /// for an LSP-primary answer (forced/index-not-built workspace search).
     indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// Degradation merged across only the UNINDEXED languages — the lower-bound
+    /// marker for an index-primary answer, where an indexed language's LSP pass
+    /// is pure enrichment (the index covers it) but an unindexed language's LSP
+    /// is its sole source. Authoritativeness is per-language, not global.
+    unindexed_indexing: Option<crate::models::lsp::IndexingDegradation>,
 }
 
 async fn collect_workspace_symbol_results(
@@ -368,14 +469,20 @@ async fn collect_workspace_symbol_results(
     let ctx = &app.output;
     let parsed_kind = kind.map(crate::models::symbol::SymbolKind::parse_or_default);
     let mut failures = Vec::new();
-    let mut indexing = None;
     if languages.is_empty() {
         return WorkspaceSymbolLookup {
             results: Vec::new(),
             failures,
-            indexing,
+            indexing: None,
+            unindexed_indexing: None,
         };
     }
+    // Per-language LSP degradation, recorded as the fan-out runs. The two
+    // disclosure markers are derived from it once below — per-language, never a
+    // single global authoritativeness flag (which would miss an unindexed
+    // language's timeout in a bare query that also spans an indexed one).
+    let mut lsp_degradation: Vec<(Language, Option<crate::models::lsp::IndexingDegradation>)> =
+        Vec::new();
 
     let workspace_query = workspace_query_from_pattern(query);
     let overfetch_limit = if looks_like_symbol_path(query) {
@@ -389,9 +496,7 @@ async fn collect_workspace_symbol_results(
     for language in languages {
         let mut symbols = match app.lsp.workspace_symbols(&workspace_query, *language).await {
             Ok(symbols) => {
-                if indexing.is_none() {
-                    indexing = symbols.indexing;
-                }
+                lsp_degradation.push((*language, symbols.indexing));
                 symbols.data
             }
             Err(e) => {
@@ -465,19 +570,41 @@ async fn collect_workspace_symbol_results(
                 file: ctx.relative_path(&symbol.location.file),
                 line: symbol.location.line,
                 column: symbol.location.column,
+                degraded_column: symbol.location.degraded_column,
                 container: symbol.container,
                 backend: Some("workspace".to_string()),
                 score,
             }
         })
         .collect();
-    sort_symbol_results(&mut outputs, query);
-    prune_low_value_symbol_results(&mut outputs, query, limit);
+    sort_symbol_results(&mut outputs, query, app.test_matcher());
+    prune_low_value_symbol_results(&mut outputs, query, limit, app.test_matcher());
     WorkspaceSymbolLookup {
         results: outputs,
         failures,
-        indexing,
+        // All-language degradation: the lower-bound marker for an LSP-primary
+        // answer (forced / index-not-built workspace search). First marker wins
+        // — a single IndexingDegradation variant, so order is immaterial.
+        indexing: lsp_degradation.iter().find_map(|(_, d)| *d),
+        // Unindexed-only: the lower-bound marker for an index-primary answer.
+        unindexed_indexing: index_primary_unindexed_degradation(&lsp_degradation),
     }
+}
+
+/// The degradation an INDEX-PRIMARY answer must disclose, from the per-language
+/// LSP degradations the workspace fan-out observed. An indexed language's LSP
+/// pass is enrichment over the authoritative index, so its degradation is NOT a
+/// lower bound and is dropped; an unindexed language's LSP is its sole source,
+/// so its degradation is disclosed. First marker wins (one degradation variant).
+/// Authoritativeness is per-language: a bare query spanning an indexed and an
+/// unindexed language still surfaces the unindexed one's timeout.
+fn index_primary_unindexed_degradation(
+    per_language: &[(Language, Option<crate::models::lsp::IndexingDegradation>)],
+) -> Option<crate::models::lsp::IndexingDegradation> {
+    per_language
+        .iter()
+        .filter(|(language, _)| !SymbolExtractor::is_supported(*language))
+        .find_map(|(_, degradation)| *degradation)
 }
 
 /// Dedup + rank the union of two result sets. Emission capping and noise
@@ -487,6 +614,7 @@ fn merge_symbol_results(
     primary: Vec<SymbolResultOutput>,
     secondary: Vec<SymbolResultOutput>,
     query: &str,
+    test_matcher: &TestMatcher,
 ) -> Vec<SymbolResultOutput> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
@@ -499,7 +627,7 @@ fn merge_symbol_results(
         }
     }
 
-    sort_symbol_results(&mut merged, query);
+    sort_symbol_results(&mut merged, query, test_matcher);
     merged
 }
 
@@ -583,6 +711,7 @@ async fn collect_document_path_results(
                     file: file_rel,
                     line: symbol.location.line,
                     column: symbol.location.column,
+                    degraded_column: symbol.location.degraded_column,
                     container: symbol.container,
                     backend: Some("document".to_string()),
                 });
@@ -590,16 +719,20 @@ async fn collect_document_path_results(
         }
     }
 
-    sort_symbol_results(&mut expanded, query);
-    prune_low_value_symbol_results(&mut expanded, query, limit);
+    sort_symbol_results(&mut expanded, query, app.test_matcher());
+    prune_low_value_symbol_results(&mut expanded, query, limit, app.test_matcher());
     expanded.truncate(limit);
     expanded
 }
 
-fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str) {
+fn sort_symbol_results(
+    results: &mut [SymbolResultOutput],
+    query: &str,
+    test_matcher: &TestMatcher,
+) {
     results.sort_by(|a, b| {
-        symbol_result_priority(query, b)
-            .cmp(&symbol_result_priority(query, a))
+        symbol_result_priority(query, b, test_matcher)
+            .cmp(&symbol_result_priority(query, a, test_matcher))
             .then_with(|| {
                 b.score
                     .partial_cmp(&a.score)
@@ -615,6 +748,7 @@ fn prune_low_value_symbol_results(
     results: &mut Vec<SymbolResultOutput>,
     query: &str,
     limit: usize,
+    test_matcher: &TestMatcher,
 ) {
     if looks_like_symbol_path(query) || results.is_empty() {
         return;
@@ -623,15 +757,19 @@ fn prune_low_value_symbol_results(
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let high_value_count = results
         .iter()
-        .filter(|result| is_high_value_symbol_result(result, &q))
+        .filter(|result| is_high_value_symbol_result(result, &q, test_matcher))
         .count();
 
     if high_value_count >= usize::min(limit, 3) {
-        results.retain(|result| is_high_value_symbol_result(result, &q));
+        results.retain(|result| is_high_value_symbol_result(result, &q, test_matcher));
     }
 }
 
-fn symbol_result_priority(query: &str, result: &SymbolResultOutput) -> i32 {
+fn symbol_result_priority(
+    query: &str,
+    result: &SymbolResultOutput,
+    test_matcher: &TestMatcher,
+) -> i32 {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let name = result.name.to_ascii_lowercase();
     let path = result
@@ -644,13 +782,13 @@ fn symbol_result_priority(query: &str, result: &SymbolResultOutput) -> i32 {
     // Test code is demoted by file path only. A container-name substring
     // check ("test") would mis-fire on Fastest/Latest/Contest, and the file
     // path already catches the real test code.
-    let test_penalty = if is_probably_test_path(&result.file) {
-        8
+    let test_penalty = if test_matcher.is_test_file(std::path::Path::new(&result.file)) {
+        TEST_FILE_PENALTY
     } else {
         0
     };
     let kind_penalty = if is_low_signal_kind(&result.kind) {
-        6
+        LOW_SIGNAL_KIND_PENALTY
     } else {
         0
     };
@@ -675,9 +813,13 @@ fn symbol_result_priority(query: &str, result: &SymbolResultOutput) -> i32 {
         - generic_exact_penalty
 }
 
-fn is_high_value_symbol_result(result: &SymbolResultOutput, query: &str) -> bool {
+fn is_high_value_symbol_result(
+    result: &SymbolResultOutput,
+    query: &str,
+    test_matcher: &TestMatcher,
+) -> bool {
     let name = result.name.to_ascii_lowercase();
-    !is_probably_test_path(&result.file)
+    !test_matcher.is_test_file(std::path::Path::new(&result.file))
         && !is_low_signal_kind(&result.kind)
         && noisy_suffix_penalty(&name, query) == 0
 }
@@ -922,6 +1064,7 @@ mod tests {
             file: file.to_string(),
             line: 1,
             column: 1,
+            degraded_column: None,
             container: None,
             backend: Some("index".to_string()),
             score: 1.0,
@@ -935,7 +1078,8 @@ mod tests {
             result("beta", "src/b.rs"),
             result("gamma", "src/c.rs"),
         ];
-        let section = finish_symbol_search(candidates, 3, "alpha", None, None, 2);
+        let section =
+            finish_symbol_search(candidates, 3, "alpha", None, None, 2, &TestMatcher::new());
 
         assert_eq!(section.count, 3);
         assert_eq!(section.showing, 2);
@@ -943,9 +1087,92 @@ mod tests {
     }
 
     #[test]
+    fn explicit_index_language_scopes_only_a_recognized_lang() {
+        // A recognized --lang scopes the index query (no cross-language leak);
+        // an absent or unknown --lang leaves it unscoped.
+        assert_eq!(explicit_index_language(Some("rust")), Some(Language::Rust));
+        assert_eq!(explicit_index_language(Some("lua")), Some(Language::Lua));
+        assert_eq!(explicit_index_language(None), None);
+        assert_eq!(explicit_index_language(Some("not-a-language")), None);
+    }
+
+    #[test]
+    fn coverage_gap_fires_for_explicit_unindexed_language_only() {
+        // Lua has no compiled-in index extractor, so an explicit `--lang lua`
+        // search discloses the gap; an empty result then reads as "not indexed
+        // here", not "no such symbol".
+        let gaps = index_coverage_gaps(Some("lua"));
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].language, "lua");
+        assert_eq!(gaps[0].reason, "not_indexed");
+        // An index-covered language is no gap; an unspecified --lang asks about
+        // nothing, so it reports nothing (no over-reporting on auto-detect).
+        assert!(index_coverage_gaps(Some("rust")).is_empty());
+        assert!(index_coverage_gaps(None).is_empty());
+    }
+
+    #[test]
+    fn coverage_gap_discloses_unindexed_lang_only_on_an_empty_result() {
+        // Empty result for an unindexed `--lang`: disclose not_indexed so the
+        // zero reads as "not indexed here", not "no such symbol".
+        let empty =
+            finish_symbol_search(vec![], 0, "foo", Some("lua"), None, 10, &TestMatcher::new());
+        assert_eq!(empty.coverage_gaps.len(), 1);
+        assert_eq!(empty.coverage_gaps[0].reason, "not_indexed");
+
+        // Results present means the live LSP covered lua — the language WAS
+        // covered, so a coverage gap would contradict the emitted items.
+        let covered = finish_symbol_search(
+            vec![result("foo", "src/a.lua")],
+            1,
+            "foo",
+            Some("lua"),
+            None,
+            10,
+            &TestMatcher::new(),
+        );
+        assert!(covered.coverage_gaps.is_empty());
+    }
+
+    #[test]
+    fn index_primary_discloses_only_unindexed_language_degradation() {
+        use crate::models::lsp::IndexingDegradation::TimedOut;
+        // An indexed language's LSP pass is enrichment over the authoritative
+        // index — its timeout is not a lower bound.
+        assert_eq!(
+            index_primary_unindexed_degradation(&[(Language::Rust, Some(TimedOut))]),
+            None
+        );
+        // An unindexed language's LSP is its sole source — disclose it.
+        assert_eq!(
+            index_primary_unindexed_degradation(&[(Language::Lua, Some(TimedOut))]),
+            Some(TimedOut)
+        );
+        // A bare query spanning both: the unindexed language's timeout still
+        // surfaces though the indexed one is clean — the case a single global
+        // authoritativeness flag silently dropped.
+        assert_eq!(
+            index_primary_unindexed_degradation(&[
+                (Language::Rust, None),
+                (Language::Lua, Some(TimedOut)),
+            ]),
+            Some(TimedOut)
+        );
+        // All indexed → nothing to disclose; the index is authoritative.
+        assert_eq!(
+            index_primary_unindexed_degradation(&[
+                (Language::Rust, Some(TimedOut)),
+                (Language::Go, None),
+            ]),
+            None
+        );
+    }
+
+    #[test]
     fn finish_symbol_search_complete_results_are_not_truncated() {
         let candidates = vec![result("alpha", "src/a.rs")];
-        let section = finish_symbol_search(candidates, 1, "alpha", None, None, 10);
+        let section =
+            finish_symbol_search(candidates, 1, "alpha", None, None, 10, &TestMatcher::new());
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);

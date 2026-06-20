@@ -52,8 +52,18 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 &["query"],
             ),
         )
-        .with_output_schema(section_output_schema(
-            "Symbol matches: name, name_path, kind, file, line, column, score",
+        .with_output_schema(with_extra(
+            section_output_schema(
+                "Symbol matches: name, name_path, kind, file, line, column, score",
+            ),
+            &[(
+                "coverage_gaps",
+                "array",
+                "Present only when an explicitly requested --lang is outside the index's \
+                 extractor set: [{language, reason: \"not_indexed\"}]. An empty items with a \
+                 coverage_gap means \"not indexed here — try search_content/AST\", not \"no \
+                 such symbol\"",
+            )],
         )),
         ToolDefinition::read_only(
             "search_content",
@@ -130,7 +140,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Incoming-call hierarchy for a function at file:line[:column].",
             with_extra(
                 location_schema(),
-                &[("limit", "integer", "Maximum results")],
+                &[
+                    ("limit", "integer", "Maximum results"),
+                    (
+                        "no_fallback",
+                        "boolean",
+                        "Refuse the references-derived approximation when the server lacks call \
+                         hierarchy (default false). With it true, a weak server yields a structured \
+                         unsupported result instead of reference-based, non-verified call edges.",
+                    ),
+                ],
             ),
         )
         .with_output_schema(with_extra(
@@ -226,6 +245,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 "reachability",
                 "string",
                 "found | not_reached_within_bound | no_static_path",
+            ),
+            (
+                "dynamic_dispatch_possible",
+                "boolean",
+                "Present (true) only when reachability is no_static_path: the static call \
+                     graph was fully explored, but dynamic dispatch (trait/virtual/callback \
+                     calls) is not analyzed, so the target may still be reachable at runtime — \
+                     never read no_static_path as an absolute unreachable",
             ),
             (
                 "chain",

@@ -50,7 +50,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 .into_iter()
                 .take(limit)
                 .map(|l| {
-                    let mut output = LocationOutput::from_path(&l.file, l.line, l.column, root);
+                    let mut output = LocationOutput::from_location(l, root);
                     if let Some(n) = args.context {
                         if let Ok(s) = read_lines_around(&l.file, l.line, n) {
                             output.snippet = Some(s);
@@ -182,6 +182,7 @@ mod tests {
             line,
             column: 5,
             snippet: None,
+            degraded_column: None,
         }
     }
 

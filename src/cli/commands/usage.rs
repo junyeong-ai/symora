@@ -10,11 +10,11 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
 use crate::cli::output::OutputContext;
-use crate::cli::response::Section;
+use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    broad_symbol_kind_bonus, coverage_reason, detect_languages_by_file_count,
-    generic_exact_identifier_penalty, is_probably_test_path, noisy_suffix_penalty,
-    symbol_match_priority,
+    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus, coverage_reason,
+    detect_languages_by_file_count, generic_exact_identifier_penalty, is_generic_broad_query,
+    noisy_suffix_penalty, symbol_match_priority,
 };
 use crate::cli::utils::{TestMatcher, read_line_at};
 use crate::error::LspError;
@@ -114,16 +114,6 @@ fn resolve_usage_languages(app: &App, lang: Option<&str>) -> Vec<Language> {
     }
 }
 
-/// One language whose symbols are absent from a fan-out result, with the
-/// reason. `usage` auto-detects multiple languages, so disclosing every gap
-/// keeps a reported `count` from ever reading as exhaustive when it is in
-/// fact a lower bound.
-#[derive(Debug, Serialize)]
-pub struct CoverageGap {
-    pub language: String,
-    pub reason: &'static str,
-}
-
 /// Outcome of fanning a workspace-symbol query across the detected
 /// languages. `usage` auto-detects multiple languages by file count, so
 /// partial coverage is the normal case. `failures` pairs each failed
@@ -136,6 +126,11 @@ struct UsageLookup {
     failures: Vec<(Language, LspError)>,
     skipped: Vec<Language>,
     answered: bool,
+    /// Degraded-indexing marker from the first answering language whose
+    /// workspace-symbol query ran under a warming index — the combined result
+    /// is then a lower bound, disclosed via the section's `indexing` field
+    /// rather than presented as a complete enumeration (invariant 4).
+    indexing: Option<crate::models::lsp::IndexingDegradation>,
 }
 
 async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language]) -> UsageLookup {
@@ -143,6 +138,7 @@ async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language])
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
     let mut answered = false;
+    let mut indexing = None;
     for (i, language) in languages.iter().enumerate() {
         // Stop fanning out (and booting more servers) once there are enough
         // candidates to rank — but record the unsearched languages so the gap
@@ -154,6 +150,9 @@ async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language])
         match app.lsp.workspace_symbols(pattern, *language).await {
             Ok(batch) => {
                 answered = true;
+                // First answering language's degradation wins (one marker, one
+                // variant); `.or` keeps it once set, captures it when still None.
+                indexing = indexing.or(batch.indexing);
                 symbols.extend(batch.data);
             }
             Err(e) => failures.push((*language, e)),
@@ -164,6 +163,7 @@ async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language])
         failures,
         skipped,
         answered,
+        indexing,
     }
 }
 
@@ -189,11 +189,11 @@ fn coverage_gaps(failures: &[(Language, LspError)], skipped: &[Language]) -> Vec
         .iter()
         .map(|(language, err)| CoverageGap {
             language: language.lsp_id().to_string(),
-            reason: coverage_reason(err),
+            reason: coverage_reason(err).to_string(),
         })
         .chain(skipped.iter().map(|language| CoverageGap {
             language: language.lsp_id().to_string(),
-            reason: "not_searched",
+            reason: "not_searched".to_string(),
         }))
         .collect();
     gaps.sort_by(|a, b| a.language.cmp(&b.language));
@@ -218,24 +218,31 @@ fn dedupe_usage_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
     deduped
 }
 
-fn rank_usage_symbols(symbols: &mut [Symbol], query: &str) {
+fn rank_usage_symbols(symbols: &mut [Symbol], query: &str, test_matcher: &TestMatcher) {
     symbols.sort_by(|a, b| {
-        usage_symbol_priority(b, query)
-            .cmp(&usage_symbol_priority(a, query))
+        usage_symbol_priority(b, query, test_matcher)
+            .cmp(&usage_symbol_priority(a, query, test_matcher))
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.location.file.cmp(&b.location.file))
             .then_with(|| a.location.line.cmp(&b.location.line))
     });
 }
 
-fn usage_symbol_priority(symbol: &Symbol, query: &str) -> i32 {
+fn usage_symbol_priority(symbol: &Symbol, query: &str, test_matcher: &TestMatcher) -> i32 {
     let name = symbol.name.to_ascii_lowercase();
     let path = symbol.path().to_ascii_lowercase();
     let kind = symbol.kind.to_string();
     let match_priority = symbol_match_priority(query, &name, &path);
-    let file = symbol.location.file.display().to_string();
-    let test_penalty = if is_probably_test_path(&file) { 8 } else { 0 };
-    let kind_penalty = if symbol.kind.is_low_level() { 6 } else { 0 };
+    let test_penalty = if test_matcher.is_test_file(&symbol.location.file) {
+        TEST_FILE_PENALTY
+    } else {
+        0
+    };
+    let kind_penalty = if symbol.kind.is_low_level() {
+        LOW_SIGNAL_KIND_PENALTY
+    } else {
+        0
+    };
     let suffix_penalty = noisy_suffix_penalty(&name, &query.to_ascii_lowercase());
     let generic_exact_penalty =
         generic_exact_identifier_penalty(query, &name, &kind, symbol.kind.is_low_level());
@@ -250,7 +257,7 @@ fn usage_symbol_priority(symbol: &Symbol, query: &str) -> i32 {
 
 fn usage_hints(query: &str, auto_lang: bool, showing: usize, truncated: bool) -> Vec<String> {
     let mut hints = Vec::new();
-    if query.len() <= 8 && query.chars().all(|c| c.is_ascii_lowercase()) {
+    if is_generic_broad_query(query) {
         hints.push(
             "This query is broad; prefer a more specific symbol name or add --lang first"
                 .to_string(),
@@ -349,11 +356,12 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         failures,
         skipped,
         answered,
+        indexing,
     } = collect_usage_symbols(app, &resolved.query, &languages).await;
     // Coverage gaps — disclosed on every result, empty or not, so partial
     // coverage is always visible rather than hidden behind a count.
     let gaps = coverage_gaps(&failures, &skipped);
-    rank_usage_symbols(&mut symbols, &resolved.query);
+    rank_usage_symbols(&mut symbols, &resolved.query, app.test_matcher());
 
     if symbols.is_empty() {
         // No server could answer at all: that failure is the result, not an
@@ -374,11 +382,13 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             filters_applied: vec![],
             analyzed: None,
             coverage_gaps: gaps,
-            section: Section::new(vec![]).with_hints(usage_hints_for_empty(
-                &resolved.query,
-                resolved.language_override.is_none(),
-                resolved_from.as_deref(),
-            )),
+            section: Section::new(vec![])
+                .with_hints(usage_hints_for_empty(
+                    &resolved.query,
+                    resolved.language_override.is_none(),
+                    resolved_from.as_deref(),
+                ))
+                .with_indexing(indexing),
         });
         return Ok(());
     }
@@ -403,7 +413,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         || args.min_refs.is_some();
     let needs_refs = needs_refs_for_sort || needs_refs_for_filter || args.metrics;
 
-    let (items, count, analyzed) = if !needs_refs {
+    let (items, count, analyzed, ref_indexing) = if !needs_refs {
         // Fast path: no LSP reference calls needed
         let mut sorted_symbols = symbols;
         sorted_symbols.sort_by(|a, b| a.name.cmp(&b.name));
@@ -415,7 +425,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             .collect();
 
         let total = sorted_symbols.len();
-        (limited, total, None)
+        (limited, total, None, None)
     } else if !needs_refs_for_sort && !needs_refs_for_filter {
         // Medium path: sort by name first, then fetch refs only for limited results
         let mut sorted_symbols = symbols;
@@ -424,7 +434,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         let limited_symbols: Vec<_> = sorted_symbols.iter().take(limit).collect();
         let total = sorted_symbols.len();
 
-        let results = fetch_refs_parallel(
+        let (results, ref_indexing) = fetch_refs_parallel(
             app,
             &limited_symbols,
             ctx.root(),
@@ -433,7 +443,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             test_matcher,
         )
         .await;
-        (results, total, None)
+        (results, total, None, ref_indexing)
     } else {
         // Slow path: need references for sorting or filtering
         // Limit symbols to analyze for performance (each requires LSP call)
@@ -444,7 +454,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             None
         };
 
-        let all_results = fetch_refs_parallel(
+        let (all_results, ref_indexing) = fetch_refs_parallel(
             app,
             &symbols_to_process,
             ctx.root(),
@@ -480,8 +490,13 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             })
             .collect();
 
-        (limited, total, analyzed)
+        (limited, total, analyzed, ref_indexing)
     };
+
+    // Merge workspace-symbol degradation (from the symbol collection) with any
+    // reference-query degradation (from the per-symbol ref counts): either makes
+    // the result a lower bound, and both are the same single marker on output.
+    let indexing = indexing.or(ref_indexing);
 
     let showing = items.len();
     let hints = usage_hints(
@@ -497,7 +512,9 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         filters_applied: filter_names,
         analyzed,
         coverage_gaps: gaps,
-        section: Section::with_total(items, count).with_hints(hints),
+        section: Section::with_total(items, count)
+            .with_hints(hints)
+            .with_indexing(indexing),
     };
 
     ctx.print_success(response);
@@ -603,7 +620,10 @@ async fn fetch_refs_parallel(
     args: &UsageArgs,
     filters: &[UsageFilter],
     test_matcher: &TestMatcher,
-) -> Vec<UsageResult> {
+) -> (
+    Vec<UsageResult>,
+    Option<crate::models::lsp::IndexingDegradation>,
+) {
     // Use semaphore for fine-grained concurrency control
     // This is faster than batch processing because it keeps MAX_CONCURRENT requests in flight
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_LSP_REQUESTS));
@@ -614,7 +634,9 @@ async fn fetch_refs_parallel(
         .map(|symbol| {
             let sem = Arc::clone(&semaphore);
             async move {
-                let _permit = sem.acquire().await.ok()?;
+                let Ok(_permit) = sem.acquire().await else {
+                    return (None, None);
+                };
                 fetch_single_symbol_refs(app, symbol, root, args, filters, test_matcher).await
             }
         })
@@ -622,10 +644,21 @@ async fn fetch_refs_parallel(
 
     let results = join_all(futures).await;
 
-    // Collect non-None results with pre-allocated capacity
+    // Collect non-None results and merge their find_references degradation: any
+    // degraded reference query makes the count (and the default --sort
+    // references order / min_refs / ZeroRefs filters) a lower bound, surfaced
+    // once on the section so the answer is never presented as complete.
     let mut all_results = Vec::with_capacity(symbols.len());
-    all_results.extend(results.into_iter().flatten());
-    all_results
+    let mut indexing = None;
+    for (result, idx) in results {
+        // If ANY reference query degraded, the merged count is a lower bound;
+        // `.or` keeps the first marker seen (one variant, so order is moot).
+        indexing = indexing.or(idx);
+        if let Some(r) = result {
+            all_results.push(r);
+        }
+    }
+    (all_results, indexing)
 }
 
 async fn fetch_single_symbol_refs(
@@ -635,17 +668,24 @@ async fn fetch_single_symbol_refs(
     args: &UsageArgs,
     filters: &[UsageFilter],
     test_matcher: &TestMatcher,
-) -> Option<UsageResult> {
-    let refs = app
+) -> (
+    Option<UsageResult>,
+    Option<crate::models::lsp::IndexingDegradation>,
+) {
+    let refs_result = app
         .lsp
         .find_references(
             &symbol.location.file,
             symbol.location.line,
             symbol.location.column,
         )
-        .await
-        .map(|r| r.data)
-        .unwrap_or_default();
+        .await;
+    // A degraded find_references makes the reference COUNT a lower bound — and
+    // the count drives the default `--sort references` ordering and the
+    // min_refs/ZeroRefs filters — so report it for disclosure even when this
+    // symbol is then filtered out, exactly as `callers.rs` threads the marker.
+    let indexing = refs_result.as_ref().ok().and_then(|r| r.indexing);
+    let refs = refs_result.map(|r| r.data).unwrap_or_default();
 
     let ref_count = refs.len();
 
@@ -653,24 +693,24 @@ async fn fetch_single_symbol_refs(
     let has_tests = refs.iter().any(|r| test_matcher.is_test_file(&r.file));
 
     if filters.contains(&UsageFilter::HasTests) && !has_tests {
-        return None;
+        return (None, indexing);
     }
 
     // Filter: only symbols without tests (for test coverage analysis)
     if filters.contains(&UsageFilter::NoTests) && has_tests {
-        return None;
+        return (None, indexing);
     }
 
     // Filter: only symbols with zero references (dead code detection)
     if filters.contains(&UsageFilter::ZeroRefs) && ref_count > 0 {
-        return None;
+        return (None, indexing);
     }
 
     // Filter: only symbols with at least N references (find important symbols)
     if let Some(min) = args.min_refs
         && ref_count < min
     {
-        return None;
+        return (None, indexing);
     }
 
     let needs_docs_check = args.metrics
@@ -694,12 +734,12 @@ async fn fetch_single_symbol_refs(
 
     // Filter: only documented symbols
     if filters.contains(&UsageFilter::HasDocs) && !has_docs {
-        return None;
+        return (None, indexing);
     }
 
     // Filter: only undocumented symbols (for doc coverage analysis)
     if filters.contains(&UsageFilter::NoDocs) && has_docs {
-        return None;
+        return (None, indexing);
     }
 
     let metrics = if args.metrics {
@@ -739,15 +779,18 @@ async fn fetch_single_symbol_refs(
 
     let signature = crate::cli::utils::extract_signature(symbol.body.as_deref());
 
-    Some(UsageResult {
-        name: symbol.name.clone(),
-        file: OutputContext::format_path(&symbol.location.file, root),
-        line: symbol.location.line,
-        kind: symbol.kind.to_string(),
-        signature,
-        metrics,
-        snippet,
-    })
+    (
+        Some(UsageResult {
+            name: symbol.name.clone(),
+            file: OutputContext::format_path(&symbol.location.file, root),
+            line: symbol.location.line,
+            kind: symbol.kind.to_string(),
+            signature,
+            metrics,
+            snippet,
+        }),
+        indexing,
+    )
 }
 
 #[cfg(test)]
@@ -797,13 +840,31 @@ mod tests {
             analyzed: None,
             coverage_gaps: vec![CoverageGap {
                 language: "rust".to_string(),
-                reason: "server_not_installed",
+                reason: "server_not_installed".to_string(),
             }],
             section: Section::new(Vec::<UsageResult>::new()),
         };
         let value = serde_json::to_value(output).unwrap();
         assert_eq!(value["coverage_gaps"][0]["language"], "rust");
         assert_eq!(value["coverage_gaps"][0]["reason"], "server_not_installed");
+    }
+
+    #[test]
+    fn usage_discloses_degraded_workspace_indexing() {
+        // A workspace-symbol query that ran under a warming index makes the
+        // result a lower bound; usage must surface that via `indexing` rather
+        // than present the partial list as a complete enumeration (invariant 4).
+        let output = UsageOutput {
+            query: "Foo".to_string(),
+            resolved_from: None,
+            filters_applied: vec![],
+            analyzed: None,
+            coverage_gaps: vec![],
+            section: Section::new(Vec::<UsageResult>::new())
+                .with_indexing(Some(crate::models::lsp::IndexingDegradation::TimedOut)),
+        };
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(value["indexing"], "timed_out");
     }
 
     #[test]
@@ -880,7 +941,11 @@ mod tests {
         let skipped = vec![Language::Python];
         let gaps = coverage_gaps(&failures, &skipped);
 
-        let by_lang = |lang: &str| gaps.iter().find(|g| g.language == lang).map(|g| g.reason);
+        let by_lang = |lang: &str| {
+            gaps.iter()
+                .find(|g| g.language == lang)
+                .map(|g| g.reason.as_str())
+        };
         assert_eq!(by_lang("rust"), Some("server_not_installed"));
         assert_eq!(by_lang("go"), Some("timed_out"));
         assert_eq!(by_lang("python"), Some("not_searched"));

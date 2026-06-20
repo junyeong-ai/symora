@@ -186,6 +186,10 @@ async fn fetch_context(
         files: Some(classified.unique_files),
         modules: Some(classified.unique_modules),
         is_exported: analysis.is_exported(),
+        // Disclose a warming-index lower bound on the same query the `refs`
+        // command discloses it for; the summary counts are otherwise read as
+        // authoritative.
+        indexing: analysis.indexing(),
     };
 
     let file = analysis.anchor.file.as_path();
@@ -516,12 +520,7 @@ async fn fetch_types(
                 kind: type_sym
                     .map(|s| s.kind.to_string())
                     .unwrap_or_else(|| "type".to_string()),
-                location: LocationOutput::from_path(
-                    &type_loc.file,
-                    type_loc.line,
-                    type_loc.column,
-                    root,
-                ),
+                location: LocationOutput::from_location(&type_loc, root),
                 detail: None,
                 body: None,
             }];
@@ -607,7 +606,7 @@ async fn fetch_tests(
         {
             items.push(TestOutput {
                 name: test_name,
-                location: LocationOutput::from_path(&r.file, r.line, r.column, root),
+                location: LocationOutput::from_location(r, root),
             });
         }
     }
@@ -1031,6 +1030,7 @@ mod tests {
                 line,
                 column: 1,
                 snippet: None,
+                degraded_column: None,
             },
             call_site: None,
             body: None,
@@ -1046,6 +1046,7 @@ mod tests {
                 line,
                 column: 1,
                 snippet: None,
+                degraded_column: None,
             },
             detail: None,
             body: None,

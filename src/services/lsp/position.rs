@@ -143,11 +143,29 @@ impl PositionConverter {
         }
     }
 
-    /// 1-indexed Unicode-scalar column for a wire `(line0, character)` on `file`
-    /// — for a public JSON `column`. Same best-effort degrade as
-    /// [`scalar_offset`](Self::scalar_offset).
-    pub fn scalar_column(&mut self, file: &Path, line0: u32, wire_char: u32) -> u32 {
-        self.scalar_offset(file, line0, wire_char) + 1
+    /// 1-indexed scalar column plus a flag disclosing whether it was DEGRADED —
+    /// i.e. the target line was unreadable so the wire offset was used verbatim
+    /// instead of transcoded. `true` can only arise for a cross-file result on a
+    /// file that became unreadable mid-request (the request's own file is always
+    /// seeded), and even then only its column may be off on a multibyte line.
+    /// Callers thread the flag onto the emitted location so an agent can tell a
+    /// transcoded column from a wire-offset guess, rather than the read path
+    /// silently presenting a guess as truth (CLAUDE.md invariant 4) — the
+    /// disclosure analogue of the edit path's fail-closed `scalar_offset_checked`.
+    pub fn scalar_column_disclosed(
+        &mut self,
+        file: &Path,
+        line0: u32,
+        wire_char: u32,
+    ) -> (u32, bool) {
+        let encoding = self.encoding;
+        match self.line(file, line0) {
+            Some(line) => (
+                encoded_offset_to_scalar(encoding, line, wire_char) + 1,
+                false,
+            ),
+            None => (wire_char + 1, true),
+        }
     }
 
     /// Like `scalar_offset` but FAILS CLOSED instead of degrading: returns
@@ -233,17 +251,24 @@ mod tests {
     }
 
     #[test]
-    fn converter_degrades_to_identity_on_unreadable_file() {
+    fn disclosed_column_flags_a_degraded_unreadable_target() {
+        // A cross-file result whose file cannot be read: the column is the raw
+        // wire offset (+1) and the degrade is DISCLOSED, so an agent can tell it
+        // from a transcoded value rather than trusting a guess.
         let mut conv = PositionConverter::new(PositionEncoding::Utf16);
-        let col = conv.scalar_column(Path::new("/nonexistent/file.rs"), 0, 4);
-        assert_eq!(col, 5, "unreadable target falls back to wire_char + 1");
+        let (col, degraded) = conv.scalar_column_disclosed(Path::new("/nonexistent/file.rs"), 0, 4);
+        assert_eq!(col, 5);
+        assert!(degraded);
     }
 
     #[test]
-    fn converter_uses_seeded_content_for_scalar_column() {
+    fn disclosed_column_is_not_degraded_for_a_readable_multibyte_line() {
+        // A readable non-BMP line transcodes correctly and is NOT flagged: utf-16
+        // unit 11 (the quote after 😀) is scalar column 11, trustworthy.
         let path = Path::new("seeded.rs");
         let mut conv = PositionConverter::new(PositionEncoding::Utf16).with_content(path, LINE);
-        // wire utf-16 char 11 on line 0 -> 1-indexed scalar column 11.
-        assert_eq!(conv.scalar_column(path, 0, 11), 11);
+        let (col, degraded) = conv.scalar_column_disclosed(path, 0, 11);
+        assert_eq!(col, 11);
+        assert!(!degraded);
     }
 }

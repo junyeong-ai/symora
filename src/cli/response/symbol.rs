@@ -33,12 +33,10 @@ impl SymbolOutput {
             name: symbol.name.clone(),
             name_path: symbol.name_path.clone(),
             kind: symbol.kind.to_string(),
-            location: LocationOutput::from_path(
-                &symbol.location.file,
-                symbol.location.line,
-                symbol.location.column,
-                root,
-            ),
+            // from_location carries degraded_column: a workspace/symbol result
+            // is cross-file and may be decoded against an unreadable line. The
+            // end_location is a synthesized end position (no separate flag).
+            location: LocationOutput::from_location(&symbol.location, root),
             end_location: symbol.location.end_line.map(|end_line| {
                 LocationOutput::from_path(
                     &symbol.location.file,

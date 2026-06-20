@@ -43,10 +43,23 @@ impl App {
         tracing::debug!("Initializing Symora at {:?}", root);
 
         let config_service = Arc::new(DefaultConfigService::new(&root));
-        let config = config_service.load(false).await.unwrap_or_default();
+        // A whole-config load failure (malformed `.symora/config.toml`, I/O
+        // error) must not vanish: the run proceeds on defaults, but the failure
+        // is captured and surfaced on whatever command the user ran, never left
+        // visible only to `doctor`. Rejected `[lsp.servers]` stanzas are a
+        // softer class already disclosed by doctor / config show, so they are
+        // not duplicated here.
+        let (config, config_errors) = match config_service.load(false).await {
+            Ok(config) => (config, Vec::new()),
+            Err(e) => {
+                tracing::warn!("config load failed, falling back to defaults: {e}");
+                (SymoraConfig::default(), vec![e.to_string()])
+            }
+        };
 
         let output = OutputContext::new(root.clone(), output_options)
-            .with_max_response_chars(config.output.max_response_chars);
+            .with_max_response_chars(config.output.max_response_chars)
+            .with_config_errors(config_errors);
 
         let runtime_config = Arc::new(LspRuntimeConfig::from(&config));
 
@@ -124,7 +137,8 @@ impl App {
     /// instead of stdout, without spawning a subprocess.
     pub fn with_output_sink(&self, sink: Arc<dyn OutputSink>, options: OutputOptions) -> Self {
         let output = OutputContext::with_sink(self.root.clone(), options, sink)
-            .with_max_response_chars(self.config.output.max_response_chars);
+            .with_max_response_chars(self.config.output.max_response_chars)
+            .with_config_errors(self.output.config_errors_snapshot());
         Self {
             root: self.root.clone(),
             output,

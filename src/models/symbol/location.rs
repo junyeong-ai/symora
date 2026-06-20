@@ -20,6 +20,13 @@ pub struct Location {
     pub end_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_column: Option<u32>,
+    /// Present (and `true`) only when `column` was DEGRADED — decoded from a
+    /// target line that could not be read, so it is the raw wire offset rather
+    /// than a transcoded scalar and may be wrong on a multibyte line. Omitted
+    /// (the common case) when the column was transcoded normally, so an agent
+    /// trusts the column absolutely unless this says otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
 }
 
 impl Location {
@@ -33,6 +40,7 @@ impl Location {
             range_start_column: None,
             end_line: None,
             end_column: None,
+            degraded_column: None,
         }
     }
 
@@ -54,7 +62,17 @@ impl Location {
             range_start_column: Some(range_start_column),
             end_line: Some(end_line),
             end_column: Some(end_column),
+            degraded_column: None,
         }
+    }
+
+    /// Mark the column as degraded (a wire-offset guess) when `degraded`; a
+    /// no-op otherwise, so the field stays omitted in the common case.
+    pub fn with_degraded_column(mut self, degraded: bool) -> Self {
+        if degraded {
+            self.degraded_column = Some(true);
+        }
+        self
     }
 
     /// Effective start position (range_start if available, else name position).

@@ -215,7 +215,8 @@ impl LspService for DaemonLspService {
                                 PathBuf::from(&ri.file),
                                 ri.line,
                                 ri.column,
-                            ),
+                            )
+                            .with_degraded_column(ri.degraded_column == Some(true)),
                             message: ri.message.clone(),
                         })
                         .collect(),
@@ -415,6 +416,13 @@ impl LspService for DaemonLspService {
                             .map(String::from),
                     },
                     "not_supported" => ServerStatus::NotSupported,
+                    "critical_failure" => ServerStatus::CriticalFailure {
+                        reason: v
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("server repeatedly failed to start")
+                            .to_string(),
+                    },
                     _ => ServerStatus::Stopped,
                 }
             }

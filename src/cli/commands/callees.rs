@@ -101,6 +101,14 @@ struct CalleesPathOutput {
     /// The (snapped) target the chain was sought to.
     target: LocationOutput,
     reachability: Reachability,
+    /// Present (and always true) only when `reachability` is `no_static_path`:
+    /// the static call graph was fully explored without a path, but dynamic
+    /// dispatch (trait/virtual/callback calls) is not folded in, so the target
+    /// may still be reachable at runtime. Makes the lower-bound nature of the
+    /// negative machine-branchable instead of leaving an agent to read
+    /// `no_static_path` as an absolute "unreachable".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    dynamic_dispatch_possible: bool,
     /// The ordered frames from the first hop through the target — present
     /// only when `reachability` is `found`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -334,9 +342,19 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
         "point --to at a declaration (e.g. a search_symbols result)",
     ));
 
+    let dynamic_dispatch_possible = reachability == Reachability::NoStaticPath;
+    if dynamic_dispatch_possible {
+        hints.push(
+            "no_static_path is a lower bound: dynamic dispatch (trait/virtual/callback calls) is \
+             not analyzed, so the target may still be reachable at runtime"
+                .to_string(),
+        );
+    }
+
     ctx.print_success(CalleesPathOutput {
         target: LocationOutput::from_path(&target_loc.file, target.line, target.column, ctx.root()),
         reachability,
+        dynamic_dispatch_possible,
         chain,
         depth: walk.depth_reached(),
         max_depth_reached: walk.max_depth_reached,
@@ -363,6 +381,7 @@ mod tests {
                 line,
                 column: 1,
                 snippet: None,
+                degraded_column: None,
             },
             call_site: None,
             body: None,
@@ -375,6 +394,7 @@ mod tests {
             line: 99,
             column: 1,
             snippet: None,
+            degraded_column: None,
         }
     }
 
@@ -386,6 +406,7 @@ mod tests {
         let out = CalleesPathOutput {
             target: target(),
             reachability: Reachability::Found,
+            dynamic_dispatch_possible: false,
             chain: Some(vec![frame("mid", 20), frame("sink", 99)]),
             depth: 3,
             max_depth_reached: false,
@@ -405,6 +426,8 @@ mod tests {
         assert!(v.get("callees_truncated").is_none());
         assert!(v.get("indexing").is_none());
         assert!(v.get("hints").is_none());
+        // Dynamic-dispatch disclosure belongs only to no_static_path.
+        assert!(v.get("dynamic_dispatch_possible").is_none());
     }
 
     #[test]
@@ -412,6 +435,7 @@ mod tests {
         let out = CalleesPathOutput {
             target: target(),
             reachability: Reachability::NotReachedWithinBound,
+            dynamic_dispatch_possible: false,
             chain: None,
             depth: 2,
             max_depth_reached: true,
@@ -433,6 +457,7 @@ mod tests {
         let out = CalleesPathOutput {
             target: target(),
             reachability: Reachability::NoStaticPath,
+            dynamic_dispatch_possible: true,
             chain: None,
             depth: 3,
             max_depth_reached: false,
@@ -451,6 +476,9 @@ mod tests {
         // A clean negative carries no incomplete marker — that flag is what
         // separates a true `no_static_path` from a hop-error lower bound.
         assert!(v.get("incomplete").is_none());
+        // The negative discloses itself as a lower bound: dynamic dispatch is
+        // not folded in, so it is never read as an absolute "unreachable".
+        assert_eq!(v["dynamic_dispatch_possible"], true);
     }
 
     #[test]
@@ -458,6 +486,7 @@ mod tests {
         let out = CalleesPathOutput {
             target: target(),
             reachability: Reachability::NotReachedWithinBound,
+            dynamic_dispatch_possible: false,
             chain: None,
             depth: 3,
             max_depth_reached: false,

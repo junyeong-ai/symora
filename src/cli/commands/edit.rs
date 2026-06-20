@@ -402,6 +402,7 @@ async fn symbol_edit(
     let span = symbol_line_span(symbol, doc.lines.len())?;
     let splice = make_splice(&span);
     if splice.removed > 0 {
+        ensure_anchor_not_stale(symbol, &doc.lines)?;
         ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
     }
     // Resolve the caller files BEFORE the edit lands: editing a symbol does not
@@ -482,6 +483,62 @@ fn ensure_exclusive_line_ownership(
     Ok(())
 }
 
+/// Refuse a destructive splice whose resolved anchor no longer matches the
+/// bytes on disk. The symbol's span is computed from LSP/index state that can
+/// lag the file about to be spliced (a stale index row, a server overlay
+/// behind disk); if the file changed since, the span may now cover a different
+/// symbol entirely, and a delete/replace there is unrecoverable. A named
+/// symbol absent from its resolved NAME line is the unambiguous signal of
+/// that drift — fail closed and send the agent back to re-resolve, the same
+/// discipline `--expect` enforces for character-range edits. Anonymous or
+/// non-identifier names carry no such textual anchor, so they are left to the
+/// EOF and line-ownership guards rather than risk a false refusal.
+fn ensure_anchor_not_stale(symbol: &Symbol, lines: &[String]) -> Result<()> {
+    let name = symbol.name.trim();
+    let is_identifier = !name.is_empty() && name.chars().all(is_identifier_char);
+    if !is_identifier {
+        return Ok(());
+    }
+    // Check the NAME line — where the identifier literally appears — NOT the
+    // declaration-range start: for a doc-commented or attributed item the range
+    // begins on a leading `///`/`#[…]` line the name never occurs on, and
+    // anchoring there would falsely refuse a destructive edit on every
+    // documented symbol. An absent name line means the file drifted under the
+    // resolved position — fail closed either way.
+    let name_line = symbol.location.line;
+    let on_name_line = name_line
+        .checked_sub(1)
+        .and_then(|i| lines.get(i as usize))
+        .is_some_and(|declaration| line_has_whole_identifier(declaration, name));
+    if !on_name_line {
+        anyhow::bail!(stale_revision(format!(
+            "Symbol '{name}' is no longer on line {name_line} of the current file — it moved or was \
+             replaced since it was resolved, so a destructive edit there would hit the wrong \
+             code. Re-query its position (search symbols / symbols) and rerun the edit."
+        )));
+    }
+    Ok(())
+}
+
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `name` occurs in `line` as a WHOLE identifier — bounded by a
+/// non-identifier character or a line edge on both sides — not merely as a
+/// substring. A substring match would let a stale `process` pass on a
+/// replacement line like `fn preprocess()` or `let process_status = …`,
+/// approving a destructive edit on the wrong code (the failure this guard
+/// exists to prevent).
+fn line_has_whole_identifier(line: &str, name: &str) -> bool {
+    line.match_indices(name).any(|(idx, matched)| {
+        let before = line[..idx].chars().next_back();
+        let after = line[idx + matched.len()..].chars().next();
+        before.is_none_or(|c| !is_identifier_char(c))
+            && after.is_none_or(|c| !is_identifier_char(c))
+    })
+}
+
 /// Delete = splice to zero lines, plus the safety check that always
 /// runs — dry-run included. The destructive path never skips it. With
 /// `expect_no_references`, the check's verified-zero result becomes a
@@ -496,6 +553,7 @@ async fn delete_symbol(
 ) -> Result<()> {
     let doc = FileDocument::load(file, dry_run)?;
     let span = symbol_line_span(symbol, doc.lines.len())?;
+    ensure_anchor_not_stale(symbol, &doc.lines)?;
     ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
 
     let check = check_dangling_references(app, file, symbol, &span).await;
@@ -580,7 +638,7 @@ async fn check_dangling_references(
         .data
         .iter()
         .filter(|r| r.file != file || r.line < span.start || r.line > span.end)
-        .map(|r| LocationOutput::from_path(&r.file, r.line, r.column, app.output.root()))
+        .map(|r| LocationOutput::from_location(r, app.output.root()))
         .collect();
     let total = dangling.len();
     // A server still indexing returns a *lower bound*, not the truth —
@@ -1460,7 +1518,11 @@ fn symbol_line_span(symbol: &Symbol, total_lines: usize) -> Result<LineRange> {
         .end_line
         .unwrap_or(symbol.location.line)
         .max(start);
-    if (end as usize) > total_lines.max(1) {
+    // `> total_lines`, not `total_lines.max(1)`: an emptied file has 0 lines, so
+    // a stale line-1 anchor (end == 1 > 0) must fail closed here rather than
+    // reach the splice and surface as a misleading out-of-range error. A symbol
+    // can never legitimately resolve into a 0-line file.
+    if (end as usize) > total_lines {
         anyhow::bail!(stale_revision(format!(
             "Symbol end line {end} exceeds file length {total_lines}; LSP range is stale, retry"
         )));
@@ -2703,6 +2765,89 @@ mod tests {
         let sym = sample_symbol(1, 100);
         let err = symbol_line_span(&sym, 5).unwrap_err();
         assert!(err.to_string().contains("exceeds file length"));
+    }
+
+    #[test]
+    fn symbol_line_span_rejects_a_stale_anchor_into_an_emptied_file() {
+        // The file was emptied since the symbol resolved (0 lines): a line-1
+        // anchor must fail closed as stale, not slip past `total_lines.max(1)`
+        // into the splice where it would surface as a misleading range error.
+        let sym = sample_symbol(1, 1);
+        let err = symbol_line_span(&sym, 0).unwrap_err();
+        assert!(err.to_string().contains("exceeds file length"));
+    }
+
+    #[test]
+    fn destructive_edit_refuses_a_stale_anchor() {
+        let sym = sample_symbol(2, 4); // named "process", name on line 2
+        // The name line still hosts the symbol — the edit is allowed.
+        let fresh = vec![
+            "// header".to_string(),
+            "fn process() {".to_string(),
+            "    work();".to_string(),
+            "}".to_string(),
+        ];
+        assert!(ensure_anchor_not_stale(&sym, &fresh).is_ok());
+
+        // The file shifted since resolution: line 2 now declares a different
+        // symbol. A delete/replace there would be unrecoverable, so refuse.
+        let stale = vec![
+            "// header".to_string(),
+            "fn unrelated() {".to_string(),
+            "    work();".to_string(),
+            "}".to_string(),
+        ];
+        let err = ensure_anchor_not_stale(&sym, &stale).unwrap_err();
+        assert!(err.to_string().contains("no longer on line 2"));
+
+        // The name must match as a WHOLE identifier, not a substring: a stale
+        // `process` reappearing only inside `preprocess` / `process_status` is
+        // still the wrong symbol and must be refused, never approved.
+        for trap in ["fn preprocess() {", "    let process_status = 0;"] {
+            let shifted = vec!["// header".to_string(), trap.to_string(), "}".to_string()];
+            assert!(
+                ensure_anchor_not_stale(&sym, &shifted).is_err(),
+                "substring-only match must not pass the guard: {trap}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchor_check_uses_the_name_line_not_the_declaration_range_start() {
+        // A doc-commented / attributed symbol: its declaration RANGE starts on
+        // the leading `///`/`#[…]` lines, but the identifier lives on a later
+        // NAME line. The guard must check the name line — anchoring on the
+        // range start would never find the name there and would falsely refuse
+        // a destructive edit on every documented symbol (the regression this
+        // pins). location.line = 3 (the `fn` line); range start = 1 (the doc).
+        let sym = Symbol::new(
+            "process".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/foo.rs"), 3, 4, 1, 1, 5, 1),
+        );
+        let lines = vec![
+            "/// Does the thing.".to_string(),
+            "#[inline]".to_string(),
+            "fn process() {".to_string(),
+            "    work();".to_string(),
+            "}".to_string(),
+        ];
+        assert!(
+            ensure_anchor_not_stale(&sym, &lines).is_ok(),
+            "a documented symbol whose name is on its name line must not be refused"
+        );
+    }
+
+    #[test]
+    fn anchor_check_skips_names_without_a_textual_anchor() {
+        // An anonymous / non-identifier name has no name to find in the source,
+        // so the guard must never produce a false refusal for it.
+        let sym = Symbol::new(
+            "<closure>".to_string(),
+            SymbolKind::Function,
+            Location::full(PathBuf::from("/tmp/foo.rs"), 1, 1, 1, 1, 1, 1),
+        );
+        assert!(ensure_anchor_not_stale(&sym, &["let f = || {};".to_string()]).is_ok());
     }
 
     #[test]

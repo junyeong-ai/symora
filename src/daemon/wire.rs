@@ -19,6 +19,8 @@ pub struct Location {
     pub end_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_column: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
 }
 
 impl From<&symbol::Location> for Location {
@@ -31,6 +33,9 @@ impl From<&symbol::Location> for Location {
             range_start_column: loc.range_start_column,
             end_line: loc.end_line,
             end_column: loc.end_column,
+            // Kept in lockstep across the wire so a degraded column discloses
+            // itself identically in daemon and in-process mode (invariant 3).
+            degraded_column: loc.degraded_column,
         }
     }
 }
@@ -45,6 +50,7 @@ impl From<Location> for symbol::Location {
             range_start_column: val.range_start_column,
             end_line: val.end_line,
             end_column: val.end_column,
+            degraded_column: val.degraded_column,
         }
     }
 }
@@ -64,6 +70,12 @@ pub struct Symbol {
     pub end_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_column: Option<u32>,
+    /// Disclosed degraded column. `find_symbols` (single seeded file) never
+    /// degrades, but `workspace/symbol` returns cross-file results decoded
+    /// against possibly-unreadable files, so the flag must survive the wire to
+    /// keep daemon and in-process workspace-symbol output in agreement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +96,7 @@ impl From<&symbol::Symbol> for Symbol {
             range_start_column: s.location.range_start_column,
             end_line: s.location.end_line,
             end_column: s.location.end_column,
+            degraded_column: s.location.degraded_column,
             container: s.container.clone(),
             body: s.body.clone(),
             children: if s.children.is_empty() {
@@ -108,6 +121,7 @@ impl From<Symbol> for symbol::Symbol {
             range_start_column: val.range_start_column,
             end_line: val.end_line,
             end_column: val.end_column,
+            degraded_column: val.degraded_column,
         };
 
         let mut sym = symbol::Symbol::new(name, kind, location);
@@ -137,6 +151,12 @@ pub struct CallItem {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    /// Disclosed degraded column for the call target, kept across the wire so
+    /// daemon and in-process callers/callees agree (invariant 3). The target is
+    /// a cross-file result that can degrade; `call_site` carries its own flag
+    /// via `wire::Location`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_site: Option<Location>,
 }
@@ -149,6 +169,7 @@ impl From<&lsp::CallHierarchyItem> for CallItem {
             file: c.location.file.display().to_string(),
             line: c.location.line,
             column: c.location.column,
+            degraded_column: c.location.degraded_column,
             call_site: c.call_site.as_ref().map(Location::from),
         }
     }
@@ -159,7 +180,8 @@ impl From<CallItem> for lsp::CallHierarchyItem {
         Self {
             name: val.name,
             kind: SymbolKind::parse_or_default(&val.kind),
-            location: symbol::Location::point(PathBuf::from(&val.file), val.line, val.column),
+            location: symbol::Location::point(PathBuf::from(&val.file), val.line, val.column)
+                .with_degraded_column(val.degraded_column == Some(true)),
             call_site: val.call_site.map(Into::into),
         }
     }
@@ -188,6 +210,11 @@ pub struct RelatedInformation {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    /// Disclosed degraded column for this related location, kept across the
+    /// wire so daemon and in-process diagnostics agree (invariant 3) — related
+    /// info points at cross-file locations that can degrade on an unreadable line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
     pub message: String,
 }
 
@@ -483,6 +510,11 @@ pub struct TypeHierarchyItem {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    /// Disclosed degraded column, kept across the wire so daemon and in-process
+    /// supertypes/subtypes agree (invariant 3) — a type hierarchy item is a
+    /// cross-file result that can degrade on an unreadable line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -495,6 +527,7 @@ impl From<&lsp::TypeHierarchyItem> for TypeHierarchyItem {
             file: item.location.file.display().to_string(),
             line: item.location.line,
             column: item.location.column,
+            degraded_column: item.location.degraded_column,
             detail: item.detail.clone(),
         }
     }
@@ -505,7 +538,8 @@ impl From<TypeHierarchyItem> for lsp::TypeHierarchyItem {
         Self {
             name: val.name,
             kind: SymbolKind::parse_or_default(&val.kind),
-            location: symbol::Location::point(PathBuf::from(val.file), val.line, val.column),
+            location: symbol::Location::point(PathBuf::from(val.file), val.line, val.column)
+                .with_degraded_column(val.degraded_column == Some(true)),
             detail: val.detail,
         }
     }
@@ -788,6 +822,7 @@ impl From<diagnostic::DiagnosticsReport> for DiagnosticsResponse {
                             file: ri.location.file.display().to_string(),
                             line: ri.location.line,
                             column: ri.location.column,
+                            degraded_column: ri.location.degraded_column,
                             message: ri.message.clone(),
                         })
                         .collect(),
@@ -899,6 +934,9 @@ mod tests {
             range_start_column: Some(1),
             end_line: Some(15),
             end_column: Some(2),
+            // A degraded column must survive the wire so daemon and in-process
+            // disclose it identically (invariant 3) — the round-trip proves it.
+            degraded_column: Some(true),
         };
 
         let wire = Location::from(&original);
@@ -911,6 +949,7 @@ mod tests {
         assert_eq!(back.range_start_column, original.range_start_column);
         assert_eq!(back.end_line, original.end_line);
         assert_eq!(back.end_column, original.end_column);
+        assert_eq!(back.degraded_column, Some(true));
     }
 
     #[test]
@@ -972,6 +1011,7 @@ mod tests {
             range_start_column: Some(1),
             end_line: Some(30),
             end_column: Some(2),
+            degraded_column: None,
         };
         let original = SymSymbol::new("update".to_string(), SymbolKind::Method, loc)
             .with_container("MyStruct".to_string());
@@ -1020,6 +1060,21 @@ mod tests {
         assert_eq!(back.children.len(), 1);
         assert_eq!(back.children[0].name, "inner");
         assert_eq!(back.children[0].kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn symbol_roundtrip_preserves_a_degraded_workspace_column() {
+        // A `workspace/symbol` result is cross-file and can be decoded against
+        // an unreadable line; the degraded flag must survive the wire so daemon
+        // and in-process workspace-symbol output agree (invariant 3).
+        let loc =
+            SymLocation::point(PathBuf::from("src/other.rs"), 9, 2).with_degraded_column(true);
+        let original = SymSymbol::new("Widget".to_string(), SymbolKind::Struct, loc);
+
+        let wire = Symbol::from(&original);
+        assert_eq!(wire.degraded_column, Some(true));
+        let back: SymSymbol = wire.into();
+        assert_eq!(back.location.degraded_column, Some(true));
     }
 
     #[test]
@@ -1084,6 +1139,9 @@ mod tests {
             range_start_column: Some(1),
             end_line: Some(40),
             end_column: Some(2),
+            // A degraded column on the call target must survive the wire so
+            // daemon and in-process callers/callees disclose it identically.
+            degraded_column: Some(true),
         };
         let call_site = SymLocation {
             file: PathBuf::from("src/handler.rs"),
@@ -1093,6 +1151,7 @@ mod tests {
             range_start_column: Some(5),
             end_line: Some(50),
             end_column: Some(30),
+            degraded_column: None,
         };
 
         let original = LspCallItem {
@@ -1110,8 +1169,11 @@ mod tests {
         assert_eq!(back.location.file, original.location.file);
         assert_eq!(back.location.line, original.location.line);
         assert_eq!(back.location.column, original.location.column);
-        // CallItem wire format only stores file/line/column for the main location (uses Location::point),
-        // so range fields are lost. call_site preserves all fields through wire::Location.
+        // CallItem wire format stores file/line/column + degraded_column for the
+        // main location (range fields are lost — it uses Location::point); the
+        // degradation flag round-trips so daemon == in-process disclosure.
+        assert_eq!(back.location.degraded_column, Some(true));
+        // call_site preserves all fields through wire::Location.
         assert!(back.call_site.is_some());
         let back_site = back.call_site.unwrap();
         assert_eq!(back_site.file, PathBuf::from("src/handler.rs"));
@@ -1168,7 +1230,10 @@ mod tests {
 
     #[test]
     fn type_hierarchy_item_roundtrip_with_detail() {
-        let loc = SymLocation::point(PathBuf::from("src/models.rs"), 15, 4);
+        // A degraded column on a supertypes/subtypes result must survive the
+        // wire so daemon and in-process disclose it identically.
+        let loc =
+            SymLocation::point(PathBuf::from("src/models.rs"), 15, 4).with_degraded_column(true);
 
         let original = LspTypeItem {
             name: "Animal".to_string(),
@@ -1185,6 +1250,7 @@ mod tests {
         assert_eq!(back.location.file, PathBuf::from("src/models.rs"));
         assert_eq!(back.location.line, 15);
         assert_eq!(back.location.column, 4);
+        assert_eq!(back.location.degraded_column, Some(true));
         assert_eq!(back.detail, Some("crate::models".to_string()));
     }
 
@@ -1225,5 +1291,33 @@ mod tests {
 
         let back: LspTypeItem = wire.into();
         assert_eq!(back.kind, SymbolKind::Struct);
+    }
+
+    #[test]
+    fn related_information_degraded_column_survives_the_wire() {
+        // A diagnostic's related-info points at a cross-file location that can
+        // degrade; the flag must survive serialization so daemon and in-process
+        // diagnostics disclose it identically (invariant 3).
+        let ri = RelatedInformation {
+            file: "src/other.rs".to_string(),
+            line: 3,
+            column: 7,
+            degraded_column: Some(true),
+            message: "originally defined here".to_string(),
+        };
+        let json = serde_json::to_string(&ri).unwrap();
+        let back: RelatedInformation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.degraded_column, Some(true));
+
+        // Omitted when absent — no filler key in the common (non-degraded) case.
+        let clean = RelatedInformation {
+            degraded_column: None,
+            ..ri
+        };
+        assert!(
+            !serde_json::to_string(&clean)
+                .unwrap()
+                .contains("degraded_column")
+        );
     }
 }

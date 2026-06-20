@@ -21,7 +21,7 @@ pub async fn execute(args: HoverArgs, app: &App) -> Result<()> {
             content: Some(info.content),
             range: info
                 .range
-                .map(|r| LocationOutput::from_path(&r.file, r.line, r.column, ctx.root())),
+                .map(|r| LocationOutput::from_location(&r, ctx.root())),
             message: None,
         },
         || HoverOutput {

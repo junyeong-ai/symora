@@ -480,9 +480,11 @@ symora daemon start | stop | restart | status
 | **분석** | `context`, `usage`, `impact`, `diff-impact` |
 | **편집** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions`, `format` |
 | **진단** | `diagnostics`, `inlay-hints`, `folding`, `selection`, `code-lens` |
-| **관리** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
+| **관리** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp`, `bench` |
 
 어떤 명령이든 `symora <command> --help`로 플래그와 전체 출력 형태를 볼 수 있습니다.
+
+> `search semantic`(자연어 검색)은 선택적 `embeddings` 피처로 빌드한 경우에만 동작하며, 기본 빌드에서는 `unsupported`를 반환합니다.
 
 ---
 

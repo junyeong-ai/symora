@@ -45,17 +45,22 @@ pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
     for lang in Language::all() {
         let server_status = app.lsp.server_status(lang).await;
 
-        let (status_str, install_hint) = match &server_status {
-            ServerStatus::Running => ("running", None),
-            ServerStatus::Stopped => ("available", None),
-            ServerStatus::NotInstalled { hint } => ("not_installed", hint.clone()),
+        let (status_str, install_hint, error) = match &server_status {
+            ServerStatus::Running => ("running", None, None),
+            ServerStatus::Stopped => ("available", None, None),
+            ServerStatus::NotInstalled { hint } => ("not_installed", hint.clone(), None),
             ServerStatus::NotSupported => continue,
+            // The give-up reason is always surfaced (not detailed-gated): a
+            // broken server is an error an agent must see to stop retrying.
+            ServerStatus::CriticalFailure { reason } => {
+                ("critical_failure", None, Some(reason.clone()))
+            }
         };
 
         lsp_servers.push(ServerStatusOutput {
             language: lang.to_string(),
             status: status_str.to_string(),
-            error: None,
+            error,
             install_hint: if args.detailed { install_hint } else { None },
         });
     }

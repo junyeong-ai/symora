@@ -8,14 +8,15 @@ use crate::cli::OutputError;
 use crate::cli::resolve_project_file;
 use crate::cli::response::{Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
-    broad_symbol_kind_bonus, generic_exact_identifier_penalty, is_probably_test_path,
-    noisy_suffix_penalty, symbol_lookup_hints, symbol_match_priority,
+    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
+    generic_exact_identifier_penalty, noisy_suffix_penalty, symbol_lookup_hints,
+    symbol_match_priority,
 };
-use crate::cli::utils::extract_signature;
+use crate::cli::utils::{TestMatcher, extract_signature};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
-use crate::services::store::SymbolSearchResult;
+use crate::services::store::{SymbolExtractor, SymbolSearchResult};
 
 #[derive(Args, Debug)]
 #[command(
@@ -244,10 +245,19 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         }
     }
 
+    let mut indexing = None;
     for language in &languages {
         let Ok(batch) = app.lsp.workspace_symbols(&query, *language).await else {
             continue;
         };
+        // Authoritativeness is PER-LANGUAGE: this is an index-primary answer, so
+        // an indexed language's LSP pass is enrichment over the authoritative
+        // index and its warmup marker is dropped, but an UNINDEXED language's LSP
+        // is its sole source — disclose only that, so a bare query spanning both
+        // still surfaces the unindexed language's timeout.
+        if !SymbolExtractor::is_supported(*language) {
+            indexing = indexing.or(batch.indexing);
+        }
         let mut batch = batch.data;
         for symbol in &mut batch {
             if let Some(path) = symbol.workspace_name_path() {
@@ -277,8 +287,8 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
 
     let mut filtered = filtered;
     if name_query.is_some() && symbol_query.is_none() {
-        sort_workspace_symbols(&mut filtered, &query);
-        prune_low_value_workspace_symbols(&mut filtered, &query, limit);
+        sort_workspace_symbols(&mut filtered, &query, app.test_matcher());
+        prune_low_value_workspace_symbols(&mut filtered, &query, limit, app.test_matcher());
     }
 
     let total = filtered.len();
@@ -303,7 +313,11 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         item_count,
     );
 
-    ctx.print_success(Section::with_total(items, total).with_hints(hints));
+    ctx.print_success(
+        Section::with_total(items, total)
+            .with_hints(hints)
+            .with_indexing(indexing),
+    );
 
     Ok(())
 }
@@ -440,25 +454,32 @@ fn workspace_symbol_hints(
     )
 }
 
-fn sort_workspace_symbols(symbols: &mut [Symbol], query: &str) {
+fn sort_workspace_symbols(symbols: &mut [Symbol], query: &str, test_matcher: &TestMatcher) {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     symbols.sort_by(|a, b| {
-        workspace_symbol_priority(b, &q)
-            .cmp(&workspace_symbol_priority(a, &q))
+        workspace_symbol_priority(b, &q, test_matcher)
+            .cmp(&workspace_symbol_priority(a, &q, test_matcher))
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.location.file.cmp(&b.location.file))
             .then_with(|| a.location.line.cmp(&b.location.line))
     });
 }
 
-fn workspace_symbol_priority(symbol: &Symbol, query: &str) -> i32 {
+fn workspace_symbol_priority(symbol: &Symbol, query: &str, test_matcher: &TestMatcher) -> i32 {
     let name = symbol.name.to_ascii_lowercase();
     let path = symbol.path().to_ascii_lowercase();
     let match_priority = symbol_match_priority(query, &name, &path);
 
-    let file = symbol.location.file.display().to_string();
-    let test_penalty = if is_probably_test_path(&file) { 8 } else { 0 };
-    let kind_penalty = if symbol.kind.is_low_level() { 6 } else { 0 };
+    let test_penalty = if test_matcher.is_test_file(&symbol.location.file) {
+        TEST_FILE_PENALTY
+    } else {
+        0
+    };
+    let kind_penalty = if symbol.kind.is_low_level() {
+        LOW_SIGNAL_KIND_PENALTY
+    } else {
+        0
+    };
     let suffix_penalty = noisy_suffix_penalty(&name, query);
     let generic_exact_penalty = generic_exact_identifier_penalty(
         query,
@@ -480,22 +501,30 @@ fn workspace_symbol_priority(symbol: &Symbol, query: &str) -> i32 {
         - generic_exact_penalty
 }
 
-fn prune_low_value_workspace_symbols(symbols: &mut Vec<Symbol>, query: &str, limit: usize) {
+fn prune_low_value_workspace_symbols(
+    symbols: &mut Vec<Symbol>,
+    query: &str,
+    limit: usize,
+    test_matcher: &TestMatcher,
+) {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let high_value_count = symbols
         .iter()
-        .filter(|symbol| is_high_value_workspace_symbol(symbol, &q))
+        .filter(|symbol| is_high_value_workspace_symbol(symbol, &q, test_matcher))
         .count();
 
     if high_value_count >= usize::min(limit, 3) {
-        symbols.retain(|symbol| is_high_value_workspace_symbol(symbol, &q));
+        symbols.retain(|symbol| is_high_value_workspace_symbol(symbol, &q, test_matcher));
     }
 }
 
-fn is_high_value_workspace_symbol(symbol: &Symbol, query: &str) -> bool {
-    let file = symbol.location.file.display().to_string();
+fn is_high_value_workspace_symbol(
+    symbol: &Symbol,
+    query: &str,
+    test_matcher: &TestMatcher,
+) -> bool {
     let name = symbol.name.to_ascii_lowercase();
-    !is_probably_test_path(&file)
+    !test_matcher.is_test_file(&symbol.location.file)
         && !symbol.kind.is_low_level()
         && noisy_suffix_penalty(&name, query) == 0
 }

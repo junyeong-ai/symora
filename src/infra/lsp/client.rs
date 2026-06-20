@@ -203,14 +203,18 @@ impl DocumentCache {
 
 /// Workspace-indexing readiness, derived from server signals.
 ///
-/// `Ready` is reached only through an explicit signal (a quiescence
-/// notification, a drained set of indexing-progress tokens, a known
-/// readiness log line) — never assumed. `TimedOut` means the wait budget
-/// expired before any such signal: usable, but degraded, and disclosed
-/// as such via the `indexing` marker. The state moves only through the
-/// transition table in [`IndexingState::on_event`], applied atomically
-/// (compare-and-swap) so a racing signal can never be stomped by a
-/// blind store.
+/// `Ready` is reached either through an explicit quiescence signal (a status
+/// notification, a drained set of indexing-progress tokens, a known readiness
+/// log line) OR by a wait elapsing without the server ever signalling activity
+/// — a server with no indexing phase (or none it exposes) is ready, not
+/// degraded. `TimedOut` is reached ONLY when a wait elapses AFTER the server
+/// signalled it was indexing (`InProgress`): a genuine lower bound, disclosed
+/// via the `indexing` marker. That distinction — real activity then timeout vs.
+/// silence then timeout — is what keeps an unsignalled server from falsely
+/// reporting every complete result as degraded, with no per-language allow-list.
+/// The state moves only through the transition table in
+/// [`IndexingState::on_event`], applied atomically (compare-and-swap) so a
+/// racing signal can never be stomped by a blind store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IndexingState {
@@ -226,14 +230,19 @@ pub enum IndexingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexingEvent {
     /// A bounded wait is claiming the session (start of
-    /// `await_indexing_signal`).
+    /// `await_indexing_signal`). A pure no-op on the state — waiting is not
+    /// evidence the server is indexing.
     WaitStarted,
-    /// The bounded wait's budget expired without a readiness signal.
+    /// The bounded wait's budget expired. Concludes `InProgress` as a degraded
+    /// lower bound (`TimedOut`); from `NotStarted` (no activity ever seen) it
+    /// resolves to `Ready` — there was no indexing phase to wait for.
     WaitTimedOut,
     /// The server signalled a fully analyzed workspace (quiescent=true,
     /// a drained progress-token set, a known readiness log line).
     ServerQuiescent,
-    /// The server signalled it is (re)working (quiescent=false).
+    /// The server signalled it is (re)working: `experimental/serverStatus`
+    /// busy, or an indexing-progress `begin`. The only signal that opens
+    /// `InProgress` — the evidence a timeout needs to mean a real lower bound.
     ServerBusy,
 }
 
@@ -259,14 +268,22 @@ impl IndexingState {
     /// is what makes the racy interleavings safe:
     ///
     /// - Only a quiescence signal ever produces `Ready`.
-    /// - A timeout verdict only concludes an in-flight wait
-    ///   (`InProgress`); it can never overwrite a `Ready` that landed
-    ///   while the waiter slept.
     /// - A busy signal re-opens `InProgress` from `Ready` (the server is
     ///   genuinely re-working) but NOT from `TimedOut`: a timed-out index
     ///   that is still incomplete must keep its disclosed marker until
     ///   quiescence proves completion.
-    /// - Claiming the wait only moves the initial `NotStarted` state.
+    /// - `WaitStarted` is a pure no-op: claiming a wait is NOT evidence the
+    ///   server is indexing. `InProgress` is reached only by a REAL activity
+    ///   signal (`ServerBusy`, fired by `experimental/serverStatus` busy or an
+    ///   indexing-progress `begin`). This is the difference between "the server
+    ///   told us it is working" and "a query happened to wait".
+    /// - A timeout that concludes an in-flight `InProgress` is a genuine lower
+    ///   bound -> `TimedOut` (disclosed via the `indexing` marker). A timeout
+    ///   from `NotStarted` — the wait elapsed without the server EVER signalling
+    ///   activity — means there is no indexing phase to wait for (or none this
+    ///   server exposes), so it resolves to `Ready`, NOT `TimedOut`. This is
+    ///   what stops a server with no readiness signal from falsely marking every
+    ///   complete result as degraded, with no per-language allow-list.
     pub fn on_event(self, event: IndexingEvent) -> IndexingState {
         use IndexingEvent::*;
         use IndexingState::*;
@@ -274,9 +291,9 @@ impl IndexingState {
             (_, ServerQuiescent) => Ready,
             (TimedOut, ServerBusy) => TimedOut,
             (_, ServerBusy) => InProgress,
-            (NotStarted, WaitStarted) => InProgress,
             (state, WaitStarted) => state,
             (InProgress, WaitTimedOut) => TimedOut,
+            (NotStarted, WaitTimedOut) => Ready,
             (state, WaitTimedOut) => state,
         }
     }
@@ -1412,10 +1429,10 @@ impl LspClient {
         // every request would make a slow server cost the timeout per
         // query forever. Recovery is signal-driven — a later quiescence
         // signal flips the state to `Ready` — and degraded answers stay
-        // marked via the `indexing` marker until one arrives. Claiming
-        // the wait is a transition (NotStarted → InProgress), not a blind
-        // store, so a `Ready` that landed since the caller checked is
-        // returned, never overwritten.
+        // marked via the `indexing` marker until one arrives. Claiming the
+        // wait is a no-op transition (it is not evidence the server is
+        // indexing), so a `Ready`/`TimedOut` that landed since the caller
+        // checked is returned, never overwritten.
         let state = self.apply_indexing_event(IndexingEvent::WaitStarted);
         if state.is_usable() {
             return state;
@@ -1423,9 +1440,10 @@ impl LspClient {
 
         let max_wait = self.indexing_timeout();
         if max_wait.is_zero() {
-            // No budget means no signal was observed — that is a disclosed
-            // timeout, not a manufactured readiness. (The transition is a
-            // no-op if a real signal landed in the meantime.)
+            // No budget means we do not wait. A server that already signalled it
+            // is indexing (`InProgress`) is disclosed as `TimedOut`; one that has
+            // signalled nothing resolves to `Ready` — no evidence of an indexing
+            // phase to disclose as a lower bound.
             return self.apply_indexing_event(IndexingEvent::WaitTimedOut);
         }
 
@@ -1548,6 +1566,10 @@ impl LspClient {
                                 .lock()
                                 .expect("indexing token set poisoned")
                                 .insert(token);
+                            // Real activity: the server told us it is indexing,
+                            // so a later timeout is a genuine lower bound rather
+                            // than the silence of a server with no indexing phase.
+                            client_progress.apply_indexing_event(IndexingEvent::ServerBusy);
                         }
                     }
                 }
@@ -1910,24 +1932,28 @@ mod tests {
             assert_eq!(state.on_event(ServerQuiescent), Ready);
         }
 
-        // Busy re-opens InProgress — except from the disclosed TimedOut.
+        // Busy — the only opener of InProgress — re-opens from anywhere except
+        // the disclosed TimedOut. This is real server activity, the evidence a
+        // later timeout needs to mean a genuine lower bound.
         assert_eq!(NotStarted.on_event(ServerBusy), InProgress);
         assert_eq!(InProgress.on_event(ServerBusy), InProgress);
         assert_eq!(Ready.on_event(ServerBusy), InProgress);
         assert_eq!(TimedOut.on_event(ServerBusy), TimedOut);
 
-        // Claiming the wait only moves the initial state — it can never
-        // stomp a Ready/TimedOut that landed since the caller checked.
-        assert_eq!(NotStarted.on_event(WaitStarted), InProgress);
+        // Claiming the wait is a pure no-op: waiting is NOT evidence the server
+        // is indexing, so it never moves NotStarted into InProgress (nor stomps
+        // a Ready/TimedOut that landed since the caller checked).
+        assert_eq!(NotStarted.on_event(WaitStarted), NotStarted);
         assert_eq!(InProgress.on_event(WaitStarted), InProgress);
         assert_eq!(Ready.on_event(WaitStarted), Ready);
         assert_eq!(TimedOut.on_event(WaitStarted), TimedOut);
 
-        // A timeout verdict only concludes an in-flight wait — it never
-        // overwrites a Ready that raced it, and never stamps a session
-        // that has no wait running.
+        // A timeout concludes an in-flight InProgress as a degraded lower bound;
+        // from NotStarted (the server never signalled activity) it resolves to
+        // Ready — no indexing phase to wait for — never a false TimedOut. It
+        // never overwrites a Ready/TimedOut that already landed.
         assert_eq!(InProgress.on_event(WaitTimedOut), TimedOut);
-        assert_eq!(NotStarted.on_event(WaitTimedOut), NotStarted);
+        assert_eq!(NotStarted.on_event(WaitTimedOut), Ready);
         assert_eq!(Ready.on_event(WaitTimedOut), Ready);
         assert_eq!(TimedOut.on_event(WaitTimedOut), TimedOut);
     }
@@ -1967,12 +1993,31 @@ mod tests {
         notify_client(&client, "$/progress", progress("t1", "end", None)).await;
         assert_eq!(
             client.indexing_state(),
-            IndexingState::NotStarted,
-            "a sibling indexing phase is still in flight"
+            IndexingState::InProgress,
+            "the server is indexing (a sibling phase is still in flight), not yet ready"
         );
 
         notify_client(&client, "$/progress", progress("t2", "end", None)).await;
         assert_eq!(client.indexing_state(), IndexingState::Ready);
+    }
+
+    /// An indexing-progress `begin` is real activity: it opens `InProgress`, so
+    /// a later timeout reads as a genuine lower bound rather than the silence of
+    /// a server with no indexing phase. (Before, only a synthetic wait-claim
+    /// opened InProgress, which is why a silent server timed out forever.)
+    #[tokio::test]
+    async fn indexing_progress_begin_opens_in_progress() {
+        let client = test_client();
+        client.register_default_handlers().await;
+        assert_eq!(client.indexing_state(), IndexingState::NotStarted);
+
+        notify_client(
+            &client,
+            "$/progress",
+            progress("t1", "begin", Some("Indexing")),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::InProgress);
     }
 
     /// Once the server demonstrates an explicit status channel, progress

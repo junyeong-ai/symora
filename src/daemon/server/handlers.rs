@@ -280,6 +280,7 @@ pub(super) async fn handle_language_status(
         ServerStatus::Stopped => "stopped",
         ServerStatus::NotInstalled { .. } => "not_installed",
         ServerStatus::NotSupported => "not_supported",
+        ServerStatus::CriticalFailure { .. } => "critical_failure",
     };
 
     let install_hint = match &status {
@@ -287,12 +288,30 @@ pub(super) async fn handle_language_status(
         _ => None,
     };
 
-    Ok(serde_json::json!({
+    let reason = match &status {
+        ServerStatus::CriticalFailure { reason } => Some(reason.clone()),
+        _ => None,
+    };
+
+    // Omit the optionals when absent rather than emitting `null` filler: an
+    // install hint exists only for `not_installed`, a reason only for
+    // `critical_failure`. The client decodes both with `get`, so absence is the
+    // signal — matching the omit-when-absent contract the wire types follow.
+    let mut value = serde_json::json!({
         "language": p.language,
         "available": available,
         "status": status_str,
-        "install_hint": install_hint,
-    }))
+    });
+    let obj = value
+        .as_object_mut()
+        .expect("json! map is always an object");
+    if let Some(hint) = install_hint {
+        obj.insert("install_hint".to_string(), serde_json::Value::String(hint));
+    }
+    if let Some(reason) = reason {
+        obj.insert("reason".to_string(), serde_json::Value::String(reason));
+    }
+    Ok(value)
 }
 
 /// Bring the daemon's language layer in line with files the requesting
