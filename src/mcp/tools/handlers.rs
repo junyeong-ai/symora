@@ -323,14 +323,30 @@ struct CallHierarchyInput {
     limit: Option<usize>,
 }
 
+/// `find_callers` carries `no_fallback`, so — like `find_callees` with its
+/// `depth` — it has its own input rather than the shared `CallHierarchyInput`,
+/// which would leak the flag to `find_implementations` (a tool with no
+/// references fallback to opt out of).
+#[derive(Deserialize)]
+struct FindCallersInput {
+    #[serde(flatten)]
+    loc: LocationInput,
+    limit: Option<usize>,
+    /// Refuse the references-derived approximation when the server lacks call
+    /// hierarchy. Omitted defaults to false (fallback enabled), preserving the
+    /// CLI default.
+    #[serde(default)]
+    no_fallback: bool,
+}
+
 async fn run_find_callers(args: Value, app: &App) -> Result<CapturedOutput> {
-    let input: CallHierarchyInput = parse_args(args)?;
+    let input: FindCallersInput = parse_args(args)?;
     capture(app, move |a| async move {
         crate::cli::commands::callers::execute(
             CallersArgs {
                 loc: input.loc.into_arg(),
                 limit: input.limit,
-                no_fallback: false,
+                no_fallback: input.no_fallback,
             },
             &a,
         )
@@ -789,7 +805,8 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "inspect_symbol" => &["symbol_path", "language", "body"],
         "find_definition" | "get_hover" => &["file", "line", "column"],
         "find_references" => &["file", "line", "column", "snippet", "limit"],
-        "find_callers" | "find_implementations" => &["file", "line", "column", "limit"],
+        "find_callers" => &["file", "line", "column", "limit", "no_fallback"],
+        "find_implementations" => &["file", "line", "column", "limit"],
         "find_callees" => &["file", "line", "column", "limit", "depth"],
         "find_call_path" => &["file", "line", "column", "to", "depth"],
         "get_context" => &[
@@ -871,7 +888,8 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "inspect_symbol" => check::<InspectSymbolInput>(args),
         "find_definition" | "get_hover" => check::<LocationInput>(args),
         "find_references" => check::<FindReferencesInput>(args),
-        "find_callers" | "find_implementations" => check::<CallHierarchyInput>(args),
+        "find_callers" => check::<FindCallersInput>(args),
+        "find_implementations" => check::<CallHierarchyInput>(args),
         "find_callees" => check::<FindCalleesInput>(args),
         "find_call_path" => check::<FindCallPathInput>(args),
         "get_context" => check::<GetContextInput>(args),

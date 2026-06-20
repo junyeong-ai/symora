@@ -1,5 +1,10 @@
+use std::path::Path;
+
 use serde_json::{Value, json};
-pub(super) fn csharp_init_options() -> Value {
+
+use super::exclude::lsp_exclude_search_patterns;
+
+pub(super) fn csharp_init_options(root: &Path) -> Value {
     json!({
         "RoslynExtensionsOptions": {
             "enableAnalyzersSupport": true,
@@ -30,13 +35,15 @@ pub(super) fn csharp_init_options() -> Value {
             "indentationSize": 4
         },
         "FileOptions": {
+            // C#-specific build/system paths that should never be indexed,
+            // independent of the project's ignore policy.
             "systemExcludeSearchPatterns": [
-                "**/node_modules/**/*",
                 "**/bin/**/*",
-                "**/obj/**/*",
-                "**/.git/**/*"
+                "**/obj/**/*"
             ],
-            "excludeSearchPatterns": []
+            // Derived from the native-index ignore policy so OmniSharp and the
+            // index agree on which files exist (see init_options/exclude.rs).
+            "excludeSearchPatterns": lsp_exclude_search_patterns(root)
         },
         "RenameOptions": {
             "renameInComments": false,

@@ -510,8 +510,17 @@ impl FindSymbolsOptions {
 pub enum ServerStatus {
     Running,
     Stopped,
-    NotInstalled { hint: Option<String> },
+    NotInstalled {
+        hint: Option<String>,
+    },
     NotSupported,
+    /// The server repeatedly failed to start/stay healthy and auto-restart was
+    /// abandoned — a terminal, honest "this server is broken, here is why",
+    /// distinct from a slow-but-recoverable `Stopped`. Recovery is a daemon
+    /// restart or a config fix.
+    CriticalFailure {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ServerStatus {
@@ -521,6 +530,7 @@ impl std::fmt::Display for ServerStatus {
             Self::Stopped => write!(f, "stopped"),
             Self::NotInstalled { .. } => write!(f, "not installed"),
             Self::NotSupported => write!(f, "not supported"),
+            Self::CriticalFailure { reason } => write!(f, "critical failure: {reason}"),
         }
     }
 }

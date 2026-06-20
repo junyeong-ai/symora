@@ -73,16 +73,11 @@ impl CallHierarchyOutput {
     pub fn from_item(item: &crate::models::lsp::CallHierarchyItem, root: &Path) -> Self {
         Self {
             name: item.name.clone(),
-            location: LocationOutput::from_path(
-                &item.location.file,
-                item.location.line,
-                item.location.column,
-                root,
-            ),
+            location: LocationOutput::from_location(&item.location, root),
             call_site: item
                 .call_site
                 .as_ref()
-                .map(|cs| LocationOutput::from_path(&cs.file, cs.line, cs.column, root)),
+                .map(|cs| LocationOutput::from_location(cs, root)),
             body: None,
         }
     }
@@ -106,12 +101,7 @@ impl TypeInfoOutput {
         Self {
             name: item.name.clone(),
             kind: item.kind.to_string(),
-            location: LocationOutput::from_path(
-                &item.location.file,
-                item.location.line,
-                item.location.column,
-                root,
-            ),
+            location: LocationOutput::from_location(&item.location, root),
             detail: item.detail.clone(),
             body: None,
         }

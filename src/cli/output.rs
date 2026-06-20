@@ -81,6 +81,13 @@ pub struct OutputContext {
     /// has moved into the command future; the derived `Clone` sharing the same
     /// `Arc` is a consistency property, not that read path.
     errored: Arc<std::sync::atomic::AtomicBool>,
+    /// Whole-config load failures captured once at `App` init (a malformed
+    /// `.symora/config.toml` that `App` fell back from to defaults). Surfaced as
+    /// a top-level `config_errors` array on whatever command the user actually
+    /// ran — omitted when empty, so the common case is untouched — instead of
+    /// the failure being visible only if they think to run `doctor`. Set above
+    /// the daemon/direct mode boundary, so both modes disclose identically.
+    config_errors: Vec<String>,
 }
 
 impl std::fmt::Debug for OutputContext {
@@ -103,6 +110,7 @@ impl OutputContext {
             sink: Arc::new(StdoutSink),
             max_response_chars: 0,
             errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            config_errors: Vec::new(),
         }
     }
 
@@ -113,7 +121,21 @@ impl OutputContext {
             sink,
             max_response_chars: 0,
             errored: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            config_errors: Vec::new(),
         }
+    }
+
+    /// Carry whole-config load failures so every command discloses them. Set
+    /// once by `App` at init; empty in the common (clean-config) case.
+    pub fn with_config_errors(mut self, config_errors: Vec<String>) -> Self {
+        self.config_errors = config_errors;
+        self
+    }
+
+    /// The captured whole-config load failures, so a re-homed context (the MCP
+    /// adapter's `with_output_sink`) keeps disclosing them across the clone.
+    pub(crate) fn config_errors_snapshot(&self) -> Vec<String> {
+        self.config_errors.clone()
     }
 
     pub fn with_max_response_chars(mut self, max_chars: usize) -> Self {
@@ -152,6 +174,13 @@ impl OutputContext {
                 serde_json::json!({})
             }
         };
+        // Inject BEFORE fitting so the size ceiling accounts for the disclosure
+        // (the contract: the char ceiling applies last and wins on the emitted
+        // total). The fitter only ever drops whole `Section` items — never this
+        // top-level `config_errors` array — so a load failure rides along and is
+        // never dropped to fit; the fitter trims result items to stay under
+        // budget instead.
+        self.inject_config_errors(&mut response);
         if self.max_response_chars > 0 {
             // The ceiling guards the exact string emitted in the active
             // format — host caps apply to emitted characters, so pretty
@@ -183,8 +212,28 @@ impl OutputContext {
         // print_success) is not a command failure and leaves this false.
         self.errored
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let response = serde_json::json!({ "error": err });
+        let mut response = serde_json::json!({ "error": err });
+        self.inject_config_errors(&mut response);
         self.emit(&response);
+    }
+
+    /// Surface captured whole-config load failures as a top-level
+    /// `config_errors` array. Injected only when there are failures and the
+    /// command did not already emit its own `config_errors` (doctor / config
+    /// show own that key), so it never clobbers a command's report and stays
+    /// absent in the clean-config common case.
+    fn inject_config_errors(&self, response: &mut serde_json::Value) {
+        if self.config_errors.is_empty() {
+            return;
+        }
+        if let Some(obj) = response.as_object_mut()
+            && !obj.contains_key("config_errors")
+        {
+            obj.insert(
+                "config_errors".to_string(),
+                serde_json::json!(self.config_errors),
+            );
+        }
     }
 
     /// True once any handler reported a handled failure via `print_error`.
@@ -302,6 +351,47 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert!(captured[0].contains("not_found"));
         assert!(captured[0].contains("missing"));
+    }
+
+    #[test]
+    fn config_load_errors_surface_on_every_command_but_omit_when_clean() {
+        // Clean config: no field, so the common case forces no defensive parse.
+        let clean = OutputContext::new(PathBuf::from("/project"), OutputOptions::default());
+        let mut v = serde_json::json!({ "count": 0 });
+        clean.inject_config_errors(&mut v);
+        assert!(v.get("config_errors").is_none());
+
+        // A captured load failure surfaces on an arbitrary command's output...
+        let buf = BufferedSink::new();
+        let ctx = OutputContext::with_sink(
+            PathBuf::from("/project"),
+            OutputOptions {
+                format: OutputFormat::Compact,
+                ..Default::default()
+            },
+            Arc::new(buf.clone()),
+        )
+        .with_config_errors(vec!["invalid TOML at line 3".to_string()]);
+        ctx.print_success(serde_json::json!({ "count": 0, "items": [] }));
+        let out = buf.take();
+        assert!(out[0].contains(r#""config_errors":["invalid TOML at line 3"]"#));
+
+        // ...and on a failing command's error envelope too.
+        ctx.print_error(OutputError::not_found("x"));
+        let out = buf.take();
+        assert!(out[0].contains("config_errors"));
+        assert!(out[0].contains("\"error\""));
+    }
+
+    #[test]
+    fn config_errors_never_clobber_a_command_that_owns_the_key() {
+        // doctor / config show emit their own config_errors; the output layer
+        // must not overwrite them with the startup-load set.
+        let ctx = OutputContext::new(PathBuf::from("/project"), OutputOptions::default())
+            .with_config_errors(vec!["startup load failed".to_string()]);
+        let mut v = serde_json::json!({ "config_errors": ["stanza rejected"] });
+        ctx.inject_config_errors(&mut v);
+        assert_eq!(v["config_errors"], serde_json::json!(["stanza rejected"]));
     }
 
     #[test]

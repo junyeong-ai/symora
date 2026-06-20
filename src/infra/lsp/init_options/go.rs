@@ -1,5 +1,10 @@
+use std::path::Path;
+
 use serde_json::{Value, json};
-pub(super) fn go_init_options() -> Value {
+
+use super::exclude::lsp_exclude_go_directory_filters;
+
+pub(super) fn go_init_options(root: &Path) -> Value {
     json!({
         "usePlaceholders": true,
         "completionDocumentation": true,
@@ -9,7 +14,10 @@ pub(super) fn go_init_options() -> Value {
         "gofumpt": false,
         "semanticTokens": true,
         "memoryMode": "DegradeClosed",
-        "directoryFilters": ["-**/vendor", "-**/node_modules", "-**/.git", "-**/testdata"],
+        // Derived from the native-index ignore policy so gopls and the index
+        // agree on which files exist (see init_options/exclude.rs). gopls skips
+        // dotted dirs and testdata itself, so the policy need not name them.
+        "directoryFilters": lsp_exclude_go_directory_filters(root),
         "analyses": {
             "unusedparams": true,
             "shadow": true,

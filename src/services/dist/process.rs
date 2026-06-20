@@ -54,15 +54,28 @@ pub fn have(program: &str) -> bool {
 }
 
 /// Resolve a command via `$PATH` without depending on the `which` crate.
+/// Returns a path only when it is an EXECUTABLE file — "available to run", not
+/// merely present — so `have` agrees with the spawn path (`resolve_command`
+/// applies the same `is_executable_file` check) and a non-executable file on
+/// PATH is never reported as installed.
 pub fn which(program: &str) -> Option<std::path::PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(program);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// `curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused -o <out> <url>`

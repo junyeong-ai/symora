@@ -2,10 +2,33 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use super::exclude::lsp_exclude_subtree_globs;
 use crate::models::lsp::path_to_uri;
 pub(super) fn java_init_options(root_path: &Path) -> Value {
     let root_uri = path_to_uri(root_path);
     let java_home = detect_java_home();
+    // Dependency/build dirs come from the native-index ignore policy so jdtls
+    // and the index agree on which files exist (see init_options/exclude.rs).
+    // The jdtls-specific dirs appended after — Eclipse `bin` output, Maven
+    // archetype/metadata, generated stubs — are server health, not an
+    // ignore-policy concern, and the index does not special-case them.
+    let mut import_exclusions = lsp_exclude_subtree_globs(root_path);
+    import_exclusions.extend(
+        [
+            "**/bin/**",
+            "**/archetype-resources/**",
+            "**/META-INF/maven/**",
+            "**/generated/**",
+            "**/generated-sources/**",
+            "**/generated-test-sources/**",
+            "**/*Proto.java",
+            "**/*Grpc.java",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    import_exclusions.sort();
+    import_exclusions.dedup();
     let gradle_home = std::env::var("GRADLE_HOME").ok();
     let gradle_user_home = std::env::var("GRADLE_USER_HOME")
         .ok()
@@ -58,21 +81,7 @@ pub(super) fn java_init_options(root_path: &Path) -> Value {
                         "globalSettings": maven_settings,
                         "userSettings": maven_user_settings
                     },
-                    "exclusions": [
-                        "**/node_modules/**",
-                        "**/.metadata/**",
-                        "**/archetype-resources/**",
-                        "**/META-INF/maven/**",
-                        "**/build/**",
-                        "**/target/**",
-                        "**/bin/**",
-                        "**/out/**",
-                        "**/generated/**",
-                        "**/generated-sources/**",
-                        "**/generated-test-sources/**",
-                        "**/*Proto.java",
-                        "**/*Grpc.java"
-                    ],
+                    "exclusions": import_exclusions,
                     "generatesMetadataFilesAtProjectRoot": false
                 },
                 "format": {

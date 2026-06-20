@@ -113,6 +113,10 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                     files: Some(total_files),
                     modules: Some(classified.unique_modules),
                     is_exported: exported,
+                    // The reference counts come from the same find_references
+                    // query; disclose its degradation so a warming-index lower
+                    // bound is never read as an authoritative count.
+                    indexing: analysis.indexing(),
                 },
                 coverage: TestCoverageOutput {
                     count: classified.test,

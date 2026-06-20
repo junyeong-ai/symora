@@ -318,7 +318,11 @@ pub(super) fn parse_type_hierarchy_item(
     let start = range.get("start")?;
     let line0 = start.get("line")?.as_u64()? as u32;
     let wire_char = start.get("character")?.as_u64()? as u32;
-    let column = conv.scalar_column(&path, line0, wire_char);
+    // Disclose a degraded column like every other inbound reader: a type
+    // hierarchy item is a cross-file result, so an unreadable target line must
+    // surface the wire-offset guess rather than present it as a transcoded
+    // truth (invariant 4).
+    let (column, degraded) = conv.scalar_column_disclosed(&path, line0, wire_char);
     let detail = item
         .get("detail")
         .and_then(|d| d.as_str())
@@ -327,7 +331,7 @@ pub(super) fn parse_type_hierarchy_item(
     Some(TypeHierarchyItem {
         name,
         kind,
-        location: Location::point(path, line0 + 1, column),
+        location: Location::point(path, line0 + 1, column).with_degraded_column(degraded),
         detail,
     })
 }

@@ -480,9 +480,11 @@ symora daemon start | stop | restart | status
 | **Analyze** | `context`, `usage`, `impact`, `diff-impact` |
 | **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions`, `format` |
 | **Diagnose** | `diagnostics`, `inlay-hints`, `folding`, `selection`, `code-lens` |
-| **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
+| **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp`, `bench` |
 
 Run `symora <command> --help` for flags and the full output shape of any command.
+
+> `search semantic` (natural-language search) exists only in builds compiled with the optional `embeddings` feature; a default build reports `unsupported`.
 
 ---
 

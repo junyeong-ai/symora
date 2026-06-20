@@ -137,10 +137,12 @@ pub fn run_deps(
                 items.push(install_vue_lsp(&server_configs[&Language::Vue]));
                 items.push(install_intelephense(&server_configs[&Language::PHP]));
                 items.push(install_yaml_lsp(&server_configs[&Language::Yaml]));
+                items.push(install_ruby_lsp(&server_configs[&Language::Ruby]));
             }
             Slot::Systems => {
                 items.push(install_clangd(&server_configs[&Language::Cpp]));
                 items.push(install_zls(&server_configs[&Language::Zig]));
+                items.push(install_csharp_lsp(&server_configs[&Language::CSharp]));
             }
         }
     }
@@ -161,8 +163,8 @@ fn choose_group_interactive(assume_yes: bool) -> DepsGroup {
     }
     eprintln!("  [1] core            — ripgrep + Rust/TS/Python/Go LSPs");
     eprintln!("  [2] core+jvm        — adds Java, Kotlin");
-    eprintln!("  [3] core+web        — adds Vue, PHP, YAML");
-    eprintln!("  [4] core+systems    — adds C/C++, Zig");
+    eprintln!("  [3] core+web        — adds Vue, PHP, YAML, Ruby");
+    eprintln!("  [4] core+systems    — adds C/C++, Zig, C#");
     eprintln!("  [5] all             — every supported LSP");
     eprintln!("  [6] skip");
 
@@ -228,6 +230,35 @@ fn run_install(name: &'static str, program: &str, args: &[&str]) -> DepResult {
     }
 }
 
+/// Install a language server, then VERIFY symora can actually spawn it. An
+/// installer exiting 0 is not proof: a binary placed on a PATH this process
+/// never had, or a partial install, would otherwise be reported `Installed`
+/// though symora still cannot use it — a plausible-but-wrong status (invariant
+/// 4). Re-probing the same resolution the spawn path uses turns a
+/// not-yet-resolvable server into an honest `Failed` with a recovery hint.
+fn run_install_server(config: &ServerConfig, program: &str, args: &[&str]) -> DepResult {
+    let result = run_install(config.display_name, program, args);
+    if result.status != DepStatus::Installed || config.is_installed() {
+        return result;
+    }
+    step(
+        Step::Warn,
+        format!(
+            "{}: install reported success but the server is not resolvable",
+            config.display_name
+        ),
+    );
+    DepResult {
+        name: config.display_name,
+        status: DepStatus::Failed,
+        note: Some(
+            "install command succeeded but symora still cannot resolve the server on PATH — \
+             open a new shell (and run `symora daemon restart`), then re-check with `symora doctor`"
+                .to_string(),
+        ),
+    }
+}
+
 /// Emit a "no automated path here, do it yourself" record. By convention
 /// `hint` reads as a complete sentence beginning with an imperative verb
 /// (`install …`, `run …`, `see …`) so the JSON `note` field renders cleanly
@@ -252,7 +283,7 @@ fn install_ripgrep() -> DepResult {
             note: None,
         };
     }
-    match Platform::current() {
+    let result = match Platform::current() {
         Platform::MacOS if have("brew") => run_install("ripgrep", "brew", &["install", "ripgrep"]),
         Platform::MacOS => manual("ripgrep", "install Homebrew or run 'cargo install ripgrep'"),
         Platform::Linux if have("apt-get") => {
@@ -274,6 +305,32 @@ fn install_ripgrep() -> DepResult {
             "ripgrep",
             "see https://github.com/BurntSushi/ripgrep/releases",
         ),
+    };
+    verify_on_path(result, "rg")
+}
+
+/// Post-install verification for a tool resolved by bare command name (ripgrep)
+/// rather than a ServerConfig: an installer exiting 0 is not proof `rg` is on
+/// this process's PATH, so re-probe and report an honest Failed otherwise —
+/// the same discipline `run_install_server` applies to language servers.
+fn verify_on_path(result: DepResult, program: &str) -> DepResult {
+    if result.status != DepStatus::Installed || have(program) {
+        return result;
+    }
+    step(
+        Step::Warn,
+        format!(
+            "{}: install reported success but `{program}` is not resolvable",
+            result.name
+        ),
+    );
+    DepResult {
+        name: result.name,
+        status: DepStatus::Failed,
+        note: Some(format!(
+            "install command succeeded but `{program}` is still not on PATH — open a new shell, \
+             then re-check"
+        )),
     }
 }
 
@@ -287,11 +344,7 @@ fn install_rust_analyzer(config: &ServerConfig) -> DepResult {
             "install rustup first — see https://rustup.rs",
         );
     }
-    run_install(
-        "rust-analyzer",
-        "rustup",
-        &["component", "add", "rust-analyzer"],
-    )
+    run_install_server(config, "rustup", &["component", "add", "rust-analyzer"])
 }
 
 fn install_typescript_lsp(config: &ServerConfig) -> DepResult {
@@ -301,8 +354,8 @@ fn install_typescript_lsp(config: &ServerConfig) -> DepResult {
     if !have("npm") {
         return manual("typescript-language-server", "install Node.js + npm");
     }
-    run_install(
-        "typescript-language-server",
+    run_install_server(
+        config,
         "npm",
         &["install", "-g", "typescript", "typescript-language-server"],
     )
@@ -315,7 +368,7 @@ fn install_pyright(config: &ServerConfig) -> DepResult {
     if !have("npm") {
         return manual("pyright", "install Node.js + npm");
     }
-    run_install("pyright", "npm", &["install", "-g", "pyright"])
+    run_install_server(config, "npm", &["install", "-g", "pyright"])
 }
 
 fn install_gopls(config: &ServerConfig) -> DepResult {
@@ -325,8 +378,8 @@ fn install_gopls(config: &ServerConfig) -> DepResult {
     if !have("go") {
         return manual("gopls", "install the Go toolchain");
     }
-    run_install(
-        "gopls",
+    run_install_server(
+        config,
         "go",
         &["install", "golang.org/x/tools/gopls@latest"],
     )
@@ -337,7 +390,9 @@ fn install_jdtls(config: &ServerConfig) -> DepResult {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => run_install("jdtls", "brew", &["install", "jdtls"]),
+        Platform::MacOS if have("brew") => {
+            run_install_server(config, "brew", &["install", "jdtls"])
+        }
         _ => manual("jdtls", "see https://download.eclipse.org/jdtls/snapshots/"),
     }
 }
@@ -347,11 +402,9 @@ fn install_kotlin_lsp(config: &ServerConfig) -> DepResult {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => run_install(
-            "kotlin-lsp",
-            "brew",
-            &["install", "JetBrains/utils/kotlin-lsp"],
-        ),
+        Platform::MacOS if have("brew") => {
+            run_install_server(config, "brew", &["install", "JetBrains/utils/kotlin-lsp"])
+        }
         _ => manual(
             "kotlin-lsp",
             "see https://github.com/JetBrains/kotlin-lsp/releases",
@@ -366,11 +419,7 @@ fn install_vue_lsp(config: &ServerConfig) -> DepResult {
     if !have("npm") {
         return manual("vue-language-server", "install Node.js + npm");
     }
-    run_install(
-        "vue-language-server",
-        "npm",
-        &["install", "-g", "@vue/language-server"],
-    )
+    run_install_server(config, "npm", &["install", "-g", "@vue/language-server"])
 }
 
 fn install_intelephense(config: &ServerConfig) -> DepResult {
@@ -380,7 +429,7 @@ fn install_intelephense(config: &ServerConfig) -> DepResult {
     if !have("npm") {
         return manual("intelephense", "install Node.js + npm");
     }
-    run_install("intelephense", "npm", &["install", "-g", "intelephense"])
+    run_install_server(config, "npm", &["install", "-g", "intelephense"])
 }
 
 fn install_yaml_lsp(config: &ServerConfig) -> DepResult {
@@ -390,11 +439,7 @@ fn install_yaml_lsp(config: &ServerConfig) -> DepResult {
     if !have("npm") {
         return manual("yaml-language-server", "install Node.js + npm");
     }
-    run_install(
-        "yaml-language-server",
-        "npm",
-        &["install", "-g", "yaml-language-server"],
-    )
+    run_install_server(config, "npm", &["install", "-g", "yaml-language-server"])
 }
 
 fn install_clangd(config: &ServerConfig) -> DepResult {
@@ -402,12 +447,12 @@ fn install_clangd(config: &ServerConfig) -> DepResult {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => run_install("clangd", "brew", &["install", "llvm"]),
+        Platform::MacOS if have("brew") => run_install_server(config, "brew", &["install", "llvm"]),
         Platform::Linux if have("apt-get") => {
-            run_install("clangd", "sudo", &["apt-get", "install", "-y", "clangd"])
+            run_install_server(config, "sudo", &["apt-get", "install", "-y", "clangd"])
         }
-        Platform::Linux if have("dnf") => run_install(
-            "clangd",
+        Platform::Linux if have("dnf") => run_install_server(
+            config,
             "sudo",
             &["dnf", "install", "-y", "clang-tools-extra"],
         ),
@@ -420,9 +465,32 @@ fn install_zls(config: &ServerConfig) -> DepResult {
         return r;
     }
     match Platform::current() {
-        Platform::MacOS if have("brew") => run_install("zls", "brew", &["install", "zls"]),
+        Platform::MacOS if have("brew") => run_install_server(config, "brew", &["install", "zls"]),
         _ => manual("zls", "see https://github.com/zigtools/zls/releases"),
     }
+}
+
+fn install_ruby_lsp(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
+        return r;
+    }
+    if !have("gem") {
+        return manual("ruby-lsp", "install Ruby first (it provides `gem`)");
+    }
+    run_install_server(config, "gem", &["install", "ruby-lsp"])
+}
+
+fn install_csharp_lsp(config: &ServerConfig) -> DepResult {
+    if let Some(r) = check_server(config) {
+        return r;
+    }
+    if !have("dotnet") {
+        return manual(
+            "csharp-ls",
+            "install the .NET SDK first (it provides `dotnet`)",
+        );
+    }
+    run_install_server(config, "dotnet", &["tool", "install", "-g", "csharp-ls"])
 }
 
 #[cfg(test)]
@@ -475,5 +543,16 @@ mod tests {
         let result = check_server(&config).unwrap();
         assert_eq!(result.status, DepStatus::Manual);
         assert!(result.note.unwrap().contains("lsp.servers"));
+    }
+
+    #[test]
+    fn install_downgrades_to_failed_when_server_still_unresolvable() {
+        // The install command "succeeds" (`true` exits 0), but symora still
+        // cannot resolve the server — an honest Failed, never a plausible
+        // Installed that the spawn path would then contradict.
+        let config = server("/nonexistent/fake-ls".to_string(), ServerSource::Builtin);
+        let result = run_install_server(&config, "true", &[]);
+        assert_eq!(result.status, DepStatus::Failed);
+        assert!(result.note.unwrap().contains("cannot resolve"));
     }
 }

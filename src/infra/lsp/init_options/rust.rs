@@ -1,4 +1,10 @@
 use serde_json::{Value, json};
+
+// No derived `files.excludeDirs` is sent: rust-analyzer's exclude surface takes
+// literal relative paths (not globs), so it cannot faithfully carry the
+// ignore-policy glob set, and rust-analyzer indexes only the cargo crate graph —
+// a non-crate ignored directory is never scanned. See `exclude.rs` for the full
+// not-wired rationale; a partial/lossy mapping is what invariant 4 forbids.
 pub(super) fn rust_init_options() -> Value {
     json!({
         "cargo": {

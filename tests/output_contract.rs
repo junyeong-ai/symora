@@ -19,14 +19,14 @@ use symora::cli::blast_radius::{BlastRadius, DepthBucket, RiskLevel};
 use symora::cli::commands::diagnostics::{DiagnosticsOutput, EnhancedDiagnostic};
 use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
-    ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, DefinitionOutput,
-    DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput, LineRange,
-    LocationOutput, ParameterOutput, RefOutput, Section, ServerStatusOutput, SignatureHelpOutput,
-    SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput, TestOutput,
-    TypeInfoOutput, fit_to_char_budget,
+    ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, CoverageGap,
+    DefinitionOutput, DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput,
+    LineRange, LocationOutput, ParameterOutput, RefOutput, Section, ServerStatusOutput,
+    SignatureHelpOutput, SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput,
+    TestOutput, TypeInfoOutput, fit_to_char_budget,
 };
 use symora::models::diagnostic::DiagnosticsStatus;
-use symora::models::lsp::{CallHierarchyItem, TypeHierarchyItem};
+use symora::models::lsp::{CallHierarchyItem, IndexingDegradation, TypeHierarchyItem};
 use symora::models::symbol::{Language, Location, Symbol, SymbolKind};
 
 fn root() -> PathBuf {
@@ -39,6 +39,7 @@ fn sample_location(line: u32, column: u32) -> LocationOutput {
         line,
         column,
         snippet: None,
+        degraded_column: None,
     }
 }
 
@@ -125,6 +126,39 @@ fn section_fitted_to_char_budget() {
 
     assert!(fitted);
     assert_json_snapshot!(value);
+}
+
+/// The output layer injects `config_errors` BEFORE the size fit (so the ceiling
+/// accounts for the disclosure), relying on the fitter trimming only whole
+/// `Section` items — never the top-level `config_errors` array. This pins that
+/// safety property: a load failure rides along even when the budget forces
+/// items to be dropped.
+#[test]
+fn fitter_preserves_config_errors_while_trimming_section_items() {
+    let items: Vec<String> = (1..=10)
+        .map(|i| format!("src/module_{i:02}.rs:1: reference"))
+        .collect();
+    let mut value = serde_json::to_value(Section::new(items)).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "config_errors".to_string(),
+        json!(["failed to load .symora/config.toml: expected a value"]),
+    );
+
+    let fitted = fit_to_char_budget(&mut value, 200, &|v: &serde_json::Value| {
+        serde_json::to_string(v)
+            .map(|s| s.chars().count())
+            .unwrap_or(usize::MAX)
+    });
+
+    assert!(fitted);
+    assert!(
+        value.get("config_errors").is_some(),
+        "config_errors must survive the size fit — it is never dropped to fit the budget"
+    );
+    assert!(
+        value["showing"].as_u64().unwrap() < 10,
+        "section items are trimmed to stay under budget"
+    );
 }
 
 /// Pins the disclosure field of `context --with-bodies`: present only on
@@ -214,6 +248,50 @@ fn location_output_includes_snippet_when_present() {
       "line": 10,
       "column": 5,
       "snippet": "let x = 1;"
+    }
+    "###);
+}
+
+#[test]
+fn section_discloses_coverage_gaps() {
+    // A search for an explicitly requested but unindexed --lang discloses a
+    // machine-branchable gap, so an empty result reads "not indexed here, try
+    // ast/content" rather than "no such symbol". Omitted when there are none.
+    let section: Section<LocationOutput> =
+        Section::new(vec![]).with_coverage_gaps(vec![CoverageGap {
+            language: "lua".to_string(),
+            reason: "not_indexed".to_string(),
+        }]);
+    assert_json_snapshot!(section, @r###"
+    {
+      "count": 0,
+      "showing": 0,
+      "items": [],
+      "coverage_gaps": [
+        {
+          "language": "lua",
+          "reason": "not_indexed"
+        }
+      ]
+    }
+    "###);
+}
+
+#[test]
+fn location_output_discloses_a_degraded_column() {
+    // A degraded column (decoded from an unreadable line) surfaces the flag so
+    // an agent can tell a wire-offset guess from a transcoded value; it is
+    // omitted in the common case (the snippet test above carries no flag).
+    let loc = LocationOutput {
+        degraded_column: Some(true),
+        ..sample_location(10, 5)
+    };
+    assert_json_snapshot!(loc, @r###"
+    {
+      "file": "src/main.rs",
+      "line": 10,
+      "column": 5,
+      "degraded_column": true
     }
     "###);
 }
@@ -369,8 +447,27 @@ fn ref_output_full_metadata() {
         files: Some(8),
         modules: Some(3),
         is_exported: Some(true),
+        indexing: None,
     };
     assert_json_snapshot!(out);
+}
+
+#[test]
+fn ref_output_discloses_degraded_indexing() {
+    // The reference counts come from a query that ran under a warming index, so
+    // they are a lower bound — disclosed via `indexing`, omitted otherwise so
+    // the common (authoritative) summary carries no filler.
+    let out = RefOutput {
+        total: 4,
+        test: 1,
+        prod: 3,
+        files: Some(2),
+        modules: Some(1),
+        is_exported: Some(false),
+        indexing: Some(IndexingDegradation::TimedOut),
+    };
+    let value = serde_json::to_value(out).unwrap();
+    assert_eq!(value["indexing"], "timed_out");
 }
 
 #[test]
@@ -382,6 +479,7 @@ fn ref_output_minimal() {
         files: None,
         modules: None,
         is_exported: None,
+        indexing: None,
     };
     assert_json_snapshot!(out);
 }
@@ -471,6 +569,7 @@ fn impact_output_full() {
             files: Some(4),
             modules: Some(2),
             is_exported: Some(true),
+            indexing: None,
         },
         coverage: TestCoverageOutput {
             count: 3,
@@ -529,6 +628,7 @@ fn impact_output_without_blast_radius() {
             files: None,
             modules: None,
             is_exported: None,
+            indexing: None,
         },
         coverage: TestCoverageOutput {
             count: 0,

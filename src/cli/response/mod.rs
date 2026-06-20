@@ -47,6 +47,8 @@ use super::errors::OutputError;
 /// - `hints` / `next_commands` — omitted when empty
 /// - `bodies_included` — present only on sections where body attachment
 ///   ran (`context --with-bodies`) and that still contain items
+/// - `coverage_gaps` — languages a search could not cover; populated only by
+///   index-backed symbol search, omitted (empty) on every other list response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section<T> {
     pub count: usize,
@@ -83,8 +85,28 @@ pub struct Section<T> {
     /// complete enumeration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// Languages a requested search could not cover, so an empty `items`
+    /// reads as "not searched here" rather than "no such symbol". Populated
+    /// only by index-backed symbol search (the one surface where a language
+    /// can be outside the index's extractor set); omitted everywhere else and
+    /// when empty. A new `Section<T>` field is justified only when it applies
+    /// to all list responses — this one is scoped by being inert elsewhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_gaps: Vec<CoverageGap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<OutputError>,
+}
+
+/// A language a search did not cover, with a stable machine-branchable reason.
+/// The shared shape for both `search`'s `Section.coverage_gaps` and `usage`'s
+/// `coverage_gaps`. Reasons: `not_indexed` (outside the search index's
+/// extractor set); `server_not_installed` / `timed_out` / `unsupported` /
+/// `unavailable` (LSP failures, via `coverage_reason`); `not_searched` (a
+/// language `usage` skipped after collecting enough candidates).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageGap {
+    pub language: String,
+    pub reason: String,
 }
 
 impl<T> Section<T> {
@@ -110,6 +132,7 @@ impl<T> Section<T> {
             next_commands: vec![],
             bodies_included: None,
             indexing: None,
+            coverage_gaps: vec![],
             error: Some(error.into()),
         }
     }
@@ -142,6 +165,13 @@ impl<T> Section<T> {
         self
     }
 
+    /// Attach the languages a search could not cover (see the field doc).
+    /// Search-only; other list responses leave it empty.
+    pub fn with_coverage_gaps(mut self, coverage_gaps: Vec<CoverageGap>) -> Self {
+        self.coverage_gaps = coverage_gaps;
+        self
+    }
+
     fn with_total_count(items: Vec<T>, count: Option<usize>) -> Self {
         let showing = items.len();
         let count = count.map_or(showing, |c| c.max(showing));
@@ -155,6 +185,7 @@ impl<T> Section<T> {
             next_commands: vec![],
             bodies_included: None,
             indexing: None,
+            coverage_gaps: vec![],
             error: None,
         }
     }
@@ -472,7 +503,11 @@ mod tests {
             .with_next_commands(vec!["c".to_string()])
             .with_indexing(Some(crate::models::lsp::IndexingDegradation::TimedOut))
             .with_stale(true)
-            .with_bodies_included(Some(1));
+            .with_bodies_included(Some(1))
+            .with_coverage_gaps(vec![CoverageGap {
+                language: "rust".to_string(),
+                reason: "not_indexed".to_string(),
+            }]);
         section.error = Some(crate::cli::OutputError::not_found("e"));
 
         let value = serde_json::to_value(section).unwrap();
@@ -488,6 +523,7 @@ mod tests {
             [
                 "bodies_included",
                 "count",
+                "coverage_gaps",
                 "error",
                 "hints",
                 "indexing",
@@ -721,10 +757,18 @@ pub struct LocationOutput {
     pub column: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    /// Carried from the source [`crate::models::symbol::Location`]: present
+    /// (and `true`) only when `column` is a degraded wire-offset guess (the
+    /// target line was unreadable). Omitted in the common case, so an agent
+    /// trusts the column unless this discloses otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded_column: Option<bool>,
 }
 
 impl LocationOutput {
     /// Create from absolute path, converting to relative when within `root`.
+    /// For a location built from bare coordinates (no source `Location`), the
+    /// column is always a normally-decoded value — never degraded.
     pub fn from_path(path: &Path, line: u32, column: u32, root: &Path) -> Self {
         let file = path
             .strip_prefix(root)
@@ -736,6 +780,18 @@ impl LocationOutput {
             line,
             column,
             snippet: None,
+            degraded_column: None,
+        }
+    }
+
+    /// Create from a model `Location`, carrying its `degraded_column` flag so
+    /// the disclosure survives to the emitted JSON. The single boundary every
+    /// converter-derived location should cross — a degraded column is only ever
+    /// produced there.
+    pub fn from_location(location: &crate::models::symbol::Location, root: &Path) -> Self {
+        Self {
+            degraded_column: location.degraded_column,
+            ..Self::from_path(&location.file, location.line, location.column, root)
         }
     }
 }

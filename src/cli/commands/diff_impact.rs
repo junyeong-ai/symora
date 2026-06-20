@@ -86,11 +86,12 @@ pub struct ChangedSymbolImpact {
     /// Production code references (Added/Modified only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prod_refs: Option<usize>,
-    /// Present only when an Added/Modified symbol's reference measurement could
-    /// not be taken ("unavailable" — the reference query failed). The `refs`
-    /// counts are then absent because they are UNKNOWN, not zero — the same
-    /// `*_status` disclosure idiom as `callers_status`, so a total measurement
-    /// failure is at least as disclosed as a partial (callers-only) one.
+    /// Present only when an Added/Modified symbol's reference counts are not
+    /// authoritative: "unavailable" (the reference query failed, so `refs` are
+    /// absent because UNKNOWN, not zero) or "indexing_degraded" (the query ran
+    /// under a warming index, so the counts are a lower bound). The same
+    /// `*_status` disclosure idiom as `callers_status`, so a reference-count
+    /// limitation is at least as disclosed as a partial (callers-only) one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refs_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -662,7 +663,10 @@ async fn analyze_symbol_impact(
         refs: Some(classified.total),
         test_refs: Some(classified.test),
         prod_refs: Some(classified.prod),
-        refs_status: None,
+        // A reference count from a query run under degraded indexing is a lower
+        // bound, not a verified total — disclose it exactly as callers_status
+        // does for the incoming-call query above.
+        refs_status: analysis.indexing().is_some().then_some("indexing_degraded"),
         callers,
         callers_status,
         deletion: None,
@@ -895,6 +899,7 @@ mod tests {
             line: 10,
             column: 1,
             snippet: None,
+            degraded_column: None,
         }
     }
 

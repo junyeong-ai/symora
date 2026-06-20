@@ -1,5 +1,29 @@
+use std::path::Path;
+
 use serde_json::{Value, json};
-pub(super) fn ruby_init_options() -> Value {
+
+use super::exclude::lsp_exclude_subtree_globs;
+
+pub(super) fn ruby_init_options(root: &Path) -> Value {
+    // Policy-derived dependency/build dirs (so ruby-lsp's index and Symora's
+    // agree) ∪ Rails dirs holding generated/compiled assets — server-specific,
+    // not an ignore-policy concern.
+    let mut excluded = lsp_exclude_subtree_globs(root);
+    excluded.extend(
+        [
+            "**/public/assets/**",
+            "**/public/packs/**",
+            "**/public/webpack/**",
+            "**/app/assets/builds/**",
+            "**/storage/**",
+            "**/log/**",
+            "**/doc/**",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    excluded.sort();
+    excluded.dedup();
     json!({
         "enabledFeatures": {
             "codeActions": true,
@@ -26,24 +50,7 @@ pub(super) fn ruby_init_options() -> Value {
         "rubyVersionManager": "auto",
         "indexing": {
             "includedPatterns": ["**/*.rb", "**/*.rake", "**/*.ru", "**/*.erb"],
-            "excludedPatterns": [
-                // Standard exclusions
-                "**/vendor/**",
-                "**/.bundle/**",
-                "**/tmp/**",
-                "**/log/**",
-                "**/coverage/**",
-                "**/.yardoc/**",
-                "**/doc/**",
-                "**/.git/**",
-                "**/node_modules/**",
-                // Rails-specific exclusions
-                "**/public/assets/**",
-                "**/public/packs/**",
-                "**/public/webpack/**",
-                "**/app/assets/builds/**",
-                "**/storage/**"
-            ]
+            "excludedPatterns": excluded
         },
         "experimentalFeaturesEnabled": false
     })

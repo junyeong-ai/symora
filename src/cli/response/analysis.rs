@@ -127,6 +127,12 @@ pub struct RefOutput {
     pub modules: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_exported: Option<bool>,
+    /// Present only when the reference query ran under degraded workspace
+    /// indexing — the counts above are then a lower bound, not authoritative.
+    /// The same disclosure the `refs` command carries on its references
+    /// `Section`, kept here because `impact`/`context` summarize that query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<crate::models::lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize)]

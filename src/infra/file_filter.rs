@@ -77,6 +77,14 @@ impl FileFilter {
         })
     }
 
+    /// Whether a `.gitignore` was loaded for this root. A caller projecting the
+    /// policy into another form (LSP `exclude` globs) gates the built-in default
+    /// patterns on this exactly as [`Self::is_ignored`] does — with a
+    /// `.gitignore` present the project's own ignores are authoritative.
+    pub(crate) fn has_gitignore(&self) -> bool {
+        self.gitignore.is_some()
+    }
+
     fn load_gitignore(root: &Path) -> Option<Gitignore> {
         let mut builder = GitignoreBuilder::new(root);
         let mut found_any = false;
@@ -211,6 +219,34 @@ impl FileFilter {
         }
 
         false
+    }
+
+    /// Whether a directory of this NAME is ignored wherever it sits — a
+    /// name-only rule (`build/`) or a built-in default (`node_modules`) — as
+    /// opposed to only at a specific path (an anchored rule like `/build/` or
+    /// `deep/buried/`). The LSP-exclude projection uses this to know when the
+    /// `**/<name>` glob matches the SAME set [`Self::is_ignored`] does: `true`
+    /// → `**/<name>` is exact; `false` → the ignore is anchored and must
+    /// project to the directory's exact relative path, or the server would
+    /// over-exclude a same-named directory the index still walks (invariant 3).
+    pub(crate) fn dir_name_ignored_anywhere(&self, name: &str) -> bool {
+        // Probe the name nested under a synthetic, never-ignored segment, as a
+        // directory: the synthetic path does not exist on disk, so `is_dir` is
+        // forced true for a dir-only rule (`build/`) to be recognized. A
+        // name-only or default rule still ignores the relocated probe; an
+        // anchored rule does not.
+        let probe = Path::new("__symora_anchor_probe__").join(name);
+        for source in [self.gitignore.as_ref(), self.symora_ignore.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if Self::check_path_hierarchy(&probe, true, source) == Some(true) {
+                return true;
+            }
+        }
+        // The built-in defaults (applied only without a `.gitignore`, exactly as
+        // `is_ignored` gates them) are all name-only.
+        self.gitignore.is_none() && matches_default_pattern(name)
     }
 
     fn check_path_hierarchy(relative: &Path, is_dir: bool, gitignore: &Gitignore) -> Option<bool> {
