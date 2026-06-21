@@ -257,7 +257,6 @@ fn merge_project(
         } else {
             overlay.languages
         },
-        ignored_paths: merge_vec(base.ignored_paths, overlay.ignored_paths),
         entry_files: {
             let mut merged = base.entry_files;
             merged.extend(overlay.entry_files);

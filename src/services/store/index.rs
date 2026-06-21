@@ -356,7 +356,7 @@ impl Store {
         };
         // One ignore-rules build for the whole batch — multi-file
         // operations (rename, actions apply) refresh many files at once.
-        let filter = FileFilter::with_gitignore(&self.project_root);
+        let filter = FileFilter::new(&self.project_root);
         let extensions = scope.extensions();
 
         let mut first_err: Option<StoreError> = None;
@@ -388,7 +388,7 @@ impl Store {
         path.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|ext| scope_extensions.contains(&ext))
-            && filter.should_include(path)
+            && !filter.is_ignored(path)
     }
 
     /// The scope of the last completed build, or `None` when no build has
@@ -533,7 +533,7 @@ impl Store {
     }
 
     async fn do_index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
-        let filter = FileFilter::with_gitignore(&self.project_root);
+        let filter = FileFilter::new(&self.project_root);
         let scope = BuildScope::from_options(&options.languages);
         let extensions = scope.extensions();
 

@@ -85,7 +85,6 @@ fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
             "languages": config.project.languages.iter()
                 .map(|l| l.lsp_id())
                 .collect::<Vec<_>>(),
-            "ignored_paths": config.project.ignored_paths,
         },
         "lsp": {
             "timeout_secs": config.lsp.timeout_secs,

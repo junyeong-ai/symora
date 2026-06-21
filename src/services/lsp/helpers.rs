@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
 use crate::error::LspError;
-use crate::infra::file_filter::{FileFilter, FileFilterConfig, matches_default_pattern};
+use crate::infra::file_filter::{FileFilter, matches_default_pattern};
 use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position, PositionEncoding};
 use crate::infra::lsp::{
     LspClient, LspFeature, SupportLevel, get_alternative_suggestion, get_support_level,
@@ -253,14 +253,7 @@ fn find_file_by_glob(root: &Path, pattern: &str) -> Option<PathBuf> {
 }
 
 pub(super) fn find_first_file(root: &Path, language: Language) -> Option<PathBuf> {
-    let filter = FileFilter::new(FileFilterConfig {
-        root: root.to_path_buf(),
-        respect_gitignore: true,
-        respect_symora_ignore: true,
-        include_hidden: false,
-        ..Default::default()
-    });
-
+    let filter = FileFilter::new(root);
     let extensions = language.extensions();
     let files = filter.discover_files(extensions);
     files.into_iter().next()

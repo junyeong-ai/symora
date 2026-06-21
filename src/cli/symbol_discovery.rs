@@ -203,7 +203,7 @@ pub fn detect_languages_by_file_count(
         .iter()
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
-    let filter = crate::infra::file_filter::FileFilter::with_gitignore(root);
+    let filter = crate::infra::file_filter::FileFilter::new(root);
     let files = filter.discover_files(&extensions);
     let mut counts: HashMap<crate::models::symbol::Language, usize> = HashMap::new();
 

@@ -132,14 +132,8 @@ fn collect_nodes(
     cache: Option<&PackCache>,
 ) -> Vec<Node> {
     let mut nodes = Vec::new();
-    for entry in file_filter.walk_builder().build().filter_map(|e| e.ok()) {
-        let abs_path = entry.path();
-        if !abs_path.is_file() {
-            continue;
-        }
-        if !file_filter.should_include(abs_path) {
-            continue;
-        }
+    for abs_path in file_filter.discover_files(&[]) {
+        let abs_path = abs_path.as_path();
         let language = Language::from_path(abs_path);
         if !is_indexable(language) {
             continue;
@@ -206,9 +200,8 @@ fn collect_nodes(
         });
     }
 
-    // Canonical node order: the ignore::Walk yields entries in filesystem
-    // readdir order (walk_builder does not set sort_by_file_path), which is
-    // machine-dependent. Sort by rel_path — unique among nodes — and renumber
+    // Canonical node order: discovery yields files in filesystem readdir order,
+    // which is machine-dependent. Sort by rel_path — unique among nodes — and renumber
     // so the whole pack (import graph, PageRank, budget fit) is reproducible
     // for a fixed source state, as pack.rs's own contract promises. ids are
     // opaque keys into the graph maps, so renumber-after-sort is safe.

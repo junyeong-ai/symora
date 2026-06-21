@@ -9,7 +9,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 use crate::error::SearchError;
-use crate::infra::file_filter::{FileFilter, FileFilterConfig};
+use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language as SymbolLanguage;
 
 #[derive(Debug, Clone)]
@@ -308,14 +308,7 @@ impl AstQueryService for DefaultAstQueryService {
                     }
                 }
             } else if path.is_dir() {
-                let filter = FileFilter::new(FileFilterConfig {
-                    root: path.clone(),
-                    respect_gitignore: true,
-                    respect_symora_ignore: true,
-                    include_hidden: false,
-                    ..Default::default()
-                });
-
+                let filter = FileFilter::new(path);
                 let files = filter.discover_files(&extensions);
 
                 for file_path in files {

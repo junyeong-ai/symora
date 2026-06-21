@@ -55,7 +55,7 @@ fn bench_pack(c: &mut Criterion) {
 
     let small = small_fixture();
     let small_root = small.path().to_path_buf();
-    let small_filter = FileFilter::with_gitignore(&small_root);
+    let small_filter = FileFilter::new(&small_root);
     let cfg = PackConfig::default();
 
     group.bench_function("small_4_files", |b| {
@@ -66,7 +66,7 @@ fn bench_pack(c: &mut Criterion) {
 
     let medium = medium_fixture(50);
     let medium_root = medium.path().to_path_buf();
-    let medium_filter = FileFilter::with_gitignore(&medium_root);
+    let medium_filter = FileFilter::new(&medium_root);
 
     group.bench_function("medium_50_files", |b| {
         b.iter(|| {

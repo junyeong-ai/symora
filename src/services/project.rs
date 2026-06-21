@@ -165,30 +165,23 @@ impl ProjectService for DefaultProjectService {
     }
 
     fn detect_languages(&self) -> Vec<Language> {
-        let mut languages = HashSet::new();
-
-        // Walk directory and detect languages from file extensions
-        let walker = walkdir::WalkDir::new(&self.root)
-            .max_depth(5)
+        // Detect languages from the same file set the index would walk, so the
+        // project's ignore policy (not an ad-hoc directory list) decides what
+        // counts — a gitignored vendored tree never contributes a phantom
+        // language.
+        let extensions: Vec<&str> = Language::all()
             .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.')
-                    && !matches!(
-                        name.as_ref(),
-                        "node_modules" | "target" | "build" | "dist" | "__pycache__" | "venv"
-                    )
-            });
+            .flat_map(|lang| lang.extensions().iter().copied())
+            .collect();
+        let filter = crate::infra::file_filter::FileFilter::new(&self.root);
 
-        for entry in walker.filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() {
-                let lang = Language::from_path(entry.path());
-                if lang != Language::Unknown {
-                    languages.insert(lang);
-                }
+        let mut languages = HashSet::new();
+        for path in filter.discover_files(&extensions) {
+            let lang = Language::from_path(&path);
+            if lang != Language::Unknown {
+                languages.insert(lang);
             }
         }
-
         languages.into_iter().collect()
     }
 }

@@ -80,7 +80,7 @@ pub async fn execute(args: PackArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let root = ctx.root().to_path_buf();
 
-    let filter = FileFilter::with_gitignore(&root);
+    let filter = FileFilter::new(&root);
     let cfg = PackConfig {
         max_symbols_per_file: args.per_file,
         ..PackConfig::default()

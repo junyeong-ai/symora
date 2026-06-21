@@ -375,7 +375,7 @@ symora config init            # 로컬 설정 작성
 symora config init --global   # 사용자 설정 작성
 ```
 
-주요 설정: LSP timeout·limit, daemon 동작, 테스트 파일 패턴, 무시 경로, 언어별 서버 오버라이드.
+주요 설정: LSP timeout·limit, daemon 동작, 테스트 파일 패턴, 언어별 서버 오버라이드.
 
 ```toml
 [lsp.servers.typescript]
@@ -385,6 +385,8 @@ tier = "slow"        # 생략 가능; fast | standard | slow 중 하나
 ```
 
 키는 `symora doctor`가 출력하는 `language` id입니다. 잘못된 키는 doctor의 `config_errors`로 보고되며 조용히 적용되지 않습니다. daemon은 시작 시 설정을 읽으므로, 변경 후 `symora daemon restart`를 실행하세요.
+
+파일 탐색은 프로젝트의 `.gitignore`(루트·중첩, 디렉터리별 시맨틱 완전 지원)를 따르며, symora 전용 제외는 `.symora/ignore`(gitignore 문법)로 추가할 수 있습니다. 루트 `.gitignore`가 없으면 흔한 의존성·빌드 디렉터리(`node_modules`, `target`, `dist` …)를 기본 제외합니다. 숨김 항목(도트파일·도트디렉터리)은 ripgrep·fd와 동일하게 항상 제외되며 `.gitignore` negation으로도 재포함되지 않습니다 — 이것이 `.git`·`.symora`를 무조건 배제하는 근거입니다.
 
 ---
 

@@ -59,7 +59,7 @@ pub async fn execute(args: BenchArgs, app: &App) -> Result<()> {
     let mut results = Vec::new();
 
     if !args.no_pack {
-        let filter = FileFilter::with_gitignore(&root);
+        let filter = FileFilter::new(&root);
         // Disable the on-disk cache so every iteration measures the cold
         // path. With cache enabled the first call writes pack-cache.db and
         // every subsequent call hits a warm cache, biasing the percentile
