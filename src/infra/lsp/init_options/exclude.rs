@@ -1,12 +1,21 @@
 //! LSP `exclude`-style globs derived from the project's ignore policy.
 //!
 //! A language server's workspace scan and Symora's native index must agree on
-//! which files exist (CLAUDE.md invariant 3). When they disagree, `refs` /
-//! `impact` count call sites in directories the index never walked — a git
-//! worktree a host project parks under a dotted dir, a vendored copy — and
+//! which *directories* they walk (CLAUDE.md invariant 3). When they disagree,
+//! `refs` / `impact` count call sites in directories the index never walked — a
+//! git worktree a host project parks under a dotted dir, a vendored copy — and
 //! inflate the very coverage numbers an agent trusts. So the `exclude` handed
 //! to a server is derived from the [`FileFilter`] policy the index uses, never
 //! a hand-maintained per-language literal that drifts from it.
+//!
+//! Scope: this projects DIRECTORY exclusions — the high-value divergence, where
+//! a whole vendored or build tree would otherwise be scanned. File-level ignore
+//! rules (`*.generated.ts`, a single gitignored file inside an indexed
+//! directory) are honored by [`FileFilter::is_ignored`] but deliberately NOT
+//! projected: most servers cannot express a file-glob exclude faithfully, and a
+//! lossy mapping would mis-scope the scan — the precise failure invariant 4
+//! forbids. The residual divergence is bounded (a server may scan an individual
+//! file the index skips, never a whole tree) and is the conservative trade.
 //!
 //! The projection mirrors the three tiers `FileFilter::is_ignored` applies — the
 //! hidden-directory class, the built-in default directories (only when the
@@ -36,20 +45,21 @@ use crate::infra::file_filter::{DEFAULT_IGNORE_PATTERNS, FileFilter};
 /// over-excludes a directory the index still walks. Returned sorted for a stable
 /// `initializationOptions` payload.
 pub(super) fn lsp_exclude_globs(root: &Path) -> Vec<String> {
-    let filter = FileFilter::with_gitignore(root);
+    let filter = FileFilter::new(root);
     let mut globs: BTreeSet<String> = BTreeSet::new();
 
     // Tier 1 — every hidden directory, in one glob. Keeps a server out of
     // `.git`, `.venv`, and any `.<tool>/…` working tree (the dotted dir a host
     // project parks git worktrees under). Unconditional, mirroring the index's
-    // `include_hidden = false` (and pyright's own default).
+    // always-on exclusion of hidden entries (and pyright's own default).
     globs.insert("**/.*".to_string());
 
     // Tier 2 — the built-in default directories, applied ONLY when the project
-    // ships no `.gitignore` (`FileFilter::is_ignored` gates them identically on
-    // `gitignore.is_none()`: a project with a `.gitignore` is trusted to declare
-    // its own ignores, so the index walks a tracked `vendor/`/`build/` and the
-    // server must not exclude it). Emitted statically so a default dir not yet
+    // ships no root `.gitignore` (`FileFilter::has_gitignore()` is false), exactly
+    // as `FileFilter::is_ignored` gates them: a project with a root `.gitignore`
+    // is trusted to declare its own ignores, so the index walks a tracked
+    // `vendor/`/`build/` and the server must not exclude it. Emitted statically
+    // so a default dir not yet
     // on disk (a `node_modules` created after init) is still excluded. Names
     // only — file/glob entries (`*.log`, `gradle-wrapper.jar`) carry no source,
     // and hidden names are already covered by Tier 1.
@@ -225,9 +235,9 @@ mod tests {
 
     #[test]
     fn gitignore_present_suppresses_built_in_defaults() {
-        // The native index applies no built-in defaults once a `.gitignore`
-        // exists (FileFilter::is_ignored gates them on `gitignore.is_none()`),
-        // so a tracked, default-named dir (`vendor/`) stays indexed — and the
+        // The native index applies no built-in defaults once a root `.gitignore`
+        // exists (FileFilter::is_ignored gates them on `has_gitignore()`), so a
+        // tracked, default-named dir (`vendor/`) stays indexed — and the
         // projection must NOT exclude it. Only the project's own ignore does.
         let temp = TempDir::new().unwrap();
         let root = temp.path();

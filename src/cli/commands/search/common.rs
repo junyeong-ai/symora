@@ -29,7 +29,7 @@ fn detect_languages_by_file_count(app: &App) -> Vec<Language> {
         .into_iter()
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
-    let filter = FileFilter::with_gitignore(app.root());
+    let filter = FileFilter::new(app.root());
     let files = filter.discover_files(&extensions);
     let mut counts: HashMap<Language, usize> = HashMap::new();
 

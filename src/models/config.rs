@@ -26,43 +26,15 @@ pub struct SymoraConfig {
     pub test: TestConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: Option<String>,
 
     #[serde(default)]
     pub languages: Vec<Language>,
 
-    #[serde(default = "default_ignored_paths")]
-    pub ignored_paths: Vec<String>,
-
     #[serde(default)]
     pub entry_files: std::collections::HashMap<String, Vec<String>>,
-}
-
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self {
-            name: None,
-            languages: Vec::new(),
-            ignored_paths: default_ignored_paths(),
-            entry_files: std::collections::HashMap::new(),
-        }
-    }
-}
-
-fn default_ignored_paths() -> Vec<String> {
-    vec![
-        "node_modules".to_string(),
-        ".git".to_string(),
-        "target".to_string(),
-        "dist".to_string(),
-        "build".to_string(),
-        "__pycache__".to_string(),
-        ".venv".to_string(),
-        "venv".to_string(),
-        ".symora".to_string(),
-    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,22 +319,5 @@ mod tests {
         assert_eq!(config.search.limit, 100);
         assert_eq!(config.daemon.idle_timeout_mins, 30);
         assert_eq!(config.output.max_response_chars, 20_000);
-    }
-
-    #[test]
-    fn test_ignored_paths() {
-        let config = SymoraConfig::default();
-        assert!(
-            config
-                .project
-                .ignored_paths
-                .contains(&".symora".to_string())
-        );
-        assert!(
-            config
-                .project
-                .ignored_paths
-                .contains(&"node_modules".to_string())
-        );
     }
 }

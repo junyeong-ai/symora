@@ -375,7 +375,7 @@ symora config init            # write a local config
 symora config init --global   # write the user config
 ```
 
-Common settings: LSP timeouts and limits, daemon behavior, test-file patterns, ignored paths, and per-language server overrides:
+Common settings: LSP timeouts and limits, daemon behavior, test-file patterns, and per-language server overrides:
 
 ```toml
 [lsp.servers.typescript]
@@ -385,6 +385,8 @@ tier = "slow"        # optional; one of fast | standard | slow
 ```
 
 The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads config at startup, so run `symora daemon restart` after editing it.
+
+File discovery follows the project's `.gitignore` (root and nested, with full per-directory semantics), plus an optional `.symora/ignore` — gitignore syntax — for symora-only exclusions. When a project ships no root `.gitignore`, common dependency and build directories (`node_modules`, `target`, `dist`, …) are skipped by default. Hidden entries (dotfiles and dot-directories) are always skipped and, like ripgrep and fd, cannot be re-included by a `.gitignore` negation — this is what keeps `.git` and `.symora` out unconditionally.
 
 ---
 

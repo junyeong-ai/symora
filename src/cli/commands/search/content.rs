@@ -107,7 +107,7 @@ async fn fallback_content_search(
             .collect(),
     };
 
-    let filter = FileFilter::with_gitignore(app.root());
+    let filter = FileFilter::new(app.root());
     let mut files = filter.discover_files(&extensions);
     files.sort();
 

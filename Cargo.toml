@@ -79,7 +79,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 # Utilities
 dirs = "6.0"
-walkdir = "2.5"
 async-trait = "0.1.89"
 ignore = "0.4.25"
 

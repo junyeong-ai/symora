@@ -145,7 +145,7 @@ fn discover_files(app: &App) -> Vec<DiscoveredFile> {
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
 
-    let filter = FileFilter::with_gitignore(app.root());
+    let filter = FileFilter::new(app.root());
     let mut files = filter.discover_files(&extensions);
     files.sort();
 
