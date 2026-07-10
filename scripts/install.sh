@@ -15,11 +15,13 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh \
-#     | bash -s -- --source --skill
+#     | bash -s -- --source --no-skill
 #
-# Piped through curl the prompts still work: input is read from /dev/tty,
-# so one terminal command covers the interactive path; without a TTY (CI)
-# every prompt takes its safe default.
+# The default run asks nothing: prebuilt binary when one is published for
+# this platform (source build otherwise), then the Claude Code skill —
+# one command, zero prompts. Every decision has an opt-out flag
+# (--source, --no-skill, ...), and --interactive restores the guided
+# prompts (read from /dev/tty, so it works even under `curl | bash`).
 #
 # Run with --help for the full flag inventory.
 
@@ -39,7 +41,8 @@ INSTALL_DIR="${SYMORA_INSTALL_DIR:-${INSTALL_DIR:-$HOME/.local/bin}}"
 VERSION="${SYMORA_VERSION:-}"
 VERSION_REQUESTED="$VERSION"
 INSTALL_METHOD=""
-SKILL_MODE="ask" # ask | yes | no
+SKILL_MODE="auto" # auto | yes | no  (auto: install; ask first under --interactive)
+INTERACTIVE=false
 VERIFY_ATTESTATIONS=false
 NO_COLOR="${NO_COLOR:-}"
 
@@ -114,16 +117,19 @@ Options:
       --source                 Build from source (no prompt). Works inside a checkout
                                or anywhere with Rust — outside a checkout the pinned
                                release is built straight from the git tag.
-      --skill                  Install the Claude Code skill without asking.
+      --skill                  Install the Claude Code skill (this is the default).
       --no-skill               Skip the skill step entirely.
+  -i, --interactive            Ask before each decision (method, skill) instead of
+                               taking the defaults. Prompts read /dev/tty, so this
+                               works even under 'curl | bash'.
       --verify-attestations    Verify GitHub build provenance with 'gh' (must be installed).
       --no-color               Disable ANSI color in output.
   -h, --help                   Show this help.
 
-Without --prebuilt/--source the method is chosen interactively on a TTY
-(prompts read /dev/tty, so 'curl | bash' stays interactive) and defaults
-to prebuilt otherwise. The skill step delegates to 'symora setup skill',
-which owns version comparison, backups, and updates.
+The default run asks nothing: prebuilt binary when one is published for
+this platform, source build otherwise, then the Claude Code skill. The
+skill step delegates to 'symora setup skill', which owns version
+comparison, backups, and updates (rerunning is always safe).
 
 After install, the binary owns its lifecycle:
   symora setup                 Interactive: install Claude Code skill and language servers
@@ -140,7 +146,7 @@ Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh \\
       | bash -s -- --version 0.9.0 --verify-attestations
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh \\
-      | bash -s -- --source --skill
+      | bash -s -- --source --no-skill
 EOF
 }
 
@@ -157,6 +163,7 @@ parse_args() {
             --source)               INSTALL_METHOD="source"; shift ;;
             --skill)                SKILL_MODE="yes"; shift ;;
             --no-skill)             SKILL_MODE="no"; shift ;;
+            -i|--interactive)       INTERACTIVE=true; shift ;;
             --verify-attestations)  VERIFY_ATTESTATIONS=true; shift ;;
             --no-color)             NO_COLOR=1; shift ;;
             -h|--help)              usage; exit 0 ;;
@@ -438,7 +445,10 @@ select_install_method() {
         return 0
     fi
 
-    if have_tty; then
+    # Default: no questions. Prebuilt is strictly better when it exists
+    # (fast, SHA-256 verified); --source and --interactive stay available
+    # for anyone who wants the other path.
+    if [ "$INTERACTIVE" = true ] && have_tty; then
         {
             log ""
             log "Installation method:"
@@ -472,21 +482,24 @@ offer_skill_install() {
         no)
             return 0
             ;;
-        ask)
-            if ! have_tty; then
-                log_dim "Skipping Claude Code skill (no TTY) — run '${BINARY_NAME} setup skill' anytime"
-                return 0
+        auto)
+            # Installing the skill is the point of the one-shot: rerunning
+            # 'setup skill' is version-aware and backed up, so defaulting
+            # to yes is safe. Only --interactive turns this into a question.
+            if [ "$INTERACTIVE" = true ] && have_tty; then
+                local choice
+                choice="$(prompt_choice "Install the Claude Code skill (~/.claude/skills/symora)? [Y/n]: " "y" "n")"
+                case "$choice" in
+                    [yY]) ;;
+                    [nN])
+                        log_dim "Skipped — run '${BINARY_NAME} setup skill' anytime"
+                        return 0
+                        ;;
+                    *) log_die "Invalid choice: $choice" ;;
+                esac
+            else
+                log_dim "Installing the Claude Code skill (pass --no-skill to opt out)"
             fi
-            local choice
-            choice="$(prompt_choice "Install the Claude Code skill (~/.claude/skills/symora)? [Y/n]: " "y" "n")"
-            case "$choice" in
-                [yY]) ;;
-                [nN])
-                    log_dim "Skipped — run '${BINARY_NAME} setup skill' anytime"
-                    return 0
-                    ;;
-                *) log_die "Invalid choice: $choice" ;;
-            esac
             ;;
     esac
 

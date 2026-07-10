@@ -392,7 +392,7 @@ tier = "slow"        # 생략 가능; fast | standard | slow 중 하나
 
 ## 설치
 
-한 줄 설치 (사전 빌드 바이너리, SHA-256 검증; 프롬프트에서 Claude Code 스킬 설치 선택 가능 — TTY가 없으면 기본값 적용):
+한 줄 설치 — 프롬프트 없음. 사전 빌드 바이너리(SHA-256 검증, 사전 빌드가 없는 플랫폼은 소스 빌드)를 내려받고 Claude Code 스킬까지 설치합니다:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
@@ -401,14 +401,17 @@ curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/ins
 유용한 변형:
 
 ```bash
+# 바이너리만 (Claude Code 스킬 생략)
+curl -fsSL .../install.sh | bash -s -- --no-skill
+
 # 특정 버전 핀 / GitHub build provenance 검증 (gh CLI 필요)
 curl -fsSL .../install.sh | bash -s -- --version <version> --verify-attestations
 
-# 소스 빌드 + 스킬, 무프롬프트 (체크아웃 없이 릴리스 태그를 git에서 빌드)
-curl -fsSL .../install.sh | bash -s -- --source --skill
+# 소스 빌드 (체크아웃 없이 릴리스 태그를 git에서 빌드)
+curl -fsSL .../install.sh | bash -s -- --source
 
-# 비대화형 (CI): prebuilt + 스킬 스킵이 기본
-curl -fsSL .../install.sh | bash -s -- --prebuilt --no-skill
+# 안내형 프롬프트 (설치 방법, 스킬) — curl 파이프에서도 동작
+curl -fsSL .../install.sh | bash -s -- --interactive
 
 # 설치 위치 변경
 curl -fsSL .../install.sh | SYMORA_INSTALL_DIR=/usr/local/bin bash
