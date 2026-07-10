@@ -37,10 +37,10 @@ pub enum McpCommand {
         profile: McpProfile,
     },
 
-    /// Print the tool catalog as JSON — names, descriptions, input and
-    /// output schemas, and mutation annotations. The exact payload
-    /// `tools/list` serves; each output schema also describes the JSON
-    /// the matching CLI command emits.
+    /// Print the tool catalog as JSON — names, descriptions, input
+    /// schemas, mutation annotations, and, on list-shaped tools, output
+    /// schemas. The exact payload `tools/list` serves; a tool's output
+    /// schema also describes the JSON the matching CLI command emits.
     Tools {
         /// Profile whose visible catalog to print.
         #[arg(long, value_enum, default_value_t = McpProfile::Full)]

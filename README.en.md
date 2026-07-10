@@ -445,11 +445,11 @@ symora setup mcp --uninstall         # disconnect (removes only the entry it wro
 symora mcp serve                                 # stdio (Claude Code, Cursor, etc.)
 symora mcp serve --transport http --port 7700    # HTTP
 
-symora mcp tools                                 # tool catalog as JSON (input/output schemas included)
+symora mcp tools                                 # tool catalog as JSON (schemas and mutation annotations)
 symora mcp tools --profile read-only             # what a read-only server would expose
 ```
 
-`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory — including output schemas — is available without starting a server; each output schema also describes the JSON the matching CLI command emits. Mutating tools are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and all support `dry_run`. The server's `initialize` response carries the full usage playbook (tool sequencing, edit addressing, error recovery), so a connected agent needs no extra setup.
+`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the list-shaped ones, and a tool's output schema also describes the JSON the matching CLI command emits. Mutating tools are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and all support `dry_run`. The server's `initialize` response carries the full usage playbook (tool sequencing, edit addressing, error recovery), so a connected agent needs no extra setup.
 
 ---
 
