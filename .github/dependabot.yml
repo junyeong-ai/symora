@@ -7,13 +7,19 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Seoul
+    # Give freshly-published versions a week to be vetted before we pull
+    # them in — cuts exposure to compromised-release supply-chain attacks.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: chore
       include: scope
     groups:
-      patch-updates:
-        update-types: [patch]
+      # Cargo.toml minimums are semver floors, so minor+patch bumps are
+      # lockfile-compatible by construction — land them as one PR.
+      compatible-updates:
+        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: /
@@ -22,7 +28,12 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Seoul
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: chore
       include: scope
+    groups:
+      actions:
+        patterns: ["*"]
