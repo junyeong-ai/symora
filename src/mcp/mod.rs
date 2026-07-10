@@ -14,8 +14,9 @@ mod server;
 mod tools;
 
 pub use http::serve_http;
-pub use protocol::{MCP_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
+pub use protocol::{MCP_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, ToolDefinition};
 pub use server::serve_stdio;
+pub use tools::visible_catalog;
 
 /// Tool-surface profile for `symora mcp serve`.
 ///

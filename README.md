@@ -444,9 +444,12 @@ symora setup mcp --uninstall         # 연결 해제 (자신이 만든 항목만
 
 symora mcp serve                                 # stdio (Claude Code, Cursor 등)
 symora mcp serve --transport http --port 7700    # HTTP
+
+symora mcp tools                                 # 도구 카탈로그를 JSON으로 (입·출력 스키마 포함)
+symora mcp tools --profile read-only             # read-only 서버가 노출할 목록
 ```
 
-소스를 수정하는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`) 모두 `dry_run`을 지원합니다. 서버의 `initialize` 응답에는 전체 사용 플레이북(도구 호출 순서, 편집 주소 지정, 오류 복구)이 포함되므로, 연결된 에이전트는 추가 설정이 필요 없습니다.
+`mcp tools`는 `tools/list`가 서빙하는 것과 동일한 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 능력 목록·출력 스키마를 얻을 수 있습니다 — 각 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 소스를 수정하는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`) 모두 `dry_run`을 지원합니다. 서버의 `initialize` 응답에는 전체 사용 플레이북(도구 호출 순서, 편집 주소 지정, 오류 복구)이 포함되므로, 연결된 에이전트는 추가 설정이 필요 없습니다.
 
 ---
 

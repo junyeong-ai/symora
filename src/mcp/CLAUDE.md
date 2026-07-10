@@ -11,6 +11,8 @@ Four things are co-versioned for every tool:
 3. A branch in the `dispatch` match
 4. Every field the input struct deserializes must be an advertised property in the catalog schema. `dispatch` rejects unknown argument keys against the catalog (`check_unknown_arguments`), so an undeclared-but-deserialized field is unreachable at runtime — adding a tool option means touching the catalog entry and the input struct in the same change.
 
+`symora mcp tools` prints the visible catalog for a profile as CLI JSON. It is a pure view over `visible_catalog` — never a second tool list — so it tracks every catalog change for free.
+
 Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep in both directions through the test-only registries kept beside the input structs in `tools/handlers.rs`: the `input_fields` registry must equal the advertised catalog property set exactly (an advertised property no struct consumes would be silently dropped by serde), and an args object covering every advertised property must deserialize into the input struct (`deserialize_input`). Adding a tool means touching all four; removing one means removing all four. The tests will fail if the registries drift. Property names mirror the backing command's field (`path` on get_file_overview vs `file` on get_diagnostics and list_file_symbols is intentional, not drift).
 
 ## Mutating tools advertise themselves — twice, in lockstep
