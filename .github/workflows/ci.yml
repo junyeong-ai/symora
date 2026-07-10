@@ -48,8 +48,9 @@ jobs:
         run: cargo nextest run --all-features --workspace
 
   # The declared rust-version in Cargo.toml is a public contract for
-  # crates.io installs — verify the code actually compiles at that floor,
-  # not just on latest stable.
+  # crates.io installs. The other jobs build on the repo's pinned
+  # toolchain (rust-toolchain.toml), so this is what catches a pin bump
+  # that outruns the declared floor.
   msrv:
     name: MSRV (rust-version from Cargo.toml)
     runs-on: ubuntu-latest
