@@ -392,7 +392,7 @@ File discovery follows the project's `.gitignore` (root and nested, with full pe
 
 ## Installation
 
-One-shot install (prebuilt binary, SHA-256 verified; prompts let you also install the Claude Code skill — defaults apply without a TTY):
+One-shot install — no prompts. Downloads the prebuilt binary (SHA-256 verified, source build where no prebuilt exists) and installs the Claude Code skill:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
@@ -401,14 +401,17 @@ curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/ins
 Useful variants:
 
 ```bash
+# Binary only, skip the Claude Code skill
+curl -fsSL .../install.sh | bash -s -- --no-skill
+
 # Pin a release / verify GitHub build provenance (needs the gh CLI)
 curl -fsSL .../install.sh | bash -s -- --version <version> --verify-attestations
 
-# Source build + skill, no prompts (builds the release tag from git; no checkout needed)
-curl -fsSL .../install.sh | bash -s -- --source --skill
+# Source build (builds the release tag from git; no checkout needed)
+curl -fsSL .../install.sh | bash -s -- --source
 
-# Non-interactive (CI): defaults to prebuilt, skill skipped
-curl -fsSL .../install.sh | bash -s -- --prebuilt --no-skill
+# Guided prompts (method, skill) — works even piped through curl
+curl -fsSL .../install.sh | bash -s -- --interactive
 
 # Change install location
 curl -fsSL .../install.sh | SYMORA_INSTALL_DIR=/usr/local/bin bash
