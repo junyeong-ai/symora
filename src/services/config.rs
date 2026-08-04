@@ -311,7 +311,6 @@ fn merge_test(
     crate::models::config::TestConfig {
         file_patterns: merge_vec(base.file_patterns, overlay.file_patterns),
         dir_patterns: merge_vec(base.dir_patterns, overlay.dir_patterns),
-        markers: merge_vec(base.markers, overlay.markers),
     }
 }
 

@@ -7,10 +7,11 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::detect_exported;
 use crate::cli::errors::OutputError;
-use crate::cli::utils::{TestMatcher, classify_refs};
+use crate::cli::utils::RefsClassification;
 use crate::error::LspError;
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::{Language, Location};
+use crate::services::TestScope;
 use crate::services::pack::{PackConfig, build_pack};
 
 #[derive(Args, Debug)]
@@ -149,7 +150,7 @@ where
 }
 
 fn bench_classify_refs(root: &std::path::Path) -> impl FnMut() {
-    let matcher = TestMatcher::new();
+    let scope = TestScope::new();
     let refs: Vec<Location> = (0..1000)
         .map(|i| {
             let path = if i % 5 == 0 {
@@ -160,9 +161,8 @@ fn bench_classify_refs(root: &std::path::Path) -> impl FnMut() {
             Location::point(path, (i % 1000) as u32 + 1, 1)
         })
         .collect();
-    let root = root.to_path_buf();
     move || {
-        let c = classify_refs(&refs, &root, None, None, &matcher);
+        let c = RefsClassification::of(&refs, &scope);
         std::hint::black_box(c.total);
     }
 }

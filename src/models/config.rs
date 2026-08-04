@@ -300,9 +300,6 @@ pub struct TestConfig {
 
     #[serde(default)]
     pub dir_patterns: Vec<String>,
-
-    #[serde(default)]
-    pub markers: Vec<String>,
 }
 
 #[cfg(test)]

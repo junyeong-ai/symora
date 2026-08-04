@@ -16,9 +16,9 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::cli::call_graph::{self, Direction, WalkConfig};
-use crate::cli::utils::TestMatcher;
 use crate::error::LspError;
 use crate::models::symbol::SymbolKind;
+use crate::services::TestScope;
 use crate::services::lsp::LspService;
 
 /// A dynamically-dispatched anchor's call-hierarchy graph is a lower bound:
@@ -26,11 +26,11 @@ use crate::services::lsp::LspService;
 /// (Phase 1 discloses the gap rather than over-approximating by widening).
 /// Such a graph therefore never earns more than this confidence, no matter
 /// how deep the walk reached.
-const DYNAMIC_DISPATCH_CONFIDENCE_CAP: f32 = 0.7;
+const DYNAMIC_DISPATCH_CONFIDENCE_CAP: f64 = 0.7;
 
 /// A walk that swallowed a hop error (an LSP failure mid-traversal) is a known
 /// lower bound, so its caller graph can never be presented as high confidence.
-const INCOMPLETE_WALK_CONFIDENCE_CAP: f32 = 0.5;
+const INCOMPLETE_WALK_CONFIDENCE_CAP: f64 = 0.5;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BlastRadius {
@@ -60,9 +60,9 @@ pub struct BlastRadius {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dynamic_dispatch: Option<DynamicDispatch>,
     pub callers_by_depth: Vec<DepthBucket>,
-    pub test_coverage_ratio: f32,
+    pub test_coverage_ratio: f64,
     pub risk: RiskLevel,
-    pub confidence: f32,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,7 +113,7 @@ pub async fn compute(
     column: u32,
     is_exported: Option<bool>,
     anchor_kind: Option<SymbolKind>,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
     cfg: &WalkConfig,
 ) -> Result<BlastRadius, LspError> {
     // Blast radius is the upward (incoming) call graph. The traversal,
@@ -129,6 +129,10 @@ pub async fn compute(
     )
     .await;
 
+    // A caller is classified where it is DECLARED, so a test living inside
+    // the production file it exercises is counted as coverage rather than as
+    // one more production dependency inflating the risk.
+    let mut classifier = test_scope.classifier();
     let buckets: Vec<DepthBucket> = walk
         .levels
         .iter()
@@ -136,7 +140,7 @@ pub async fn compute(
         .map(|(i, items)| {
             let test = items
                 .iter()
-                .filter(|c| test_matcher.is_test_file(&c.location.file))
+                .filter(|c| classifier.is_test_code(&c.location.file, c.location.line))
                 .count();
             DepthBucket {
                 depth: (i + 1) as u32,
@@ -155,7 +159,7 @@ pub async fn compute(
     let test_ratio = if transitive_callers == 0 {
         0.0
     } else {
-        total_test as f32 / transitive_callers as f32
+        coarse(total_test as f64 / transitive_callers as f64)
     };
     let depth_reached = buckets.last().map(|b| b.depth).unwrap_or(0);
 
@@ -229,7 +233,19 @@ async fn detect_dynamic_dispatch(
     }
 }
 
-fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f32) -> RiskLevel {
+/// Round a published score to the precision it actually carries.
+///
+/// `risk` and `confidence` are assembled from fixed steps and compared
+/// against fixed thresholds, so binary floating point would otherwise leak
+/// values like `0.9000000357627869` into the output contract. Rounding at
+/// the point of computation — before the thresholds see the value — keeps
+/// the published number and the number the verdict was made on identical,
+/// so an agent can reproduce the verdict from the response alone.
+fn coarse(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f64) -> RiskLevel {
     let exported = exported.unwrap_or(false);
     if transitive == 0 {
         return RiskLevel::Low;
@@ -259,12 +275,12 @@ fn compute_confidence(
     direct_callers: usize,
     depth_reached: u32,
     dynamic_dispatch: Option<&DynamicDispatch>,
-) -> f32 {
+) -> f64 {
     // Confidence is high when the LSP actually returned a call hierarchy
     // (direct_callers > 0) AND we explored the requested depth without
     // tripping the safety cap. Zero direct callers is the dominant
     // false-negative case (LSP feature unsupported, or a true leaf).
-    let mut score: f32 = 0.5;
+    let mut score: f64 = 0.5;
     if direct_callers > 0 {
         score += 0.3;
     }
@@ -274,7 +290,7 @@ fn compute_confidence(
     if depth_reached >= 3 {
         score += 0.1;
     }
-    let score = score.clamp(0.0, 1.0);
+    let score = coarse(score.clamp(0.0, 1.0));
     // A dynamically-dispatched anchor's graph is a known lower bound, so it
     // can never be presented as high confidence regardless of depth.
     if dynamic_dispatch.is_some() {
@@ -314,7 +330,7 @@ mod tests {
             implementations,
             errors: std::collections::HashSet::new(),
         };
-        let matcher = TestMatcher::default();
+        let matcher = TestScope::default();
         tokio_test::block_on(compute(
             &stub,
             Path::new("src/lib.rs"),

@@ -1,4 +1,4 @@
-//! Microbenchmarks for the blast-radius helpers and `classify_refs`.
+//! Microbenchmarks for the blast-radius helpers and reference classification.
 //! Mock-LSP-driven `compute()` benches are intentionally omitted: the
 //! tokio-rusqlite + LSP mock setup would dominate measurement noise. We
 //! benchmark the pure analysis surface instead.
@@ -7,8 +7,9 @@ use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use symora::cli::utils::{TestMatcher, classify_refs};
+use symora::cli::utils::RefsClassification;
 use symora::models::symbol::Location;
+use symora::services::TestScope;
 
 fn make_locations(count: usize, root: &std::path::Path) -> Vec<Location> {
     (0..count)
@@ -26,13 +27,13 @@ fn make_locations(count: usize, root: &std::path::Path) -> Vec<Location> {
 fn bench_classify_refs(c: &mut Criterion) {
     let mut group = c.benchmark_group("classify_refs");
     let root = PathBuf::from("/repo");
-    let matcher = TestMatcher::new();
+    let scope = TestScope::new();
 
     for size in [10usize, 100, 1000, 5000] {
         let refs = make_locations(size, &root);
         group.bench_function(format!("size_{size}"), |b| {
             b.iter(|| {
-                let classified = classify_refs(black_box(&refs), &root, None, None, &matcher);
+                let classified = RefsClassification::of(black_box(&refs), &scope);
                 black_box(classified.total);
             });
         });

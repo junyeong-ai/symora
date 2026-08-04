@@ -35,19 +35,14 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     // best against the position the agent actually typed.
     let (err_file, err_line, err_column) = (loc.file.clone(), loc.line, loc.column);
 
-    match LocationAnalysis::at(app.lsp.as_ref(), loc).await {
+    match LocationAnalysis::at(app.lsp.as_ref(), loc, ctx.root()).await {
         Ok(analysis) => {
             let root = ctx.root();
-            let project_refs: Vec<_> = analysis
-                .references()
+            let usages = analysis.references();
+            let total = usages.len();
+
+            let items: Vec<LocationOutput> = usages
                 .iter()
-                .filter(|l| ctx.is_project_path(&l.file))
-                .collect();
-
-            let total = project_refs.len();
-
-            let items: Vec<LocationOutput> = project_refs
-                .into_iter()
                 .take(limit)
                 .map(|l| {
                     let mut output = LocationOutput::from_location(l, root);

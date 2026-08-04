@@ -31,14 +31,14 @@ pub struct ImpactArgs {
 pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let loc = args.loc.parse()?.to_absolute()?;
-    let test_matcher = app.test_matcher();
+    let test_scope = app.test_scope();
     let root = ctx.root();
     let depth = args.depth.clamp(1, IMPACT_MAX_DEPTH);
     let limit = normalize_limit(args.limit);
 
-    match LocationAnalysis::at(app.lsp.as_ref(), loc).await {
+    match LocationAnalysis::at(app.lsp.as_ref(), loc, root).await {
         Ok(analysis) => {
-            let classified = analysis.classify(root, test_matcher, false);
+            let classified = analysis.classify(test_scope);
 
             let mut affected_files: Vec<AffectedFileOutput> = classified
                 .file_counts
@@ -80,7 +80,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 analysis.anchor.column,
                 exported,
                 anchor_kind,
-                test_matcher,
+                test_scope,
                 &WalkConfig {
                     max_depth: depth,
                     ..Default::default()
