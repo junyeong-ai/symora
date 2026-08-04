@@ -10,6 +10,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -122,9 +123,75 @@ fn cli_and_mcp_emit_identical_payloads() {
     }
 }
 
+fn run_via_daemon(args: &[&str]) -> Vec<Value> {
+    let output = Command::new(SYMORA)
+        .args(args)
+        .args(["--format", "compact"])
+        .stderr(Stdio::null())
+        .output()
+        .expect("run symora CLI (daemon)");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("CLI emits valid JSON"))
+        .collect()
+}
+
+/// Whether a payload carries a degradation marker, at any depth.
+///
+/// `indexing` states how far along the language server's workspace analysis
+/// was when the answer was computed. Two backends warmed at different times
+/// legitimately report different states, so a payload carrying one says
+/// nothing about parity — it is a snapshot of the run, not of the meaning.
+fn discloses_degradation(payload: &[Value]) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => map.contains_key("indexing") || map.values().any(walk),
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    payload.iter().any(walk)
+}
+
+/// Poll one backend until it stops disclosing degradation, and return the
+/// payload it settled on.
+fn quiesced(
+    backend: &str,
+    args: &[&str],
+    run: fn(&[&str]) -> Vec<Value>,
+    deadline: Instant,
+) -> Vec<Value> {
+    loop {
+        let payload = run(args);
+        if !discloses_degradation(&payload) {
+            return payload;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{backend} never reached quiescence for {args:?}; parity is undefined while \
+             workspace analysis is still running",
+        );
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Long enough for a cold language server to analyse this workspace on a
+/// loaded CI machine. A stall past it is reported rather than papered over
+/// with a comparison that was never meaningful.
+const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(600);
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
 /// Daemon ↔ direct parity for LSP-backed commands. Needs rust-analyzer
 /// and a startable daemon, so it is opt-in:
 /// `cargo test --test parity -- --ignored`.
+///
+/// Each backend is warmed to quiescence before the comparison, because the
+/// invariant is only defined once both have an answer to give: while a
+/// workspace is still being analysed the two sides are looking at different
+/// amounts of the same project, and that difference is disclosed on
+/// purpose. Once quiescent, the payloads are compared whole — no field is
+/// exempted, so a real divergence cannot hide behind an allowance.
 #[test]
 #[ignore = "requires rust-analyzer and a daemon-capable environment"]
 fn daemon_and_direct_emit_identical_payloads() {
@@ -137,20 +204,32 @@ fn daemon_and_direct_emit_identical_payloads() {
     ];
 
     for args in cases {
-        let direct = run_cli(args);
+        let deadline = Instant::now() + QUIESCENCE_TIMEOUT;
+        let direct = quiesced("direct", args, run_cli, deadline);
+        let daemon = quiesced("daemon", args, run_via_daemon, deadline);
 
-        let output = Command::new(SYMORA)
-            .args(*args)
-            .args(["--format", "compact"])
-            .stderr(Stdio::null())
-            .output()
-            .expect("run symora CLI (daemon)");
-        let daemon: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l).expect("CLI emits valid JSON"))
-            .collect();
-
+        assert!(
+            !direct.is_empty(),
+            "parity case {args:?} produced no output — the comparison is vacuous",
+        );
         assert_eq!(direct, daemon, "daemon and direct diverged for {args:?}");
     }
+}
+
+/// The quiescence gate is only meaningful if it actually recognises the
+/// marker — a detector that always answered "clean" would turn the wait
+/// into a no-op and put the flaky comparison right back.
+#[test]
+fn degradation_is_detected_at_any_depth() {
+    let top: Value = serde_json::from_str(r#"{"count":0,"indexing":"timed_out"}"#).unwrap();
+    let nested: Value =
+        serde_json::from_str(r#"{"refs":{"total":0,"indexing":"timed_out"}}"#).unwrap();
+    let in_array: Value = serde_json::from_str(r#"{"items":[{"indexing":"timed_out"}]}"#).unwrap();
+    let clean: Value = serde_json::from_str(r#"{"count":1,"items":[{"line":3}]}"#).unwrap();
+
+    assert!(discloses_degradation(&[top]));
+    assert!(discloses_degradation(&[nested]));
+    assert!(discloses_degradation(&[in_array]));
+    assert!(!discloses_degradation(&[clean]));
+    assert!(!discloses_degradation(&[]));
 }
