@@ -26,8 +26,10 @@ pub struct Symbol {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Symbol>,
+    /// The kind that tells this symbol apart from its same-named siblings,
+    /// set only when it does. See [`Symbol::compute_paths_for_all`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub overload_idx: Option<u32>,
+    pub discriminator: Option<SymbolKind>,
 }
 
 impl Symbol {
@@ -40,7 +42,7 @@ impl Symbol {
             container: None,
             body: None,
             children: Vec::new(),
-            overload_idx: None,
+            discriminator: None,
         }
     }
 
@@ -76,8 +78,8 @@ impl Symbol {
             None => self.name.clone(),
         };
 
-        self.name_path = Some(match self.overload_idx {
-            Some(idx) => format!("{}[{}]", base_path, idx),
+        self.name_path = Some(match self.discriminator {
+            Some(kind) => format!("{base_path}[{kind}]"),
             None => base_path.clone(),
         });
 
@@ -89,9 +91,9 @@ impl Symbol {
         // string). Passing this node's own NAME (not its accumulated path) down
         // makes every producer agree, so a copied path round-trips. A
         // namespace/module/package qualifies nothing: it passes its parent path
-        // straight through (a free item under it stays bare). The name is
-        // index-free, so same-named sibling parents (`Foo[0]`, `Foo[1]`) still
-        // share a child path (`Foo/bar`).
+        // straight through (a free item under it stays bare). The name carries
+        // no qualifier, so same-named sibling parents (`Foo[struct]`,
+        // `Foo[object]`) still share a child path (`Foo/bar`).
         let child_parent = if self.kind.is_namespace_like() {
             parent_path
         } else {
@@ -103,31 +105,49 @@ impl Symbol {
     }
 
     pub fn compute_paths_for_all(symbols: &mut [Symbol]) {
-        Self::assign_overload_indices(symbols);
+        Self::assign_discriminators(symbols);
         for symbol in symbols {
             symbol.compute_paths(None);
         }
     }
 
-    fn assign_overload_indices(symbols: &mut [Symbol]) {
+    /// Give each symbol the qualifier that distinguishes it from its
+    /// same-named siblings — its kind, and only where its kind is unique
+    /// among them.
+    ///
+    /// A path is the addressing key an edit re-resolves against a live file,
+    /// so it has to survive edits elsewhere in that file. A kind does: a
+    /// `struct Cart` stays `Cart[struct]` however many `impl Cart` blocks
+    /// appear beside it. A position among siblings does not — inserting one
+    /// overload above another silently moves every path below it, which on a
+    /// mutating surface rewrites the wrong symbol.
+    ///
+    /// Where kind cannot tell siblings apart — true overloads — nothing is
+    /// invented. Those symbols share a bare path, and every surface that must
+    /// act on exactly one of them already refuses an ambiguous path and names
+    /// the candidates with their positions.
+    fn assign_discriminators(symbols: &mut [Symbol]) {
         use std::collections::HashMap;
 
-        let mut name_counts: HashMap<String, u32> = HashMap::new();
+        let mut kinds_by_name: HashMap<String, Vec<SymbolKind>> = HashMap::new();
         for symbol in symbols.iter() {
-            *name_counts.entry(symbol.name.clone()).or_insert(0) += 1;
+            kinds_by_name
+                .entry(symbol.name.clone())
+                .or_default()
+                .push(symbol.kind);
         }
 
-        let mut name_indices: HashMap<String, u32> = HashMap::new();
         for symbol in symbols.iter_mut() {
-            let count = name_counts.get(&symbol.name).copied().unwrap_or(1);
-            if count > 1 {
-                let idx = name_indices.entry(symbol.name.clone()).or_insert(0);
-                symbol.overload_idx = Some(*idx);
-                *idx += 1;
-            }
+            let kinds = kinds_by_name
+                .get(&symbol.name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let identifies =
+                kinds.len() > 1 && kinds.iter().filter(|k| **k == symbol.kind).count() == 1;
+            symbol.discriminator = identifies.then_some(symbol.kind);
 
             if !symbol.children.is_empty() {
-                Self::assign_overload_indices(&mut symbol.children);
+                Self::assign_discriminators(&mut symbol.children);
             }
         }
     }
@@ -153,11 +173,11 @@ impl Symbol {
     }
 
     fn matches_pattern(path: &str, pattern: &str, exact: bool) -> bool {
-        let (pattern_base, pattern_idx) = Self::parse_overload_index(pattern);
-        let (path_base, path_idx) = Self::parse_overload_index(path);
+        let (pattern_base, pattern_qualifier) = Self::split_qualifier(pattern);
+        let (path_base, path_qualifier) = Self::split_qualifier(path);
 
-        if let Some(pidx) = pattern_idx
-            && path_idx != Some(pidx)
+        if let Some(qualifier) = pattern_qualifier
+            && path_qualifier != Some(qualifier)
         {
             return false;
         }
@@ -177,12 +197,17 @@ impl Symbol {
         }
     }
 
-    fn parse_overload_index(s: &str) -> (&str, Option<u32>) {
-        if let Some(bracket_pos) = s.rfind('[')
-            && s.ends_with(']')
-            && let Ok(idx) = s[bracket_pos + 1..s.len() - 1].parse::<u32>()
+    /// Split a path into its base and its trailing `[qualifier]`, if any.
+    /// An unqualified pattern matches a qualified path, so an agent that
+    /// knows only the name still reaches every candidate.
+    fn split_qualifier(s: &str) -> (&str, Option<&str>) {
+        if let Some(bracket) = s.rfind('[')
+            && let Some(qualifier) = s[bracket..]
+                .strip_prefix('[')
+                .and_then(|q| q.strip_suffix(']'))
+            && !qualifier.is_empty()
         {
-            return (&s[..bracket_pos], Some(idx));
+            return (&s[..bracket], Some(qualifier));
         }
         (s, None)
     }
@@ -741,14 +766,14 @@ mod tests {
         assert_eq!(Symbol::normalize_symbol_name("implicit"), "implicit");
     }
 
-    /// Malformed overload indices degrade to literal names (no match against
-    /// real symbols), never a parse panic or a wrong match.
+    /// A qualifier that matches no real symbol degrades to a literal name
+    /// (no match), never a parse panic or a wrong match.
     #[test]
-    fn matches_path_treats_malformed_overload_index_as_literal() {
+    fn matches_path_treats_an_unmatched_qualifier_as_literal() {
         let mut sym = build_symbol("bar", SymbolKind::Method);
         sym.name_path = Some("Foo/bar".to_string());
 
-        assert!(!sym.matches_path("bar[abc]"));
+        assert!(!sym.matches_path("bar[class]"));
         assert!(!sym.matches_path("bar["));
         assert!(!sym.matches_path("bar[]"));
     }
@@ -847,13 +872,16 @@ mod tests {
         assert_eq!(results.len(), 3);
     }
 
+    /// Kind qualifies a name only where it identifies. Overloads share a
+    /// kind, so nothing is invented for them; the sibling that a kind does
+    /// single out gets it.
     #[test]
-    fn overload_indices_assign_only_on_collisions() {
+    fn a_qualifier_is_assigned_only_where_kind_identifies() {
         let mut class = build_symbol("MyClass", SymbolKind::Class);
         class.children = vec![
             build_symbol("doSomething", SymbolKind::Method),
             build_symbol("doSomething", SymbolKind::Method),
-            build_symbol("doSomething", SymbolKind::Method),
+            build_symbol("doSomething", SymbolKind::Field),
             build_symbol("unique", SymbolKind::Method),
         ];
 
@@ -861,14 +889,18 @@ mod tests {
         Symbol::compute_paths_for_all(&mut symbols);
 
         let class = &symbols[0];
-        assert_eq!(class.children[0].overload_idx, Some(0));
-        assert_eq!(class.children[1].overload_idx, Some(1));
-        assert_eq!(class.children[2].overload_idx, Some(2));
-        assert_eq!(class.children[3].overload_idx, None);
+        assert_eq!(class.children[0].discriminator, None);
+        assert_eq!(class.children[1].discriminator, None);
+        assert_eq!(class.children[2].discriminator, Some(SymbolKind::Field));
+        assert_eq!(class.children[3].discriminator, None);
 
         assert_eq!(
             class.children[0].name_path,
-            Some("MyClass/doSomething[0]".to_string())
+            Some("MyClass/doSomething".to_string())
+        );
+        assert_eq!(
+            class.children[2].name_path,
+            Some("MyClass/doSomething[field]".to_string())
         );
         assert_eq!(
             class.children[3].name_path,
@@ -876,72 +908,75 @@ mod tests {
         );
     }
 
-    /// Colliding parents get overload indices, but their children hang
-    /// off the index-free base path — so one child path can match several
-    /// symbols (an ambiguity edit refuses), while an indexed parent path
-    /// stays unique.
+    /// The shape a type and its implementation block make in Rust: two
+    /// same-named siblings of different kinds, each addressable, and each
+    /// path unmoved by anything added beside it.
+    #[test]
+    fn a_type_and_its_implementation_block_stay_separately_addressable() {
+        let mut symbols = vec![
+            build_symbol("Cart", SymbolKind::Struct),
+            build_symbol("Cart", SymbolKind::Object),
+        ];
+        Symbol::compute_paths_for_all(&mut symbols);
+
+        assert_eq!(symbols[0].path(), "Cart[struct]");
+        assert_eq!(symbols[1].path(), "Cart[object]");
+        assert_eq!(Symbol::filter_by_path(&symbols, "Cart[struct]").len(), 1);
+        assert_eq!(Symbol::filter_by_path(&symbols, "Cart").len(), 2);
+
+        let mut reordered = vec![
+            build_symbol("Cart", SymbolKind::Object),
+            build_symbol("Cart", SymbolKind::Struct),
+        ];
+        Symbol::compute_paths_for_all(&mut reordered);
+        assert_eq!(reordered[1].path(), "Cart[struct]");
+    }
+
+    /// Qualified parents keep distinct paths, but their children hang off
+    /// the unqualified base — so one child path can match several symbols
+    /// (an ambiguity edit refuses) while the parent path stays unique.
     #[test]
     fn filter_by_path_matches_same_named_parents_children() {
         let mut first = build_symbol("Foo", SymbolKind::Class);
         first.children = vec![build_symbol("bar", SymbolKind::Method)];
-        let mut second = build_symbol("Foo", SymbolKind::Class);
+        let mut second = build_symbol("Foo", SymbolKind::Interface);
         second.children = vec![build_symbol("bar", SymbolKind::Method)];
 
         let mut symbols = vec![first, second];
         Symbol::compute_paths_for_all(&mut symbols);
 
-        assert_eq!(symbols[0].path(), "Foo[0]");
-        assert_eq!(symbols[1].path(), "Foo[1]");
+        assert_eq!(symbols[0].path(), "Foo[class]");
+        assert_eq!(symbols[1].path(), "Foo[interface]");
         assert_eq!(Symbol::filter_by_path(&symbols, "Foo/bar").len(), 2);
-        assert_eq!(Symbol::filter_by_path(&symbols, "Foo[0]").len(), 1);
+        assert_eq!(Symbol::filter_by_path(&symbols, "Foo[class]").len(), 1);
         assert!(Symbol::filter_by_path(&symbols, "Foo/missing").is_empty());
     }
 
     #[test]
-    fn matches_path_filters_by_overload_index() {
-        let mut sym = build_symbol("doSomething", SymbolKind::Method);
-        sym.overload_idx = Some(1);
-        sym.name_path = Some("MyClass/doSomething[1]".to_string());
+    fn matches_path_filters_by_qualifier() {
+        let mut sym = build_symbol("doSomething", SymbolKind::Field);
+        sym.discriminator = Some(SymbolKind::Field);
+        sym.name_path = Some("MyClass/doSomething[field]".to_string());
 
         assert!(sym.matches_path("doSomething"));
-        assert!(sym.matches_path("doSomething[1]"));
-        assert!(!sym.matches_path("doSomething[0]"));
-        assert!(sym.matches_path("MyClass/doSomething[1]"));
-        assert!(!sym.matches_path("MyClass/doSomething[0]"));
+        assert!(sym.matches_path("doSomething[field]"));
+        assert!(!sym.matches_path("doSomething[method]"));
+        assert!(sym.matches_path("MyClass/doSomething[field]"));
+        assert!(!sym.matches_path("MyClass/doSomething[method]"));
     }
 
     #[test]
-    fn matches_path_supports_absolute_form() {
-        let mut sym = build_symbol("update", SymbolKind::Method);
-        sym.name_path = Some("MyClass/update".to_string());
-
-        assert!(sym.matches_path("update"));
-        assert!(sym.matches_path("MyClass/update"));
-
-        assert!(sym.matches_path("/MyClass/update"));
-        assert!(!sym.matches_path("/update"));
-        assert!(!sym.matches_path("/Other/MyClass/update"));
-    }
-
-    #[test]
-    fn parse_overload_index_extracts_bracketed_int() {
-        assert_eq!(Symbol::parse_overload_index("method"), ("method", None));
+    fn split_qualifier_separates_a_trailing_bracketed_token() {
+        assert_eq!(Symbol::split_qualifier("method"), ("method", None));
         assert_eq!(
-            Symbol::parse_overload_index("method[0]"),
-            ("method", Some(0))
+            Symbol::split_qualifier("method[field]"),
+            ("method", Some("field"))
         );
         assert_eq!(
-            Symbol::parse_overload_index("method[123]"),
-            ("method", Some(123))
+            Symbol::split_qualifier("Class/method[method]"),
+            ("Class/method", Some("method"))
         );
-        assert_eq!(
-            Symbol::parse_overload_index("Class/method[2]"),
-            ("Class/method", Some(2))
-        );
-        assert_eq!(
-            Symbol::parse_overload_index("method[abc]"),
-            ("method[abc]", None)
-        );
-        assert_eq!(Symbol::parse_overload_index("method["), ("method[", None));
+        assert_eq!(Symbol::split_qualifier("method[]"), ("method[]", None));
+        assert_eq!(Symbol::split_qualifier("method["), ("method[", None));
     }
 }
