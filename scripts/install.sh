@@ -129,7 +129,7 @@ Options:
 The default run asks nothing: prebuilt binary when one is published for
 this platform, source build otherwise, then the Claude Code skill. The
 skill step delegates to 'symora setup skill', which owns version
-comparison, backups, and updates (rerunning is always safe).
+comparison and updates (rerunning is always safe).
 
 After install, the binary owns its lifecycle:
   symora setup                 Interactive: install Claude Code skill and language servers
@@ -471,7 +471,7 @@ select_install_method() {
 
 # ─── skill ──────────────────────────────────────────────────────────────────
 
-# The binary owns skill installation (version comparison, backups,
+# The binary owns skill installation (version comparison,
 # updates) — this step only decides whether to invoke it. `-y` keeps the
 # delegated run prompt-free; stdin under `curl | bash` is the script
 # stream and must not be consumed by the child.

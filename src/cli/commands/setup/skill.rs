@@ -1,9 +1,8 @@
 //! `symora setup skill` — install or update the Claude Code skill.
 
 use std::path::Path;
-use std::time::SystemTime;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 
@@ -20,10 +19,6 @@ pub struct SkillArgs {
     #[arg(long, value_name = "REF")]
     pub git_ref: Option<String>,
 
-    /// Skip the timestamped backup before overwriting an existing skill.
-    #[arg(long)]
-    pub no_backup: bool,
-
     /// Always reinstall, even if the version comparison says equal.
     #[arg(long)]
     pub force: bool,
@@ -39,8 +34,6 @@ pub struct SkillOutcome {
     pub delta: SkillVersionDelta,
     pub destination: String,
     pub origin: SkillOriginRepr,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -99,7 +92,6 @@ pub fn run_skill(args: SkillArgs, assume_yes: bool) -> Result<SkillOutcome> {
             delta,
             destination: display(&dest),
             origin: origin_repr,
-            backup: None,
         });
     }
 
@@ -117,20 +109,15 @@ pub fn run_skill(args: SkillArgs, assume_yes: bool) -> Result<SkillOutcome> {
         decide_action(delta, assume_yes)
     };
 
-    let (backup, final_version) = match action {
+    let final_version = match action {
         SkillAction::KeptExisting => {
             step(Step::Skip, "kept existing skill");
-            (None, installed_version.clone())
+            installed_version.clone()
         }
         SkillAction::Installed | SkillAction::Updated | SkillAction::Reinstalled => {
-            let backup = if args.no_backup {
-                None
-            } else {
-                Some(backup_existing(&dest)?)
-            };
             replace_dir(&source.root, &dest)?;
             step(Step::Ok, format!("skill installed at {}", display(&dest)));
-            (backup, incoming_version.clone())
+            incoming_version.clone()
         }
     };
 
@@ -141,7 +128,6 @@ pub fn run_skill(args: SkillArgs, assume_yes: bool) -> Result<SkillOutcome> {
         delta,
         destination: display(&dest),
         origin: origin_repr,
-        backup,
     })
 }
 
@@ -226,26 +212,6 @@ fn copy_recursively(src: &Path, dst: &Path) -> Result<()> {
         copy_recursively(&entry.path(), &target)?;
     }
     Ok(())
-}
-
-fn backup_existing(dest: &Path) -> Result<String> {
-    let stamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let parent = dest
-        .parent()
-        .ok_or_else(|| anyhow!("skill destination has no parent: {}", dest.display()))?;
-    let basename = dest
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow!("non-UTF-8 skill destination: {}", dest.display()))?;
-    let backup = parent.join(format!("{basename}.backup_{stamp}"));
-    copy_recursively(dest, &backup)
-        .with_context(|| format!("backing up to {}", backup.display()))?;
-    let label = display(&backup);
-    step(Step::Info, format!("backup → {label}"));
-    Ok(label)
 }
 
 /// Default the git ref to the running binary's release tag. `CARGO_PKG_VERSION`
