@@ -50,7 +50,10 @@ impl App {
         // softer class already disclosed by doctor / config show, so they are
         // not duplicated here.
         let (config, config_errors) = match config_service.load(false).await {
-            Ok(config) => (config, Vec::new()),
+            Ok(config) => {
+                let errors = config.unknown_keys.clone();
+                (config, errors)
+            }
             Err(e) => {
                 tracing::warn!("config load failed, falling back to defaults: {e}");
                 (SymoraConfig::default(), vec![e.to_string()])

@@ -42,6 +42,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 # installer never reshuffles a user's existing config keys.
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 serde_repr = "0.1.20"
+# Reports the config keys deserialization ignored, so a mistyped or retired
+# setting is disclosed instead of silently doing nothing.
+serde_ignored = "0.1.14"
 toml = "1.1"
 # Format-preserving TOML edits (comments, ordering, all table forms) for the
 # MCP installer's Codex config — the canonical crate for surgical TOML editing.

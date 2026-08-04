@@ -154,6 +154,24 @@ fn discloses_degradation(payload: &[Value]) -> bool {
     payload.iter().any(walk)
 }
 
+/// 1-indexed line of a symbol's declaration, located in the source at run
+/// time.
+///
+/// A hardcoded `line:col` into a file this repository keeps editing goes
+/// stale silently: it lands on a comment, the anchor resolves to no symbol,
+/// and the comparison passes because both backends returned the same
+/// nothing. Resolving the position from the source is how the
+/// language-fixture suite keeps its anchors honest.
+fn declaration_line(path: &str, declaration: &str) -> u32 {
+    let source = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("parity anchor file {path} unreadable: {e}"));
+    source
+        .lines()
+        .position(|line| line.trim_start().starts_with(declaration))
+        .map(|index| index as u32 + 1)
+        .unwrap_or_else(|| panic!("parity anchor `{declaration}` not found in {path}"))
+}
+
 /// Poll one backend until it stops disclosing degradation, and return the
 /// payload it settled on.
 fn quiesced(
@@ -195,9 +213,13 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 #[test]
 #[ignore = "requires rust-analyzer and a daemon-capable environment"]
 fn daemon_and_direct_emit_identical_payloads() {
+    let anchor = format!(
+        "src/utils.rs:{}",
+        declaration_line("src/utils.rs", "pub fn estimate_tokens")
+    );
     let cases: &[&[&str]] = &[
         &["symbols", "src/main.rs", "--depth", "1"],
-        &["refs", "src/cli/response/mod.rs:45:12", "--limit", "5"],
+        &["refs", &anchor, "--limit", "5"],
         // Tri-state diagnostics: the `status` presence rule must not
         // depend on which side of the socket the wait ran on.
         &["diagnostics", "src/main.rs"],
@@ -208,9 +230,19 @@ fn daemon_and_direct_emit_identical_payloads() {
         let direct = quiesced("direct", args, run_cli, deadline);
         let daemon = quiesced("daemon", args, run_via_daemon, deadline);
 
+        // A payload is always non-empty — an error object is a payload — so
+        // emptiness is not what makes a case vacuous. A reference case that
+        // resolved to no symbol compares two identical nothings and proves
+        // nothing about parity.
         assert!(
             !direct.is_empty(),
             "parity case {args:?} produced no output — the comparison is vacuous",
+        );
+        assert!(
+            !direct
+                .iter()
+                .any(|payload| payload["target"]["anchor_status"] == "not_a_symbol"),
+            "parity case {args:?} anchored no symbol — the comparison is vacuous",
         );
         assert_eq!(direct, daemon, "daemon and direct diverged for {args:?}");
     }

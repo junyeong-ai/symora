@@ -183,7 +183,15 @@ impl LocationAnalysis {
 }
 
 /// Reduce a raw `find_references` result to the symbol's usages: inside the
-/// project, and never the declaration the anchor snapped to.
+/// project, never the declaration the anchor snapped to, and in source
+/// order.
+///
+/// A language server returns references in whatever order it found them, so
+/// a list capped by `--limit` would otherwise show a different five every
+/// run and a different five on either side of the daemon socket. Ordering
+/// by position makes which usages survive the cap a property of the code
+/// rather than of the answer — the same reason the call-graph walk sorts
+/// each frontier before its fan-out cap applies.
 ///
 /// `declaration` is `None` when the anchor resolved to no symbol — there is
 /// then no declaration to recognise, and dropping the anchor position anyway
@@ -193,14 +201,21 @@ fn usages_of(
     root: &Path,
     declaration: Option<&ParsedLocation>,
 ) -> Vec<Location> {
-    references
+    let mut usages: Vec<Location> = references
         .into_iter()
         .filter(|r| r.file.starts_with(root))
         .filter(|r| {
             !declaration
                 .is_some_and(|d| r.file == d.file && r.line == d.line && r.column == d.column)
         })
-        .collect()
+        .collect();
+    usages.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.line.cmp(&b.line))
+            .then(a.column.cmp(&b.column))
+    });
+    usages
 }
 
 /// Resolve a navigation anchor through the same line/column addressing

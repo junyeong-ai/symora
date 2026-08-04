@@ -24,6 +24,13 @@ pub struct SymoraConfig {
 
     #[serde(default)]
     pub test: TestConfig,
+
+    /// Keys present in the config file that no setting consumes — a
+    /// mistyped name, or one a release retired. Never applied, never
+    /// serialized; disclosed as `config_errors` so a setting that stopped
+    /// taking effect says so instead of doing nothing quietly.
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
