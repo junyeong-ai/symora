@@ -41,6 +41,12 @@ pub trait StoreService: Send + Sync {
 
     async fn index_status(&self) -> Result<IndexStats, StoreError>;
 
+    /// The languages the index answers authoritatively for. Callers route
+    /// on this rather than on how many rows a query happened to return: a
+    /// short result from a covered language is a complete answer, while any
+    /// result from an uncovered one is a lower bound no matter its size.
+    async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError>;
+
     async fn index_clear(&self) -> Result<(), StoreError>;
 
     /// Bring just-edited files' index rows in line with the bytes on disk
@@ -144,6 +150,10 @@ impl StoreService for DefaultStoreService {
 
     async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
         self.store().await?.index(options).await
+    }
+
+    async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError> {
+        self.store().await?.indexed_languages().await
     }
 
     async fn index_status(&self) -> Result<IndexStats, StoreError> {

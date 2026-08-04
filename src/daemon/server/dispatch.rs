@@ -225,6 +225,9 @@ pub(super) async fn dispatch(
         methods::INDEX_STATUS => {
             store_handlers::handle_index_status(&params, projects, lsp_config).await
         }
+        methods::INDEXED_LANGUAGES => {
+            store_handlers::handle_indexed_languages(&params, projects, lsp_config).await
+        }
         methods::INDEX_CLEAR => {
             store_handlers::handle_index_clear(&params, projects, lsp_config).await
         }

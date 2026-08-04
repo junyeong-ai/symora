@@ -146,6 +146,23 @@ pub(super) async fn handle_index_status(
     serde_json::to_value(stats).map_err(RpcError::from)
 }
 
+pub(super) async fn handle_indexed_languages(
+    params: &serde_json::Value,
+    projects: &ProjectsMap,
+    lsp_config: &Arc<LspRuntimeConfig>,
+) -> Result<serde_json::Value, RpcError> {
+    let p: ProjectParams = parse_params(params)?;
+    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    ctx.touch();
+
+    let languages = ctx
+        .store
+        .indexed_languages()
+        .await
+        .map_err(RpcError::from)?;
+    serde_json::to_value(languages).map_err(RpcError::from)
+}
+
 pub(super) async fn handle_index_clear(
     params: &serde_json::Value,
     projects: &ProjectsMap,

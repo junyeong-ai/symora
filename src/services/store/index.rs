@@ -61,6 +61,21 @@ impl BuildScope {
         }
     }
 
+    /// The languages a build under this scope extracts symbols for.
+    /// Narrower than [`extensions`](Self::extensions): a scope can name a
+    /// language the binary has no extractor for, and such a build indexes
+    /// the files' content without ever producing a symbol row for them.
+    fn languages(&self) -> Vec<Language> {
+        match self {
+            Self::All => SymbolExtractor::supported_languages().to_vec(),
+            Self::Languages(langs) => langs
+                .iter()
+                .copied()
+                .filter(|l| SymbolExtractor::is_supported(*l))
+                .collect(),
+        }
+    }
+
     fn meta_value(&self) -> String {
         match self {
             Self::All => "all".to_string(),
@@ -391,6 +406,19 @@ impl Store {
             && !filter.is_ignored(path)
     }
 
+    /// The languages this index answers authoritatively for.
+    ///
+    /// Empty until a build completes, which is the same statement the store
+    /// makes by reporting `NotInitialized` to a read: nothing here has been
+    /// covered, so nothing here can be trusted as complete.
+    pub async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError> {
+        Ok(self
+            .build_scope()
+            .await?
+            .map(|scope| scope.languages())
+            .unwrap_or_default())
+    }
+
     /// The scope of the last completed build, or `None` when no build has
     /// ever completed against this store.
     async fn build_scope(&self) -> Result<Option<BuildScope>, StoreError> {
@@ -490,6 +518,7 @@ impl Store {
     }
 
     pub async fn stats(&self) -> Result<IndexStats, StoreError> {
+        let languages = self.indexed_languages().await?;
         let db_path = Self::db_path(&self.project_root);
         let index_size_bytes = tokio::fs::metadata(&db_path)
             .await
@@ -516,6 +545,7 @@ impl Store {
                         })
                         .unwrap_or(0) as u64,
                     is_indexing,
+                    languages,
                     progress: None,
                 })
             })
