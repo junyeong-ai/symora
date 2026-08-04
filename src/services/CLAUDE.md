@@ -19,6 +19,10 @@ The build scope recorded at index time is load-bearing, not bookkeeping: `indexe
 
 The position answer adds regions the LANGUAGE excludes from a production build (`infra/ast/test_regions.rs` — Rust's `#[cfg(test)]` and `#[test]`). That bound is deliberate: a compiler fact cannot produce a false positive, whereas a framework naming convention can, and code wrongly called test code deflates every coverage and risk signal downstream. Adding a language means finding its conditional-compilation rule, not its test-framework vocabulary.
 
+## Import edges come from the parse tree
+
+`services/imports.rs` reads a file's module references through a tree-sitter query per language, and `pack` builds its graph from those. A reference is only a reference where the grammar says one is: a Go constant holding a package path, an import written inside a comment, and a doc example are all text that scanning lines would have taken for structure, and PageRank amplifies whatever structure it is handed. Adding a language is one query plus the fixture that proves what it captures — never a new line rule.
+
 ## Service abstractions: LSP and Store
 
 `LspService` and `StoreService` are the traits every command speaks to. Each has two interchangeable implementations, chosen once above the mode boundary:
