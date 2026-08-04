@@ -106,7 +106,6 @@ pub async fn execute(args: SetupArgs, app: &App) -> Result<()> {
             if !args.skip_skill {
                 let skill_args = SkillArgs {
                     git_ref: args.git_ref.clone(),
-                    no_backup: false,
                     force: false,
                 };
                 skill_outcome = Some(run_skill(skill_args, args.yes)?);

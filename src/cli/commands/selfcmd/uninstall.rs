@@ -4,7 +4,6 @@
 //! after `unlink`).
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
@@ -18,10 +17,6 @@ pub struct UninstallArgs {
     /// Keep the user-level skill at `~/.claude/skills/symora`.
     #[arg(long)]
     pub keep_skill: bool,
-
-    /// Skip the timestamped backup before removing the skill.
-    #[arg(long)]
-    pub no_backup: bool,
 
     /// Keep the global config directory (`$XDG_CONFIG_HOME/symora` or `~/.config/symora`).
     #[arg(long)]
@@ -43,8 +38,6 @@ pub struct UninstallOutcome {
 pub struct RemovalRecord {
     pub kind: RemovalKind,
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backup: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -130,12 +123,6 @@ fn remove_skill(
         return Ok(());
     }
 
-    let backup = if args.no_backup {
-        None
-    } else {
-        Some(backup_dir(&skill)?)
-    };
-
     std::fs::remove_dir_all(&skill).with_context(|| format!("removing {}", skill.display()))?;
     step(
         Step::Ok,
@@ -144,7 +131,6 @@ fn remove_skill(
     removed.push(RemovalRecord {
         kind: RemovalKind::Skill,
         path: skill.display().to_string(),
-        backup,
     });
 
     prune_empty_ancestors(&skill, removed, 2);
@@ -179,7 +165,6 @@ fn remove_simple_dir(
     removed.push(RemovalRecord {
         kind,
         path: dir.display().to_string(),
-        backup: None,
     });
     Ok(())
 }
@@ -200,7 +185,6 @@ fn remove_binary(exe: &Path, removed: &mut Vec<RemovalRecord>) {
     removed.push(RemovalRecord {
         kind: RemovalKind::Binary,
         path: exe.display().to_string(),
-        backup: None,
     });
 }
 
@@ -216,46 +200,9 @@ fn prune_empty_ancestors(start: &Path, removed: &mut Vec<RemovalRecord>, levels:
         removed.push(RemovalRecord {
             kind: RemovalKind::EmptyParent,
             path: dir.display().to_string(),
-            backup: None,
         });
         current = dir.parent().map(|p| p.to_path_buf());
     }
-}
-
-fn backup_dir(dir: &Path) -> Result<String> {
-    let stamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let parent = dir
-        .parent()
-        .ok_or_else(|| anyhow!("path has no parent: {}", dir.display()))?;
-    let basename = dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow!("non-UTF-8 name: {}", dir.display()))?;
-    let backup = parent.join(format!("{basename}.backup_{stamp}"));
-    copy_dir(dir, &backup)?;
-    let label = paths::display(&backup);
-    step(Step::Info, format!("backup → {label}"));
-    Ok(label)
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    if src.is_file() {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(src, dst)?;
-        return Ok(());
-    }
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let target = dst.join(entry.file_name());
-        copy_dir(&entry.path(), &target)?;
-    }
-    Ok(())
 }
 
 fn remove_if_empty(dir: &Path) -> bool {
