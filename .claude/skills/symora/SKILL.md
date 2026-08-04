@@ -1,6 +1,6 @@
 ---
 name: symora
-version: 0.17.0
+version: 0.18.0
 description: Symbol-centric code navigation in this repository via the `symora` CLI — rough discovery, exact inspection, file overviews, references, context, usage, and impact analysis. JSON output.
 when_to_use: User asks "where is this defined", "who calls this", "how does this function reach that one", "what would break if I change this", "show me this file's structure", or otherwise wants semantic answers instead of plain text search.
 allowed-tools: Bash(symora *)
@@ -104,6 +104,7 @@ symora diff-impact
 Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run`.
 
 - `edit replace-body` (and MCP `replace_symbol_body`) replaces the symbol's ENTIRE definition span — signature, braces, and body. Pass the complete definition as `--body`, not just the inner code.
+- Each `edit` subcommand names its source argument for what that argument is: `replace-body --body <complete definition>`, `insert-before`/`insert-after` `--code <lines>`, `replace --text <raw range replacement>`, `pattern --text <replacement for each AST match>` (with `--pattern` and `--lang`). The MCP tools carry the same names as properties (`body`, `code`).
 - The `edit` subcommands target by `<file> --symbol <path>` or by `file:line[:col]`. `<path>` matches like every `--symbol` surface — bare name, `Class/method` suffix, `*/method` wildcard, or the exact `name_path` returned by `search`/`symbols` (a method on a type reads `Type/method` consistently, including Rust `impl` blocks). Prefer `--symbol` over `file:line`: it re-resolves against the live file, so sequential edits in one file don't invalidate each other — line addressing goes stale after every edit.
 - A `file:line` target without a column addresses the symbol declared on that line (a method's declaration line edits the method, not its impl/class); a body line falls back to the enclosing symbol; several declarations on one line are an ambiguity error — pass the column.
 - For `edit`, the preview is an exact diff hunk; `rename` and `actions apply` instead report the files they would touch (`affected_files`/`files_changed` and a `changes` list), not a hunk.

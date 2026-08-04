@@ -320,7 +320,11 @@ symora diff-impact                                  # impact of the current git 
 
 # Edit & refactor (mutations preview with --dry-run)
 symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
-symora edit insert-before / insert-after / delete / replace / pattern
+symora edit insert-before <file> --symbol 'Class/method' --code "// note"
+symora edit insert-after  <file> --symbol 'Class/method' --code "// note"
+symora edit delete        <file> --symbol 'Class/method' --expect-no-references
+symora edit replace       <file>:10 --end <file>:12 --text "new lines"
+symora edit pattern       <file> --pattern '(function_item) @f' --lang rust --text "…"
 symora rename src/services/checkout.ts:48:9 settleOrder --dry-run
 symora actions list src/services/checkout.ts:48:9   # available code actions
 symora format src/services/checkout.ts              # LSP format
