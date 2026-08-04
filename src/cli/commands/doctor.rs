@@ -9,9 +9,11 @@ use std::sync::Arc;
 use futures::future::join_all;
 
 use crate::app::App;
+use crate::cli::OutputError;
 use crate::config::LspRuntimeConfig;
 use crate::infra::lsp::health::serves_workspace;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
+use crate::models::symbol::Language;
 use crate::services::store::SymbolExtractor;
 
 #[derive(Args, Debug)]
@@ -99,15 +101,30 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
         }
         Err(e) => (HashMap::new(), vec![e.to_string()]),
     };
+    // Resolved through the same parser every `--lang` uses, so one
+    // vocabulary addresses a language across the whole CLI. A substring
+    // match reached both too far and not far enough: `java` also answered
+    // for javascript, while `ts` answered for nothing.
+    let requested = match args.language.as_deref().map(str::parse::<Language>) {
+        Some(Ok(language)) => Some(language),
+        Some(Err(_)) => {
+            ctx.print_error(
+                OutputError::invalid(format!(
+                    "Unknown language: {}",
+                    args.language.unwrap_or_default()
+                ))
+                .with_hint("Run `symora doctor` with no argument to list every language id."),
+            );
+            return Ok(());
+        }
+        None => None,
+    };
+
     // Narrow before probing: a single-language report must not pay for
     // spawning every other language's server.
     let all_servers: Vec<_> = check_all_servers(servers::merged(&overrides))
         .into_iter()
-        .filter(|s| {
-            args.language
-                .as_ref()
-                .is_none_or(|filter| s.language.to_string().contains(&filter.to_lowercase()))
-        })
+        .filter(|s| requested.is_none_or(|language| s.language == language))
         .collect();
 
     // Whether a server serves is settled one way, by the handshake, for

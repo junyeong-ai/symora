@@ -101,7 +101,12 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone(), ctx.root()).await {
         Ok(a) => a,
         Err(e) => {
-            ctx.print_error(lsp_error_at(e, &loc.file, loc.line, loc.column));
+            ctx.print_error(lsp_error_at(
+                e,
+                &ctx.relative_path(&loc.file),
+                loc.line,
+                loc.column,
+            ));
             return Ok(());
         }
     };
