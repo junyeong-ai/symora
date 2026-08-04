@@ -116,6 +116,18 @@ impl ServerConfig {
         self.resolve().is_ok()
     }
 
+    /// Whether a successful version probe settles that this command can
+    /// serve, or whether the protocol handshake has to decide.
+    ///
+    /// A builtin command is the server's own published name, so a binary
+    /// answering `--version` under it is that server. A configured path
+    /// could be any executable that happens to accept the flag, and a probe
+    /// routed through `version_command` measured a different binary
+    /// entirely — neither says anything about what this path serves.
+    pub fn version_probe_is_conclusive(&self) -> bool {
+        self.source == ServerSource::Builtin && self.version_command.is_none()
+    }
+
     /// Version string for `doctor` reports.
     ///
     /// Runs the version probe (`version_command` when the stdio server
@@ -1016,13 +1028,20 @@ pub fn merged(overrides: &HashMap<String, ServerOverride>) -> HashMap<Language, 
 pub struct ServerHealth {
     pub language: Language,
     pub name: &'static str,
+    /// An executable resolves at the effective command — a fact about the
+    /// filesystem, not about what that executable does.
     pub installed: bool,
+    /// Whether the server can serve a workspace. `None` when the cheap
+    /// probe could not settle it and the protocol handshake has not run.
+    pub serves: Option<bool>,
     pub version: Option<String>,
     pub install_instruction: &'static str,
     pub tier: ServerTier,
     pub source: ServerSource,
     /// Effective spawn command from the merged table.
     pub command: String,
+    /// Effective spawn arguments from the merged table.
+    pub args: Vec<String>,
 }
 
 /// Check health of every server in the given table
@@ -1036,16 +1055,23 @@ pub fn check_all_servers(configs: HashMap<Language, ServerConfig>) -> Vec<Server
         } else {
             None
         };
+        // A version string proves the binary executes, and for a builtin
+        // command that also proves which server it is. Anything short of
+        // that leaves the question open for the handshake.
+        let serves = (installed && version.is_some() && config.version_probe_is_conclusive())
+            .then_some(true);
 
         results.push(ServerHealth {
             language,
             name: config.display_name,
             installed,
+            serves,
             version,
             install_instruction: config.install.current(),
             tier: config.tier,
             source: config.source,
             command: config.command,
+            args: config.args,
         });
     }
 

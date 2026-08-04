@@ -4,7 +4,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::LspManager;
+use super::client::LspClient;
+use crate::config::LspRuntimeConfig;
 use crate::models::symbol::Language;
+
+/// Whether the server at `command` can serve `root`, decided by the
+/// protocol's own handshake.
+///
+/// This is the only measurement that answers the question an agent asks of
+/// `doctor` — a file existing on PATH does not make a server, and a version
+/// flag can be answered by a shim that recurses, by a wrapper that never
+/// launches, or by an unrelated executable a config override points at. The
+/// handshake either returns capabilities or it does not, so nothing here
+/// has to be inferred.
+pub async fn serves_workspace(
+    language: Language,
+    command: &str,
+    args: &[String],
+    root: &std::path::Path,
+    config: Arc<LspRuntimeConfig>,
+    timeout: Duration,
+) -> bool {
+    let client = LspClient::new(language, root.to_path_buf(), config);
+    let started = tokio::time::timeout(timeout, client.start(command, args)).await;
+    let _ = client.shutdown().await;
+    matches!(started, Ok(Ok(())))
+}
 
 /// Per-language failure bookkeeping for one monitor run. `consecutive` counts
 /// unhealthy checks toward the next restart; `restarts` counts restart cycles
