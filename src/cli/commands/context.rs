@@ -157,9 +157,8 @@ async fn fetch_context(
         t
     };
 
-    // The counts cover every usage; `params.refs` caps only what the
-    // response lists, so `total` stays the true total the output contract
-    // promises rather than the size of a slice.
+    // `refs` here is a summary, not a list — nothing to cap, and `total`
+    // is the true total the output contract promises.
     let classified = analysis.classify(test_scope);
 
     let refs_summary = RefOutput {

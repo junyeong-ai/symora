@@ -84,10 +84,16 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     let (overrides, config_errors) = match app.config_service.load(false).await {
         Ok(config) => {
             let errors = config
-                .lsp
-                .server_override_errors
+                .unknown_keys
                 .iter()
-                .map(ToString::to_string)
+                .cloned()
+                .chain(
+                    config
+                        .lsp
+                        .server_override_errors
+                        .iter()
+                        .map(ToString::to_string),
+                )
                 .collect();
             (config.lsp.servers, errors)
         }

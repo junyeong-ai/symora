@@ -971,6 +971,18 @@ mod tests {
         assert!(!sym.matches_path("MyClass/doSomething[method]"));
     }
 
+    /// A leading `/` pins the whole path, so a suffix that would otherwise
+    /// match is refused.
+    #[test]
+    fn matches_path_supports_absolute_form() {
+        let mut sym = build_symbol("bar", SymbolKind::Method);
+        sym.name_path = Some("Foo/bar".to_string());
+
+        assert!(sym.matches_path("/Foo/bar"));
+        assert!(!sym.matches_path("/bar"));
+        assert!(sym.matches_path("bar"));
+    }
+
     #[test]
     fn split_qualifier_separates_a_trailing_bracketed_token() {
         assert_eq!(Symbol::split_qualifier("method"), ("method", None));

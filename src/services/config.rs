@@ -44,12 +44,12 @@ impl DefaultConfigService {
         self.root.join(".symora").join("config.toml")
     }
 
-    async fn load_raw_from_path(path: &Path) -> Result<RawSymoraConfig, ConfigError> {
+    async fn load_raw_from_path(path: &Path) -> Result<RawParse, ConfigError> {
         if !path.exists() {
-            return Ok(RawSymoraConfig::default());
+            return Ok(RawParse::default());
         }
         let content = tokio::fs::read_to_string(path).await?;
-        toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
+        parse_raw(&content, path)
     }
 
     async fn write_default_config(path: &Path) -> Result<(), ConfigError> {
@@ -80,24 +80,25 @@ pub fn load_merged_config_sync(
     root: &Path,
     global_only: bool,
 ) -> Result<SymoraConfig, ConfigError> {
-    fn load_raw_sync(path: &Path) -> Result<RawSymoraConfig, ConfigError> {
+    fn load_raw_sync(path: &Path) -> Result<RawParse, ConfigError> {
         if !path.exists() {
-            return Ok(RawSymoraConfig::default());
+            return Ok(RawParse::default());
         }
         let content = std::fs::read_to_string(path)?;
-        toml::from_str(&content).map_err(|e| ConfigError::Parse(e.to_string()))
+        parse_raw(&content, path)
     }
 
     if global_only {
         let raw = load_raw_sync(&DefaultConfigService::global_config_path())?;
-        return Ok(resolve_config(raw));
+        return Ok(resolve_config(raw.config, raw.unknown_keys));
     }
 
     let service = DefaultConfigService::new(root);
     let global = load_raw_sync(&DefaultConfigService::global_config_path())?;
     let project = load_raw_sync(&service.project_config_path())?;
-    let merged = merge_raw_config(global, project);
-    let mut config = resolve_config(merged);
+    let unknown_keys = [global.unknown_keys, project.unknown_keys].concat();
+    let merged = merge_raw_config(global.config, project.config);
+    let mut config = resolve_config(merged, unknown_keys);
     config = apply_env_overrides(config);
     Ok(config)
 }
@@ -107,13 +108,14 @@ impl ConfigService for DefaultConfigService {
     async fn load(&self, global_only: bool) -> Result<SymoraConfig, ConfigError> {
         if global_only {
             let raw = Self::load_raw_from_path(&Self::global_config_path()).await?;
-            return Ok(resolve_config(raw));
+            return Ok(resolve_config(raw.config, raw.unknown_keys));
         }
 
         let global = Self::load_raw_from_path(&Self::global_config_path()).await?;
         let project = Self::load_raw_from_path(&self.project_config_path()).await?;
-        let merged = merge_raw_config(global, project);
-        let mut config = resolve_config(merged);
+        let unknown_keys = [global.unknown_keys, project.unknown_keys].concat();
+        let merged = merge_raw_config(global.config, project.config);
+        let mut config = resolve_config(merged, unknown_keys);
         config = apply_env_overrides(config);
         Ok(config)
     }
@@ -179,7 +181,36 @@ impl ConfigService for DefaultConfigService {
 // Raw config types for TOML parsing — Option fields track explicit settings
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Default)]
+/// A parsed config file plus the keys nothing in it consumed.
+#[derive(Debug, Clone, Default)]
+struct RawParse {
+    config: RawSymoraConfig,
+    unknown_keys: Vec<String>,
+}
+
+/// Deserialize a config file, recording every key the typed shape ignored.
+///
+/// Serde drops unknown keys silently, which turns a mistyped or retired
+/// setting into one that quietly does nothing — the failure rejected
+/// `[lsp.servers]` stanzas are already reported to avoid, generalised to
+/// every section. Refusing the whole file instead would discard the
+/// settings that are correct, so the keys are collected and disclosed while
+/// the rest applies.
+fn parse_raw(content: &str, path: &Path) -> Result<RawParse, ConfigError> {
+    let mut unknown_keys = Vec::new();
+    let deserializer = toml::Deserializer::parse(content)
+        .map_err(|e| ConfigError::Parse(format!("{}: {e}", path.display())))?;
+    let config: RawSymoraConfig = serde_ignored::deserialize(deserializer, |key| {
+        unknown_keys.push(format!("{}: unknown key `{key}`", path.display()));
+    })
+    .map_err(|e| ConfigError::Parse(format!("{}: {e}", path.display())))?;
+    Ok(RawParse {
+        config,
+        unknown_keys,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
 struct RawSymoraConfig {
     #[serde(default)]
     project: crate::models::config::ProjectConfig,
@@ -318,13 +349,14 @@ fn merge_test(
 // Resolve: apply defaults to any fields that were never explicitly set
 // ---------------------------------------------------------------------------
 
-fn resolve_config(raw: RawSymoraConfig) -> SymoraConfig {
+fn resolve_config(raw: RawSymoraConfig, unknown_keys: Vec<String>) -> SymoraConfig {
     use crate::models::config::defaults;
     use crate::models::config::*;
 
     let (servers, server_override_errors) = resolve_server_overrides(raw.lsp.servers);
 
     SymoraConfig {
+        unknown_keys,
         project: raw.project,
         lsp: LspConfig {
             timeout_secs: raw.lsp.timeout_secs.unwrap_or_else(defaults::timeout_secs),
@@ -486,7 +518,7 @@ mod tests {
 
     fn resolve_str(content: &str) -> SymoraConfig {
         let raw: RawSymoraConfig = toml::from_str(content).unwrap();
-        resolve_config(raw)
+        resolve_config(raw, Vec::new())
     }
 
     #[test]
@@ -651,7 +683,7 @@ command = "/custom/rust-analyzer"
                 .unwrap();
         let project: RawSymoraConfig =
             toml::from_str("[lsp.servers.rust]\ncommand = \"/project/rust-analyzer\"\n").unwrap();
-        let resolved = resolve_config(merge_raw_config(global, project));
+        let resolved = resolve_config(merge_raw_config(global, project), Vec::new());
         let o = &resolved.lsp.servers["rust"];
         assert_eq!(o.command.as_deref(), Some("/project/rust-analyzer"));
         // Wholesale replacement: the global stanza's explicit args are gone.
