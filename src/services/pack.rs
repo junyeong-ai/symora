@@ -107,7 +107,7 @@ pub fn build_pack(
         }
     }
 
-    let graph = build_import_graph(&nodes);
+    let graph = build_import_graph(&nodes, &declared_module_prefix(root));
     let personalization = personalization_vector(&nodes, focus);
     let ranks = page_rank(&graph, &personalization, cfg);
     Ok(fit_to_budget(&nodes, &ranks, budget_tokens))
@@ -121,6 +121,9 @@ struct Node {
     rel_path: String,
     language: Language,
     module_path: Vec<String>,
+    /// Components of the directory holding this file — what a reference to
+    /// a package resolves to in languages where a package is a directory.
+    directory: Vec<String>,
     imports: Vec<String>,
     signatures: Vec<PackedSymbol>,
 }
@@ -151,6 +154,7 @@ fn collect_nodes(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| abs_path.display().to_string());
         let module_path = module_path(abs_path, root);
+        let directory = directory_path(abs_path, root);
 
         // Cache hit: same mtime + same language → replay cached artefacts.
         if let Some(cache) = cache
@@ -163,6 +167,7 @@ fn collect_nodes(
                 rel_path,
                 language,
                 module_path,
+                directory,
                 imports: cached.imports,
                 signatures: cached.signatures,
             });
@@ -194,6 +199,7 @@ fn collect_nodes(
             rel_path,
             language,
             module_path,
+            directory,
             imports,
             signatures,
         });
@@ -225,6 +231,23 @@ fn is_indexable(language: Language) -> bool {
         language,
         Language::Unknown | Language::Yaml | Language::Toml | Language::Markdown
     )
+}
+
+/// Components of the directory holding a file.
+///
+/// Derived from the file's own location rather than from its module path,
+/// which a directory module's `mod`/`index` file has already been folded
+/// into: `src/cli/mod.rs` lives in `src/cli` and answers to `src::cli`, and
+/// deriving one from the other would place it a level too high.
+fn directory_path(abs_path: &Path, root: &Path) -> Vec<String> {
+    let rel = abs_path.strip_prefix(root).unwrap_or(abs_path);
+    rel.parent()
+        .map(|dir| {
+            dir.iter()
+                .filter_map(|c| c.to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The module path a file answers to, as path components with the file
@@ -267,60 +290,204 @@ fn module_path(abs_path: &Path, root: &Path) -> Vec<String> {
 // reproducibility contract. Ascending-id iteration is the canonical order.
 type Graph = BTreeMap<usize, Vec<usize>>;
 
-fn build_import_graph(nodes: &[Node]) -> Graph {
-    let mut by_suffix: HashMap<&[String], Vec<usize>> = HashMap::new();
+fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
+    let mut by_module: HashMap<&[String], Vec<usize>> = HashMap::new();
+    let mut by_directory: HashMap<&[String], Vec<usize>> = HashMap::new();
     for node in nodes {
         for start in 0..node.module_path.len() {
-            by_suffix
+            by_module
                 .entry(&node.module_path[start..])
                 .or_default()
                 .push(node.id);
         }
+        for start in 0..=node.directory.len() {
+            by_directory
+                .entry(&node.directory[start..])
+                .or_default()
+                .push(node.id);
+        }
     }
+    let index = ProjectIndex {
+        by_module,
+        by_directory,
+        module_prefix,
+    };
 
     let mut graph: Graph = BTreeMap::new();
     for node in nodes {
         graph.entry(node.id).or_default();
         let mut seen = HashSet::new();
         for target in &node.imports {
-            let Some(dst) = resolve_import(&import_components(target), &by_suffix) else {
-                continue;
-            };
-            if dst != node.id && seen.insert(dst) {
-                graph.entry(node.id).or_default().push(dst);
+            for dst in index.resolve(&Reference::parse(target), node) {
+                if dst != node.id && seen.insert(dst) {
+                    graph.entry(node.id).or_default().push(dst);
+                }
             }
         }
     }
     graph
 }
 
-/// The node an import reference names, or `None` when it names something
-/// outside the project or nothing unambiguous.
+/// Where a reference is anchored.
 ///
-/// A reference resolves only when its components are an exact suffix of a
-/// file's module path — first read whole, then with its last component
-/// dropped, because `use a::b::Item` names a module and an item in one
-/// path. Matching a shorter suffix than that would let `std::process` land
-/// on a project file called `process`, and matching a bare final component
-/// would link every import of `symbols` to all four files carrying that
-/// name. A suffix several files share names none of them, so it yields no
-/// edge rather than one edge per candidate.
-fn resolve_import(
-    components: &[String],
-    by_suffix: &HashMap<&[String], Vec<usize>>,
-) -> Option<usize> {
-    for candidate in [components, components.split_last()?.1] {
-        if candidate.is_empty() {
-            continue;
+/// A path is only meaningful against the thing it is written relative to,
+/// and the two anchors carry different information: `../util` says "one
+/// directory up from here", which the importing file's own location
+/// resolves exactly, while `crate::cli::output` says "from the project's
+/// root". Collapsing them — dropping the leading hops and matching whatever
+/// tail is left — loses the very part that made the relative form
+/// unambiguous, and in a tree with more than one `utils` it loses the edge
+/// entirely.
+#[derive(Debug, PartialEq, Eq)]
+enum Reference {
+    /// Anchored at the importing file's directory, `up` levels above it.
+    Relative { up: usize, components: Vec<String> },
+    /// Anchored at the project root.
+    Absolute(Vec<String>),
+}
+
+impl Reference {
+    fn parse(raw: &str) -> Self {
+        let raw = raw
+            .trim()
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == '`');
+        let mut rest = raw;
+        let mut up = 0usize;
+        let mut relative = false;
+
+        // `./x` and `../x` in the quoted-path languages, `.x` and `..x` in
+        // Python, `self::x` and `super::x` in Rust: the same two ideas
+        // spelled three ways.
+        loop {
+            if let Some(tail) = rest.strip_prefix("../").or_else(|| rest.strip_prefix("..")) {
+                relative = true;
+                up += 1;
+                rest = tail;
+            } else if let Some(tail) = rest
+                .strip_prefix("./")
+                .or_else(|| rest.strip_prefix("super::"))
+            {
+                if rest.starts_with("super::") {
+                    up += 1;
+                }
+                relative = true;
+                rest = tail;
+            } else if let Some(tail) = rest.strip_prefix("self::") {
+                relative = true;
+                rest = tail;
+            } else if rest.starts_with('.') && !rest.starts_with("..") {
+                relative = true;
+                rest = &rest[1..];
+            } else {
+                break;
+            }
         }
-        if let Some(matches) = by_suffix.get(candidate) {
-            return match matches.as_slice() {
-                [only] => Some(*only),
-                _ => None,
-            };
+
+        let components = split_components(rest);
+        if relative {
+            Self::Relative { up, components }
+        } else {
+            Self::Absolute(components)
         }
     }
-    None
+}
+
+fn split_components(raw: &str) -> Vec<String> {
+    raw.split(['/', '.', ':'])
+        .filter(|part| !part.is_empty() && *part != "crate")
+        .map(str::to_string)
+        .collect()
+}
+
+/// The project's files, indexed by every suffix of their module path and of
+/// their directory, plus the module prefix its own imports carry.
+struct ProjectIndex<'a> {
+    by_module: HashMap<&'a [String], Vec<usize>>,
+    by_directory: HashMap<&'a [String], Vec<usize>>,
+    module_prefix: &'a [String],
+}
+
+impl ProjectIndex<'_> {
+    /// The nodes a reference names, empty when it names something outside
+    /// the project or nothing unambiguous.
+    fn resolve(&self, reference: &Reference, from: &Node) -> Vec<usize> {
+        match reference {
+            Reference::Relative { up, components } => {
+                let base = from.directory.len().checked_sub(*up);
+                let Some(base) = base else {
+                    return Vec::new();
+                };
+                let mut path = from.directory[..base].to_vec();
+                path.extend_from_slice(components);
+                self.at(&path, from.language)
+            }
+            Reference::Absolute(components) => {
+                // A declared module prefix is part of the reference but not
+                // part of the tree, so it is removed before matching rather
+                // than hunted for on disk.
+                let components = components
+                    .strip_prefix(self.module_prefix)
+                    .unwrap_or(components);
+                // `use a::b::Item` names a module and an item in one path;
+                // read it whole, then without the item.
+                for candidate in [components, components.split_last().map_or(&[][..], |s| s.1)] {
+                    if candidate.is_empty() {
+                        continue;
+                    }
+                    let hit = self.at(candidate, from.language);
+                    if !hit.is_empty() {
+                        return hit;
+                    }
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// The nodes at an exact project path: the file it names, or — where a
+    /// package IS a directory — every file the directory holds.
+    fn at(&self, path: &[String], language: Language) -> Vec<usize> {
+        if let Some(files) = self.by_module.get(path) {
+            return match files.as_slice() {
+                // A path several files share names none of them.
+                [only] => vec![*only],
+                _ => Vec::new(),
+            };
+        }
+        if package_is_directory(language)
+            && let Some(files) = self.by_directory.get(path)
+        {
+            return files.clone();
+        }
+        Vec::new()
+    }
+}
+
+/// Whether the language defines a package as a directory, so that a
+/// reference to one names every file in it rather than a single module
+/// file. Go's specification says so outright; the rest address a directory
+/// through a `mod`/`index` file, which `module_path` already folds in.
+fn package_is_directory(language: Language) -> bool {
+    matches!(language, Language::Go)
+}
+
+/// The module path a project's own imports are written against, when the
+/// language's build manifest declares one that does not exist on disk.
+///
+/// Go names its module in `go.mod`, and every intra-project import repeats
+/// that name in full because Go has no relative import form. Reading it is
+/// how the language itself resolves those imports; inferring it from the
+/// tree would be a guess about which leading components are real
+/// directories.
+fn declared_module_prefix(root: &Path) -> Vec<String> {
+    let Ok(go_mod) = std::fs::read_to_string(root.join("go.mod")) else {
+        return Vec::new();
+    };
+    go_mod
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("module "))
+        .map(|path| split_components(path.trim()))
+        .unwrap_or_default()
 }
 
 /// Pull import paths out of a source file using deliberately conservative,
@@ -342,7 +509,11 @@ fn extract_imports(source: &str, language: Language) -> Vec<String> {
                 } else if let Some(rest) = trimmed.strip_prefix("mod ")
                     && let Some(name) = rest.split([';', '{', ' ']).next()
                 {
-                    out.push(name.trim().to_string());
+                    // A `mod` declaration names a sibling file or a
+                    // subdirectory of the declaring one — the same anchor
+                    // `self::` spells, and the reason it must not be matched
+                    // against the whole project.
+                    out.push(format!("self::{}", name.trim()));
                 }
             }
             Language::Python => {
@@ -439,18 +610,6 @@ fn quoted_segment(s: &str) -> Option<String> {
     let rest = &s[quote + 1..];
     let end = rest.as_bytes().iter().position(|b| *b == q)?;
     Some(rest[..end].to_string())
-}
-
-/// An import reference as module-path components, with every language's
-/// separator normalised and the relative-position keywords that address the
-/// current crate rather than name part of the path dropped.
-fn import_components(raw: &str) -> Vec<String> {
-    raw.trim()
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
-        .split(['/', '.', ':'])
-        .filter(|part| !part.is_empty() && *part != "crate" && *part != "self" && *part != "super")
-        .map(str::to_string)
-        .collect()
 }
 
 // --- PageRank --------------------------------------------------------------
@@ -920,19 +1079,28 @@ mod tests {
     use super::*;
 
     fn node(id: usize, rel: &str, contents: &str) -> Node {
+        node_in(id, rel, contents, Language::Rust)
+    }
+
+    fn node_in(id: usize, rel: &str, contents: &str, language: Language) -> Node {
         let cfg = PackConfig::default();
         Node {
             id,
             rel_path: rel.to_string(),
-            language: Language::Rust,
+            language,
+            directory: directory_path(Path::new(rel), Path::new("")),
             module_path: module_path(Path::new(rel), Path::new("")),
-            imports: extract_imports(contents, Language::Rust),
-            signatures: top_signatures_from(contents, Language::Rust, &cfg),
+            imports: extract_imports(contents, language),
+            signatures: top_signatures_from(contents, language, &cfg),
         }
     }
 
     fn edges_of(nodes: &[Node], id: usize) -> Vec<String> {
-        build_import_graph(nodes)
+        edges_with(nodes, id, &[])
+    }
+
+    fn edges_with(nodes: &[Node], id: usize, prefix: &[String]) -> Vec<String> {
+        build_import_graph(nodes, prefix)
             .get(&id)
             .map(|dsts| {
                 dsts.iter()
@@ -940,6 +1108,19 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_directory_module_still_lives_in_its_own_directory() {
+        assert_eq!(
+            directory_path(Path::new("/repo/src/cli/mod.rs"), Path::new("/repo")),
+            vec!["src", "cli"]
+        );
+        assert_eq!(
+            directory_path(Path::new("/repo/src/cli/output.rs"), Path::new("/repo")),
+            vec!["src", "cli"]
+        );
+        assert!(directory_path(Path::new("/repo/main.rs"), Path::new("/repo")).is_empty());
     }
 
     #[test]
@@ -964,18 +1145,108 @@ mod tests {
         );
     }
 
+    /// A reference is parsed with the anchor it was written against, and a
+    /// relative one keeps the hop count that makes it exact.
     #[test]
-    fn import_components_normalise_every_separator_and_drop_crate_relative_keywords() {
+    fn a_reference_keeps_the_anchor_it_was_written_against() {
+        let abs = |c: &[&str]| Reference::Absolute(c.iter().map(|s| s.to_string()).collect());
+        let rel = |up, c: &[&str]| Reference::Relative {
+            up,
+            components: c.iter().map(|s| s.to_string()).collect(),
+        };
+
         assert_eq!(
-            import_components("crate::services::pack"),
-            vec!["services", "pack"]
+            Reference::parse("crate::services::pack"),
+            abs(&["services", "pack"])
         );
         assert_eq!(
-            import_components("\"./services/pack\""),
-            vec!["services", "pack"]
+            Reference::parse("github.com/acme/w/internal/store"),
+            abs(&["github", "com", "acme", "w", "internal", "store"])
         );
-        assert_eq!(import_components("foo.bar.baz"), vec!["foo", "bar", "baz"]);
-        assert_eq!(import_components("super::super::util"), vec!["util"]);
+        assert_eq!(
+            Reference::parse("\"./services/pack\""),
+            rel(0, &["services", "pack"])
+        );
+        assert_eq!(
+            Reference::parse("\"../../shared/util\""),
+            rel(2, &["shared", "util"])
+        );
+        assert_eq!(Reference::parse("super::super::util"), rel(2, &["util"]));
+        assert_eq!(Reference::parse("self::helper"), rel(0, &["helper"]));
+        assert_eq!(
+            Reference::parse("..pkg.sibling"),
+            rel(1, &["pkg", "sibling"])
+        );
+        assert_eq!(Reference::parse("."), rel(0, &[]));
+    }
+
+    /// Two files can share a trailing name and be reached by relative
+    /// references of different depth. Dropping the depth made both
+    /// references ambiguous and cost the edges entirely.
+    #[test]
+    fn relative_references_of_different_depth_reach_different_files() {
+        let nodes = vec![
+            node_in(
+                0,
+                "src/a/b/caller.ts",
+                "import { x } from \"./utils\";\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "src/a/b/utils.ts", "", Language::TypeScript),
+            node_in(2, "src/a/utils.ts", "", Language::TypeScript),
+            node_in(
+                3,
+                "src/a/b/other.ts",
+                "import { y } from \"../utils\";\n",
+                Language::TypeScript,
+            ),
+        ];
+        assert_eq!(edges_of(&nodes, 0), vec!["src/a/b/utils.ts"]);
+        assert_eq!(edges_of(&nodes, 3), vec!["src/a/utils.ts"]);
+    }
+
+    /// Go repeats its declared module path in every intra-project import,
+    /// and that prefix is not a directory anywhere in the tree. Without
+    /// reading it out of `go.mod` a Go project forms no edges at all, and
+    /// the ranking it feeds degenerates to uniform.
+    #[test]
+    fn a_go_import_resolves_through_the_module_path_go_mod_declares() {
+        let prefix: Vec<String> = ["github", "com", "acme", "widget"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let nodes = vec![
+            node_in(
+                0,
+                "cmd/server/main.go",
+                "import \"github.com/acme/widget/internal/store\"\n",
+                Language::Go,
+            ),
+            node_in(1, "internal/store/store.go", "", Language::Go),
+            node_in(2, "internal/store/query.go", "", Language::Go),
+        ];
+        // A Go package is a directory, so the reference names every file in it.
+        assert_eq!(
+            edges_with(&nodes, 0, &prefix),
+            vec!["internal/store/store.go", "internal/store/query.go"]
+        );
+        // Without the declared prefix the reference matches nothing.
+        assert!(edges_of(&nodes, 0).is_empty());
+    }
+
+    #[test]
+    fn a_go_mod_module_line_yields_the_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module github.com/acme/widget\n\ngo 1.24\n",
+        )
+        .expect("write go.mod");
+        assert_eq!(
+            declared_module_prefix(dir.path()),
+            vec!["github", "com", "acme", "widget"]
+        );
+        assert!(declared_module_prefix(Path::new("/nonexistent")).is_empty());
     }
 
     #[test]
@@ -1055,7 +1326,20 @@ mod tests {
         let imports = extract_imports(src, Language::Rust);
         assert!(imports.iter().any(|s| s.contains("services::pack")));
         assert!(imports.iter().any(|s| s.contains("cli::output")));
-        assert!(imports.iter().any(|s| s == "auth"));
+        assert!(imports.iter().any(|s| s == "self::auth"));
+    }
+
+    /// `mod x;` names the declaring file's own neighbour. Resolved against
+    /// the whole project it would land on any lone file called `x`, however
+    /// unrelated.
+    #[test]
+    fn a_mod_declaration_names_a_neighbour_not_a_namesake() {
+        let nodes = vec![
+            node(0, "src/handlers/mod.rs", "mod auth;\n"),
+            node(1, "src/handlers/auth.rs", ""),
+            node(2, "src/services/auth.rs", ""),
+        ];
+        assert_eq!(edges_of(&nodes, 0), vec!["src/handlers/auth.rs"]);
     }
 
     #[test]
@@ -1268,7 +1552,7 @@ mod tests {
     fn import_graph_links_use_to_target() {
         let a = node(0, "src/a.rs", "use crate::b;\npub fn a() {}\n");
         let b = node(1, "src/b.rs", "pub fn b() {}\n");
-        let graph = build_import_graph(&[a, b]);
+        let graph = build_import_graph(&[a, b], &[]);
         assert!(graph[&0].contains(&1));
         assert!(graph[&1].is_empty());
     }
