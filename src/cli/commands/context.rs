@@ -14,6 +14,8 @@ use crate::cli::response::{
 };
 use crate::cli::utils::{extract_signature, find_symbol_at_position};
 use crate::cli::{LocationArg, OutputError};
+
+use super::common::lsp_error_at;
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::Symbol;
 use crate::services::TestScope;
@@ -99,12 +101,7 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone(), ctx.root()).await {
         Ok(a) => a,
         Err(e) => {
-            ctx.print_error(format_analysis_transport_error(
-                &e.to_string(),
-                &loc.file,
-                loc.line,
-                loc.column,
-            ));
+            ctx.print_error(lsp_error_at(e, &loc.file, loc.line, loc.column));
             return Ok(());
         }
     };
@@ -543,31 +540,6 @@ fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> Output
 
 fn is_unsupported_lsp_feature(error: &str) -> bool {
     error.contains("does not support") || error.contains("no handler for request")
-}
-
-fn is_transport_lsp_failure(error: &str) -> bool {
-    error.contains("Broken pipe") || error.contains("timed out") || error.contains("timeout")
-}
-
-fn format_analysis_transport_error(
-    error: &str,
-    file: &Path,
-    line: u32,
-    column: u32,
-) -> OutputError {
-    if is_transport_lsp_failure(error) {
-        OutputError::lsp_unavailable("The language server did not respond cleanly").with_hint(
-            format!(
-                "Retry after `symora daemon restart`, or continue with `symora symbols {}` and `symora usage {}:{}:{}`.",
-                file.display(),
-                file.display(),
-                line,
-                column,
-            ),
-        )
-    } else {
-        OutputError::internal(error.to_string())
-    }
 }
 
 /// Name each covering test by resolving the symbol that ENCLOSES the
