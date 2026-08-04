@@ -106,19 +106,19 @@ pub async fn execute_symbol_search(
                 .collect();
             let mut failures = Vec::new();
             let mut workspace_indexing = None;
-            if !search_languages.is_empty() && candidates.len() < limit {
+            // The index is the authority for the languages a completed build
+            // covered, so a short result from one of them is a complete
+            // answer, not a reason to go asking a language server. The live
+            // fan-out runs for the languages it does not cover — where the
+            // server is the sole source, which is also why its degradation is
+            // a real lower bound here rather than warm-up noise over an
+            // answer the index already settled.
+            let covered = app.store.indexed_languages().await.unwrap_or_default();
+            let uncovered = languages_needing_live_lookup(&search_languages, &covered);
+            if !uncovered.is_empty() {
                 let lookup =
-                    collect_workspace_symbol_results(app, query, kind, limit, &search_languages)
-                        .await;
-                // This is an index-primary answer, so authoritativeness is
-                // PER-LANGUAGE: an indexed language's LSP pass is pure enrichment
-                // over the authoritative index (its warmup `timed_out` is not a
-                // lower bound and is dropped — index completeness rides on
-                // `stale`), but an unindexed language's LSP is its sole source,
-                // so only THAT degradation is disclosed. A bare query spanning an
-                // indexed and an unindexed language still surfaces the unindexed
-                // one's timeout, which a global authoritativeness flag missed.
-                workspace_indexing = lookup.unindexed_indexing;
+                    collect_workspace_symbol_results(app, query, kind, limit, &uncovered).await;
+                workspace_indexing = lookup.indexing;
                 candidates =
                     merge_symbol_results(candidates, lookup.results, query, app.test_scope());
                 failures = lookup.failures;
@@ -449,14 +449,11 @@ fn index_coverage_gaps(language: Option<&str>) -> Vec<CoverageGap> {
 struct WorkspaceSymbolLookup {
     results: Vec<SymbolResultOutput>,
     failures: Vec<(Language, LspError)>,
-    /// Degradation merged across ALL queried languages — the lower-bound marker
-    /// for an LSP-primary answer (forced/index-not-built workspace search).
+    /// Degradation merged across the queried languages. Every caller reaches
+    /// the fan-out only for languages the index does not answer, so the
+    /// server is the sole source for all of them and this is a genuine
+    /// lower-bound marker rather than warm-up noise.
     indexing: Option<crate::models::lsp::IndexingDegradation>,
-    /// Degradation merged across only the UNINDEXED languages — the lower-bound
-    /// marker for an index-primary answer, where an indexed language's LSP pass
-    /// is pure enrichment (the index covers it) but an unindexed language's LSP
-    /// is its sole source. Authoritativeness is per-language, not global.
-    unindexed_indexing: Option<crate::models::lsp::IndexingDegradation>,
 }
 
 async fn collect_workspace_symbol_results(
@@ -474,7 +471,6 @@ async fn collect_workspace_symbol_results(
             results: Vec::new(),
             failures,
             indexing: None,
-            unindexed_indexing: None,
         };
     }
     // Per-language LSP degradation, recorded as the fan-out runs. The two
@@ -582,29 +578,28 @@ async fn collect_workspace_symbol_results(
     WorkspaceSymbolLookup {
         results: outputs,
         failures,
-        // All-language degradation: the lower-bound marker for an LSP-primary
-        // answer (forced / index-not-built workspace search). First marker wins
-        // — a single IndexingDegradation variant, so order is immaterial.
+        // First marker wins — a single IndexingDegradation variant, so order
+        // is immaterial.
         indexing: lsp_degradation.iter().find_map(|(_, d)| *d),
-        // Unindexed-only: the lower-bound marker for an index-primary answer.
-        unindexed_indexing: index_primary_unindexed_degradation(&lsp_degradation),
     }
 }
 
-/// The degradation an INDEX-PRIMARY answer must disclose, from the per-language
-/// LSP degradations the workspace fan-out observed. An indexed language's LSP
-/// pass is enrichment over the authoritative index, so its degradation is NOT a
-/// lower bound and is dropped; an unindexed language's LSP is its sole source,
-/// so its degradation is disclosed. First marker wins (one degradation variant).
-/// Authoritativeness is per-language: a bare query spanning an indexed and an
-/// unindexed language still surfaces the unindexed one's timeout.
-fn index_primary_unindexed_degradation(
-    per_language: &[(Language, Option<crate::models::lsp::IndexingDegradation>)],
-) -> Option<crate::models::lsp::IndexingDegradation> {
-    per_language
+/// The languages a symbol search still has to ask a language server about:
+/// those the index does not answer authoritatively.
+///
+/// Coverage is what decides this, never how many rows the index returned. A
+/// specific name matches few symbols in any codebase, so a result count
+/// under the limit is the normal shape of a complete answer — routing on it
+/// paid for a live workspace query on every search that already had one.
+fn languages_needing_live_lookup(
+    search_languages: &[Language],
+    covered: &[Language],
+) -> Vec<Language> {
+    search_languages
         .iter()
-        .filter(|(language, _)| !SymbolExtractor::is_supported(*language))
-        .find_map(|(_, degradation)| *degradation)
+        .copied()
+        .filter(|language| !covered.contains(language))
+        .collect()
 }
 
 /// Dedup + rank the union of two result sets. Emission capping and noise
@@ -1127,36 +1122,30 @@ mod tests {
     }
 
     #[test]
-    fn index_primary_discloses_only_unindexed_language_degradation() {
-        use crate::models::lsp::IndexingDegradation::TimedOut;
-        // An indexed language's LSP pass is enrichment over the authoritative
-        // index — its timeout is not a lower bound.
-        assert_eq!(
-            index_primary_unindexed_degradation(&[(Language::Rust, Some(TimedOut))]),
-            None
+    fn live_lookup_covers_only_what_the_index_does_not() {
+        // A covered language is answered from the index alone, however few
+        // rows the query matched.
+        assert!(
+            languages_needing_live_lookup(&[Language::Rust], &[Language::Rust, Language::Go])
+                .is_empty()
         );
-        // An unindexed language's LSP is its sole source — disclose it.
+        // An uncovered one has no other source.
         assert_eq!(
-            index_primary_unindexed_degradation(&[(Language::Lua, Some(TimedOut))]),
-            Some(TimedOut)
+            languages_needing_live_lookup(&[Language::Lua], &[Language::Rust]),
+            vec![Language::Lua]
         );
-        // A bare query spanning both: the unindexed language's timeout still
-        // surfaces though the indexed one is clean — the case a single global
-        // authoritativeness flag silently dropped.
+        // A bare query spanning both narrows to the uncovered half.
         assert_eq!(
-            index_primary_unindexed_degradation(&[
-                (Language::Rust, None),
-                (Language::Lua, Some(TimedOut)),
-            ]),
-            Some(TimedOut)
+            languages_needing_live_lookup(
+                &[Language::Rust, Language::Lua, Language::Markdown],
+                &[Language::Rust]
+            ),
+            vec![Language::Lua, Language::Markdown]
         );
-        // All indexed → nothing to disclose; the index is authoritative.
+        // A build that covered nothing leaves every language to the server.
         assert_eq!(
-            index_primary_unindexed_degradation(&[
-                (Language::Rust, Some(TimedOut)),
-                (Language::Go, None),
-            ]),
-            None
+            languages_needing_live_lookup(&[Language::Rust], &[]),
+            vec![Language::Rust]
         );
     }
 

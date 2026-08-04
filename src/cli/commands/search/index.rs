@@ -16,6 +16,11 @@ struct IndexStatusOutput {
     index_size_bytes: u64,
     last_indexed: u64,
     is_indexing: bool,
+    /// The languages this index answers authoritatively for — empty until a
+    /// build completes. Row counts alone cannot tell a whole index from one
+    /// a narrowed build or a per-file refresh left partial, and a symbol
+    /// search reads as complete only for the languages listed here.
+    languages: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     progress: Option<f32>,
 }
@@ -60,6 +65,11 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
                 index_size_bytes: stats.index_size_bytes,
                 last_indexed: stats.last_indexed,
                 is_indexing: stats.is_indexing,
+                languages: stats
+                    .languages
+                    .iter()
+                    .map(|l| l.lsp_id().to_string())
+                    .collect(),
                 progress: stats.progress,
             }),
             Err(e) => ctx.print_error(OutputError::internal(e.to_string())),

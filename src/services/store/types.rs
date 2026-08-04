@@ -45,6 +45,11 @@ pub struct IndexStats {
     pub index_size_bytes: u64,
     pub last_indexed: u64,
     pub is_indexing: bool,
+    /// The languages the last completed build extracts symbols for — the
+    /// set this index answers authoritatively for. Empty until a build
+    /// completes, which is how a partial index is told from a whole one.
+    #[serde(default)]
+    pub languages: Vec<Language>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<f32>,
 }
