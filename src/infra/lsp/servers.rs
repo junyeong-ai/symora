@@ -1038,6 +1038,8 @@ pub struct ServerHealth {
     pub install_instruction: &'static str,
     pub tier: ServerTier,
     pub source: ServerSource,
+    /// How long this server's tier is allowed to take to initialize.
+    pub init_timeout: std::time::Duration,
     /// Effective spawn command from the merged table.
     pub command: String,
     /// Effective spawn arguments from the merged table.
@@ -1070,6 +1072,7 @@ pub fn check_all_servers(configs: HashMap<Language, ServerConfig>) -> Vec<Server
             install_instruction: config.install.current(),
             tier: config.tier,
             source: config.source,
+            init_timeout: config.init_timeout(),
             command: config.command,
             args: config.args,
         });

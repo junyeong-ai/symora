@@ -9,7 +9,7 @@
 **컴파일러처럼 코드베이스를 읽으세요 — 문자열이 아니라 심볼 단위로.** Symora는 "이게 어디 정의돼 있지", "누가 이걸 호출하지", "이걸 바꾸면 뭐가 깨지지" 같은 질문에 정확한 구조화 JSON으로 답하는 CLI입니다. AI 코딩 에이전트와 스크립트를 위해 설계됐습니다.
 
 [![CI](https://github.com/junyeong-ai/symora/workflows/CI/badge.svg)](https://github.com/junyeong-ai/symora/actions)
-[![Rust](https://img.shields.io/badge/rust-1.97%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/junyeong-ai/symora)
 
 [English](README.en.md) | **한국어**

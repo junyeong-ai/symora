@@ -9,7 +9,7 @@
 **Read a codebase the way a compiler does — by symbol, not by string.** Symora is a CLI that answers "where is this defined", "who calls this", and "what breaks if I change this" with precise, structured JSON, built for AI coding agents and scripts.
 
 [![CI](https://github.com/junyeong-ai/symora/workflows/CI/badge.svg)](https://github.com/junyeong-ai/symora/actions)
-[![Rust](https://img.shields.io/badge/rust-1.97%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/junyeong-ai/symora)
 
 **English** | [한국어](README.md)

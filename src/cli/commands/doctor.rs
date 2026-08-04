@@ -5,17 +5,14 @@ use clap::Args;
 use serde::Serialize;
 
 use std::sync::Arc;
-use std::time::Duration;
+
+use futures::future::join_all;
 
 use crate::app::App;
 use crate::config::LspRuntimeConfig;
 use crate::infra::lsp::health::serves_workspace;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
 use crate::services::store::SymbolExtractor;
-
-/// Long enough for the slowest supported server to answer `initialize`,
-/// which returns capabilities without waiting on workspace analysis.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -107,22 +104,34 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
         })
         .collect();
 
+    // Handshakes are independent, and a server that never answers costs its
+    // whole tier budget — run them together so one unresponsive server
+    // delays the report by its own timeout rather than by everyone else's
+    // as well.
     let runtime = Arc::new(LspRuntimeConfig::from(app.config()));
-    for server in &mut all_servers {
-        if server.serves.is_none() {
-            server.serves = Some(
-                server.installed
-                    && serves_workspace(
-                        server.language,
-                        &server.command,
-                        &server.args,
-                        app.root(),
-                        Arc::clone(&runtime),
-                        HANDSHAKE_TIMEOUT,
-                    )
-                    .await,
-            );
+    let verdicts = join_all(all_servers.iter().map(|server| {
+        let runtime = Arc::clone(&runtime);
+        async move {
+            match server.serves {
+                Some(known) => known,
+                None => {
+                    server.installed
+                        && serves_workspace(
+                            server.language,
+                            &server.command,
+                            &server.args,
+                            app.root(),
+                            runtime,
+                            server.init_timeout,
+                        )
+                        .await
+                }
+            }
         }
+    }))
+    .await;
+    for (server, serves) in all_servers.iter_mut().zip(verdicts) {
+        server.serves = Some(serves);
     }
 
     let languages: Vec<LanguageStatus> = all_servers
