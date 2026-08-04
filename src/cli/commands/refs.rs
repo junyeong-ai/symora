@@ -102,7 +102,12 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                     .with_indexing(indexing),
             });
         }
-        Err(e) => ctx.print_error(lsp_error_at(e, &err_file, err_line, err_column)),
+        Err(e) => ctx.print_error(lsp_error_at(
+            e,
+            &ctx.relative_path(&err_file),
+            err_line,
+            err_column,
+        )),
     }
 
     Ok(())

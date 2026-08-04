@@ -29,7 +29,7 @@ use crate::services::lsp::LspService;
 /// message would mean matching prose, which cannot tell the two apart and
 /// leaves every unrecognised shape as an `internal` error with no move
 /// against it.
-pub(crate) fn lsp_error_at(err: LspError, file: &Path, line: u32, column: u32) -> OutputError {
+pub(crate) fn lsp_error_at(err: LspError, file: &str, line: u32, column: u32) -> OutputError {
     let recoverable = err.is_recoverable();
     let mapped: OutputError = err.into();
     if !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
@@ -37,18 +37,14 @@ pub(crate) fn lsp_error_at(err: LspError, file: &Path, line: u32, column: u32) -
     }
     if recoverable {
         return mapped.with_hint(format!(
-            "Retry after `symora daemon restart`, or use `symora symbols {0}` and \
-             `symora usage {0}:{1}:{2}` to continue from file-level analysis.",
-            file.display(),
-            line,
-            column,
+            "Retry after `symora daemon restart`, or use `symora symbols {file}` and \
+             `symora usage {file}:{line}:{column}` to continue from file-level analysis.",
         ));
     }
     mapped.with_hint(format!(
         "The server reported why above — resolve that, then retry. \
-         Until it can start, `symora map file {0}` and `symora search content` \
+         Until it can start, `symora map file {file}` and `symora search content` \
          answer without a language server.",
-        file.display(),
     ))
 }
 
@@ -356,7 +352,7 @@ mod tests {
     /// session that never started cannot serve any of them.
     #[test]
     fn recovery_route_follows_whether_the_session_can_return() {
-        let path = std::path::Path::new("src/main.rs");
+        let path = "src/main.rs";
 
         let dropped = lsp_error_at(
             LspError::ServerTerminated {
@@ -395,7 +391,7 @@ mod tests {
                 feature: "callHierarchy".into(),
                 suggestion: "use refs".into(),
             },
-            std::path::Path::new("src/main.rs"),
+            "src/main.rs",
             1,
             1,
         );
