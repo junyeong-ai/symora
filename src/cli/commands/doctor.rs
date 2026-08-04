@@ -4,9 +4,18 @@ use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::app::App;
+use crate::config::LspRuntimeConfig;
+use crate::infra::lsp::health::serves_workspace;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
 use crate::services::store::SymbolExtractor;
+
+/// Long enough for the slowest supported server to answer `initialize`,
+/// which returns capabilities without waiting on workspace analysis.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
@@ -32,7 +41,14 @@ struct DoctorOutput {
 struct LanguageStatus {
     language: String,
     server: String,
+    /// An executable resolves at the effective command. This is a fact
+    /// about the filesystem: a version-manager shim, a wrapper that cannot
+    /// launch, and a working server all satisfy it alike.
     installed: bool,
+    /// Whether the server actually serves this workspace, verified through
+    /// the LSP handshake wherever the version probe could not settle it.
+    /// An agent branches on this, never on `installed` alone.
+    serves: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
     tier: String,
@@ -56,7 +72,9 @@ struct LanguageStatus {
 #[derive(Serialize)]
 struct Summary {
     total: usize,
-    installed: usize,
+    /// Servers verified to serve this workspace — what an agent counts on,
+    /// as distinct from how many binaries happen to be present.
+    serving: usize,
     missing: usize,
 }
 
@@ -78,19 +96,49 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
         }
         Err(e) => (HashMap::new(), vec![e.to_string()]),
     };
-    let all_servers = check_all_servers(servers::merged(&overrides));
-
-    let languages: Vec<LanguageStatus> = all_servers
+    // Narrow before probing: a single-language report must not pay for
+    // spawning every other language's server.
+    let mut all_servers: Vec<_> = check_all_servers(servers::merged(&overrides))
         .into_iter()
         .filter(|s| {
             args.language
                 .as_ref()
                 .is_none_or(|filter| s.language.to_string().contains(&filter.to_lowercase()))
         })
+        .collect();
+
+    let runtime = Arc::new(LspRuntimeConfig::from(app.config()));
+    for server in &mut all_servers {
+        if server.serves.is_none() {
+            server.serves = Some(
+                server.installed
+                    && serves_workspace(
+                        server.language,
+                        &server.command,
+                        &server.args,
+                        app.root(),
+                        Arc::clone(&runtime),
+                        HANDSHAKE_TIMEOUT,
+                    )
+                    .await,
+            );
+        }
+    }
+
+    let languages: Vec<LanguageStatus> = all_servers
+        .into_iter()
         .map(|s| {
             let overridden = s.source == ServerSource::Config;
-            let install = if s.installed {
+            let serves = s.serves.unwrap_or(false);
+            let install = if serves {
                 None
+            } else if s.installed {
+                Some(format!(
+                    "`{}` resolves but does not serve this workspace — run it directly to \
+                     see why (a version-manager shim that cannot dispatch, or a missing \
+                     toolchain the server needs), then run `symora daemon restart`",
+                    s.command
+                ))
             } else if overridden {
                 Some(format!(
                     "fix [lsp.servers.{}]: command `{}` not found or not executable — \
@@ -105,6 +153,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 language: s.language.to_string(),
                 server: s.name.to_string(),
                 installed: s.installed,
+                serves,
                 version: s.version,
                 tier: s.tier.as_str().to_string(),
                 symbol_extraction: SymbolExtractor::is_supported(s.language),
@@ -116,15 +165,15 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
         })
         .collect();
 
-    let installed_count = languages.iter().filter(|l| l.installed).count();
+    let serving = languages.iter().filter(|l| l.serves).count();
     let total = languages.len();
 
     let response = DoctorOutput {
         platform: platform_to_string(Platform::current()),
         summary: Summary {
             total,
-            installed: installed_count,
-            missing: total - installed_count,
+            serving,
+            missing: total - serving,
         },
         languages,
         config_errors,
@@ -156,6 +205,7 @@ mod tests {
             language: "ruby".to_string(),
             server: "ruby-lsp".to_string(),
             installed: false,
+            serves: false,
             version: None,
             tier: "fast".to_string(),
             symbol_extraction: SymbolExtractor::is_supported(Language::Ruby),
@@ -167,5 +217,30 @@ mod tests {
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["symbol_extraction"], false);
         assert_eq!(value["ast_search"], true);
+    }
+
+    /// A binary resolving and a server working are different facts, and the
+    /// row states both: a version-manager shim satisfies the first while
+    /// failing the second, and an agent that read only `installed` would
+    /// plan a whole session around a language it cannot navigate.
+    #[test]
+    fn a_resolved_binary_that_does_not_serve_is_reported_as_such() {
+        let status = LanguageStatus {
+            language: "rust".to_string(),
+            server: "rust-analyzer".to_string(),
+            installed: true,
+            serves: false,
+            version: None,
+            tier: "fast".to_string(),
+            symbol_extraction: true,
+            ast_search: true,
+            source: None,
+            command: None,
+            install: Some("`rust-analyzer` resolves but does not serve".to_string()),
+        };
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["installed"], true);
+        assert_eq!(value["serves"], false);
+        assert!(value["install"].is_string());
     }
 }
