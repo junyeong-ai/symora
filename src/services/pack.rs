@@ -153,7 +153,7 @@ fn collect_nodes(
             .strip_prefix(root)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| abs_path.display().to_string());
-        let module_path = module_path(abs_path, root);
+        let module_path = module_path(abs_path, root, language);
         let directory = directory_path(abs_path, root);
 
         // Cache hit: same mtime + same language → replay cached artefacts.
@@ -250,9 +250,26 @@ fn directory_path(abs_path: &Path, root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The name a file's language reserves for the file that stands for its
+/// whole directory, if the language reserves one.
+///
+/// Each name belongs to one language family and is an ordinary module
+/// elsewhere: Rust addresses `src/cli/` through `mod.rs` while `index.rs`
+/// is just a module named `index`, and the reverse holds for JavaScript.
+/// Collapsing both everywhere gave a Rust directory holding `mod.rs` and
+/// `index.rs` two files with one module path, and an ambiguous path names
+/// neither — so the pair silently cost each other every edge.
+fn directory_module_file(language: Language) -> Option<&'static str> {
+    match language {
+        Language::Rust => Some("mod"),
+        Language::JavaScript | Language::TypeScript | Language::Vue => Some("index"),
+        _ => None,
+    }
+}
+
 /// The module path a file answers to, as path components with the file
-/// extension dropped and a directory module's `mod`/`index` file collapsed
-/// onto its directory.
+/// extension dropped and a directory module's file collapsed onto its
+/// directory.
 ///
 /// This is the correspondence every language pack understands shares
 /// between a module reference and a file location — `cli::call_graph` for
@@ -260,7 +277,7 @@ fn directory_path(abs_path: &Path, root: &Path) -> Vec<String> {
 /// for `src/services/pack.ts`. Resolution matches against it exactly, so
 /// nothing here needs to know which prefixes a language's source root
 /// conventionally carries.
-fn module_path(abs_path: &Path, root: &Path) -> Vec<String> {
+fn module_path(abs_path: &Path, root: &Path, language: Language) -> Vec<String> {
     let rel = abs_path.strip_prefix(root).unwrap_or(abs_path);
     let mut components: Vec<String> = rel
         .iter()
@@ -274,7 +291,7 @@ fn module_path(abs_path: &Path, root: &Path) -> Vec<String> {
     }
     if components
         .last()
-        .is_some_and(|c| c == "mod" || c == "index")
+        .is_some_and(|c| directory_module_file(language) == Some(c.as_str()))
     {
         components.pop();
     }
@@ -1089,7 +1106,7 @@ mod tests {
             rel_path: rel.to_string(),
             language,
             directory: directory_path(Path::new(rel), Path::new("")),
-            module_path: module_path(Path::new(rel), Path::new("")),
+            module_path: module_path(Path::new(rel), Path::new(""), language),
             imports: extract_imports(contents, language),
             signatures: top_signatures_from(contents, language, &cfg),
         }
@@ -1126,20 +1143,26 @@ mod tests {
     #[test]
     fn module_path_drops_the_extension_and_collapses_directory_modules() {
         assert_eq!(
-            module_path(Path::new("/repo/src/services/pack.rs"), Path::new("/repo")),
+            module_path(
+                Path::new("/repo/src/services/pack.rs"),
+                Path::new("/repo"),
+                Language::Rust
+            ),
             vec!["src", "services", "pack"]
         );
         assert_eq!(
             module_path(
                 Path::new("/repo/src/services/lsp/mod.rs"),
-                Path::new("/repo")
+                Path::new("/repo"),
+                Language::Rust
             ),
             vec!["src", "services", "lsp"]
         );
         assert_eq!(
             module_path(
                 Path::new("/repo/web/components/index.ts"),
-                Path::new("/repo")
+                Path::new("/repo"),
+                Language::TypeScript
             ),
             vec!["web", "components"]
         );

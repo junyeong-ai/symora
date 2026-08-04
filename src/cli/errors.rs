@@ -113,10 +113,18 @@ impl From<LspError> for OutputError {
             LspError::FeatureNotSupported { suggestion, .. } => {
                 Self::new(ErrorCode::Unsupported, message).with_hint(suggestion)
             }
-            LspError::ServerStart(_) | LspError::ServerTerminated { .. } => {
-                Self::new(ErrorCode::LspUnavailable, message)
-                    .with_hint("Try: symora daemon stop && symora daemon start")
-            }
+            // A session that dropped comes back when the server is
+            // restarted. One that never established will fail the same way
+            // on the next attempt, so it carries no restart advice — the
+            // server's own message is in `message`, and a command that knows
+            // a route around it attaches that instead.
+            LspError::ServerTerminated { .. } => Self::new(ErrorCode::LspUnavailable, message)
+                .with_hint("Try: symora daemon stop && symora daemon start"),
+            LspError::ServerStart(_) => Self::new(ErrorCode::LspUnavailable, message).with_hint(
+                "The server reported why above — resolve that, then retry. \
+                 `symora search content`, `symora search ast`, and `symora map` \
+                 answer without a language server.",
+            ),
             LspError::NotConnected => {
                 Self::new(ErrorCode::LspUnavailable, message).with_hint("Try: symora daemon start")
             }

@@ -197,7 +197,13 @@ impl Symbol {
         }
     }
 
-    /// Split a path into its base and its trailing `[qualifier]`, if any.
+    /// Split a path into its base and its trailing `[kind]`, if any.
+    ///
+    /// Only a real kind counts. Brackets are ordinary name syntax in
+    /// several languages — a Scala or Kotlin `Foo[A]` is one name, not a
+    /// qualified one — and reading those as qualifiers would make a pattern
+    /// match nothing while a bare `Foo` started matching them.
+    ///
     /// An unqualified pattern matches a qualified path, so an agent that
     /// knows only the name still reaches every candidate.
     fn split_qualifier(s: &str) -> (&str, Option<&str>) {
@@ -205,7 +211,7 @@ impl Symbol {
             && let Some(qualifier) = s[bracket..]
                 .strip_prefix('[')
                 .and_then(|q| q.strip_suffix(']'))
-            && !qualifier.is_empty()
+            && qualifier.parse::<SymbolKind>().is_ok()
         {
             return (&s[..bracket], Some(qualifier));
         }
@@ -978,5 +984,19 @@ mod tests {
         );
         assert_eq!(Symbol::split_qualifier("method[]"), ("method[]", None));
         assert_eq!(Symbol::split_qualifier("method["), ("method[", None));
+    }
+
+    /// Brackets carry type parameters in several languages. Reading one as
+    /// a qualifier would leave `Foo[A]` matching nothing and make a bare
+    /// `Foo` match it, neither of which the caller asked for.
+    #[test]
+    fn a_bracketed_type_parameter_is_part_of_the_name() {
+        assert_eq!(Symbol::split_qualifier("Foo[A]"), ("Foo[A]", None));
+        assert_eq!(Symbol::split_qualifier("Map[K, V]"), ("Map[K, V]", None));
+
+        let mut generic = build_symbol("Foo[A]", SymbolKind::Class);
+        generic.name_path = Some("Foo[A]".to_string());
+        assert!(generic.matches_path("Foo[A]"));
+        assert!(!generic.matches_path("Foo"));
     }
 }

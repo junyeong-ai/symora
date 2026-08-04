@@ -95,7 +95,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     };
     // Narrow before probing: a single-language report must not pay for
     // spawning every other language's server.
-    let mut all_servers: Vec<_> = check_all_servers(servers::merged(&overrides))
+    let all_servers: Vec<_> = check_all_servers(servers::merged(&overrides))
         .into_iter()
         .filter(|s| {
             args.language
@@ -104,41 +104,38 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
         })
         .collect();
 
+    // Whether a server serves is settled one way, by the handshake, for
+    // every server alike. A version flag is not a substitute: several
+    // builtin entries spawn a general-purpose runtime that loads the server
+    // from a separately-installed package, and the runtime answers
+    // `--version` whether or not that package is there.
+    //
     // Handshakes are independent, and a server that never answers costs its
     // whole tier budget — run them together so one unresponsive server
-    // delays the report by its own timeout rather than by everyone else's
-    // as well.
+    // delays the report by its own timeout rather than by everyone else's.
     let runtime = Arc::new(LspRuntimeConfig::from(app.config()));
-    let verdicts = join_all(all_servers.iter().map(|server| {
+    let serving = join_all(all_servers.iter().map(|server| {
         let runtime = Arc::clone(&runtime);
         async move {
-            match server.serves {
-                Some(known) => known,
-                None => {
-                    server.installed
-                        && serves_workspace(
-                            server.language,
-                            &server.command,
-                            &server.args,
-                            app.root(),
-                            runtime,
-                            server.init_timeout,
-                        )
-                        .await
-                }
-            }
+            server.installed
+                && serves_workspace(
+                    server.language,
+                    &server.command,
+                    &server.args,
+                    app.root(),
+                    runtime,
+                    server.init_timeout,
+                )
+                .await
         }
     }))
     .await;
-    for (server, serves) in all_servers.iter_mut().zip(verdicts) {
-        server.serves = Some(serves);
-    }
 
     let languages: Vec<LanguageStatus> = all_servers
         .into_iter()
-        .map(|s| {
+        .zip(serving)
+        .map(|(s, serves)| {
             let overridden = s.source == ServerSource::Config;
-            let serves = s.serves.unwrap_or(false);
             let install = if serves {
                 None
             } else if s.installed {
