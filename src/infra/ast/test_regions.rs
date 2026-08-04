@@ -68,9 +68,11 @@ fn collect_rust_regions(node: Node, source: &[u8], out: &mut Vec<RangeInclusive<
 /// The span an attribute makes test-only, if it does.
 ///
 /// An outer attribute is a sibling preceding the item it decorates, so the
-/// span runs from the attribute through the end of the first following
-/// sibling that is not itself an attribute (attributes stack). An inner
-/// attribute (`#![cfg(test)]`) applies to the item that encloses it.
+/// span runs from the attribute through the end of the item it lands on.
+/// Reaching that item means passing whatever may sit between the two:
+/// further attributes, since they stack, and comments, which the grammar
+/// admits anywhere as extras. An inner attribute (`#![cfg(test)]`) applies
+/// to the item that encloses it instead.
 fn rust_region_at(node: Node, source: &[u8]) -> Option<RangeInclusive<u32>> {
     let kind = node.kind();
     if kind != "attribute_item" && kind != "inner_attribute_item" {
@@ -85,7 +87,7 @@ fn rust_region_at(node: Node, source: &[u8]) -> Option<RangeInclusive<u32>> {
         node.parent().unwrap_or(node).end_position().row as u32 + 1
     } else {
         let mut sibling = node.next_named_sibling();
-        while sibling.is_some_and(|s| s.kind() == "attribute_item") {
+        while sibling.is_some_and(|s| s.kind() == "attribute_item" || s.is_extra()) {
             sibling = sibling.and_then(|s| s.next_named_sibling());
         }
         sibling.unwrap_or(node).end_position().row as u32 + 1
@@ -236,6 +238,27 @@ mod tests {
         assert_eq!(regions(src), vec![(3, 6)]);
         assert!(!covers(src, 1));
         assert!(covers(src, 5));
+    }
+
+    /// Anything the grammar admits between an attribute and its item —
+    /// further attributes, comments, doc comments — is passed over on the
+    /// way to the item, or the region would end at whatever sat in between
+    /// and leave the tests it guards counted as production code.
+    #[test]
+    fn the_region_reaches_its_item_past_whatever_sits_between() {
+        let line = "#[cfg(test)]\n// a note\nmod tests {\n    fn helper() {}\n}\n";
+        assert_eq!(regions(line), vec![(1, 5)]);
+        assert!(covers(line, 4));
+
+        let doc = "#[cfg(test)]\n/// a note\nmod tests {\n    fn helper() {}\n}\n";
+        assert!(covers(doc, 4));
+
+        let block = "#[cfg(test)]\n/* a\n   note */\nmod tests {\n    fn helper() {}\n}\n";
+        assert!(covers(block, 5));
+
+        let mixed =
+            "#[cfg(test)]\n// a note\n#[allow(dead_code)]\nmod tests {\n    fn helper() {}\n}\n";
+        assert!(covers(mixed, 5));
     }
 
     #[test]

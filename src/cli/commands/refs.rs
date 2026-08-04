@@ -109,14 +109,15 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
 }
 
 /// Gated follow-up commands for a reference list, in fixed priority order:
-/// a single reference is the declaration itself, so `usage` answers what
-/// the list couldn't; a truncated multi-file spread is summarized whole by
-/// one `impact` call (cheaper than re-paying the reference query with a
-/// raised limit); a multi-reference set concentrated in one file — whether
-/// complete or truncated — reads best through `context --all` there. The
-/// truncation gate requires the spread (`unique_files > 1`) so a
-/// single-file truncation steers to `context`, never bouncing between
-/// `refs` and `impact`.
+/// no usages at all is what `usage` can still answer, since it searches by
+/// name across the workspace rather than from one resolved position; a
+/// truncated multi-file spread is summarized whole by one `impact` call
+/// (cheaper than re-paying the reference query with a raised limit); a
+/// multi-reference set concentrated in one file — whether complete or
+/// truncated — reads best through `context --all` there. The truncation
+/// gate requires the spread (`unique_files > 1`) so a single-file
+/// truncation steers to `context`, never bouncing between `refs` and
+/// `impact`.
 fn refs_next_commands(
     items: &[LocationOutput],
     total: usize,
@@ -130,7 +131,7 @@ fn refs_next_commands(
         .len();
 
     let mut commands = Vec::new();
-    if total == 1 {
+    if total == 0 {
         commands.push(format!("symora usage {anchor}"));
     }
     if total > limit && unique_files > 1 {
@@ -158,12 +159,19 @@ mod tests {
     }
 
     #[test]
-    fn declaration_only_steers_to_usage() {
-        let items = vec![item("src/main.rs", 10)];
+    fn no_usages_steers_to_usage() {
         assert_eq!(
-            refs_next_commands(&items, 1, 20, "src/main.rs:10:5"),
+            refs_next_commands(&[], 0, 20, "src/main.rs:10:5"),
             vec!["symora usage src/main.rs:10:5"]
         );
+    }
+
+    /// One genuine usage is an answer, not a dead end — the list already
+    /// holds what a broader search would find.
+    #[test]
+    fn a_single_usage_emits_nothing() {
+        let items = vec![item("src/main.rs", 10)];
+        assert!(refs_next_commands(&items, 1, 20, "src/main.rs:10:5").is_empty());
     }
 
     #[test]
@@ -205,10 +213,5 @@ mod tests {
             item("src/a.rs", 3),
         ];
         assert!(refs_next_commands(&items, 3, 20, "src/main.rs:10:5").is_empty());
-    }
-
-    #[test]
-    fn empty_result_emits_nothing() {
-        assert!(refs_next_commands(&[], 0, 20, "src/main.rs:10:5").is_empty());
     }
 }

@@ -326,7 +326,7 @@ symora actions list src/services/checkout.ts:48:9   # 가능한 코드 액션
 symora format src/services/checkout.ts              # LSP 포맷
 
 # 상태 & 진단
-symora doctor                # language server: 설치됨 / 누락 + 설치 명령
+symora doctor                # language server: 실제 동작 여부(serves) / 누락 + 설치 명령
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 symora status                # 프로젝트 + daemon 상태
 ```
@@ -358,7 +358,7 @@ Symora는 각 프로젝트의 `.symora/store.db`에 지속성 SQLite 인덱스�
 ```bash
 symora search index build               # 증분: 변경된 파일만, 삭제된 파일 정리
 symora search index build --force --lang rust
-symora search index status              # symbol_count, file_count, last_indexed
+symora search index status              # languages(커버 언어), symbol_count, file_count, last_indexed
 symora search index clear
 ```
 
@@ -500,8 +500,8 @@ symora daemon start | stop | restart | status
 
 | 증상 | 해결 |
 | --- | --- |
-| `search …`가 `count: 0` | `symora search index status`; `symbol_count: 0`이면 `symora search index build`. |
-| `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart`. |
+| `search …`가 `count: 0` | `symora search index status`; `languages`가 비었으면 빌드된 적이 없다는 뜻 — `symora search index build`. 검색한 언어가 목록에 없으면 그 답은 인덱스가 아니라 language server에서 온 것입니다. |
+| `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. |
 | `indexing: "timed_out"` | language server가 아직 워밍업 중 — count는 하한. 따뜻해진 뒤 재시도. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
 | 편집 후 결과가 stale | `symora search index build`(증분), 또는 `symora daemon restart`. |

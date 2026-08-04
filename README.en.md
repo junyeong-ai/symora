@@ -326,7 +326,7 @@ symora actions list src/services/checkout.ts:48:9   # available code actions
 symora format src/services/checkout.ts              # LSP format
 
 # Health & diagnostics
-symora doctor                # language servers: installed / missing + install commands
+symora doctor                # language servers: verified serving / missing + install commands
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 symora status                # project + daemon state
 ```
@@ -358,7 +358,7 @@ Symora keeps a persistent SQLite index at `.symora/store.db` in each project.
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted
 symora search index build --force --lang rust
-symora search index status              # symbol_count, file_count, last_indexed
+symora search index status              # languages covered, symbol_count, file_count, last_indexed
 symora search index clear
 ```
 
@@ -500,8 +500,8 @@ Run `symora <command> --help` for flags and the full output shape of any command
 
 | Symptom | Fix |
 | --- | --- |
-| `count: 0` from `search …` | `symora search index status`; if `symbol_count: 0`, run `symora search index build`. |
-| `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. |
+| `count: 0` from `search …` | `symora search index status`; an empty `languages` means no build has completed — run `symora search index build`. A language absent from it was answered by a language server, not the index. |
+| `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. |
 | `indexing: "timed_out"` | The language server is still warming up — the count is a lower bound. Retry once it's warm. |
 | `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
 | Stale results after edits | `symora search index build` (incremental), or `symora daemon restart`. |
