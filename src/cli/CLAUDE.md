@@ -16,6 +16,12 @@ Shared discovery and steering heuristics are centralized in `src/cli/symbol_disc
 
 `Symbol::compute_paths_for_all` (in `src/models/symbol/`) is the single source of truth for path strings like `Class/method`. Path matching (exact, `/`-anchored suffix, bare last-component, and `*` wildcard) is what makes `--symbol` flows reliable — keep its semantics stable.
 
+## One definition of a symbol's references
+
+`LocationAnalysis` owns what "the references of a symbol" means: project-local, and never the declaration the anchor snapped to. `refs`, `impact`, and `context` project from that one set, so the count they publish under the same name is the same number. Don't re-filter a raw `find_references` result in a command, and don't add a parameter that lets a call site choose a different meaning for a published field — that is how the three surfaces drifted apart in the first place.
+
+`RefsClassification` then decides what each usage counts as, per POSITION (`services::test_scope`), so a usage inside a `#[cfg(test)]` region of a production file is coverage. File-level classification stays correct for file-shaped facts — `impact`'s per-file rows, `map`'s counts, search ranking.
+
 ## One call-graph traversal
 
 Depth-bounded call-graph walks share one core, `src/cli/call_graph.rs` (`walk` over a `Direction` with a `WalkConfig`): `impact`/`blast_radius` walk `Incoming`, `callees --depth`/`--to` walk `Outgoing`. The core owns frontier ordering (sorted → deterministic), the visited set, the depth/fan-out caps, and the lower-bound markers (`max_depth_reached`, truncation). Don't hand-roll a second BFS in a command — extend the core and surface its markers, so a swallowed hop never reads as a genuine empty result.

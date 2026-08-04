@@ -11,6 +11,14 @@ The SQLite index at `.symora/store.db` is product reliability, not a cache. Rule
 - Never clear the index during normal daemon idle or shutdown. The index is what makes warm starts fast.
 - Two rebuildable caches sit beside the store: `pack-cache.db` (`services/pack_cache.rs`) and `embeddings.db` (`services/embedding_cache.rs` — semantic-search vectors, bound to the active model id + dimension and reset on mismatch). Both rebuild from source, so a failure to *open* one degrades gracefully rather than failing the command: the embedding path logs at `warn!` and embeds in memory; the pack path treats it as a miss. Once open, the embedding cache surfaces operational errors (they propagate to the command), whereas the pack cache stays best-effort — a read/decode failure is a miss and a write/prune failure is logged at `debug!` and ignored.
 
+The build scope recorded at index time is load-bearing, not bookkeeping: `indexed_languages` derives from it, and symbol search routes on that set — a covered language is answered from the index alone, an uncovered one is the only reason to pay for a live workspace query. Widening what a build claims to cover silently widens what search treats as authoritative.
+
+## Test-versus-production classification
+
+`services/test_scope.rs` answers two different questions and they must not be conflated. `is_test_file` is a path question, for ranking and whole-file summaries. `TestClassifier::is_test_code` is a position question, for anything that counts a reference as coverage rather than as a production dependency.
+
+The position answer adds regions the LANGUAGE excludes from a production build (`infra/ast/test_regions.rs` — Rust's `#[cfg(test)]` and `#[test]`). That bound is deliberate: a compiler fact cannot produce a false positive, whereas a framework naming convention can, and code wrongly called test code deflates every coverage and risk signal downstream. Adding a language means finding its conditional-compilation rule, not its test-framework vocabulary.
+
 ## Service abstractions: LSP and Store
 
 `LspService` and `StoreService` are the traits every command speaks to. Each has two interchangeable implementations, chosen once above the mode boundary:
