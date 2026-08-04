@@ -120,7 +120,7 @@ struct Node {
     id: usize,
     rel_path: String,
     language: Language,
-    aliases: Vec<String>,
+    module_path: Vec<String>,
     imports: Vec<String>,
     signatures: Vec<PackedSymbol>,
 }
@@ -150,7 +150,7 @@ fn collect_nodes(
             .strip_prefix(root)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| abs_path.display().to_string());
-        let aliases = derive_aliases(abs_path, root);
+        let module_path = module_path(abs_path, root);
 
         // Cache hit: same mtime + same language → replay cached artefacts.
         if let Some(cache) = cache
@@ -162,7 +162,7 @@ fn collect_nodes(
                 id: nodes.len(),
                 rel_path,
                 language,
-                aliases,
+                module_path,
                 imports: cached.imports,
                 signatures: cached.signatures,
             });
@@ -181,7 +181,6 @@ fn collect_nodes(
             let entry = CachedEntry {
                 mtime,
                 language,
-                aliases: aliases.clone(),
                 imports: imports.clone(),
                 signatures: signatures.clone(),
             };
@@ -194,7 +193,7 @@ fn collect_nodes(
             id: nodes.len(),
             rel_path,
             language,
-            aliases,
+            module_path,
             imports,
             signatures,
         });
@@ -228,46 +227,36 @@ fn is_indexable(language: Language) -> bool {
     )
 }
 
-/// Module aliases worth matching against import targets. Keep them generous
-/// — false positives become low-weight edges, not catastrophic ones.
-fn derive_aliases(abs_path: &Path, root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let stem = abs_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    if !stem.is_empty() && stem != "mod" && stem != "index" {
-        out.push(stem.to_string());
-    }
-
+/// The module path a file answers to, as path components with the file
+/// extension dropped and a directory module's `mod`/`index` file collapsed
+/// onto its directory.
+///
+/// This is the correspondence every language pack understands shares
+/// between a module reference and a file location — `cli::call_graph` for
+/// `src/cli/call_graph.rs`, `foo.bar` for `foo/bar.py`, `./services/pack`
+/// for `src/services/pack.ts`. Resolution matches against it exactly, so
+/// nothing here needs to know which prefixes a language's source root
+/// conventionally carries.
+fn module_path(abs_path: &Path, root: &Path) -> Vec<String> {
     let rel = abs_path.strip_prefix(root).unwrap_or(abs_path);
-    let mut path_components: Vec<String> = rel
+    let mut components: Vec<String> = rel
         .iter()
-        .filter_map(|c| c.to_str().map(|s| s.to_string()))
+        .filter_map(|c| c.to_str().map(str::to_string))
         .collect();
 
-    if let Some(last) = path_components.last_mut()
-        && let Some((stem, _ext)) = last.rsplit_once('.')
+    if let Some(last) = components.last_mut()
+        && let Some((stem, _extension)) = last.rsplit_once('.')
     {
         *last = stem.to_string();
     }
-
-    if path_components.len() >= 2 {
-        let joined = path_components.join("::");
-        if !out.contains(&joined) {
-            out.push(joined);
-        }
-        if path_components.last().is_some_and(|p| p == "mod") {
-            // Rust: `src/services/lsp/mod.rs` is referenced as `services::lsp`
-            let trimmed = &path_components[..path_components.len() - 1];
-            let joined = trimmed.join("::");
-            if !out.contains(&joined) {
-                out.push(joined);
-            }
-        }
+    if components
+        .last()
+        .is_some_and(|c| c == "mod" || c == "index")
+    {
+        components.pop();
     }
 
-    out
+    components
 }
 
 // --- graph -----------------------------------------------------------------
@@ -279,10 +268,13 @@ fn derive_aliases(abs_path: &Path, root: &Path) -> Vec<String> {
 type Graph = BTreeMap<usize, Vec<usize>>;
 
 fn build_import_graph(nodes: &[Node]) -> Graph {
-    let mut alias_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut by_suffix: HashMap<&[String], Vec<usize>> = HashMap::new();
     for node in nodes {
-        for alias in &node.aliases {
-            alias_index.entry(alias.as_str()).or_default().push(node.id);
+        for start in 0..node.module_path.len() {
+            by_suffix
+                .entry(&node.module_path[start..])
+                .or_default()
+                .push(node.id);
         }
     }
 
@@ -291,24 +283,50 @@ fn build_import_graph(nodes: &[Node]) -> Graph {
         graph.entry(node.id).or_default();
         let mut seen = HashSet::new();
         for target in &node.imports {
-            for token in tokenize_import(target) {
-                if let Some(matches) = alias_index.get(token.as_str()) {
-                    for &dst in matches {
-                        if dst != node.id && seen.insert(dst) {
-                            graph.entry(node.id).or_default().push(dst);
-                        }
-                    }
-                }
+            let Some(dst) = resolve_import(&import_components(target), &by_suffix) else {
+                continue;
+            };
+            if dst != node.id && seen.insert(dst) {
+                graph.entry(node.id).or_default().push(dst);
             }
         }
     }
     graph
 }
 
+/// The node an import reference names, or `None` when it names something
+/// outside the project or nothing unambiguous.
+///
+/// A reference resolves only when its components are an exact suffix of a
+/// file's module path — first read whole, then with its last component
+/// dropped, because `use a::b::Item` names a module and an item in one
+/// path. Matching a shorter suffix than that would let `std::process` land
+/// on a project file called `process`, and matching a bare final component
+/// would link every import of `symbols` to all four files carrying that
+/// name. A suffix several files share names none of them, so it yields no
+/// edge rather than one edge per candidate.
+fn resolve_import(
+    components: &[String],
+    by_suffix: &HashMap<&[String], Vec<usize>>,
+) -> Option<usize> {
+    for candidate in [components, components.split_last()?.1] {
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(matches) = by_suffix.get(candidate) {
+            return match matches.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// Pull import paths out of a source file using deliberately conservative,
-/// deterministic textual rules. False negatives are OK (a missed edge just
-/// lowers a PageRank score); false positives across project boundaries
-/// don't matter because we only look up against this project's alias index.
+/// deterministic textual rules. A missed reference only costs an edge, and
+/// a reference that names something outside the project is discarded by
+/// resolution rather than needing to be recognised here.
 fn extract_imports(source: &str, language: Language) -> Vec<String> {
     let mut out = Vec::new();
     for line in source.lines() {
@@ -423,26 +441,16 @@ fn quoted_segment(s: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Split an import path text into the module identifiers worth matching.
-fn tokenize_import(raw: &str) -> Vec<String> {
-    let cleaned = raw
-        .trim()
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`');
-    let normalized = cleaned.replace(['/', '.'], "::").replace("::::", "::");
-    let parts: Vec<&str> = normalized
-        .split("::")
-        .filter(|s| !s.is_empty() && *s != "crate" && *s != "self" && *s != "super" && *s != ".")
-        .collect();
-
-    let mut out = Vec::new();
-    if let Some(last) = parts.last() {
-        out.push((*last).to_string());
-    }
-    if parts.len() >= 2 {
-        out.push(parts.join("::"));
-        out.push(parts[..parts.len() - 1].join("::"));
-    }
-    out
+/// An import reference as module-path components, with every language's
+/// separator normalised and the relative-position keywords that address the
+/// current crate rather than name part of the path dropped.
+fn import_components(raw: &str) -> Vec<String> {
+    raw.trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
+        .split(['/', '.', ':'])
+        .filter(|part| !part.is_empty() && *part != "crate" && *part != "self" && *part != "super")
+        .map(str::to_string)
+        .collect()
 }
 
 // --- PageRank --------------------------------------------------------------
@@ -456,12 +464,7 @@ fn personalization_vector(nodes: &[Node], focus: Option<&str>) -> BTreeMap<usize
         let focus_lower = focus_str.to_lowercase();
         let mut focused: Vec<usize> = nodes
             .iter()
-            .filter(|n| {
-                n.rel_path.to_lowercase().contains(&focus_lower)
-                    || n.aliases
-                        .iter()
-                        .any(|a| a.to_lowercase().contains(&focus_lower))
-            })
+            .filter(|n| n.rel_path.to_lowercase().contains(&focus_lower))
             .map(|n| n.id)
             .collect();
         if focused.is_empty() {
@@ -916,55 +919,134 @@ fn estimate_tokens_for_file(rel_path: &str, symbols: &[PackedSymbol]) -> usize {
 mod tests {
     use super::*;
 
-    fn node(id: usize, rel: &str, aliases: &[&str], contents: &str) -> Node {
+    fn node(id: usize, rel: &str, contents: &str) -> Node {
         let cfg = PackConfig::default();
         Node {
             id,
             rel_path: rel.to_string(),
             language: Language::Rust,
-            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            module_path: module_path(Path::new(rel), Path::new("")),
             imports: extract_imports(contents, Language::Rust),
             signatures: top_signatures_from(contents, Language::Rust, &cfg),
         }
     }
 
-    #[test]
-    fn aliases_for_rust_module() {
-        let aliases = derive_aliases(Path::new("/repo/src/services/pack.rs"), Path::new("/repo"));
-        assert!(aliases.contains(&"pack".to_string()));
-        assert!(aliases.contains(&"src::services::pack".to_string()));
+    fn edges_of(nodes: &[Node], id: usize) -> Vec<String> {
+        build_import_graph(nodes)
+            .get(&id)
+            .map(|dsts| {
+                dsts.iter()
+                    .map(|d| nodes[*d].rel_path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     #[test]
-    fn aliases_for_rust_mod_file() {
-        let aliases = derive_aliases(
-            Path::new("/repo/src/services/lsp/mod.rs"),
-            Path::new("/repo"),
+    fn module_path_drops_the_extension_and_collapses_directory_modules() {
+        assert_eq!(
+            module_path(Path::new("/repo/src/services/pack.rs"), Path::new("/repo")),
+            vec!["src", "services", "pack"]
         );
-        assert!(aliases.contains(&"src::services::lsp".to_string()));
-        assert!(!aliases.iter().any(|a| a == "mod"));
+        assert_eq!(
+            module_path(
+                Path::new("/repo/src/services/lsp/mod.rs"),
+                Path::new("/repo")
+            ),
+            vec!["src", "services", "lsp"]
+        );
+        assert_eq!(
+            module_path(
+                Path::new("/repo/web/components/index.ts"),
+                Path::new("/repo")
+            ),
+            vec!["web", "components"]
+        );
     }
 
     #[test]
-    fn tokenize_rust_use_path() {
-        let toks = tokenize_import("crate::services::pack");
-        assert!(toks.contains(&"pack".to_string()));
-        assert!(toks.contains(&"services::pack".to_string()));
-        assert!(!toks.contains(&"crate".to_string()));
+    fn import_components_normalise_every_separator_and_drop_crate_relative_keywords() {
+        assert_eq!(
+            import_components("crate::services::pack"),
+            vec!["services", "pack"]
+        );
+        assert_eq!(
+            import_components("\"./services/pack\""),
+            vec!["services", "pack"]
+        );
+        assert_eq!(import_components("foo.bar.baz"), vec!["foo", "bar", "baz"]);
+        assert_eq!(import_components("super::super::util"), vec!["util"]);
     }
 
     #[test]
-    fn tokenize_typescript_string_path() {
-        let toks = tokenize_import("\"./services/pack\"");
-        assert!(toks.contains(&"pack".to_string()));
-        assert!(toks.contains(&"services::pack".to_string()));
+    fn a_reference_resolves_to_the_file_whose_module_path_it_ends() {
+        let nodes = vec![
+            node(0, "src/cli/output.rs", "use crate::services::pack;\n"),
+            node(1, "src/services/pack.rs", ""),
+        ];
+        assert_eq!(edges_of(&nodes, 0), vec!["src/services/pack.rs"]);
     }
 
     #[test]
-    fn tokenize_python_dotted_module() {
-        let toks = tokenize_import("foo.bar.baz");
-        assert!(toks.contains(&"baz".to_string()));
-        assert!(toks.contains(&"foo::bar::baz".to_string()));
+    fn a_reference_that_names_an_item_resolves_to_its_module() {
+        let nodes = vec![
+            node(
+                0,
+                "src/cli/output.rs",
+                "use crate::services::pack::PackConfig;\n",
+            ),
+            node(1, "src/services/pack.rs", ""),
+        ];
+        assert_eq!(edges_of(&nodes, 0), vec!["src/services/pack.rs"]);
+    }
+
+    /// The failure a bare-name index cannot avoid: an external crate whose
+    /// final segment happens to match a project file's name. `std::process`
+    /// names nothing in this project, so it must contribute no edge.
+    #[test]
+    fn an_external_reference_never_lands_on_a_same_named_project_file() {
+        let nodes = vec![
+            node(0, "src/cli/output.rs", "use std::process::Command;\n"),
+            node(1, "src/services/dist/process.rs", ""),
+        ];
+        assert!(edges_of(&nodes, 0).is_empty());
+    }
+
+    /// Four files can share a basename; a reference short enough to fit all
+    /// of them identifies none, and inventing an edge to each would hand
+    /// every one of them the same borrowed rank.
+    #[test]
+    fn an_ambiguous_reference_yields_no_edge() {
+        let nodes = vec![
+            node(0, "src/cli/output.rs", "use symbols;\n"),
+            node(1, "src/services/store/symbols.rs", ""),
+            node(2, "src/services/lsp/symbols.rs", ""),
+        ];
+        assert!(edges_of(&nodes, 0).is_empty());
+
+        let qualified = vec![
+            node(
+                0,
+                "src/cli/output.rs",
+                "use crate::services::store::symbols;\n",
+            ),
+            node(1, "src/services/store/symbols.rs", ""),
+            node(2, "src/services/lsp/symbols.rs", ""),
+        ];
+        assert_eq!(
+            edges_of(&qualified, 0),
+            vec!["src/services/store/symbols.rs"]
+        );
+    }
+
+    /// A directory module is addressed by its directory, not by `mod`.
+    #[test]
+    fn a_directory_module_resolves_through_its_directory_name() {
+        let nodes = vec![
+            node(0, "src/app.rs", "use crate::services::lsp::LspService;\n"),
+            node(1, "src/services/lsp/mod.rs", ""),
+        ];
+        assert_eq!(edges_of(&nodes, 0), vec!["src/services/lsp/mod.rs"]);
     }
 
     #[test]
@@ -1112,9 +1194,9 @@ mod tests {
     #[test]
     fn personalization_biases_toward_focus() {
         let nodes = vec![
-            node(0, "src/auth.rs", &["auth"], ""),
-            node(1, "src/render.rs", &["render"], ""),
-            node(2, "src/util.rs", &["util"], ""),
+            node(0, "src/auth.rs", ""),
+            node(1, "src/render.rs", ""),
+            node(2, "src/util.rs", ""),
         ];
         let pers = personalization_vector(&nodes, Some("auth"));
         assert!(pers[&0] > pers[&1]);
@@ -1123,20 +1205,14 @@ mod tests {
 
     #[test]
     fn personalization_uniform_when_focus_missing() {
-        let nodes = vec![
-            node(0, "src/auth.rs", &["auth"], ""),
-            node(1, "src/render.rs", &["render"], ""),
-        ];
+        let nodes = vec![node(0, "src/auth.rs", ""), node(1, "src/render.rs", "")];
         let pers = personalization_vector(&nodes, None);
         assert!((pers[&0] - pers[&1]).abs() < 1e-9);
     }
 
     #[test]
     fn personalization_falls_back_to_uniform_on_no_match() {
-        let nodes = vec![
-            node(0, "src/auth.rs", &["auth"], ""),
-            node(1, "src/render.rs", &["render"], ""),
-        ];
+        let nodes = vec![node(0, "src/auth.rs", ""), node(1, "src/render.rs", "")];
         let pers = personalization_vector(&nodes, Some("nonexistent"));
         assert!((pers[&0] - pers[&1]).abs() < 1e-3);
     }
@@ -1148,10 +1224,9 @@ mod tests {
             node(
                 0,
                 "src/a.rs",
-                &["a"],
                 &format!("{big_signature}\n{big_signature}\n{big_signature}\n"),
             ),
-            node(1, "src/b.rs", &["b"], "pub fn small() {}\n"),
+            node(1, "src/b.rs", "pub fn small() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.6), (1, 0.4)].into();
         let result = fit_to_budget(&nodes, &ranks, 50);
@@ -1164,8 +1239,8 @@ mod tests {
     #[test]
     fn fit_to_budget_orders_by_rank() {
         let nodes = vec![
-            node(0, "src/low.rs", &["low"], "pub fn low() {}\n"),
-            node(1, "src/high.rs", &["high"], "pub fn high() {}\n"),
+            node(0, "src/low.rs", "pub fn low() {}\n"),
+            node(1, "src/high.rs", "pub fn high() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.1), (1, 0.9)].into();
         let result = fit_to_budget(&nodes, &ranks, 10_000);
@@ -1180,8 +1255,8 @@ mod tests {
         // rather than left to the unstable sort's arrival order. Input is given
         // in reversed (zebra-before-alpha) order on purpose.
         let nodes = vec![
-            node(0, "src/zebra.rs", &["z"], "pub fn z() {}\n"),
-            node(1, "src/alpha.rs", &["a"], "pub fn a() {}\n"),
+            node(0, "src/zebra.rs", "pub fn z() {}\n"),
+            node(1, "src/alpha.rs", "pub fn a() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.5), (1, 0.5)].into();
         let result = fit_to_budget(&nodes, &ranks, 10_000);
@@ -1191,13 +1266,8 @@ mod tests {
 
     #[test]
     fn import_graph_links_use_to_target() {
-        let a = node(
-            0,
-            "src/a.rs",
-            &["a", "src::a"],
-            "use crate::b;\npub fn a() {}\n",
-        );
-        let b = node(1, "src/b.rs", &["b", "src::b"], "pub fn b() {}\n");
+        let a = node(0, "src/a.rs", "use crate::b;\npub fn a() {}\n");
+        let b = node(1, "src/b.rs", "pub fn b() {}\n");
         let graph = build_import_graph(&[a, b]);
         assert!(graph[&0].contains(&1));
         assert!(graph[&1].is_empty());
