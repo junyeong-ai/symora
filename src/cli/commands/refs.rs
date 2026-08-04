@@ -2,11 +2,13 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::app::App;
+use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
 use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::cli::utils::{extract_signature, read_line_at, read_lines_around};
-use crate::cli::{LocationArg, OutputError};
+
+use super::common::lsp_error_at;
 
 #[derive(Args, Debug)]
 pub struct RefsArgs {
@@ -100,36 +102,10 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                     .with_indexing(indexing),
             });
         }
-        Err(e) => ctx.print_error(refs_error(e, &err_file, err_line, err_column)),
+        Err(e) => ctx.print_error(lsp_error_at(e, &err_file, err_line, err_column)),
     }
 
     Ok(())
-}
-
-/// Enrich the central `LspError → OutputError` mapping with a refs-specific
-/// recovery hint when the underlying failure is transport-level
-/// (timeout / broken pipe). All other error shapes — including
-/// `ServerNotInstalled`, `Unsupported`, parse errors — keep the structured
-/// code the central classifier produced.
-fn refs_error(
-    err: crate::error::LspError,
-    file: &std::path::Path,
-    line: u32,
-    column: u32,
-) -> OutputError {
-    use crate::cli::ErrorCode;
-
-    let mapped: OutputError = err.into();
-    if matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
-        return mapped.with_hint(format!(
-            "Retry after `symora daemon restart`, or use `symora symbols {0}` and \
-             `symora usage {0}:{1}:{2}` to continue from file-level analysis.",
-            file.display(),
-            line,
-            column,
-        ));
-    }
-    mapped
 }
 
 /// Gated follow-up commands for a reference list, in fixed priority order:

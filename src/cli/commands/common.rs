@@ -5,15 +5,52 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::LocationArg;
 use crate::cli::response::Section;
 use crate::cli::utils::{
     AnchorResolution, SymbolResolution, ambiguity_hint, column_addressed_symbol,
     line_addressed_symbol,
 };
+use crate::cli::{ErrorCode, LocationArg, OutputError};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::services::lsp::LspService;
+
+/// Map a position-anchored LSP failure, adding the recovery route that is
+/// still open at that position.
+///
+/// Which route depends on whether the session can come back. A dropped or
+/// timed-out request leaves the server able to serve this workspace, so the
+/// advice is to retry and meanwhile fall back to lighter LSP-backed queries.
+/// A session that never established cannot serve it at all, and pointing at
+/// another LSP-backed command would send the agent into the same wall — the
+/// route there runs through the surfaces that need no language server.
+///
+/// The split is read from the typed error. Re-deriving it from the rendered
+/// message would mean matching prose, which cannot tell the two apart and
+/// leaves every unrecognised shape as an `internal` error with no move
+/// against it.
+pub(crate) fn lsp_error_at(err: LspError, file: &Path, line: u32, column: u32) -> OutputError {
+    let recoverable = err.is_recoverable();
+    let mapped: OutputError = err.into();
+    if !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
+        return mapped;
+    }
+    if recoverable {
+        return mapped.with_hint(format!(
+            "Retry after `symora daemon restart`, or use `symora symbols {0}` and \
+             `symora usage {0}:{1}:{2}` to continue from file-level analysis.",
+            file.display(),
+            line,
+            column,
+        ));
+    }
+    mapped.with_hint(format!(
+        "The server reported why above — resolve that, then retry. \
+         Until it can start, `symora map file {0}` and `symora search content` \
+         answer without a language server.",
+        file.display(),
+    ))
+}
 
 /// A snapped anchor position plus its disclosure: when a line-only input
 /// hit a multi-declaration line, the first declaration was chosen and
@@ -312,5 +349,57 @@ mod tests {
         );
         assert!(unavail[0].contains("could not be read to resolve a symbol"));
         assert!(!unavail[0].contains("is not a symbol"));
+    }
+
+    /// The two `lsp_unavailable` causes need opposite advice: a dropped
+    /// session can come back, so lighter LSP queries are worth trying; a
+    /// session that never started cannot serve any of them.
+    #[test]
+    fn recovery_route_follows_whether_the_session_can_return() {
+        let path = std::path::Path::new("src/main.rs");
+
+        let dropped = lsp_error_at(
+            LspError::ServerTerminated {
+                language: crate::models::symbol::Language::Rust,
+            },
+            path,
+            10,
+            5,
+        );
+        assert!(matches!(dropped.code, ErrorCode::LspUnavailable));
+        let hint = dropped.hint.expect("a dropped session has a retry route");
+        assert!(hint.contains("symora symbols"));
+
+        let never_started = lsp_error_at(
+            LspError::ServerStart("rust language server: bad workspace".into()),
+            path,
+            10,
+            5,
+        );
+        assert!(matches!(never_started.code, ErrorCode::LspUnavailable));
+        let hint = never_started
+            .hint
+            .expect("a rejected handshake still has a route");
+        assert!(!hint.contains("symora symbols"));
+        assert!(hint.contains("symora map file"));
+    }
+
+    /// A capability gap is not a transport failure and keeps the code the
+    /// central classifier assigned it.
+    #[test]
+    fn non_transport_failures_keep_their_own_code() {
+        let unsupported = lsp_error_at(
+            LspError::FeatureNotSupported {
+                language: crate::models::symbol::Language::Rust,
+                server: "rust-analyzer".into(),
+                feature: "callHierarchy".into(),
+                suggestion: "use refs".into(),
+            },
+            std::path::Path::new("src/main.rs"),
+            1,
+            1,
+        );
+        assert!(matches!(unsupported.code, ErrorCode::Unsupported));
+        assert_eq!(unsupported.hint.as_deref(), Some("use refs"));
     }
 }

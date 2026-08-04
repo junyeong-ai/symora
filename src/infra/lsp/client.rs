@@ -515,9 +515,17 @@ impl LspClient {
             params.initialization_options.is_some()
         );
 
+        // A rejected handshake is a statement about the session, not about
+        // the request that carried it: the server is installed and answering,
+        // but it will never serve this workspace (a missing toolchain, an
+        // unreadable project layout). Reporting it as the server failing to
+        // start routes it to the same recovery advice as a server that never
+        // came up, instead of the generic internal-error path an agent has no
+        // move against.
         let result: InitializeResult = self
             .request("initialize", Some(serde_json::to_value(params)?))
-            .await?;
+            .await
+            .map_err(|e| self.handshake_failure(e))?;
 
         // Close the encoding negotiation: record the server's choice once.
         *self.position_encoding.write().await =
@@ -528,9 +536,22 @@ impl LspClient {
 
         // Send initialized notification
         self.notify("initialized", Some(serde_json::json!({})))
-            .await?;
+            .await
+            .map_err(|e| self.handshake_failure(e))?;
 
         Ok(())
+    }
+
+    /// Recast a failure of the initialize handshake as the server failing to
+    /// start, preserving the server's own explanation — it is the only part
+    /// that says what to fix.
+    fn handshake_failure(&self, error: LspError) -> LspError {
+        match error {
+            LspError::ServerError { message, .. } | LspError::Protocol(message) => {
+                LspError::ServerStart(format!("{} language server: {message}", self.language))
+            }
+            other => other,
+        }
     }
 
     /// Build client capabilities optimized for the target language server (LSP 3.17 complete)
