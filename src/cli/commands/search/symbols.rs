@@ -12,10 +12,10 @@ use crate::cli::symbol_discovery::{
     generic_exact_identifier_penalty, noisy_suffix_penalty, symbol_lookup_hints,
     symbol_match_priority,
 };
-use crate::cli::utils::TestMatcher;
 use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
+use crate::services::TestScope;
 use crate::services::store::{SymbolExtractor, SymbolSearchResult};
 
 use super::common::{looks_like_symbol_path, resolve_search_languages};
@@ -120,7 +120,7 @@ pub async fn execute_symbol_search(
                 // one's timeout, which a global authoritativeness flag missed.
                 workspace_indexing = lookup.unindexed_indexing;
                 candidates =
-                    merge_symbol_results(candidates, lookup.results, query, app.test_matcher());
+                    merge_symbol_results(candidates, lookup.results, query, app.test_scope());
                 failures = lookup.failures;
                 count = count.max(candidates.len());
             }
@@ -131,7 +131,7 @@ pub async fn execute_symbol_search(
                 language,
                 kind,
                 limit,
-                app.test_matcher(),
+                app.test_scope(),
             )
             .with_stale(stale)
             .with_indexing(workspace_indexing);
@@ -232,7 +232,7 @@ async fn execute_glob_symbol_search(
             language,
             kind,
             limit,
-            app.test_matcher(),
+            app.test_scope(),
         )
         .with_stale(stale),
     );
@@ -300,7 +300,7 @@ async fn execute_workspace_symbol_search(
     if looks_like_symbol_path(query) && candidates.len() < limit {
         let expanded =
             collect_document_path_results(app, query, kind, limit, languages, &candidates).await;
-        candidates = merge_symbol_results(candidates, expanded, query, app.test_matcher());
+        candidates = merge_symbol_results(candidates, expanded, query, app.test_scope());
     }
 
     // Scope the index supplement to an EXPLICIT `--lang` only — never to an
@@ -327,12 +327,12 @@ async fn execute_workspace_symbol_search(
             .into_iter()
             .map(|r| index_result_output(r, ctx))
             .collect();
-        candidates = merge_symbol_results(candidates, index_results, query, app.test_matcher());
+        candidates = merge_symbol_results(candidates, index_results, query, app.test_scope());
     }
 
     count = count.max(candidates.len());
     let section = with_workspace_failure_disclosure(
-        finish_symbol_search(candidates, count, query, language, kind, limit, app.test_matcher())
+        finish_symbol_search(candidates, count, query, language, kind, limit, app.test_scope())
             .with_stale(stale)
             // Any emitted language having run timed-out makes the whole
             // list a lower bound — captured when each query ran.
@@ -389,9 +389,9 @@ fn finish_symbol_search(
     language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
 ) -> Section<SymbolResultOutput> {
-    prune_low_value_symbol_results(&mut candidates, query, limit, test_matcher);
+    prune_low_value_symbol_results(&mut candidates, query, limit, test_scope);
     candidates.truncate(limit);
 
     let truncated = candidates.len() < count;
@@ -577,8 +577,8 @@ async fn collect_workspace_symbol_results(
             }
         })
         .collect();
-    sort_symbol_results(&mut outputs, query, app.test_matcher());
-    prune_low_value_symbol_results(&mut outputs, query, limit, app.test_matcher());
+    sort_symbol_results(&mut outputs, query, app.test_scope());
+    prune_low_value_symbol_results(&mut outputs, query, limit, app.test_scope());
     WorkspaceSymbolLookup {
         results: outputs,
         failures,
@@ -614,7 +614,7 @@ fn merge_symbol_results(
     primary: Vec<SymbolResultOutput>,
     secondary: Vec<SymbolResultOutput>,
     query: &str,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
 ) -> Vec<SymbolResultOutput> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
@@ -627,7 +627,7 @@ fn merge_symbol_results(
         }
     }
 
-    sort_symbol_results(&mut merged, query, test_matcher);
+    sort_symbol_results(&mut merged, query, test_scope);
     merged
 }
 
@@ -719,20 +719,16 @@ async fn collect_document_path_results(
         }
     }
 
-    sort_symbol_results(&mut expanded, query, app.test_matcher());
-    prune_low_value_symbol_results(&mut expanded, query, limit, app.test_matcher());
+    sort_symbol_results(&mut expanded, query, app.test_scope());
+    prune_low_value_symbol_results(&mut expanded, query, limit, app.test_scope());
     expanded.truncate(limit);
     expanded
 }
 
-fn sort_symbol_results(
-    results: &mut [SymbolResultOutput],
-    query: &str,
-    test_matcher: &TestMatcher,
-) {
+fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_scope: &TestScope) {
     results.sort_by(|a, b| {
-        symbol_result_priority(query, b, test_matcher)
-            .cmp(&symbol_result_priority(query, a, test_matcher))
+        symbol_result_priority(query, b, test_scope)
+            .cmp(&symbol_result_priority(query, a, test_scope))
             .then_with(|| {
                 b.score
                     .partial_cmp(&a.score)
@@ -748,7 +744,7 @@ fn prune_low_value_symbol_results(
     results: &mut Vec<SymbolResultOutput>,
     query: &str,
     limit: usize,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
 ) {
     if looks_like_symbol_path(query) || results.is_empty() {
         return;
@@ -757,19 +753,15 @@ fn prune_low_value_symbol_results(
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let high_value_count = results
         .iter()
-        .filter(|result| is_high_value_symbol_result(result, &q, test_matcher))
+        .filter(|result| is_high_value_symbol_result(result, &q, test_scope))
         .count();
 
     if high_value_count >= usize::min(limit, 3) {
-        results.retain(|result| is_high_value_symbol_result(result, &q, test_matcher));
+        results.retain(|result| is_high_value_symbol_result(result, &q, test_scope));
     }
 }
 
-fn symbol_result_priority(
-    query: &str,
-    result: &SymbolResultOutput,
-    test_matcher: &TestMatcher,
-) -> i32 {
+fn symbol_result_priority(query: &str, result: &SymbolResultOutput, test_scope: &TestScope) -> i32 {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let name = result.name.to_ascii_lowercase();
     let path = result
@@ -782,7 +774,7 @@ fn symbol_result_priority(
     // Test code is demoted by file path only. A container-name substring
     // check ("test") would mis-fire on Fastest/Latest/Contest, and the file
     // path already catches the real test code.
-    let test_penalty = if test_matcher.is_test_file(std::path::Path::new(&result.file)) {
+    let test_penalty = if test_scope.is_test_file(std::path::Path::new(&result.file)) {
         TEST_FILE_PENALTY
     } else {
         0
@@ -816,10 +808,10 @@ fn symbol_result_priority(
 fn is_high_value_symbol_result(
     result: &SymbolResultOutput,
     query: &str,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
 ) -> bool {
     let name = result.name.to_ascii_lowercase();
-    !test_matcher.is_test_file(std::path::Path::new(&result.file))
+    !test_scope.is_test_file(std::path::Path::new(&result.file))
         && !is_low_signal_kind(&result.kind)
         && noisy_suffix_penalty(&name, query) == 0
 }
@@ -1079,7 +1071,7 @@ mod tests {
             result("gamma", "src/c.rs"),
         ];
         let section =
-            finish_symbol_search(candidates, 3, "alpha", None, None, 2, &TestMatcher::new());
+            finish_symbol_search(candidates, 3, "alpha", None, None, 2, &TestScope::new());
 
         assert_eq!(section.count, 3);
         assert_eq!(section.showing, 2);
@@ -1116,7 +1108,7 @@ mod tests {
         // Empty result for an unindexed `--lang`: disclose not_indexed so the
         // zero reads as "not indexed here", not "no such symbol".
         let empty =
-            finish_symbol_search(vec![], 0, "foo", Some("lua"), None, 10, &TestMatcher::new());
+            finish_symbol_search(vec![], 0, "foo", Some("lua"), None, 10, &TestScope::new());
         assert_eq!(empty.coverage_gaps.len(), 1);
         assert_eq!(empty.coverage_gaps[0].reason, "not_indexed");
 
@@ -1129,7 +1121,7 @@ mod tests {
             Some("lua"),
             None,
             10,
-            &TestMatcher::new(),
+            &TestScope::new(),
         );
         assert!(covered.coverage_gaps.is_empty());
     }
@@ -1172,7 +1164,7 @@ mod tests {
     fn finish_symbol_search_complete_results_are_not_truncated() {
         let candidates = vec![result("alpha", "src/a.rs")];
         let section =
-            finish_symbol_search(candidates, 1, "alpha", None, None, 10, &TestMatcher::new());
+            finish_symbol_search(candidates, 1, "alpha", None, None, 10, &TestScope::new());
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);

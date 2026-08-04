@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -11,10 +12,11 @@ use crate::cli::response::{
     CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput, TestOutput,
     TypeInfoOutput,
 };
-use crate::cli::utils::{TestMatcher, extract_signature, find_symbol_at_position};
+use crate::cli::utils::{extract_signature, find_symbol_at_position};
 use crate::cli::{LocationArg, OutputError};
 use crate::models::lsp::{CallHierarchyItem, FindSymbolsOptions};
 use crate::models::symbol::Symbol;
+use crate::services::TestScope;
 use crate::services::lsp::LspService;
 use crate::utils::estimate_tokens;
 
@@ -80,11 +82,9 @@ pub struct ContextOutput {
     pub tests: Option<Section<TestOutput>>,
 }
 
-struct ContextParams<'a> {
-    refs: usize,
+struct ContextParams {
     calls: usize,
     tests: usize,
-    custom_markers: &'a [String],
 }
 
 pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
@@ -92,13 +92,11 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let loc = args.loc.parse()?.to_absolute()?;
     let config = app.config();
     let params = ContextParams {
-        refs: config.lsp.refs_limit,
         calls: config.lsp.calls_limit,
         tests: config.lsp.tests_limit,
-        custom_markers: &config.test.markers,
     };
 
-    let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone()).await {
+    let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone(), ctx.root()).await {
         Ok(a) => a,
         Err(e) => {
             ctx.print_error(format_analysis_transport_error(
@@ -115,7 +113,7 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
         app.lsp.as_ref(),
         &args,
         ctx.root(),
-        app.test_matcher(),
+        app.test_scope(),
         &params,
         analysis,
     )
@@ -129,8 +127,8 @@ async fn fetch_context(
     lsp: &dyn LspService,
     args: &ContextArgs,
     root: &Path,
-    test_matcher: &TestMatcher,
-    params: &ContextParams<'_>,
+    test_scope: &TestScope,
+    params: &ContextParams,
     analysis: LocationAnalysis,
 ) -> ContextOutput {
     let resolved_line = analysis
@@ -162,22 +160,10 @@ async fn fetch_context(
         t
     };
 
-    // Honour the per-call references limit by classifying a truncated slice
-    // of the analysis output. Keeps the heavy LSP round-trip in
-    // `LocationAnalysis::at` while letting commands cap their response size.
-    let limit = params.refs;
-    let refs_slice: &[crate::models::symbol::Location] = if analysis.references.len() > limit {
-        &analysis.references[..limit]
-    } else {
-        &analysis.references
-    };
-    let classified = crate::cli::utils::classify_refs(
-        refs_slice,
-        root,
-        Some(&analysis.anchor.file),
-        Some(analysis.anchor.line),
-        test_matcher,
-    );
+    // The counts cover every usage; `params.refs` caps only what the
+    // response lists, so `total` stays the true total the output contract
+    // promises rather than the size of a slice.
+    let classified = analysis.classify(test_scope);
 
     let refs_summary = RefOutput {
         total: classified.total,
@@ -246,15 +232,7 @@ async fn fetch_context(
         },
         async {
             if want_tests {
-                Some(
-                    fetch_tests(
-                        &classified.test_refs,
-                        root,
-                        params.tests,
-                        params.custom_markers,
-                    )
-                    .await,
-                )
+                Some(fetch_tests(lsp, &classified.test_refs, root, params.tests).await)
             } else {
                 None
             }
@@ -592,139 +570,46 @@ fn format_analysis_transport_error(
     }
 }
 
+/// Name each covering test by resolving the symbol that ENCLOSES the
+/// reference, from the language server's own symbol tree.
+///
+/// The alternative — scanning backwards for annotation text — cannot tell
+/// `test(` in a spec file from a call to a function named `test`, and every
+/// language needs its own vocabulary of markers to guess with. Asking which
+/// symbol contains the line is one question, exact for every language that
+/// serves document symbols, and it names the test that actually covers the
+/// usage rather than the nearest thing that looked like one.
 async fn fetch_tests(
+    lsp: &dyn LspService,
     test_refs: &[&crate::models::symbol::Location],
     root: &Path,
     limit: usize,
-    custom_markers: &[String],
 ) -> Section<TestOutput> {
     let mut items = Vec::with_capacity(limit);
+    let mut symbols_by_file: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
 
     for r in test_refs.iter().take(limit) {
-        if let Ok(content) = tokio::fs::read_to_string(&r.file).await
-            && let Some(test_name) = extract_test_name(&content, r.line, custom_markers)
-        {
+        let symbols = match symbols_by_file.entry(r.file.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(
+                lsp.find_symbols(&r.file, FindSymbolsOptions::default().with_depth(10))
+                    .await
+                    .unwrap_or_default(),
+            ),
+        };
+
+        if let Some(symbol) = find_symbol_at_position(symbols, r.line, Some(r.column)) {
             items.push(TestOutput {
-                name: test_name,
+                name: symbol
+                    .name_path
+                    .clone()
+                    .unwrap_or_else(|| symbol.name.clone()),
                 location: LocationOutput::from_location(r, root),
             });
         }
     }
 
     Section::new(items)
-}
-
-/// Max lines to search backwards for a test marker annotation
-const TEST_MARKER_SEARCH_WINDOW: usize = 10;
-
-fn extract_test_name(content: &str, line: u32, custom_markers: &[String]) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    let line_idx = (line.saturating_sub(1)) as usize;
-
-    if line_idx >= lines.len() {
-        return None;
-    }
-
-    for i in (0..=line_idx.min(TEST_MARKER_SEARCH_WINDOW)).rev() {
-        let idx = line_idx.saturating_sub(i);
-        let line_content = lines.get(idx)?;
-
-        if is_test_marker(line_content, custom_markers) {
-            if let Some(fn_line) = lines.get(idx + 1)
-                && let Some(name) = extract_fn_name(fn_line)
-            {
-                return Some(name);
-            }
-            if let Some(name) = extract_fn_name(line_content) {
-                return Some(name);
-            }
-        }
-    }
-
-    None
-}
-
-fn is_test_marker(line: &str, custom_markers: &[String]) -> bool {
-    const MARKERS: &[&str] = &[
-        "#[test]",
-        "#[tokio::test]",
-        "#[rstest]",
-        "@Test",
-        "@ParameterizedTest",
-        "[Test]",
-        "[Fact]",
-        "[Theory]",
-        "[TestMethod]",
-        "/** @test */",
-        "fn test_",
-        "func Test",
-        "def test_",
-        "function test",
-        "it(",
-        "test(",
-        "it \"",
-        "it '",
-        "it {",
-        "should(",
-        "test \"",
-        "describe(",
-        "describe \"",
-        "context(",
-        "given(",
-        "When(",
-        "Then(",
-    ];
-
-    MARKERS.iter().any(|m| line.contains(m))
-        || custom_markers.iter().any(|m| line.contains(m.as_str()))
-}
-
-fn extract_fn_name(line: &str) -> Option<String> {
-    const FN_PREFIXES: &[&str] = &[
-        "fn ",
-        "func ",
-        "def ",
-        "fun ",
-        "function ",
-        "void ",
-        "public void ",
-        "async ",
-    ];
-
-    for prefix in FN_PREFIXES {
-        if let Some(pos) = line.find(prefix) {
-            let rest = &line[pos + prefix.len()..];
-            let name = rest.split(['(', '<', ' ', ':', '{']).next()?;
-            let name = name.trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    const STRING_PATTERNS: &[&str] = &[
-        "it(",
-        "test(",
-        "it \"",
-        "it '",
-        "test \"",
-        "describe(",
-        "describe \"",
-    ];
-
-    for prefix in STRING_PATTERNS {
-        if let Some(pos) = line.find(prefix) {
-            let rest = &line[pos + prefix.len()..];
-            let rest = rest.trim_start_matches(['\'', '"', '(']);
-            let name = rest.split(['\'', '"', ',', ')']).next()?;
-            let name = name.trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

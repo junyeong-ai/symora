@@ -1,21 +1,29 @@
 //! Bundled LSP analysis at a precise location.
 //!
 //! The single home for the `find_symbols + resolve target + find_references +
-//! classify` sequence that `impact`, `context`, and `diff_impact` share.
-//! Exposes one `classify()` helper and an `is_exported()` predicate, so each
-//! command focuses on shaping its own response shape.
+//! classify` sequence that `refs`, `impact`, `context`, and `diff_impact`
+//! share.
+//!
+//! It also fixes what "the references of a symbol" means. The language
+//! server is asked for them with the declaration included, so the
+//! declaration can be recognised and dropped here: a symbol's own
+//! declaration is not a usage of it, and results outside the project are
+//! not the project's business. Every surface projects from the set this
+//! type holds, so the count `refs`, `impact`, and `context` publish under
+//! the same name is the same number.
 
 use std::path::Path;
 
 use crate::cli::ParsedLocation;
 use crate::cli::utils::{
-    AnchorResolution, RefsClassification, SymbolResolution, TestMatcher, ambiguity_hint,
-    classify_refs, column_addressed_symbol, line_addressed_symbol,
+    AnchorResolution, RefsClassification, SymbolResolution, ambiguity_hint,
+    column_addressed_symbol, line_addressed_symbol,
 };
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
+use crate::services::test_scope::TestScope;
 
 pub struct LocationAnalysis {
     pub(crate) anchor: ParsedLocation,
@@ -77,7 +85,11 @@ impl LocationAnalysis {
     ///
     /// Soft-fails on `find_symbols` (target stays `None`); hard-fails on
     /// `find_references` because every caller needs the refs list.
-    pub async fn at(lsp: &dyn LspService, anchor: ParsedLocation) -> Result<Self, LspError> {
+    pub async fn at(
+        lsp: &dyn LspService,
+        anchor: ParsedLocation,
+        root: &Path,
+    ) -> Result<Self, LspError> {
         let language = Language::from_path(&anchor.file);
         // Resolve the symbol first so the anchor can snap to its name
         // position; references and blast radius are then taken from the same
@@ -117,11 +129,12 @@ impl LocationAnalysis {
         let references = lsp
             .find_references(&anchor.file, anchor.line, anchor.column)
             .await?;
+        let usages = usages_of(references.data, root, target.is_some().then_some(&anchor));
         Ok(Self {
             anchor,
             language,
             target,
-            references: references.data,
+            references: usages,
             indexing: references.indexing,
             ambiguity,
             anchor_resolution,
@@ -135,6 +148,7 @@ impl LocationAnalysis {
         lsp: &dyn LspService,
         file: &Path,
         symbol: Symbol,
+        root: &Path,
     ) -> Result<Self, LspError> {
         let anchor = ParsedLocation {
             file: file.to_path_buf(),
@@ -146,35 +160,47 @@ impl LocationAnalysis {
         let references = lsp
             .find_references(&anchor.file, anchor.line, anchor.column)
             .await?;
+        let usages = usages_of(references.data, root, Some(&anchor));
         Ok(Self {
             anchor,
             language,
             target: Some(symbol),
-            references: references.data,
+            references: usages,
             indexing: references.indexing,
             ambiguity: None,
             anchor_resolution: AnchorResolution::Resolved,
         })
     }
 
-    pub fn classify<'a>(
-        &'a self,
-        root: &Path,
-        test_matcher: &TestMatcher,
-        skip_self: bool,
-    ) -> RefsClassification<'a> {
-        let (self_file, self_line) = if skip_self {
-            (Some(self.anchor.file.as_path()), Some(self.anchor.line))
-        } else {
-            (None, None)
-        };
-        classify_refs(&self.references, root, self_file, self_line, test_matcher)
+    pub fn classify<'a>(&'a self, test_scope: &TestScope) -> RefsClassification<'a> {
+        RefsClassification::of(&self.references, test_scope)
     }
 
     pub fn is_exported(&self) -> Option<bool> {
         let body = self.target.as_ref().and_then(|s| s.body.as_deref())?;
         Some(detect_exported(body, self.language))
     }
+}
+
+/// Reduce a raw `find_references` result to the symbol's usages: inside the
+/// project, and never the declaration the anchor snapped to.
+///
+/// `declaration` is `None` when the anchor resolved to no symbol — there is
+/// then no declaration to recognise, and dropping the anchor position anyway
+/// would remove a genuine usage.
+fn usages_of(
+    references: Vec<Location>,
+    root: &Path,
+    declaration: Option<&ParsedLocation>,
+) -> Vec<Location> {
+    references
+        .into_iter()
+        .filter(|r| r.file.starts_with(root))
+        .filter(|r| {
+            !declaration
+                .is_some_and(|d| r.file == d.file && r.line == d.line && r.column == d.column)
+        })
+        .collect()
 }
 
 /// Resolve a navigation anchor through the same line/column addressing

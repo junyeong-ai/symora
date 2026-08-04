@@ -24,7 +24,7 @@ pub struct App {
     pub(crate) store: Arc<dyn StoreService>,
     pub(crate) config_service: Arc<dyn ConfigService>,
     pub(crate) config: SymoraConfig,
-    test_matcher: crate::cli::utils::TestMatcher,
+    test_scope: crate::services::TestScope,
 }
 
 impl App {
@@ -97,7 +97,7 @@ impl App {
             if use_daemon { "enabled" } else { "disabled" }
         );
 
-        let test_matcher = crate::cli::utils::TestMatcher::from_config(&config.test);
+        let test_scope = crate::services::TestScope::from_config(&config.test);
 
         Ok(Self {
             root,
@@ -108,7 +108,7 @@ impl App {
             store,
             config_service,
             config,
-            test_matcher,
+            test_scope,
         })
     }
 
@@ -120,8 +120,8 @@ impl App {
         &self.config
     }
 
-    pub fn test_matcher(&self) -> &crate::cli::utils::TestMatcher {
-        &self.test_matcher
+    pub fn test_scope(&self) -> &crate::services::TestScope {
+        &self.test_scope
     }
 
     /// True once a handler reported a handled failure via `print_error`.
@@ -148,7 +148,7 @@ impl App {
             store: Arc::clone(&self.store),
             config_service: Arc::clone(&self.config_service),
             config: self.config.clone(),
-            test_matcher: self.test_matcher.clone(),
+            test_scope: self.test_scope.clone(),
         }
     }
 }

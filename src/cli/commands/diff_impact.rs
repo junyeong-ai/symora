@@ -9,8 +9,9 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
-use crate::cli::utils::{TestMatcher, find_symbol_at_position};
+use crate::cli::utils::find_symbol_at_position;
 use crate::models::lsp::FindSymbolsOptions;
+use crate::services::TestScope;
 use crate::services::lsp::LspService;
 use crate::services::store::SymbolExtractor;
 
@@ -155,7 +156,7 @@ struct DiffHunk {
 pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let root = ctx.root();
-    let test_matcher = app.test_matcher();
+    let test_scope = app.test_scope();
 
     let hunks = parse_git_diff(root, &args.revision, args.staged)?;
 
@@ -191,7 +192,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         &hunks,
         root,
         preimage_ref,
-        test_matcher,
+        test_scope,
         args.callers,
         args.max_symbols,
         calls_limit,
@@ -410,7 +411,7 @@ async fn analyze_hunks(
     hunks: &[DiffHunk],
     root: &Path,
     preimage_ref: &str,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
     include_callers: bool,
     max_symbols: usize,
     calls_limit: usize,
@@ -496,7 +497,7 @@ async fn analyze_hunks(
                         sym.clone(),
                         ChangeType::Modified,
                         root,
-                        test_matcher,
+                        test_scope,
                         include_callers,
                         calls_limit,
                     )
@@ -580,7 +581,7 @@ async fn analyze_hunks(
                     sym.clone(),
                     change_type,
                     root,
-                    test_matcher,
+                    test_scope,
                     include_callers,
                     calls_limit,
                 )
@@ -601,7 +602,7 @@ async fn analyze_symbol_impact(
     sym: crate::models::symbol::Symbol,
     change_type: ChangeType,
     root: &Path,
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
     include_callers: bool,
     calls_limit: usize,
 ) -> ChangedSymbolImpact {
@@ -610,7 +611,7 @@ async fn analyze_symbol_impact(
     let line = sym.location.line;
     let column = sym.location.column;
 
-    let analysis = match LocationAnalysis::for_symbol(lsp, file, sym).await {
+    let analysis = match LocationAnalysis::for_symbol(lsp, file, sym, root).await {
         Ok(a) => a,
         Err(_) => {
             // Measurement failed (LSP error/unavailable) — emit absent refs,
@@ -632,7 +633,7 @@ async fn analyze_symbol_impact(
         }
     };
 
-    let classified = analysis.classify(root, test_matcher, true);
+    let classified = analysis.classify(test_scope);
 
     // A failed incoming-call query, or one run under degraded indexing, must not
     // pass as a verified caller set: disclose it so an empty list is read as

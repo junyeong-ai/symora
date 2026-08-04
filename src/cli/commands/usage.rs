@@ -16,11 +16,12 @@ use crate::cli::symbol_discovery::{
     detect_languages_by_file_count, generic_exact_identifier_penalty, is_generic_broad_query,
     noisy_suffix_penalty, symbol_match_priority,
 };
-use crate::cli::utils::{TestMatcher, read_line_at};
+use crate::cli::utils::read_line_at;
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
 use crate::models::symbol::Symbol;
+use crate::services::TestScope;
 
 /// Maximum concurrent LSP requests (higher = faster but more LSP server load)
 const MAX_CONCURRENT_LSP_REQUESTS: usize = 20;
@@ -218,22 +219,22 @@ fn dedupe_usage_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
     deduped
 }
 
-fn rank_usage_symbols(symbols: &mut [Symbol], query: &str, test_matcher: &TestMatcher) {
+fn rank_usage_symbols(symbols: &mut [Symbol], query: &str, test_scope: &TestScope) {
     symbols.sort_by(|a, b| {
-        usage_symbol_priority(b, query, test_matcher)
-            .cmp(&usage_symbol_priority(a, query, test_matcher))
+        usage_symbol_priority(b, query, test_scope)
+            .cmp(&usage_symbol_priority(a, query, test_scope))
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.location.file.cmp(&b.location.file))
             .then_with(|| a.location.line.cmp(&b.location.line))
     });
 }
 
-fn usage_symbol_priority(symbol: &Symbol, query: &str, test_matcher: &TestMatcher) -> i32 {
+fn usage_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScope) -> i32 {
     let name = symbol.name.to_ascii_lowercase();
     let path = symbol.path().to_ascii_lowercase();
     let kind = symbol.kind.to_string();
     let match_priority = symbol_match_priority(query, &name, &path);
-    let test_penalty = if test_matcher.is_test_file(&symbol.location.file) {
+    let test_penalty = if test_scope.is_test_file(&symbol.location.file) {
         TEST_FILE_PENALTY
     } else {
         0
@@ -361,7 +362,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     // Coverage gaps — disclosed on every result, empty or not, so partial
     // coverage is always visible rather than hidden behind a count.
     let gaps = coverage_gaps(&failures, &skipped);
-    rank_usage_symbols(&mut symbols, &resolved.query, app.test_matcher());
+    rank_usage_symbols(&mut symbols, &resolved.query, app.test_scope());
 
     if symbols.is_empty() {
         // No server could answer at all: that failure is the result, not an
@@ -395,11 +396,11 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
 
     let filters = args.filter.as_deref().unwrap_or_default();
     let filter_names: Vec<String> = filters.iter().map(|f| f.to_string()).collect();
-    let test_matcher = app.test_matcher();
+    let test_scope = app.test_scope();
 
     // Apply pre-filter for NotTestFile (no LSP calls needed)
     if filters.contains(&UsageFilter::NotTestFile) {
-        symbols.retain(|s| !test_matcher.is_test_file(&s.location.file));
+        symbols.retain(|s| !test_scope.is_test_file(&s.location.file));
     }
 
     // Fast path: sort by name without LSP calls for references
@@ -440,7 +441,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             ctx.root(),
             &args,
             filters,
-            test_matcher,
+            test_scope,
         )
         .await;
         (results, total, None, ref_indexing)
@@ -460,7 +461,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             ctx.root(),
             &args,
             filters,
-            test_matcher,
+            test_scope,
         )
         .await;
 
@@ -619,7 +620,7 @@ async fn fetch_refs_parallel(
     root: &std::path::Path,
     args: &UsageArgs,
     filters: &[UsageFilter],
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
 ) -> (
     Vec<UsageResult>,
     Option<crate::models::lsp::IndexingDegradation>,
@@ -637,7 +638,7 @@ async fn fetch_refs_parallel(
                 let Ok(_permit) = sem.acquire().await else {
                     return (None, None);
                 };
-                fetch_single_symbol_refs(app, symbol, root, args, filters, test_matcher).await
+                fetch_single_symbol_refs(app, symbol, root, args, filters, test_scope).await
             }
         })
         .collect();
@@ -667,7 +668,7 @@ async fn fetch_single_symbol_refs(
     root: &std::path::Path,
     args: &UsageArgs,
     filters: &[UsageFilter],
-    test_matcher: &TestMatcher,
+    test_scope: &TestScope,
 ) -> (
     Option<UsageResult>,
     Option<crate::models::lsp::IndexingDegradation>,
@@ -690,7 +691,7 @@ async fn fetch_single_symbol_refs(
     let ref_count = refs.len();
 
     // Use iterator to check for tests without collecting all test refs
-    let has_tests = refs.iter().any(|r| test_matcher.is_test_file(&r.file));
+    let has_tests = refs.iter().any(|r| test_scope.is_test_file(&r.file));
 
     if filters.contains(&UsageFilter::HasTests) && !has_tests {
         return (None, indexing);
@@ -746,7 +747,7 @@ async fn fetch_single_symbol_refs(
         // Only collect up to 3 test files (avoid allocating entire list)
         let test_files: Vec<String> = refs
             .iter()
-            .filter(|r| test_matcher.is_test_file(&r.file))
+            .filter(|r| test_scope.is_test_file(&r.file))
             .take(3)
             .map(|r| OutputContext::format_path(&r.file, root))
             .collect();

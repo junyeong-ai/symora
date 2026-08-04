@@ -523,7 +523,7 @@ fn build_file_record(path: &Path, app: &App) -> Option<FileRecord> {
         abs_path: path.to_path_buf(),
         rel_path: rel,
         language,
-        is_test: app.test_matcher().is_test_file(path),
+        is_test: app.test_scope().is_test_file(path),
         stem,
         parent,
         top_dir,
