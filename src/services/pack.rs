@@ -4,8 +4,8 @@
 //!
 //! This is the engine behind `symora pack`. It is intentionally
 //! self-contained: it does not depend on the LSP, the daemon, or a built
-//! search index. A single repo walk + per-language regex extraction is
-//! enough to produce a useful, deterministic pack.
+//! search index. One repo walk, each file's imports read from its parse
+//! tree, is enough to produce a useful, deterministic pack.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ use anyhow::Result;
 use crate::constants::defaults::{PACK_MAX_FILE_BYTES, PACK_SYMBOLS_PER_FILE};
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
+use crate::services::imports::ImportExtractor;
 use crate::services::pack_cache::{CachedEntry, PackCache};
 use crate::utils::estimate_tokens;
 
@@ -98,7 +99,13 @@ pub fn build_pack(
         None
     };
 
-    let nodes = collect_nodes(root, file_filter, cfg, cache.as_ref());
+    let nodes = collect_nodes(
+        root,
+        file_filter,
+        cfg,
+        cache.as_ref(),
+        &ImportExtractor::new(),
+    );
 
     if let Some(cache) = cache.as_ref() {
         let active: HashSet<String> = nodes.iter().map(|n| n.rel_path.clone()).collect();
@@ -133,6 +140,7 @@ fn collect_nodes(
     file_filter: &FileFilter,
     cfg: &PackConfig,
     cache: Option<&PackCache>,
+    imports: &ImportExtractor,
 ) -> Vec<Node> {
     let mut nodes = Vec::new();
     for abs_path in file_filter.discover_files(&[]) {
@@ -179,7 +187,7 @@ fn collect_nodes(
             Ok(c) => c,
             Err(_) => continue,
         };
-        let imports = extract_imports(&contents, language);
+        let imports = imports.extract(&contents, language);
         let signatures = top_signatures_from(&contents, language, cfg);
 
         if let Some(cache) = cache {
@@ -505,128 +513,6 @@ fn declared_module_prefix(root: &Path) -> Vec<String> {
         .find_map(|line| line.trim().strip_prefix("module "))
         .map(|path| split_components(path.trim()))
         .unwrap_or_default()
-}
-
-/// Pull import paths out of a source file using deliberately conservative,
-/// deterministic textual rules. A missed reference only costs an edge, and
-/// a reference that names something outside the project is discarded by
-/// resolution rather than needing to be recognised here.
-fn extract_imports(source: &str, language: Language) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        match language {
-            Language::Rust => {
-                if let Some(rest) = trimmed
-                    .strip_prefix("use ")
-                    .or_else(|| trimmed.strip_prefix("pub use "))
-                    && let Some(path) = rest.split([';', '{', ' ']).next()
-                {
-                    out.push(path.trim().to_string());
-                } else if let Some(rest) = trimmed.strip_prefix("mod ")
-                    && let Some(name) = rest.split([';', '{', ' ']).next()
-                {
-                    // A `mod` declaration names a sibling file or a
-                    // subdirectory of the declaring one — the same anchor
-                    // `self::` spells, and the reason it must not be matched
-                    // against the whole project.
-                    out.push(format!("self::{}", name.trim()));
-                }
-            }
-            Language::Python => {
-                if let Some(rest) = trimmed.strip_prefix("from ")
-                    && let Some(path) = rest.split_whitespace().next()
-                {
-                    out.push(path.to_string());
-                } else if let Some(rest) = trimmed.strip_prefix("import ")
-                    && let Some(path) = rest.split([',', ' ']).next()
-                {
-                    out.push(path.trim().to_string());
-                }
-            }
-            Language::JavaScript | Language::TypeScript => {
-                if let Some(quoted) = quoted_after("from ", trimmed) {
-                    out.push(quoted);
-                } else if let Some(quoted) = quoted_after("import ", trimmed) {
-                    out.push(quoted);
-                } else if let Some(quoted) = quoted_after("require(", trimmed) {
-                    out.push(quoted);
-                }
-            }
-            Language::Go => {
-                if let Some(quoted) = quoted_after("import ", trimmed) {
-                    out.push(quoted);
-                } else if let Some(quoted) = quoted_segment(trimmed) {
-                    // Inside `import ( "a/b"  "c/d" )` blocks
-                    out.push(quoted);
-                }
-            }
-            Language::Java | Language::Kotlin | Language::Scala => {
-                if let Some(rest) = trimmed.strip_prefix("import ")
-                    && let Some(path) = rest.split([';', ' ', '{']).next()
-                {
-                    out.push(path.trim_start_matches("static ").trim().to_string());
-                } else if let Some(rest) = trimmed.strip_prefix("package ")
-                    && let Some(path) = rest.split([';', ' ']).next()
-                {
-                    out.push(path.trim().to_string());
-                }
-            }
-            Language::Swift => {
-                if let Some(rest) = trimmed.strip_prefix("import ")
-                    && let Some(path) = rest.split_whitespace().next()
-                {
-                    out.push(path.to_string());
-                }
-            }
-            Language::Elixir => {
-                for prefix in ["alias ", "import ", "require ", "use "] {
-                    if let Some(rest) = trimmed.strip_prefix(prefix)
-                        && let Some(path) = rest.split([',', ' ', '{']).next()
-                    {
-                        out.push(path.trim().to_string());
-                        break;
-                    }
-                }
-            }
-            Language::Dart => {
-                if let Some(quoted) = quoted_after("import ", trimmed) {
-                    out.push(quoted);
-                } else if let Some(quoted) = quoted_after("part ", trimmed) {
-                    out.push(quoted);
-                } else if let Some(quoted) = quoted_after("export ", trimmed) {
-                    out.push(quoted);
-                }
-            }
-            Language::Terraform => {
-                // Terraform's `module` block points at a source path.
-                if trimmed.starts_with("source ")
-                    && let Some(quoted) = quoted_segment(trimmed)
-                {
-                    out.push(quoted);
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-fn quoted_after(prefix: &str, line: &str) -> Option<String> {
-    let idx = line.find(prefix)?;
-    let after = &line[idx + prefix.len()..];
-    quoted_segment(after)
-}
-
-fn quoted_segment(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let quote = bytes
-        .iter()
-        .position(|b| *b == b'"' || *b == b'\'' || *b == b'`')?;
-    let q = bytes[quote];
-    let rest = &s[quote + 1..];
-    let end = rest.as_bytes().iter().position(|b| *b == q)?;
-    Some(rest[..end].to_string())
 }
 
 // --- PageRank --------------------------------------------------------------
@@ -1107,7 +993,7 @@ mod tests {
             language,
             directory: directory_path(Path::new(rel), Path::new("")),
             module_path: module_path(Path::new(rel), Path::new(""), language),
-            imports: extract_imports(contents, language),
+            imports: ImportExtractor::new().extract(contents, language),
             signatures: top_signatures_from(contents, language, &cfg),
         }
     }
@@ -1343,15 +1229,6 @@ mod tests {
         assert_eq!(edges_of(&nodes, 0), vec!["src/services/lsp/mod.rs"]);
     }
 
-    #[test]
-    fn extract_rust_use_paths() {
-        let src = "use crate::services::pack;\npub use crate::cli::output;\nmod auth;\n";
-        let imports = extract_imports(src, Language::Rust);
-        assert!(imports.iter().any(|s| s.contains("services::pack")));
-        assert!(imports.iter().any(|s| s.contains("cli::output")));
-        assert!(imports.iter().any(|s| s == "self::auth"));
-    }
-
     /// `mod x;` names the declaring file's own neighbour. Resolved against
     /// the whole project it would land on any lone file called `x`, however
     /// unrelated.
@@ -1363,22 +1240,6 @@ mod tests {
             node(2, "src/services/auth.rs", ""),
         ];
         assert_eq!(edges_of(&nodes, 0), vec!["src/handlers/auth.rs"]);
-    }
-
-    #[test]
-    fn extract_python_imports() {
-        let src = "from foo.bar import baz\nimport util\n";
-        let imports = extract_imports(src, Language::Python);
-        assert!(imports.iter().any(|s| s == "foo.bar"));
-        assert!(imports.iter().any(|s| s == "util"));
-    }
-
-    #[test]
-    fn extract_typescript_imports() {
-        let src = "import { Foo } from './bar';\nimport baz from \"../baz\";\n";
-        let imports = extract_imports(src, Language::TypeScript);
-        assert!(imports.iter().any(|s| s.contains("bar")));
-        assert!(imports.iter().any(|s| s.contains("baz")));
     }
 
     #[test]
@@ -1440,41 +1301,6 @@ mod tests {
         let sym = extract_signature("Future<void> main() async {", Language::Dart).unwrap();
         assert_eq!(sym.name, "main");
         assert_eq!(sym.kind, "function");
-    }
-
-    #[test]
-    fn extract_swift_imports_test() {
-        let imports = extract_imports("import Foundation\nimport SwiftUI\n", Language::Swift);
-        assert!(imports.iter().any(|s| s == "Foundation"));
-        assert!(imports.iter().any(|s| s == "SwiftUI"));
-    }
-
-    #[test]
-    fn extract_elixir_imports_test() {
-        let imports = extract_imports(
-            "alias My.Module\nimport Ecto.Query\nuse GenServer\n",
-            Language::Elixir,
-        );
-        assert!(imports.iter().any(|s| s == "My.Module"));
-        assert!(imports.iter().any(|s| s == "Ecto.Query"));
-        assert!(imports.iter().any(|s| s == "GenServer"));
-    }
-
-    #[test]
-    fn extract_dart_imports_test() {
-        let imports = extract_imports(
-            "import 'package:flutter/material.dart';\nexport 'src/foo.dart';\n",
-            Language::Dart,
-        );
-        assert!(imports.iter().any(|s| s.contains("material")));
-        assert!(imports.iter().any(|s| s.contains("foo")));
-    }
-
-    #[test]
-    fn extract_terraform_module_source_test() {
-        let src = "module \"vpc\" {\n  source = \"./modules/vpc\"\n}";
-        let imports = extract_imports(src, Language::Terraform);
-        assert!(imports.iter().any(|s| s.contains("modules/vpc")));
     }
 
     #[test]

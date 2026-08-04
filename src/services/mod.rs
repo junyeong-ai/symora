@@ -9,6 +9,7 @@ pub mod daemon_store;
 pub mod dist;
 pub mod embedding_cache;
 pub mod embeddings;
+pub mod imports;
 pub mod lsp;
 pub mod pack;
 mod pack_cache;
