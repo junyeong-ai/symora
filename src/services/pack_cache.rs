@@ -1,14 +1,14 @@
 //! On-disk cache for the pack engine.
 //!
 //! Each repo gets a `.symora/pack-cache.db` SQLite file keyed by the
-//! project-relative path. We store mtime + the three derived artefacts
-//! (aliases, imports, signatures) per file. A `build_pack` run replays
-//! the cache when mtimes match and re-extracts otherwise, so warm
-//! rebuilds skip the dominant `read_to_string` + per-language scan.
+//! project-relative path. We store mtime + the derived artefacts (imports,
+//! signatures) per file. A `build_pack` run replays the cache when mtimes
+//! match and re-extracts otherwise, so warm rebuilds skip the dominant
+//! `read_to_string` + per-language scan.
 //!
 //! Schema is intentionally tiny — caches are rebuildable, so a read or
-//! decode failure is treated as a miss and a schema-version mismatch resets
-//! the rows, rather than maintaining migrations.
+//! decode failure is treated as a miss and a schema-version mismatch
+//! recreates the table, rather than maintaining migrations.
 
 use std::path::Path;
 
@@ -19,15 +19,14 @@ use crate::models::symbol::Language;
 use crate::services::pack::PackedSymbol;
 
 /// Bumped whenever the on-disk layout changes shape (new column, changed
-/// JSON shape inside a TEXT column, etc.). Mismatched versions trigger a
-/// full cache reset rather than risking stale-decode bugs at read time.
-const SCHEMA_VERSION: i32 = 1;
+/// JSON shape inside a TEXT column, etc.). Mismatched versions recreate the
+/// table rather than risking stale-decode bugs at read time.
+const SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct CachedEntry {
     pub mtime: i64,
     pub language: Language,
-    pub aliases: Vec<String>,
     pub imports: Vec<String>,
     pub signatures: Vec<PackedSymbol>,
 }
@@ -43,13 +42,13 @@ impl PackCache {
         let db_path = dir.join("pack-cache.db");
 
         let conn = Connection::open(&db_path).map_err(|e| StoreError::Database(e.to_string()))?;
-        conn.execute_batch(SCHEMA)
+        conn.execute_batch(META_SCHEMA)
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        // Reset stale caches when the on-disk layout no longer matches what
-        // this binary expects. Pack caches are rebuildable, so dropping
-        // rows is always safe — and far safer than letting a newer
-        // serializer try to decode an older shape.
+        // Recreate the table when the on-disk layout no longer matches what
+        // this binary expects. Pack caches are rebuildable, so dropping the
+        // table is always safe — and a version bump has to be able to change
+        // the table's SHAPE, which clearing its rows would not.
         let stored: i32 = conn
             .query_row(
                 "SELECT CAST(value AS INTEGER) FROM pack_meta WHERE key = 'schema_version'",
@@ -58,7 +57,7 @@ impl PackCache {
             )
             .unwrap_or(0);
         if stored != SCHEMA_VERSION {
-            conn.execute("DELETE FROM pack_files", [])
+            conn.execute_batch("DROP TABLE IF EXISTS pack_files")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
             conn.execute(
                 "INSERT OR REPLACE INTO pack_meta (key, value) VALUES ('schema_version', ?1)",
@@ -66,6 +65,8 @@ impl PackCache {
             )
             .map_err(|e| StoreError::Database(e.to_string()))?;
         }
+        conn.execute_batch(FILES_SCHEMA)
+            .map_err(|e| StoreError::Database(e.to_string()))?;
 
         Ok(Self { conn })
     }
@@ -74,7 +75,7 @@ impl PackCache {
         let mut stmt = self
             .conn
             .prepare_cached(
-                "SELECT mtime, language, aliases, imports, signatures \
+                "SELECT mtime, language, imports, signatures \
                  FROM pack_files WHERE path = ?1",
             )
             .ok()?;
@@ -84,15 +85,13 @@ impl PackCache {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
             ))
         })
         .ok()
-        .and_then(|(mtime, language, aliases, imports, signatures)| {
+        .and_then(|(mtime, language, imports, signatures)| {
             Some(CachedEntry {
                 mtime,
                 language: language.parse::<Language>().ok()?,
-                aliases: serde_json::from_str(&aliases).ok()?,
                 imports: serde_json::from_str(&imports).ok()?,
                 signatures: serde_json::from_str(&signatures).ok()?,
             })
@@ -100,8 +99,6 @@ impl PackCache {
     }
 
     pub fn put(&self, rel_path: &str, entry: &CachedEntry) -> Result<(), StoreError> {
-        let aliases = serde_json::to_string(&entry.aliases)
-            .map_err(|e| StoreError::Database(e.to_string()))?;
         let imports = serde_json::to_string(&entry.imports)
             .map_err(|e| StoreError::Database(e.to_string()))?;
         let signatures = serde_json::to_string(&entry.signatures)
@@ -110,13 +107,12 @@ impl PackCache {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO pack_files \
-                 (path, mtime, language, aliases, imports, signatures) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (path, mtime, language, imports, signatures) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     rel_path,
                     entry.mtime,
                     entry.language.lsp_id(),
-                    aliases,
                     imports,
                     signatures,
                 ],
@@ -157,7 +153,7 @@ impl PackCache {
     }
 }
 
-const SCHEMA: &str = r#"
+const META_SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA temp_store = MEMORY;
@@ -167,12 +163,13 @@ CREATE TABLE IF NOT EXISTS pack_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"#;
 
+const FILES_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS pack_files (
     path TEXT PRIMARY KEY,
     mtime INTEGER NOT NULL,
     language TEXT NOT NULL,
-    aliases TEXT NOT NULL,
     imports TEXT NOT NULL,
     signatures TEXT NOT NULL
 );
@@ -187,7 +184,6 @@ mod tests {
         CachedEntry {
             mtime,
             language: Language::Rust,
-            aliases: vec!["foo".into(), "bar".into()],
             imports: vec!["crate::baz".into()],
             signatures: vec![PackedSymbol {
                 name: "foo".into(),
@@ -205,7 +201,6 @@ mod tests {
         cache.put("src/foo.rs", &entry(100)).unwrap();
         let got = cache.get("src/foo.rs").unwrap();
         assert_eq!(got.mtime, 100);
-        assert_eq!(got.aliases, vec!["foo".to_string(), "bar".to_string()]);
         assert_eq!(got.signatures.len(), 1);
         assert_eq!(got.signatures[0].name, "foo");
     }
