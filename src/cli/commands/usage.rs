@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
+use crate::cli::analysis::LocationAnalysis;
 use crate::cli::output::OutputContext;
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
@@ -673,25 +674,25 @@ async fn fetch_single_symbol_refs(
     Option<UsageResult>,
     Option<crate::models::lsp::IndexingDegradation>,
 ) {
-    let refs_result = app
-        .lsp
-        .find_references(
-            &symbol.location.file,
-            symbol.location.line,
-            symbol.location.column,
-        )
-        .await;
+    let analysis = LocationAnalysis::for_symbol(
+        app.lsp.as_ref(),
+        &symbol.location.file,
+        symbol.clone(),
+        root,
+    )
+    .await;
     // A degraded find_references makes the reference COUNT a lower bound — and
     // the count drives the default `--sort references` ordering and the
     // min_refs/ZeroRefs filters — so report it for disclosure even when this
     // symbol is then filtered out, exactly as `callers.rs` threads the marker.
-    let indexing = refs_result.as_ref().ok().and_then(|r| r.indexing);
-    let refs = refs_result.map(|r| r.data).unwrap_or_default();
+    let indexing = analysis.as_ref().ok().and_then(LocationAnalysis::indexing);
+    let classified = analysis
+        .as_ref()
+        .ok()
+        .map(|analysis| analysis.classify(test_scope));
 
-    let ref_count = refs.len();
-
-    // Use iterator to check for tests without collecting all test refs
-    let has_tests = refs.iter().any(|r| test_scope.is_test_file(&r.file));
+    let ref_count = classified.as_ref().map_or(0, |c| c.total);
+    let has_tests = classified.as_ref().is_some_and(|c| c.test > 0);
 
     if filters.contains(&UsageFilter::HasTests) && !has_tests {
         return (None, indexing);
@@ -745,12 +746,18 @@ async fn fetch_single_symbol_refs(
 
     let metrics = if args.metrics {
         // Only collect up to 3 test files (avoid allocating entire list)
-        let test_files: Vec<String> = refs
-            .iter()
-            .filter(|r| test_scope.is_test_file(&r.file))
-            .take(3)
-            .map(|r| OutputContext::format_path(&r.file, root))
-            .collect();
+        let test_files: Vec<String> = classified
+            .as_ref()
+            .map(|c| {
+                c.test_refs
+                    .iter()
+                    .map(|r| OutputContext::format_path(&r.file, root))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .take(3)
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Some(UsageMetrics {
             references: ref_count,
