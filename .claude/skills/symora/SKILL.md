@@ -19,7 +19,7 @@ Failures are structured: `{"error": {"code": "server_not_installed", "message": 
 
 ## Workflow
 
-1. `symora search index status` — confirm the index is built. If `symbol_count: 0`, run `symora search index build` once.
+1. `symora search index status` — confirm the index covers your languages. `languages` lists what a completed build covers and is what makes a symbol search's answer complete; if it is empty or missing yours, run `symora search index build` once.
 2. `symora pack --tokens 4000` — token-budgeted repo brief (PageRank-ranked files with top-level signatures) — or `symora map summary` for a lighter entrypoint list. Either is the orientation step for a new task.
 3. `symora search symbols <query>` — rough workspace discovery (index-backed).
 4. `symora map file <path>` — compact file overview. Outer fields (`siblings`, `related_files`, `counterpart_files`, `language`) are always valid; the embedded `symbols` field carries `{"error": {"code": "server_not_installed", ...}}` when the LSP is absent — parse the outer shape and ignore `symbols` in that case.
@@ -143,7 +143,7 @@ Use these when search results are unexpectedly empty, a language server is unres
 
 ## When commands fail
 
-- `count: 0` from `search …`: run `symora search index status` — if `symbol_count: 0` the index has never been built, run `symora search index build`.
+- `count: 0` from `search …`: run `symora search index status` — if `languages` is empty, no build has completed (row counts alone can't tell you: a per-file refresh leaves rows behind without covering anything), so run `symora search index build`. If `languages` omits the language you're searching, the answer came from a live language server, not the index.
 - `search symbols` returns `count: 0` with a hint naming a language: the zero is not exhaustive for that language — either it has no index extractor and no live language server, or the search ran workspace-only (index not built, or `--workspace-symbols`) and the live lookup failed. `next_commands` carries the route-appropriate remedy: `search content`/`doctor`, `search index build` when building the index can actually cover the language, or re-running without `--workspace-symbols`. These hints are coverage-driven: a covered language's genuine zero stays bare — a bare `count: 0` means the search really found nothing.
 - `server_not_installed` error: run `symora doctor <lang>` and install per its `install` field. If the binary exists but is off PATH (nvm/mise/asdf, hermetic CI), set `command = "/absolute/path"` under `[lsp.servers.<lang>]` in `.symora/config.toml` (key = the `language` id doctor prints), run `symora daemon restart`, then confirm with `symora doctor <lang>` — the row shows `source: "config"`; if it doesn't, check the top-level `config_errors` for the rejected key or field. A config override has NO observable effect — including any error you are testing for — until the daemon restarts; the warm daemon keeps its startup server table. While the LSP is missing, fall back to `search symbols`, `search content`, `map file`, `map dir`.
 - `context` or `refs` reports an unsupported feature: follow the suggested fallback rather than retrying.
