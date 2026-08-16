@@ -237,11 +237,11 @@ symora impact src/services/checkout.ts:48 --depth 2
     "max_depth_reached": true,
     "callers_by_depth": [
       { "depth": 1, "count": 2, "test": 0, "prod": 2 },
-      { "depth": 2, "count": 2, "test": 0, "prod": 2 }
+      { "depth": 2, "count": 2, "test": 2, "prod": 0 }
     ],
     "test_coverage_ratio": 0.5,
     "risk": "high",
-    "confidence": 0.8
+    "confidence": 0.9
   },
   "next_commands": ["symora impact src/services/checkout.ts:48 --depth 3"]
 }
@@ -332,10 +332,10 @@ symora format src/services/checkout.ts              # LSP 포맷
 # 상태 & 진단
 symora doctor                # language server: 실제 동작 여부(serves) / 누락 + 설치 명령
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
-symora status                # 프로젝트 + daemon 상태
+symora status                # 프로젝트 + language server 상태 (daemon은 `symora daemon status`)
 ```
 
-전역 플래그는 서브커맨드 *앞*에 둡니다: `symora --format compact search symbols X`(단일 라인 JSON), `symora -q rename …`(에러만), `symora -v status`(verbose).
+전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format compact search symbols X`(단일 라인 JSON), `symora -q rename …`(에러만), `symora -v status`(verbose). `--workspace <name>`과 `--token-estimate`도 전역입니다.
 
 ---
 
@@ -343,7 +343,7 @@ symora status                # 프로젝트 + daemon 상태
 
 모든 명령은 기계 파싱을 위해 설계됐고, 규칙은 안정적입니다.
 
-- **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `hints`, `next_commands`, `indexing`.
+- **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, `error`.
 - **명령 실패**는 구조화 JSON이고 0이 아닌 코드로 종료합니다.
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
@@ -351,7 +351,7 @@ symora status                # 프로젝트 + daemon 상태
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 두 가지는 예외입니다: 잘못된 CLI 인자는 평문 usage 에러를 출력하고 exit 2로, "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
 - **위치는 1-indexed** — 입력과 출력 모두. snapping 명령(`refs`, `callers`, `callees`, `context`, `impact`, `usage`, `edit`)은 `file:line:column` 또는 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정)을 받고, position-exact 명령(`def`, `hover`, `typedef`, `rename`, `actions`)은 컬럼을 그대로 사용합니다. 출력 위치는 항상 line과 column을 함께 담습니다.
 - **격하는 숨기지 않고 공개됩니다.** `indexing: "timed_out"`는 count가 하한임을 뜻하고, `coverage_gaps`는 검색하지 못한 언어를 나열하며, `unsupported` 에러는 빠진 LSP 기능을 지목하고 대안을 알려줍니다.
-- **`--format compact`**는 단일 라인 JSON을 출력합니다. 비-TTY로 파이프하면 전체 JSON이 유지됩니다.
+- **`--format compact`**는 단일 라인 JSON을 출력합니다. 모든 응답은 형식과 무관하게 `output.max_response_chars`(기본 20,000자)로 상한이 걸립니다: 항목 단위로 통째로 잘리고, `truncated`와 설정 키를 지목하는 hint로 공개됩니다 — compact는 더 촘촘한 인코딩이라 같은 상한 아래 더 많은 항목을 담습니다.
 
 ---
 
@@ -362,7 +362,7 @@ Symora는 각 프로젝트의 `.symora/store.db`에 지속성 SQLite 인덱스�
 ```bash
 symora search index build               # 증분: 변경된 파일만, 삭제된 파일 정리
 symora search index build --force --lang rust
-symora search index status              # languages(커버 언어), symbol_count, file_count, last_indexed
+symora search index status              # languages(커버 언어), 심볼/파일/라인 수, 크기, last_indexed
 symora search index clear
 ```
 
@@ -372,7 +372,7 @@ symora search index clear
 
 ## 설정
 
-우선순위: `.symora/config.toml` → `~/.config/symora/config.toml` → 기본값.
+우선순위: `.symora/config.toml` → `~/.config/symora/config.toml`(`XDG_CONFIG_HOME` 존중) → 기본값. 두 환경 변수 `SYMORA_SEARCH_LIMIT`, `SYMORA_LSP_TIMEOUT`은 파일보다 우선합니다.
 
 ```bash
 symora config init            # 로컬 설정 작성
@@ -462,7 +462,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 에이전트용 플레이북은 이 README가 아니라 *도구와 함께* 배포되어 바이너리와 항상 일치합니다.
 
 - `symora setup skill`은 Claude Code 스킬(전체 CLI 플레이북)을 설치합니다.
-- `symora mcp serve`는 동일한 가이드를 MCP `initialize` instructions로 반환합니다.
+- `symora mcp serve`는 같은 내용을 MCP 도구 어휘로 옮긴 가이드를 `initialize` instructions로 반환합니다.
 
 요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 명령 실패는 0이 아닌 코드로 종료하는 구조화된 `{code, message, hint}`입니다(잘못된 CLI 인자는 평문 usage 에러).
 
