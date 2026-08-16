@@ -2,11 +2,32 @@
 
 use crate::models::symbol::Symbol;
 
-/// Find the innermost symbol at a position (recursive search).
+/// Whether a symbol's declared range covers a position. The one reading of
+/// containment every navigator here shares, so two of them can never disagree
+/// about which symbols a position is inside.
 ///
-/// - `column = None`: line-only matching (deepest symbol containing the line).
-/// - `column = Some(col)`: line+column range matching (deepest symbol whose
-///   range contains the position).
+/// - `column = None`: line-only matching.
+/// - `column = Some(col)`: line+column range matching.
+fn contains_position(symbol: &Symbol, line: u32, column: Option<u32>) -> bool {
+    let loc = &symbol.location;
+    let start = loc.line;
+    let end = loc.end_line.unwrap_or(start);
+
+    match column {
+        None => line >= start && line <= end,
+        Some(col) => {
+            if start == end {
+                loc.line == line && col >= loc.column && loc.end_column.is_none_or(|ec| col <= ec)
+            } else {
+                (line > start && line < end)
+                    || (line == start && col >= loc.column)
+                    || (line == end && loc.end_column.is_none_or(|ec| col <= ec))
+            }
+        }
+    }
+}
+
+/// Find the innermost symbol at a position (recursive search).
 pub fn find_symbol_at_position(
     symbols: &[Symbol],
     line: u32,
@@ -14,35 +35,52 @@ pub fn find_symbol_at_position(
 ) -> Option<&Symbol> {
     fn search(symbols: &[Symbol], line: u32, column: Option<u32>) -> Option<&Symbol> {
         for symbol in symbols {
-            let loc = &symbol.location;
-            let start = loc.line;
-            let end = loc.end_line.unwrap_or(start);
-
-            let in_range = match column {
-                None => line >= start && line <= end,
-                Some(col) => {
-                    if start == end {
-                        loc.line == line
-                            && col >= loc.column
-                            && loc.end_column.is_none_or(|ec| col <= ec)
-                    } else {
-                        (line > start && line < end)
-                            || (line == start && col >= loc.column)
-                            || (line == end && loc.end_column.is_none_or(|ec| col <= ec))
-                    }
-                }
-            };
-
-            if in_range {
-                if let Some(child) = search(&symbol.children, line, column) {
-                    return Some(child);
-                }
-                return Some(symbol);
+            if !contains_position(symbol, line, column) {
+                continue;
             }
+            if let Some(child) = search(&symbol.children, line, column) {
+                return Some(child);
+            }
+            return Some(symbol);
         }
         None
     }
     search(symbols, line, column)
+}
+
+/// The callable that owns a position: the innermost function, method, or
+/// constructor whose range contains it.
+///
+/// [`find_symbol_at_position`] answers "what is declared here", which for a
+/// position inside a body is the binding it landed in — a `const` on the
+/// statement, a parameter, a field. That is the right answer for addressing a
+/// symbol and the wrong one for naming the code a position *runs in*: a test
+/// runner, a caller, and a reader all name the callable, never the local it
+/// happens to sit next to. Kind decides, so the answer holds for any language
+/// the server describes; a name is required because the answer is an identity
+/// and an anonymous frame cannot serve as one — the search continues outward
+/// past it rather than reporting a blank.
+pub fn enclosing_callable(symbols: &[Symbol], line: u32, column: Option<u32>) -> Option<&Symbol> {
+    fn search<'a>(
+        symbols: &'a [Symbol],
+        line: u32,
+        column: Option<u32>,
+        found: Option<&'a Symbol>,
+    ) -> Option<&'a Symbol> {
+        for symbol in symbols {
+            if !contains_position(symbol, line, column) {
+                continue;
+            }
+            let found = if symbol.kind.is_callable() && !symbol.name.trim().is_empty() {
+                Some(symbol)
+            } else {
+                found
+            };
+            return search(&symbol.children, line, column, found);
+        }
+        found
+    }
+    search(symbols, line, column, None)
 }
 
 /// How a target position resolved against the symbol tree. Both
@@ -267,5 +305,88 @@ mod tests {
             }
             _ => panic!("two declarations on one line are ambiguous"),
         }
+    }
+    fn binding(name: &str, line: u32, col: u32) -> Symbol {
+        Symbol::new(
+            name.to_string(),
+            SymbolKind::Constant,
+            Location::full(
+                std::path::PathBuf::from("x.rs"),
+                line,
+                col,
+                line,
+                col,
+                line,
+                80,
+            ),
+        )
+    }
+
+    fn nest(mut parent: Symbol, children: Vec<Symbol>) -> Symbol {
+        parent.children = children;
+        parent
+    }
+
+    /// A position inside a body lands on whatever is declared there — a local
+    /// binding, not the code it runs in. The two navigators answer different
+    /// questions about the same position, and a caller that wants an identity
+    /// wants the callable.
+    #[test]
+    fn a_position_inside_a_binding_resolves_to_the_callable_that_runs_it() {
+        let symbols = vec![nest(
+            func("test_places_an_order", 18, 16, 22),
+            vec![binding("order", 20, 9)],
+        )];
+
+        let inner = find_symbol_at_position(&symbols, 20, Some(30)).expect("a symbol is declared");
+        assert_eq!(inner.name, "order");
+
+        let owner = enclosing_callable(&symbols, 20, Some(30)).expect("a callable owns the line");
+        assert_eq!(owner.name, "test_places_an_order");
+    }
+
+    /// The nearest callable wins over an outer one, so a helper defined inside
+    /// a test is named as itself rather than as its host.
+    #[test]
+    fn the_innermost_callable_owns_the_position() {
+        let symbols = vec![nest(
+            func("outer", 5, 4, 40),
+            vec![nest(
+                func("inner", 10, 8, 20),
+                vec![binding("value", 12, 12)],
+            )],
+        )];
+
+        let owner = enclosing_callable(&symbols, 12, Some(20)).expect("a callable owns the line");
+        assert_eq!(owner.name, "inner");
+    }
+
+    /// An anonymous frame is a position, not an identity. The search passes it
+    /// and reports the nearest callable that can be named — never a blank.
+    #[test]
+    fn an_anonymous_callable_is_passed_for_the_nearest_named_one() {
+        let symbols = vec![nest(
+            func("test_retries", 30, 16, 40),
+            vec![nest(func("", 32, 20, 38), vec![binding("attempt", 34, 12)])],
+        )];
+
+        let owner = enclosing_callable(&symbols, 34, Some(20)).expect("a callable owns the line");
+        assert_eq!(owner.name, "test_retries");
+    }
+
+    /// A position no callable contains has no owner to report; the caller is
+    /// left to say so rather than handed the enclosing type.
+    #[test]
+    fn a_position_outside_every_callable_has_no_owner() {
+        let symbols = vec![nest(
+            Symbol::new(
+                "Cart".to_string(),
+                SymbolKind::Class,
+                Location::full(std::path::PathBuf::from("x.rs"), 1, 7, 1, 7, 9, 1),
+            ),
+            vec![binding("total", 3, 5)],
+        )];
+
+        assert!(enclosing_callable(&symbols, 3, Some(9)).is_none());
     }
 }
