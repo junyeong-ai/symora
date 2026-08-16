@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -12,7 +12,7 @@ use crate::cli::response::{
     CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput, TestOutput,
     TypeInfoOutput,
 };
-use crate::cli::utils::{extract_signature, find_symbol_at_position};
+use crate::cli::utils::{enclosing_callable, extract_signature, find_symbol_at_position};
 use crate::cli::{LocationArg, OutputError};
 
 use super::common::lsp_error_at;
@@ -546,25 +546,31 @@ fn is_unsupported_lsp_feature(error: &str) -> bool {
     error.contains("does not support") || error.contains("no handler for request")
 }
 
-/// Name each covering test by resolving the symbol that ENCLOSES the
-/// reference, from the language server's own symbol tree.
+/// The distinct tests that exercise the target: for each reference the scope
+/// classified as test code, the callable it runs in.
 ///
 /// The alternative — scanning backwards for annotation text — cannot tell
 /// `test(` in a spec file from a call to a function named `test`, and every
-/// language needs its own vocabulary of markers to guess with. Asking which
-/// symbol contains the line is one question, exact for every language that
-/// serves document symbols, and it names the test that actually covers the
-/// usage rather than the nearest thing that looked like one.
+/// language needs its own vocabulary of markers to guess with. Asking the
+/// symbol tree which callable owns the position is one question, exact for
+/// every language that serves document symbols.
+///
+/// A test that touches the target twice is one test, so the answer is a set:
+/// the same callable resolved again adds no entry, and each entry keeps the
+/// first reference that reached it. `count` is what that set held before the
+/// emission cap, so a capped list says so rather than presenting its head as
+/// the whole.
 async fn fetch_tests(
     lsp: &dyn LspService,
     test_refs: &[&crate::models::symbol::Location],
     root: &Path,
     limit: usize,
 ) -> Section<TestOutput> {
-    let mut items = Vec::with_capacity(limit);
+    let mut items = Vec::new();
+    let mut seen: HashSet<(PathBuf, u32, u32)> = HashSet::new();
     let mut symbols_by_file: HashMap<PathBuf, Vec<Symbol>> = HashMap::new();
 
-    for r in test_refs.iter().take(limit) {
+    for r in test_refs {
         let symbols = match symbols_by_file.entry(r.file.clone()) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(
@@ -574,18 +580,25 @@ async fn fetch_tests(
             ),
         };
 
-        if let Some(symbol) = find_symbol_at_position(symbols, r.line, Some(r.column)) {
-            items.push(TestOutput {
-                name: symbol
-                    .name_path
-                    .clone()
-                    .unwrap_or_else(|| symbol.name.clone()),
-                location: LocationOutput::from_location(r, root),
-            });
+        let Some(symbol) = enclosing_callable(symbols, r.line, Some(r.column)) else {
+            continue;
+        };
+        let declared = &symbol.location;
+        if !seen.insert((declared.file.clone(), declared.line, declared.column)) {
+            continue;
         }
+        items.push(TestOutput {
+            name: symbol
+                .name_path
+                .clone()
+                .unwrap_or_else(|| symbol.name.clone()),
+            location: LocationOutput::from_location(r, root),
+        });
     }
 
-    Section::new(items)
+    let found = items.len();
+    items.truncate(limit);
+    Section::with_total(items, found)
 }
 
 #[cfg(test)]
