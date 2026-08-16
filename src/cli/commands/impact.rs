@@ -49,7 +49,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                     refs,
                 })
                 .collect();
-            affected_files.sort_by_key(|f| std::cmp::Reverse(f.refs));
+            rank_affected_files(&mut affected_files);
             let total_files = affected_files.len();
             affected_files.truncate(limit);
 
@@ -156,6 +156,14 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 /// boundary, like `depth`.
 fn normalize_limit(limit: usize) -> usize {
     limit.max(1)
+}
+
+/// Most-referenced first, path as the tiebreak. The rows arrive in hash-map
+/// order and a truncation follows, so the comparator must be a total order
+/// (paths are unique) — a bare count sort would let arrival order pick which
+/// equal-count files survive the cap, a different answer every run.
+fn rank_affected_files(files: &mut [AffectedFileOutput]) {
+    files.sort_by(|a, b| b.refs.cmp(&a.refs).then_with(|| a.file.cmp(&b.file)));
 }
 
 fn impact_next_commands(
@@ -337,5 +345,39 @@ mod tests {
         let radius = radius(false, None);
         assert!(impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&radius)).is_empty());
         assert!(impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, None).is_empty());
+    }
+
+    fn affected(file: &str, refs: usize) -> AffectedFileOutput {
+        AffectedFileOutput {
+            file: file.to_string(),
+            is_test: false,
+            refs,
+        }
+    }
+
+    /// Equal-count files rank by path, so the order — and which files a
+    /// `--limit` keeps — is the same whatever order the counts arrived in.
+    #[test]
+    fn equal_count_files_rank_the_same_from_any_arrival_order() {
+        let mut one = vec![
+            affected("b.rs", 2),
+            affected("a.rs", 2),
+            affected("c.rs", 5),
+        ];
+        let mut other = vec![
+            affected("a.rs", 2),
+            affected("c.rs", 5),
+            affected("b.rs", 2),
+        ];
+
+        rank_affected_files(&mut one);
+        rank_affected_files(&mut other);
+
+        let order: Vec<&str> = one.iter().map(|f| f.file.as_str()).collect();
+        assert_eq!(order, ["c.rs", "a.rs", "b.rs"]);
+        assert_eq!(
+            order,
+            other.iter().map(|f| f.file.as_str()).collect::<Vec<_>>()
+        );
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -240,9 +240,11 @@ struct RawLspConfig {
     /// Raw [lsp.servers.<lang>] stanzas. Kept as TOML tables so
     /// `resolve_server_overrides` can partition unknown keys AND unknown
     /// fields into corrective errors instead of failing the whole config
-    /// or silently dropping a typo'd field.
+    /// or silently dropping a typo'd field. Ordered by key so the
+    /// resolve — and the `config_errors` it reports — reads the stanzas
+    /// in one canonical order.
     #[serde(default)]
-    servers: HashMap<String, toml::Table>,
+    servers: BTreeMap<String, toml::Table>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -417,9 +419,9 @@ const SERVER_OVERRIDE_FIELDS: [&str; 3] = ["command", "args", "tier"];
 /// rejected whole: applying its remainder would let a typo'd `command`
 /// silently fall back to the builtin launch.
 fn resolve_server_overrides(
-    raw: HashMap<String, toml::Table>,
-) -> (HashMap<String, ServerOverride>, Vec<ServerOverrideError>) {
-    let mut applied = HashMap::new();
+    raw: BTreeMap<String, toml::Table>,
+) -> (BTreeMap<String, ServerOverride>, Vec<ServerOverrideError>) {
+    let mut applied = BTreeMap::new();
     let mut errors = Vec::new();
     for (key, table) in raw {
         match Language::from_str(&key) {

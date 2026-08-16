@@ -992,7 +992,9 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
 /// The builtin table with [lsp.servers] overrides applied. This is THE
 /// server table: LspManager spawn, doctor, and setup deps must all read
 /// it so "reported installed" can never diverge from "actually spawnable".
-pub fn merged(overrides: &HashMap<String, ServerOverride>) -> HashMap<Language, ServerConfig> {
+pub fn merged(
+    overrides: &std::collections::BTreeMap<String, ServerOverride>,
+) -> HashMap<Language, ServerConfig> {
     let mut configs = defaults();
     for (key, o) in overrides {
         // Resolve-time partitioning is the sole validator: only canonical
@@ -1175,7 +1177,7 @@ mod tests {
 
     #[test]
     fn merged_with_no_overrides_matches_defaults() {
-        let merged = merged(&HashMap::new());
+        let merged = merged(&std::collections::BTreeMap::new());
         let base = defaults();
         assert_eq!(merged.len(), base.len());
         for (language, config) in &merged {
@@ -1189,7 +1191,7 @@ mod tests {
 
     #[test]
     fn merged_command_only_override_keeps_builtin_args() {
-        let mut overrides = HashMap::new();
+        let mut overrides = std::collections::BTreeMap::new();
         overrides.insert(
             "typescript".to_string(),
             ServerOverride {
@@ -1208,7 +1210,7 @@ mod tests {
 
     #[test]
     fn merged_overrides_args_and_tier() {
-        let mut overrides = HashMap::new();
+        let mut overrides = std::collections::BTreeMap::new();
         overrides.insert(
             "typescript".to_string(),
             ServerOverride {

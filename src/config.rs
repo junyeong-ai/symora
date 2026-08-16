@@ -1,6 +1,6 @@
 //! LSP Runtime Configuration
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::models::config::SymoraConfig;
@@ -99,11 +99,11 @@ pub struct LspRuntimeConfig {
     /// server stays silent.
     pub diagnostics_wait: Duration,
     /// Custom project entry files per language (overrides defaults in find_project_entry)
-    pub entry_files: HashMap<String, Vec<String>>,
+    pub entry_files: BTreeMap<String, Vec<String>>,
     /// [lsp.servers] launch overrides, keyed by Language::lsp_id(). Merged
     /// over servers::defaults() by LspManager at construction. Only
     /// validated (canonical-key) entries reach this map.
-    pub servers: HashMap<String, crate::models::config::ServerOverride>,
+    pub servers: BTreeMap<String, crate::models::config::ServerOverride>,
     /// Hard cap on simultaneously running language servers. Prevents
     /// memory-bound monorepos from spawning a server per language and
     /// running out of file descriptors / RAM.
@@ -119,8 +119,8 @@ impl Default for LspRuntimeConfig {
             diagnostics_wait: Duration::from_millis(
                 crate::models::config::defaults::diagnostics_wait_ms(),
             ),
-            entry_files: HashMap::new(),
-            servers: HashMap::new(),
+            entry_files: BTreeMap::new(),
+            servers: BTreeMap::new(),
             max_concurrent_servers: crate::constants::defaults::LSP_MAX_CONCURRENT_SERVERS,
         }
     }

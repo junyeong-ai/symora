@@ -106,7 +106,10 @@ pub fn build_symbol_search_query(with_kind: bool, with_lang: bool) -> String {
     // prefix > substring. Exact-leaf is checked first so a nested symbol
     // whose name equals the query still scores 1.0 (a path-suffix test
     // would otherwise shadow it). Length is the ORDER BY tiebreaker, not a
-    // score input.
+    // score input; path and position close it to a total order (the table is
+    // UNIQUE over file/line/col), so which equal-score rows survive the LIMIT
+    // is a property of the data, not of the physical row order a rebuild or
+    // query plan happens to produce.
     format!(
         r#"SELECT s.name, s.name_path, s.kind, s.line, s.col, f.path, s.container,
     COUNT(*) OVER () AS total,
@@ -125,7 +128,7 @@ WHERE (
     s.name LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE
     OR (s.name_path IS NOT NULL AND s.name_path LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE)
 ){kind_filter}{lang_filter}
-ORDER BY score DESC, LENGTH(COALESCE(s.name_path, s.name)) ASC
+ORDER BY score DESC, LENGTH(COALESCE(s.name_path, s.name)) ASC, f.path ASC, s.line ASC, s.col ASC
 LIMIT ?2"#
     )
 }
@@ -160,6 +163,10 @@ pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
     // Relevance is the match's position within the trimmed line — an
     // earlier hit is more relevant. Line length is the ORDER BY tiebreaker
     // only; it carries no relevance signal and must not enter the score.
+    // Path and line number close the ordering to a total one, so the LIMIT
+    // keeps the same rows on both the FTS and LIKE-only plans — without it
+    // the two plans retrieve ties in different physical orders and could
+    // emit different subsets of the identical result set.
     format!(
         r#"SELECT c.content, c.line_num, f.path, f.language,
     COUNT(*) OVER () AS total,
@@ -172,7 +179,7 @@ pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
 FROM content_lines c
 JOIN files f ON c.file_id = f.id
 WHERE {fts_prefilter}c.content LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE{lang_filter}
-ORDER BY score DESC, LENGTH(c.content) ASC
+ORDER BY score DESC, LENGTH(c.content) ASC, f.path ASC, c.line_num ASC
 LIMIT ?2"#
     )
 }

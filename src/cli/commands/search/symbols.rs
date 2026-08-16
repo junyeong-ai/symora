@@ -546,6 +546,9 @@ async fn collect_workspace_symbol_results(
             .partial_cmp(&score_workspace_symbol(query, a))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.location.file.cmp(&b.location.file))
+            .then_with(|| a.location.line.cmp(&b.location.line))
+            .then_with(|| a.location.column.cmp(&b.location.column))
     });
 
     let mut outputs: Vec<_> = results
@@ -734,6 +737,7 @@ fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_sco
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.line.cmp(&b.line))
+            .then_with(|| a.column.cmp(&b.column))
     });
 }
 
