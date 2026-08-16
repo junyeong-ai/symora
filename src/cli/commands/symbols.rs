@@ -463,6 +463,7 @@ fn sort_workspace_symbols(symbols: &mut [Symbol], query: &str, test_scope: &Test
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.location.file.cmp(&b.location.file))
             .then_with(|| a.location.line.cmp(&b.location.line))
+            .then_with(|| a.location.column.cmp(&b.location.column))
     });
 }
 

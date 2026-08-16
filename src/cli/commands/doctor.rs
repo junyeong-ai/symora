@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use clap::Args;
@@ -99,7 +99,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 .collect();
             (config.lsp.servers, errors)
         }
-        Err(e) => (HashMap::new(), vec![e.to_string()]),
+        Err(e) => (BTreeMap::new(), vec![e.to_string()]),
     };
     // Resolved through the same parser every `--lang` uses, so one
     // vocabulary addresses a language across the whole CLI. A substring

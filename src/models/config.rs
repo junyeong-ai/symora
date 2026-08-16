@@ -41,7 +41,7 @@ pub struct ProjectConfig {
     pub languages: Vec<Language>,
 
     #[serde(default)]
-    pub entry_files: std::collections::HashMap<String, Vec<String>>,
+    pub entry_files: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,8 +79,8 @@ pub struct LspConfig {
 
     /// [lsp.servers.<lang>] launch overrides, keyed by Language::lsp_id().
     /// Only validated (canonical-key) entries live here.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub servers: std::collections::HashMap<String, ServerOverride>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub servers: std::collections::BTreeMap<String, ServerOverride>,
 
     /// Rejected [lsp.servers] stanzas from the last resolve (non-canonical
     /// keys, unknown fields, mistyped values) — never applied, never
@@ -101,7 +101,7 @@ impl Default for LspConfig {
             type_hierarchy_limit: defaults::type_hierarchy_limit(),
             tests_limit: defaults::tests_limit(),
             diagnostics_wait_ms: defaults::diagnostics_wait_ms(),
-            servers: std::collections::HashMap::new(),
+            servers: std::collections::BTreeMap::new(),
             server_override_errors: Vec::new(),
         }
     }

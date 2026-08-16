@@ -899,6 +899,36 @@ mod tests {
             .unwrap()
     }
 
+    /// A LIMIT under a score tie must keep a well-defined row. Both search
+    /// queries order by path and position after score, so which equal-score
+    /// row survives the cap is a property of the data — never of the physical
+    /// row order a rebuild or a different query plan happens to produce.
+    #[tokio::test]
+    async fn tied_scores_keep_the_path_ascending_row_under_a_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for file in ["b.rs", "a.rs"] {
+            tokio::fs::write(root.join(file), "fn same_probe() {}\n")
+                .await
+                .unwrap();
+        }
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let symbols = store
+            .search_symbols("same_probe", 1, None, None)
+            .await
+            .unwrap();
+        assert_eq!(symbols.total, 2);
+        assert_eq!(symbols.rows.len(), 1);
+        assert!(symbols.rows[0].file.ends_with("a.rs"));
+
+        let content = store.search_content("same_probe", 1, None).await.unwrap();
+        assert_eq!(content.total, 2);
+        assert_eq!(content.rows.len(), 1);
+        assert!(content.rows[0].file.ends_with("a.rs"));
+    }
+
     /// The FTS trigram pre-filter must return exactly the same rows, scores, and
     /// order as the LIKE-only scan for every >= 3-char query, including
     /// FTS-syntax characters, mixed case, and non-ASCII text. Any divergence
