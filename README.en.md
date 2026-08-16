@@ -237,11 +237,11 @@ symora impact src/services/checkout.ts:48 --depth 2
     "max_depth_reached": true,
     "callers_by_depth": [
       { "depth": 1, "count": 2, "test": 0, "prod": 2 },
-      { "depth": 2, "count": 2, "test": 0, "prod": 2 }
+      { "depth": 2, "count": 2, "test": 2, "prod": 0 }
     ],
     "test_coverage_ratio": 0.5,
     "risk": "high",
-    "confidence": 0.8
+    "confidence": 0.9
   },
   "next_commands": ["symora impact src/services/checkout.ts:48 --depth 3"]
 }
@@ -332,10 +332,10 @@ symora format src/services/checkout.ts              # LSP format
 # Health & diagnostics
 symora doctor                # language servers: verified serving / missing + install commands
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
-symora status                # project + daemon state
+symora status                # project + language-server state (daemon: `symora daemon status`)
 ```
 
-Global flags go *before* the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose).
+Global flags work before or after the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose). `--workspace <name>` and `--token-estimate` are global too.
 
 ---
 
@@ -343,7 +343,7 @@ Global flags go *before* the subcommand: `symora --format compact search symbols
 
 Every command is built for machine parsing, and the rules are stable:
 
-- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — `truncated`, `stale`, `hints`, `next_commands`, and `indexing`.
+- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — `truncated`, `stale`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, and `error`.
 - **Command failures** are structured JSON and exit non-zero:
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
@@ -351,7 +351,7 @@ Every command is built for machine parsing, and the rules are stable:
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. Two things sit outside this: a bad CLI argument prints a plain usage error and exits 2, and a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
 - **Positions are 1-indexed** on both input and output. Snapping commands (`refs`, `callers`, `callees`, `context`, `impact`, `usage`, `edit`) take `file:line:column` or a column-less `file:line` that addresses the symbol declared on that line; position-exact commands (`def`, `hover`, `typedef`, `rename`, `actions`) use the literal column. Emitted locations always carry line and column.
 - **Degradation is disclosed, never hidden.** `indexing: "timed_out"` means a count is a lower bound; `coverage_gaps` lists languages that couldn't be searched; an `unsupported` error names the missing LSP capability and points to an alternative.
-- **`--format compact`** emits single-line JSON; piping to a non-TTY keeps full JSON.
+- **`--format compact`** emits single-line JSON. Every response, in any format, is capped at `output.max_response_chars` (default 20,000): whole items are dropped to fit, disclosed via `truncated` and a hint naming the config key — and compact's denser encoding fits more items under the same ceiling.
 
 ---
 
@@ -362,7 +362,7 @@ Symora keeps a persistent SQLite index at `.symora/store.db` in each project.
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted
 symora search index build --force --lang rust
-symora search index status              # languages covered, symbol_count, file_count, last_indexed
+symora search index status              # languages covered, symbol/file/line counts, size, last_indexed
 symora search index clear
 ```
 
@@ -372,7 +372,7 @@ Search degrades gracefully without an index (it falls back to a filesystem scan 
 
 ## Configuration
 
-Precedence: `.symora/config.toml` → `~/.config/symora/config.toml` → built-in defaults.
+Precedence: `.symora/config.toml` → `~/.config/symora/config.toml` (honors `XDG_CONFIG_HOME`) → built-in defaults. Two environment overrides sit above the files: `SYMORA_SEARCH_LIMIT` and `SYMORA_LSP_TIMEOUT`.
 
 ```bash
 symora config init            # write a local config
@@ -462,7 +462,7 @@ symora mcp tools --profile read-only             # what a read-only server would
 The agent-facing playbook ships *with the tool*, not in this README, so it stays in lockstep with the binary:
 
 - `symora setup skill` installs the Claude Code skill (the full CLI playbook).
-- `symora mcp serve` returns the same guidance through the MCP `initialize` instructions.
+- `symora mcp serve` returns the equivalent guidance, written in MCP tool vocabulary, through the `initialize` instructions.
 
 The short version: discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`); list responses share one shape; positions are 1-indexed; command failures are structured `{code, message, hint}` at non-zero exit (a bad CLI argument is a plain usage error).
 
