@@ -19,19 +19,28 @@ pub struct ReleaseAsset {
     pub checksum: PathBuf,
 }
 
-/// Resolve the latest release version, in two stages:
-///   1. follow the redirect on `/releases/latest` (no API rate limit)
-///   2. fall back to the GitHub API
-fn resolve_via_redirect() -> Option<String> {
-    let effective = curl_resolve_redirect(&format!("{RELEASES_URL}/latest")).ok()?;
-    let after = effective.split("/releases/tag/").nth(1)?;
-    let tag = after.split(['/', '?', '#']).next()?;
+/// The version a release tag names, or `None` for a tag that names none.
+fn version_of_tag(tag: &str) -> Option<String> {
     let version = tag.strip_prefix('v').unwrap_or(tag);
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// The version the API's answer names.
+///
+/// Read from the release object's own `tag_name`, which is the first key of
+/// that name in the body — the release GitHub calls latest is the whole
+/// response, and the fields that follow (author, assets) carry no such key.
+pub(super) fn tag_from_api_body(body: &str) -> Option<String> {
+    let after = body.split_once("\"tag_name\"")?.1;
+    let after = after.split_once(':')?.1;
+    let after = after.split_once('"')?.1;
+    version_of_tag(after.split_once('"')?.0)
+}
+
+/// The version the redirect's destination names.
+pub(super) fn tag_from_effective_url(url: &str) -> Option<String> {
+    let after = url.split_once("/releases/tag/")?.1;
+    version_of_tag(after.split(['/', '?', '#']).next()?)
 }
 
 fn resolve_via_api() -> Option<String> {
@@ -43,26 +52,30 @@ fn resolve_via_api() -> Option<String> {
         &["--fail", "--silent", "--location", API_LATEST_URL],
     )
     .ok()?;
-    let needle = "\"tag_name\":";
-    let idx = body.find(needle)?;
-    let after = &body[idx + needle.len()..];
-    let q1 = after.find('"')?;
-    let after = &after[q1 + 1..];
-    let q2 = after.find('"')?;
-    let tag = &after[..q2];
-    let version = tag.strip_prefix('v').unwrap_or(tag);
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
+    tag_from_api_body(&body)
 }
 
+fn resolve_via_redirect() -> Option<String> {
+    tag_from_effective_url(&curl_resolve_redirect(&format!("{RELEASES_URL}/latest")).ok()?)
+}
+
+/// The latest release version — asked of the API, and of the web redirect
+/// only where the API could not answer.
+///
+/// Both answer the same question and they disagree for minutes at a time:
+/// the redirect on `/releases/tag/` is a view that trails the API after a
+/// release is published, which is exactly when someone runs an update. Read
+/// in that window it names the release before, and the update built on it
+/// calls the running binary current — a wrong answer delivered with the
+/// confidence of a right one. So the API settles it, and the redirect
+/// answers only when the API cannot: the API's rate limit counts against an
+/// unauthenticated IP, which a shared runner can exhaust, and the redirect
+/// has no limit to exhaust.
 pub fn resolve_latest_version() -> Result<String> {
-    if let Some(v) = resolve_via_redirect() {
+    if let Some(v) = resolve_via_api() {
         return Ok(v);
     }
-    if let Some(v) = resolve_via_api() {
+    if let Some(v) = resolve_via_redirect() {
         return Ok(v);
     }
     Err(anyhow!("could not resolve latest release version"))
@@ -106,4 +119,83 @@ pub fn download_release(version: &str, target: &str, dest_dir: &Path) -> Result<
         archive,
         checksum,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The API is what settles which release is latest, and it settles it
+    /// only while its answer parses. A parse that returns nothing is not a
+    /// visible failure — resolution falls through to the redirect, which
+    /// trails by minutes after a release and names the one before it. So the
+    /// shape the API actually sends is pinned here: pretty-printed, with the
+    /// key reached past an `html_url` that carries a release tag of its own.
+    #[test]
+    fn the_api_answer_is_read_from_the_release_it_describes() {
+        let body = r#"{
+  "url": "https://api.github.com/repos/junyeong-ai/symora/releases/372327722",
+  "html_url": "https://github.com/junyeong-ai/symora/releases/tag/v0.20.0",
+  "id": 372327722,
+  "author": { "login": "github-actions[bot]", "id": 41898282 },
+  "node_id": "RE_kwDO",
+  "tag_name": "v0.20.1",
+  "target_commitish": "main",
+  "name": "v0.20.1",
+  "draft": false,
+  "prerelease": false
+}"#;
+        assert_eq!(tag_from_api_body(body).as_deref(), Some("0.20.1"));
+        assert_eq!(
+            tag_from_api_body(r#"{"tag_name":"v1.0.0-rc.1"}"#).as_deref(),
+            Some("1.0.0-rc.1")
+        );
+        // A tag without the `v` is still a tag; one that is only `v` is not.
+        assert_eq!(
+            tag_from_api_body(r#"{"tag_name": "0.9.0"}"#).as_deref(),
+            Some("0.9.0")
+        );
+        for empty in [r#"{"tag_name": "v"}"#, r#"{"tag_name": ""}"#, "{}", ""] {
+            assert_eq!(tag_from_api_body(empty), None, "body {empty:?}");
+        }
+    }
+
+    /// The redirect answers when the API cannot, and its destination is a URL
+    /// rather than a document — query and fragment are not part of the tag.
+    #[test]
+    fn the_redirect_answer_is_read_from_where_it_landed() {
+        assert_eq!(
+            tag_from_effective_url("https://github.com/junyeong-ai/symora/releases/tag/v0.20.1")
+                .as_deref(),
+            Some("0.20.1")
+        );
+        assert_eq!(
+            tag_from_effective_url(
+                "https://github.com/junyeong-ai/symora/releases/tag/v0.20.1?foo=1#bar"
+            )
+            .as_deref(),
+            Some("0.20.1")
+        );
+        for missed in [
+            "https://github.com/junyeong-ai/symora/releases/latest",
+            "https://github.com/junyeong-ai/symora/releases/tag/v",
+            "https://github.com/junyeong-ai/symora/releases/tag/",
+        ] {
+            assert_eq!(tag_from_effective_url(missed), None, "url {missed:?}");
+        }
+    }
+
+    /// Whatever a source answered still has to survive the pattern the
+    /// download path builds a URL from — the two are one decision.
+    #[test]
+    fn every_resolved_version_is_one_the_download_path_accepts() {
+        for body in [
+            r#"{"tag_name": "v0.20.1"}"#,
+            r#"{"tag_name": "v1.0.0-rc.1"}"#,
+            r#"{"tag_name": "0.9.0"}"#,
+        ] {
+            let version = tag_from_api_body(body).expect("body names a tag");
+            assert!(is_valid_version(&version), "version {version:?}");
+        }
+    }
 }
