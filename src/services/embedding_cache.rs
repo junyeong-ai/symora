@@ -244,9 +244,19 @@ impl EmbeddingCache {
     /// with `score`, returning the top `limit` by descending score and the
     /// total number scored. Vectors are streamed one row at a time and
     /// dropped after scoring, so peak memory is O(limit), never the corpus.
+    /// Rank the cached chunks of `language` that belong to `active`.
+    ///
+    /// The active set is what THIS run found on disk, and it is the filter
+    /// rather than `prune` because the two answer different questions. Prune
+    /// deletes, so it may only run when the walk saw everything; ranking has
+    /// to exclude a row whenever the walk did not, or a file that changed or
+    /// vanished behind a path this run could not read would keep scoring as a
+    /// current match. Filtering costs nothing the walk did not already pay
+    /// and, unlike deleting, is safe when the walk was incomplete.
     pub fn rank_top<F: Fn(&[f32]) -> f32>(
         &self,
         language: Option<&str>,
+        active: &HashSet<String>,
         limit: usize,
         score: F,
     ) -> Result<(Vec<RankedChunk>, usize), StoreError> {
@@ -262,10 +272,14 @@ impl EmbeddingCache {
         let mut rows = stmt.query(params![language]).map_err(db)?;
         let mut top = TopK::new(limit);
         while let Some(r) = rows.next().map_err(db)? {
+            let path: String = r.get(0).map_err(db)?;
+            if !active.contains(&path) {
+                continue;
+            }
             let vector = decode_vector(&r.get::<_, Vec<u8>>(4).map_err(db)?);
             let score = score(&vector);
             top.offer(RankedChunk {
-                file: r.get(0).map_err(db)?,
+                file: path,
                 start_line: r.get::<_, i64>(1).map_err(db)? as u32,
                 end_line: r.get::<_, i64>(2).map_err(db)? as u32,
                 snippet: r.get(3).map_err(db)?,
@@ -276,6 +290,20 @@ impl EmbeddingCache {
     }
 
     /// Drop files no longer present in `active`. Returns the count removed.
+    /// Every path the cache holds a chunk for. Test-facing: production code
+    /// filters by the walk's active set, never by the cache's own contents.
+    #[cfg(test)]
+    pub fn cached_paths(&self) -> HashSet<String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT path FROM embed_chunks")
+            .expect("cached_paths query");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("cached_paths rows");
+        rows.filter_map(Result::ok).collect()
+    }
+
     pub fn prune(&self, active: &HashSet<String>) -> Result<usize, StoreError> {
         let db = |e: rusqlite::Error| StoreError::Database(e.to_string());
         let known: Vec<String> = self
@@ -289,14 +317,37 @@ impl EmbeddingCache {
         }
         let tx = self.conn.unchecked_transaction().map_err(db)?;
         for path in &stale {
-            tx.execute("DELETE FROM embed_chunks WHERE path = ?1", params![path])
-                .map_err(db)?;
-            tx.execute("DELETE FROM embed_files WHERE path = ?1", params![path])
-                .map_err(db)?;
+            delete_file_rows(&tx, path).map_err(db)?;
         }
         tx.commit().map_err(db)?;
         Ok(stale.len())
     }
+
+    /// Forget everything cached for `rel_path`.
+    ///
+    /// A file whose content could not be read is left with no row rather than
+    /// a row recording the failure. The mtime is how the next run decides
+    /// whether to embed, so any mtime written on a failure path is a value the
+    /// file can come to hold again — a timestamp-preserving restore, or a
+    /// permission change, which does not move mtime at all — and the run that
+    /// meets it would read the record as "already current" and skip a file it
+    /// has never embedded. Absence has no value to collide with.
+    pub fn remove_file(&self, rel_path: &str) -> Result<(), StoreError> {
+        let db = |e: rusqlite::Error| StoreError::Database(e.to_string());
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        delete_file_rows(&tx, rel_path).map_err(db)?;
+        tx.commit().map_err(db)?;
+        Ok(())
+    }
+}
+
+fn delete_file_rows(conn: &rusqlite::Connection, rel_path: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM embed_chunks WHERE path = ?1",
+        params![rel_path],
+    )?;
+    conn.execute("DELETE FROM embed_files WHERE path = ?1", params![rel_path])?;
+    Ok(())
 }
 
 /// Pack an embedding into a little-endian `f32` byte blob.
@@ -367,9 +418,17 @@ mod tests {
     }
 
     /// Count cached chunks for `language` — `rank_top` with limit 0 keeps no
-    /// items but still tallies the total.
+    /// items but still tallies the total. `active` names every cached path so
+    /// the count is of the cache rather than of one walk's view of it.
     fn count(cache: &EmbeddingCache, language: Option<&str>) -> usize {
-        cache.rank_top(language, 0, |_| 0.0).unwrap().1
+        cache
+            .rank_top(language, &all_cached_paths(cache), 0, |_| 0.0)
+            .unwrap()
+            .1
+    }
+
+    fn all_cached_paths(cache: &EmbeddingCache) -> HashSet<String> {
+        cache.cached_paths()
     }
 
     #[test]
@@ -420,7 +479,9 @@ mod tests {
 
         // The scorer reads the decoded vector, so this also proves the BLOB
         // round-tripped intact.
-        let (items, total) = cache.rank_top(None, 10, |v| v[2]).unwrap();
+        let (items, total) = cache
+            .rank_top(None, &all_cached_paths(&cache), 10, |v| v[2])
+            .unwrap();
         assert_eq!(total, 1);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].file, "src/a.rs");
@@ -504,15 +565,21 @@ mod tests {
         }
 
         assert_eq!(count(&cache, None), 7);
-        let (rust, rust_total) = cache.rank_top(Some("rust"), 100, |_| 0.0).unwrap();
+        let (rust, rust_total) = cache
+            .rank_top(Some("rust"), &all_cached_paths(&cache), 100, |_| 0.0)
+            .unwrap();
         assert_eq!(rust_total, 5);
         assert!(rust.iter().all(|r| r.file.ends_with(".rs")));
-        let (python, py_total) = cache.rank_top(Some("python"), 100, |_| 0.0).unwrap();
+        let (python, py_total) = cache
+            .rank_top(Some("python"), &all_cached_paths(&cache), 100, |_| 0.0)
+            .unwrap();
         assert_eq!(py_total, 2);
         assert!(python.iter().all(|r| r.file.ends_with(".py")));
 
         // The limit caps the items returned; the total stays the full count.
-        let (top2, total) = cache.rank_top(None, 2, |_| 0.0).unwrap();
+        let (top2, total) = cache
+            .rank_top(None, &all_cached_paths(&cache), 2, |_| 0.0)
+            .unwrap();
         assert_eq!(total, 7);
         assert_eq!(top2.len(), 2);
     }
@@ -534,11 +601,51 @@ mod tests {
         // Score is the vector's single component; the top 3 must be the
         // largest three in descending order — proving the heap, not path
         // order, decides the result.
-        let (items, total) = cache.rank_top(None, 3, |v| v[0]).unwrap();
+        let (items, total) = cache
+            .rank_top(None, &all_cached_paths(&cache), 3, |v| v[0])
+            .unwrap();
         assert_eq!(total, 5);
         assert_eq!(
             items.iter().map(|r| r.score).collect::<Vec<_>>(),
             vec![4.0, 3.0, 2.0]
+        );
+    }
+
+    /// Ranking excludes a row whenever the walk that produced the active set
+    /// did not see its file, and that is a different question from pruning:
+    /// prune deletes, so it may only run when the walk saw everything, while a
+    /// run that was turned away from part of the tree must still not rank a
+    /// file it could not confirm. Filtering costs nothing the walk did not
+    /// already pay and, unlike deleting, is safe when the walk was incomplete.
+    #[test]
+    fn ranking_excludes_a_file_this_run_did_not_see() {
+        let dir = TempDir::new().unwrap();
+        let cache = EmbeddingCache::open(dir.path(), "model-a", 1).unwrap();
+        cache
+            .put_file("src/seen.rs", 1, "rust", &[chunk(1, vec![1.0])])
+            .unwrap();
+        cache
+            .put_file("src/hidden.rs", 1, "rust", &[chunk(1, vec![9.0])])
+            .unwrap();
+
+        let seen_only: HashSet<String> = ["src/seen.rs".to_string()].into_iter().collect();
+        let (ranked, scored) = cache
+            .rank_top(Some("rust"), &seen_only, 10, |v| v[0])
+            .unwrap();
+        assert_eq!(scored, 1, "only the file this run saw was scored");
+        assert_eq!(
+            ranked.iter().map(|r| r.file.as_str()).collect::<Vec<_>>(),
+            vec!["src/seen.rs"],
+            "the higher-scoring row belongs to a file the walk never confirmed"
+        );
+
+        let (ranked, _) = cache
+            .rank_top(Some("rust"), &all_cached_paths(&cache), 10, |v| v[0])
+            .unwrap();
+        assert_eq!(
+            ranked.len(),
+            2,
+            "and a whole walk ranks everything the cache holds"
         );
     }
 

@@ -104,13 +104,16 @@ pub(super) async fn prepare_rename(
         .await
 }
 
+/// The workspace edit that renames the symbol at a position, or `None` when
+/// the server declines: nothing renameable is there. That is the protocol's
+/// own answer to a position, not a failure of the exchange.
 pub(super) async fn rename(
     service: &DefaultLspService,
     file: &Path,
     line: u32,
     column: u32,
     new_name: &str,
-) -> Result<RenameResult, LspError> {
+) -> Result<Option<RenameResult>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let content = read_file_validated(file, max_file_size).await?;
     let uri = path_to_uri(file);
@@ -145,14 +148,11 @@ pub(super) async fn rename(
         .await?;
 
     if result.is_null() {
-        return Err(LspError::Protocol(
-            "Symbol at this position cannot be renamed. Try a different position or symbol."
-                .to_string(),
-        ));
+        return Ok(None);
     }
 
     if let Some(kind) = find_resource_operation(&result) {
-        return Err(LspError::Protocol(format!(
+        return Err(LspError::UnsupportedEdit(format!(
             "Rename requires a file {kind} operation, which symora does not \
              apply. Perform the file operation manually, then rename the \
              remaining references.",
@@ -160,5 +160,5 @@ pub(super) async fn rename(
     }
 
     let changes = parse_workspace_edit(&result, encoding)?;
-    Ok(RenameResult { changes })
+    Ok(Some(RenameResult { changes }))
 }

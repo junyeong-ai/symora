@@ -16,7 +16,13 @@ pub async fn execute(args: DefArgs, app: &App) -> Result<()> {
     execute_optional(
         app,
         args.loc,
-        |file, line, col| async move { app.lsp.goto_definition(&file, line, col).await },
+        |file, line, col| async move {
+            Ok(app
+                .lsp
+                .goto_definition(&file, line, col)
+                .await?
+                .map(|definition| definition.location))
+        },
         |def, ctx| DefinitionOutput {
             definition: Some(LocationOutput::from_location(&def, ctx.root())),
             message: None,

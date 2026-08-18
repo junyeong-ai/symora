@@ -45,17 +45,10 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.calls_limit);
     let loc = args.loc.parse()?.to_absolute()?;
-    let anchor = crate::cli::commands::common::snap_to_symbol_anchor(
-        app.lsp.as_ref(),
-        &loc.file,
-        loc.line,
-        loc.column_explicit.then_some(loc.column),
-    )
-    .await;
+    let anchor = crate::cli::commands::common::anchor_of(app.lsp.as_ref(), &loc).await;
     let (line, column) = (anchor.line, anchor.column);
-    let relative = ctx.relative_path(&loc.file);
 
-    let result = app.lsp.incoming_calls(&loc.file, line, column).await;
+    let result = app.lsp.incoming_calls(&anchor.file, line, column).await;
 
     match result {
         Ok(calls) => {
@@ -69,7 +62,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
             ctx.print_success(CallersOutput {
                 section: Section::with_total(items, total)
-                    .with_hints(anchor.anchor_hints(&relative, "callers"))
+                    .with_hints(anchor.anchor_hints(ctx.root(), "callers"))
                     .with_indexing(calls.indexing),
                 callers_status: None,
             });
@@ -79,7 +72,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
         // transient errors surface as errors, never as a silently weaker
         // answer.
         Err(ref e) if !args.no_fallback && e.is_unsupported() => {
-            match fallback_from_refs(app, &loc.file, line, column, limit).await {
+            match fallback_from_refs(app, &anchor.file, line, column, limit).await {
                 Ok((calls, total_refs, indexing)) => {
                     let items: Vec<CallHierarchyOutput> = calls
                         .iter()
@@ -88,7 +81,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
                     ctx.print_success(CallersOutput {
                         section: Section::with_total(items, total_refs)
-                            .with_hints(anchor.anchor_hints(&relative, "callers"))
+                            .with_hints(anchor.anchor_hints(ctx.root(), "callers"))
                             .with_indexing(indexing),
                         callers_status: Some("references_derived"),
                     });

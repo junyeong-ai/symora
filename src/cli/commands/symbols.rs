@@ -6,14 +6,19 @@ use std::path::{Path, PathBuf};
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::resolve_project_file;
-use crate::cli::response::{Section, SymbolOutput};
+use crate::cli::response::disclosure::{
+    DisclosureRoute, LiveLookup, LowerBound, WorkspaceSearchRoute, coverage_shortfall,
+    index_holes_bound, index_unavailable_disclosure, literal_query, ordered_bounds,
+    vouched_by_index, with_coverage_disclosure, workspace_route_for,
+};
+use crate::cli::response::{CoverageGap, Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
     LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
-    generic_exact_identifier_penalty, noisy_suffix_penalty, symbol_lookup_hints,
-    symbol_match_priority,
+    generic_exact_identifier_penalty, no_languages_error, noisy_suffix_penalty,
+    resolve_search_languages, symbol_lookup_hints, symbol_match_priority,
 };
 use crate::cli::utils::extract_signature;
-use crate::infra::file_filter::FileFilter;
+use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use crate::services::TestScope;
@@ -196,17 +201,22 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     } = params;
     let ctx = &app.output;
 
-    let languages = resolve_workspace_languages(app, lang);
-    if languages.is_empty() {
-        let valid = Language::all()
-            .iter()
-            .map(|l| l.lsp_id())
-            .collect::<Vec<_>>()
-            .join(", ");
-        ctx.print_error(OutputError::invalid(format!(
-            "No valid workspace languages available. Valid languages: {}",
-            valid
-        )));
+    let detected = resolve_search_languages(app, lang);
+    if detected.languages.is_empty() {
+        ctx.print_error(no_languages_error(ctx, &detected, lang));
+        return Ok(());
+    }
+    let languages = detected.languages.clone();
+
+    // The index reports the count it saw through the window it was given, so
+    // an empty window publishes a zero for a repository full of matches — and
+    // the live fan-out below is skipped on the same comparison. The sibling
+    // `search symbols` route refuses this for the same reason.
+    if limit == 0 {
+        ctx.print_error(
+            OutputError::invalid("--limit must be at least 1")
+                .with_hint("Use --limit 1 to learn the count from a single result."),
+        );
         return Ok(());
     }
 
@@ -233,23 +243,80 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let index_lang = lang
         .map(Language::parse_or_default)
         .filter(|l| *l != Language::Unknown);
-    if let Ok(page) = app
+    let mut vouched: Vec<Language> = Vec::new();
+    let mut index_bounds: Vec<LowerBound> = Vec::new();
+    let mut stale_files: Vec<String> = Vec::new();
+    let mut from_index: HashMap<String, String> = HashMap::new();
+    let mut unavailable: Option<(String, String)> = None;
+    // What the index did for this answer, read from the outcome rather than
+    // asserted: an index that was never built takes no part in an answer, and
+    // saying it did prescribes narrowing a result the index never produced.
+    let mut workspace_only: Option<WorkspaceSearchRoute> = None;
+    match app
         .store
         .search_symbols(&query, limit.saturating_mul(2), None, index_lang)
         .await
     {
-        for row in page.rows {
-            let symbol = symbol_from_index_row(row);
-            if seen.insert(workspace_dedup_key(&symbol)) {
-                symbols.push(symbol);
+        Ok(page) => {
+            // A page is more than its rows: what the index could not see when it
+            // was built, what it held past this page's cap, and whether the files
+            // behind these rows have moved since all qualify the answer they feed.
+            vouched = vouched_by_index(&page.covered, !page.rows.is_empty());
+            if !page.rows.is_empty() {
+                stale_files = page.stale_files.clone();
+                index_bounds = index_holes_bound(ctx, &page.unread_paths, &vouched);
+                // Said whether or not the rows past the cap would have survived
+                // this command's filters, because nothing here can tell: the store
+                // takes one kind and this route has lists of them. "Fewer rows
+                // than the index holds" keeps `count` a lower bound either way,
+                // and the alternative is the worse reading — `truncated` alone
+                // says "3 of 6", which an agent takes for a count of 6.
+                if page.rows.len() < page.total {
+                    index_bounds.push(LowerBound::IndexPageCapped);
+                }
             }
+            for row in page.rows {
+                let file = row.file.display().to_string();
+                let symbol = symbol_from_index_row(row);
+                let key = workspace_dedup_key(&symbol);
+                from_index.insert(key.clone(), file);
+                if seen.insert(key) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+        // The index took no part in this answer. Said rather than swallowed:
+        // an index-confirmed answer and one made while the index could not be
+        // read are different claims, and only the second is worth retrying.
+        Err(e) => {
+            // A daemon that was never reached says nothing about the store, so
+            // there is nothing to answer around: it is reported as itself.
+            let Some(reason) = workspace_route_for(&e) else {
+                ctx.print_error(OutputError::from(e));
+                return Ok(());
+            };
+            unavailable = index_unavailable_disclosure(&e);
+            workspace_only = Some(reason);
         }
     }
 
     let mut indexing = None;
-    for language in &languages {
-        let Ok(batch) = app.lsp.workspace_symbols(&query, *language).await else {
-            continue;
+    // What the fan-out could not cover, in the same terms every other symbol
+    // surface uses. A language dropped here answers nothing, and without this
+    // its silence is indistinguishable from a language that answered "none".
+    let mut failures: Vec<(Language, LspError)> = Vec::new();
+    let mut skipped: Vec<Language> = Vec::new();
+    for (queried, language) in languages.iter().enumerate() {
+        if symbols.len() >= limit.saturating_mul(2) {
+            skipped.extend_from_slice(&languages[queried..]);
+            break;
+        }
+        let batch = match app.lsp.workspace_symbols(&query, *language).await {
+            Ok(batch) => batch,
+            Err(e) => {
+                failures.push((*language, e));
+                continue;
+            }
         };
         // Authoritativeness is PER-LANGUAGE: this is an index-primary answer, so
         // an indexed language's LSP pass is enrichment over the authoritative
@@ -270,11 +337,14 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
                 symbols.push(symbol);
             }
         }
-
-        if symbols.len() >= limit.saturating_mul(2) {
-            break;
-        }
     }
+    let shortfall = coverage_shortfall(
+        &vouched,
+        LiveLookup::Ran {
+            failures: &failures,
+            skipped: &skipped,
+        },
+    );
 
     let pattern = symbol_query.or(name_query.filter(|_| substring));
     let filtered = Symbol::filter_advanced(
@@ -294,6 +364,15 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
 
     let total = filtered.len();
     let limited: Vec<_> = filtered.into_iter().take(limit).collect();
+    // `stale` speaks for the files behind the items actually EMITTED. The page
+    // it comes from is a superset of them — sorting, the kind filters, and the
+    // limit all cut into it — so a page holding one stale row and one fresh
+    // one says nothing about an answer that kept only the fresh one.
+    let stale = limited.iter().any(|symbol| {
+        from_index
+            .get(&workspace_dedup_key(symbol))
+            .is_some_and(|file| stale_files.contains(file))
+    });
 
     let items: Vec<SymbolOutput> = if body || signature {
         workspace_symbol_bodies(app, &limited, signature).await
@@ -305,20 +384,34 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     };
     let item_count = items.len();
     let truncated = item_count < total;
-    let hints = workspace_symbol_hints(
-        name_query,
-        symbol_query,
-        lang,
-        include_kinds.is_none(),
-        truncated,
-        item_count,
-    );
-
-    ctx.print_success(
+    let bounds = ordered_bounds(detected.shortfall(ctx), index_bounds);
+    // The same shaping every symbol surface uses: a gap stated in the
+    // structured field is stated in words and given a remedy too, and the
+    // route decides the wording.
+    let route = workspace_only.map_or(DisclosureRoute::IndexConsulted, |reason| {
+        DisclosureRoute::WorkspaceOnly(reason)
+    });
+    let section = with_coverage_disclosure(
         Section::with_total(items, total)
-            .with_hints(hints)
-            .with_indexing(indexing),
+            .with_hints(workspace_symbol_hints(
+                name_query,
+                symbol_query,
+                lang,
+                include_kinds.is_none(),
+                truncated,
+                item_count,
+                limit,
+            ))
+            .with_indexing(indexing)
+            .with_stale(stale)
+            .with_coverage_gaps(shortfall.iter().copied().map(CoverageGap::from).collect()),
+        &shortfall,
+        &query,
+        route,
+        &bounds,
+        &Vec::from_iter(unavailable),
     );
+    ctx.print_success(section);
 
     Ok(())
 }
@@ -408,35 +501,6 @@ fn collect_bodied(symbols: &[Symbol], file: &Path, out: &mut HashMap<(PathBuf, S
     }
 }
 
-fn resolve_workspace_languages(app: &App, lang: Option<&str>) -> Vec<Language> {
-    match lang.map(Language::parse_or_default) {
-        Some(Language::Unknown) => vec![],
-        Some(language) => vec![language],
-        None => detect_languages_by_file_count(app),
-    }
-}
-
-fn detect_languages_by_file_count(app: &App) -> Vec<Language> {
-    let extensions: Vec<&str> = Language::all()
-        .into_iter()
-        .flat_map(|lang| lang.extensions().iter().copied())
-        .collect();
-    let filter = FileFilter::new(app.root());
-    let files = filter.discover_files(&extensions);
-    let mut counts: HashMap<Language, usize> = HashMap::new();
-
-    for file in files {
-        let language = Language::from_path(&file);
-        if language != Language::Unknown {
-            *counts.entry(language).or_insert(0) += 1;
-        }
-    }
-
-    let mut ranked: Vec<_> = counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.lsp_id().cmp(b.0.lsp_id())));
-    ranked.into_iter().map(|(language, _)| language).collect()
-}
-
 fn workspace_symbol_hints(
     name_query: Option<&str>,
     symbol_query: Option<&str>,
@@ -444,6 +508,7 @@ fn workspace_symbol_hints(
     no_kind_filter: bool,
     truncated: bool,
     result_count: usize,
+    limit: usize,
 ) -> Vec<String> {
     symbol_lookup_hints(
         name_query.or(symbol_query).unwrap_or_default(),
@@ -452,6 +517,7 @@ fn workspace_symbol_hints(
         no_kind_filter && name_query.is_some(),
         truncated,
         result_count,
+        limit,
     )
 }
 
@@ -534,13 +600,7 @@ fn effective_workspace_query(name_query: Option<&str>, symbol_query: Option<&str
 
     symbol_query
         .map(str::trim)
-        .and_then(|pattern| {
-            let trimmed = pattern.trim_start_matches('/');
-            let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
-            let base = last.split('[').next().unwrap_or(last);
-            let candidate = base.trim_matches('*').trim();
-            (!candidate.is_empty()).then(|| candidate.to_string())
-        })
+        .and_then(literal_query)
         .unwrap_or_default()
 }
 

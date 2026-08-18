@@ -56,6 +56,24 @@ fn run(args: &[&str]) -> std::process::Output {
         .expect("symora binary should exist")
 }
 
+/// The JSON of a command that had to succeed.
+///
+/// Every assertion that a field is ABSENT needs this. An `{"error": ...}`
+/// response is missing every other field, so a test that only looks for
+/// absence is satisfied just as well by the command failing — and a defect
+/// that breaks the command then reads as the property holding.
+#[cfg(unix)]
+fn json_ok(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let out = run_in(dir, args);
+    assert!(
+        out.status.success(),
+        "{args:?} failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("JSON on stdout")
+}
+
 #[cfg(unix)]
 fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(SYMORA)
@@ -422,6 +440,225 @@ fn doctor_reports_override_provenance_and_spawnability() {
 }
 
 /// An applied edit re-indexes the touched file in the same flow, so a
+/// A file the embed loop cannot read shortens the corpus on every run, so
+/// every run has to say so. The cache's mtime is its freshness record, and
+/// stamping the live one on a file that was given up on makes it mean "up to
+/// date" instead: the failure would be disclosed once and then never again,
+/// leaving every later run — the ones actually likely to be scripted —
+/// reading as an exhaustive ranking.
+#[cfg(unix)]
+#[test]
+fn a_permanently_unreadable_file_shortens_every_semantic_run_and_says_so_every_time() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::write(root.join("b.rs"), "pub fn beta() {}\n").unwrap();
+    std::fs::set_permissions(root.join("b.rs"), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Whether this run can assert anything is settled by the build's features
+    // and by probing the tree — never by reading the output under test, which
+    // would take a defect for the environment and pass silently.
+    if !cfg!(feature = "embeddings") || std::fs::read_to_string(root.join("b.rs")).is_ok() {
+        std::fs::set_permissions(root.join("b.rs"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        return;
+    }
+
+    let incomplete_of = || -> serde_json::Value {
+        json_ok(
+            root,
+            &["--format", "compact", "search", "semantic", "alpha"],
+        )["incomplete"]
+            .clone()
+    };
+
+    for run in 1..=3 {
+        assert_eq!(
+            incomplete_of(),
+            serde_json::Value::Bool(true),
+            "run {run} did not disclose a file that is still unreadable"
+        );
+    }
+
+    std::fs::set_permissions(root.join("b.rs"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        incomplete_of(),
+        serde_json::Value::Null,
+        "a shortfall that is cured must stop being reported"
+    );
+}
+
+/// A walk turned away from part of the tree learned nothing about what lives
+/// there, so no command may draw a conclusion from its absence. "No languages
+/// here", "file not in this project", and "no source files" are all such
+/// conclusions, and each has an I/O failure standing behind it that the caller
+/// can act on instead.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let blocked = root.join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    std::fs::write(blocked.join("b.rs"), "pub fn beta() {}\n").unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let code_of = |args: &[&str]| -> String {
+        let out = run_in(root, args);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // Whether the mode bits constrain this user is probed against the tree,
+    // never read off the output under test: a guard that consults the answer
+    // would take a defect for the environment and pass silently.
+    if std::fs::read_dir(&blocked).is_ok() {
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+    // Every language this project has is behind the blocked directory, so
+    // "no languages" would be a claim the walk never got to make.
+    assert_eq!(code_of(&["--format", "compact", "usage", "beta"]), "io");
+    assert_eq!(
+        code_of(&["--format", "compact", "symbols", "--name", "beta"]),
+        "io"
+    );
+    assert_eq!(
+        code_of(&["--format", "compact", "map", "file", "blocked/b.rs"]),
+        "io"
+    );
+    assert_eq!(
+        code_of(&["--format", "compact", "map", "related", "blocked/b.rs"]),
+        "io"
+    );
+
+    // A path that genuinely is not there still reads as not there.
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    assert_eq!(
+        code_of(&["--format", "compact", "map", "file", "nope.rs"]),
+        "not_found"
+    );
+
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Every other symbol route confirms a zero against disk — an index miss
+/// fans out live or rescans the tree — but no language server honors `*`, so
+/// a wildcard has only the index. With no rows there is not even a `backend`
+/// field to read, which leaves a bare `count: 0` reading as "no such symbol"
+/// when the truth is "written since the last build".
+#[cfg(unix)]
+#[test]
+fn a_wildcard_zero_says_it_was_never_confirmed_against_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("lib.rs"), "pub struct AlphaWidget;\n").unwrap();
+
+    let out = run_in(root, &["--format", "compact", "search", "index", "build"]);
+    assert!(
+        out.status.success(),
+        "index build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::write(root.join("zeta.rs"), "pub struct ZetaWidget;\n").unwrap();
+
+    let out = run_in(
+        root,
+        &["--format", "compact", "search", "symbols", "*Zeta*"],
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["count"], 0, "the index has no row for it yet");
+    let hints = json["hints"]
+        .as_array()
+        .expect("an unconfirmed zero says so: {json}");
+    assert!(
+        hints[0]
+            .as_str()
+            .unwrap()
+            .contains("matched against the index alone"),
+        "a wildcard zero must not read as absence: {hints:?}"
+    );
+
+    // A wildcard that DOES match says nothing extra: every row carries
+    // `backend: "index"`, which is the same statement about provenance.
+    let out = run_in(
+        root,
+        &["--format", "compact", "search", "symbols", "*Alpha*"],
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["count"], 1);
+    assert!(
+        json["hints"].is_null(),
+        "a non-empty wildcard answer carries its provenance in `backend`: {json}"
+    );
+}
+
+/// A build that could not read some paths leaves the index short for
+/// languages its scope still names, and every route that answers FROM that
+/// index has to say so. The path-like form is the one that regressed: it
+/// reaches the same index for the same languages, and a route that decides
+/// coverage from `vouched` while deciding the lower bound from something else
+/// drops the disclosure for a query that differs only by a `/`.
+#[cfg(unix)]
+#[test]
+fn every_route_that_answers_from_a_holed_index_says_the_count_is_short() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("lib.rs"),
+        "pub struct UserStore;\nimpl UserStore {\n    pub fn load(&self) {}\n}\n",
+    )
+    .unwrap();
+    let locked = root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("hidden.rs"), "pub fn load_hidden() {}\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Probed against the tree, never read off the output under test: a guard
+    // that consults the answer would take a defect for the environment and
+    // pass silently.
+    let mode_bites = std::fs::read_dir(&locked).is_err();
+    run_in(root, &["--format", "compact", "search", "index", "build"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if !mode_bites {
+        return;
+    }
+
+    for query in ["load", "UserStore/load"] {
+        let out = run_in(root, &["--format", "compact", "search", "symbols", query]);
+        assert!(
+            out.status.success(),
+            "search symbols '{query}' failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            json["incomplete"],
+            serde_json::Value::Bool(true),
+            "'{query}' answered from a holed index without marking the count a lower bound: {json}"
+        );
+        // Named for the INDEX specifically. The permissions are restored before
+        // the query runs, so this run's own walk reads the tree whole and has
+        // no shortfall of its own to stand in for the build's.
+        let hints = json["hints"].as_array().expect("a cause names the bound");
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str().unwrap().contains("The index was built while")),
+            "'{query}' set the flag without naming the index as its cause: {hints:?}"
+        );
+    }
+}
+
 /// search immediately after the write finds the new content and has no
 /// memory of the old — no manual `search index build` in between.
 #[cfg(unix)]
@@ -470,13 +707,14 @@ fn edit_reindexes_the_store_so_search_sees_the_new_content() {
 }
 
 /// The C-1 scenario: a built index covering rust plus a rust LSP that
-/// cannot start. An empty path-like query consults the index in the same
-/// call, so its zero covers rust — it must stay bare (no coverage claim
-/// against rust, no `search index build` no-op), exactly like the
-/// plain-name query on the same state.
+/// cannot start. The index has no match, so it vouches for nothing — the
+/// live recheck it triggers is the answer, and its failure leaves a zero
+/// that is not authoritative for rust. The zero says so, and still does
+/// not offer `search index build`: the index is already built, so
+/// rebuilding it is a no-op remedy.
 #[cfg(unix)]
 #[test]
-fn pathlike_zero_with_built_index_stays_bare_for_covered_language() {
+fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("main.rs"),
@@ -518,9 +756,18 @@ fn pathlike_zero_with_built_index_stays_bare_for_covered_language() {
         assert!(
             hints
                 .iter()
-                .all(|h| !h.as_str().unwrap().contains("does not cover rust")),
-            "query '{query}': the index covered rust in this call, \
-             yet the zero claims otherwise: {hints:?}"
+                .any(|h| h.as_str().unwrap().contains("not authoritative for rust")),
+            "query '{query}': the index had no match and the server is dead, \
+             yet the zero reads as complete: {hints:?}"
+        );
+        let gaps = json
+            .get("coverage_gaps")
+            .and_then(|g| g.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            gaps.iter().any(|g| g["language"] == "rust"),
+            "query '{query}': the structured gap must agree with the hint: {gaps:?}"
         );
         let next = json
             .get("next_commands")
@@ -533,4 +780,218 @@ fn pathlike_zero_with_built_index_stays_bare_for_covered_language() {
             "query '{query}': index build is a no-op remedy here: {next:?}"
         );
     }
+}
+
+/// A file that holds no text is outside a search's domain, not a hole in its
+/// answer — the line the indexer has always drawn, now drawn once for every
+/// surface that reads files. Invalid UTF-8 reaches that verdict through a read
+/// error rather than through a NUL byte, and reading it as "could not read"
+/// would make an answer that is whole report itself as short.
+#[test]
+fn a_file_that_is_not_text_is_outside_the_domain_rather_than_a_hole() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::write(root.join("bad.rs"), b"\xff\xfe not utf8 \xc3\x28\n").unwrap();
+
+    for args in [
+        &["--format", "compact", "search", "content", "alpha"][..],
+        &[
+            "--format",
+            "compact",
+            "search",
+            "ast",
+            "function_item",
+            "-l",
+            "rust",
+        ][..],
+        &["--format", "compact", "pack", "--tokens", "500"][..],
+    ] {
+        let json = json_ok(root, args);
+        assert!(
+            json.get("incomplete").is_none(),
+            "{args:?} called a non-text file a shortfall: {json}"
+        );
+    }
+}
+
+/// A `--path` the caller named is an assertion about the tree. A typo that
+/// searches an empty domain and answers `0` is the worst reading of it, and
+/// "could not be read" is not true either — nothing is there to read.
+#[test]
+fn a_named_path_that_is_not_there_fails_rather_than_answering_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+
+    let out = run_in(
+        root,
+        &[
+            "--format",
+            "compact",
+            "search",
+            "ast",
+            "function_item",
+            "-l",
+            "rust",
+            "--path",
+            "does/not/exist",
+        ],
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "not_found", "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does/not/exist"),
+        "the path that is missing is the one named: {json}"
+    );
+}
+
+/// The build's shortfall names the paths it is about, so the reader can act on
+/// it. A count alone leaves an agent with `--force` and nowhere to look, and
+/// `--force` cannot read a path whose permissions are the problem.
+#[cfg(unix)]
+#[test]
+fn a_holed_build_names_the_paths_it_could_not_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    let blocked = root.join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    std::fs::write(blocked.join("b.rs"), "pub fn beta() {}\n").unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Probed against the tree, never read off the output under test: a guard
+    // that consults the answer would take a defect for the environment and
+    // pass silently.
+    let mode_bites = std::fs::read_dir(&blocked).is_err();
+    run_in(root, &["--format", "compact", "search", "index", "build"]);
+    let out = run_in(root, &["--format", "compact", "search", "index", "status"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if !mode_bites {
+        return;
+    }
+    let paths = json["unread_paths"]
+        .as_array()
+        .expect("a build that could not read a path names it");
+    assert_eq!(
+        paths
+            .iter()
+            .map(|p| p.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["blocked"],
+        "the path is named where the reader's own files are: {json}"
+    );
+}
+
+/// A file the embed loop could not read must leave behind no record a later
+/// run can take for freshness. Recording the failure under the mtime the file
+/// had is exactly such a record: mtimes recur — a timestamp-preserving
+/// restore, or a permission change, which does not move one at all — and the
+/// run that meets one skips a file it has never embedded, with nothing left to
+/// say the corpus is short. Absence has no value to collide with.
+#[cfg(unix)]
+#[test]
+fn a_read_failure_leaves_no_record_a_later_run_can_take_for_freshness() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+    let target = root.join("b.rs");
+    std::fs::write(&target, "pub fn beta() {}\n").unwrap();
+    let original = std::fs::metadata(&target).unwrap().modified().unwrap();
+
+    let search = || -> serde_json::Value {
+        json_ok(
+            root,
+            &[
+                "--format",
+                "compact",
+                "search",
+                "semantic",
+                "database connection pool",
+            ],
+        )
+    };
+    // Whether this run can assert anything is settled by the build's features
+    // and by probing the tree — never by reading the output under test, which
+    // would take a defect for the environment and pass silently.
+    if !cfg!(feature = "embeddings") {
+        return;
+    }
+    search();
+
+    // The content moves, so the cache's record of this file is stale and the
+    // next run has to read it — which is the run that fails.
+    std::fs::write(&target, "pub fn database_connection_pool() {}\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mode_bites = std::fs::read_to_string(&target).is_err();
+    search();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    if !mode_bites {
+        return;
+    }
+
+    // The file comes back with the timestamp it had when it was last embedded
+    // successfully — the shape a restore from an archive leaves.
+    std::fs::File::options()
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original))
+        .unwrap();
+
+    let json = search();
+    let items = json["items"].as_array().cloned().unwrap_or_default();
+    assert!(
+        items
+            .iter()
+            .any(|item| item["file"].as_str() == Some("b.rs")),
+        "the file was never embedded, and a recurring mtime made the run skip it: {json}"
+    );
+}
+
+/// `stale` speaks for the files behind the items a response actually emitted.
+/// The index page it is read from is a superset of them — sorting, the kind
+/// filters, and the limit all cut into it — so a page holding one stale row
+/// and one fresh one says nothing about an answer that kept only the fresh
+/// one, and saying otherwise sends an agent to rebuild over nothing.
+#[test]
+fn stale_speaks_only_for_the_files_behind_the_items_emitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("f.rs"), "pub fn probe_fn() {}\n").unwrap();
+    std::fs::write(root.join("s.rs"), "pub struct ProbeStruct;\n").unwrap();
+    run_in(root, &["--format", "compact", "search", "index", "build"]);
+
+    // Only the file behind the function moves.
+    std::fs::write(root.join("f.rs"), "pub fn probe_fn() { let _x = 1; }\n").unwrap();
+
+    let stale_of = |args: &[&str]| json_ok(root, args)["stale"].clone();
+    assert_eq!(
+        stale_of(&["--format", "compact", "symbols", "--name", "Probe"]),
+        serde_json::Value::Bool(true),
+        "the answer holds the row whose file moved"
+    );
+    assert_eq!(
+        stale_of(&[
+            "--format", "compact", "symbols", "--name", "Probe", "--kind", "struct"
+        ]),
+        serde_json::Value::Null,
+        "the only row left is backed by a file that never moved"
+    );
+    assert_eq!(
+        stale_of(&[
+            "--format", "compact", "symbols", "--name", "Probe", "--kind", "function"
+        ]),
+        serde_json::Value::Bool(true),
+        "and the row that did move still says so on its own"
+    );
 }

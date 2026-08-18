@@ -30,11 +30,17 @@ pub trait StoreService: Send + Sync {
         language: Option<Language>,
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError>;
 
+    /// Search content rows of exactly the given languages — the domain is
+    /// part of the question, enforced in the store query, so rows a
+    /// narrowed build indexed outside it never leak into the answer. The
+    /// page carries the coverage the rows were read under (same snapshot),
+    /// so routing the uncovered remainder to a live read cannot race a
+    /// concurrent rebuild.
     async fn search_content(
         &self,
         query: &str,
         limit: usize,
-        language: Option<Language>,
+        languages: &[Language],
     ) -> Result<SearchPage<ContentSearchResult>, StoreError>;
 
     async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError>;
@@ -96,9 +102,18 @@ impl DefaultStoreService {
     async fn store_for_read(&self) -> Result<&Arc<Store>, StoreError> {
         match self.store().await {
             Ok(store) => Ok(store),
-            Err(_) if !Store::db_path(&self.root).exists() => Err(StoreError::NotInitialized),
+            Err(_) if Self::db_is_definitely_absent(&self.root) => Err(StoreError::NotInitialized),
             Err(e) => Err(e),
         }
+    }
+
+    /// Whether there is definitely no index file. Only a probe that ANSWERS
+    /// counts: `exists()` folds a permission or metadata error into "absent",
+    /// which would turn an index nobody can stat into one nobody built —
+    /// silently scanning past a real failure, reporting an empty status, or
+    /// skipping the refresh that keeps an edit from leaving stale rows behind.
+    fn db_is_definitely_absent(root: &std::path::Path) -> bool {
+        matches!(Store::db_path(root).try_exists(), Ok(false))
     }
 
     /// Flush the write-ahead log — a daemon-idle maintenance step. A no-op
@@ -108,15 +123,6 @@ impl DefaultStoreService {
         match self.store.get() {
             Some(store) => store.checkpoint().await,
             None => Ok(()),
-        }
-    }
-
-    /// Evict entries past their TTL — daemon-idle maintenance. A no-op until
-    /// the store is first opened.
-    pub async fn cleanup_expired(&self) -> usize {
-        match self.store.get() {
-            Some(store) => store.cleanup_expired().await,
-            None => 0,
         }
     }
 }
@@ -140,11 +146,11 @@ impl StoreService for DefaultStoreService {
         &self,
         query: &str,
         limit: usize,
-        language: Option<Language>,
+        languages: &[Language],
     ) -> Result<SearchPage<ContentSearchResult>, StoreError> {
         self.store_for_read()
             .await?
-            .search_content(query, limit, language)
+            .search_content(query, limit, languages)
             .await
     }
 
@@ -159,7 +165,7 @@ impl StoreService for DefaultStoreService {
     async fn index_status(&self) -> Result<IndexStats, StoreError> {
         // No DB means an empty index, not an error — report zeros so status
         // works on a read-only or never-built project just like a read does.
-        if !Store::db_path(&self.root).exists() {
+        if Self::db_is_definitely_absent(&self.root) {
             return Ok(IndexStats::default());
         }
         self.store().await?.stats().await
@@ -175,7 +181,7 @@ impl StoreService for DefaultStoreService {
         // authoritative never-built gate is the build marker inside the
         // store (`Store::refresh_files`), because any read materializes
         // the DB file without ever building an index.
-        if !Store::db_path(&self.root).exists() {
+        if Self::db_is_definitely_absent(&self.root) {
             return Ok(());
         }
         self.store().await?.refresh_files(paths).await

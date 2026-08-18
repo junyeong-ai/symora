@@ -5,12 +5,17 @@ use serde::{Deserialize, Serialize};
 use crate::models::lsp::{CodeActionKind, FoldingRangeKind, InlayHintKind};
 use crate::models::symbol::SymbolKind;
 use crate::models::{diagnostic, lsp, symbol};
+use crate::services::store::UnreadPath;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Location {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_end_column: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range_start_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -29,6 +34,8 @@ impl From<&symbol::Location> for Location {
             file: loc.file.display().to_string(),
             line: loc.line,
             column: loc.column,
+            name_end_line: loc.name_end_line,
+            name_end_column: loc.name_end_column,
             range_start_line: loc.range_start_line,
             range_start_column: loc.range_start_column,
             end_line: loc.end_line,
@@ -46,6 +53,8 @@ impl From<Location> for symbol::Location {
             file: PathBuf::from(val.file),
             line: val.line,
             column: val.column,
+            name_end_line: val.name_end_line,
+            name_end_column: val.name_end_column,
             range_start_line: val.range_start_line,
             range_start_column: val.range_start_column,
             end_line: val.end_line,
@@ -62,6 +71,10 @@ pub struct Symbol {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_end_column: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range_start_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +105,8 @@ impl From<&symbol::Symbol> for Symbol {
             file: s.location.file.display().to_string(),
             line: s.location.line,
             column: s.location.column,
+            name_end_line: s.location.name_end_line,
+            name_end_column: s.location.name_end_column,
             range_start_line: s.location.range_start_line,
             range_start_column: s.location.range_start_column,
             end_line: s.location.end_line,
@@ -117,6 +132,8 @@ impl From<Symbol> for symbol::Symbol {
             file: PathBuf::from(val.file),
             line: val.line,
             column: val.column,
+            name_end_line: val.name_end_line,
+            name_end_column: val.name_end_column,
             range_start_line: val.range_start_line,
             range_start_column: val.range_start_column,
             end_line: val.end_line,
@@ -362,9 +379,35 @@ pub struct ReferencesResponse {
     pub indexing: Option<lsp::IndexingDegradation>,
 }
 
+/// A store search's payload: rows plus the coverage they were read under,
+/// from one store snapshot — the wire form of `store::SearchPage`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SearchResponse<T> {
+    pub count: usize,
+    pub items: Vec<T>,
+    /// The files backing `items` that changed since they were indexed. Named
+    /// rather than a flag because a caller that filters the page narrows the
+    /// question to the files its answer kept — a distinction the direct path
+    /// makes, so the wire has to carry it too.
+    #[serde(default, skip_serializing_if = "<[String]>::is_empty")]
+    pub stale_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "<[String]>::is_empty")]
+    pub covered: Vec<String>,
+    /// Paths the build behind this page could not read. They qualify
+    /// `covered` — the languages named there are indexed only in part while
+    /// any remain — so they have to cross with them, or the daemon path
+    /// would vouch for a coverage the direct path knows is partial.
+    #[serde(default, skip_serializing_if = "<[UnreadPath]>::is_empty")]
+    pub unread_paths: Vec<UnreadPath>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DefinitionResponse {
     pub definition: Option<Location>,
+    /// Whether the server reported the queried token as its own definition
+    /// (see [`lsp::Definition`]); always false for type definitions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_self: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -418,9 +461,11 @@ pub struct PrepareRenameResponse {
     pub placeholder: Option<String>,
 }
 
+/// `changes` is `None` when the server declined the rename — nothing
+/// renameable at the position — and the applied edit set otherwise.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RenameResponse {
-    pub changes: Vec<FileChange>,
+    pub changes: Option<Vec<FileChange>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -724,24 +769,23 @@ impl_vec_response!(
     TypeHierarchyItem
 );
 
-pub enum DefinitionKind {
-    Definition,
-    TypeDefinition,
-}
-
 impl DefinitionResponse {
-    pub fn from_location(def: Option<symbol::Location>, kind: DefinitionKind) -> Self {
-        let message = if def.is_none() {
-            Some(match kind {
-                DefinitionKind::Definition => "No definition found".into(),
-                DefinitionKind::TypeDefinition => "No type definition found".into(),
-            })
-        } else {
-            None
-        };
+    pub fn from_definition(def: Option<lsp::Definition>) -> Self {
+        let message = def.is_none().then(|| "No definition found".to_string());
+        Self {
+            is_self: def.as_ref().is_some_and(|d| d.is_self),
+            definition: def.as_ref().map(|d| Location::from(&d.location)),
+            message,
+        }
+    }
+
+    pub fn from_type_definition(def: Option<symbol::Location>) -> Self {
         Self {
             definition: def.as_ref().map(Location::from),
-            message,
+            is_self: false,
+            message: def
+                .is_none()
+                .then(|| "No type definition found".to_string()),
         }
     }
 }
@@ -930,6 +974,8 @@ mod tests {
             file: PathBuf::from("src/main.rs"),
             line: 10,
             column: 5,
+            name_end_line: Some(10),
+            name_end_column: Some(9),
             range_start_line: Some(10),
             range_start_column: Some(1),
             end_line: Some(15),
@@ -945,6 +991,8 @@ mod tests {
         assert_eq!(back.file, original.file);
         assert_eq!(back.line, original.line);
         assert_eq!(back.column, original.column);
+        assert_eq!(back.name_end_line, original.name_end_line);
+        assert_eq!(back.name_end_column, original.name_end_column);
         assert_eq!(back.range_start_line, original.range_start_line);
         assert_eq!(back.range_start_column, original.range_start_column);
         assert_eq!(back.end_line, original.end_line);
@@ -1007,6 +1055,8 @@ mod tests {
             file: PathBuf::from("src/lib.rs"),
             line: 20,
             column: 8,
+            name_end_line: Some(20),
+            name_end_column: Some(14),
             range_start_line: Some(18),
             range_start_column: Some(1),
             end_line: Some(30),
@@ -1022,6 +1072,7 @@ mod tests {
         assert_eq!(back.name, "update");
         assert_eq!(back.kind, SymbolKind::Method);
         assert_eq!(back.container, Some("MyStruct".to_string()));
+        assert_eq!(back.location.name_end_column, Some(14));
         assert_eq!(back.location.range_start_line, Some(18));
         assert_eq!(back.location.end_line, Some(30));
     }
@@ -1135,6 +1186,8 @@ mod tests {
             file: PathBuf::from("src/service.rs"),
             line: 25,
             column: 10,
+            name_end_line: None,
+            name_end_column: None,
             range_start_line: Some(25),
             range_start_column: Some(1),
             end_line: Some(40),
@@ -1147,6 +1200,8 @@ mod tests {
             file: PathBuf::from("src/handler.rs"),
             line: 50,
             column: 12,
+            name_end_line: None,
+            name_end_column: None,
             range_start_line: Some(50),
             range_start_column: Some(5),
             end_line: Some(50),

@@ -10,6 +10,15 @@ pub enum LspError {
     #[error("Server not connected. Try: symora daemon stop && symora daemon start")]
     NotConnected,
 
+    /// A request reached a listener and the connection closed before an
+    /// answer came back — the peer exited or was replaced mid-request.
+    /// Deliberately distinct from `NotConnected`, which states that nothing
+    /// is listening at all: this one proves only that *this* peer stopped
+    /// answering, so it must never license starting a replacement or
+    /// reporting the daemon absent.
+    #[error("Connection closed before '{0}' was answered")]
+    ConnectionLost(String),
+
     #[error("Server not installed: {name}. Install: {install_hint}")]
     ServerNotInstalled { name: String, install_hint: String },
 
@@ -48,6 +57,13 @@ pub enum LspError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+
+    /// The server answered with an edit symora does not apply — a workspace
+    /// edit that renames, creates, or deletes files, or a code action that
+    /// is a server-side command rather than an edit. The answer is well
+    /// formed; applying it is outside what this tool does.
+    #[error("{0}")]
+    UnsupportedEdit(String),
 
     #[error("File too large ({size_mb}MB > {limit_mb}MB limit): {path}")]
     FileTooLarge {
@@ -105,6 +121,7 @@ impl LspError {
             self,
             Self::ServerTerminated { .. }
                 | Self::NotConnected
+                | Self::ConnectionLost(_)
                 | Self::Timeout(_)
                 | Self::RequestCancelled
         ) || matches!(
@@ -238,8 +255,20 @@ pub enum SearchError {
 
 #[derive(Debug, Error)]
 pub enum StoreError {
-    #[error("Database error: {0}")]
+    /// Any store failure with no recovery of its own. Renders its message
+    /// verbatim: the output code already names the domain, and every store
+    /// error that crosses the daemon wire without a code of its own comes
+    /// back as this one, so a prefix here would restate the daemon's
+    /// message inside a second frame.
+    #[error("{0}")]
     Database(String),
+
+    /// The file at the store path cannot be read as a database of this
+    /// schema: corrupt, truncated, or not SQLite at all. Distinct from
+    /// every other failure because it is the only one whose recovery is to
+    /// replace the file — a busy or unreadable database is intact.
+    #[error("Store database is unusable: {0}")]
+    Corrupt(String),
 
     #[error("schema version mismatch: db={found}, expected={expected}")]
     SchemaMismatch { found: i32, expected: i32 },
@@ -247,18 +276,90 @@ pub enum StoreError {
     #[error("Store not initialized. Run: symora search index build")]
     NotInitialized,
 
+    /// The build was asked to cover no language at all. Every step below reads
+    /// an empty set as its opposite — the walker takes it for every extension,
+    /// the prune for an empty tree — so the scope is refused rather than acted
+    /// on, and the caller learns it named none.
+    #[error("Index build scope names no language")]
+    EmptyScope,
+
     #[error("Indexing already in progress")]
     AlreadyIndexing,
 
+    /// A build owns the index right now, so it has no completed state to
+    /// answer from. `begin_build` clears the completion marker and
+    /// `publish_build` restores it, so for a build's whole duration the
+    /// index looks unbuilt — and reporting that as `NotInitialized` tells an
+    /// agent to build an index that is already building. A read can still be
+    /// answered live in the meantime; what changes is the remedy, which is
+    /// to wait.
+    #[error("Index is being rebuilt and has no completed state to answer from")]
+    Rebuilding,
+
+    /// Another process holds the store for a write that has not finished.
+    /// Nothing is wrong with the index and nothing was half-applied:
+    /// retrying is the whole remedy.
+    #[error("Store is busy with another operation")]
+    Busy,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// The store could not be reached: the daemon that owns it is gone,
+    /// unreachable, or never answered. Not a statement about the store —
+    /// it says nothing was learned about it — so the transport's own error
+    /// is carried through and reported with the transport's own code,
+    /// making the same failure read the same whichever command was in
+    /// flight when it happened. Only a client of a remote store produces
+    /// it; an in-process store has no transport to fail.
+    #[error(transparent)]
+    Unreachable(Box<LspError>),
 }
 
 impl StoreError {
-    /// Wire error codes for the semantic store-error variants, so the daemon
-    /// client recovers the typed variant instead of matching a message.
+    /// Whether this failure describes the STORE, or something between the
+    /// caller and it.
+    ///
+    /// Every other variant is a state a command can answer around — nothing
+    /// built yet, a build in progress, a database that will not open.
+    /// `Unreachable` is not a state of the store at all: the daemon was never
+    /// reached, so the store said nothing. A fallback that absorbed it would
+    /// let a lost daemon go unnoticed while every command quietly paid for the
+    /// slow path, and would make one lost daemon read differently depending on
+    /// which command happened to be in flight (INV3). Exhaustive on purpose: a
+    /// variant added without an answer here fails to compile.
+    pub fn describes_the_store(&self) -> bool {
+        match self {
+            Self::Unreachable(_) => false,
+            Self::Database(_)
+            | Self::Corrupt(_)
+            | Self::SchemaMismatch { .. }
+            | Self::NotInitialized
+            | Self::AlreadyIndexing
+            | Self::Busy
+            | Self::Rebuilding
+            | Self::EmptyScope
+            | Self::Io(_) => true,
+        }
+    }
+
+    /// Wire error codes for every store-error variant whose output code
+    /// differs from `Database`'s, so the daemon client recovers the typed
+    /// variant instead of matching a message. A variant without one arrives
+    /// as `Database`, which is correct exactly when the two share an output
+    /// code — pinned by a round-trip test over the whole enum.
     pub const NOT_INITIALIZED_CODE: i32 = -32010;
     pub const ALREADY_INDEXING_CODE: i32 = -32011;
+    pub const BUSY_CODE: i32 = -32012;
+    pub const IO_CODE: i32 = -32013;
+    pub const REBUILDING_CODE: i32 = -32014;
+    pub const EMPTY_SCOPE_CODE: i32 = -32015;
+
+    /// How many variants a daemon can send — every one but `Unreachable`,
+    /// which says the daemon was not reached. It lives here, beside the
+    /// variants, because the round-trip test that samples them cannot count
+    /// them for itself: a list it keeps would only ever agree with itself.
+    pub const SENDABLE_VARIANTS: usize = 9;
 }
 
 #[derive(Debug, Error)]

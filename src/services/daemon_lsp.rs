@@ -15,9 +15,9 @@ use crate::daemon::wire::{
 use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, Indexed, InlayHint, Position, PrepareRenameResult, Range, RenameResult,
-    SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
+    FoldingRange, HoverInfo, Indexed, InlayHint, Position, PrepareRenameResult, Range,
+    RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
@@ -94,12 +94,16 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Location>, LspError> {
+    ) -> Result<Option<Definition>, LspError> {
         let result = self.client.goto_definition(file, line, column).await?;
 
         let response: DefinitionResponse = parse(result)?;
 
-        Ok(response.definition.map(Into::into))
+        let is_self = response.is_self;
+        Ok(response.definition.map(|location| Definition {
+            location: location.into(),
+            is_self,
+        }))
     }
 
     async fn goto_type_definition(
@@ -251,14 +255,14 @@ impl LspService for DaemonLspService {
         line: u32,
         column: u32,
         new_name: &str,
-    ) -> Result<RenameResult, LspError> {
+    ) -> Result<Option<RenameResult>, LspError> {
         let result = self.client.rename(file, line, column, new_name).await?;
 
         let response: RenameResponse = parse(result)?;
 
-        Ok(RenameResult {
-            changes: response.changes.into_iter().map(Into::into).collect(),
-        })
+        Ok(response.changes.map(|changes| RenameResult {
+            changes: changes.into_iter().map(Into::into).collect(),
+        }))
     }
 
     async fn incoming_calls(

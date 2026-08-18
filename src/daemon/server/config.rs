@@ -11,6 +11,9 @@ pub struct DaemonRuntimeConfig {
     pub socket_path: PathBuf,
     pub pid_path: PathBuf,
     pub lock_path: PathBuf,
+    /// Guards the moment a server claims the socket path, so a probe and
+    /// the bind that follows it cannot be split by another server.
+    pub bind_lock_path: PathBuf,
     pub idle_timeout: Duration,
     pub max_concurrent: usize,
 }
@@ -27,6 +30,7 @@ impl DaemonRuntimeConfig {
             socket_path: base.join("daemon.sock"),
             pid_path: base.join("daemon.pid"),
             lock_path: base.join("daemon.lock"),
+            bind_lock_path: base.join("daemon.bind.lock"),
             idle_timeout: Duration::from_secs(settings.idle_timeout_mins * 60),
             max_concurrent: settings.max_concurrent,
         }

@@ -10,14 +10,18 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::ParsedLocation;
 use crate::cli::analysis::LocationAnalysis;
+use crate::cli::errors::ErrorCode;
 use crate::cli::output::OutputContext;
+use crate::cli::response::disclosure::{
+    LiveLookup, LowerBound, coverage_shortfall, with_lower_bounds,
+};
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus, coverage_reason,
-    detect_languages_by_file_count, generic_exact_identifier_penalty, is_generic_broad_query,
-    noisy_suffix_penalty, symbol_match_priority,
+    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
+    generic_exact_identifier_penalty, is_generic_broad_query, no_languages_error,
+    noisy_suffix_penalty, resolve_search_languages, symbol_match_priority,
 };
-use crate::cli::utils::read_line_at;
+use crate::cli::utils::{AnchorResolution, read_line_at};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
@@ -95,6 +99,21 @@ pub enum UsageFilter {
     ZeroRefs,
 }
 
+impl UsageFilter {
+    /// Whether answering this filter needs facts only a per-symbol probe
+    /// produces — a reference set, a hover. One that does not is answered from
+    /// the symbol itself, so its route settles `count` before any probe runs
+    /// and a probe failure cannot shorten the list. Exhaustive on purpose: a
+    /// filter added without an answer here fails to compile rather than
+    /// silently taking the route that cannot serve it.
+    fn needs_analysis(&self) -> bool {
+        match self {
+            Self::HasTests | Self::NoTests | Self::HasDocs | Self::NoDocs | Self::ZeroRefs => true,
+            Self::NotTestFile => false,
+        }
+    }
+}
+
 impl std::fmt::Display for UsageFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -105,14 +124,6 @@ impl std::fmt::Display for UsageFilter {
             UsageFilter::NotTestFile => write!(f, "not_test_file"),
             UsageFilter::ZeroRefs => write!(f, "zero_refs"),
         }
-    }
-}
-
-fn resolve_usage_languages(app: &App, lang: Option<&str>) -> Vec<Language> {
-    match lang.map(Language::parse_or_default) {
-        Some(Language::Unknown) => vec![],
-        Some(language) => vec![language],
-        None => detect_languages_by_file_count(app.root(), &Language::all()),
     }
 }
 
@@ -184,22 +195,15 @@ fn representative_failure(failures: Vec<(Language, LspError)>) -> Option<LspErro
 }
 
 /// Every language absent from the result — one whose server failed, or one
-/// left unsearched after enough candidates were found — with its reason,
-/// sorted by language for deterministic output.
+/// left unsearched after enough candidates were found — with its reason.
+/// `usage` holds no index of its own, so nothing is vouched for ahead of
+/// the fan-out and the shortfall is exactly what the fan-out could not
+/// answer.
 fn coverage_gaps(failures: &[(Language, LspError)], skipped: &[Language]) -> Vec<CoverageGap> {
-    let mut gaps: Vec<CoverageGap> = failures
-        .iter()
-        .map(|(language, err)| CoverageGap {
-            language: language.lsp_id().to_string(),
-            reason: coverage_reason(err).to_string(),
-        })
-        .chain(skipped.iter().map(|language| CoverageGap {
-            language: language.lsp_id().to_string(),
-            reason: "not_searched".to_string(),
-        }))
-        .collect();
-    gaps.sort_by(|a, b| a.language.cmp(&b.language));
-    gaps
+    coverage_shortfall(&[], LiveLookup::Ran { failures, skipped })
+        .into_iter()
+        .map(CoverageGap::from)
+        .collect()
 }
 
 fn dedupe_usage_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
@@ -258,7 +262,10 @@ fn usage_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScope) -
         - generic_exact_penalty
 }
 
-fn usage_hints(query: &str, auto_lang: bool, showing: usize, truncated: bool) -> Vec<String> {
+/// Hints about how the query was ASKED. What the analysis could not reach is a
+/// lower bound rather than advice, and `LowerBound::AnalysisCapped` states it
+/// once — including on the empty answer, which needs it most.
+fn usage_hints(query: &str, auto_lang: bool) -> Vec<String> {
     let mut hints = Vec::new();
     if is_generic_broad_query(query) {
         hints.push(
@@ -272,18 +279,12 @@ fn usage_hints(query: &str, auto_lang: bool, showing: usize, truncated: bool) ->
                 .to_string(),
         );
     }
-    if truncated && showing > 0 {
-        hints.push(
-            "Increase --max-symbols when important candidates may be missing from analysis"
-                .to_string(),
-        );
-    }
     hints.truncate(3);
     hints
 }
 
 fn usage_hints_for_empty(query: &str, auto_lang: bool, resolved_from: Option<&str>) -> Vec<String> {
-    let mut hints = usage_hints(query, auto_lang, 0, false);
+    let mut hints = usage_hints(query, auto_lang);
     if let Some(loc) = resolved_from {
         hints.push(format!(
             "Workspace symbol lookup was empty for the resolved symbol. Continue with `symora symbols {}` or `symora refs {}` for file-level follow-up.",
@@ -334,7 +335,11 @@ pub struct UsageResult {
 pub struct UsageMetrics {
     pub references: usize,
     pub has_tests: bool,
-    pub has_docs: bool,
+    /// Omitted when the hover that would settle it failed. A hover that
+    /// ANSWERS with nothing means undocumented; one that fails never reached
+    /// that verdict, and `false` would publish it anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_docs: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub test_files: Vec<String>,
 }
@@ -343,16 +348,36 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let limit = args.limit.unwrap_or(10);
     let max_symbols = args.max_symbols.unwrap_or(50);
-    let resolved = resolve_usage_query(app, &args.pattern, args.lang.as_deref()).await?;
+    let resolved = match resolve_usage_query(app, &args.pattern, args.lang.as_deref()).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            match error.downcast::<OutputError>() {
+                Ok(error) => ctx.print_error(error),
+                Err(error) => match error.downcast::<LspError>() {
+                    Ok(error) => ctx.print_error(error),
+                    Err(error) => return Err(error),
+                },
+            }
+            return Ok(());
+        }
+    };
 
-    let languages = resolve_usage_languages(app, resolved.language_override.as_deref());
-    if languages.is_empty() {
-        ctx.print_error(
-            OutputError::invalid("Unknown language")
-                .with_hint("Run 'symora doctor' to see supported languages."),
-        );
+    let detected = resolve_search_languages(app, resolved.language_override.as_deref());
+    if detected.languages.is_empty() {
+        ctx.print_error(no_languages_error(
+            ctx,
+            &detected,
+            resolved.language_override.as_deref(),
+        ));
         return Ok(());
     }
+    let languages = detected.languages.clone();
+
+    // A language hidden behind an unreadable path never reaches
+    // `coverage_gaps`, so the walk's shortfall is what makes the answer read
+    // as a lower bound — computed before the first exit, because the empty
+    // answer is the one most likely to be misread as "no usages".
+    let bound = detected.shortfall(ctx);
 
     let UsageLookup {
         mut symbols,
@@ -385,13 +410,16 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             filters_applied: vec![],
             analyzed: None,
             coverage_gaps: gaps,
-            section: Section::new(vec![])
-                .with_hints(usage_hints_for_empty(
-                    &resolved.query,
-                    resolved.language_override.is_none(),
-                    resolved_from.as_deref(),
-                ))
-                .with_indexing(indexing),
+            section: with_lower_bounds(
+                Section::new(vec![])
+                    .with_hints(usage_hints_for_empty(
+                        &resolved.query,
+                        resolved.language_override.is_none(),
+                        resolved_from.as_deref(),
+                    ))
+                    .with_indexing(indexing),
+                &Vec::from_iter(bound),
+            ),
         });
         return Ok(());
     }
@@ -408,15 +436,11 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     // Fast path: sort by name without LSP calls for references
     // Only fetch references for limited results
     let needs_refs_for_sort = matches!(args.sort, SortMetric::References);
-    let needs_refs_for_filter = filters.contains(&UsageFilter::HasTests)
-        || filters.contains(&UsageFilter::NoTests)
-        || filters.contains(&UsageFilter::HasDocs)
-        || filters.contains(&UsageFilter::NoDocs)
-        || filters.contains(&UsageFilter::ZeroRefs)
-        || args.min_refs.is_some();
+    let needs_refs_for_filter =
+        filters.iter().any(|filter| filter.needs_analysis()) || args.min_refs.is_some();
     let needs_refs = needs_refs_for_sort || needs_refs_for_filter || args.metrics;
 
-    let (items, count, analyzed, ref_indexing) = if !needs_refs {
+    let (items, count, analyzed, ref_indexing, unanalysed) = if !needs_refs {
         // Fast path: no LSP reference calls needed
         let mut sorted_symbols = symbols;
         sorted_symbols.sort_by(|a, b| a.name.cmp(&b.name));
@@ -428,7 +452,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             .collect();
 
         let total = sorted_symbols.len();
-        (limited, total, None, None)
+        (limited, total, None, None, 0)
     } else if !needs_refs_for_sort && !needs_refs_for_filter {
         // Medium path: sort by name first, then fetch refs only for limited results
         let mut sorted_symbols = symbols;
@@ -437,16 +461,27 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         let limited_symbols: Vec<_> = sorted_symbols.iter().take(limit).collect();
         let total = sorted_symbols.len();
 
-        let (results, ref_indexing) = fetch_refs_parallel(
-            app,
-            &limited_symbols,
-            ctx.root(),
-            &args,
-            filters,
-            test_scope,
-        )
-        .await;
-        (results, total, None, ref_indexing)
+        // No filter here reads an analysis — that is what routed the call to
+        // this path — so none is passed, and the probe has nothing to reject.
+        // `total` is then the symbol count, settled before any probe ran.
+        let (analysed, ref_indexing) =
+            fetch_refs_parallel(app, &limited_symbols, ctx.root(), &args, &[], test_scope).await;
+        // A probe that answered nothing costs this symbol its metrics, and
+        // dropping the symbol to hide that would turn a missing field into a
+        // missing row — against a count already settled. It is emitted as the
+        // fast path emits every symbol, without metrics, and the answer stays
+        // exactly as long as its count says.
+        let results: Vec<UsageResult> = analysed
+            .into_iter()
+            .zip(&limited_symbols)
+            .map(|(analysed, symbol)| match analysed {
+                Analysed::Kept(result) => *result,
+                Analysed::Failed | Analysed::FilteredOut => {
+                    build_result_without_refs(symbol, ctx.root(), args.snippet)
+                }
+            })
+            .collect();
+        (results, total, None, ref_indexing, 0)
     } else {
         // Slow path: need references for sorting or filtering
         // Limit symbols to analyze for performance (each requires LSP call)
@@ -457,7 +492,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             None
         };
 
-        let (all_results, ref_indexing) = fetch_refs_parallel(
+        let (analysed, ref_indexing) = fetch_refs_parallel(
             app,
             &symbols_to_process,
             ctx.root(),
@@ -466,6 +501,21 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             test_scope,
         )
         .await;
+        // This path sorts or filters on reference counts, so a symbol whose
+        // analysis failed has no answer to give and cannot be emitted without
+        // inventing one. It leaves the count, which is what makes the count a
+        // lower bound here and not on the path above.
+        let unanalysed = analysed
+            .iter()
+            .filter(|a| matches!(a, Analysed::Failed))
+            .count();
+        let all_results: Vec<UsageResult> = analysed
+            .into_iter()
+            .filter_map(|a| match a {
+                Analysed::Kept(result) => Some(*result),
+                Analysed::Failed | Analysed::FilteredOut => None,
+            })
+            .collect();
 
         let total = all_results.len();
         let mut with_refs: Vec<_> = all_results
@@ -493,7 +543,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             })
             .collect();
 
-        (limited, total, analyzed, ref_indexing)
+        (limited, total, analyzed, ref_indexing, unanalysed)
     };
 
     // Merge workspace-symbol degradation (from the symbol collection) with any
@@ -501,13 +551,18 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     // the result a lower bound, and both are the same single marker on output.
     let indexing = indexing.or(ref_indexing);
 
-    let showing = items.len();
-    let hints = usage_hints(
-        &resolved.query,
-        resolved.language_override.is_none(),
-        showing,
-        analyzed.is_some(),
-    );
+    // A symbol whose analysis failed answered none of the filters and is
+    // absent from the list because of that, not because it did not match.
+    let bounds: Vec<LowerBound> = bound
+        .into_iter()
+        .chain((unanalysed > 0).then_some(LowerBound::SymbolsNotAnalysed(unanalysed)))
+        // The cap is documented and configurable, but unlike `--limit` it
+        // stops the analysis rather than the emission: the symbols past it
+        // never reached a filter, so they are absent from `count` and not
+        // merely from this page.
+        .chain(analyzed.map(LowerBound::AnalysisCapped))
+        .collect();
+    let hints = usage_hints(&resolved.query, resolved.language_override.is_none());
 
     let response = UsageOutput {
         query: resolved.query,
@@ -515,9 +570,12 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         filters_applied: filter_names,
         analyzed,
         coverage_gaps: gaps,
-        section: Section::with_total(items, count)
-            .with_hints(hints)
-            .with_indexing(indexing),
+        section: with_lower_bounds(
+            Section::with_total(items, count)
+                .with_hints(hints)
+                .with_indexing(indexing),
+            &bounds,
+        ),
     };
 
     ctx.print_success(response);
@@ -544,44 +602,66 @@ async fn resolve_usage_query(
         });
     }
 
-    let loc = ParsedLocation::parse(input)?.to_absolute_with_root(Some(app.root()))?;
-    let symbols = app
-        .lsp
-        .find_symbols(&loc.file, FindSymbolsOptions::default().with_depth(10))
-        .await?;
-    // The shared line/column addressing rules: an omitted column targets
-    // the symbol DECLARED on the line (first declaration on ambiguity —
-    // the resolved name is echoed via `resolved_from`/`query`), a column
-    // resolves position-precisely.
-    let resolution = match loc.column_explicit {
-        true => crate::cli::utils::column_addressed_symbol(&symbols, loc.line, loc.column),
-        false => crate::cli::utils::line_addressed_symbol(&symbols, loc.line),
+    let loc = ParsedLocation::parse(input)?.to_absolute()?;
+    // The shared anchor rules: an omitted column targets the symbol DECLARED
+    // on the line (first declaration on ambiguity — the resolved name is
+    // echoed via `resolved_from`/`query`), a column the token at that
+    // position, resolved through its definition when it is a usage.
+    let anchor = crate::cli::analysis::resolve_anchor(
+        app.lsp.as_ref(),
+        &loc,
+        FindSymbolsOptions::default().with_depth(10),
+    )
+    .await?;
+    let position = if loc.column_explicit {
+        format!("{}:{}:{}", ctx_rel(app, &loc.file), loc.line, loc.column)
+    } else {
+        format!("{}:{}", ctx_rel(app, &loc.file), loc.line)
     };
-    let symbol = match resolution {
-        crate::cli::utils::SymbolResolution::Match(symbol) => Some(symbol),
-        crate::cli::utils::SymbolResolution::Ambiguous(declared) => declared.first().copied(),
-        crate::cli::utils::SymbolResolution::NotFound => None,
-    };
-    let Some(symbol) = symbol else {
-        return Ok(ResolvedUsageQuery {
-            query: input.to_string(),
-            language_override: lang.map(str::to_string),
-            resolved_from: None,
-        });
+    let Some(symbol) = anchor.symbol else {
+        // `usage` analyzes symbols by name across the workspace; a position
+        // that denotes an unlisted binding, or nothing, has no such name — say
+        // so, rather than searching for the position string.
+        let error = match anchor.resolution {
+            AnchorResolution::Binding => OutputError::invalid(format!(
+                "{position} denotes a binding the symbol tree does not list (a local, a \
+                 parameter, a module, or a generated item), which usage does not analyze"
+            ))
+            .with_hint(format!("Use `symora refs {position}` for its references")),
+            // The read failed, so nothing was learned about the position.
+            // "No symbol" is a conclusion about the tree, and answering an
+            // I/O failure with one sends a caller off to look elsewhere for
+            // a symbol that may well be there.
+            AnchorResolution::Unavailable => OutputError::new(
+                ErrorCode::Io,
+                format!("{position} could not be read to resolve a symbol"),
+            )
+            .with_hint("Retry, or anchor at a declaration (e.g. a `symora search symbols` result)"),
+            AnchorResolution::Resolved | AnchorResolution::NotASymbol => {
+                if loc.column_explicit {
+                    OutputError::not_found(format!("No symbol at {position}")).with_hint(format!(
+                        "Address the symbol declared on or enclosing the line with {}:{}, or a \
+                         declaration from `symora symbols`",
+                        ctx_rel(app, &loc.file),
+                        loc.line
+                    ))
+                } else {
+                    OutputError::not_found(format!("No symbol at {position}")).with_hint(
+                        "Anchor at a declaration (e.g. a `symora search symbols` result)",
+                    )
+                }
+            }
+        };
+        return Err(error.into());
     };
 
-    let inferred_lang = Language::from_path(&loc.file);
+    let inferred_lang = Language::from_path(&anchor.file);
     Ok(ResolvedUsageQuery {
         query: symbol.name.clone(),
         language_override: lang.map(str::to_string).or_else(|| {
             (inferred_lang != Language::Unknown).then(|| inferred_lang.lsp_id().to_string())
         }),
-        resolved_from: Some(format!(
-            "{}:{}:{}",
-            ctx_rel(app, &loc.file),
-            loc.line,
-            loc.column
-        )),
+        resolved_from: Some(position),
     })
 }
 
@@ -624,7 +704,7 @@ async fn fetch_refs_parallel(
     filters: &[UsageFilter],
     test_scope: &TestScope,
 ) -> (
-    Vec<UsageResult>,
+    Vec<Analysed>,
     Option<crate::models::lsp::IndexingDegradation>,
 ) {
     // Use semaphore for fine-grained concurrency control
@@ -638,7 +718,9 @@ async fn fetch_refs_parallel(
             let sem = Arc::clone(&semaphore);
             async move {
                 let Ok(_permit) = sem.acquire().await else {
-                    return (None, None);
+                    // The semaphore closed, so this symbol was never analysed
+                    // at all — the same unknown as a probe that failed.
+                    return (Analysed::Failed, None);
                 };
                 fetch_single_symbol_refs(app, symbol, root, args, filters, test_scope).await
             }
@@ -647,21 +729,20 @@ async fn fetch_refs_parallel(
 
     let results = join_all(futures).await;
 
-    // Collect non-None results and merge their find_references degradation: any
-    // degraded reference query makes the count (and the default --sort
-    // references order / min_refs / ZeroRefs filters) a lower bound, surfaced
-    // once on the section so the answer is never presented as complete.
-    let mut all_results = Vec::with_capacity(symbols.len());
+    // Merge the find_references degradation: any degraded reference query makes
+    // the count (and the default --sort references order / min_refs / ZeroRefs
+    // filters) a lower bound, surfaced once on the section so the answer is
+    // never presented as complete. The per-symbol verdicts stay in the order
+    // they were asked for, so a caller can pair one with the symbol it is for.
+    let mut analysed = Vec::with_capacity(symbols.len());
     let mut indexing = None;
     for (result, idx) in results {
         // If ANY reference query degraded, the merged count is a lower bound;
         // `.or` keeps the first marker seen (one variant, so order is moot).
         indexing = indexing.or(idx);
-        if let Some(r) = result {
-            all_results.push(r);
-        }
+        analysed.push(result);
     }
-    (all_results, indexing)
+    (analysed, indexing)
 }
 
 async fn fetch_single_symbol_refs(
@@ -671,10 +752,7 @@ async fn fetch_single_symbol_refs(
     args: &UsageArgs,
     filters: &[UsageFilter],
     test_scope: &TestScope,
-) -> (
-    Option<UsageResult>,
-    Option<crate::models::lsp::IndexingDegradation>,
-) {
+) -> (Analysed, Option<crate::models::lsp::IndexingDegradation>) {
     let analysis = LocationAnalysis::for_symbol(
         app.lsp.as_ref(),
         &symbol.location.file,
@@ -687,39 +765,46 @@ async fn fetch_single_symbol_refs(
     // min_refs/ZeroRefs filters — so report it for disclosure even when this
     // symbol is then filtered out, exactly as `callers.rs` threads the marker.
     let indexing = analysis.as_ref().ok().and_then(LocationAnalysis::indexing);
-    let classified = analysis
-        .as_ref()
-        .ok()
-        .map(|analysis| analysis.classify(test_scope));
+    let Ok(analysis) = analysis.as_ref() else {
+        // Every filter below reads a reference count, and an analysis that
+        // failed has none — not zero. Letting it default would put an
+        // unanalysed symbol in a `zero-refs` list, which is a list an agent
+        // deletes from, and keep it out of a `min-refs` one. The symbol drops
+        // out and the answer says it is short.
+        return (Analysed::Failed, indexing);
+    };
+    let classified = analysis.classify(test_scope);
 
-    let ref_count = classified.as_ref().map_or(0, |c| c.total);
-    let has_tests = classified.as_ref().is_some_and(|c| c.test > 0);
+    let ref_count = classified.total;
+    let has_tests = classified.test > 0;
 
     if filters.contains(&UsageFilter::HasTests) && !has_tests {
-        return (None, indexing);
+        return (Analysed::FilteredOut, indexing);
     }
 
     // Filter: only symbols without tests (for test coverage analysis)
     if filters.contains(&UsageFilter::NoTests) && has_tests {
-        return (None, indexing);
+        return (Analysed::FilteredOut, indexing);
     }
 
     // Filter: only symbols with zero references (dead code detection)
     if filters.contains(&UsageFilter::ZeroRefs) && ref_count > 0 {
-        return (None, indexing);
+        return (Analysed::FilteredOut, indexing);
     }
 
     // Filter: only symbols with at least N references (find important symbols)
     if let Some(min) = args.min_refs
         && ref_count < min
     {
-        return (None, indexing);
+        return (Analysed::FilteredOut, indexing);
     }
 
     let needs_docs_check = args.metrics
         || filters.contains(&UsageFilter::HasDocs)
         || filters.contains(&UsageFilter::NoDocs);
 
+    // A hover that ANSWERS with nothing means undocumented; one that fails
+    // leaves it unknown, which is a third state and not the second.
     let has_docs = if needs_docs_check {
         app.lsp
             .hover(
@@ -729,36 +814,25 @@ async fn fetch_single_symbol_refs(
             )
             .await
             .ok()
-            .flatten()
-            .is_some_and(|h| !h.content.is_empty())
+            .map(|hover| hover.is_some_and(|h| !h.content.is_empty()))
     } else {
-        false
+        None
     };
 
-    // Filter: only documented symbols
-    if filters.contains(&UsageFilter::HasDocs) && !has_docs {
-        return (None, indexing);
-    }
-
-    // Filter: only undocumented symbols (for doc coverage analysis)
-    if filters.contains(&UsageFilter::NoDocs) && has_docs {
-        return (None, indexing);
+    if let Some(outcome) = docs_shortfall(has_docs, filters) {
+        return (outcome, indexing);
     }
 
     let metrics = if args.metrics {
         // Only collect up to 3 test files (avoid allocating entire list)
         let test_files: Vec<String> = classified
-            .as_ref()
-            .map(|c| {
-                c.test_refs
-                    .iter()
-                    .map(|r| OutputContext::format_path(&r.file, root))
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .take(3)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .test_refs
+            .iter()
+            .map(|r| OutputContext::format_path(&r.file, root))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .take(3)
+            .collect();
 
         Some(UsageMetrics {
             references: ref_count,
@@ -789,7 +863,7 @@ async fn fetch_single_symbol_refs(
     let signature = crate::cli::utils::extract_signature(symbol.body.as_deref());
 
     (
-        Some(UsageResult {
+        Analysed::Kept(Box::new(UsageResult {
             name: symbol.name.clone(),
             file: OutputContext::format_path(&symbol.location.file, root),
             line: symbol.location.line,
@@ -797,14 +871,107 @@ async fn fetch_single_symbol_refs(
             signature,
             metrics,
             snippet,
-        }),
+        })),
         indexing,
     )
+}
+
+/// What an unknown or unwanted documentation verdict costs a symbol.
+///
+/// Three states, not two: a hover that ANSWERS with nothing means
+/// undocumented, one that fails means unknown. A filter that reads
+/// documentation has no answer for the unknown, so the symbol answered none of
+/// the filters applied — which is exactly what a failed analysis reports, and
+/// why the count then says it is short. A `--metrics` run asked for the fact
+/// rather than filtering on it, so the unknown costs that run a missing field
+/// and not a missing row; the reference count its sort and count are built
+/// from was never in doubt.
+fn docs_shortfall(has_docs: Option<bool>, filters: &[UsageFilter]) -> Option<Analysed> {
+    match has_docs {
+        None => filters
+            .iter()
+            .any(|filter| matches!(filter, UsageFilter::HasDocs | UsageFilter::NoDocs))
+            .then_some(Analysed::Failed),
+        Some(true) => filters
+            .contains(&UsageFilter::NoDocs)
+            .then_some(Analysed::FilteredOut),
+        Some(false) => filters
+            .contains(&UsageFilter::HasDocs)
+            .then_some(Analysed::FilteredOut),
+    }
+}
+
+/// What analysing one symbol produced.
+///
+/// Every usage filter reads a reference or documentation fact, and a probe
+/// that failed has none — not zero, and not "undocumented" — so a failure and
+/// a filter miss are different verdicts that both yield no row. Collapsing
+/// them would put an unanalysed symbol in a `zero-refs` list, which is a list
+/// an agent deletes from, and it would hide from the caller which of its rows
+/// are missing because nothing could be learned about them. Only the caller
+/// knows what its `count` is derived from, so the two stay distinct until it
+/// decides.
+enum Analysed {
+    Kept(Box<UsageResult>),
+    FilteredOut,
+    Failed,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hover that could not be read leaves documentation unknown, and
+    /// unknown is not "undocumented". A filter that reads it has no answer for
+    /// the symbol at all; a `--metrics` run that only wanted the fact keeps the
+    /// row and loses the field, because the reference count its count is built
+    /// from was never in doubt.
+    #[test]
+    fn an_unreadable_hover_costs_a_filter_the_symbol_and_metrics_only_the_field() {
+        let metrics_only: &[UsageFilter] = &[];
+        assert!(
+            docs_shortfall(None, metrics_only).is_none(),
+            "nothing here filters on documentation, so the row stands"
+        );
+        assert!(docs_shortfall(Some(true), metrics_only).is_none());
+        assert!(docs_shortfall(Some(false), metrics_only).is_none());
+
+        for filter in [UsageFilter::HasDocs, UsageFilter::NoDocs] {
+            let name = filter.to_string();
+            assert!(
+                matches!(docs_shortfall(None, &[filter]), Some(Analysed::Failed)),
+                "{name} cannot be answered for a symbol whose hover failed"
+            );
+        }
+        assert!(matches!(
+            docs_shortfall(Some(false), &[UsageFilter::HasDocs]),
+            Some(Analysed::FilteredOut)
+        ));
+        assert!(docs_shortfall(Some(true), &[UsageFilter::HasDocs]).is_none());
+        assert!(matches!(
+            docs_shortfall(Some(true), &[UsageFilter::NoDocs]),
+            Some(Analysed::FilteredOut)
+        ));
+        assert!(docs_shortfall(Some(false), &[UsageFilter::NoDocs]).is_none());
+
+        // A filter that reads something else says nothing about documentation.
+        assert!(docs_shortfall(None, &[UsageFilter::HasTests]).is_none());
+
+        // The field goes missing rather than reading `false`, which would
+        // publish a verdict the hover never reached.
+        let metrics = |has_docs| UsageMetrics {
+            references: 1,
+            has_tests: false,
+            has_docs,
+            test_files: vec![],
+        };
+        let unknown = serde_json::to_value(metrics(None)).unwrap();
+        assert!(unknown.get("has_docs").is_none(), "{unknown}");
+        assert_eq!(
+            serde_json::to_value(metrics(Some(false))).unwrap()["has_docs"],
+            serde_json::json!(false)
+        );
+    }
 
     #[test]
     fn usage_output_flattens_the_section_contract() {
@@ -901,38 +1068,6 @@ mod tests {
     #[test]
     fn representative_failure_is_none_when_every_server_answered() {
         assert!(representative_failure(vec![]).is_none());
-    }
-
-    #[test]
-    fn coverage_reason_classifies_method_not_found_as_unsupported() {
-        // A server that does not implement workspace/symbol returns -32601 —
-        // permanent, so it must read as unsupported, not a retryable failure.
-        assert_eq!(
-            coverage_reason(&LspError::ServerError {
-                code: -32601,
-                message: "method not found".to_string(),
-            }),
-            "unsupported"
-        );
-        assert_eq!(
-            coverage_reason(&LspError::Timeout("slow".to_string())),
-            "timed_out"
-        );
-        assert_eq!(
-            coverage_reason(&LspError::ServerNotInstalled {
-                name: "x".to_string(),
-                install_hint: "y".to_string(),
-            }),
-            "server_not_installed"
-        );
-        // Any other server error stays the generic catch-all.
-        assert_eq!(
-            coverage_reason(&LspError::ServerError {
-                code: -32603,
-                message: "internal".to_string(),
-            }),
-            "unavailable"
-        );
     }
 
     #[test]

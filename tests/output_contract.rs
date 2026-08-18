@@ -278,6 +278,36 @@ fn section_discloses_coverage_gaps() {
 }
 
 #[test]
+fn section_marks_a_count_that_is_only_a_lower_bound() {
+    // `count` reads as the whole match set, so a count assembled over
+    // something the command could not see all of has to say so — and stay
+    // absent when the count is exact, or the flag becomes routine enough to
+    // ignore. The cause belongs in `hints`; this is what an agent branches on.
+    let bounded: Section<LocationOutput> = Section::with_total(vec![], 3)
+        .with_incomplete(true)
+        .with_hints(vec!["2 path(s) could not be read".to_string()]);
+    assert_json_snapshot!(bounded, @r###"
+    {
+      "count": 3,
+      "showing": 0,
+      "items": [],
+      "truncated": true,
+      "incomplete": true,
+      "hints": [
+        "2 path(s) could not be read"
+      ]
+    }
+    "###);
+
+    let exact: Section<LocationOutput> = Section::with_total(vec![], 3);
+    let json = serde_json::to_value(&exact).unwrap();
+    assert!(
+        json.get("incomplete").is_none(),
+        "an exact count carries no marker"
+    );
+}
+
+#[test]
 fn location_output_discloses_a_degraded_column() {
     // A degraded column (decoded from an unreadable line) surfaces the flag so
     // an agent can tell a wire-offset guess from a transcoded value; it is
@@ -448,6 +478,7 @@ fn ref_output_full_metadata() {
         modules: Some(3),
         is_exported: Some(true),
         indexing: None,
+        incomplete: false,
     };
     assert_json_snapshot!(out);
 }
@@ -465,9 +496,29 @@ fn ref_output_discloses_degraded_indexing() {
         modules: Some(1),
         is_exported: Some(false),
         indexing: Some(IndexingDegradation::TimedOut),
+        incomplete: false,
     };
     let value = serde_json::to_value(out).unwrap();
     assert_eq!(value["indexing"], "timed_out");
+}
+
+#[test]
+fn ref_output_discloses_an_omitted_usage() {
+    // The server's reference set left out the very usage the query was made
+    // from, so the counts are a lower bound — disclosed via `incomplete`,
+    // omitted otherwise so the common (authoritative) summary carries no filler.
+    let out = RefOutput {
+        total: 0,
+        test: 0,
+        prod: 0,
+        files: Some(0),
+        modules: Some(0),
+        is_exported: None,
+        indexing: None,
+        incomplete: true,
+    };
+    let value = serde_json::to_value(out).unwrap();
+    assert_eq!(value["incomplete"], true);
 }
 
 #[test]
@@ -480,6 +531,7 @@ fn ref_output_minimal() {
         modules: None,
         is_exported: None,
         indexing: None,
+        incomplete: false,
     };
     assert_json_snapshot!(out);
 }
@@ -570,6 +622,7 @@ fn impact_output_full() {
             modules: Some(2),
             is_exported: Some(true),
             indexing: None,
+            incomplete: false,
         },
         coverage: TestCoverageOutput {
             count: 3,
@@ -629,6 +682,7 @@ fn impact_output_without_blast_radius() {
             modules: None,
             is_exported: None,
             indexing: None,
+            incomplete: false,
         },
         coverage: TestCoverageOutput {
             count: 0,

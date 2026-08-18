@@ -133,27 +133,19 @@ async fn fetch_context(
     params: &ContextParams,
     analysis: LocationAnalysis,
 ) -> ContextOutput {
-    let resolved_line = analysis
-        .target
-        .as_ref()
-        .map(|s| s.location.line)
-        .unwrap_or(analysis.anchor.line);
-    let resolved_column = analysis
-        .target
-        .as_ref()
-        .map(|s| s.location.column)
-        .unwrap_or(analysis.anchor.column);
+    let resolved_line = analysis.anchor.line;
+    let resolved_column = analysis.anchor.column;
 
     let target = {
         let mut t = TargetOutput::from_symbol_or_fallback(
-            analysis.target.as_ref(),
+            analysis.target(),
             &analysis.anchor.file,
             resolved_line,
             resolved_column,
             root,
             analysis.anchor_resolution().as_status(),
         );
-        if let Some(sym) = analysis.target.as_ref() {
+        if let Some(sym) = analysis.target() {
             t = t.with_signature(extract_signature(sym.body.as_deref()));
             if args.body || args.all || args.with_bodies {
                 t = t.with_body(sym.body.clone());
@@ -177,6 +169,7 @@ async fn fetch_context(
         // command discloses it for; the summary counts are otherwise read as
         // authoritative.
         indexing: analysis.indexing(),
+        incomplete: analysis.omits_input(root),
     };
 
     let file = analysis.anchor.file.as_path();
@@ -759,7 +752,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<Location>, LspError> {
+        ) -> Result<Option<crate::models::lsp::Definition>, LspError> {
             unreachable!()
         }
         async fn goto_type_definition(
@@ -814,7 +807,7 @@ mod tests {
             _line: u32,
             _column: u32,
             _new_name: &str,
-        ) -> Result<RenameResult, LspError> {
+        ) -> Result<Option<RenameResult>, LspError> {
             unreachable!()
         }
         async fn incoming_calls(

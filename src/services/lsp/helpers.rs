@@ -255,7 +255,7 @@ fn find_file_by_glob(root: &Path, pattern: &str) -> Option<PathBuf> {
 pub(super) fn find_first_file(root: &Path, language: Language) -> Option<PathBuf> {
     let filter = FileFilter::new(root);
     let extensions = language.extensions();
-    let files = filter.discover_files(extensions);
+    let files = filter.discover_files(extensions).files;
     files.into_iter().next()
 }
 
@@ -523,6 +523,7 @@ mod tests {
         LspLocation {
             uri: uri.to_string(),
             range: Default::default(),
+            origin: None,
         }
     }
 

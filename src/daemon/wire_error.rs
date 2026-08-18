@@ -17,6 +17,9 @@ pub enum WireLspError {
         message: String,
     },
     NotConnected,
+    ConnectionLost {
+        method: String,
+    },
     ServerNotInstalled {
         name: String,
         install_hint: String,
@@ -47,6 +50,9 @@ pub enum WireLspError {
     Protocol {
         message: String,
     },
+    UnsupportedEdit {
+        message: String,
+    },
     FileTooLarge {
         path: String,
         size_mb: u64,
@@ -64,6 +70,9 @@ impl From<&LspError> for WireLspError {
                 message: msg.clone(),
             },
             LspError::NotConnected => Self::NotConnected,
+            LspError::ConnectionLost(method) => Self::ConnectionLost {
+                method: method.clone(),
+            },
             LspError::ServerNotInstalled { name, install_hint } => Self::ServerNotInstalled {
                 name: name.clone(),
                 install_hint: install_hint.clone(),
@@ -99,6 +108,9 @@ impl From<&LspError> for WireLspError {
             LspError::Protocol(msg) => Self::Protocol {
                 message: msg.clone(),
             },
+            LspError::UnsupportedEdit(msg) => Self::UnsupportedEdit {
+                message: msg.clone(),
+            },
             LspError::FileTooLarge {
                 path,
                 size_mb,
@@ -123,6 +135,7 @@ impl From<WireLspError> for LspError {
         match wire {
             WireLspError::ServerStart { message } => LspError::ServerStart(message),
             WireLspError::NotConnected => LspError::NotConnected,
+            WireLspError::ConnectionLost { method } => LspError::ConnectionLost(method),
             WireLspError::ServerNotInstalled { name, install_hint } => {
                 LspError::ServerNotInstalled { name, install_hint }
             }
@@ -146,6 +159,7 @@ impl From<WireLspError> for LspError {
             WireLspError::RequestCancelled => LspError::RequestCancelled,
             WireLspError::ServerError { code, message } => LspError::ServerError { code, message },
             WireLspError::Protocol { message } => LspError::Protocol(message),
+            WireLspError::UnsupportedEdit { message } => LspError::UnsupportedEdit(message),
             WireLspError::FileTooLarge {
                 path,
                 size_mb,
@@ -206,6 +220,22 @@ mod tests {
                 assert_eq!(feature, "callHierarchy");
             }
             other => panic!("expected FeatureNotSupported, got {other:?}"),
+        }
+    }
+
+    /// An edit the server produced but symora does not apply is a capability
+    /// statement about this tool, not a protocol failure — it must cross the
+    /// socket as itself so both modes classify it as unsupported.
+    #[test]
+    fn unsupported_edit_round_trips_as_itself() {
+        let recovered = round_trip(LspError::UnsupportedEdit(
+            "Rename requires a file rename operation".into(),
+        ));
+        match recovered {
+            LspError::UnsupportedEdit(message) => {
+                assert!(message.contains("file rename operation"));
+            }
+            other => panic!("expected UnsupportedEdit, got {other:?}"),
         }
     }
 

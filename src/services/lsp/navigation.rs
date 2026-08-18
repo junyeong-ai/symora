@@ -6,7 +6,7 @@ use crate::infra::lsp::LspFeature;
 use crate::infra::lsp::protocol::{
     LspLocation, TextDocumentIdentifier, TextDocumentPositionParams,
 };
-use crate::models::lsp::{Indexed, path_to_uri};
+use crate::models::lsp::{Definition, Indexed, path_to_uri};
 use crate::models::symbol::Location;
 
 use super::converters::*;
@@ -79,9 +79,9 @@ pub(super) async fn goto_definition(
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Option<Location>, LspError> {
+) -> Result<Option<Definition>, LspError> {
     let project_root = service.manager.root().to_path_buf();
-    goto_location(
+    let chosen = goto_location(
         service,
         file,
         line,
@@ -90,7 +90,27 @@ pub(super) async fn goto_definition(
         None,
         |locs| select_best_definition(locs, &project_root).cloned(),
     )
-    .await
+    .await?;
+    Ok(chosen.map(|(wire, location)| {
+        // The server said the queried token is its own definition when the
+        // target starts inside the origin token it identified at the query
+        // position. A plain-Location server names no origin; the one thing
+        // it can still say that way is a definition of the exact queried
+        // position to itself. Same-file is judged on the PARSED path — a
+        // raw URI comparison would split on percent-encoding choices the
+        // two sides are free to make differently (`(`, `,`, `+`, …).
+        let is_self = location.file == file
+            && match &wire.origin {
+                Some(origin) => {
+                    (origin.start.line, origin.start.character)
+                        <= (wire.range.start.line, wire.range.start.character)
+                        && (wire.range.start.line, wire.range.start.character)
+                            < (origin.end.line, origin.end.character)
+                }
+                None => (location.line, location.column) == (line, column),
+            };
+        Definition { location, is_self }
+    }))
 }
 
 pub(super) async fn goto_type_definition(
@@ -99,7 +119,7 @@ pub(super) async fn goto_type_definition(
     line: u32,
     column: u32,
 ) -> Result<Option<Location>, LspError> {
-    goto_location(
+    let chosen = goto_location(
         service,
         file,
         line,
@@ -112,7 +132,8 @@ pub(super) async fn goto_type_definition(
         None,
         |locs| locs.first().cloned(),
     )
-    .await
+    .await?;
+    Ok(chosen.map(|(_, location)| location))
 }
 
 async fn goto_location(
@@ -123,7 +144,7 @@ async fn goto_location(
     method: &str,
     feature: Option<LspFeature>,
     select: impl Fn(&[LspLocation]) -> Option<LspLocation>,
-) -> Result<Option<Location>, LspError> {
+) -> Result<Option<(LspLocation, Location)>, LspError> {
     if let Some(feat) = feature {
         check_feature_support(file, feat)?;
     }
@@ -167,7 +188,8 @@ async fn goto_location(
                 match chosen {
                     Some(loc) => {
                         let mut conv = PositionConverter::new(client.position_encoding().await);
-                        Ok(Some(convert_location(&loc, &mut conv)))
+                        let converted = convert_location(&loc, &mut conv);
+                        Ok(Some((loc, converted)))
                     }
                     None => Ok(None),
                 }

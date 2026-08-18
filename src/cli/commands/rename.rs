@@ -3,11 +3,11 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::ParsedLocation;
 use crate::cli::commands::edit::apply_workspace_edits;
 use crate::cli::commands::edit::refresh_store_files;
 use crate::cli::response::FileChangeOutput;
-use crate::cli::utils::find_symbol_at_position;
+use crate::cli::utils::find_named_at_position;
+use crate::cli::{OutputError, ParsedLocation};
 use crate::models::lsp::FindSymbolsOptions;
 
 #[derive(Args, Debug)]
@@ -66,7 +66,20 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
         .rename(&loc.file, loc.line, loc.column, &args.new_name)
         .await
     {
-        Ok(result) => {
+        Ok(None) => ctx.print_error(
+            OutputError::invalid(format!(
+                "No renameable symbol at {}:{}:{}",
+                ctx.relative_path(&loc.file),
+                loc.line,
+                loc.column
+            ))
+            .with_hint(
+                "Point at an identifier — `symora hover` or `symora def` at the position shows \
+                 what the language server reads there, and `symora symbols <file>` lists the \
+                 declarations to target",
+            ),
+        ),
+        Ok(Some(result)) => {
             // Apply workspace edits to files
             match apply_workspace_edits(&result.changes, args.dry_run, app.root()) {
                 Ok(applied_changes) => {
@@ -119,12 +132,12 @@ async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<
         return Some(result.placeholder);
     }
 
-    // 2. Try find_symbols and match by position
+    // 2. Try find_symbols: the symbol whose name the position is on
     if let Ok(symbols) = app
         .lsp
         .find_symbols(&loc.file, FindSymbolsOptions::default().with_depth(10))
         .await
-        && let Some(sym) = find_symbol_at_position(&symbols, loc.line, Some(loc.column))
+        && let Some(sym) = find_named_at_position(&symbols, loc.line, loc.column)
     {
         return Some(sym.name.clone());
     }

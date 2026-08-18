@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 pub const INIT_SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -7,12 +7,25 @@ PRAGMA foreign_keys = ON;
 PRAGMA cache_size = -16384;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 134217728;
-PRAGMA busy_timeout = 5000;
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- The paths the last completed build could not read — a file it could not
+-- open, or a directory it could not enter. They are what the build did not
+-- see, so an answer drawn from it is short by whatever they hold. Rows, not a
+-- count, because a count cannot be repaired one path at a time, cannot say
+-- which language it kept out, and cannot tell a reader where to look.
+--
+-- `is_file` is what the walk knew, not what a later stat could re-derive: a
+-- file's name settles its language and a directory's does not, and a directory
+-- named `generated.py` would otherwise be read as holding only Python.
+CREATE TABLE IF NOT EXISTS unread_paths (
+    path TEXT PRIMARY KEY,
+    is_file INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS files (
@@ -65,8 +78,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS content_lines_fts USING fts5(
 );
 
 -- Keep the FTS index in lockstep with content_lines through every mutation
--- site automatically — including the two bulk paths (cleanup_expired, clear)
--- that bypass the per-file delete helper — so the index can never desync.
+-- site automatically — including the bulk path (clear) that bypasses the
+-- per-file delete helper — so the index can never desync.
 CREATE TRIGGER IF NOT EXISTS content_lines_ai AFTER INSERT ON content_lines BEGIN
     INSERT INTO content_lines_fts(rowid, content) VALUES (new.id, new.content);
 END;
@@ -81,18 +94,23 @@ CREATE TRIGGER IF NOT EXISTS content_lines_au AFTER UPDATE ON content_lines BEGI
 END;
 "#;
 
-pub fn build_symbol_search_query(with_kind: bool, with_lang: bool) -> String {
+/// `lang_count` is the number of language parameters bound after the query
+/// (?1), the limit (?2), and the optional kind — the search's domain,
+/// restricting rows to those languages. Zero means no language restriction
+/// (the whole table).
+pub fn build_symbol_search_query(with_kind: bool, lang_count: usize) -> String {
     let kind_filter = if with_kind { " AND s.kind = ?3" } else { "" };
-    // Bind order is query(?1), limit(?2), then kind and language in that order,
-    // so the language slot is ?4 when a kind filter precedes it, else ?3.
-    let lang_filter = if with_lang {
-        if with_kind {
-            " AND f.language = ?4"
-        } else {
-            " AND f.language = ?3"
-        }
+    // Bind order is query(?1), limit(?2), the optional kind, then one slot
+    // per covered language, so the first language slot is ?4 when a kind
+    // filter precedes it and ?3 otherwise.
+    let first_lang_slot = if with_kind { 4 } else { 3 };
+    let lang_filter = if lang_count > 0 {
+        let slots: Vec<String> = (0..lang_count)
+            .map(|i| format!("?{}", i + first_lang_slot))
+            .collect();
+        format!(" AND f.language IN ({})", slots.join(", "))
     } else {
-        ""
+        String::new()
     };
     // Substring matching is for a LITERAL query: `_`/`%` in an identifier are
     // content, not LIKE wildcards. Escape them (and the escape char) so each
@@ -133,11 +151,15 @@ LIMIT ?2"#
     )
 }
 
-pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
-    let lang_filter = if with_lang {
-        " AND f.language = ?3"
+/// `lang_count` is the number of language parameters bound after the query
+/// (?1) and limit (?2) — the search's domain, restricting rows to those
+/// languages. Zero means no language restriction (the whole table).
+pub fn build_content_search_query(lang_count: usize, use_fts: bool) -> String {
+    let lang_filter = if lang_count > 0 {
+        let slots: Vec<String> = (0..lang_count).map(|i| format!("?{}", i + 3)).collect();
+        format!(" AND f.language IN ({})", slots.join(", "))
     } else {
-        ""
+        String::new()
     };
     // For queries >= 3 chars, an FTS5 trigram MATCH pre-filters candidate rows
     // sub-linearly. It is ONLY a pre-filter: the LIKE below stays authoritative,
@@ -161,8 +183,12 @@ pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
     // LIKE with both.
     let like_q = r#"REPLACE(REPLACE(REPLACE(?1, '\', '\\'), '_', '\_'), '%', '\%')"#;
     // Relevance is the match's position within the trimmed line — an
-    // earlier hit is more relevant. Line length is the ORDER BY tiebreaker
-    // only; it carries no relevance signal and must not enter the score.
+    // earlier hit is more relevant. Trimming strips tabs as well as spaces
+    // (char(9,32)), the same two the scan path strips
+    // (`score_content_line`'s `trim_matches([' ', '\t'])`), so a tab-indented
+    // line scores the same whichever source answered. Line length is the
+    // ORDER BY tiebreaker only; it carries no relevance signal and must not
+    // enter the score.
     // Path and line number close the ordering to a total one, so the LIMIT
     // keeps the same rows on both the FTS and LIKE-only plans — without it
     // the two plans retrieve ties in different physical orders and could
@@ -171,9 +197,9 @@ pub fn build_content_search_query(with_lang: bool, use_fts: bool) -> String {
         r#"SELECT c.content, c.line_num, f.path, f.language,
     COUNT(*) OVER () AS total,
     CASE
-        WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) = 1 THEN 1.0
-        WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) BETWEEN 2 AND 8 THEN 0.8
-        WHEN INSTR(TRIM(LOWER(c.content)), LOWER(?1)) BETWEEN 9 AND 32 THEN 0.6
+        WHEN INSTR(TRIM(LOWER(c.content), char(9,32)), LOWER(?1)) = 1 THEN 1.0
+        WHEN INSTR(TRIM(LOWER(c.content), char(9,32)), LOWER(?1)) BETWEEN 2 AND 8 THEN 0.8
+        WHEN INSTR(TRIM(LOWER(c.content), char(9,32)), LOWER(?1)) BETWEEN 9 AND 32 THEN 0.6
         ELSE 0.4
     END AS score
 FROM content_lines c

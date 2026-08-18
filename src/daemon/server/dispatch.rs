@@ -34,6 +34,7 @@ pub(super) async fn dispatch(
         methods::PING => Ok(serde_json::json!({
             "pong": true,
             "version": env!("CARGO_PKG_VERSION"),
+            "build": crate::daemon::protocol::BUILD_ID,
         })),
         methods::STATUS => handlers::handle_status(projects, config, start_time).await,
         methods::SHUTDOWN => Ok(serde_json::json!({"shutting_down": true})),
@@ -56,9 +57,8 @@ pub(super) async fn dispatch(
 
         methods::GOTO_DEFINITION => {
             handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
-                to_json(wire::DefinitionResponse::from_location(
+                to_json(wire::DefinitionResponse::from_definition(
                     ctx.lsp.goto_definition(&f, l, c).await?,
-                    wire::DefinitionKind::Definition,
                 ))
             })
             .await
@@ -66,9 +66,8 @@ pub(super) async fn dispatch(
 
         methods::GOTO_TYPE_DEFINITION => {
             handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
-                to_json(wire::DefinitionResponse::from_location(
+                to_json(wire::DefinitionResponse::from_type_definition(
                     ctx.lsp.goto_type_definition(&f, l, c).await?,
-                    wire::DefinitionKind::TypeDefinition,
                 ))
             })
             .await

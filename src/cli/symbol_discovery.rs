@@ -1,4 +1,17 @@
-use crate::error::LspError;
+//! Discovery and steering heuristics: how a symbol query is classified, how
+//! matches are ranked, and which languages a search covers.
+//!
+//! What an answer says about its own shortfalls lives in
+//! [`crate::cli::response::disclosure`] instead — this module decides what to
+//! look for and in what order, that one decides how to admit what was missed.
+
+use std::path::Path;
+
+use crate::app::App;
+use crate::cli::errors::ErrorCode;
+use crate::cli::response::disclosure::{LowerBound, as_paths, name_some, relative_paths};
+use crate::cli::{OutputContext, OutputError};
+use crate::models::symbol::Language;
 
 // Ranking weights for symbol discovery. Every value is expressed relative to
 // the `symbol_match_priority` tier ladder (exact = 40, anchored-suffix = 34,
@@ -59,6 +72,7 @@ pub fn symbol_lookup_hints(
     no_kind_filter: bool,
     truncated: bool,
     result_count: usize,
+    limit: usize,
 ) -> Vec<String> {
     if result_count <= 1 && !truncated {
         return Vec::new();
@@ -71,7 +85,12 @@ pub fn symbol_lookup_hints(
                 .to_string(),
         );
     }
-    if truncated {
+    // Only when the emission cap is what bound the list. A count above the
+    // rows can also come from matches noise suppression removed, or from a
+    // source total larger than the rows in hand — raising `--limit` surfaces
+    // neither, so prescribing it would send an agent after results that
+    // cannot arrive.
+    if truncated && result_count >= limit {
         hints.push("Narrow results with a longer query or increase --limit".to_string());
     }
     if !path_mode {
@@ -97,21 +116,6 @@ pub fn symbol_lookup_hints(
 /// single-match sets (nothing to concentrate) and multi-file spreads.
 pub fn is_single_file_concentration(unique_files: usize, total: usize) -> bool {
     total > 1 && unique_files == 1
-}
-
-/// Why a language is missing from the result, as a stable marker an agent
-/// can branch on (install a server, retry a timeout, or narrow with --lang).
-/// A capability gap — `is_unsupported` covers both the static table and a
-/// runtime JSON-RPC method-not-found — classifies as `unsupported`, matching
-/// the central error classifier.
-pub fn coverage_reason(err: &LspError) -> &'static str {
-    match err {
-        LspError::ServerNotInstalled { .. } => "server_not_installed",
-        LspError::Timeout(_) => "timed_out",
-        LspError::UnsupportedLanguage(_) => "unsupported",
-        e if e.is_unsupported() => "unsupported",
-        _ => "unavailable",
-    }
 }
 
 /// Relevance tier of a name/path against a query. The ladder is intentionally
@@ -193,10 +197,118 @@ pub fn broad_symbol_kind_bonus(query: &str, name: &str, kind: &str, low_signal_k
     }
 }
 
+/// The languages a search covers: the one named, or the code languages the
+/// project contains, ranked by file count. An unnamed search is about code
+/// — a symbol query has nothing to ask a configuration format, and listing
+/// one as a language it could not cover would be noise rather than a gap —
+/// while naming a format explicitly is a request, and requests are honored.
+/// An unrecognized name covers nothing, which its caller reports.
+///
+/// Detection walks the tree, so it can miss a language whose only files sit
+/// under a path it could not read. That language never enters the requested
+/// set, so no coverage gap can name it — the walk's shortfall is reported
+/// instead, and it is what makes the answer a lower bound.
+pub fn resolve_search_languages(app: &App, language: Option<&str>) -> DetectedLanguages {
+    match language.map(Language::parse_or_default) {
+        Some(Language::Unknown) => DetectedLanguages::default(),
+        Some(lang) => DetectedLanguages {
+            languages: vec![lang],
+            unread_paths: Vec::new(),
+        },
+        None => {
+            let detected = detect_languages_by_file_count(app.root(), &Language::all());
+            DetectedLanguages {
+                languages: detected
+                    .languages
+                    .into_iter()
+                    .filter(|lang| is_code_language(*lang))
+                    .collect(),
+                unread_paths: detected.unread_paths,
+            }
+        }
+    }
+}
+
+/// The languages an unscoped search covers — the fan-out it pays for, the
+/// corpus it embeds, the files it ranks and scans. Markup and configuration
+/// formats are covered only when named: a symbol query has nothing to ask one,
+/// and listing it as a language the answer could not cover is noise rather
+/// than a gap. Narrowing this narrows every one of those at once.
+pub fn is_code_language(language: Language) -> bool {
+    !matches!(
+        language,
+        Language::Markdown | Language::Toml | Language::Yaml
+    )
+}
+
+/// The error an empty language set is.
+///
+/// Empty for three different facts, each with its own remedy, and the caller
+/// cannot tell them apart from the set alone. A walk that was turned away
+/// never learned what the project holds — the I/O failure is the answer, not
+/// the conclusion. A `--lang` naming no language this build knows is an input
+/// error. Anything else is a project with no code this command can search,
+/// which is a finding. Said once here so no surface re-derives it and gets one
+/// of the three wrong.
+pub fn no_languages_error(
+    ctx: &OutputContext,
+    detected: &DetectedLanguages,
+    requested: Option<&str>,
+) -> OutputError {
+    let unread = relative_paths(ctx, &detected.unread_paths);
+    if !unread.is_empty() {
+        return OutputError::new(
+            ErrorCode::Io,
+            format!(
+                "{} path(s) could not be read ({}), so no language could be detected here",
+                unread.len(),
+                name_some(&unread)
+            ),
+        )
+        .with_hint("Check the permissions on those paths, or name a language with --lang.");
+    }
+    match requested {
+        Some(language) => OutputError::invalid(format!("Unknown language: {language}"))
+            .with_hint("Run 'symora doctor' to see supported languages."),
+        None => OutputError::not_found("No source files found to search"),
+    }
+}
+
+/// The languages a command will ask about, and how much of the tree the walk
+/// that chose them could not read.
+///
+/// The two travel together because a language whose only files sit under an
+/// unreadable path never enters the set at all — so nothing downstream can
+/// name it as a gap, and only these paths say the answer may be short.
+#[derive(Default)]
+pub struct DetectedLanguages {
+    pub languages: Vec<Language>,
+    /// Absolute, as the walk produced them. Every consumer says them through
+    /// [`relative_paths`], so there is one form on the way in and one on the
+    /// way out; a caller that relativized first would double-transform the
+    /// moment the output layer's own convention changes.
+    pub unread_paths: Vec<String>,
+}
+
+impl DetectedLanguages {
+    /// What the walk that chose these languages could not read, as the bound
+    /// it makes an answer. Derived here rather than at each call site: a
+    /// language hidden behind such a path never enters `languages`, so no
+    /// coverage gap can name it and this is the only thing that says the
+    /// answer may be short on its account.
+    pub fn shortfall(&self, ctx: &OutputContext) -> Option<LowerBound> {
+        let unread = relative_paths(ctx, &self.unread_paths);
+        (!unread.is_empty()).then_some(LowerBound::ScanCouldNotReadPaths(unread))
+    }
+}
+
+/// The project's languages, most files first. One detector for every surface
+/// that asks the question — a second copy is how a shortfall added here stops
+/// reaching the commands that need it.
 pub fn detect_languages_by_file_count(
-    root: &std::path::Path,
-    all_languages: &[crate::models::symbol::Language],
-) -> Vec<crate::models::symbol::Language> {
+    root: &Path,
+    all_languages: &[Language],
+) -> DetectedLanguages {
     use std::collections::HashMap;
 
     let extensions: Vec<&str> = all_languages
@@ -204,19 +316,22 @@ pub fn detect_languages_by_file_count(
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
     let filter = crate::infra::file_filter::FileFilter::new(root);
-    let files = filter.discover_files(&extensions);
-    let mut counts: HashMap<crate::models::symbol::Language, usize> = HashMap::new();
+    let discovery = filter.discover_files(&extensions);
+    let mut counts: HashMap<Language, usize> = HashMap::new();
 
-    for file in files {
-        let language = crate::models::symbol::Language::from_path(&file);
-        if language != crate::models::symbol::Language::Unknown {
+    for file in discovery.files {
+        let language = Language::from_path(&file);
+        if language != Language::Unknown {
             *counts.entry(language).or_insert(0) += 1;
         }
     }
 
     let mut ranked: Vec<_> = counts.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.lsp_id().cmp(b.0.lsp_id())));
-    ranked.into_iter().map(|(language, _)| language).collect()
+    DetectedLanguages {
+        languages: ranked.into_iter().map(|(language, _)| language).collect(),
+        unread_paths: as_paths(&discovery.unreadable),
+    }
 }
 
 fn is_simple_lower_query(query: &str) -> bool {

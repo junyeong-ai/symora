@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::cli::response::Section;
 use crate::config::LspRuntimeConfig;
 use crate::daemon::params::{
     EditedFilesParams, IndexBuildParams, ProjectParams, SearchContentParams, SearchSymbolsParams,
 };
 use crate::daemon::protocol::RpcError;
+use crate::daemon::wire;
 use crate::models::symbol::{Language, SymbolKind};
-use crate::services::store::{IndexOptions, StoreService};
+use crate::services::store::{IndexOptions, SearchPage, StoreService};
 
 use super::context::{ProjectsMap, get_context};
 use super::dispatch::parse_params;
@@ -70,8 +70,7 @@ pub(super) async fn handle_search_symbols(
         })
         .collect();
 
-    serde_json::to_value(Section::with_total(items, page.total).with_stale(page.stale))
-        .map_err(RpcError::from)
+    serde_json::to_value(search_response(&page, items)).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_search_content(
@@ -83,11 +82,15 @@ pub(super) async fn handle_search_content(
     let ctx = get_context(projects, &p.project, lsp_config).await?;
     ctx.touch();
 
-    let language = p.language.as_ref().map(|l| Language::parse_or_default(l));
+    let languages: Vec<Language> = p
+        .languages
+        .iter()
+        .map(|l| Language::parse_or_default(l))
+        .collect();
 
     let page = ctx
         .store
-        .search_content(&p.query, p.limit.unwrap_or(100), language)
+        .search_content(&p.query, p.limit.unwrap_or(100), &languages)
         .await
         .map_err(RpcError::from)?;
 
@@ -104,8 +107,31 @@ pub(super) async fn handle_search_content(
         })
         .collect();
 
-    serde_json::to_value(Section::with_total(items, page.total).with_stale(page.stale))
-        .map_err(RpcError::from)
+    serde_json::to_value(search_response(&page, items)).map_err(RpcError::from)
+}
+
+/// Every field of the page except its rows, which the caller has already
+/// rendered. Destructured rather than read field by field, so a field added to
+/// the page fails to compile here until the wire carries it — the daemon and a
+/// direct run would otherwise disagree about a fact only one of them has.
+fn search_response<T>(
+    page: &SearchPage<T>,
+    items: Vec<serde_json::Value>,
+) -> wire::SearchResponse<serde_json::Value> {
+    let SearchPage {
+        total,
+        rows: _,
+        stale_files,
+        covered,
+        unread_paths,
+    } = page;
+    wire::SearchResponse {
+        count: *total,
+        items,
+        stale_files: stale_files.clone(),
+        covered: covered.iter().map(|l| l.lsp_id().to_string()).collect(),
+        unread_paths: unread_paths.clone(),
+    }
 }
 
 pub(super) async fn handle_index_build(

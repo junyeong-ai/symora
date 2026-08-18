@@ -64,6 +64,8 @@ fn location_from_range(
         file,
         line: range.start.line + 1,
         column,
+        name_end_line: None,
+        name_end_column: None,
         range_start_line: None,
         range_start_column: None,
         end_line: Some(range.end.line + 1),
@@ -129,6 +131,8 @@ pub(super) fn convert_document_symbols(
             // only its degradation sets the flag. The declaration-range endpoints
             // are secondary bounds — an out-of-range end (stale/EOF-exclusive
             // range) must not mark a cleanly-decoded name column as a guess.
+            let (name_end_col, _) =
+                conv.scalar_column_disclosed(file, sel.end.line, sel.end.character);
             let (start_col, _) =
                 conv.scalar_column_disclosed(file, range.start.line, range.start.character);
             let (end_col, _) =
@@ -142,6 +146,7 @@ pub(super) fn convert_document_symbols(
                 range.end.line + 1,
                 end_col,
             )
+            .with_name_end(sel.end.line + 1, name_end_col)
             .with_degraded_column(name_degraded);
 
             let display_name = Symbol::normalize_symbol_name(&doc_sym.name);

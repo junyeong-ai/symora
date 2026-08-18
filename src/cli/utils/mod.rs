@@ -16,5 +16,6 @@ pub use refs::{RefsClassification, extract_module};
 pub use signature::extract_signature;
 pub use symbol_nav::{
     AnchorResolution, SymbolResolution, ambiguity_hint, column_addressed_symbol,
-    enclosing_callable, find_symbol_at_position, line_addressed_symbol, symbols_declared_on_line,
+    enclosing_callable, find_named_at_position, find_symbol_at_position, line_addressed_symbol,
+    symbols_declared_on_line,
 };

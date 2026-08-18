@@ -1,6 +1,6 @@
 //! Position-driven navigation over a `documentSymbol` tree.
 
-use crate::models::symbol::Symbol;
+use crate::models::symbol::{Symbol, SymbolKind};
 
 /// Whether a symbol's declared range covers a position. The one reading of
 /// containment every navigator here shares, so two of them can never disagree
@@ -10,21 +10,69 @@ use crate::models::symbol::Symbol;
 /// - `column = Some(col)`: line+column range matching.
 fn contains_position(symbol: &Symbol, line: u32, column: Option<u32>) -> bool {
     let loc = &symbol.location;
-    let start = loc.line;
+    let (start, start_column) = loc.effective_start();
     let end = loc.end_line.unwrap_or(start);
 
     match column {
         None => line >= start && line <= end,
         Some(col) => {
             if start == end {
-                loc.line == line && col >= loc.column && loc.end_column.is_none_or(|ec| col <= ec)
+                start == line && col >= start_column && loc.end_column.is_none_or(|ec| col <= ec)
             } else {
                 (line > start && line < end)
-                    || (line == start && col >= loc.column)
+                    || (line == start && col >= start_column)
                     || (line == end && loc.end_column.is_none_or(|ec| col <= ec))
             }
         }
     }
+}
+
+/// Whether a position lies within `[start, name end]` of a symbol's
+/// declaration. The name end is the server's stated span; when it stated
+/// none, the span runs to the end of the name's line, so a declaration line
+/// still addresses its symbol and body lines never do. A file-level symbol
+/// stands for the file, not for a position in it, and matches nothing.
+fn spans_position(symbol: &Symbol, start: (u32, u32), line: u32, column: u32) -> bool {
+    if symbol.kind == SymbolKind::File {
+        return false;
+    }
+    let loc = &symbol.location;
+    let end = match (loc.name_end_line, loc.name_end_column) {
+        (Some(l), Some(c)) => (l, c),
+        _ => {
+            let line_end = match loc.end_line {
+                Some(l) if l == loc.line => loc.end_column.unwrap_or(u32::MAX),
+                _ => u32::MAX,
+            };
+            (loc.line, line_end)
+        }
+    };
+    (line, column) >= start && (line, column) <= end
+}
+
+/// Whether a position is on a symbol's name — the one place a position
+/// means that symbol and nothing else, whatever language it is written in.
+fn names_position(symbol: &Symbol, line: u32, column: u32) -> bool {
+    let loc = &symbol.location;
+    spans_position(symbol, (loc.line, loc.column), line, column)
+}
+
+/// Whether a position is on a symbol's declaration header: the name's line
+/// from where the declaration begins there through the end of the name. This
+/// is what a position addresses when it is on no token of its own — the
+/// keyword or visibility before a name, the whitespace between them. Tokens
+/// there that are something else (a return type, a receiver, an attribute on
+/// the same line) are read through the language server first, so this is
+/// the reading of last resort for a declaration line, never of the body it
+/// introduces or of the attribute lines above it.
+fn declares_position(symbol: &Symbol, line: u32, column: u32) -> bool {
+    let loc = &symbol.location;
+    spans_position(
+        symbol,
+        loc.effective_start().max((loc.line, 1)),
+        line,
+        column,
+    )
 }
 
 /// Find the innermost symbol at a position (recursive search).
@@ -46,6 +94,39 @@ pub fn find_symbol_at_position(
         None
     }
     search(symbols, line, column)
+}
+
+/// The innermost symbol whose name a position is on — see
+/// [`names_position`].
+pub fn find_named_at_position(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> {
+    innermost(symbols, line, column, names_position)
+}
+
+/// The innermost symbol whose declaration header a position is on — see
+/// [`declares_position`]. A position inside a body, on a usage, or on
+/// nothing addresses no symbol here, whatever encloses it.
+fn find_declaration_at_position(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> {
+    innermost(symbols, line, column, declares_position)
+}
+
+fn innermost(
+    symbols: &[Symbol],
+    line: u32,
+    column: u32,
+    spans: fn(&Symbol, u32, u32) -> bool,
+) -> Option<&Symbol> {
+    for symbol in symbols {
+        if !contains_position(symbol, line, Some(column)) {
+            continue;
+        }
+        if let Some(child) = innermost(&symbol.children, line, column, spans) {
+            return Some(child);
+        }
+        if spans(symbol, line, column) {
+            return Some(symbol);
+        }
+    }
+    None
 }
 
 /// The callable that owns a position: the innermost function, method, or
@@ -99,12 +180,13 @@ pub enum SymbolResolution<'a> {
     NotFound,
 }
 
-/// Whether a snapped/analyzed anchor resolved to a symbol, and if not, why. The
-/// two failure cases are kept distinct because they license different claims:
-/// `NotASymbol` was checked and is genuinely not a symbol; `Unavailable` could
-/// not be checked (the symbol read failed), so neither "is" nor "is not a
-/// symbol" may be claimed. Collapsing them would let a mere read failure be
-/// reported as a false "not a symbol".
+/// What a resolved anchor is. The states license different claims and are
+/// kept distinct for that reason: `Resolved` and `Binding` are anchored at a
+/// declaration — the reference set is exact — and differ only in whether the
+/// symbol tree lists it; `NotASymbol` was checked and denotes nothing;
+/// `Unavailable` could not be checked (a read failed), so neither "is" nor
+/// "is not a symbol" may be claimed. Collapsing the last two would let a mere
+/// read failure be reported as a false "not a symbol".
 ///
 /// This is the single source of the anchor-resolution disclosure: every surface
 /// (callers/callees/implementations/refs/impact/context) renders it through
@@ -112,28 +194,43 @@ pub enum SymbolResolution<'a> {
 /// consistent `*_status` string, never a per-surface bool/shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorResolution {
-    /// Snapped to a symbol's name anchor (possibly after disambiguating a
-    /// multi-declaration line).
+    /// Anchored at a listed symbol's declaration (possibly after
+    /// disambiguating a multi-declaration line, or after resolving a usage
+    /// through its definition).
     Resolved,
-    /// Symbols were read but none is addressed by this position.
+    /// Anchored at a declaration the symbol tree does not list — a local, a
+    /// parameter, a generated item — reached through the position's
+    /// definition. The answer is that binding's; the target cannot be named
+    /// from the tree.
+    Binding,
+    /// Symbols were read but none is addressed by this position, and the
+    /// language server resolves nothing there.
     NotASymbol,
-    /// The symbol read failed, so the position could not be snapped; whether it
-    /// is a symbol is unknown.
+    /// A read failed, so the position could not be resolved; whether it is a
+    /// symbol is unknown.
     Unavailable,
 }
 
 impl AnchorResolution {
-    /// Whether the input snapped cleanly to a symbol.
+    /// Whether the input resolved to a listed symbol.
     pub fn is_resolved(self) -> bool {
         matches!(self, AnchorResolution::Resolved)
     }
 
-    /// The public disclosure marker for an unresolved anchor, or `None` when
-    /// resolved (the field is then omitted). One shared vocabulary across every
-    /// surface: `"not_a_symbol"` vs `"unavailable"` — never collapsed to a bool.
+    /// Whether the anchor position is a declaration — a reference reported
+    /// there is the declaration itself, not a usage.
+    pub fn is_declaration(self) -> bool {
+        matches!(self, AnchorResolution::Resolved | AnchorResolution::Binding)
+    }
+
+    /// The public disclosure marker for an anchor that is not a listed symbol,
+    /// or `None` when resolved (the field is then omitted). One shared
+    /// vocabulary across every surface: `"binding"`, `"not_a_symbol"`,
+    /// `"unavailable"` — never collapsed to a bool.
     pub fn as_status(self) -> Option<&'static str> {
         match self {
             AnchorResolution::Resolved => None,
+            AnchorResolution::Binding => Some("binding"),
             AnchorResolution::NotASymbol => Some("not_a_symbol"),
             AnchorResolution::Unavailable => Some("unavailable"),
         }
@@ -142,9 +239,8 @@ impl AnchorResolution {
 
 /// The navigation disclosure for a multi-declaration line resolved to its first
 /// declaration: names the alternatives and how to target another. The single
-/// home for this wording, shared by `snap_to_symbol_anchor` and
-/// `resolve_navigation_target` so the two cannot drift. `declared` is ordered by
-/// declaration column, so `[0]` is the chosen first declaration.
+/// home for this wording, so every surface says it the same way. `declared` is
+/// ordered by declaration column, so `[0]` is the chosen first declaration.
 pub fn ambiguity_hint(line: u32, declared: &[&Symbol]) -> String {
     let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
     let first = declared
@@ -158,15 +254,18 @@ pub fn ambiguity_hint(line: u32, declared: &[&Symbol]) -> String {
     )
 }
 
-/// Resolution for a column-addressed target (`file:line:col`): the
-/// innermost symbol whose range contains the exact position. When the
-/// column matches nothing, fall back to the line's declarations while
-/// that stays unambiguous.
+/// Resolution for a column-addressed target (`file:line:col`) against the
+/// symbol tree alone: the symbol whose declaration header the exact position
+/// is on. A column is a precise address, so a position inside a body
+/// resolves to no declaration rather than to the symbol that happens to
+/// enclose it. A surface that can ask the language server what a token
+/// denotes does so before falling back to this (see `cli::analysis`); one
+/// that addresses declarations in the tree — an edit — uses this directly.
 pub fn column_addressed_symbol(symbols: &[Symbol], line: u32, column: u32) -> SymbolResolution<'_> {
-    if let Some(symbol) = find_symbol_at_position(symbols, line, Some(column)) {
-        return SymbolResolution::Match(symbol);
+    match find_declaration_at_position(symbols, line, column) {
+        Some(symbol) => SymbolResolution::Match(symbol),
+        None => SymbolResolution::NotFound,
     }
-    declared_or_enclosing(symbols, line)
 }
 
 /// Resolution for a line-addressed target (`file:line`, no column): a
@@ -210,8 +309,11 @@ pub fn symbols_declared_on_line(symbols: &[Symbol], line: u32) -> Vec<&Symbol> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::symbol::{Location, SymbolKind};
+    use crate::models::symbol::Location;
 
+    /// A declaration whose visibility and keyword occupy the columns before
+    /// the name (`pub fn name`), as a language server describes it: the range
+    /// starts at column 1 of the name's line and the name span is stated.
     fn func(name: &str, line: u32, name_col: u32, end_line: u32) -> Symbol {
         Symbol::new(
             name.to_string(),
@@ -221,17 +323,18 @@ mod tests {
                 line,
                 name_col,
                 line,
-                name_col,
+                1,
                 end_line,
                 1,
-            ),
+            )
+            .with_name_end(line, name_col + name.len() as u32),
         )
     }
 
     #[test]
-    fn column_addressing_snaps_declaration_start_column_to_the_name() {
+    fn column_addressing_resolves_a_declaration_start_column_to_the_name() {
         // The function name is at column 8 (after `fn `), but the declaration
-        // starts at column 1 (`pub`) — the column `search symbols` reports.
+        // starts at column 1 (`pub`) — the column a structural match reports.
         // Column-addressing from column 1 must still land on the name anchor so
         // callers/refs/impact agree with an exact name position.
         let symbols = vec![func("load_config", 41, 8, 50)];
@@ -240,6 +343,131 @@ mod tests {
         };
         assert_eq!((sym.location.line, sym.location.column), (41, 8));
         assert_eq!(sym.name, "load_config");
+    }
+
+    /// A column is a precise address: anywhere on the declaration — its
+    /// keyword, its name, the position just past its name (where a caret at
+    /// the end of an identifier sits, and where servers still read the
+    /// identifier) — is that symbol; a position further along the line, or
+    /// on a body line, is not, whatever encloses it. That is what keeps
+    /// refs/callers/impact reading a position the way def/hover/rename read
+    /// it.
+    #[test]
+    fn column_addressing_stops_at_the_end_of_the_name() {
+        let symbols = vec![func("load_config", 41, 8, 50)];
+
+        for column in [1, 8, 12, 19] {
+            let SymbolResolution::Match(sym) = column_addressed_symbol(&symbols, 41, column) else {
+                panic!("column {column} is on the declaration");
+            };
+            assert_eq!(sym.name, "load_config");
+        }
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 41, 25),
+            SymbolResolution::NotFound
+        ));
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 45, 12),
+            SymbolResolution::NotFound
+        ));
+    }
+
+    /// The attributes, decorators, and doc comments a declaration's range
+    /// begins with are tokens of their own, not the declaration: a column on
+    /// them addresses no symbol (the caller reads the token through the
+    /// language server), while a column-less line there still belongs to the
+    /// declaration whose range it opens.
+    #[test]
+    fn attribute_lines_are_not_the_declaration_for_a_column_but_are_for_a_line() {
+        let symbols = vec![Symbol::new(
+            "load_config".to_string(),
+            SymbolKind::Function,
+            Location::full(std::path::PathBuf::from("x.rs"), 41, 8, 39, 1, 50, 1)
+                .with_name_end(41, 19),
+        )];
+
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 39, 3),
+            SymbolResolution::NotFound
+        ));
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 41, 1),
+            SymbolResolution::Match(_)
+        ));
+        match line_addressed_symbol(&symbols, 39) {
+            SymbolResolution::Match(sym) => assert_eq!(sym.name, "load_config"),
+            _ => panic!("the attribute line opens the declaration's range"),
+        }
+    }
+
+    /// A position inside a body resolves to no declaration even when the
+    /// server lists a local binding there — the binding's own header is what
+    /// addresses it, not the statement it introduces.
+    #[test]
+    fn column_addressing_inside_a_body_addresses_no_symbol() {
+        let symbols = vec![nest(
+            func("test_places_an_order", 18, 16, 22),
+            vec![binding("order", 20, 11)],
+        )];
+
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 20, 30),
+            SymbolResolution::NotFound
+        ));
+        let SymbolResolution::Match(sym) = column_addressed_symbol(&symbols, 20, 12) else {
+            panic!("the binding's own name addresses it");
+        };
+        assert_eq!(sym.name, "order");
+    }
+
+    /// The name span is the one place a position means the symbol without
+    /// asking anyone; the header additionally claims the keywords before it.
+    /// A file-level symbol stands for the file and claims no position — it is
+    /// what an empty symbol tree is padded with, and must not turn every
+    /// column of line 1 into a match.
+    #[test]
+    fn a_name_span_is_narrower_than_a_header_and_a_file_symbol_claims_nothing() {
+        let symbols = vec![
+            Symbol::new(
+                "x.rs".to_string(),
+                SymbolKind::File,
+                Location::point(std::path::PathBuf::from("x.rs"), 1, 1),
+            ),
+            func("load_config", 41, 8, 50),
+        ];
+
+        assert!(find_named_at_position(&symbols, 41, 1).is_none());
+        assert_eq!(
+            find_named_at_position(&symbols, 41, 10).map(|s| s.name.as_str()),
+            Some("load_config")
+        );
+        assert_eq!(
+            find_declaration_at_position(&symbols, 41, 1).map(|s| s.name.as_str()),
+            Some("load_config")
+        );
+        assert!(find_named_at_position(&symbols, 1, 20).is_none());
+        assert!(find_declaration_at_position(&symbols, 1, 20).is_none());
+    }
+
+    /// Without a stated name span the header runs to the end of the name's
+    /// line: a declaration line still addresses its symbol, body lines never
+    /// do.
+    #[test]
+    fn column_addressing_without_a_name_span_takes_the_declaration_line() {
+        let symbols = vec![Symbol::new(
+            "load_config".to_string(),
+            SymbolKind::Function,
+            Location::full(std::path::PathBuf::from("x.rs"), 41, 8, 41, 1, 50, 1),
+        )];
+
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 41, 40),
+            SymbolResolution::Match(_)
+        ));
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 45, 12),
+            SymbolResolution::NotFound
+        ));
     }
 
     #[test]
@@ -306,6 +534,8 @@ mod tests {
             _ => panic!("two declarations on one line are ambiguous"),
         }
     }
+    /// A local `const name = …` as a server describes it: the declaration
+    /// range spans the whole statement, the name span is stated.
     fn binding(name: &str, line: u32, col: u32) -> Symbol {
         Symbol::new(
             name.to_string(),
@@ -315,10 +545,11 @@ mod tests {
                 line,
                 col,
                 line,
-                col,
+                col.saturating_sub(6),
                 line,
                 80,
-            ),
+            )
+            .with_name_end(line, col + name.len() as u32),
         )
     }
 

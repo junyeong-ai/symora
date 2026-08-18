@@ -46,7 +46,6 @@ INTERACTIVE=false
 VERIFY_ATTESTATIONS=false
 NO_COLOR="${NO_COLOR:-}"
 
-DAEMON_DIR="$HOME/.symora"
 
 SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 ORIGINAL_DIR="$(pwd)"
@@ -401,8 +400,11 @@ Pass --version vX.Y.Z — refusing to build an arbitrary branch."
 
 stop_running_daemon() {
     local existing="$INSTALL_DIR/$BINARY_NAME"
-    if [ -x "$existing" ] && [ -f "$DAEMON_DIR/daemon.pid" ]; then
-        log_info "↺ stopping running daemon before binary swap"
+    # A daemon is running when one answers, not when a file it left behind
+    # exists; `daemon stop` settles that itself and returns at once when
+    # nothing is there.
+    if [ -x "$existing" ]; then
+        log_info "↺ stopping any running daemon before binary swap"
         "$existing" daemon stop >/dev/null 2>&1 || true
     fi
 }

@@ -5,13 +5,18 @@ use serde::{Deserialize, Serialize};
 
 /// Source code location (1-indexed).
 ///
-/// For symbols: `line`/`column` = name position, `range_start_*`/`end_*` =
-/// full declaration range.
+/// For symbols: `line`/`column` = name position, `name_end_*` = where the
+/// name span ends (the server's selection range, when it states one),
+/// `range_start_*`/`end_*` = full declaration range.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Location {
     pub file: PathBuf,
     pub line: u32,
     pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_end_column: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range_start_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,6 +41,8 @@ impl Location {
             file,
             line,
             column,
+            name_end_line: None,
+            name_end_column: None,
             range_start_line: None,
             range_start_column: None,
             end_line: None,
@@ -58,12 +65,22 @@ impl Location {
             file,
             line,
             column,
+            name_end_line: None,
+            name_end_column: None,
             range_start_line: Some(range_start_line),
             range_start_column: Some(range_start_column),
             end_line: Some(end_line),
             end_column: Some(end_column),
             degraded_column: None,
         }
+    }
+
+    /// Record where the name span ends, so a position can be told to be on
+    /// the name rather than merely inside the declaration.
+    pub fn with_name_end(mut self, line: u32, column: u32) -> Self {
+        self.name_end_line = Some(line);
+        self.name_end_column = Some(column);
+        self
     }
 
     /// Mark the column as degraded (a wire-offset guess) when `degraded`; a

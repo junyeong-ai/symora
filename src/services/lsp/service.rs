@@ -10,9 +10,10 @@ use crate::error::LspError;
 use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, Indexed, IndexingDegradation, InlayHint, PrepareRenameResult, RenameResult,
-    SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem, path_to_uri,
+    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
+    FoldingRange, HoverInfo, Indexed, IndexingDegradation, InlayHint, PrepareRenameResult,
+    RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -133,7 +134,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Location>, LspError> {
+    ) -> Result<Option<Definition>, LspError> {
         navigation::goto_definition(self, file, line, column).await
     }
 
@@ -192,7 +193,7 @@ impl LspService for DefaultLspService {
         line: u32,
         column: u32,
         new_name: &str,
-    ) -> Result<RenameResult, LspError> {
+    ) -> Result<Option<RenameResult>, LspError> {
         rename::rename(self, file, line, column, new_name).await
     }
 

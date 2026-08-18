@@ -9,6 +9,8 @@ use crate::cli::response::Section;
 use crate::infra::ast::{format_query_error, get_node_types, supported_languages};
 use crate::models::symbol::Language;
 
+use crate::cli::response::disclosure::{LowerBound, as_paths, relative_paths, with_lower_bounds};
+
 #[derive(Serialize)]
 struct AstMatchOutput {
     file: String,
@@ -33,6 +35,24 @@ struct NodeTypeOutput {
     node_type: &'static str,
     example: &'static str,
     query: String,
+}
+
+/// The paths a caller named that are definitely not there.
+///
+/// A named path is an assertion about the tree, so a typo has to fail rather
+/// than search a domain the caller did not mean and answer `0`. Only a
+/// definite `Ok(false)` counts: a path the check itself could not resolve may
+/// well be there, and the walk reports that as the shortfall it is.
+fn missing_paths(paths: &[PathBuf]) -> Option<OutputError> {
+    let missing: Vec<String> = paths
+        .iter()
+        .filter(|path| matches!(path.try_exists(), Ok(false)))
+        .map(|path| path.display().to_string())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        OutputError::not_found(format!("Path not found: {}", missing.join(", ")))
+            .with_hint("Check the --path arguments against the tree and retry.")
+    })
 }
 
 /// Auto-wrap bare identifiers like `function_definition` so users don't
@@ -79,16 +99,31 @@ pub async fn execute_ast_search(
     let normalized_pattern = normalize_ast_pattern(pattern);
     let pattern = &normalized_pattern;
 
-    let lang = parse_language(language)?;
-    let paths = path.unwrap_or_else(|| vec![app.root().to_path_buf()]);
+    let lang = match parse_language(language) {
+        Ok(lang) => lang,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
+    let paths = match path {
+        Some(paths) => match missing_paths(&paths) {
+            Some(error) => {
+                ctx.print_error(error);
+                return Ok(());
+            }
+            None => paths,
+        },
+        None => vec![app.root().to_path_buf()],
+    };
 
     match app.ast.query(pattern, lang, &paths).await {
-        Ok(matches) => {
-            let total = matches.len();
+        Ok(answer) => {
+            let total = answer.matches.len();
             let limited: Vec<_> = if limit == 0 {
-                matches
+                answer.matches
             } else {
-                matches.into_iter().take(limit).collect()
+                answer.matches.into_iter().take(limit).collect()
             };
             let items = limited
                 .iter()
@@ -102,7 +137,14 @@ pub async fn execute_ast_search(
                     captures: m.captures.clone(),
                 })
                 .collect();
-            ctx.print_success(Section::with_total(items, total));
+            let unread = relative_paths(ctx, &as_paths(&answer.unread_paths));
+            let bounds = Vec::from_iter(
+                (!unread.is_empty()).then_some(LowerBound::ScanCouldNotReadPaths(unread)),
+            );
+            ctx.print_success(with_lower_bounds(
+                Section::with_total(items, total),
+                &bounds,
+            ));
         }
         Err(crate::error::SearchError::InvalidPattern(e)) => {
             ctx.print_error(OutputError::invalid(format_query_error(lang, &e)));
@@ -122,7 +164,13 @@ pub async fn execute_ast_search(
 
 pub fn execute_list_nodes(app: &App, language: &str) -> Result<()> {
     let ctx = &app.output;
-    let lang = parse_language(language)?;
+    let lang = match parse_language(language) {
+        Ok(lang) => lang,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
 
     let nodes = get_node_types(lang);
 
@@ -154,13 +202,16 @@ pub fn execute_list_nodes(app: &App, language: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_language(lang: &str) -> Result<Language> {
+/// A `--lang` the AST engine has no grammar for. Reported as bad input, not as
+/// an internal failure: `internal` means the tool broke and an agent branches
+/// on it as unretryable, while this clears the moment the name is corrected.
+/// The same code every other `--lang` refusal gives.
+fn parse_language(lang: &str) -> std::result::Result<Language, OutputError> {
     lang.parse::<Language>().map_err(|_| {
         let supported: Vec<_> = supported_languages().iter().map(|l| l.lsp_id()).collect();
-        anyhow::anyhow!(
-            "Unknown language: '{}'\n\nFor AST search, supported: {}",
-            lang,
+        OutputError::invalid(format!("Unknown language: {lang}")).with_hint(format!(
+            "For AST search, supported: {}",
             supported.join(", ")
-        )
+        ))
     })
 }

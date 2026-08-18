@@ -21,6 +21,11 @@ use tokio::sync::oneshot;
 
 use crate::error::StoreError;
 
+/// How long a statement waits for another process's write to finish before
+/// reporting contention. The store is shared by a daemon and direct runs,
+/// so contention is ordinary and waiting is the answer.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
 
 pub struct SqliteDb {
@@ -37,7 +42,13 @@ impl SqliteDb {
         let worker = thread::Builder::new()
             .name("symora-sqlite".to_string())
             .spawn(move || {
-                let mut conn = match rusqlite::Connection::open(&path) {
+                let mut conn = match rusqlite::Connection::open(&path).and_then(|conn| {
+                    // Before any statement can contend: another process
+                    // writing is a reason to wait, and a connection without
+                    // this would call that failure instead.
+                    conn.busy_timeout(BUSY_TIMEOUT)?;
+                    Ok(conn)
+                }) {
                     Ok(conn) => {
                         let _ = ready_tx.send(Ok(()));
                         conn
@@ -81,7 +92,7 @@ impl SqliteDb {
             // observes no torn state.
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| f(conn)));
             let result = match outcome {
-                Ok(r) => r.map_err(|e| StoreError::Database(e.to_string())),
+                Ok(r) => r.map_err(classify),
                 Err(panic) => {
                     if !conn.is_autocommit() {
                         let _ = conn.execute_batch("ROLLBACK");
@@ -112,6 +123,22 @@ impl SqliteDb {
             Ok(())
         })
         .await
+    }
+}
+
+/// SQLite says which failures mean the file is not a database and which
+/// mean someone else is writing it. The first is the only one whose
+/// recovery is to replace the file; the second is ordinary in a store a
+/// daemon and direct runs share, and its remedy is to try again.
+pub(super) fn classify(error: rusqlite::Error) -> StoreError {
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase) => {
+            StoreError::Corrupt(error.to_string())
+        }
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            StoreError::Busy
+        }
+        _ => StoreError::Database(error.to_string()),
     }
 }
 

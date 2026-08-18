@@ -14,7 +14,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::Result;
 
 use crate::constants::defaults::{PACK_MAX_FILE_BYTES, PACK_SYMBOLS_PER_FILE};
-use crate::infra::file_filter::FileFilter;
+use crate::infra::file_filter::{Discovery, FileFilter};
 use crate::models::symbol::Language;
 use crate::services::imports::ImportExtractor;
 use crate::services::pack_cache::{CachedEntry, PackCache};
@@ -73,6 +73,11 @@ pub struct PackResult {
     pub files: Vec<PackedFile>,
     pub estimated_tokens: usize,
     pub graph_size: usize,
+    /// Paths the walk behind this pack could not read. A pack is a selection,
+    /// so a file's absence never meant it does not exist — but `graph_size`
+    /// publishes how many the selection chose FROM, and the budget's own
+    /// exclusions are disclosed while these would not be.
+    pub unreadable_paths: Vec<std::path::PathBuf>,
 }
 
 /// Build a context pack for `root` under the given token budget.
@@ -99,15 +104,21 @@ pub fn build_pack(
         None
     };
 
-    let nodes = collect_nodes(
+    let collected = collect_nodes(
         root,
         file_filter,
         cfg,
         cache.as_ref(),
         &ImportExtractor::new(),
     );
+    let nodes = collected.nodes;
 
-    if let Some(cache) = cache.as_ref() {
+    // Prune evicts what the walk did not find, which only means "gone" when
+    // the walk saw everything. A path it could not read is not absent, and
+    // dropping its entry throws away work a later, complete walk has to redo.
+    if let Some(cache) = cache.as_ref()
+        && collected.unreadable.is_empty()
+    {
         let active: HashSet<String> = nodes.iter().map(|n| n.rel_path.clone()).collect();
         if let Err(e) = cache.prune(&active) {
             tracing::debug!("pack cache prune failed: {e}");
@@ -117,7 +128,13 @@ pub fn build_pack(
     let graph = build_import_graph(&nodes, &declared_module_prefix(root));
     let personalization = personalization_vector(&nodes, focus);
     let ranks = page_rank(&graph, &personalization, cfg);
-    Ok(fit_to_budget(&nodes, &ranks, budget_tokens))
+    let fitted = fit_to_budget(&nodes, &ranks, budget_tokens);
+    Ok(PackResult {
+        files: fitted.files,
+        estimated_tokens: fitted.estimated_tokens,
+        graph_size: nodes.len(),
+        unreadable_paths: collected.unreadable,
+    })
 }
 
 // --- node collection ------------------------------------------------------
@@ -141,9 +158,13 @@ fn collect_nodes(
     cfg: &PackConfig,
     cache: Option<&PackCache>,
     imports: &ImportExtractor,
-) -> Vec<Node> {
+) -> CollectedNodes {
     let mut nodes = Vec::new();
-    for abs_path in file_filter.discover_files(&[]) {
+    let Discovery {
+        files,
+        mut unreadable,
+    } = file_filter.discover_files(&[]);
+    for abs_path in files {
         let abs_path = abs_path.as_path();
         let language = Language::from_path(abs_path);
         if !is_indexable(language) {
@@ -151,12 +172,20 @@ fn collect_nodes(
         }
         let metadata = match std::fs::metadata(abs_path) {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(e) => {
+                if crate::infra::hides_content(&e) {
+                    unreadable.push(abs_path.to_path_buf());
+                }
+                continue;
+            }
         };
         if metadata.len() > cfg.max_file_size_bytes {
             continue;
         }
-        let mtime = file_mtime(&metadata);
+        let Some(mtime) = file_mtime(&metadata) else {
+            unreadable.push(abs_path.to_path_buf());
+            continue;
+        };
         let rel_path = abs_path
             .strip_prefix(root)
             .map(|p| p.display().to_string())
@@ -185,7 +214,12 @@ fn collect_nodes(
         // Cache miss: pay the I/O + extraction cost, then upsert.
         let contents = match std::fs::read_to_string(abs_path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                if crate::infra::hides_text(&e) {
+                    unreadable.push(abs_path.to_path_buf());
+                }
+                continue;
+            }
         };
         let imports = imports.extract(&contents, language);
         let signatures = top_signatures_from(&contents, language, cfg);
@@ -222,16 +256,36 @@ fn collect_nodes(
     for (i, node) in nodes.iter_mut().enumerate() {
         node.id = i;
     }
-    nodes
+    CollectedNodes { nodes, unreadable }
 }
 
-fn file_mtime(metadata: &std::fs::Metadata) -> i64 {
+/// The pack's candidate files, and how many paths it could not read — a
+/// directory the walk could not enter, and a discovered file whose metadata or
+/// contents would not come back. A pack built over a partial walk must not
+/// evict cache entries for the paths it never saw, and the active set is built
+/// from the nodes it DID make, so a file dropped after discovery would be
+/// pruned as though it were gone.
+struct CollectedNodes {
+    nodes: Vec<Node>,
+    unreadable: Vec<std::path::PathBuf>,
+}
+
+/// The file's modification time in nanoseconds, or `None` when the filesystem
+/// would not give it.
+///
+/// Not a default: the mtime is the cache's whole freshness test, so a stand-in
+/// value would be recorded and then matched by the same stand-in on every
+/// later run — a permanent cache hit serving stale imports and signatures for
+/// a file that keeps changing, with nothing saying so. Nanoseconds for the
+/// same reason the embedding cache uses them: at whole-second resolution two
+/// edits inside one second are indistinguishable, and the second one is
+/// invisible until some later edit happens to land in a different second.
+fn file_mtime(metadata: &std::fs::Metadata) -> Option<i64> {
     metadata
         .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map(|d| d.as_nanos() as i64)
 }
 
 fn is_indexable(language: Language) -> bool {
@@ -602,7 +656,17 @@ fn page_rank(
 
 // --- budget fit ------------------------------------------------------------
 
-fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) -> PackResult {
+/// The files a budget kept and what they cost. Not a `PackResult`: a pack
+/// also has to say what the walk behind it could not read, and this step never
+/// saw the walk — returning the whole shape here would mean writing an empty
+/// list for the caller to overwrite, which is a claim of completeness one
+/// forgotten line turns into a lie.
+struct Fitted {
+    files: Vec<PackedFile>,
+    estimated_tokens: usize,
+}
+
+fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) -> Fitted {
     let mut ordered: Vec<&Node> = nodes.iter().collect();
     ordered.sort_by(|a, b| {
         let ra = ranks.get(&a.id).copied().unwrap_or(0.0);
@@ -639,10 +703,9 @@ fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) ->
         }
     }
 
-    PackResult {
+    Fitted {
         files: packed,
         estimated_tokens: spent,
-        graph_size: nodes.len(),
     }
 }
 
