@@ -275,8 +275,24 @@ is_valid_version() {
     [[ "$1" =~ ^[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.+-]*)?$ ]]
 }
 
+# The latest release version — asked of the API, and of the web redirect only
+# where the API could not answer. Both answer the same question and they
+# disagree for minutes at a time: the redirect trails the API after a release
+# is published, which is exactly when someone installs, and read in that
+# window it names the release before. So the API settles it, and the redirect
+# answers only when the API cannot: the API's rate limit counts against an
+# unauthenticated IP, which a shared runner can exhaust, and the redirect has
+# no limit to exhaust.
 resolve_latest_version() {
     local effective tag
+
+    tag="$(http_get "${API_LATEST_URL}" 2>/dev/null \
+        | sed -nE 's/.*"tag_name": *"v([^"]+)".*/\1/p' \
+        | head -n 1)"
+    if [ -n "$tag" ]; then
+        printf '%s\n' "$tag"
+        return 0
+    fi
 
     effective="$(curl --fail --silent --location --head \
                       --output /dev/null \
@@ -293,9 +309,7 @@ resolve_latest_version() {
             ;;
     esac
 
-    http_get "${API_LATEST_URL}" 2>/dev/null \
-        | sed -nE 's/.*"tag_name": *"v([^"]+)".*/\1/p' \
-        | head -n 1
+    return 1
 }
 
 # ─── binary install ─────────────────────────────────────────────────────────
