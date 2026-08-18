@@ -15,6 +15,10 @@ struct IndexStatusOutput {
     file_count: usize,
     symbol_count: usize,
     content_line_count: usize,
+    /// The bytes the index occupies on disk. A property of the store rather
+    /// than of any one build, so it is read here and not reported by the
+    /// build that happened to write it — a size named beside a build reads
+    /// as that build's cost, when what it measures keeps moving afterwards.
     index_size_bytes: u64,
     last_indexed: u64,
     is_indexing: bool,
@@ -39,7 +43,6 @@ struct IndexBuildOutput {
     file_count: usize,
     symbol_count: usize,
     content_line_count: usize,
-    index_size_bytes: u64,
     /// Paths the build could not read — files it could not open, and
     /// directories it could not enter — so the index does not cover them
     /// even though its scope names their language. A build that hit any of
@@ -106,7 +109,6 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
                     file_count: stats.file_count,
                     symbol_count: stats.symbol_count,
                     content_line_count: stats.content_line_count,
-                    index_size_bytes: stats.index_size_bytes,
                     unread_paths: named_unread_paths(ctx, &stats.unread_paths),
                 }),
                 Err(e) => ctx.print_error(OutputError::from(e)),
