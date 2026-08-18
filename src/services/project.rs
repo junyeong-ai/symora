@@ -176,7 +176,7 @@ impl ProjectService for DefaultProjectService {
         let filter = crate::infra::file_filter::FileFilter::new(&self.root);
 
         let mut languages = HashSet::new();
-        for path in filter.discover_files(&extensions) {
+        for path in filter.discover_files(&extensions).files {
             let lang = Language::from_path(&path);
             if lang != Language::Unknown {
                 languages.insert(lang);

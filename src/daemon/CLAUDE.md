@@ -8,11 +8,11 @@ Types in `wire.rs` (Symbol, Location, Diagnostic, …) are an external protocol.
 
 - Use `String` for paths, not `PathBuf` — guarantees UTF-8 on the wire across platforms.
 - Convert to/from `models::*` types via explicit `From` impls. Don't shortcut by serializing `models::*` directly.
-- The ping version handshake guarantees client and daemon come from the same binary, so wire types evolve freely within a release — no cross-version compatibility shims. Optional fields still use `#[serde(skip_serializing_if = "Option::is_none")]` to keep payloads lean.
+- The ping handshake guarantees client and daemon were built from the same sources, features, target, and profile (`protocol::BUILD_ID`), so wire types evolve freely within a release — no cross-version compatibility shims. Optional fields still use `#[serde(skip_serializing_if = "Option::is_none")]` to keep payloads lean.
 
 ## Server cleanup
 
-The socket file is removed explicitly on shutdown (`remove_file` in `server/mod.rs`), not via `Drop`. A process killed before that runs can leave a stale socket — `daemon start` runs a liveness check before deciding to (re)spawn, and the server then removes any stale socket immediately before `UnixListener::bind`.
+A daemon leaves its socket and pid files behind: the next daemon settles them when it claims the path (`claim_socket`), under `daemon.bind.lock` and only after confirming nobody answers. Removing them at shutdown would give a slow teardown the power to unlink a successor's live socket, so liveness is always a connection attempt — never a path lookup — on both sides of the wire.
 
 ## Request timeouts
 

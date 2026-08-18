@@ -115,9 +115,32 @@ impl From<crate::error::StoreError> for RpcError {
         let code = match error {
             StoreError::NotInitialized => StoreError::NOT_INITIALIZED_CODE,
             StoreError::AlreadyIndexing => StoreError::ALREADY_INDEXING_CODE,
-            _ => -32603,
+            StoreError::Busy => StoreError::BUSY_CODE,
+            StoreError::Io(_) => StoreError::IO_CODE,
+            StoreError::Rebuilding => StoreError::REBUILDING_CODE,
+            StoreError::EmptyScope => StoreError::EMPTY_SCOPE_CODE,
+            // No wire code of their own: a client reconstructs them as
+            // `Database`, which renders identically because they share its
+            // output code. Named rather than caught by a `_`, so a variant
+            // added to `StoreError` fails to compile here until someone
+            // decides which of the two it is.
+            StoreError::Database(_)
+            | StoreError::Corrupt(_)
+            | StoreError::SchemaMismatch { .. } => -32603,
+            // Only a client of a remote store can fail to reach it, and a
+            // daemon owns its store outright — so this arm exists to fail
+            // loudly in tests if that ever stops being true, rather than
+            // shipping a transport error as a store error the client would
+            // then reconstruct as one.
+            StoreError::Unreachable(_) => {
+                debug_assert!(false, "a daemon cannot fail to reach its own store");
+                -32603
+            }
         };
-        Self::new(code, format!("Store error: {error}"))
+        // The variant's own message, unprefixed: the code names the domain,
+        // and a caller reconstructing the error puts this straight back into
+        // it, so any decoration here would compound on the way out.
+        Self::new(code, error.to_string())
     }
 }
 
@@ -126,6 +149,17 @@ impl From<serde_json::Error> for RpcError {
         Self::internal_error(&error.to_string())
     }
 }
+
+/// Identity of what this process speaks: the crate's sources, its enabled
+/// features, its target and profile, hashed at compile time (`build.rs`).
+/// It is a compatibility token rather than an exact fingerprint of the
+/// executable — a different toolchain compiling the same inputs produces
+/// the same wire and the same identity, which is the property that matters.
+/// The daemon reports it in its ping and a client accepts only its own, so
+/// a daemon built from other inputs — including other inputs of the same
+/// version — is replaced before any wire exchange rather than answering
+/// with an incompatible payload.
+pub const BUILD_ID: &str = env!("SYMORA_BUILD_ID");
 
 pub mod methods {
     pub const FIND_SYMBOLS: &str = "find_symbols";

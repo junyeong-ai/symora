@@ -349,8 +349,8 @@ symora status                # 프로젝트 + language server 상태 (daemon은 
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 두 가지는 예외입니다: 잘못된 CLI 인자는 평문 usage 에러를 출력하고 exit 2로, "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
-- **위치는 1-indexed** — 입력과 출력 모두. snapping 명령(`refs`, `callers`, `callees`, `context`, `impact`, `usage`, `edit`)은 `file:line:column` 또는 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정)을 받고, position-exact 명령(`def`, `hover`, `typedef`, `rename`, `actions`)은 컬럼을 그대로 사용합니다. 출력 위치는 항상 line과 column을 함께 담습니다.
-- **격하는 숨기지 않고 공개됩니다.** `indexing: "timed_out"`는 count가 하한임을 뜻하고, `coverage_gaps`는 검색하지 못한 언어를 나열하며, `unsupported` 에러는 빠진 LSP 기능을 지목하고 대안을 알려줍니다.
+- **위치는 1-indexed** — 입력과 출력 모두이며, 하나의 주소는 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `context`, `impact`, `usage`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 출력 위치는 항상 line과 column을 함께 담습니다.
+- **격하는 숨기지 않고 공개됩니다.** `indexing: "timed_out"`는 count가 하한임을 뜻하고, `coverage_gaps`는 검색하지 못한 언어를 나열하며, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
 - **`--format compact`**는 단일 라인 JSON을 출력합니다. 모든 응답은 형식과 무관하게 `output.max_response_chars`(기본 20,000자)로 상한이 걸립니다: 항목 단위로 통째로 잘리고, `truncated`와 설정 키를 지목하는 hint로 공개됩니다 — compact는 더 촘촘한 인코딩이라 같은 상한 아래 더 많은 항목을 담습니다.
 
 ---
@@ -471,9 +471,9 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 ## 플랫폼 참고
 
 - **Linux**, **macOS**: 지원.
-- **Windows**: daemon 워크플로 미지원 (Unix domain socket 사용).
+- **Windows**: daemon 워크플로와 SQLite 인덱스 미지원. 데몬은 Unix domain socket을, 인덱스는 프로세스 간 배타를 위해 Unix 파일 락(`flock`)을 쓰기 때문입니다 — `search index build`는 그 사실을 오류로 알리고, 검색은 언어 서버와 트리 스캔으로 그대로 동작합니다.
 
-Unix에서는 daemon이 기본 켜짐(`SYMORA_NO_DAEMON=1`이면 in-process 강제). 모드는 시작 시 한 번 결정되며 런타임 폴백은 없습니다. `daemon start`/`daemon restart`는 백그라운드에서 띄우고 즉시 반환합니다.
+Unix에서는 daemon이 기본 켜짐(`SYMORA_NO_DAEMON=1`이면 in-process 강제). 모드는 시작 시 한 번 결정되며 런타임 폴백은 없습니다. `daemon start`/`daemon restart`는 데몬이 실제로 응답할 때까지 기다렸다가 반환하므로, 성공 응답은 곧 서비스 가능 상태를 뜻합니다. 동시에 여러 명령이 콜드 스타트를 만나도 데몬은 하나만 뜹니다.
 
 ```bash
 symora daemon start | stop | restart | status
@@ -508,6 +508,7 @@ symora daemon start | stop | restart | status
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. |
 | `indexing: "timed_out"` | language server가 아직 워밍업 중 — count는 하한. 따뜻해진 뒤 재시도. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
+| `search index`의 `conflict` | 다른 프로세스가 인덱스를 다시 만드는 중 — 그대로 재시도. 절반만 적용된 상태는 남지 않습니다. |
 | 편집 후 결과가 stale | `symora search index build`(증분), 또는 `symora daemon restart`. |
 | 디버깅 | `symora -v <command>`로 verbose 로그. |
 

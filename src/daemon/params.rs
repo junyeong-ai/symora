@@ -89,8 +89,10 @@ pub(crate) struct SearchContentParams {
     pub query: String,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// The language domain the search covers; the store answers for
+    /// exactly this set.
     #[serde(default)]
-    pub language: Option<String>,
+    pub languages: Vec<String>,
 }
 
 /// A batch of files symora just wrote — shared by `refresh_files` (store

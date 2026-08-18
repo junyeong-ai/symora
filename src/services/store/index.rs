@@ -1,23 +1,37 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension;
 
 use super::db::SqliteDb;
+
 use super::schema::*;
 use super::symbols::SymbolExtractor;
 use super::types::*;
 use crate::error::StoreError;
-use crate::infra::file_filter::FileFilter;
+use crate::infra::file_filter::{Discovery, FileFilter};
+use crate::infra::file_lock::FileLock;
 use crate::models::symbol::{Language, SymbolKind};
 
-/// Extensions a full index pass covers when no language filter narrows it.
-/// Also the domain an unrestricted build's `refresh_files` honors, so an
-/// edit can never index a file kind a build wouldn't.
-const INDEXED_EXTENSIONS: &[&str] = &[
-    "rs", "go", "py", "ts", "tsx", "js", "jsx", "java", "kt", "kts", "cpp", "cc", "cxx", "c", "h",
-    "hpp", "cs", "rb", "php", "lua", "sh",
+/// The languages a full index pass covers when no language filter narrows
+/// it: every file of theirs — every extension the language declares — is
+/// indexed for content, and those with an extractor for symbols too. Also
+/// the domain an unrestricted build's `refresh_files` honors, so an edit can
+/// never index a file kind a build wouldn't.
+const INDEXED_LANGUAGES: &[Language] = &[
+    Language::Rust,
+    Language::Go,
+    Language::Python,
+    Language::TypeScript,
+    Language::JavaScript,
+    Language::Java,
+    Language::Kotlin,
+    Language::Cpp,
+    Language::CSharp,
+    Language::Ruby,
+    Language::PHP,
+    Language::Lua,
+    Language::Bash,
 ];
 
 /// Meta key recording that a full build completed, and what it covered.
@@ -27,6 +41,24 @@ const INDEXED_EXTENSIONS: &[&str] = &[
 /// a 1-file index inside it.
 const META_BUILD_SCOPE: &str = "build_scope";
 
+/// Meta key holding the monotonic build epoch. Every operation that
+/// destroys index rows advances it, and a build may publish its completion
+/// marker only while the epoch it opened with still stands — so a build
+/// another operation superseded can never mark the index whole.
+const META_BUILD_EPOCH: &str = "build_epoch";
+
+/// How long opening a store waits for a build to release the index before
+/// giving up on replacing a database it cannot read. Long enough to cover
+/// an ordinary build, short enough that a command never looks hung.
+const DB_REPLACE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long taking the index waits out a holder before calling it a build
+/// in progress. A status probe holds the lock for a syscall rather than
+/// for work, and refusing an operation on account of one would report a
+/// build nothing is running.
+const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The language scope the last completed build covered. Persisted in the
 /// store's `meta` table so per-file refreshes honor the build's narrowing
 /// (`search index build --lang rust` must not gain `.py` rows from an
@@ -34,7 +66,7 @@ const META_BUILD_SCOPE: &str = "build_scope";
 /// the DB file exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BuildScope {
-    /// Unrestricted build: every extension in `INDEXED_EXTENSIONS`.
+    /// Unrestricted build: every language in `INDEXED_LANGUAGES`.
     All,
     Languages(Vec<Language>),
 }
@@ -52,28 +84,35 @@ impl BuildScope {
         }
     }
 
-    /// The extension set a build under this scope discovers — also the
-    /// domain a refresh honors.
-    fn extensions(&self) -> Vec<&'static str> {
+    /// The languages whose files a build under this scope indexes — the
+    /// content search's coverage.
+    fn content_languages(&self) -> Vec<Language> {
         match self {
-            Self::All => INDEXED_EXTENSIONS.to_vec(),
-            Self::Languages(langs) => langs.iter().flat_map(|l| l.extensions()).copied().collect(),
+            Self::All => INDEXED_LANGUAGES.to_vec(),
+            Self::Languages(langs) => langs.clone(),
         }
     }
 
+    /// The extension set a build under this scope discovers — also the
+    /// domain a refresh honors.
+    fn extensions(&self) -> Vec<&'static str> {
+        self.content_languages()
+            .iter()
+            .flat_map(|l| l.extensions())
+            .copied()
+            .collect()
+    }
+
     /// The languages a build under this scope extracts symbols for.
-    /// Narrower than [`extensions`](Self::extensions): a scope can name a
-    /// language the binary has no extractor for, and such a build indexes
-    /// the files' content without ever producing a symbol row for them.
+    /// Narrower than [`content_languages`](Self::content_languages): a scope
+    /// can name a language the binary has no extractor for, and such a build
+    /// indexes the files' content without ever producing a symbol row for
+    /// them.
     fn languages(&self) -> Vec<Language> {
-        match self {
-            Self::All => SymbolExtractor::supported_languages().to_vec(),
-            Self::Languages(langs) => langs
-                .iter()
-                .copied()
-                .filter(|l| SymbolExtractor::is_supported(*l))
-                .collect(),
-        }
+        self.content_languages()
+            .into_iter()
+            .filter(|l| SymbolExtractor::is_supported(*l))
+            .collect()
     }
 
     fn meta_value(&self) -> String {
@@ -101,13 +140,91 @@ impl BuildScope {
     }
 }
 
+/// What opening a build window does to the rows already in the index.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reindex {
+    /// Keep them: the build refreshes and prunes in place.
+    InPlace,
+    /// Drop every row first.
+    FromScratch,
+}
+
+fn read_meta(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        rusqlite::params![key],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+}
+
+fn write_meta(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
+}
+
+/// What the last completed build covers, and how completely.
+///
+/// The two facts are written in one transaction and only mean anything
+/// together: a scope naming a language whose files the walk could not enter
+/// covers that language in part, so a reader that takes the scope without the
+/// paths reads a partial index as a whole one.
+struct CompletedBuild {
+    scope: BuildScope,
+    /// Paths the build could not read — a file it could not open or a
+    /// directory it could not enter. Their symbols and text are absent from
+    /// an index whose scope names their language, so anything counted out of
+    /// this build is a lower bound while any remain.
+    unread_paths: Vec<UnreadPath>,
+}
+
+/// The last completed build, or `None` when none has ever completed against
+/// this store. Read inside whatever transaction needs it: the marker is the
+/// readiness answer, and a copy of it held anywhere else would be stale the
+/// moment another process built, cleared, or crashed.
+fn read_completed_build(
+    conn: &rusqlite::Connection,
+) -> Result<Option<CompletedBuild>, rusqlite::Error> {
+    let Some(scope) = read_meta(conn, META_BUILD_SCOPE)?
+        .as_deref()
+        .map(BuildScope::parse)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(CompletedBuild {
+        scope,
+        unread_paths: read_unread_paths(conn)?,
+    }))
+}
+
+/// The paths the last completed build could not read, in one stable order so
+/// two readings of the same index answer alike.
+fn read_unread_paths(conn: &rusqlite::Connection) -> Result<Vec<UnreadPath>, rusqlite::Error> {
+    conn.prepare("SELECT path, is_file FROM unread_paths ORDER BY path")?
+        .query_map([], |row| {
+            Ok(UnreadPath {
+                path: row.get(0)?,
+                is_file: row.get(1)?,
+            })
+        })?
+        .collect()
+}
+
+fn read_build_epoch(conn: &rusqlite::Connection) -> Result<i64, rusqlite::Error> {
+    Ok(read_meta(conn, META_BUILD_EPOCH)?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0))
+}
+
 pub struct Store {
     db: SqliteDb,
     project_root: PathBuf,
     config: StoreConfig,
     symbol_extractor: SymbolExtractor,
-    is_indexing: AtomicBool,
-    index_ready: AtomicBool,
 }
 
 impl Store {
@@ -116,6 +233,14 @@ impl Store {
     /// know whether an index exists.
     pub fn db_path(project_root: &Path) -> PathBuf {
         project_root.join(".symora").join("store.db")
+    }
+
+    /// The file whose lock decides who may rewrite this index: a build
+    /// holds it exclusively for its whole destructive window, a per-file
+    /// refresh holds it shared, and replacing the database itself waits
+    /// for it.
+    fn lock_path(project_root: &Path) -> PathBuf {
+        project_root.join(".symora").join("index.lock")
     }
 
     pub async fn open(project_root: &Path, config: StoreConfig) -> Result<Self, StoreError> {
@@ -136,33 +261,27 @@ impl Store {
                     "Store schema changed (db v{found} -> v{expected}), rebuilding index: {}",
                     db_path.display()
                 );
-                Self::recover_db(&db_path).await?
+                Self::replace_db(project_root, &db_path).await?
             }
-            Err(e) => {
+            // Only a file that cannot be read as a database is replaced.
+            // A busy, locked, or unreadable-for-other-reasons store is
+            // intact, and destroying it would turn a passing contention
+            // into permanent loss.
+            Err(StoreError::Corrupt(reason)) => {
                 tracing::warn!(
-                    "Store database unreadable, recreating: {}: {e}",
+                    "Store database is unusable, recreating: {}: {reason}",
                     db_path.display()
                 );
-                Self::recover_db(&db_path).await?
+                Self::replace_db(project_root, &db_path).await?
             }
+            Err(e) => return Err(e),
         };
-
-        let has_data: bool = db
-            .call(|conn| {
-                Ok(conn
-                    .query_row::<i64, _, _>("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-                    .unwrap_or(0)
-                    > 0)
-            })
-            .await?;
 
         Ok(Self {
             db,
             project_root: project_root.to_path_buf(),
             config,
             symbol_extractor: SymbolExtractor::new(),
-            is_indexing: AtomicBool::new(false),
-            index_ready: AtomicBool::new(has_data),
         })
     }
 
@@ -189,6 +308,43 @@ impl Store {
         Ok(db)
     }
 
+    /// Swap in a fresh database for one this binary cannot use. Holding
+    /// the build lock is the point: replacing the file under a running
+    /// build would leave that build writing to a database no one else can
+    /// reach, and whoever takes the lock second finds the replacement
+    /// already made and simply opens it. The wait polls rather than blocks
+    /// so that giving up actually gives up — a blocking acquire could not
+    /// be called back, and would sit on a thread long after the caller was
+    /// told the index was busy.
+    async fn replace_db(project_root: &Path, db_path: &Path) -> Result<SqliteDb, StoreError> {
+        let lock_path = Self::lock_path(project_root);
+        let deadline = tokio::time::Instant::now() + DB_REPLACE_LOCK_WAIT;
+        let _lock = loop {
+            if let Some(lock) = FileLock::exclusive(&lock_path)? {
+                break lock;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(StoreError::Database(
+                    "timed out waiting for an index build to finish before rebuilding the index"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(LOCK_POLL_INTERVAL).await;
+        };
+
+        // The recheck answers one question — did someone else already
+        // replace it — and classifies what it finds exactly as the first
+        // attempt did. A writer that ignores this lock would otherwise get
+        // an intact database renamed out from under it.
+        match Self::try_open_db(db_path).await {
+            Ok(db) => Ok(db),
+            Err(StoreError::Corrupt(_) | StoreError::SchemaMismatch { .. }) => {
+                Self::recover_db(db_path).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     async fn recover_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
         if db_path.exists() {
             let backup_path = db_path.with_extension("db.bak");
@@ -201,10 +357,13 @@ impl Store {
         Ok(db)
     }
 
-    pub fn is_indexing(&self) -> bool {
-        self.is_indexing.load(Ordering::SeqCst)
-    }
-
+    /// Search the symbols the index covers, within the domain asked for.
+    /// The answer names the languages it speaks for — the last completed
+    /// build's extractor scope, narrowed by an explicit `--lang` — and holds
+    /// rows for exactly those, enforced in the query: rows a narrowed build
+    /// left behind cannot answer for a language it no longer covers, and the
+    /// caller's live read of the remainder can neither duplicate a row nor
+    /// miss a language.
     pub async fn search_symbols(
         &self,
         query: &str,
@@ -212,30 +371,51 @@ impl Store {
         kind_filter: Option<SymbolKind>,
         language: Option<Language>,
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
-        if !self.index_ready.load(Ordering::SeqCst) {
-            return Err(StoreError::NotInitialized);
-        }
-
         let query = query.to_string();
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
-        let lang_str = language.map(|l| l.lsp_id().to_string());
+        let requested = language;
 
-        let (mut page, snapshot) = self
+        let answer = self
             .db
             .call(move |conn| {
-                let sql = build_symbol_search_query(kind_str.is_some(), lang_str.is_some());
-                let mut stmt = conn.prepare(&sql)?;
-                // Bind in the order the SQL numbers them: query, limit, then the
-                // optional kind and language filters.
-                let mut params: Vec<&dyn rusqlite::ToSql> = vec![&query, &limit];
-                if let Some(kind) = &kind_str {
-                    params.push(kind);
+                let tx = conn.unchecked_transaction()?;
+                let Some(build) = read_completed_build(&tx)? else {
+                    return Ok(None);
+                };
+                let covered: Vec<Language> = match requested {
+                    Some(language) => build
+                        .scope
+                        .languages()
+                        .into_iter()
+                        .filter(|indexed| *indexed == language)
+                        .collect(),
+                    None => build.scope.languages(),
+                };
+                if covered.is_empty() {
+                    return Ok(Some((
+                        SearchPage {
+                            total: 0,
+                            rows: Vec::new(),
+                            stale_files: Vec::new(),
+                            covered,
+                            unread_paths: build.unread_paths.clone(),
+                        },
+                        Vec::new(),
+                    )));
                 }
-                if let Some(lang) = &lang_str {
-                    params.push(lang);
-                }
-                let rows = stmt.query(params.as_slice())?;
+
+                let lang_ids: Vec<String> =
+                    covered.iter().map(|l| l.lsp_id().to_string()).collect();
+                let sql = build_symbol_search_query(kind_str.is_some(), lang_ids.len());
+                let mut stmt = tx.prepare(&sql)?;
+                let params: Vec<rusqlite::types::Value> =
+                    std::iter::once(rusqlite::types::Value::from(query))
+                        .chain(std::iter::once(rusqlite::types::Value::from(limit)))
+                        .chain(kind_str.map(rusqlite::types::Value::from))
+                        .chain(lang_ids.into_iter().map(rusqlite::types::Value::from))
+                        .collect();
+                let rows = stmt.query(rusqlite::params_from_iter(params))?;
 
                 let mut total = 0usize;
                 let rows: Vec<SymbolSearchResult> = rows
@@ -270,46 +450,97 @@ impl Store {
                 // connection closure as the row query, so a concurrent
                 // reindex cannot land between reading the rows and reading
                 // the hashes they were derived from.
-                let snapshot = indexed_hashes(conn, rows.iter().map(|r| &r.file))?;
+                let snapshot = indexed_hashes(&tx, rows.iter().map(|r| &r.file))?;
+                drop(stmt);
+                tx.commit()?;
                 let page = SearchPage {
                     total,
                     rows,
-                    stale: false,
+                    stale_files: Vec::new(),
+                    covered,
+                    unread_paths: build.unread_paths.clone(),
                 };
-                Ok((page, snapshot))
+                Ok(Some((page, snapshot)))
             })
             .await?;
 
-        page.stale = any_backing_file_changed(snapshot).await;
+        let (mut page, snapshot) = match answer {
+            Some(answer) => answer,
+            None => return Err(self.no_completed_build()),
+        };
+        page.stale_files = changed_backing_files(snapshot).await;
         Ok(page)
     }
 
+    /// Why the index has no completed build to answer from. A build owns the
+    /// index for its whole duration — `begin_build` clears the completion
+    /// marker and `publish_build` restores it — so an absent marker is two
+    /// different states, and collapsing them makes a rebuilding index read
+    /// as one that was never built.
+    fn no_completed_build(&self) -> StoreError {
+        if self.build_in_progress() {
+            StoreError::Rebuilding
+        } else {
+            StoreError::NotInitialized
+        }
+    }
+
+    /// Search the content the index covers, within the domain asked for.
+    /// The answer names the languages it speaks for — the requested set
+    /// intersected with the last completed build's scope — and holds rows
+    /// for exactly those, so the caller's live read of the remainder can
+    /// neither duplicate a row nor miss a language. Scope, rows, and the
+    /// hashes behind them come from one snapshot, so a rebuild racing this
+    /// call cannot land between them.
     pub async fn search_content(
         &self,
         query: &str,
         limit: usize,
-        language: Option<Language>,
+        languages: &[Language],
     ) -> Result<SearchPage<ContentSearchResult>, StoreError> {
-        if !self.index_ready.load(Ordering::SeqCst) {
-            return Err(StoreError::NotInitialized);
-        }
-
+        let requested = languages.to_vec();
         let query = query.to_string();
         let limit = limit as i64;
-        let lang_str = language.map(|l| l.lsp_id().to_string());
         // The trigram pre-filter needs >= 3 chars; shorter queries fall back to
         // the LIKE-only scan (the deterministic threshold, not a guess).
         let use_fts = query.chars().count() >= FTS_MIN_QUERY_CHARS;
 
-        let (mut page, snapshot) = self
+        let answer = self
             .db
             .call(move |conn| {
-                let sql = build_content_search_query(lang_str.is_some(), use_fts);
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = match &lang_str {
-                    Some(l) => stmt.query(rusqlite::params![query, limit, l])?,
-                    None => stmt.query(rusqlite::params![query, limit])?,
+                let tx = conn.unchecked_transaction()?;
+                let Some(build) = read_completed_build(&tx)? else {
+                    return Ok(None);
                 };
+                let covered: Vec<Language> = build
+                    .scope
+                    .content_languages()
+                    .into_iter()
+                    .filter(|language| requested.contains(language))
+                    .collect();
+                if covered.is_empty() {
+                    return Ok(Some((
+                        SearchPage {
+                            total: 0,
+                            rows: Vec::new(),
+                            stale_files: Vec::new(),
+                            covered,
+                            unread_paths: build.unread_paths.clone(),
+                        },
+                        Vec::new(),
+                    )));
+                }
+
+                let lang_ids: Vec<String> =
+                    covered.iter().map(|l| l.lsp_id().to_string()).collect();
+                let sql = build_content_search_query(lang_ids.len(), use_fts);
+                let mut stmt = tx.prepare(&sql)?;
+                let params: Vec<rusqlite::types::Value> =
+                    std::iter::once(rusqlite::types::Value::from(query))
+                        .chain(std::iter::once(rusqlite::types::Value::from(limit)))
+                        .chain(lang_ids.into_iter().map(rusqlite::types::Value::from))
+                        .collect();
+                let rows = stmt.query(rusqlite::params_from_iter(params))?;
 
                 let mut total = 0usize;
                 let rows: Vec<ContentSearchResult> = rows
@@ -336,17 +567,25 @@ impl Store {
                     })
                     .collect();
 
-                let snapshot = indexed_hashes(conn, rows.iter().map(|r| &r.file))?;
+                let snapshot = indexed_hashes(&tx, rows.iter().map(|r| &r.file))?;
+                drop(stmt);
+                tx.commit()?;
                 let page = SearchPage {
                     total,
                     rows,
-                    stale: false,
+                    stale_files: Vec::new(),
+                    covered,
+                    unread_paths: build.unread_paths.clone(),
                 };
-                Ok((page, snapshot))
+                Ok(Some((page, snapshot)))
             })
             .await?;
 
-        page.stale = any_backing_file_changed(snapshot).await;
+        let (mut page, snapshot) = match answer {
+            Some(answer) => answer,
+            None => return Err(self.no_completed_build()),
+        };
+        page.stale_files = changed_backing_files(snapshot).await;
         Ok(page)
     }
 
@@ -365,6 +604,13 @@ impl Store {
     /// `stale`) and propagate to the caller, which logs the disclosed
     /// warn — the edit itself already succeeded and stays successful.
     pub async fn refresh_files(&self, paths: &[PathBuf]) -> Result<(), StoreError> {
+        // A build owning the index cannot be joined, and its own pass will
+        // not cover an edit made after it read the file — so the refresh is
+        // refused rather than dropped, and the caller discloses it exactly
+        // as it discloses any other refresh that could not run.
+        let Some(_lock) = FileLock::shared(&Self::lock_path(&self.project_root))? else {
+            return Err(StoreError::AlreadyIndexing);
+        };
         let Some(scope) = self.build_scope().await? else {
             tracing::debug!("Skipping index refresh: the index was never built");
             return Ok(());
@@ -375,25 +621,65 @@ impl Store {
         let extensions = scope.extensions();
 
         let mut first_err: Option<StoreError> = None;
+        let mut settled: Vec<String> = Vec::new();
         for path in paths {
-            let result = if Self::is_indexable(path, &extensions, &filter)
-                && tokio::fs::try_exists(path).await.unwrap_or(false)
-            {
-                self.index_file(path).await
-            } else {
+            let result = if !Self::is_indexable(path, &extensions, &filter) {
                 self.remove_file_rows(path).await
+            } else {
+                // Rows come out only for a file the tree definitively no
+                // longer has. An existence probe that FAILS answers nothing —
+                // a directory that will not open reads exactly like a deleted
+                // file — and deleting durable rows on an unknown is the one
+                // outcome that cannot be undone by retrying.
+                match tokio::fs::try_exists(path).await {
+                    Ok(true) => self.index_file(path).await,
+                    Ok(false) => self.remove_file_rows(path).await,
+                    Err(e) => Err(StoreError::Io(e)),
+                }
             };
-            if let Err(e) = result {
-                tracing::debug!("Failed to refresh {} in index: {e}", path.display());
-                if first_err.is_none() {
-                    first_err = Some(e);
+            match result {
+                Ok(()) => settled.push(path.display().to_string()),
+                Err(e) => {
+                    tracing::debug!("Failed to refresh {} in index: {e}", path.display());
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
                 }
             }
         }
+        // The per-file failure is what the caller acts on, so it outranks a
+        // failure to update the bookkeeping beside it.
+        let forgotten = self.forget_unread_paths(settled).await;
         match first_err {
             Some(e) => Err(e),
-            None => Ok(()),
+            None => forgotten,
         }
+    }
+
+    /// Drop from the build's shortfall the paths a refresh has just settled.
+    ///
+    /// The shortfall says these paths are absent from the index. A refresh
+    /// that read one — or established that the tree no longer holds it — has
+    /// made that false for that path, and a shortfall outliving the failure it
+    /// describes sends a reader to rebuild over a hole that is not there. What
+    /// the refresh did not settle stays, because nothing about it changed.
+    async fn forget_unread_paths(&self, paths: Vec<String>) -> Result<(), StoreError> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                {
+                    let mut stmt = tx.prepare("DELETE FROM unread_paths WHERE path = ?1")?;
+                    for path in &paths {
+                        stmt.execute(rusqlite::params![path])?;
+                    }
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await
     }
 
     /// Whether the last build would cover this file: an extension inside
@@ -419,97 +705,136 @@ impl Store {
             .unwrap_or_default())
     }
 
-    /// The scope of the last completed build, or `None` when no build has
-    /// ever completed against this store.
+    /// The languages whose files the last completed build indexed for
+    /// content — a content search's coverage, wider than
+    /// [`indexed_languages`](Self::indexed_languages) by the languages the
+    /// index holds text for without a symbol extractor.
     async fn build_scope(&self) -> Result<Option<BuildScope>, StoreError> {
-        let value: Option<String> = self
+        Ok(self
             .db
-            .call(|conn| {
-                conn.query_row(
-                    "SELECT value FROM meta WHERE key = ?1",
-                    rusqlite::params![META_BUILD_SCOPE],
-                    |r| r.get(0),
-                )
-                .optional()
-            })
-            .await?;
-        Ok(value.as_deref().map(BuildScope::parse))
+            .call(|conn| read_completed_build(conn))
+            .await?
+            .map(|build| build.scope))
     }
 
-    async fn record_build_scope(&self, scope: &BuildScope) -> Result<(), StoreError> {
-        let value = scope.meta_value();
+    /// Open the window in which an index is rebuilt: the completion marker
+    /// comes off and the epoch advances, in one transaction, before the
+    /// first row is touched. The returned epoch is the right to publish
+    /// completion — [`publish_build`](Self::publish_build) spends it — so
+    /// an index is marked whole only by the operation that last owned it,
+    /// and a build interrupted, cleared, or overtaken leaves a store that
+    /// reads as never built rather than as one whose marker outlives its
+    /// rows.
+    ///
+    /// The index lock is what keeps two builds from overlapping; the
+    /// epoch is what keeps a marker honest when the lock did not hold —
+    /// a lock file deleted between two runs, a filesystem where the
+    /// advisory lock does not carry. It guarantees that a completion
+    /// marker was written by the operation that last owned the index, not
+    /// that rows were written by only one: the lock owns that, and where
+    /// the lock is gone an overtaken build's rows can survive under
+    /// another's marker until the next build prunes them.
+    async fn begin_build(&self, reindex: Reindex) -> Result<i64, StoreError> {
         self.db
             .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    rusqlite::params![META_BUILD_SCOPE, value],
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let epoch = read_build_epoch(&tx)? + 1;
+                // The shortfall qualifies the completion marker, so it is
+                // cleared with it: paths left behind would outlive the claim
+                // they were about, and `clear` would leave some for an index
+                // that no longer holds anything.
+                tx.execute(
+                    "DELETE FROM meta WHERE key = ?1",
+                    rusqlite::params![META_BUILD_SCOPE],
                 )?;
-                Ok(())
+                tx.execute("DELETE FROM unread_paths", [])?;
+                if reindex == Reindex::FromScratch {
+                    tx.execute("DELETE FROM content_lines", [])?;
+                    tx.execute("DELETE FROM symbols", [])?;
+                    tx.execute("DELETE FROM files", [])?;
+                }
+                write_meta(&tx, META_BUILD_EPOCH, &epoch.to_string())?;
+                tx.commit()?;
+                Ok(epoch)
             })
             .await
+    }
+
+    async fn publish_build(
+        &self,
+        epoch: i64,
+        scope: &BuildScope,
+        unread_paths: Vec<UnreadPath>,
+    ) -> Result<(), StoreError> {
+        let value = scope.meta_value();
+        let owned = self
+            .db
+            .call(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let owned = read_build_epoch(&tx)? == epoch;
+                if owned {
+                    write_meta(&tx, META_BUILD_SCOPE, &value)?;
+                    // The rows qualify exactly the marker written beside them,
+                    // so they are replaced wholesale in the same transaction:
+                    // what an earlier build could not read says nothing about
+                    // what this one could.
+                    tx.execute("DELETE FROM unread_paths", [])?;
+                    let mut stmt =
+                        tx.prepare("INSERT INTO unread_paths (path, is_file) VALUES (?1, ?2)")?;
+                    for unread in &unread_paths {
+                        stmt.execute(rusqlite::params![unread.path, unread.is_file])?;
+                    }
+                    drop(stmt);
+                }
+                tx.commit()?;
+                Ok(owned)
+            })
+            .await?;
+        owned.then_some(()).ok_or(StoreError::AlreadyIndexing)
     }
 
     async fn remove_file_rows(&self, path: &Path) -> Result<(), StoreError> {
         let path_str = path.display().to_string();
         self.db
             .call(move |conn| {
-                let file_id: Option<i64> = conn
-                    .query_row(
-                        "SELECT id FROM files WHERE path = ?1",
-                        rusqlite::params![&path_str],
-                        |r| r.get(0),
-                    )
-                    .ok();
+                // Only "there is no such row" means there is nothing to
+                // delete. Every other failure is the store refusing, and
+                // reporting it as a completed removal would let a caller
+                // record the path as settled while its rows are still there.
+                let file_id = match conn.query_row(
+                    "SELECT id FROM files WHERE path = ?1",
+                    rusqlite::params![&path_str],
+                    |r| r.get::<_, i64>(0),
+                ) {
+                    Ok(id) => Some(id),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(e),
+                };
 
+                // One file's rows span three tables; a failure partway would
+                // leave the index holding half a file, which no later run
+                // would notice as anything but a whole one.
                 if let Some(fid) = file_id {
-                    delete_file_and_data(conn, fid)?;
+                    let tx = conn.unchecked_transaction()?;
+                    delete_file_and_data(&tx, fid)?;
+                    tx.commit()?;
                 }
                 Ok(())
             })
             .await
     }
 
-    pub async fn cleanup_expired(&self) -> usize {
-        let cutoff = (now_unix() - self.config.ttl_secs) as i64;
-        self.db
-            .call(move |conn| {
-                let tx = conn.unchecked_transaction()?;
-                let count = tx.query_row(
-                    "SELECT COUNT(*) FROM files WHERE indexed_at < ?1",
-                    rusqlite::params![cutoff],
-                    |r| r.get::<_, i64>(0),
-                )? as usize;
-
-                if count > 0 {
-                    tx.execute(
-                        "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE indexed_at < ?1)",
-                        rusqlite::params![cutoff],
-                    )?;
-                    tx.execute(
-                        "DELETE FROM content_lines WHERE file_id IN (SELECT id FROM files WHERE indexed_at < ?1)",
-                        rusqlite::params![cutoff],
-                    )?;
-                    tx.execute("DELETE FROM files WHERE indexed_at < ?1", rusqlite::params![cutoff])?;
-                }
-                tx.commit()?;
-                Ok(count)
-            })
-            .await
-            .unwrap_or(0)
-    }
-
-    /// Empty the index, including the build-completed marker: a cleared
-    /// store is "never built" again, so a stray per-file refresh can't
-    /// start regrowing a partial index inside it.
+    /// Empty the index. A cleared store reads as never built, so a stray
+    /// per-file refresh cannot start regrowing a partial index inside it,
+    /// and a build this clear interrupted cannot mark what it left behind.
     pub async fn clear(&self) -> Result<(), StoreError> {
-        self.db
-            .execute(
-                "DELETE FROM content_lines; DELETE FROM symbols; DELETE FROM files; \
-                 DELETE FROM meta; VACUUM;",
-            )
-            .await?;
-        self.index_ready.store(false, Ordering::SeqCst);
+        let _lock = self.own_index().await?;
+        self.begin_build(Reindex::FromScratch).await?;
+        if let Err(e) = self.db.execute("VACUUM;").await {
+            tracing::debug!("Failed to reclaim index space: {}", e);
+        }
         Ok(())
     }
 
@@ -517,49 +842,97 @@ impl Store {
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE);").await
     }
 
+    /// The index's scope, row counts, and size, read in one transaction so
+    /// they describe the same committed state — a rebuild committing
+    /// mid-read cannot make the report name one build's languages beside
+    /// another build's counts. `is_indexing` answers the question the
+    /// counts raise — could a build have been moving these numbers while
+    /// they were read — so the lock is inspected on both sides of the
+    /// snapshot and either sighting is the answer. Reading it once could
+    /// only ever be true of an instant: before the snapshot it misses a
+    /// build that starts during it, after the snapshot it misses one that
+    /// ends during it, and each miss pairs "no build in progress" with a
+    /// build's own half-written rows. The size is the database's
+    /// own page count times page size — the logical size of the index,
+    /// which every connection observing this state reports identically. The
+    /// main file's length would not: under WAL, pages committed since the
+    /// last checkpoint live in the log, so that number depends on when the
+    /// last checkpoint ran rather than on what the index holds.
     pub async fn stats(&self) -> Result<IndexStats, StoreError> {
-        let languages = self.indexed_languages().await?;
-        let db_path = Self::db_path(&self.project_root);
-        let index_size_bytes = tokio::fs::metadata(&db_path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let is_indexing = self.is_indexing.load(Ordering::SeqCst);
-
-        self.db
+        let owned_before = self.build_in_progress();
+        let mut stats = self
+            .db
             .call(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                let build = read_completed_build(&tx)?;
+                let languages = build
+                    .as_ref()
+                    .map(|build| build.scope.languages())
+                    .unwrap_or_default();
+                let unread_paths = build.map(|build| build.unread_paths).unwrap_or_default();
                 let count_of = |table: &str| {
-                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                    tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
                         r.get::<_, i64>(0)
                     })
                     .unwrap_or(0) as usize
+                };
+                let pragma = |name: &str| {
+                    tx.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+                        .unwrap_or(0) as u64
                 };
                 Ok(IndexStats {
                     file_count: count_of("files"),
                     symbol_count: count_of("symbols"),
                     content_line_count: count_of("content_lines"),
-                    index_size_bytes,
-                    last_indexed: conn
+                    index_size_bytes: pragma("page_count") * pragma("page_size"),
+                    last_indexed: tx
                         .query_row("SELECT COALESCE(MAX(indexed_at), 0) FROM files", [], |r| {
                             r.get::<_, i64>(0)
                         })
                         .unwrap_or(0) as u64,
-                    is_indexing,
+                    is_indexing: false,
                     languages,
-                    progress: None,
+                    unread_paths,
                 })
             })
-            .await
+            .await?;
+        stats.is_indexing = owned_before || self.build_in_progress();
+        Ok(stats)
     }
 
     pub async fn index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
-        if self.is_indexing.swap(true, Ordering::SeqCst) {
-            return Err(StoreError::AlreadyIndexing);
-        }
+        let _lock = self.own_index().await?;
+        self.do_index(options).await
+    }
 
-        let result = self.do_index(options).await;
-        self.is_indexing.store(false, Ordering::SeqCst);
-        result
+    /// Whether a build owns the index right now — a fact any process can read,
+    /// so a status query sees a daemon's build as readily as its own.
+    ///
+    /// A lock this process cannot take leaves a reader exactly where a platform
+    /// without locking does: unable to observe a build, and unable to be one.
+    /// Both answer "none in progress" rather than failing the read that asked,
+    /// because a tree whose `.symora` is not writable is the ordinary case —
+    /// another user's checkout, a read-only mount, a restored cache — and a
+    /// reader there wants the index reported, not an I/O error.
+    fn build_in_progress(&self) -> bool {
+        FileLock::shared(&Self::lock_path(&self.project_root)).is_ok_and(|holder| holder.is_none())
+    }
+
+    /// Take the index for an operation that rewrites it. Another such
+    /// operation holds the lock for as long as it works, and is reported
+    /// as one; anything else holding it is momentary and waited out.
+    async fn own_index(&self) -> Result<FileLock, StoreError> {
+        let lock_path = Self::lock_path(&self.project_root);
+        let deadline = tokio::time::Instant::now() + INDEX_LOCK_WAIT;
+        loop {
+            if let Some(lock) = FileLock::exclusive(&lock_path)? {
+                return Ok(lock);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(StoreError::AlreadyIndexing);
+            }
+            tokio::time::sleep(LOCK_POLL_INTERVAL).await;
+        }
     }
 
     async fn do_index(&self, options: IndexOptions) -> Result<IndexStats, StoreError> {
@@ -567,16 +940,40 @@ impl Store {
         let scope = BuildScope::from_options(&options.languages);
         let extensions = scope.extensions();
 
-        let files = filter.discover_files(&extensions);
+        // A scope naming no language covers no file, and every step below reads
+        // an empty set as its opposite: the walker takes an empty extension
+        // list for "every extension", and the prune takes an empty discovery
+        // for "the tree is empty" and deletes the whole index. Refused here so
+        // neither reading can be reached, and so a caller that meant a scope
+        // learns it named none rather than finding an emptied store behind a
+        // completion marker.
+        if extensions.is_empty() {
+            return Err(StoreError::EmptyScope);
+        }
+        let Discovery {
+            files,
+            unreadable: unreadable_dirs,
+        } = filter.discover_files(&extensions);
         let discovered_paths: std::collections::HashSet<String> = files
             .iter()
             .map(|path| path.display().to_string())
             .collect();
 
-        if options.force {
-            self.clear().await?;
-        } else {
-            self.prune_deleted_files(&discovered_paths).await?;
+        let epoch = self
+            .begin_build(if options.force {
+                Reindex::FromScratch
+            } else {
+                Reindex::InPlace
+            })
+            .await?;
+        // Pruning reads "absent from the walk" as "gone from the tree", which
+        // holds only where the walk went. It is scoped to that rather than
+        // refused outright: a single directory the walk could not enter would
+        // otherwise keep every deleted file's rows alive across the whole
+        // project, which leaves the index answering for files that are gone.
+        if !options.force {
+            let hidden: Vec<PathBuf> = unreadable_dirs.clone();
+            self.prune_deleted_files(&discovered_paths, &hidden).await?;
         }
 
         // Each future acquires its own permit when polled, so the semaphore
@@ -596,18 +993,43 @@ impl Store {
                 }
             })
             .collect();
-        for result in futures::future::join_all(tasks).await {
-            if let Err(e) = result {
-                tracing::warn!("Failed to index file: {}", e);
+        // `join_all` preserves the order it was given, so each verdict pairs
+        // with the file it is about — which is what lets a path the build
+        // could not read be named, and later repaired one at a time.
+        // What the WALK could not enter is recorded as a non-file: it may be a
+        // directory, and nothing can tell now, so the safe reading is that it
+        // could hold any language. What a READ could not open is a file by
+        // construction, and its name settles which language it kept out.
+        let mut unread_paths: Vec<UnreadPath> = unreadable_dirs
+            .iter()
+            .map(|path| UnreadPath {
+                path: path.display().to_string(),
+                is_file: false,
+            })
+            .collect();
+        for (file, result) in files.iter().zip(futures::future::join_all(tasks).await) {
+            match result {
+                Ok(()) => {}
+                // The only `io::Error` a file's indexing can raise is the
+                // read of the file itself, which is the hole this records.
+                Err(StoreError::Io(e)) => {
+                    unread_paths.push(UnreadPath {
+                        path: file.display().to_string(),
+                        is_file: true,
+                    });
+                    tracing::warn!("Failed to read file for indexing: {}", e);
+                }
+                // The store refused the write. Recording it as an unreadable
+                // path would blame the filesystem for a store failure, and
+                // publishing afterwards would claim a scope whose rows were
+                // never written — so the build fails as what it is.
+                Err(e) => return Err(e),
             }
         }
+        unread_paths.sort_by(|a, b| a.path.cmp(&b.path));
+        unread_paths.dedup_by(|a, b| a.path == b.path);
 
-        // The durable build-completed marker, with the scope this build
-        // covered. Last build wins on purpose: the pruning above already
-        // narrows the row domain to this scope, so the recorded scope must
-        // follow it — and per-file refreshes honor exactly this domain.
-        self.record_build_scope(&scope).await?;
-        self.index_ready.store(true, Ordering::SeqCst);
+        self.publish_build(epoch, &scope, unread_paths).await?;
         let _ = self.checkpoint().await;
         self.stats().await
     }
@@ -615,11 +1037,28 @@ impl Store {
     async fn index_file(&self, path: &Path) -> Result<(), StoreError> {
         let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
-            Err(e) => {
-                tracing::debug!("Skipping file {}: {}", path.display(), e);
-                return Ok(());
+            // The tree settled this path: nothing is there, or what is there
+            // is not text. Rows a textual past left must go, or the index
+            // keeps serving lines the scan no longer sees.
+            Err(e) if !crate::infra::hides_text(&e) => {
+                tracing::debug!("Dropping non-text file {}: {}", path.display(), e);
+                return self.remove_file_rows(path).await;
             }
+            // The file is there and this build could not read it. The
+            // scope about to be published would claim a language whose
+            // files it did not all see, so the failure is carried up and
+            // counted rather than logged away.
+            Err(e) => return Err(StoreError::Io(e)),
         };
+        // A NUL byte marks the file as binary (git's own test), and binary
+        // content is outside the search domain on BOTH backends — SQLite's
+        // LENGTH() also stops at NUL, so admitting such a row would give
+        // the index and the scan different ideas of the same line. The
+        // verdict is definitive, so any rows from a textual past go too.
+        if content.contains('\0') {
+            tracing::debug!("Dropping binary file {}", path.display());
+            return self.remove_file_rows(path).await;
+        }
 
         let content_hash = crate::infra::hash_content(&content) as i64;
 
@@ -735,6 +1174,7 @@ impl Store {
     async fn prune_deleted_files(
         &self,
         discovered_paths: &std::collections::HashSet<String>,
+        unwalked: &[PathBuf],
     ) -> Result<(), StoreError> {
         let known_files: Vec<(i64, String)> = self
             .db
@@ -746,9 +1186,23 @@ impl Store {
             })
             .await?;
 
+        // Two ways a row is stale, and both must be DEFINITE. A path missing
+        // from the walk that produced `discovered_paths` is genuinely gone —
+        // unless it sits under one the walk could not enter, where "not
+        // discovered" says nothing about the tree and deleting would destroy
+        // durable rows on a permission change. The second check catches a file
+        // deleted since that walk, and only a probe that answers counts:
+        // `exists()` folds a metadata error into "absent", which would delete
+        // rows because a permission changed under a file that is still there.
         let stale: Vec<i64> = known_files
             .into_iter()
-            .filter(|(_, path)| !discovered_paths.contains(path) || !Path::new(path).exists())
+            .filter(|(_, path)| {
+                let walked = !unwalked
+                    .iter()
+                    .any(|unwalked| Path::new(path).starts_with(unwalked));
+                (walked && !discovered_paths.contains(path))
+                    || matches!(Path::new(path).try_exists(), Ok(false))
+            })
             .map(|(id, _)| id)
             .collect();
 
@@ -802,24 +1256,30 @@ fn indexed_hashes<'a>(
         .collect()
 }
 
-/// True when any file in the snapshot no longer matches the indexed hash it
-/// was served under — rewritten, deleted, or unreadable since `index()` ran.
+/// The files in the snapshot that no longer match the indexed hash their rows
+/// were served under — rewritten, deleted, or unreadable since `index()` ran.
 /// Biased toward false positives on purpose: a spurious stale banner is
-/// harmless, stale rows presented as current are not. Cost is one disk read
-/// per distinct backing file, bounded by the page size.
-async fn any_backing_file_changed(snapshot: Vec<(String, Option<i64>)>) -> bool {
+/// harmless, stale rows presented as current are not.
+///
+/// Named rather than counted, because a caller that filters the page has to
+/// narrow the question to the files its answer kept: a page holding one stale
+/// row and one fresh one says nothing about an answer that emitted only the
+/// fresh one. Cost is one disk read per distinct backing file, bounded by the
+/// page size — the same read the fresh case always paid.
+async fn changed_backing_files(snapshot: Vec<(String, Option<i64>)>) -> Vec<String> {
+    let mut changed = Vec::new();
     for (path, indexed_hash) in snapshot {
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
                 if indexed_hash != Some(crate::infra::hash_content(&content) as i64) {
-                    return true;
+                    changed.push(path);
                 }
             }
             // Deleted or unreadable: the row is no longer backed by disk.
-            Err(_) => return true,
+            Err(_) => changed.push(path),
         }
     }
-    false
+    changed
 }
 
 fn delete_file_related_data(
@@ -850,6 +1310,303 @@ fn delete_file_and_data(conn: &rusqlite::Connection, file_id: i64) -> Result<(),
 mod tests {
     use super::*;
 
+    /// A refresh removes a file's rows for exactly one reason: the tree no
+    /// longer has the file. An existence probe that FAILS is not that reason —
+    /// a directory that will not open reads like a deletion — and rows are
+    /// durable, so the wrong call here destroys indexed data that no retry
+    /// brings back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refresh_that_cannot_tell_whether_a_file_exists_keeps_its_rows() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let file = nested.join("lib.rs");
+        tokio::fs::write(&file, "fn alpha() {}\n").await.unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        let before = store.search_symbols("alpha", 10, None, None).await.unwrap();
+        assert_eq!(before.total, 1);
+
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let probe_still_answers = tokio::fs::try_exists(&file).await.is_ok();
+        let refreshed = store.refresh_files(std::slice::from_ref(&file)).await;
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if probe_still_answers {
+            // Running with a user the mode bits do not constrain (root), so
+            // there is no unknown to preserve rows through.
+            return;
+        }
+        assert!(
+            matches!(refreshed, Err(StoreError::Io(_))),
+            "an unreadable path is surfaced, not silently treated as a deletion"
+        );
+        let after = store.search_symbols("alpha", 10, None, None).await.unwrap();
+        assert_eq!(
+            after.total, 1,
+            "rows survive a refresh that could not learn whether the file is gone"
+        );
+    }
+
+    /// A directory the walk could not enter says nothing about the tree
+    /// outside it, so pruning is scoped to where the walk went rather than
+    /// refused outright. Refusing it leaves every deleted file's rows alive
+    /// across the whole project on account of one blocked directory, and the
+    /// index then answers for files that are gone — while its shortfall calls
+    /// the count a lower bound.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_blocked_directory_does_not_keep_deleted_rows_alive_elsewhere() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let doomed = root.join("doomed.rs");
+        tokio::fs::write(&doomed, "fn doomed() {}\n").await.unwrap();
+        tokio::fs::write(root.join("kept.rs"), "fn kept() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(
+            store
+                .search_symbols("doomed", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+
+        // The file goes, and a directory unrelated to it becomes unreadable
+        // between one build and the next.
+        tokio::fs::remove_file(&doomed).await.unwrap();
+        let blocked = root.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        tokio::fs::write(blocked.join("b.rs"), "fn beta() {}\n")
+            .await
+            .unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mode_bites = std::fs::read_dir(&blocked).is_err();
+
+        store.index(IndexOptions::default()).await.unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !mode_bites {
+            return;
+        }
+        assert_eq!(
+            store
+                .search_symbols("doomed", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            0,
+            "the walk reached this file's directory, so its absence is a deletion"
+        );
+        assert_eq!(
+            store
+                .search_symbols("kept", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1,
+            "and nothing the walk did see was taken with it"
+        );
+    }
+
+    /// The other half of the same rule. Inside a directory the walk could not
+    /// enter, "absent from the walk" is not evidence of anything, and rows are
+    /// durable: deleting them because a permission changed is the one outcome
+    /// no retry undoes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_blocked_directory_keeps_the_rows_of_what_it_hides() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let blocked = root.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        tokio::fs::write(blocked.join("hidden.rs"), "fn hidden() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(
+            store
+                .search_symbols("hidden", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mode_bites = std::fs::read_dir(&blocked).is_err();
+        store.index(IndexOptions::default()).await.unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if !mode_bites {
+            return;
+        }
+        assert_eq!(
+            store
+                .search_symbols("hidden", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1,
+            "a permission change is not a deletion"
+        );
+    }
+
+    /// A shortfall states that paths are absent from the index. A refresh that
+    /// reads one has made that false for that path, and a statement that
+    /// outlives the failure it describes sends a reader to rebuild over a hole
+    /// that is no longer there — the fourth way a disclosure goes wrong, a past
+    /// fact standing in for a present one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refresh_settles_the_path_it_repaired_out_of_the_builds_shortfall() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("a.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+        let blocked = root.join("b.rs");
+        tokio::fs::write(&blocked, "fn beta() {}\n").await.unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Probed against the tree, never read off the output under test: a
+        // guard that consults the answer would take a defect for the
+        // environment and pass silently.
+        let mode_bites = std::fs::read_to_string(&blocked).is_err();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        let built = store.stats().await.unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        if !mode_bites {
+            return;
+        }
+        assert_eq!(
+            built.unread_paths,
+            vec![UnreadPath {
+                path: blocked.display().to_string(),
+                is_file: true,
+            }],
+            "a file the build could not open is recorded as one, so its name settles its language"
+        );
+
+        store
+            .refresh_files(std::slice::from_ref(&blocked))
+            .await
+            .unwrap();
+        assert!(
+            store.stats().await.unwrap().unread_paths.is_empty(),
+            "the path the refresh read is no longer one the index is missing"
+        );
+        assert_eq!(
+            store
+                .search_symbols("beta", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1,
+            "and its symbols are there to be found"
+        );
+    }
+
+    /// The fact a symbol search leans on when it keeps a live workspace-symbol
+    /// row for a file whose extension names no language: such a file yields no
+    /// row at all, so the index and a live answer can never count it twice.
+    /// Asserted against a real build rather than against a predicate, because
+    /// the guarantee is a property of the whole path — discovery is by the
+    /// scope's extensions, and a name that matches none of them never reaches
+    /// extraction — and only a build exercises that path end to end.
+    #[tokio::test]
+    async fn a_file_whose_extension_names_no_language_yields_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("runner"), "#!/bin/sh\nalpha() { :; }\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let page = store.search_symbols("alpha", 10, None, None).await.unwrap();
+        assert_eq!(page.total, 1);
+        assert!(
+            page.rows.iter().all(|row| row.file.ends_with("lib.rs")),
+            "an unrecognised path must contribute no symbol row: {:?}",
+            page.rows.iter().map(|r| &r.file).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            store.stats().await.unwrap().file_count,
+            1,
+            "the file was never discovered, so it has no row of any kind"
+        );
+    }
+
+    /// A scope that names no language covers no file, and every step below
+    /// reads an empty set as its opposite: the walker takes an empty extension
+    /// list for "every extension", and the prune takes an empty discovery for
+    /// "the tree is empty". Acted on, it would empty the index and publish a
+    /// completion marker over nothing — after which every refresh routes to a
+    /// row removal and the store stays empty behind a marker claiming a build.
+    /// So it is refused, and what was already indexed is still there.
+    #[tokio::test]
+    async fn a_scope_that_names_no_language_is_refused_rather_than_acted_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn alpha() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(store.stats().await.unwrap().file_count, 1);
+
+        let refused = store
+            .index(IndexOptions {
+                force: false,
+                languages: Some(Vec::new()),
+            })
+            .await;
+        assert!(
+            matches!(refused, Err(StoreError::EmptyScope)),
+            "a scope covering nothing is an input error, not an empty build: {refused:?}"
+        );
+        assert_eq!(
+            store.stats().await.unwrap().file_count,
+            1,
+            "and it leaves the index it could not have covered exactly as it was"
+        );
+        assert_eq!(
+            store
+                .search_symbols("alpha", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1,
+            "still answering, still marked complete"
+        );
+    }
+
     async fn total_matches(store: &Store, query: &str) -> usize {
         store
             .search_symbols(query, 50, None, None)
@@ -866,7 +1623,7 @@ mod tests {
         store
             .db
             .call(move |conn| {
-                let sql = build_content_search_query(false, use_fts);
+                let sql = build_content_search_query(0, use_fts);
                 let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt
                     .query_map(rusqlite::params![q, 10_000_i64], |r| {
@@ -923,7 +1680,10 @@ mod tests {
         assert_eq!(symbols.rows.len(), 1);
         assert!(symbols.rows[0].file.ends_with("a.rs"));
 
-        let content = store.search_content("same_probe", 1, None).await.unwrap();
+        let content = store
+            .search_content("same_probe", 1, &[Language::Rust])
+            .await
+            .unwrap();
         assert_eq!(content.total, 2);
         assert_eq!(content.rows.len(), 1);
         assert!(content.rows[0].file.ends_with("a.rs"));
@@ -1050,6 +1810,231 @@ mod tests {
     }
 
     /// Sub-3-char queries have no trigrams, so production routes them to the
+    /// The SQL relevance TRIM strips the same whitespace set the scan
+    /// scorer strips — tab and space, `char(9,32)` — so a tab-indented
+    /// line scores 1.0 from the index exactly as it does from a tree
+    /// scan, and the two backends stay rank-identical.
+    #[tokio::test]
+    async fn a_tab_indented_line_scores_as_the_scan_scores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn probe() {\n\ttab_probe();\n}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let page = store
+            .search_content("tab_probe", 10, &[Language::Rust])
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].score, 1.0);
+    }
+
+    /// Readiness is the durable marker, not a fact any handle caches: a
+    /// store opened before a build was made elsewhere answers from that
+    /// build, and one whose build is still in flight answers from nothing.
+    /// The daemon and a direct run are two such handles.
+    #[tokio::test]
+    async fn readiness_follows_the_store_not_the_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn handle_probe() {}\n")
+            .await
+            .unwrap();
+
+        let reader = Store::open(root, StoreConfig::default()).await.unwrap();
+        assert!(matches!(
+            reader
+                .search_content("handle_probe", 10, &[Language::Rust])
+                .await,
+            Err(StoreError::NotInitialized)
+        ));
+
+        let builder = Store::open(root, StoreConfig::default()).await.unwrap();
+        builder.index(IndexOptions::default()).await.unwrap();
+
+        let page = reader
+            .search_content("handle_probe", 10, &[Language::Rust])
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+
+        reader.begin_build(Reindex::InPlace).await.unwrap();
+        assert!(matches!(
+            builder
+                .search_content("handle_probe", 10, &[Language::Rust])
+                .await,
+            Err(StoreError::NotInitialized)
+        ));
+        assert!(matches!(
+            builder.search_symbols("handle_probe", 10, None, None).await,
+            Err(StoreError::NotInitialized)
+        ));
+    }
+
+    /// Replacing the database is reserved for a file that cannot be read
+    /// as one. A store that merely cannot be opened right now — another
+    /// process is writing it — is intact, and replacing it would turn a
+    /// passing contention into permanent loss.
+    #[tokio::test]
+    async fn only_a_file_that_is_not_a_database_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn recover_probe() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        drop(store);
+
+        let db_path = Store::db_path(root);
+        tokio::fs::write(&db_path, b"not a database at all")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        assert!(db_path.with_extension("db.bak").exists());
+        assert!(store.build_scope().await.unwrap().is_none());
+    }
+
+    /// The classification the replacement decision rests on: only SQLite's
+    /// own verdict that the file is not a database sends it down the
+    /// destructive path, and a locked store is a retryable condition
+    /// rather than a broken one.
+    #[test]
+    fn store_errors_carry_what_the_caller_must_decide_on() {
+        let sqlite = |code: rusqlite::ErrorCode| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error {
+                    code,
+                    extended_code: 0,
+                },
+                None,
+            )
+        };
+        assert!(matches!(
+            super::super::db::classify(sqlite(rusqlite::ErrorCode::NotADatabase)),
+            StoreError::Corrupt(_)
+        ));
+        assert!(matches!(
+            super::super::db::classify(sqlite(rusqlite::ErrorCode::DatabaseCorrupt)),
+            StoreError::Corrupt(_)
+        ));
+        assert!(matches!(
+            super::super::db::classify(sqlite(rusqlite::ErrorCode::DatabaseBusy)),
+            StoreError::Busy
+        ));
+        assert!(matches!(
+            super::super::db::classify(sqlite(rusqlite::ErrorCode::DatabaseLocked)),
+            StoreError::Busy
+        ));
+        assert!(matches!(
+            super::super::db::classify(sqlite(rusqlite::ErrorCode::PermissionDenied)),
+            StoreError::Database(_)
+        ));
+    }
+
+    /// One build owns the index at a time, across processes as well as
+    /// within one: a second build meeting a held lock is refused rather
+    /// than left to prune and write rows under the first one's feet.
+    #[tokio::test]
+    async fn a_second_build_is_refused_while_one_owns_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn lock_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+
+        let held = FileLock::exclusive(&Store::lock_path(root)).expect("uncontended");
+        assert!(matches!(
+            store.index(IndexOptions::default()).await,
+            Err(StoreError::AlreadyIndexing)
+        ));
+        assert!(matches!(
+            store.clear().await,
+            Err(StoreError::AlreadyIndexing)
+        ));
+        drop(held);
+
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(store.build_scope().await.unwrap(), Some(BuildScope::All));
+    }
+
+    /// A build only marks the index whole while it still owns the epoch it
+    /// opened with. Anything that destroys rows in between — a clear, a
+    /// later build — takes that ownership, so the loser leaves a store that
+    /// reads as never built instead of one marked over rows it lost.
+    #[tokio::test]
+    async fn a_superseded_build_cannot_mark_the_index_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn epoch_probe() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+
+        let overtaken = store.begin_build(Reindex::InPlace).await.unwrap();
+        store.clear().await.unwrap();
+        assert!(matches!(
+            store
+                .publish_build(overtaken, &BuildScope::All, Vec::new())
+                .await,
+            Err(StoreError::AlreadyIndexing)
+        ));
+        assert!(store.build_scope().await.unwrap().is_none());
+
+        let owned = store.begin_build(Reindex::InPlace).await.unwrap();
+        store
+            .publish_build(owned, &BuildScope::All, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(store.build_scope().await.unwrap(), Some(BuildScope::All));
+    }
+
+    /// The index answers for the requested languages it actually covers,
+    /// and says which those are. Rows a narrower build left outside its
+    /// scope stay invisible, so the caller's live read of the remainder can
+    /// never double-serve a file.
+    #[tokio::test]
+    async fn a_narrowed_build_answers_only_within_the_scope_it_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "fn scope_probe() {}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("app.py"), "def scope_probe(): pass\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        store
+            .index(IndexOptions {
+                force: false,
+                languages: Some(vec![Language::Rust]),
+            })
+            .await
+            .unwrap();
+
+        let page = store
+            .search_content("scope_probe", 10, &[Language::Rust, Language::Python])
+            .await
+            .unwrap();
+        assert_eq!(page.covered, vec![Language::Rust]);
+        assert_eq!(page.total, 1);
+        assert!(page.rows[0].file.ends_with("lib.rs"));
+
+        let uncovered = store
+            .search_content("scope_probe", 10, &[Language::Python])
+            .await
+            .unwrap();
+        assert!(uncovered.covered.is_empty());
+        assert_eq!(uncovered.total, 0);
+    }
+
     /// LIKE-only path; the result must equal the LIKE-only scan (a non-empty
     /// 2-char substring still returns its matches, not a silent zero).
     #[tokio::test]
@@ -1064,7 +2049,10 @@ mod tests {
 
         // "fn" is 2 chars: search_content must gate it onto the LIKE path and
         // still find the line, identical to the LIKE-only scan.
-        let via_api = store.search_content("fn", 50, None).await.unwrap();
+        let via_api = store
+            .search_content("fn", 50, &[Language::Rust])
+            .await
+            .unwrap();
         let like_only = content_rows(&store, "fn", false).await;
         assert_eq!(via_api.total, like_only.len());
         assert!(via_api.total > 0);
@@ -1120,7 +2108,7 @@ mod tests {
         assert_eq!(total_matches(&store, "alpha").await, 0);
         let page = store.search_symbols("beta", 50, None, None).await.unwrap();
         assert_eq!(page.total, 1);
-        assert!(!page.stale);
+        assert!(!page.stale());
     }
 
     #[tokio::test]
@@ -1333,7 +2321,7 @@ mod tests {
                 .search_symbols("alpha", 50, None, None)
                 .await
                 .unwrap()
-                .stale
+                .stale()
         );
 
         // An edit the store never saw (external tool, git checkout): the old
@@ -1343,7 +2331,7 @@ mod tests {
             .unwrap();
         let page = store.search_symbols("alpha", 50, None, None).await.unwrap();
         assert_eq!(page.total, 1);
-        assert!(page.stale);
+        assert!(page.stale());
 
         // …until the next index pass clears it.
         store.index(IndexOptions::default()).await.unwrap();
@@ -1352,7 +2340,7 @@ mod tests {
                 .search_symbols("alpha", 50, None, None)
                 .await
                 .unwrap()
-                .stale
+                .stale()
         );
     }
 
@@ -1372,7 +2360,7 @@ mod tests {
                 .search_symbols("alpha", 50, None, None)
                 .await
                 .unwrap()
-                .stale
+                .stale()
         );
     }
 
@@ -1401,7 +2389,7 @@ mod tests {
                 .search_symbols("alpha", 50, None, None)
                 .await
                 .unwrap()
-                .stale
+                .stale()
         );
         tokio::fs::write(root.join("a.rs"), "fn alpha() {}\n")
             .await
@@ -1411,7 +2399,7 @@ mod tests {
                 .search_symbols("alpha", 50, None, None)
                 .await
                 .unwrap()
-                .stale
+                .stale()
         );
     }
 }

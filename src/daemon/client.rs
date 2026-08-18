@@ -10,8 +10,10 @@ use tokio::time::timeout;
 
 use crate::config::LspRuntimeConfig;
 use crate::daemon::protocol::{Request, Response, methods};
+use crate::daemon::proves_no_listener;
 use crate::daemon::server::DaemonRuntimeConfig;
 use crate::error::LspError;
+use crate::infra::file_lock::FileLock;
 use crate::models::symbol::Language;
 
 fn calculate_timeout(config: &LspRuntimeConfig, file: Option<&Path>, method: &str) -> Duration {
@@ -47,6 +49,17 @@ fn calculate_timeout_for_language(
 ) -> Duration {
     let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
     config.timeout_for(language, lsp_method)
+}
+
+/// What [`DaemonClient::ensure_running`] found, and did about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonStart {
+    /// A daemon of this binary was already serving.
+    AlreadyRunning,
+    /// None was serving; one was started.
+    Started,
+    /// A daemon from a different binary was serving and was replaced.
+    Replaced,
 }
 
 /// Daemon client for CLI commands
@@ -113,94 +126,68 @@ impl DaemonClient {
 
     // Connection Management
 
-    /// Ensure a daemon of *this* binary's version is running, starting or
-    /// replacing one as necessary. A daemon left over from a different
-    /// binary is replaced — the wire format is only guaranteed within a
-    /// single version.
-    pub async fn ensure_running(&self) -> Result<(), LspError> {
+    /// Ensure a daemon of *this* binary is running, starting or replacing
+    /// one as necessary — the single owner of daemon lifecycle, so no
+    /// other path may spawn one. A daemon left over from a different
+    /// binary is replaced: the wire format is guaranteed only within one
+    /// build.
+    pub async fn ensure_running(&self) -> Result<DaemonStart, LspError> {
         if matches!(self.ping().await, Ok(true)) {
-            return Ok(());
+            return Ok(DaemonStart::AlreadyRunning);
         }
         self.start_daemon_with_lock().await
     }
 
-    async fn start_daemon_with_lock(&self) -> Result<(), LspError> {
-        use std::fs::OpenOptions;
-
-        if let Some(parent) = self.config.lock_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                LspError::ServerStart(format!("Failed to create daemon directory: {}", e))
-            })?;
-        }
-
-        let lock_file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.config.lock_path)
-            .map_err(|e| LspError::ServerStart(format!("Failed to open lock file: {}", e)))?;
-
-        if Self::try_lock_exclusive(&lock_file) {
-            // Re-check under the lock: another process may have already
-            // replaced the daemon while we waited.
-            match self.ping().await {
-                Ok(true) => {
-                    Self::unlock(&lock_file);
-                    return Ok(());
-                }
-                Ok(false) => {
-                    // A daemon from a different binary answers the socket.
-                    // Replace it *under the lock* so concurrent CLIs can't
-                    // shoot down each other's freshly started daemon.
-                    tracing::info!("Daemon version differs from CLI; replacing daemon");
-                    if let Err(e) = self.shutdown().await {
-                        Self::unlock(&lock_file);
-                        return Err(e);
-                    }
-                }
-                Err(_) => {}
+    async fn start_daemon_with_lock(&self) -> Result<DaemonStart, LspError> {
+        let lock = FileLock::exclusive(&self.config.lock_path)
+            .map_err(|e| LspError::ServerStart(format!("Failed to open lock file: {e}")))?;
+        match lock {
+            Some(_lock) => self.start_daemon_locked().await,
+            None => {
+                tracing::debug!("Another process is starting daemon, waiting...");
+                self.wait_for_daemon(Duration::from_secs(10))
+                    .await
+                    .map(|()| DaemonStart::Started)
             }
+        }
+    }
 
-            let result = self.spawn_daemon();
-            Self::unlock(&lock_file);
-            result?;
+    /// The whole sequence — re-check, replace, spawn, wait — runs under the
+    /// startup lock. Releasing it at spawn time would let the next process
+    /// find no daemon yet, start a second one, and have that one take the
+    /// socket out from under the first.
+    async fn start_daemon_locked(&self) -> Result<DaemonStart, LspError> {
+        let replaced = match self.ping().await {
+            Ok(true) => return Ok(DaemonStart::AlreadyRunning),
+            Ok(false) => {
+                tracing::info!("Daemon binary differs from CLI; replacing daemon");
+                self.shutdown().await?;
+                true
+            }
+            // Nothing is listening — the only failure that licenses a spawn.
+            // Anything else left the question open, and starting a second
+            // daemon would displace a live one's socket.
+            Err(LspError::NotConnected) => false,
+            Err(e) => return Err(e),
+        };
+
+        self.spawn_daemon()?;
+        self.wait_for_daemon(Duration::from_secs(10)).await?;
+        Ok(if replaced {
+            DaemonStart::Replaced
         } else {
-            tracing::debug!("Another process is starting daemon, waiting...");
-        }
-
-        self.wait_for_daemon(Duration::from_secs(10)).await
+            DaemonStart::Started
+        })
     }
-
-    #[cfg(unix)]
-    fn try_lock_exclusive(file: &std::fs::File) -> bool {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: flock with a valid fd is safe; LOCK_NB makes it non-blocking
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
-    }
-
-    #[cfg(not(unix))]
-    fn try_lock_exclusive(_file: &std::fs::File) -> bool {
-        true
-    }
-
-    #[cfg(unix)]
-    fn unlock(file: &std::fs::File) {
-        use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::flock(file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn unlock(_file: &std::fs::File) {}
 
     fn spawn_daemon(&self) -> Result<(), LspError> {
         let exe = std::env::current_exe()
             .map_err(|e| LspError::ServerStart(format!("Failed to get executable path: {}", e)))?;
 
         let child = Command::new(&exe)
+            .current_dir(&self.project_root)
             .arg("daemon")
-            .arg("start")
+            .arg("serve")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -229,9 +216,11 @@ impl DaemonClient {
         ))
     }
 
-    /// Ping the daemon. `Ok(true)` means it is alive *and* built from the
-    /// same version as this client; `Ok(false)` means alive but from a
-    /// different binary.
+    /// Ping the daemon. `Ok(true)` means it is alive *and* running the
+    /// same binary as this client — version and build token both — so a
+    /// daemon left over from an earlier build of the same version is
+    /// restarted before any wire exchange; `Ok(false)` means alive but
+    /// from a different binary.
     async fn ping(&self) -> Result<bool, LspError> {
         let response = self
             .send_request(methods::PING, None, Duration::from_secs(30))
@@ -239,13 +228,20 @@ impl DaemonClient {
         if response.error.is_some() {
             return Err(LspError::Protocol("Ping failed".to_string()));
         }
-        let same_version = response
-            .result
-            .as_ref()
-            .and_then(|r| r.get("version"))
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| v == env!("CARGO_PKG_VERSION"));
-        Ok(same_version)
+        let field = |key: &str| {
+            response
+                .result
+                .as_ref()
+                .and_then(|r| r.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+        // Fail closed: a daemon that reports no build identity is an older
+        // binary and never passes. A mismatched wire is a silent wrong
+        // answer; a replaced daemon is at worst a loud restart.
+        let same_binary = field("version").is_some_and(|v| v == env!("CARGO_PKG_VERSION"))
+            && field("build").is_some_and(|b| b == crate::daemon::protocol::BUILD_ID);
+        Ok(same_binary)
     }
 
     // Request Infrastructure
@@ -258,7 +254,13 @@ impl DaemonClient {
     ) -> Result<Response, LspError> {
         let stream = UnixStream::connect(&self.config.socket_path)
             .await
-            .map_err(|_| LspError::NotConnected)?;
+            .map_err(|e| {
+                if proves_no_listener(&e) {
+                    LspError::NotConnected
+                } else {
+                    LspError::Io(e)
+                }
+            })?;
 
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
@@ -272,7 +274,7 @@ impl DaemonClient {
         writer.flush().await?;
 
         let mut line = String::new();
-        timeout(timeout_duration, reader.read_line(&mut line))
+        let read = timeout(timeout_duration, reader.read_line(&mut line))
             .await
             .map_err(|_| {
                 LspError::Timeout(format!(
@@ -281,6 +283,17 @@ impl DaemonClient {
                     timeout_duration.as_secs()
                 ))
             })??;
+
+        // End of stream: the daemon closed without answering — it exited or
+        // was replaced while this request was in flight. Parsing the empty
+        // read would blame the payload for the connection, and send the
+        // caller after a malformed response that was never sent. It is not
+        // `NotConnected` either: this connection was accepted, so all it
+        // proves is that this peer stopped answering, and a replacement may
+        // already be serving the socket.
+        if read == 0 {
+            return Err(LspError::ConnectionLost(method.to_string()));
+        }
 
         Ok(serde_json::from_str(&line)?)
     }
@@ -315,14 +328,23 @@ impl DaemonClient {
         self.send_request(method, Some(params), timeout).await
     }
 
-    fn extract_result(response: Response) -> Result<serde_json::Value, LspError> {
+    /// An error the daemon typed as an [`LspError`] carries its variant in
+    /// `data` and is reconstructed from it. Anything else — a store error, a
+    /// JSON-RPC framing failure — did not come from a language server, so it
+    /// is carried through verbatim: `server_error_friendly` rewrites messages
+    /// by matching language-server prose, and applied here it would restate
+    /// an unrelated failure in the vocabulary of positions and documents.
+    pub(crate) fn extract_result(response: Response) -> Result<serde_json::Value, LspError> {
         if let Some(error) = response.error {
             if let Some(data) = error.data
                 && let Ok(wire) = serde_json::from_value::<super::wire_error::WireLspError>(data)
             {
                 return Err(wire.into());
             }
-            return Err(LspError::server_error_friendly(error.code, error.message));
+            return Err(LspError::ServerError {
+                code: error.code,
+                message: error.message,
+            });
         }
         response
             .result
@@ -517,13 +539,13 @@ impl DaemonClient {
         &self,
         query: &str,
         limit: Option<usize>,
-        language: Option<&str>,
+        languages: &[String],
     ) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
         let params = serde_json::json!({
             "query": query,
             "limit": limit,
-            "language": language,
+            "languages": languages,
         });
         self.request_with_project(methods::SEARCH_CONTENT, params, None)
             .await
@@ -617,29 +639,46 @@ impl DaemonClient {
             .and_then(Self::extract_result)
     }
 
-    pub async fn shutdown(&self) -> Result<(), LspError> {
-        if let Err(e) = self
+    /// Stop the running daemon. `Ok(false)` means the request reached no
+    /// daemon — there was nothing to stop, which callers report rather
+    /// than dress up as a stop that happened.
+    pub async fn shutdown(&self) -> Result<bool, LspError> {
+        let reached = match self
             .send_request(methods::SHUTDOWN, None, Duration::from_secs(30))
             .await
         {
-            tracing::warn!("Shutdown request failed (may already be stopped): {}", e);
-        }
-        self.wait_for_shutdown().await
+            Ok(_) => true,
+            Err(LspError::NotConnected) => false,
+            Err(e) => return Err(e),
+        };
+        self.wait_for_shutdown().await?;
+        Ok(reached)
     }
 
+    /// Wait until nothing answers on the socket. Only a refused or absent
+    /// socket confirms the daemon is gone; a connection that fails for any
+    /// other reason leaves the question open and is reported as itself,
+    /// because the caller's next move is to start a replacement.
     async fn wait_for_shutdown(&self) -> Result<(), LspError> {
         let start = std::time::Instant::now();
         let max_wait = Duration::from_secs(5);
 
         while start.elapsed() < max_wait {
-            if !self.config.socket_path.exists() {
-                tracing::debug!("Daemon shutdown confirmed");
-                return Ok(());
+            match UnixStream::connect(&self.config.socket_path).await {
+                Ok(_) => {}
+                Err(e) if proves_no_listener(&e) => {
+                    tracing::debug!("Daemon shutdown confirmed");
+                    return Ok(());
+                }
+                Err(e) => return Err(LspError::Io(e)),
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        tracing::warn!("Daemon may not have shutdown cleanly");
-        Ok(())
+        // Starting a replacement now would hand it a socket the old daemon
+        // still owns, and it would exit rather than serve.
+        Err(LspError::Timeout(
+            "Daemon did not stop within timeout".to_string(),
+        ))
     }
 }

@@ -5,12 +5,15 @@
 //!   - `lsp`: LSP-derived responses (definition, hover, hierarchies, etc.).
 //!   - `analysis`: derived analytics (impact, refs, tests, coverage).
 //!   - `editing`: code-action and rename results.
+//!   - `disclosure`: what a response says about its own shortfalls.
 //!
-//! Everything is re-exported flat so existing call sites use
-//! `crate::cli::response::SymbolOutput` regardless of which submodule
-//! defines it.
+//! The output types are re-exported flat, so existing call sites use
+//! `crate::cli::response::SymbolOutput` regardless of which submodule defines
+//! them. `disclosure` keeps its own namespace: it is a vocabulary a command
+//! reasons in, not a shape it emits.
 
 mod analysis;
+pub mod disclosure;
 mod editing;
 mod lsp;
 mod symbol;
@@ -47,8 +50,8 @@ use super::errors::OutputError;
 /// - `hints` / `next_commands` — omitted when empty
 /// - `bodies_included` — present only on sections where body attachment
 ///   ran (`context --with-bodies`) and that still contain items
-/// - `coverage_gaps` — languages a search could not cover; populated only by
-///   index-backed symbol search, omitted (empty) on every other list response
+/// - `coverage_gaps` — languages a search could not cover; populated by every
+///   symbol-search route, omitted (empty) on every other list response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section<T> {
     pub count: usize,
@@ -56,13 +59,40 @@ pub struct Section<T> {
     pub items: Vec<T>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
-    /// Present only when a file backing one of `items` changed on disk
-    /// after it was indexed — the rows may no longer match the file.
-    /// Re-running `symora search index build` refreshes them. This is
-    /// index-vs-disk content drift, distinct from the edit-time stale-range
-    /// guard.
+    /// Present when a file backing one of `items` changed on disk after it
+    /// was indexed — those rows may no longer match the file, and re-running
+    /// `symora search index build` refreshes them. This is index-vs-disk
+    /// content drift, distinct from the edit-time stale-range guard. It errs
+    /// toward being set: the size fitter drops rows without knowing which
+    /// ones it spoke for, so a section it trimmed may carry the flag over
+    /// survivors that are all current.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+    /// Present (true) only when `count` is a lower bound rather than
+    /// everything the answer's own SOURCES held — the answer was assembled
+    /// from something the command could not see all of.
+    ///
+    /// Whether a source is itself current is a different axis and is not this
+    /// flag: an index-backed count is exact for the build behind it, and that
+    /// build is a snapshot, so a file written since it ran has no row to find
+    /// and none to mark `stale`. That axis is read from `backend`, `stale`,
+    /// and `search index status`, and cured by `search index build`. Setting
+    /// this flag for it would mark nearly every index hit, and a flag that is
+    /// almost always set is one an agent learns to skip. The cause is always
+    /// named in `hints`, because the remedies differ: paths the walk could not
+    /// read, an index built over such paths, or two overlapping sources at
+    /// least one of which was not materialised whole. The same word `refs`
+    /// uses for a reference set the server admits is short.
+    ///
+    /// It divides work with `coverage_gaps` rather than duplicating it: a gap
+    /// names a LANGUAGE the answer does not speak for, and an agent reading
+    /// one already knows the count is short for it. This says the count is
+    /// short for a reason no language gap can express — every requested
+    /// language was covered, and the answer is still not whole. Do not set it
+    /// from a non-empty `coverage_gaps`; that would make the more precise
+    /// field redundant and this one routine enough to ignore.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -86,11 +116,12 @@ pub struct Section<T> {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indexing: Option<crate::models::lsp::IndexingDegradation>,
     /// Languages a requested search could not cover, so an empty `items`
-    /// reads as "not searched here" rather than "no such symbol". Populated
-    /// only by index-backed symbol search (the one surface where a language
-    /// can be outside the index's extractor set); omitted everywhere else and
-    /// when empty. A new `Section<T>` field is justified only when it applies
-    /// to all list responses — this one is scoped by being inert elsewhere.
+    /// reads as "not searched here" rather than "no such symbol", and a
+    /// short one reads as partial rather than whole. Populated by every
+    /// symbol-search route — index-backed, wildcard, and workspace-only
+    /// alike — at any result count; omitted everywhere else and when empty.
+    /// A new `Section<T>` field is justified only when it applies to all
+    /// list responses — this one is scoped by being inert elsewhere.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage_gaps: Vec<CoverageGap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,11 +130,10 @@ pub struct Section<T> {
 
 /// A language a search did not cover, with a stable machine-branchable reason.
 /// The shared shape for both `search`'s `Section.coverage_gaps` and `usage`'s
-/// `coverage_gaps`. Reasons: `not_indexed` (outside the search index's
-/// extractor set); `server_not_installed` / `timed_out` / `unsupported` /
-/// `unavailable` (LSP failures, via `coverage_reason`); `not_searched` (a
-/// language `usage` skipped after collecting enough candidates).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `coverage_gaps`, and the emitted form of `symbol_discovery::Uncovered`,
+/// which owns the reason set: `not_indexed`, `server_not_installed`,
+/// `timed_out`, `unsupported`, `unavailable`, `not_searched`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageGap {
     pub language: String,
     pub reason: String,
@@ -128,6 +158,7 @@ impl<T> Section<T> {
             items: vec![],
             truncated: false,
             stale: false,
+            incomplete: false,
             hints: vec![],
             next_commands: vec![],
             bodies_included: None,
@@ -165,6 +196,13 @@ impl<T> Section<T> {
         self
     }
 
+    /// Mark `count` as a lower bound (see the field doc). The caller states
+    /// the cause in `hints`; the flag alone is what an agent branches on.
+    pub fn with_incomplete(mut self, incomplete: bool) -> Self {
+        self.incomplete = incomplete;
+        self
+    }
+
     /// Attach the languages a search could not cover (see the field doc).
     /// Search-only; other list responses leave it empty.
     pub fn with_coverage_gaps(mut self, coverage_gaps: Vec<CoverageGap>) -> Self {
@@ -181,6 +219,7 @@ impl<T> Section<T> {
             items,
             truncated: showing < count,
             stale: false,
+            incomplete: false,
             hints: vec![],
             next_commands: vec![],
             bodies_included: None,
@@ -281,15 +320,30 @@ pub fn fit_to_char_budget(
         }
         let keep = best.unwrap_or(0);
         apply_keep(value, &candidate.path, &original, keep);
+        // `bodies_included` counts the items it is emitted beside, and
+        // `apply_keep` recounts it against the survivors; `stale` speaks for
+        // whichever of them came from a file that has since changed. An empty
+        // section has nothing left for either to speak for.
+        //
+        // A partial keep leaves `stale` alone. This layer cannot tell which
+        // rows it named, and the two ways of being wrong are not equal: a flag
+        // kept over rows that are all current costs a rebuild nobody needed,
+        // while a flag dropped over a row that is stale hands an agent aged
+        // content as though it were fresh.
         if keep == 0
             && let Some(node) = value
                 .pointer_mut(&candidate.path)
                 .and_then(serde_json::Value::as_object_mut)
         {
             node.remove("bodies_included");
+            node.remove("stale");
         }
         dropped = true;
-        if best.is_some() {
+        // The removals above shrink the response too, so a section emptied at
+        // the ceiling can come in under it once they are gone. Measuring again
+        // is what keeps the next section's items from being dropped for a
+        // budget this one already met.
+        if best.is_some() || measure(value) <= max_chars {
             return true;
         }
         // Even zero items leaves the response over the ceiling — keep the
@@ -593,6 +647,88 @@ mod tests {
                 .iter()
                 .any(|h| h.as_str().unwrap().contains("output.max_response_chars"))
         );
+    }
+
+    /// Fields that speak for the items go with them. `stale` describes the
+    /// files behind emitted rows, so a section the fitter emptied has nothing
+    /// left for it to be about — and a reader would take it for a claim about
+    /// rows that are no longer there.
+    /// `stale` names files this layer cannot see, so once the fitter drops any
+    /// row it might have spoken for, the claim cannot be checked against what
+    /// is left — a section whose stale row was in the dropped tail would
+    /// otherwise send an agent to rebuild for rows that never moved.
+    #[test]
+    fn a_partial_keep_keeps_the_claim_it_cannot_narrow() {
+        let items: Vec<String> = (0..20)
+            .map(|i| format!("item-{i:02}-{}", "x".repeat(40)))
+            .collect();
+        let mut value = serde_json::to_value(Section::new(items).with_stale(true)).unwrap();
+
+        assert!(fit_to_char_budget(&mut value, 600, &compact_chars));
+
+        let showing = value["showing"].as_u64().unwrap();
+        assert!(showing > 0 && showing < 20, "a partial keep: {showing}");
+        assert_eq!(
+            value["stale"], true,
+            "this layer cannot tell whether the stale row is one of the survivors, \
+             and only one of the two answers can hand an agent aged content as fresh: {value}"
+        );
+    }
+
+    #[test]
+    fn fit_drops_the_fields_that_spoke_for_the_items_it_removed() {
+        let items: Vec<String> = (0..20)
+            .map(|i| format!("item-{i:02}-{}", "x".repeat(40)))
+            .collect();
+        let mut value = serde_json::to_value(Section::new(items).with_stale(true)).unwrap();
+        assert_eq!(value["stale"], true);
+
+        assert!(fit_to_char_budget(&mut value, 120, &compact_chars));
+
+        assert_eq!(value["showing"], 0, "the budget leaves no room for items");
+        assert!(
+            value.get("stale").is_none(),
+            "an empty section carries no claim about the files behind its rows: {value}"
+        );
+    }
+
+    /// Emptying a section removes the fields that spoke for its items, and
+    /// that shrinks the response as well. A fit reached that way is still a
+    /// fit: continuing would drop the NEXT section's items to meet a ceiling
+    /// this one already met. Stated as the property rather than against one
+    /// ceiling, because the window where it shows is only as wide as the
+    /// removed fields and the disclosure hint's own length moves with the
+    /// ceiling.
+    #[test]
+    fn no_section_is_trimmed_for_a_ceiling_an_earlier_one_already_met() {
+        let wide: Vec<String> = (0..8)
+            .map(|i| format!("w-{i}-{}", "x".repeat(60)))
+            .collect();
+        let narrow: Vec<String> = (0..4).map(|i| format!("n-{i}")).collect();
+        let value = serde_json::json!({
+            "wide": serde_json::to_value(Section::new(wide).with_stale(true)).unwrap(),
+            "narrow": serde_json::to_value(Section::new(narrow)).unwrap(),
+        });
+
+        for budget in 100..600 {
+            let mut fitted = value.clone();
+            if !fit_to_char_budget(&mut fitted, budget, &compact_chars) {
+                continue;
+            }
+            if compact_chars(&fitted) > budget {
+                // Even emptying everything left it over; nothing to judge.
+                continue;
+            }
+            let mut untrimmed = fitted.clone();
+            untrimmed["narrow"] = value["narrow"].clone();
+            if compact_chars(&untrimmed) <= budget {
+                assert_eq!(
+                    fitted["narrow"]["showing"], 4,
+                    "ceiling {budget}: the second section was trimmed although \
+                     leaving it whole would have fit: {fitted}"
+                );
+            }
+        }
     }
 
     #[test]

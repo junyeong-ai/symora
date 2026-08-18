@@ -20,11 +20,13 @@ pub struct TargetOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// The unresolved-anchor disclosure, omitted when the target resolved: a
-    /// synthesized `symbol@line:col` placeholder carries `"not_a_symbol"` (the
-    /// position was checked and is not a symbol) or `"unavailable"` (the symbol
-    /// read failed). One shared `*_status` vocabulary across every surface (see
-    /// `AnchorResolution::as_status`), so a placeholder is never mistaken for a
-    /// resolved symbol and a read failure is never reported as "not a symbol".
+    /// synthesized `symbol@line:col` placeholder carries `"binding"` (a
+    /// declaration the symbol tree does not list — the placeholder sits at
+    /// it), `"not_a_symbol"` (the position was checked and denotes nothing),
+    /// or `"unavailable"` (a read failed). One shared `*_status` vocabulary
+    /// across every surface (see `AnchorResolution::as_status`), so a
+    /// placeholder is never mistaken for a resolved symbol and a read failure
+    /// is never reported as "not a symbol".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_status: Option<&'static str>,
 }
@@ -72,8 +74,9 @@ impl TargetOutput {
     }
 
     /// When `symbol` is `None`, `anchor_status` carries WHY it did not resolve
-    /// (`AnchorResolution::as_status`: "not_a_symbol" or "unavailable") and is
-    /// recorded on the placeholder. A resolved symbol ignores it (status omitted).
+    /// (`AnchorResolution::as_status`: "binding", "not_a_symbol", or
+    /// "unavailable") and is recorded on the placeholder. A resolved symbol
+    /// ignores it (status omitted).
     pub fn from_symbol_or_fallback(
         symbol: Option<&Symbol>,
         file: &Path,
@@ -104,13 +107,17 @@ impl TargetOutput {
 }
 
 /// Response for the `refs` command: the resolved target symbol plus its
-/// reference list. `target` discloses what the input position snapped to —
+/// reference list. `target` discloses what the input position resolved to —
 /// the same honesty `impact`/`context`/`usage` already provide — so a
 /// line-only query is self-describing without a second lookup. The
 /// reference `Section` is flattened in, keeping the one list contract.
 #[derive(Debug, Serialize)]
 pub struct RefsOutput {
     pub target: TargetOutput,
+    /// Carries the reference list's own `incomplete` — set when the language
+    /// server's reference set omits the very usage the query was made from,
+    /// so the count is a lower bound. The same disclosure `RefOutput` carries
+    /// for `impact`/`context`.
     #[serde(flatten)]
     pub references: Section<LocationOutput>,
 }
@@ -133,6 +140,13 @@ pub struct RefOutput {
     /// `Section`, kept here because `impact`/`context` summarize that query.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// Present (true) only when the language server's reference set omits
+    /// the very usage the query was made from — the counts above are then a
+    /// lower bound. Some servers leave out the usages of certain bindings
+    /// (rust-analyzer does for the parameters of async functions); this is
+    /// how the omission is disclosed on every surface that publishes the set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
 }
 
 #[derive(Debug, Serialize)]

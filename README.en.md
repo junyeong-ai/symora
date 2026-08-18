@@ -349,8 +349,8 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. Two things sit outside this: a bad CLI argument prints a plain usage error and exits 2, and a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output. Snapping commands (`refs`, `callers`, `callees`, `context`, `impact`, `usage`, `edit`) take `file:line:column` or a column-less `file:line` that addresses the symbol declared on that line; position-exact commands (`def`, `hover`, `typedef`, `rename`, `actions`) use the literal column. Emitted locations always carry line and column.
-- **Degradation is disclosed, never hidden.** `indexing: "timed_out"` means a count is a lower bound; `coverage_gaps` lists languages that couldn't be searched; an `unsupported` error names the missing LSP capability and points to an alternative.
+- **Positions are 1-indexed** on both input and output, and one address means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `context`, `impact`, `usage`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `edit` addresses declarations only: a column must sit on one. Emitted locations always carry line and column.
+- **Degradation is disclosed, never hidden.** `indexing: "timed_out"` means a count is a lower bound; `coverage_gaps` lists languages that couldn't be searched; an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
 - **`--format compact`** emits single-line JSON. Every response, in any format, is capped at `output.max_response_chars` (default 20,000): whole items are dropped to fit, disclosed via `truncated` and a hint naming the config key — and compact's denser encoding fits more items under the same ceiling.
 
 ---
@@ -471,9 +471,9 @@ The short version: discovery flows from rough (`pack`, `map summary`, `search sy
 ## Platform notes
 
 - **Linux** and **macOS**: supported.
-- **Windows**: the daemon workflow is unsupported (Symora uses Unix domain sockets).
+- **Windows**: the daemon workflow and the SQLite index are unsupported — the daemon speaks over a Unix domain socket, and the index relies on Unix file locks (`flock`) to keep two processes from rewriting it at once. `search index build` says so rather than building without that guarantee; search keeps working through the language server and a tree scan.
 
-On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` launch in the background and return immediately.
+On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` return once the daemon actually answers, so a success response means it is serving. Concurrent commands meeting a cold start bring up exactly one daemon.
 
 ```bash
 symora daemon start | stop | restart | status
@@ -508,6 +508,7 @@ Run `symora <command> --help` for flags and the full output shape of any command
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. |
 | `indexing: "timed_out"` | The language server is still warming up — the count is a lower bound. Retry once it's warm. |
 | `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
+| `conflict` from `search index` | Another process is rebuilding the index — retry as-is; nothing is left half-applied. |
 | Stale results after edits | `symora search index build` (incremental), or `symora daemon restart`. |
 | Debugging | `symora -v <command>` for verbose logs. |
 

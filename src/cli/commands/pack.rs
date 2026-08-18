@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 use crate::cli::response::Section;
+use crate::cli::response::disclosure::{as_paths, name_some, relative_paths};
 use crate::infra::file_filter::FileFilter;
 use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, build_pack};
 
@@ -55,6 +56,17 @@ struct PackOutput {
     budget_tokens: usize,
     estimated_tokens: usize,
     graph_size: usize,
+    /// Present (true) only when the walk could not read part of the tree, so
+    /// `graph_size` — the file set this pack selected from — is a lower bound.
+    /// The budget's own exclusions are already visible in `estimated_tokens`
+    /// against `budget_tokens`; this is the exclusion nothing else would show.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+    /// The paths that flag stands for. A reader cannot act on "somewhere in
+    /// the tree", and this pack has no rebuild to prescribe — naming them is
+    /// the whole remedy. The markdown shape says the same sentence.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unread_paths: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus: Option<String>,
     files: Section<PackFileOutput>,
@@ -89,11 +101,11 @@ pub async fn execute(args: PackArgs, app: &App) -> Result<()> {
     match build_pack(&root, args.tokens, args.focus.as_deref(), &filter, &cfg) {
         Ok(result) => match args.shape {
             PackShape::Json => {
-                let output = build_json_output(&args, result);
+                let output = build_json_output(ctx, &args, result);
                 ctx.print_success(output);
             }
             PackShape::Markdown => {
-                let text = render_markdown(&args, &result);
+                let text = render_markdown(ctx, &args, &result);
                 ctx.print_text(&text);
             }
         },
@@ -103,14 +115,21 @@ pub async fn execute(args: PackArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
-fn build_json_output(args: &PackArgs, result: PackResult) -> PackOutput {
+fn build_json_output(
+    ctx: &crate::cli::OutputContext,
+    args: &PackArgs,
+    result: PackResult,
+) -> PackOutput {
     let estimated = result.estimated_tokens;
     let graph = result.graph_size;
+    let unread_paths = relative_paths(ctx, &as_paths(&result.unreadable_paths));
     let files: Vec<PackFileOutput> = result.files.into_iter().map(into_file_output).collect();
     PackOutput {
         budget_tokens: args.tokens,
         estimated_tokens: estimated,
         graph_size: graph,
+        incomplete: !unread_paths.is_empty(),
+        unread_paths,
         focus: args.focus.clone(),
         files: Section::new(files),
     }
@@ -134,7 +153,11 @@ fn into_symbol_output(symbol: PackedSymbol) -> PackSymbolOutput {
     }
 }
 
-fn render_markdown(args: &PackArgs, result: &PackResult) -> String {
+fn render_markdown(
+    ctx: &crate::cli::OutputContext,
+    args: &PackArgs,
+    result: &PackResult,
+) -> String {
     let mut out = String::new();
     out.push_str("# Symora context pack\n\n");
     out.push_str(&format!(
@@ -145,6 +168,17 @@ fn render_markdown(args: &PackArgs, result: &PackResult) -> String {
         "- **Graph**: {} files in the import graph\n",
         result.graph_size
     ));
+    // The markdown shape publishes `graph_size` as a header fact just as the
+    // JSON does, so it carries the same claim and needs the same qualifier.
+    let named = relative_paths(ctx, &as_paths(&result.unreadable_paths));
+    if !named.is_empty() {
+        out.push_str(&format!(
+            "- **Incomplete**: {} path(s) could not be read ({}), so the graph above is a lower \
+             bound\n",
+            named.len(),
+            name_some(&named)
+        ));
+    }
     out.push_str(&format!("- **Files included**: {}\n", result.files.len()));
     if let Some(focus) = args.focus.as_deref() {
         out.push_str(&format!("- **Focus**: `{focus}`\n"));
@@ -176,6 +210,10 @@ fn render_markdown(args: &PackArgs, result: &PackResult) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn ctx() -> crate::cli::OutputContext {
+        crate::cli::OutputContext::new(PathBuf::from("/proj"), crate::cli::OutputOptions::default())
+    }
+
     use super::*;
     use crate::models::symbol::Language;
     use std::path::PathBuf;
@@ -195,6 +233,7 @@ mod tests {
             }],
             estimated_tokens: 50,
             graph_size: 25,
+            unreadable_paths: Vec::new(),
         }
     }
 
@@ -206,7 +245,7 @@ mod tests {
             per_file: 12,
             shape: PackShape::Markdown,
         };
-        let md = render_markdown(&args, &sample_result());
+        let md = render_markdown(&ctx(), &args, &sample_result());
         assert!(md.starts_with("# Symora context pack"));
         assert!(md.contains("4000"));
         assert!(md.contains("auth"));
@@ -222,7 +261,7 @@ mod tests {
             per_file: 12,
             shape: PackShape::Markdown,
         };
-        let md = render_markdown(&args, &sample_result());
+        let md = render_markdown(&ctx(), &args, &sample_result());
         assert!(!md.contains("Focus"));
     }
 
@@ -236,7 +275,7 @@ mod tests {
             per_file: 12,
             shape: PackShape::Markdown,
         };
-        let md = render_markdown(&args, &result);
+        let md = render_markdown(&ctx(), &args, &result);
         assert!(md.contains("no extractable symbols"));
     }
 }

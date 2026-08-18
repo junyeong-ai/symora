@@ -39,6 +39,28 @@ use ignore::Match;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+/// What a walk of the tree found, and what it could not see.
+///
+/// A bare file list cannot distinguish "no such file" from "a directory that
+/// would not open", and every answer built on one — an index that prunes rows
+/// for files it did not rediscover, a scan that publishes its match count as
+/// exact — is wrong in the second case. Pairing the two makes the difference
+/// impossible to drop by accident.
+#[derive(Default)]
+pub struct Discovery {
+    pub files: Vec<PathBuf>,
+    /// Tree entries the walk could not read: a directory it could not enter
+    /// or a file whose metadata it could not stat. Not a count of files —
+    /// one unreadable directory hides everything beneath it.
+    ///
+    /// Paths rather than a tally, because an answer scoped to part of the
+    /// tree has to ask whether the failure was in ITS part: a count alone
+    /// makes a directory read as incomplete because an unrelated one would
+    /// not open. A failure the walker could not place is recorded at the
+    /// root, so it qualifies every scope rather than none.
+    pub unreadable: Vec<PathBuf>,
+}
+
 /// The project's ignore policy, cheap to clone (a shared, lazily-populated
 /// matcher cache behind an [`Arc`]).
 ///
@@ -123,7 +145,14 @@ impl FileFilter {
     /// ignore handling is off, and `filter_entry` routes each entry through
     /// [`Self::is_ignored`], so an ignored directory is pruned (never descended)
     /// and the walk and the predicate stay identical by construction.
-    pub fn discover_files(&self, extensions: &[&str]) -> Vec<PathBuf> {
+    /// Files matching `extensions`, and how much of the tree the walk could
+    /// not read. The completeness travels with the files rather than beside
+    /// them so that ignoring it is a written decision ([`Discovery::files`])
+    /// rather than the default: a caller that deletes rows for files it did
+    /// not find, or that publishes a count as exact, is wrong to ignore it —
+    /// an unreadable directory makes "not discovered" stop meaning "not
+    /// there".
+    pub fn discover_files(&self, extensions: &[&str]) -> Discovery {
         let policy = self.inner.clone();
         let walker = WalkBuilder::new(&self.inner.root)
             // The crate is a traversal engine only: disable every built-in
@@ -139,7 +168,22 @@ impl FileFilter {
             .build();
 
         let mut files = Vec::new();
-        for entry in walker.filter_map(|e| e.ok()) {
+        let mut unreadable = Vec::new();
+        for entry in walker {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::debug!("Skipping unreadable tree entry: {e}");
+                    // An entry that went away while the walk was running holds
+                    // nothing the answer can be short of — the same line every
+                    // surface that reads files draws.
+                    if e.io_error().is_none_or(crate::infra::hides_content) {
+                        unreadable
+                            .push(walk_error_path(&e).unwrap_or_else(|| self.inner.root.clone()));
+                    }
+                    continue;
+                }
+            };
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
@@ -152,7 +196,7 @@ impl FileFilter {
             }
             files.push(path.to_path_buf());
         }
-        files
+        Discovery { files, unreadable }
     }
 
     /// Whether the built-in defaults are suppressed because the project declares
@@ -422,6 +466,23 @@ pub(crate) const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     "temp",
 ];
 
+/// The path a walk error is about, when the walker could place it.
+///
+/// `ignore` wraps its errors — `WithDepth` and `WithLineNumber` around a
+/// `WithPath`, in either order — so only unwrapping the outermost layer finds
+/// a path on some errors and not others. A failure that names no path at all
+/// is the caller's to place, and it places it at the root, where it qualifies
+/// every scope rather than none.
+fn walk_error_path(error: &ignore::Error) -> Option<std::path::PathBuf> {
+    match error {
+        ignore::Error::WithPath { path, .. } => Some(path.clone()),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            walk_error_path(err)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +539,7 @@ mod tests {
             "a same-named src/ elsewhere must stay indexed"
         );
 
-        let discovered = filter.discover_files(&["ts"]);
+        let discovered = filter.discover_files(&["ts"]).files;
         assert!(
             discovered
                 .iter()
@@ -526,7 +587,7 @@ mod tests {
         );
         assert!(filter.is_ignored(&root.join("foo")));
 
-        let discovered = filter.discover_files(&["rs"]);
+        let discovered = filter.discover_files(&["rs"]).files;
         assert!(discovered.iter().any(|p| p.ends_with("keep.rs")));
         assert!(
             !discovered.iter().any(|p| p.ends_with("bar.rs")),
@@ -593,7 +654,7 @@ mod tests {
         assert!(filter.is_ignored(&root.join(".keep.rs")));
         assert!(!filter.is_ignored(&root.join("visible.rs")));
 
-        let discovered = filter.discover_files(&["rs"]);
+        let discovered = filter.discover_files(&["rs"]).files;
         assert!(discovered.iter().any(|p| p.ends_with("visible.rs")));
         assert!(
             !discovered
@@ -689,11 +750,11 @@ mod tests {
         touch(&root.join("node_modules/dep/index.js"));
 
         let filter = FileFilter::new(root);
-        let rs = filter.discover_files(&["rs"]);
+        let rs = filter.discover_files(&["rs"]).files;
         assert_eq!(rs.len(), 1);
         assert!(rs[0].ends_with("a.rs"));
 
-        let all = filter.discover_files(&[]);
+        let all = filter.discover_files(&[]).files;
         assert!(all.iter().any(|p| p.ends_with("a.rs")));
         assert!(all.iter().any(|p| p.ends_with("b.ts")));
         assert!(

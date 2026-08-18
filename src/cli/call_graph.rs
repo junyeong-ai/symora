@@ -370,7 +370,7 @@ pub(crate) mod test_support {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<Location>, LspError> {
+        ) -> Result<Option<crate::models::lsp::Definition>, LspError> {
             unreachable!()
         }
         async fn goto_type_definition(
@@ -417,7 +417,7 @@ pub(crate) mod test_support {
             _line: u32,
             _column: u32,
             _new_name: &str,
-        ) -> Result<RenameResult, LspError> {
+        ) -> Result<Option<RenameResult>, LspError> {
             unreachable!()
         }
         async fn supertypes(

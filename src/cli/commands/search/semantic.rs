@@ -24,8 +24,12 @@ use crate::cli::response::Section;
 use crate::constants::defaults::{PACK_MAX_FILE_BYTES, SEMANTIC_CHUNK_LINES as CHUNK_LINES};
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
+
+use crate::cli::response::disclosure::{LowerBound, relative_unread_paths, with_lower_bounds};
+use crate::cli::symbol_discovery::is_code_language;
 use crate::services::embedding_cache::{CachedChunk, EmbeddingCache, RankedChunk, TopK};
 use crate::services::embeddings::{EmbeddingError, EmbeddingProvider, cosine, default_provider};
+use crate::services::store::UnreadPath;
 
 #[derive(Debug, Serialize)]
 struct SemanticResultOutput {
@@ -47,6 +51,17 @@ pub async fn execute_semantic_search(
         ctx.print_error(OutputError::invalid(
             "Semantic search query cannot be empty",
         ));
+        return Ok(());
+    }
+
+    if language.map(Language::parse_or_default) == Some(Language::Unknown) {
+        ctx.print_error(
+            OutputError::invalid(format!(
+                "Unknown language: {}",
+                language.unwrap_or_default()
+            ))
+            .with_hint("Run 'symora doctor' to see supported languages."),
+        );
         return Ok(());
     }
 
@@ -83,12 +98,26 @@ fn semantic_search(
     language: Option<&str>,
     limit: usize,
 ) -> Result<Section<SemanticResultOutput>> {
-    let files = discover_files(app);
+    let language = language.map(Language::parse_or_default);
+    let corpus = discover_files(app);
+    // Discovery settles what the walk could not read; embedding below adds
+    // what it could not read afterwards, and the two finish as one list.
+    // A ranking narrowed to one language is not shortened by a file of
+    // another: the filter excluded it before the read ever failed. A path the
+    // walk could not ENTER names no language, so it could have held this one.
+    let mut unread_paths: Vec<String> = relative_unread_paths(&app.output, &corpus.unread_paths)
+        .into_iter()
+        .filter(|unread| match (language, unread.is_file) {
+            (Some(lang), true) => Language::from_path(std::path::Path::new(&unread.path)) == lang,
+            _ => true,
+        })
+        .map(|unread| unread.path)
+        .collect();
+    let files = corpus.files;
     if files.is_empty() {
-        return Ok(Section::new(vec![]));
+        return Ok(bounded_section(Section::new(vec![]), unread_paths));
     }
 
-    let language = language.map(Language::parse_or_default);
     let query_vec = provider.embed_query(query)?;
     let score = |vector: &[f32]| cosine(&query_vec, vector);
 
@@ -100,14 +129,25 @@ fn semantic_search(
         match EmbeddingCache::open(app.root(), provider.model_id(), provider.dimension()) {
             Ok(cache) => {
                 let active: HashSet<String> = files.iter().map(|f| f.rel.clone()).collect();
-                cache.prune(&active)?;
-                refresh_cache(&cache, provider, &files, language)?;
+                // Prune DELETES what the walk did not find, which only means
+                // "gone" when the walk saw everything — a path it could not
+                // read is not absent, and dropping its embedding would throw
+                // away work a later, complete walk has to redo. This holds on
+                // every run because a read failure re-counts on every run.
+                // Ranking is filtered by the same set unconditionally: what
+                // may not be deleted on an incomplete walk still may not be
+                // ranked, or a file that changed behind an unreadable path
+                // would keep scoring against content it no longer has.
+                if unread_paths.is_empty() {
+                    cache.prune(&active)?;
+                }
+                unread_paths.extend(refresh_cache(&cache, provider, &files, language)?);
                 let lang_id = language.map(|l| l.lsp_id());
-                cache.rank_top(lang_id, limit, score)?
+                cache.rank_top(lang_id, &active, limit, score)?
             }
             Err(e) => {
                 tracing::warn!("Embedding cache unavailable, embedding in memory: {e}");
-                rank_in_memory(provider, &files, language, limit, score)?
+                rank_in_memory(provider, &files, language, limit, score, &mut unread_paths)?
             }
         };
 
@@ -123,8 +163,27 @@ fn semantic_search(
         .collect();
 
     // `total` is the full candidate count, so `truncated` honestly says the
-    // agent is seeing the top `--limit` of a larger relevance ranking.
-    Ok(Section::with_total(items, total))
+    // agent is seeing the top `--limit` of a larger relevance ranking — over
+    // the corpus that could be read, which `incomplete` qualifies.
+    Ok(bounded_section(
+        Section::with_total(items, total),
+        unread_paths,
+    ))
+}
+
+/// Publish a ranking over a corpus that may be short of the project, naming
+/// the reason. Both exits take it, so a shortfall settled before the ranking
+/// and one settled during it read the same.
+fn bounded_section(
+    section: Section<SemanticResultOutput>,
+    unread_paths: Vec<String>,
+) -> Section<SemanticResultOutput> {
+    with_lower_bounds(
+        section,
+        &Vec::from_iter(
+            (!unread_paths.is_empty()).then_some(LowerBound::ScanCouldNotReadPaths(unread_paths)),
+        ),
+    )
 }
 
 /// A discovered, in-budget source file: absolute path (for reading),
@@ -138,42 +197,78 @@ struct DiscoveredFile {
 /// Every indexable code file in the project — language-agnostic, since the
 /// cache is shared across `--lang` queries. Config/doc formats are excluded:
 /// semantic search targets code.
-fn discover_files(app: &App) -> Vec<DiscoveredFile> {
+fn discover_files(app: &App) -> DiscoveredCorpus {
     let extensions: Vec<&str> = Language::all()
         .into_iter()
-        .filter(|lang| !matches!(lang, Language::Markdown | Language::Yaml | Language::Toml))
+        .filter(|lang| is_code_language(*lang))
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
 
     let filter = FileFilter::new(app.root());
-    let mut files = filter.discover_files(&extensions);
+    let discovery = filter.discover_files(&extensions);
+    let mut files = discovery.files;
     files.sort();
 
-    files
-        .into_iter()
-        .filter_map(|path| {
-            let metadata = std::fs::metadata(&path).ok()?;
-            if metadata.len() > PACK_MAX_FILE_BYTES {
-                return None;
+    let mut corpus = DiscoveredCorpus {
+        files: Vec::new(),
+        unread_paths: discovery
+            .unreadable
+            .iter()
+            .map(|path| UnreadPath {
+                path: path.display().to_string(),
+                is_file: false,
+            })
+            .collect(),
+    };
+    for path in files {
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                if crate::infra::hides_content(&e) {
+                    corpus.unread_paths.push(UnreadPath {
+                        path: path.display().to_string(),
+                        is_file: true,
+                    });
+                }
+                continue;
             }
-            // Nanosecond resolution so two edits in the same wall-clock
-            // second still register as a change and re-embed.
-            let mtime = metadata
-                .modified()
-                .ok()?
-                .duration_since(UNIX_EPOCH)
-                .ok()?
-                .as_nanos() as i64;
-            let rel = app.output.relative_path(&path);
-            Some(DiscoveredFile { path, rel, mtime })
-        })
-        .collect()
+        };
+        if metadata.len() > PACK_MAX_FILE_BYTES {
+            continue;
+        }
+        // Nanosecond resolution so two edits in the same wall-clock second
+        // still register as a change and re-embed.
+        let Some(mtime) = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i64)
+        else {
+            corpus.unread_paths.push(UnreadPath {
+                path: path.display().to_string(),
+                is_file: true,
+            });
+            continue;
+        };
+        let rel = app.output.relative_path(&path);
+        corpus.files.push(DiscoveredFile { path, rel, mtime });
+    }
+    corpus
+}
+
+/// The files semantic search will embed and rank, and how many paths it could
+/// not read. A corpus short by an unreadable path ranks a smaller candidate
+/// set than the project holds, which is what makes its count a lower bound.
+struct DiscoveredCorpus {
+    files: Vec<DiscoveredFile>,
+    unread_paths: Vec<UnreadPath>,
 }
 
 /// Whether a file belongs to the requested language. No filter matches
-/// everything; an unrecognized language (`Unknown`) matches no code file —
-/// the same empty result content search returns, never a silent "rank
-/// everything".
+/// everything, and a filter matches only its own files — never a silent "rank
+/// everything". An unrecognized name never reaches here: the command refuses
+/// it at the boundary, as every other `--lang` does, because a zero from a
+/// typo reads as "no such code" rather than as "no such language".
 fn language_matches(file: &DiscoveredFile, language: Option<Language>) -> bool {
     match language {
         None => true,
@@ -191,7 +286,8 @@ fn refresh_cache(
     provider: &dyn EmbeddingProvider,
     files: &[DiscoveredFile],
     language: Option<Language>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut unread = Vec::new();
     for file in files {
         if !language_matches(file, language) {
             continue;
@@ -199,14 +295,27 @@ fn refresh_cache(
         if cache.cached_mtime(&file.rel) == Some(file.mtime) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&file.path) else {
-            continue;
+        // The mtime moved, so whatever the cache holds for this file is known
+        // to describe content that no longer exists. Failing to read the new
+        // content leaves the old vectors in place, and they would rank as a
+        // current match — a plausible answer about text the file no longer
+        // has. Forgetting the file entirely keeps the ranking honest and
+        // leaves nothing for a later run to mistake for a current embedding.
+        let content = match std::fs::read_to_string(&file.path) {
+            Ok(content) => content,
+            Err(e) => {
+                if crate::infra::hides_text(&e) {
+                    unread.push(file.rel.clone());
+                }
+                cache.remove_file(&file.rel)?;
+                continue;
+            }
         };
         let chunks = embed_chunks(provider, &chunk_file(&content))?;
         let lang_id = Language::from_path(&file.path).lsp_id();
         cache.put_file(&file.rel, file.mtime, lang_id, &chunks)?;
     }
-    Ok(())
+    Ok(unread)
 }
 
 /// Fallback when the cache can't open: embed the requested language and rank
@@ -218,14 +327,21 @@ fn rank_in_memory<F: Fn(&[f32]) -> f32>(
     language: Option<Language>,
     limit: usize,
     score: F,
+    unread: &mut Vec<String>,
 ) -> Result<(Vec<RankedChunk>, usize)> {
     let mut top = TopK::new(limit);
     for file in files {
         if !language_matches(file, language) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&file.path) else {
-            continue;
+        let content = match std::fs::read_to_string(&file.path) {
+            Ok(content) => content,
+            Err(e) => {
+                if crate::infra::hides_text(&e) {
+                    unread.push(file.rel.clone());
+                }
+                continue;
+            }
         };
         for chunk in embed_chunks(provider, &chunk_file(&content))? {
             let score = score(&chunk.vector);
@@ -312,6 +428,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Every path the cache holds — the ranking filter is the walk's active
+    /// set, so a test about the cache's own contents names all of them.
+    fn cached_paths(cache: &EmbeddingCache) -> HashSet<String> {
+        cache.cached_paths()
+    }
+
     /// Deterministic, model-free provider so the incremental-refresh logic
     /// can be tested without loading an ONNX model. It records how many
     /// chunks it was asked to embed, which is the signal these tests assert
@@ -363,7 +485,13 @@ mod tests {
 
         // First pass embeds both files.
         refresh_cache(&cache, &provider, &files, None).unwrap();
-        assert_eq!(cache.rank_top(None, 0, |_| 0.0).unwrap().1, 2);
+        assert_eq!(
+            cache
+                .rank_top(None, &cached_paths(&cache), 0, |_| 0.0)
+                .unwrap()
+                .1,
+            2
+        );
         let after_first = embedded.load(Ordering::SeqCst);
         assert_eq!(after_first, 2);
 
@@ -382,7 +510,13 @@ mod tests {
         ];
         refresh_cache(&cache, &provider, &moved, None).unwrap();
         assert_eq!(embedded.load(Ordering::SeqCst), after_first + 1);
-        assert_eq!(cache.rank_top(None, 0, |_| 0.0).unwrap().1, 2);
+        assert_eq!(
+            cache
+                .rank_top(None, &cached_paths(&cache), 0, |_| 0.0)
+                .unwrap()
+                .1,
+            2
+        );
     }
 
     #[test]
@@ -434,8 +568,8 @@ mod tests {
         // A valid language matches its own files and rejects others.
         assert!(language_matches(&rs, Some(Language::Rust)));
         assert!(!language_matches(&rs, Some(Language::Python)));
-        // An unrecognized language parses to Unknown, which matches no code
-        // file — the same empty result content search returns.
+        // Belt and braces for a name the boundary refuses: even reaching
+        // here, `Unknown` must not match, so a filter can never widen.
         assert!(!language_matches(
             &rs,
             Some(Language::parse_or_default("cobol"))

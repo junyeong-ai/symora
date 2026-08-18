@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::{Semaphore, broadcast};
+use tokio::sync::{Semaphore, watch};
 
 use serde::Serialize;
 
@@ -30,19 +30,29 @@ pub(super) async fn handle_connection(
     config: Arc<DaemonRuntimeConfig>,
     lsp_config: Arc<LspRuntimeConfig>,
     start_time: Instant,
-    shutdown_tx: broadcast::Sender<()>,
+    shutdown: watch::Sender<bool>,
 ) -> Result<(), std::io::Error> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
     const MAX_LINE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
+    // Shutdown releases the listener, so no NEW connection reaches this
+    // process — but a connection already accepted would keep serving
+    // requests from it, and a replacement is serving the socket by then.
+    // Two daemons answering for the same projects is the state the socket
+    // claim exists to prevent, so an established connection stops taking
+    // work at the same moment a new one stops arriving. A request already
+    // dispatched still gets its answer; only the next one is declined.
+    let mut shutdown_rx = shutdown.subscribe();
     loop {
         let mut line_buf = Vec::with_capacity(4096);
-        let bytes_read = (&mut reader)
-            .take(MAX_LINE_SIZE as u64 + 1)
-            .read_until(b'\n', &mut line_buf)
-            .await?;
+        let mut bounded = (&mut reader).take(MAX_LINE_SIZE as u64 + 1);
+        let bytes_read = tokio::select! {
+            biased;
+            _ = shutdown_rx.wait_for(|stopping| *stopping) => break,
+            read = bounded.read_until(b'\n', &mut line_buf) => read?,
+        };
         if bytes_read == 0 {
             break;
         }
@@ -74,12 +84,21 @@ pub(super) async fn handle_connection(
                 continue;
             }
         };
-        let _permit = match semaphore.acquire().await {
-            Ok(permit) => permit,
-            Err(_) => {
-                tracing::debug!("Semaphore closed, ending connection");
-                break;
-            }
+        // The wait for a permit is unbounded, and shutdown can land inside
+        // it. Taking work that queued before the signal and starting it after
+        // is the same as never having seen the signal: by then the listener is
+        // released and a replacement daemon owns the projects this request
+        // would touch. Only a request already dispatched runs to its answer.
+        let _permit = tokio::select! {
+            biased;
+            _ = shutdown_rx.wait_for(|stopping| *stopping) => break,
+            permit = semaphore.acquire() => match permit {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::debug!("Semaphore closed, ending connection");
+                    break;
+                }
+            },
         };
 
         let request: Request = match serde_json::from_str(&line) {
@@ -117,7 +136,7 @@ pub(super) async fn handle_connection(
         writer.flush().await?;
 
         if should_shutdown {
-            let _ = shutdown_tx.send(());
+            shutdown.send_replace(true);
         }
     }
 

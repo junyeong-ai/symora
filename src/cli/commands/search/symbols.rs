@@ -6,19 +6,24 @@ use serde::{Deserialize, Serialize};
 use crate::app::App;
 use crate::cli::OutputContext;
 use crate::cli::OutputError;
+use crate::cli::response::disclosure::{
+    DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
+    index_holes_bound, index_unavailable_disclosure, ordered_bounds, relative_stale_files,
+    vouched_by_index, with_coverage_disclosure, workspace_route_for,
+};
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus, coverage_reason,
-    generic_exact_identifier_penalty, noisy_suffix_penalty, symbol_lookup_hints,
-    symbol_match_priority,
+    DetectedLanguages, LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
+    generic_exact_identifier_penalty, no_languages_error, noisy_suffix_penalty,
+    resolve_search_languages, symbol_lookup_hints, symbol_match_priority,
 };
 use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::TestScope;
-use crate::services::store::{SymbolExtractor, SymbolSearchResult};
+use crate::services::store::SymbolSearchResult;
 
-use super::common::{looks_like_symbol_path, resolve_search_languages};
+use super::common::looks_like_symbol_path;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SymbolResultOutput {
@@ -41,6 +46,23 @@ pub(super) struct SymbolResultOutput {
     pub score: f64,
 }
 
+/// `stale` narrowed to the rows this section actually emitted.
+///
+/// The index page it was read from is a superset of them — ranking, the merge
+/// with live rows, and the limit all cut into it — so a page holding one stale
+/// row and one fresh one says nothing about an answer that kept only the fresh
+/// one. A live row is current by nature, whatever its file did.
+fn with_emitted_stale(
+    section: Section<SymbolResultOutput>,
+    stale_files: &std::collections::HashSet<String>,
+) -> Section<SymbolResultOutput> {
+    let stale = section
+        .items
+        .iter()
+        .any(|item| item.backend.as_deref() == Some("index") && stale_files.contains(&item.file));
+    section.with_stale(stale)
+}
+
 pub async fn execute_symbol_search(
     app: &App,
     query: &str,
@@ -57,6 +79,29 @@ pub async fn execute_symbol_search(
         return Ok(());
     }
 
+    // A zero cap cannot be answered honestly: the index reports the total
+    // it saw through the window, so an empty window would publish a zero
+    // for a repository full of matches. Ask for one result to learn the
+    // count.
+    if limit == 0 {
+        ctx.print_error(
+            OutputError::invalid("--limit must be at least 1")
+                .with_hint("Use --limit 1 to learn the count from a single result."),
+        );
+        return Ok(());
+    }
+
+    if language.map(Language::parse_or_default) == Some(Language::Unknown) {
+        ctx.print_error(
+            OutputError::invalid(format!(
+                "Unknown language: {}",
+                language.unwrap_or_default()
+            ))
+            .with_hint("Run 'symora doctor' to see supported languages."),
+        );
+        return Ok(());
+    }
+
     // `*` wildcards are the file-tree matcher's syntax; neither the LIKE index
     // nor the LSP workspace search honors them (they would fuzzy-strip the star
     // and surface unrelated crates), so resolve a glob against the index with
@@ -65,7 +110,7 @@ pub async fn execute_symbol_search(
         return execute_glob_symbol_search(app, query, language, kind, limit).await;
     }
 
-    let search_languages = resolve_search_languages(app, language);
+    let detected = resolve_search_languages(app, language);
     let use_workspace = workspace_symbols || looks_like_symbol_path(query);
 
     if use_workspace {
@@ -80,8 +125,11 @@ pub async fn execute_symbol_search(
             language,
             kind,
             limit,
-            &search_languages,
-            route,
+            WorkspaceRoute {
+                route,
+                detected: &detected,
+                index_unavailable: None,
+            },
         )
         .await;
     }
@@ -98,61 +146,94 @@ pub async fn execute_symbol_search(
     {
         Ok(page) => {
             let mut count = page.total;
-            let stale = page.stale;
+            let stale_files = relative_stale_files(ctx, &page.stale_files);
             let mut candidates: Vec<SymbolResultOutput> = page
                 .rows
                 .into_iter()
                 .map(|r| index_result_output(r, ctx))
                 .collect();
             let mut failures = Vec::new();
+            let mut skipped = Vec::new();
             let mut workspace_indexing = None;
-            let covered = app.store.indexed_languages().await.unwrap_or_default();
-            let uncovered =
-                languages_needing_live_lookup(&search_languages, &covered, candidates.is_empty());
+            let vouched = vouched_by_index(&page.covered, !candidates.is_empty());
+            let lower_bounds = ordered_bounds(
+                detected.shortfall(ctx),
+                index_holes_bound(ctx, &page.unread_paths, &vouched),
+            );
+            let uncovered = languages_needing_live_lookup(&detected.languages, &vouched);
             if !uncovered.is_empty() {
                 let lookup =
                     collect_workspace_symbol_results(app, query, kind, limit, &uncovered).await;
                 workspace_indexing = lookup.indexing;
+                let live_total = lookup.total;
                 candidates =
                     merge_symbol_results(candidates, lookup.results, query, app.test_scope());
                 failures = lookup.failures;
-                count = count.max(candidates.len());
+                skipped = lookup.skipped;
+                // The two sources cannot overlap: the live lookup runs for
+                // exactly the languages the index did not vouch for, and the
+                // index answered only for the ones it did. So the union is
+                // the sum, not the larger of the two — taking the larger
+                // would report a hundred Rust matches as the whole answer
+                // while a hundred Lua ones sat beside them, with nothing in
+                // the coverage gaps to say so.
+                count += live_total;
             }
-            let mut section = finish_symbol_search(
-                candidates,
-                count,
+            let shortfall = coverage_shortfall(
+                &vouched,
+                LiveLookup::Ran {
+                    failures: &failures,
+                    skipped: &skipped,
+                },
+            );
+            let section = with_coverage_disclosure(
+                with_emitted_stale(
+                    finish_symbol_search(
+                        candidates,
+                        count,
+                        query,
+                        language,
+                        kind,
+                        limit,
+                        app.test_scope(),
+                        &shortfall,
+                    ),
+                    &stale_files,
+                )
+                .with_indexing(workspace_indexing),
+                &shortfall,
                 query,
-                language,
-                kind,
-                limit,
-                app.test_scope(),
-            )
-            .with_stale(stale)
-            .with_indexing(workspace_indexing);
-            if section.count == 0 {
-                let hints = symbol_search_coverage_hints(&failures);
-                if !hints.is_empty() {
-                    section = section
-                        .with_hints(hints)
-                        .with_next_commands(symbol_search_coverage_next_commands(query, &failures));
-                }
-            }
+                DisclosureRoute::IndexConsulted,
+                &lower_bounds,
+                &[],
+            );
             ctx.print_success(section);
         }
-        // No index yet: answer from live LSP workspace symbols instead.
-        Err(StoreError::NotInitialized) => {
+        // Nothing to read the index for: never built, a build owns it, or it
+        // could not be opened at all. Live LSP workspace symbols answer in its
+        // place, and the route says which of the three it was — one is cured
+        // by building, one by waiting, and one by neither.
+        Err(e) => {
+            // A daemon that was never reached says nothing about the store, so
+            // there is nothing to answer around: it is reported as itself.
+            let Some(route) = workspace_route_for(&e) else {
+                ctx.print_error(OutputError::from(e));
+                return Ok(());
+            };
             return execute_workspace_symbol_search(
                 app,
                 query,
                 language,
                 kind,
                 limit,
-                &search_languages,
-                WorkspaceSearchRoute::IndexNotBuilt,
+                WorkspaceRoute {
+                    route,
+                    detected: &detected,
+                    index_unavailable: index_unavailable_disclosure(&e),
+                },
             )
             .await;
         }
-        Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
     }
 
     Ok(())
@@ -201,13 +282,31 @@ async fn execute_glob_symbol_search(
             );
             return Ok(());
         }
+        // A wildcard is answered from the index alone, so a build in
+        // progress leaves nothing to answer with — but telling the caller
+        // to build one would be prescribing what is already running.
+        Err(StoreError::Rebuilding) => {
+            ctx.print_error(
+                OutputError::from(StoreError::Rebuilding)
+                    .with_hint("Wait for 'symora search index status' to report is_indexing: false, then retry the wildcard query"),
+            );
+            return Ok(());
+        }
         Err(e) => {
-            ctx.print_error(OutputError::internal(e.to_string()));
+            ctx.print_error(OutputError::from(e));
             return Ok(());
         }
     };
 
-    let stale = page.stale;
+    let stale_files = relative_stale_files(ctx, &page.stale_files);
+    let covered = page.covered.clone();
+    // No live lookup runs on this route, so the index answers for everything
+    // its scope covers — including the zeroes.
+    let detected = resolve_search_languages(app, language);
+    let lower_bounds = ordered_bounds(
+        detected.shortfall(ctx),
+        index_holes_bound(ctx, &page.unread_paths, &covered),
+    );
     // Keep every glob match for an accurate count; finish_symbol_search caps
     // the emitted page at `limit` and sets `truncated`.
     let matches: Vec<SymbolResultOutput> = page
@@ -218,18 +317,54 @@ async fn execute_glob_symbol_search(
         .collect();
     let count = matches.len();
 
-    ctx.print_success(
-        finish_symbol_search(
-            matches,
-            count,
-            query,
-            language,
-            kind,
-            limit,
-            app.test_scope(),
-        )
-        .with_stale(stale),
+    let shortfall = coverage_shortfall(
+        &covered,
+        LiveLookup::NotRun {
+            requested: &detected.languages,
+        },
     );
+    // A wildcard is matched against the index alone — no language server can
+    // honor `*` — so unlike every other route this zero was never confirmed
+    // against disk. With no rows there is no `backend` to read either, which
+    // leaves nothing at all to distinguish "no such symbol" from "written
+    // since the last build". Said only on the zero: a non-empty answer
+    // carries `backend: "index"` on every row, which is the same statement.
+    // Said only on the zero, and as a fact of this ROUTE: it is about the index
+    // being behind, which is a different axis from the bounds, and passing it
+    // through the shared shaping is what keeps the bounds in front of it and
+    // keeps its rebuild from surviving a cap that dropped the sentence
+    // explaining it.
+    let unconfirmed_zero: Vec<(String, String)> = (count == 0)
+        .then(|| {
+            (
+                "Wildcards are matched against the index alone, so a symbol written since the \
+                 last build has no row to match"
+                    .to_string(),
+                "symora search index build".to_string(),
+            )
+        })
+        .into_iter()
+        .collect();
+    ctx.print_success(with_coverage_disclosure(
+        with_emitted_stale(
+            finish_symbol_search(
+                matches,
+                count,
+                query,
+                language,
+                kind,
+                limit,
+                app.test_scope(),
+                &shortfall,
+            ),
+            &stale_files,
+        ),
+        &shortfall,
+        query,
+        DisclosureRoute::IndexConsulted,
+        &lower_bounds,
+        &unconfirmed_zero,
+    ));
     Ok(())
 }
 
@@ -251,19 +386,14 @@ fn index_result_output(row: SymbolSearchResult, ctx: &OutputContext) -> SymbolRe
     }
 }
 
-/// Which entry point routed the call to live workspace symbols. An empty
-/// result's failure disclosure keys its remedy off this — the honest next
-/// command depends on why the index was skipped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WorkspaceSearchRoute {
-    /// `--workspace-symbols` explicitly skipped the index.
-    Forced,
-    /// The store reported `NotInitialized`; the live lookup is the
-    /// fallback and the zero is workspace-only.
-    IndexNotBuilt,
-    /// A path-like query routed here; a built index still supplements
-    /// the live results in the same call.
-    PathQuery,
+/// What routed a search to live workspace symbols, and what that route owes
+/// the answer: the walk that chose the languages to fan out over — which is
+/// also what reported the shortfall those languages are short by — and what an
+/// index this run could not consult costs.
+struct WorkspaceRoute<'a> {
+    route: WorkspaceSearchRoute,
+    detected: &'a DetectedLanguages,
+    index_unavailable: Option<(String, String)>,
 }
 
 async fn execute_workspace_symbol_search(
@@ -272,50 +402,133 @@ async fn execute_workspace_symbol_search(
     language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
-    languages: &[Language],
-    route: WorkspaceSearchRoute,
+    routed: WorkspaceRoute<'_>,
 ) -> Result<()> {
+    let WorkspaceRoute {
+        route,
+        detected,
+        index_unavailable,
+    } = routed;
     let ctx = &app.output;
+    let languages = &detected.languages;
     if languages.is_empty() {
-        ctx.print_error(OutputError::not_found(
-            "No project languages detected for workspace symbol search",
-        ));
+        ctx.print_error(no_languages_error(ctx, detected, language));
         return Ok(());
     }
 
     let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
+    // The fan-out overfetches and then cuts, so its rows are the whole live
+    // answer only when nothing was cut. Read before the rows are moved.
+    let mut live = Contribution {
+        found: lookup.total > 0,
+        cut_short: lookup.results.len() < lookup.total,
+    };
     let mut candidates = lookup.results;
-    let failures = lookup.failures;
+    let mut failures = lookup.failures;
+    let mut skipped = lookup.skipped;
     let indexing = lookup.indexing;
-    let mut count = candidates.len();
-    let mut stale = false;
-    let mut index_answered = false;
+    let mut count = lookup.total;
+    let mut stale_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut index_consulted = false;
+    let mut index_vouched: Vec<Language> = Vec::new();
+    let mut index_bounds: Vec<LowerBound> = Vec::new();
+    let mut lower_bounds: Vec<LowerBound> = Vec::new();
 
-    if looks_like_symbol_path(query) && candidates.len() < limit {
-        let expanded =
-            collect_document_path_results(app, query, kind, limit, languages, &candidates).await;
-        candidates = merge_symbol_results(candidates, expanded, query, app.test_scope());
+    if looks_like_symbol_path(query) {
+        if candidates.len() < limit {
+            // Document expansion is part of the same live answer: what it finds
+            // is live, and what it had to leave behind leaves the live side cut
+            // short just as the fan-out's own cap does.
+            let expanded =
+                collect_document_path_results(app, query, kind, limit, languages, &candidates)
+                    .await;
+            live.found |= !expanded.results.is_empty();
+            live.cut_short |= expanded.capped;
+            // Said on its own, not only through `unmerged_overlap`: rows left
+            // behind by the widening's own cap shorten the answer whether or
+            // not an index also contributed, and a widening that was cut short
+            // before finding anything is exactly the case the overlap
+            // predicate cannot see.
+            if expanded.capped {
+                lower_bounds.push(LowerBound::LiveWideningCapped);
+            }
+            if expanded.undescribed {
+                lower_bounds.push(LowerBound::LiveFileNotDescribed);
+            }
+            failures.extend(expanded.failures);
+            skipped.extend(expanded.skipped);
+            candidates =
+                merge_symbol_results(candidates, expanded.results, query, app.test_scope());
+        } else {
+            // The page filled before the widening ran, so it never ran at all.
+            // That is the same fact the cap inside it states — files this
+            // answer never opened, holding path matches `count` never counted
+            // — and the same thing raises the limit past both.
+            live.cut_short = true;
+            lower_bounds.push(LowerBound::LiveWideningCapped);
+        }
     }
 
-    // Scope the index supplement to an EXPLICIT `--lang` only — never to an
-    // auto-detected single language (which the user did not request). Same rule
-    // and helper as every other index-query path.
-    if looks_like_symbol_path(query)
-        && let Ok(page) = app
-            .store
-            .search_symbols(
-                query,
-                limit,
-                kind.map(SymbolKind::parse_or_default),
-                explicit_index_language(language),
-            )
-            .await
-    {
-        index_answered = true;
+    // Scope the supplement to an EXPLICIT `--lang` only — never to an
+    // auto-detected single language (which the user did not request). Same
+    // rule and helper as every other index-query path. `None` where the route
+    // never asks: a route that skipped the index has no store outcome, and
+    // standing in a failure for it would let the route the caller chose be
+    // overwritten by one it never met.
+    let supplement = match route.supplements_from_index() {
+        true => Some(
+            app.store
+                .search_symbols(
+                    query,
+                    limit,
+                    kind.map(SymbolKind::parse_or_default),
+                    explicit_index_language(language),
+                )
+                .await,
+        ),
+        false => None,
+    };
+    let mut route = route;
+    let mut supplement_unavailable = None;
+    let page = match supplement {
+        // An index this run could not read is not the same as there being
+        // nothing to supplement with: the answer rests on the live lookup
+        // alone, and that is worth saying rather than reading as one the index
+        // confirmed. The route becomes what the store said it was, so the
+        // remedy fits the state rather than the query that asked — a path
+        // query prescribing a build to an index already rebuilding otherwise.
+        Some(Err(error)) => {
+            // Except when the store never answered at all, which is the
+            // transport failing and is reported as itself.
+            let Some(reason) = workspace_route_for(&error) else {
+                ctx.print_error(OutputError::from(error));
+                return Ok(());
+            };
+            supplement_unavailable = index_unavailable_disclosure(&error);
+            route = reason;
+            None
+        }
+        Some(Ok(page)) => Some(page),
+        None => None,
+    };
+    if let Some(page) = page {
+        index_consulted = true;
+        index_vouched = vouched_by_index(&page.covered, !page.rows.is_empty());
+        // A vouched language is one this answer stopped asking about live, so
+        // the index is its authority here exactly as on the plain route — a
+        // path-like query does not change what the index's holes cost.
+        index_bounds = index_holes_bound(ctx, &page.unread_paths, &index_vouched);
+        lower_bounds.extend(unmerged_overlap(
+            live,
+            Contribution {
+                found: page.total > 0,
+                cut_short: page.rows.len() < page.total,
+            },
+        ));
         count = count.max(page.total);
         // The merged output contains index rows, so the page's staleness
         // applies to it; the live workspace results are current by nature.
-        stale = page.stale;
+        stale_files = relative_stale_files(ctx, &page.stale_files);
         let index_results: Vec<SymbolResultOutput> = page
             .rows
             .into_iter()
@@ -324,58 +537,58 @@ async fn execute_workspace_symbol_search(
         candidates = merge_symbol_results(candidates, index_results, query, app.test_scope());
     }
 
+    let mut lower_bounds = {
+        let mut bounds = ordered_bounds(detected.shortfall(ctx), index_bounds);
+        bounds.extend(lower_bounds);
+        bounds
+    };
+    lower_bounds.dedup();
+
     count = count.max(candidates.len());
-    let section = with_workspace_failure_disclosure(
-        finish_symbol_search(candidates, count, query, language, kind, limit, app.test_scope())
-            .with_stale(stale)
-            // Any emitted language having run timed-out makes the whole
-            // list a lower bound — captured when each query ran.
-            .with_indexing(indexing),
-        &failures,
+    let shortfall = coverage_shortfall(
+        &index_vouched,
+        LiveLookup::Ran {
+            failures: &failures,
+            skipped: &skipped,
+        },
+    );
+    let section = with_coverage_disclosure(
+        with_emitted_stale(
+            finish_symbol_search(
+                candidates,
+                count,
+                query,
+                language,
+                kind,
+                limit,
+                app.test_scope(),
+                &shortfall,
+            ),
+            &stale_files,
+        )
+        // Any emitted language having run timed-out makes the whole
+        // list a lower bound — captured when each query ran.
+        .with_indexing(indexing),
+        &shortfall,
         query,
-        route,
-        index_answered,
+        if index_consulted {
+            DisclosureRoute::IndexConsulted
+        } else {
+            DisclosureRoute::WorkspaceOnly(route)
+        },
+        &lower_bounds,
+        &Vec::from_iter(supplement_unavailable.or(index_unavailable)),
     );
     ctx.print_success(section);
     Ok(())
 }
 
-/// Empty results disclose this call's failed lookups — every language
-/// whose zero the call cannot vouch for is a coverage gap. When the index
-/// supplement answered in this same call, extractor-covered languages are
-/// answered regardless of LSP state, so only `uncovered_language_failures`
-/// qualify — the same gate and vocabulary as the index path. Otherwise the
-/// zero is workspace-only and every failure is a gap, with the remedy
-/// keyed to the route. Non-empty results stay bare, and a clean empty
-/// stays a genuine zero.
-fn with_workspace_failure_disclosure(
-    section: Section<SymbolResultOutput>,
-    failures: &[(Language, LspError)],
-    query: &str,
-    route: WorkspaceSearchRoute,
-    index_answered: bool,
-) -> Section<SymbolResultOutput> {
-    if section.count != 0 || failures.is_empty() {
-        return section;
-    }
-    if index_answered {
-        let hints = symbol_search_coverage_hints(failures);
-        if hints.is_empty() {
-            return section;
-        }
-        let next_commands = symbol_search_coverage_next_commands(query, failures);
-        return section.with_hints(hints).with_next_commands(next_commands);
-    }
-    section
-        .with_hints(workspace_symbol_failure_hints(failures))
-        .with_next_commands(workspace_symbol_failure_next_commands(
-            query, failures, route,
-        ))
-}
-
-/// Final shaping shared by both search paths: suppress low-value noise,
-/// cap emission at `limit`, and derive `truncated`/hints from the exact
-/// candidate count — never from limit saturation.
+/// Final shaping shared by every search path: suppress low-value noise,
+/// cap emission at `limit`, derive `truncated` from the exact candidate
+/// count — never from limit saturation — and publish what the answer could
+/// not cover. The shortfall is a parameter because no route may emit a
+/// result without stating it: a language missing from a partial answer is
+/// hidden better than one missing from an empty answer.
 fn finish_symbol_search(
     mut candidates: Vec<SymbolResultOutput>,
     count: usize,
@@ -384,33 +597,20 @@ fn finish_symbol_search(
     kind: Option<&str>,
     limit: usize,
     test_scope: &TestScope,
+    shortfall: &[Uncovered],
 ) -> Section<SymbolResultOutput> {
     prune_low_value_symbol_results(&mut candidates, query, limit, test_scope);
     candidates.truncate(limit);
 
     let truncated = candidates.len() < count;
-    let hints = symbol_search_hints(query, language, kind, truncated, candidates.len());
+    let hints = symbol_search_hints(query, language, kind, truncated, candidates.len(), limit);
     let next_commands = symbol_search_next_commands(&candidates, query, language);
-    // Disclose `not_indexed` only when the result is EMPTY: it explains a zero
-    // for an unindexed `--lang` ("not indexed here", not "no such symbol"). When
-    // results came back (the live LSP covered the language), the language WAS
-    // covered, so claiming a coverage gap would contradict the present items.
-    let coverage_gaps = if count == 0 {
-        index_coverage_gaps(language)
-    } else {
-        Vec::new()
-    };
     Section::with_total(candidates, count)
         .with_hints(hints)
         .with_next_commands(next_commands)
-        .with_coverage_gaps(coverage_gaps)
+        .with_coverage_gaps(shortfall.iter().copied().map(CoverageGap::from).collect())
 }
 
-/// Disclose, as a structured signal, that an explicitly requested `--lang` is
-/// outside the index's extractor set — so an empty `items` reads as "this
-/// language is not indexed" (try `search ast` / `search content`) rather than
-/// "no such symbol". Gated to an explicit language: an auto-detected language
-/// that happens to be unindexed is not a gap the agent asked about.
 /// The single language to scope an index `search_symbols` query to: `Some` only
 /// for an explicit, recognized `--lang`. An absent or unknown `--lang` leaves
 /// the query unscoped, so `--lang rust` no longer returns indexed symbols from
@@ -420,21 +620,6 @@ fn explicit_index_language(language: Option<&str>) -> Option<Language> {
     (lang != Language::Unknown).then_some(lang)
 }
 
-fn index_coverage_gaps(language: Option<&str>) -> Vec<CoverageGap> {
-    let Some(lang_str) = language else {
-        return Vec::new();
-    };
-    let lang = Language::parse_or_default(lang_str);
-    if lang != Language::Unknown && !SymbolExtractor::is_supported(lang) {
-        vec![CoverageGap {
-            language: lang.lsp_id().to_string(),
-            reason: "not_indexed".to_string(),
-        }]
-    } else {
-        Vec::new()
-    }
-}
-
 /// Workspace-symbol fan-out outcome: the ranked results plus each failed
 /// language with its error, so an empty result can disclose which
 /// languages it does not actually cover instead of swallowing them.
@@ -442,7 +627,16 @@ fn index_coverage_gaps(language: Option<&str>) -> Vec<CoverageGap> {
 /// degraded indexing — the combined result is then a lower bound.
 struct WorkspaceSymbolLookup {
     results: Vec<SymbolResultOutput>,
+    /// Distinct matches the fan-out found, before the emission cap. The
+    /// results are overfetched and then cut, so their length is what this
+    /// call chose to carry rather than what it saw; a count taken from it
+    /// would report a capped list as a complete enumeration.
+    total: usize,
     failures: Vec<(Language, LspError)>,
+    /// Languages the fan-out never asked, because enough candidates had
+    /// already been collected. Their absence from the result says nothing
+    /// about them, so they are disclosed exactly as a failure is.
+    skipped: Vec<Language>,
     /// Degradation merged across the queried languages. Every caller reaches
     /// the fan-out only for languages the index does not answer, so the
     /// server is the sole source for all of them and this is a genuine
@@ -463,7 +657,9 @@ async fn collect_workspace_symbol_results(
     if languages.is_empty() {
         return WorkspaceSymbolLookup {
             results: Vec::new(),
+            total: 0,
             failures,
+            skipped: Vec::new(),
             indexing: None,
         };
     }
@@ -482,8 +678,13 @@ async fn collect_workspace_symbol_results(
     };
     let mut seen = HashSet::new();
     let mut results = Vec::new();
+    let mut skipped: Vec<Language> = Vec::new();
 
-    for language in languages {
+    for (queried, language) in languages.iter().enumerate() {
+        if results.len() >= overfetch_limit.saturating_mul(2) {
+            skipped.extend_from_slice(&languages[queried..]);
+            break;
+        }
         let mut symbols = match app.lsp.workspace_symbols(&workspace_query, *language).await {
             Ok(symbols) => {
                 lsp_degradation.push((*language, symbols.indexing));
@@ -524,6 +725,9 @@ async fn collect_workspace_symbol_results(
         };
 
         for symbol in filtered {
+            if !answers_for(&symbol.location.file, languages) {
+                continue;
+            }
             let key = format!(
                 "{}:{}:{}:{}",
                 symbol.location.file.display(),
@@ -534,10 +738,6 @@ async fn collect_workspace_symbol_results(
             if seen.insert(key) {
                 results.push(symbol);
             }
-        }
-
-        if results.len() >= overfetch_limit.saturating_mul(2) {
-            break;
         }
     }
 
@@ -551,6 +751,7 @@ async fn collect_workspace_symbol_results(
             .then_with(|| a.location.column.cmp(&b.location.column))
     });
 
+    let total = results.len();
     let mut outputs: Vec<_> = results
         .into_iter()
         .take(overfetch_limit)
@@ -574,36 +775,67 @@ async fn collect_workspace_symbol_results(
     prune_low_value_symbol_results(&mut outputs, query, limit, app.test_scope());
     WorkspaceSymbolLookup {
         results: outputs,
+        total,
         failures,
+        skipped,
         // First marker wins — a single IndexingDegradation variant, so order
         // is immaterial.
         indexing: lsp_degradation.iter().find_map(|(_, d)| *d),
     }
 }
 
-/// The languages a symbol search still has to ask a language server about.
+/// What one source of an answer brought, in the only two terms the union
+/// depends on: whether it found anything at all, and whether the rows it
+/// found are all still in hand.
+#[derive(Clone, Copy, Debug)]
+struct Contribution {
+    found: bool,
+    cut_short: bool,
+}
+
+/// Whether the union of a live answer and an index answer can be counted or
+/// only bounded from below.
 ///
-/// A language outside the index's coverage always needs one — the index has
-/// nothing to say. A covered language needs one only when the index found
-/// nothing, because a hit is an answer while a miss is not evidence of
-/// absence: the index is authoritative for what it indexed, and a symbol
-/// written since the last build is in neither that set nor, without asking,
-/// the result. Reporting such a search as an empty result would state the
-/// symbol does not exist.
+/// A path query reaches both sources for the SAME languages, so unlike every
+/// other route their answers can name the same symbol and the union is not
+/// the sum. Deduplication settles it whenever both sets are in hand; when
+/// either was cut short the overlap is unobservable, and the larger source is
+/// then a floor under the union rather than a count of it. A source that
+/// found nothing leaves no overlap to miss, and the other's total stands.
+fn unmerged_overlap(live: Contribution, index: Contribution) -> Option<LowerBound> {
+    (live.found && index.found && (live.cut_short || index.cut_short))
+        .then_some(LowerBound::UnmergedOverlap)
+}
+
+/// Whether a workspace-symbol row belongs to the fan-out that produced it.
+/// A server answers for a workspace, not for the language it was chosen by:
+/// a TypeScript server with `allowJs` returns rows from `.js` files, and one
+/// asked about JavaScript hands back `.ts` ones. Dropping rows that belong to
+/// ANOTHER requested language is what makes the fan-out disjoint from an index
+/// answer for that language — without it the two sources can count the same
+/// symbol twice.
 ///
-/// What this deliberately does not do is route on how MANY rows came back.
-/// A specific name matches few symbols in any codebase, so a count under
-/// the limit is the normal shape of a complete answer, and paying for a
-/// live workspace query on every such search is what made the hot path slow.
-fn languages_needing_live_lookup(
-    search_languages: &[Language],
-    covered: &[Language],
-    index_found_nothing: bool,
-) -> Vec<Language> {
-    search_languages
+/// A path the extension table does not recognise (a shebang script, an
+/// extensionless entry point) is kept. What makes that safe is not that the
+/// index never holds such a FILE — a build can — but that it never holds a
+/// SYMBOL from one: symbol extraction is per language and `Language::Unknown`
+/// has no extractor, so no index row exists to double-count against. Dropping
+/// the row would discard a real answer a server gave for a file it serves.
+fn answers_for(file: &std::path::Path, languages: &[Language]) -> bool {
+    match Language::from_path(file) {
+        Language::Unknown => true,
+        language => languages.contains(&language),
+    }
+}
+
+/// The requested languages the index cannot answer for, which is also what
+/// makes the two result sets disjoint: nothing here was answered from the
+/// index, and nothing the index answered is here.
+fn languages_needing_live_lookup(requested: &[Language], vouched: &[Language]) -> Vec<Language> {
+    requested
         .iter()
         .copied()
-        .filter(|language| index_found_nothing || !covered.contains(language))
+        .filter(|language| !vouched.contains(language))
         .collect()
 }
 
@@ -638,16 +870,18 @@ async fn collect_document_path_results(
     limit: usize,
     languages: &[Language],
     seed_results: &[SymbolResultOutput],
-) -> Vec<SymbolResultOutput> {
+) -> DocumentExpansion {
     let ctx = &app.output;
     let parsed_kind = kind.map(crate::models::symbol::SymbolKind::parse_or_default);
     let leaf = workspace_query_from_pattern(query);
     if leaf.is_empty() {
-        return Vec::new();
+        return DocumentExpansion::default();
     }
 
     let mut candidate_files = Vec::new();
     let mut seen_files = HashSet::new();
+    let mut capped = false;
+    let mut undescribed = false;
 
     for result in seed_results {
         let file = app.root().join(&result.file);
@@ -656,12 +890,21 @@ async fn collect_document_path_results(
         }
     }
 
+    let mut failures = Vec::new();
+    let mut skipped = Vec::new();
     if candidate_files.len() < limit {
-        let workspace_seeds =
-            collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages)
-                .await
-                .results;
-        for result in workspace_seeds {
+        let seeds = collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages).await;
+        // The leaf requery is a fan-out like any other, and what it could not
+        // ask about is a coverage fact — discarding it here would leave the
+        // caller publishing a set of languages it never actually covered.
+        failures = seeds.failures;
+        skipped = seeds.skipped;
+        // The fan-out returns its rows already cut to its own overfetch limit
+        // while reporting the total it saw, so seeds can run out here while
+        // more existed upstream.
+        capped |= seeds.total > seeds.results.len();
+        let mut seeds = seeds.results.into_iter();
+        for result in seeds.by_ref() {
             let file = app.root().join(&result.file);
             if seen_files.insert(file.clone()) {
                 candidate_files.push(file);
@@ -670,17 +913,35 @@ async fn collect_document_path_results(
                 }
             }
         }
+        // Reaching the cap on the last seed omitted nothing. Only a seed left
+        // unread does.
+        capped |= seeds.next().is_some();
     }
 
     let mut expanded = Vec::new();
     let mut seen_symbols = HashSet::new();
-    for file in candidate_files.into_iter().take(limit * 2) {
-        let Ok(mut symbols) = app
+    for file in candidate_files {
+        let symbols = app
             .lsp
             .find_symbols(&file, FindSymbolsOptions::default().with_depth(10))
-            .await
-        else {
-            continue;
+            .await;
+        let mut symbols = match symbols {
+            Ok(symbols) => symbols,
+            // A file whose symbols the server would not give up is a gap in
+            // the language it belongs to, recorded the way every other
+            // per-language failure is rather than silently skipped. A file
+            // whose extension names no language cannot be one — a gap names a
+            // language, and `--lang unknown` is not a command anyone can run —
+            // so it shortens the widening instead.
+            Err(e) => {
+                let language = Language::from_path(&file);
+                if languages.contains(&language) {
+                    failures.push((language, e));
+                } else {
+                    undescribed = true;
+                }
+                continue;
+            }
         };
 
         crate::models::symbol::Symbol::compute_paths_for_all(&mut symbols);
@@ -721,8 +982,33 @@ async fn collect_document_path_results(
 
     sort_symbol_results(&mut expanded, query, app.test_scope());
     prune_low_value_symbol_results(&mut expanded, query, limit, app.test_scope());
+    capped |= expanded.len() > limit;
     expanded.truncate(limit);
-    expanded
+    DocumentExpansion {
+        results: expanded,
+        capped,
+        undescribed,
+        failures,
+        skipped,
+    }
+}
+
+/// What widening a path query into document symbols found, what it could not
+/// cover, and whether it had to stop before it was done.
+///
+/// The expansion is a fan-out of its own: it requeries the leaf across the
+/// same languages, so its failures and skips are coverage facts the caller has
+/// to publish. `capped` and `undescribed` are narrower and separate: rows left
+/// behind by a cap are cured by raising `--limit`, a file no server would
+/// describe is not, and only the cap makes the union with an index answer
+/// uncountable.
+#[derive(Default)]
+struct DocumentExpansion {
+    results: Vec<SymbolResultOutput>,
+    capped: bool,
+    undescribed: bool,
+    failures: Vec<(Language, LspError)>,
+    skipped: Vec<Language>,
 }
 
 fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_scope: &TestScope) {
@@ -879,6 +1165,7 @@ fn symbol_search_hints(
     kind: Option<&str>,
     truncated: bool,
     result_count: usize,
+    limit: usize,
 ) -> Vec<String> {
     symbol_lookup_hints(
         query,
@@ -887,111 +1174,8 @@ fn symbol_search_hints(
         kind.is_none(),
         truncated,
         result_count,
+        limit,
     )
-}
-
-/// Failed languages whose zero an empty result cannot vouch for: no
-/// compiled-in index extractor AND this call's workspace-symbol lookup
-/// failed. Extractor-covered languages are answered by the index
-/// regardless of LSP state, so they never qualify. Sorted by language id
-/// for deterministic output.
-fn uncovered_language_failures(failures: &[(Language, LspError)]) -> Vec<&(Language, LspError)> {
-    let mut uncovered: Vec<_> = failures
-        .iter()
-        .filter(|(language, _)| !SymbolExtractor::is_supported(*language))
-        .collect();
-    uncovered.sort_by_key(|(language, _)| language.lsp_id());
-    uncovered
-}
-
-fn symbol_search_coverage_hints(failures: &[(Language, LspError)]) -> Vec<String> {
-    let mut hints: Vec<String> = uncovered_language_failures(failures)
-        .into_iter()
-        .map(|(language, err)| {
-            format!(
-                "This zero does not cover {lang}: {lang} has no index symbol extractor and its language server is unavailable ({reason})",
-                lang = language.lsp_id(),
-                reason = coverage_reason(err)
-            )
-        })
-        .collect();
-    hints.truncate(2);
-    hints
-}
-
-fn symbol_search_coverage_next_commands(
-    query: &str,
-    failures: &[(Language, LspError)],
-) -> Vec<String> {
-    let mut commands: Vec<String> = uncovered_language_failures(failures)
-        .first()
-        .map(|(language, _)| {
-            let lang = language.lsp_id();
-            vec![
-                format!("symora search content '{query}' --lang {lang}"),
-                format!("symora doctor {lang}"),
-            ]
-        })
-        .unwrap_or_default();
-    commands.truncate(2);
-    commands
-}
-
-/// Sorted by language id for deterministic output, capped like the
-/// index-path coverage hints.
-fn workspace_symbol_failure_hints(failures: &[(Language, LspError)]) -> Vec<String> {
-    let mut sorted: Vec<_> = failures.iter().collect();
-    sorted.sort_by_key(|(language, _)| language.lsp_id());
-    let mut hints: Vec<String> = sorted
-        .into_iter()
-        .map(|(language, err)| {
-            format!(
-                "This zero does not cover {lang}: its workspace symbol lookup failed ({reason})",
-                lang = language.lsp_id(),
-                reason = coverage_reason(err)
-            )
-        })
-        .collect();
-    hints.truncate(2);
-    hints
-}
-
-/// Route-appropriate remedies for a workspace-only zero, keyed on the
-/// first failed language: a forced live lookup is cured by dropping the
-/// flag so the index can answer; an unbuilt index is cured by building it
-/// — but only for a language the extractor covers. `search index build`
-/// can never help a language with no extractor, so those steer to content
-/// search instead, like the index path's coverage commands.
-fn workspace_symbol_failure_next_commands(
-    query: &str,
-    failures: &[(Language, LspError)],
-    route: WorkspaceSearchRoute,
-) -> Vec<String> {
-    let mut sorted: Vec<_> = failures.iter().collect();
-    sorted.sort_by_key(|(language, _)| language.lsp_id());
-    let Some((language, _)) = sorted.first() else {
-        return Vec::new();
-    };
-    let lang = language.lsp_id();
-    match route {
-        WorkspaceSearchRoute::Forced => vec![
-            format!("symora search symbols '{query}'"),
-            format!("symora doctor {lang}"),
-        ],
-        WorkspaceSearchRoute::IndexNotBuilt | WorkspaceSearchRoute::PathQuery => {
-            if SymbolExtractor::is_supported(*language) {
-                vec![
-                    "symora search index build".to_string(),
-                    format!("symora doctor {lang}"),
-                ]
-            } else {
-                vec![
-                    format!("symora search content '{query}' --lang {lang}"),
-                    format!("symora doctor {lang}"),
-                ]
-            }
-        }
-    }
 }
 
 fn symbol_search_next_commands(
@@ -1042,10 +1226,53 @@ fn needs_symbol_follow_up(results: &[SymbolResultOutput]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::response::disclosure::{
+        CoverageReason, symbol_coverage_hints, symbol_coverage_next_commands,
+    };
+
+    /// A path query is the one route whose two sources answer for the same
+    /// languages, so their union is not the sum and `count` is exact only
+    /// while both sets are still in hand to deduplicate.
+    #[test]
+    fn an_overlap_is_counted_when_both_sources_are_whole_and_bounded_otherwise() {
+        let cut = Contribution {
+            found: true,
+            cut_short: true,
+        };
+        let whole = Contribution {
+            found: true,
+            cut_short: false,
+        };
+        let nothing = Contribution {
+            found: false,
+            cut_short: false,
+        };
+
+        assert_eq!(
+            unmerged_overlap(cut, cut),
+            Some(LowerBound::UnmergedOverlap)
+        );
+        assert_eq!(
+            unmerged_overlap(whole, cut),
+            Some(LowerBound::UnmergedOverlap),
+            "one whole source does not make the other's cut rows observable"
+        );
+        assert_eq!(
+            unmerged_overlap(cut, whole),
+            Some(LowerBound::UnmergedOverlap)
+        );
+        assert_eq!(unmerged_overlap(whole, whole), None);
+        assert_eq!(
+            unmerged_overlap(cut, nothing),
+            None,
+            "a source that found nothing leaves no overlap to miss"
+        );
+        assert_eq!(unmerged_overlap(nothing, cut), None);
+    }
 
     #[test]
     fn symbol_hints_are_empty_for_exact_single_result() {
-        let hints = symbol_search_hints("SearchCommand/Content", None, None, false, 1);
+        let hints = symbol_search_hints("SearchCommand/Content", None, None, false, 1, 10);
         assert!(hints.is_empty());
     }
 
@@ -1071,12 +1298,44 @@ mod tests {
             result("beta", "src/b.rs"),
             result("gamma", "src/c.rs"),
         ];
-        let section =
-            finish_symbol_search(candidates, 3, "alpha", None, None, 2, &TestScope::new());
+        let section = finish_symbol_search(
+            candidates,
+            3,
+            "alpha",
+            None,
+            None,
+            2,
+            &TestScope::new(),
+            &[],
+        );
 
         assert_eq!(section.count, 3);
         assert_eq!(section.showing, 2);
         assert!(section.truncated);
+    }
+
+    /// The disjointness the merged `count` rests on. A server chosen for one
+    /// language routinely answers for another it also handles, so a row is
+    /// kept on the language of its FILE, not on the language of the request
+    /// that produced it — otherwise a JavaScript lookup served by the
+    /// TypeScript server returns the very rows the index already counted.
+    #[test]
+    fn a_fan_out_keeps_only_files_of_the_languages_it_asked_about() {
+        use std::path::Path;
+        let asked = [Language::JavaScript];
+        assert!(answers_for(Path::new("src/b.js"), &asked));
+        assert!(!answers_for(Path::new("src/a.ts"), &asked));
+        // The language of the request never widens what its answer covers.
+        assert!(!answers_for(Path::new("src/a.ts"), &[Language::Rust]));
+        // A file no language claims is attributable to none of them.
+        assert!(
+            answers_for(Path::new("bin/deploy"), &asked),
+            "an unrecognised path is not in the index either, so keeping it cannot double-count"
+        );
+        // Both asked for, both kept — the fan-out's own domain is honored.
+        let both = [Language::TypeScript, Language::JavaScript];
+        assert!(answers_for(Path::new("src/a.ts"), &both));
+        assert!(answers_for(Path::new("src/b.js"), &both));
     }
 
     #[test]
@@ -1089,71 +1348,80 @@ mod tests {
         assert_eq!(explicit_index_language(Some("not-a-language")), None);
     }
 
+    /// The shortfall an answer publishes is the shortfall it was built
+    /// with — a route cannot emit a result without stating what it could
+    /// not cover, and that statement does not depend on the result being
+    /// empty: a language missing from a partial answer is hidden better
+    /// than one missing from an empty one.
     #[test]
-    fn coverage_gap_fires_for_explicit_unindexed_language_only() {
-        // Lua has no compiled-in index extractor, so an explicit `--lang lua`
-        // search discloses the gap; an empty result then reads as "not indexed
-        // here", not "no such symbol".
-        let gaps = index_coverage_gaps(Some("lua"));
-        assert_eq!(gaps.len(), 1);
-        assert_eq!(gaps[0].language, "lua");
-        assert_eq!(gaps[0].reason, "not_indexed");
-        // An index-covered language is no gap; an unspecified --lang asks about
-        // nothing, so it reports nothing (no over-reporting on auto-detect).
-        assert!(index_coverage_gaps(Some("rust")).is_empty());
-        assert!(index_coverage_gaps(None).is_empty());
-    }
-
-    #[test]
-    fn coverage_gap_discloses_unindexed_lang_only_on_an_empty_result() {
-        // Empty result for an unindexed `--lang`: disclose not_indexed so the
-        // zero reads as "not indexed here", not "no such symbol".
-        let empty =
-            finish_symbol_search(vec![], 0, "foo", Some("lua"), None, 10, &TestScope::new());
-        assert_eq!(empty.coverage_gaps.len(), 1);
-        assert_eq!(empty.coverage_gaps[0].reason, "not_indexed");
-
-        // Results present means the live LSP covered lua — the language WAS
-        // covered, so a coverage gap would contradict the emitted items.
-        let covered = finish_symbol_search(
-            vec![result("foo", "src/a.lua")],
+    fn a_partial_answer_publishes_its_shortfall_too() {
+        let shortfall = vec![Uncovered {
+            language: Language::Go,
+            reason: CoverageReason::ServerNotInstalled,
+        }];
+        let published = vec![CoverageGap {
+            language: "go".to_string(),
+            reason: "server_not_installed".to_string(),
+        }];
+        let partial = finish_symbol_search(
+            vec![result("foo", "src/a.rs")],
             1,
             "foo",
-            Some("lua"),
+            None,
             None,
             10,
             &TestScope::new(),
+            &shortfall,
         );
-        assert!(covered.coverage_gaps.is_empty());
+        assert_eq!(partial.coverage_gaps, published);
+
+        let empty = finish_symbol_search(
+            vec![],
+            0,
+            "foo",
+            None,
+            None,
+            10,
+            &TestScope::new(),
+            &shortfall,
+        );
+        assert_eq!(empty.coverage_gaps, published);
+
+        let complete = finish_symbol_search(
+            vec![result("foo", "src/a.rs")],
+            1,
+            "foo",
+            None,
+            None,
+            10,
+            &TestScope::new(),
+            &[],
+        );
+        assert!(complete.coverage_gaps.is_empty());
     }
 
     #[test]
     fn a_covered_language_that_matched_is_answered_from_the_index() {
         assert!(
-            languages_needing_live_lookup(
-                &[Language::Rust],
-                &[Language::Rust, Language::Go],
-                false
-            )
-            .is_empty()
+            languages_needing_live_lookup(&[Language::Rust], &[Language::Rust, Language::Go])
+                .is_empty()
         );
         // An uncovered language has no other source, matched or not.
         assert_eq!(
-            languages_needing_live_lookup(&[Language::Lua], &[Language::Rust], false),
+            languages_needing_live_lookup(&[Language::Lua], &[Language::Rust]),
             vec![Language::Lua]
         );
         // A bare query spanning both narrows to the uncovered half.
         assert_eq!(
             languages_needing_live_lookup(
                 &[Language::Rust, Language::Lua, Language::Markdown],
-                &[Language::Rust],
-                false
+                &[Language::Rust]
             ),
             vec![Language::Lua, Language::Markdown]
         );
         // A build that covered nothing leaves every language to the server.
         assert_eq!(
-            languages_needing_live_lookup(&[Language::Rust], &[], false),
+            languages_needing_live_lookup(&[Language::Rust], &[]),
             vec![Language::Rust]
         );
     }
@@ -1166,8 +1434,7 @@ mod tests {
         assert_eq!(
             languages_needing_live_lookup(
                 &[Language::Rust, Language::Go],
-                &[Language::Rust, Language::Go],
-                true
+                &vouched_by_index(&[Language::Rust, Language::Go], false)
             ),
             vec![Language::Rust, Language::Go]
         );
@@ -1176,16 +1443,73 @@ mod tests {
     #[test]
     fn finish_symbol_search_complete_results_are_not_truncated() {
         let candidates = vec![result("alpha", "src/a.rs")];
-        let section =
-            finish_symbol_search(candidates, 1, "alpha", None, None, 10, &TestScope::new());
+        let section = finish_symbol_search(
+            candidates,
+            1,
+            "alpha",
+            None,
+            None,
+            10,
+            &TestScope::new(),
+            &[],
+        );
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);
         assert!(!section.truncated);
     }
 
+    fn gaps(failures: &[(Language, LspError)], vouched: &[Language]) -> Vec<Uncovered> {
+        coverage_shortfall(
+            vouched,
+            LiveLookup::Ran {
+                failures,
+                skipped: &[],
+            },
+        )
+    }
+
+    /// A language the fan-out stopped before reaching is as unanswered as
+    /// one whose server failed: the result says nothing about it, so it
+    /// says so.
     #[test]
-    fn coverage_hint_fires_for_uncovered_language_with_failed_server() {
+    fn a_language_the_fan_out_never_asked_is_disclosed() {
+        let shortfall = coverage_shortfall(
+            &[Language::Rust],
+            LiveLookup::Ran {
+                failures: &[],
+                skipped: &[Language::Go, Language::Rust],
+            },
+        );
+        assert_eq!(shortfall.len(), 1);
+        assert_eq!(shortfall[0].language, Language::Go);
+        assert_eq!(shortfall[0].reason, CoverageReason::NotSearched);
+
+        // Every route words it and offers the remedy — the structured gap
+        // and the prose come from the same set, so neither can be alone.
+        for route in [
+            DisclosureRoute::IndexConsulted,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+        ] {
+            let section = with_coverage_disclosure(
+                Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+                &shortfall,
+                "common",
+                route,
+                &[],
+                &[],
+            );
+            assert!(section.hints[0].contains("never searched"), "{route:?}");
+            assert_eq!(
+                section.next_commands,
+                vec!["symora search symbols 'common' --lang go"],
+                "{route:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_disclosure_fires_for_an_uncovered_language_with_a_failed_server() {
         let failures = vec![(
             Language::Lua,
             LspError::ServerNotInstalled {
@@ -1193,22 +1517,26 @@ mod tests {
                 install_hint: "brew install lua-language-server".to_string(),
             },
         )];
+        let shortfall = gaps(&failures, &[Language::Rust]);
 
-        let hints = symbol_search_coverage_hints(&failures);
+        assert_eq!(shortfall.len(), 1);
+        assert_eq!(shortfall[0].language, Language::Lua);
+        assert_eq!(shortfall[0].reason, CoverageReason::ServerNotInstalled);
+
+        let hints = symbol_coverage_hints(&shortfall, DisclosureRoute::IndexConsulted);
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("lua"));
         assert!(hints[0].contains("server_not_installed"));
-
         assert_eq!(
-            symbol_search_coverage_next_commands("q", &failures),
+            symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted),
             vec!["symora search content 'q' --lang lua", "symora doctor lua"]
         );
     }
 
     #[test]
-    fn coverage_hint_silent_for_extractor_language() {
-        // Rust is index-covered: a failed server does not make its zero
-        // non-exhaustive, so no disclosure fires.
+    fn coverage_disclosure_silent_for_a_language_the_index_answered_for() {
+        // The index answered for Rust in this very call: a failed server
+        // does not make its zero non-exhaustive, so nothing is disclosed.
         let failures = vec![(
             Language::Rust,
             LspError::ServerNotInstalled {
@@ -1216,14 +1544,94 @@ mod tests {
                 install_hint: "rustup component add rust-analyzer".to_string(),
             },
         )];
-        assert!(symbol_search_coverage_hints(&failures).is_empty());
-        assert!(symbol_search_coverage_next_commands("q", &failures).is_empty());
+        let shortfall = gaps(&failures, &[Language::Rust]);
+        assert!(shortfall.is_empty());
+        assert!(symbol_coverage_hints(&shortfall, DisclosureRoute::IndexConsulted).is_empty());
+        assert!(
+            symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted)
+                .is_empty()
+        );
+    }
+
+    /// A language the binary CAN extract but this build did not index is
+    /// answered live, so a failed server leaves a gap the index cannot fill.
+    #[test]
+    fn coverage_disclosure_fires_for_an_extractor_language_outside_the_build_scope() {
+        let failures = vec![(
+            Language::Go,
+            LspError::ServerNotInstalled {
+                name: "gopls".to_string(),
+                install_hint: "go install golang.org/x/tools/gopls@latest".to_string(),
+            },
+        )];
+        let shortfall = gaps(&failures, &[Language::Rust]);
+        assert_eq!(shortfall.len(), 1);
+        assert_eq!(shortfall[0].language, Language::Go);
+        assert_eq!(
+            symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted),
+            vec!["symora search content 'q' --lang go", "symora doctor go"]
+        );
+    }
+
+    /// An index that returned nothing vouches for nothing: the live recheck
+    /// it triggers is the answer, and its failure is a gap even in a
+    /// language the build covers. Otherwise a stale index plus a dead server
+    /// would publish a confident zero.
+    #[test]
+    fn an_empty_index_answer_vouches_for_no_language() {
+        assert!(vouched_by_index(&[Language::Rust], false).is_empty());
+        assert_eq!(
+            vouched_by_index(&[Language::Rust], true),
+            vec![Language::Rust]
+        );
+
+        let failures = vec![(
+            Language::Rust,
+            LspError::ServerNotInstalled {
+                name: "rust-analyzer".to_string(),
+                install_hint: "rustup component add rust-analyzer".to_string(),
+            },
+        )];
+        let shortfall = gaps(&failures, &vouched_by_index(&[Language::Rust], false));
+        assert_eq!(shortfall.len(), 1);
+        assert_eq!(shortfall[0].language, Language::Rust);
+    }
+
+    /// A route that never asks a language server discloses what the index
+    /// does not hold — and only that. A language the index holds WAS
+    /// searched, so its lack of a match is an answer, not a gap; calling
+    /// it `not_indexed` would name a cause that is false and send the
+    /// agent to rebuild an index that is already there.
+    #[test]
+    fn an_index_only_route_discloses_only_what_the_index_lacks() {
+        let shortfall = coverage_shortfall(
+            &[Language::Rust],
+            LiveLookup::NotRun {
+                requested: &[Language::Rust, Language::Go],
+            },
+        );
+        assert_eq!(shortfall.len(), 1);
+        assert_eq!(shortfall[0].language, Language::Go);
+        assert_eq!(shortfall[0].reason, CoverageReason::NotIndexed);
+        assert!(
+            symbol_coverage_hints(&shortfall, DisclosureRoute::IndexConsulted)[0]
+                .contains("wildcard")
+        );
+
+        assert!(
+            coverage_shortfall(
+                &[Language::Rust],
+                LiveLookup::NotRun {
+                    requested: &[Language::Rust],
+                },
+            )
+            .is_empty()
+        );
     }
 
     #[test]
-    fn coverage_hint_silent_with_no_failures() {
-        assert!(symbol_search_coverage_hints(&[]).is_empty());
-        assert!(symbol_search_coverage_next_commands("q", &[]).is_empty());
+    fn coverage_disclosure_silent_with_no_failures() {
+        assert!(gaps(&[], &[Language::Rust]).is_empty());
     }
 
     fn server_failure(language: Language) -> (Language, LspError) {
@@ -1237,42 +1645,49 @@ mod tests {
     }
 
     /// A built index covering rust + the rust LSP failing + a path-like query:
-    /// the index answered in this same call, so its zero covers rust — no
-    /// coverage claim, no index-build no-op.
+    /// the index answered for rust in this same call, so its zero covers
+    /// rust — no coverage claim, no index-build no-op.
     #[test]
-    fn index_answered_route_stays_bare_for_extractor_covered_failure() {
+    fn index_answered_route_stays_bare_for_a_covered_failure() {
         let failures = vec![server_failure(Language::Rust)];
-        let section = with_workspace_failure_disclosure(
-            Section::with_total(Vec::new(), 0),
-            &failures,
+        let shortfall = gaps(&failures, &[Language::Rust]);
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &shortfall,
             "Nonexistent/missing_xyz",
-            WorkspaceSearchRoute::PathQuery,
-            true,
+            DisclosureRoute::IndexConsulted,
+            &[],
+            &[],
         );
         assert!(section.hints.is_empty());
         assert!(section.next_commands.is_empty());
     }
 
-    /// With the index answered, an extractor-less failure is a genuine
-    /// gap and gets the index path's hint/command family — never a
-    /// `search index build` that cannot cover the language.
+    /// With the index answered, a failure outside what it covered is a
+    /// genuine gap and gets the index path's hint/command family — never a
+    /// `search index build` that would not cover the language.
     #[test]
-    fn index_answered_route_steers_extractor_less_failure_to_content_search() {
+    fn index_answered_route_steers_uncovered_failure_to_content_search() {
         let failures = vec![server_failure(Language::Lua)];
-        let section = with_workspace_failure_disclosure(
-            Section::with_total(Vec::new(), 0),
-            &failures,
+        let shortfall = gaps(&failures, &[Language::Rust]);
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &shortfall,
             "Mod/handler",
-            WorkspaceSearchRoute::PathQuery,
-            true,
+            DisclosureRoute::IndexConsulted,
+            &[],
+            &[],
         );
         assert_eq!(section.hints.len(), 1);
         assert!(section.hints[0].contains("lua"));
-        assert!(section.hints[0].contains("no index symbol extractor"));
+        assert!(section.hints[0].contains("not authoritative for"));
+        // The remedy is a LITERAL text search, so the path structure a symbol
+        // query carries is stripped from it: `Mod/handler` names a container
+        // and what it holds, and no source file contains that spelling.
         assert_eq!(
             section.next_commands,
             vec![
-                "symora search content 'Mod/handler' --lang lua",
+                "symora search content 'handler' --lang lua",
                 "symora doctor lua"
             ]
         );
@@ -1281,12 +1696,13 @@ mod tests {
     #[test]
     fn index_not_built_route_steers_extractor_covered_failure_to_index_build() {
         let failures = vec![server_failure(Language::Rust)];
-        let section = with_workspace_failure_disclosure(
-            Section::with_total(Vec::new(), 0),
-            &failures,
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &gaps(&failures, &[]),
             "alpha",
-            WorkspaceSearchRoute::IndexNotBuilt,
-            false,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            &[],
+            &[],
         );
         assert_eq!(section.hints.len(), 1);
         assert!(section.hints[0].contains("rust"));
@@ -1303,12 +1719,13 @@ mod tests {
     #[test]
     fn index_not_built_route_never_suggests_index_build_for_extractor_less_language() {
         let failures = vec![server_failure(Language::Lua)];
-        let section = with_workspace_failure_disclosure(
-            Section::with_total(Vec::new(), 0),
-            &failures,
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &gaps(&failures, &[]),
             "alpha",
-            WorkspaceSearchRoute::IndexNotBuilt,
-            false,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            &[],
+            &[],
         );
         assert_eq!(section.hints.len(), 1);
         assert!(section.hints[0].contains("lua"));
@@ -1326,12 +1743,13 @@ mod tests {
     #[test]
     fn forced_route_suggests_dropping_the_flag() {
         let failures = vec![server_failure(Language::Rust)];
-        let section = with_workspace_failure_disclosure(
-            Section::with_total(Vec::new(), 0),
-            &failures,
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &gaps(&failures, &[]),
             "alpha",
-            WorkspaceSearchRoute::Forced,
-            false,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced),
+            &[],
+            &[],
         );
         assert_eq!(section.hints.len(), 1);
         assert!(section.hints[0].contains("workspace symbol lookup failed"));
@@ -1341,37 +1759,23 @@ mod tests {
         );
     }
 
+    /// A non-empty answer discloses its shortfall too. A missing language
+    /// hides better among results than in an empty list: the agent reads
+    /// the rows it got as the whole answer.
     #[test]
-    fn workspace_failure_disclosure_silent_on_empty_result_without_failures() {
-        for route in [
-            WorkspaceSearchRoute::Forced,
-            WorkspaceSearchRoute::IndexNotBuilt,
-            WorkspaceSearchRoute::PathQuery,
-        ] {
-            let section = with_workspace_failure_disclosure(
-                Section::with_total(Vec::new(), 0),
-                &[],
-                "alpha",
-                route,
-                false,
-            );
-            assert!(section.hints.is_empty());
-            assert!(section.next_commands.is_empty());
-        }
-    }
-
-    #[test]
-    fn workspace_failure_disclosure_keeps_non_empty_results_bare() {
+    fn workspace_failure_disclosure_reaches_non_empty_results() {
         let failures = vec![server_failure(Language::Rust)];
-        let section = with_workspace_failure_disclosure(
+        let section = with_coverage_disclosure(
             Section::with_total(vec![result("alpha", "src/a.rs")], 1),
-            &failures,
+            &gaps(&failures, &[]),
             "alpha",
-            WorkspaceSearchRoute::IndexNotBuilt,
-            false,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
+            &[],
+            &[],
         );
-        assert!(section.hints.is_empty());
-        assert!(section.next_commands.is_empty());
+        assert_eq!(section.hints.len(), 1);
+        assert!(section.hints[0].contains("rust"));
+        assert!(!section.next_commands.is_empty());
     }
 
     /// A workspace-symbol row must carry the same `name_path` the index and

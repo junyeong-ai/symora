@@ -1415,11 +1415,12 @@ fn unique_symbol_by_path(symbols: &[Symbol], pattern: &str, file_display: &str) 
 
 /// Find the symbol an edit target addresses, through the shared
 /// resolution functions every surface uses (`cli::utils::symbol_nav`).
-/// With a column, resolution is position-precise; without one, the line's
-/// own declaration is preferred over the enclosing block
+/// With a column, resolution is position-precise — the position must be on
+/// a symbol's declaration, never merely inside one; without a column, the
+/// line's own declaration is preferred over the enclosing block
 /// (`line_addressed_symbol`). Ambiguity and misses become structured
-/// errors the agent can act on — guessing would edit a sibling the caller
-/// didn't address.
+/// errors the agent can act on — guessing would edit a sibling or an
+/// enclosing block the caller didn't address.
 async fn find_symbol_at_location(
     app: &App,
     file: &Path,
@@ -1438,35 +1439,33 @@ async fn find_symbol_at_location(
         None => line_addressed_symbol(&symbols, line),
     };
 
+    let file_display = app.output.relative_path(file);
     match resolution {
         SymbolResolution::Match(symbol) => Ok(symbol.clone()),
-        SymbolResolution::NotFound => {
-            let file_display = app.output.relative_path(file);
-            Err(anyhow::Error::new(
-                crate::cli::OutputError::not_found(format!(
-                    "No symbol found at line {line} in {file_display}"
-                ))
-                .with_hint(format!(
-                    "List symbol paths with 'symora symbols {file_display}'"
-                )),
+        SymbolResolution::NotFound => Err(anyhow::Error::new(match column {
+            Some(col) => crate::cli::OutputError::not_found(format!(
+                "Column {col} of line {line} in {file_display} is not on a symbol's declaration"
             ))
-        }
+            .with_hint(format!(
+                "Pass the name column of the symbol to edit — 'symora symbols {file_display}' \
+                 lists them; a column-less {file_display}:{line} addresses the symbol declared \
+                 on that line, or the one enclosing it"
+            )),
+            None => crate::cli::OutputError::not_found(format!(
+                "No symbol found at line {line} in {file_display}"
+            ))
+            .with_hint(format!(
+                "List symbol paths with 'symora symbols {file_display}'"
+            )),
+        })),
         SymbolResolution::Ambiguous(declared) => {
             let names: Vec<&str> = declared.iter().map(|s| s.name.as_str()).collect();
-            let message = match column {
-                Some(col) => format!(
-                    "Line {line} declares multiple symbols ({}); column {col} \
-                     matches none of them",
-                    names.join(", "),
-                ),
-                None => format!(
+            Err(anyhow::Error::new(
+                crate::cli::OutputError::invalid(format!(
                     "Line {line} declares multiple symbols ({})",
                     names.join(", "),
-                ),
-            };
-            Err(anyhow::Error::new(
-                crate::cli::OutputError::invalid(message)
-                    .with_hint("Pass the exact column of the symbol to edit (file:line:col)"),
+                ))
+                .with_hint("Pass the exact column of the symbol to edit (file:line:col)"),
             ))
         }
     }
@@ -1556,11 +1555,17 @@ async fn pattern_edit(
     let abs_path = resolve_file_path(app, file)?;
     let doc = FileDocument::load(&abs_path, dry_run)?;
 
-    let matches = app
+    let answer = app
         .ast
         .query(pattern, language, std::slice::from_ref(&abs_path))
         .await
         .map_err(|e| anyhow::anyhow!("AST query failed: {}", e))?;
+    // The one file this edit names is the whole search domain, so a path the
+    // query could not read leaves nothing to say "no matches" about.
+    if !answer.unread_paths.is_empty() {
+        anyhow::bail!("Cannot read or parse {file} for AST replacement");
+    }
+    let matches = answer.matches;
 
     let replace_all = index.eq_ignore_ascii_case("all");
     let target_index: Option<usize> = if replace_all {
@@ -2102,20 +2107,29 @@ mod tests {
         }
     }
 
-    /// `file:line:col` semantics are untouched by the line-only rule: an
-    /// exact column resolves by range, so a column inside the impl but
-    /// before the method name still addresses the impl.
+    /// `file:line:col` is position-precise: the column must be on a symbol's
+    /// declaration. The indent before a method and a line inside its body
+    /// address nothing — resolving either to the enclosing impl would let a
+    /// destructive edit land on a block the caller never named.
     #[test]
-    fn column_addressing_keeps_position_precise_range_matching() {
+    fn column_addressing_keeps_position_precise() {
         let symbols = impl_with_method();
         match column_addressed_symbol(&symbols, 26, 12) {
             SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "new"),
             _ => panic!("the method name column must address the method"),
         }
-        match column_addressed_symbol(&symbols, 26, 1) {
+        match column_addressed_symbol(&symbols, 24, 1) {
             SymbolResolution::Match(symbol) => assert_eq!(symbol.name, "Rect"),
-            _ => panic!("column 1 falls in the impl's interior range"),
+            _ => panic!("the impl's own declaration start addresses the impl"),
         }
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 26, 1),
+            SymbolResolution::NotFound
+        ));
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 27, 9),
+            SymbolResolution::NotFound
+        ));
     }
 
     /// `impl Rect` spanning lines 24..=32 with `pub fn new` declared on

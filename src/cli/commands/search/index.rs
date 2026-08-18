@@ -3,8 +3,10 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::response::disclosure::relative_unread_paths;
 use crate::models::symbol::Language;
 use crate::services::store::IndexOptions;
+use crate::services::store::UnreadPath;
 
 use super::IndexCommand;
 
@@ -16,13 +18,19 @@ struct IndexStatusOutput {
     index_size_bytes: u64,
     last_indexed: u64,
     is_indexing: bool,
+    /// Paths the last completed build could not read — files it could not
+    /// open, directories it could not enter. Present only when there were
+    /// any: the index does not cover them even though `languages` names
+    /// their language, so a zero from one of those languages is a lower
+    /// bound. Named rather than counted, because the repair is per path —
+    /// fix their permissions and rebuild, or refresh one of them on its own.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unread_paths: Vec<String>,
     /// The languages this index answers authoritatively for — empty until a
     /// build completes. Row counts alone cannot tell a whole index from one
     /// a narrowed build or a per-file refresh left partial, and a symbol
     /// search reads as complete only for the languages listed here.
     languages: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    progress: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -32,6 +40,52 @@ struct IndexBuildOutput {
     symbol_count: usize,
     content_line_count: usize,
     index_size_bytes: u64,
+    /// Paths the build could not read — files it could not open, and
+    /// directories it could not enter — so the index does not cover them
+    /// even though its scope names their language. A build that hit any of
+    /// these also leaves deleted files' rows in place, because it can no
+    /// longer tell "gone" from "not seen". Omitted when there were none.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unread_paths: Vec<String>,
+}
+
+/// The unread paths as a response says them: relative to the project root, and
+/// as names alone — whether the walk knew one to be a file decides which
+/// languages it can be keeping rows from, which is the answer's business and
+/// not the reader's.
+fn named_unread_paths(ctx: &crate::cli::OutputContext, paths: &[UnreadPath]) -> Vec<String> {
+    relative_unread_paths(ctx, paths)
+        .into_iter()
+        .map(|unread| unread.path)
+        .collect()
+}
+
+/// The languages a build is scoped to, or `None` for every indexed language.
+///
+/// A name that resolves to no language is refused rather than dropped: what a
+/// build covers is what every later search treats as authoritative, so a typo
+/// silently narrowing the scope to nothing would leave an index that answers
+/// confident zeroes for the code it holds. The same refusal every other
+/// `--lang` gives.
+fn parse_build_languages(languages: Option<&str>) -> Result<Option<Vec<Language>>, OutputError> {
+    let Some(spec) = languages else {
+        return Ok(None);
+    };
+    let mut parsed = Vec::new();
+    for name in spec.split(',').map(str::trim) {
+        match Language::parse_or_default(name) {
+            Language::Unknown => {
+                return Err(OutputError::invalid(format!("Unknown language: {name}"))
+                    .with_hint("Run 'symora doctor' to see supported languages."));
+            }
+            language => parsed.push(language),
+        }
+    }
+    if parsed.is_empty() {
+        return Err(OutputError::invalid("--lang names no language")
+            .with_hint("Pass a comma-separated list, or omit --lang to index every language."));
+    }
+    Ok(Some(parsed))
 }
 
 pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<()> {
@@ -39,13 +93,13 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
 
     match command {
         IndexCommand::Build { force, languages } => {
-            let languages = languages.map(|s| {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(Language::parse_or_default)
-                    .collect()
-            });
+            let languages = match parse_build_languages(languages.as_deref()) {
+                Ok(languages) => languages,
+                Err(e) => {
+                    ctx.print_error(e);
+                    return Ok(());
+                }
+            };
             match app.store.index(IndexOptions { force, languages }).await {
                 Ok(stats) => ctx.print_success(IndexBuildOutput {
                     status: "completed".to_string(),
@@ -53,8 +107,9 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
                     symbol_count: stats.symbol_count,
                     content_line_count: stats.content_line_count,
                     index_size_bytes: stats.index_size_bytes,
+                    unread_paths: named_unread_paths(ctx, &stats.unread_paths),
                 }),
-                Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
+                Err(e) => ctx.print_error(OutputError::from(e)),
             }
         }
         IndexCommand::Status => match app.store.index_status().await {
@@ -65,20 +120,45 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
                 index_size_bytes: stats.index_size_bytes,
                 last_indexed: stats.last_indexed,
                 is_indexing: stats.is_indexing,
+                unread_paths: named_unread_paths(ctx, &stats.unread_paths),
                 languages: stats
                     .languages
                     .iter()
                     .map(|l| l.lsp_id().to_string())
                     .collect(),
-                progress: stats.progress,
             }),
-            Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
+            Err(e) => ctx.print_error(OutputError::from(e)),
         },
         IndexCommand::Clear => match app.store.index_clear().await {
             Ok(()) => ctx.print_success(serde_json::json!({ "cleared": true })),
-            Err(e) => ctx.print_error(OutputError::internal(e.to_string())),
+            Err(e) => ctx.print_error(OutputError::from(e)),
         },
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a build covers is what every later search treats as authoritative,
+    /// so a `--lang` that names no language must not quietly become a scope.
+    /// Dropping the name would leave a build that indexes files it then
+    /// answers for none of — a confident zero over code it holds.
+    #[test]
+    fn a_lang_that_names_no_language_is_refused_rather_than_dropped() {
+        assert_eq!(parse_build_languages(None).unwrap(), None);
+        assert_eq!(
+            parse_build_languages(Some("rust,python")).unwrap(),
+            Some(vec![Language::Rust, Language::Python])
+        );
+
+        for spec in ["bogus", "", "rust,bogus", ",", " "] {
+            assert!(
+                parse_build_languages(Some(spec)).is_err(),
+                "'{spec}' names no language and must be refused"
+            );
+        }
+    }
 }

@@ -21,9 +21,9 @@ use crate::error::LspError;
 use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, FindSymbolsOptions, FoldingRange,
-    HoverInfo, Indexed, InlayHint, PrepareRenameResult, RenameResult, SelectionRange, ServerStatus,
-    SignatureHelp, TextEdit, TypeHierarchyItem,
+    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
+    FoldingRange, HoverInfo, Indexed, InlayHint, PrepareRenameResult, RenameResult, SelectionRange,
+    ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -57,12 +57,15 @@ pub trait LspService: Send + Sync {
         column: u32,
     ) -> Result<Indexed<Vec<Location>>, LspError>;
 
+    /// The definition the server names at a position — see
+    /// [`Definition`]: a self-definition is disclosed, never presented as
+    /// a definition that goes somewhere.
     async fn goto_definition(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Location>, LspError>;
+    ) -> Result<Option<Definition>, LspError>;
 
     async fn goto_type_definition(
         &self,
@@ -107,7 +110,7 @@ pub trait LspService: Send + Sync {
         line: u32,
         column: u32,
         new_name: &str,
-    ) -> Result<RenameResult, LspError>;
+    ) -> Result<Option<RenameResult>, LspError>;
 
     async fn incoming_calls(
         &self,

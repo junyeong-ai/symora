@@ -62,7 +62,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 .collect();
 
             let target = TargetOutput::from_symbol_or_fallback(
-                analysis.target.as_ref(),
+                analysis.target(),
                 &analysis.anchor.file,
                 analysis.anchor.line,
                 analysis.anchor.column,
@@ -117,6 +117,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                     // query; disclose its degradation so a warming-index lower
                     // bound is never read as an authoritative count.
                     indexing: analysis.indexing(),
+                    incomplete: analysis.omits_input(root),
                 },
                 coverage: TestCoverageOutput {
                     count: classified.test,

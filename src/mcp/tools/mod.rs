@@ -266,7 +266,7 @@ mod tests {
     }
 
     /// The location schema is split by omitted-column semantics: symbol-level
-    /// tools snap an omitted column to the symbol on the line, position-exact
+    /// tools address the symbol on the line for an omitted column, position-exact
     /// tools resolve at the literal column. The two families share an identical
     /// `{file, line, column}` shape, so only the `column` description tells them
     /// apart — this biconditional pins each tool to its family, so a tool wired
@@ -290,12 +290,12 @@ mod tests {
         ] {
             let desc = column_desc(name);
             assert!(
-                desc.contains("does not snap"),
+                desc.contains("does not resolve to a symbol"),
                 "{name}: position-exact tool must advertise position-exact column semantics, got: {desc}",
             );
         }
 
-        // Symbol-level: an omitted column snaps to the symbol on the line.
+        // Symbol-level: an omitted column addresses the symbol on the line.
         for name in [
             "find_references",
             "find_callers",
@@ -308,7 +308,7 @@ mod tests {
             let desc = column_desc(name);
             assert!(
                 desc.contains("address the symbol on the line"),
-                "{name}: symbol-level tool must advertise symbol-snapping column semantics, got: {desc}",
+                "{name}: symbol-level tool must advertise symbol-level column semantics, got: {desc}",
             );
         }
     }

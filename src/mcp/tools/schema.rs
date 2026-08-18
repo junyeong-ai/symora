@@ -23,8 +23,8 @@ pub fn schema_object(fields: &[(&str, &str, &str)], required: &[&str]) -> Value 
 
 /// `file`/`line`/`column` location schema. The omitted-column semantics differ
 /// by tool family, so the `column` description is supplied by the caller:
-/// symbol-level tools snap to the symbol on the line, position-exact tools
-/// resolve at the literal column — see [`location_schema`] and
+/// symbol-level tools address the symbol declared on the line, position-exact
+/// tools resolve at the literal column — see [`location_schema`] and
 /// [`position_exact_location_schema`].
 fn location_schema_with(column_desc: &str) -> Value {
     schema_object(
@@ -37,23 +37,24 @@ fn location_schema_with(column_desc: &str) -> Value {
     )
 }
 
-/// Location schema for the symbol-level tools — those that snap an omitted
-/// column to the symbol declared on the line (the inverse of
+/// Location schema for the symbol-level tools — those that resolve the input
+/// to the declaration it addresses (the inverse of
 /// [`position_exact_location_schema`]).
 pub fn location_schema() -> Value {
     location_schema_with(
-        "1-indexed column for position-precise targeting; omit to address \
-         the symbol on the line",
+        "1-indexed column: on a declaration it means that symbol, elsewhere the \
+         token there (a call site resolves to the symbol called, as \
+         find_definition reads it); omit to address the symbol on the line",
     )
 }
 
 /// Location schema for the position-exact tools — those whose handler sends the
-/// literal column straight to the LSP request without snapping to a symbol, so
+/// literal column straight to the LSP request without resolving a symbol, so
 /// an omitted column resolves at the line start rather than the symbol.
 pub fn position_exact_location_schema() -> Value {
     location_schema_with(
         "1-indexed column (default: 1, the line start). Resolution is \
-         position-exact and does not snap to a symbol — pass the symbol's \
+         position-exact and does not resolve to a symbol — pass the symbol's \
          column, since the line start is often whitespace",
     )
 }
@@ -80,7 +81,8 @@ pub fn edit_target_schema() -> Value {
             (
                 "column",
                 "integer",
-                "1-indexed column for position-precise targeting. Only valid together \
+                "1-indexed column, which must be on the symbol's declaration (its keyword \
+                 through its name; a column inside a body is refused). Only valid together \
                  with line; omitted, the symbol declared on the line is targeted.",
             ),
         ],
@@ -113,6 +115,14 @@ pub fn section_output_schema(items_description: &str) -> Value {
                 "description": "Present (and true) only when index-served rows \
                                 came from files that changed on disk since \
                                 indexing — rebuild the index to refresh",
+            },
+            "incomplete": {
+                "type": "boolean",
+                "description": "Present (and true) only when count is a lower \
+                                bound rather than everything the answer's own \
+                                sources held — a path they could not be read \
+                                from, or a cap that stopped short of what they \
+                                hold. The cause leads hints",
             },
             "hints": { "type": "array", "items": { "type": "string" } },
             "next_commands": { "type": "array", "items": { "type": "string" } },
@@ -187,7 +197,7 @@ pub struct LocationInput {
     pub line: u32,
     /// Omitted addresses the symbol on the line; present targets a precise
     /// column. Kept optional so symbol-level tools (callers/callees/…) keep the
-    /// CLI's line-addressed snapping instead of being pinned to column 1.
+    /// CLI's line addressing instead of being pinned to column 1.
     #[serde(default)]
     pub column: Option<u32>,
 }

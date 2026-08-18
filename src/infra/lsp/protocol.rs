@@ -498,6 +498,13 @@ pub struct LspLocation {
     /// Range is required by LSP spec but some servers (kotlin-language-server) may omit it
     #[serde(default)]
     pub range: Range,
+    /// The origin token the server identified at the query position — a
+    /// `LocationLink`'s `originSelectionRange`, absent on plain `Location`
+    /// responses. Wire coordinates in the QUERY file; carried so a reader
+    /// can tell a definition of the token to itself from one that goes
+    /// somewhere. Never (de)serialized — it exists only past parsing.
+    #[serde(skip)]
+    pub origin: Option<Range>,
 }
 
 /// LocationLink - used by some LSP servers (rust-analyzer) for definition responses
@@ -521,6 +528,7 @@ impl LocationLink {
         LspLocation {
             uri: self.target_uri.clone(),
             range: self.target_selection_range.clone(),
+            origin: self.origin_selection_range.clone(),
         }
     }
 }

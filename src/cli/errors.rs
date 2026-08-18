@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, LspError, ProjectError, SearchError, StoreError};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     NotFound,
@@ -17,10 +17,12 @@ pub enum ErrorCode {
     ParseError,
     StoreNotInitialized,
     AlreadyExists,
-    /// A computed or asserted edit range no longer matches the on-disk file:
-    /// the analysis ran against a different (stale) revision. Agents branch
-    /// on this to re-read the file and retry, rather than treating it as a
-    /// generic internal failure.
+    /// What the command needs moved or is held by someone else: an edit
+    /// range that no longer matches the on-disk file (the analysis ran
+    /// against a stale revision), or an index another process is rebuilding.
+    /// Agents branch on this to retry — re-reading first, where the state
+    /// is a file revision — rather than treating it as a generic internal
+    /// failure.
     Conflict,
     /// An asserted precondition on a mutating command is unmet or could not
     /// be verified (e.g. `--expect-no-references` on `edit delete`). Unlike
@@ -128,6 +130,10 @@ impl From<LspError> for OutputError {
             LspError::NotConnected => {
                 Self::new(ErrorCode::LspUnavailable, message).with_hint("Try: symora daemon start")
             }
+            // The answer was lost, not refused: the same request against the
+            // daemon that replaced this one succeeds.
+            LspError::ConnectionLost(_) => Self::new(ErrorCode::LspUnavailable, message)
+                .with_hint("The daemon was stopping or being replaced — retry."),
             LspError::Timeout(_) => Self::new(ErrorCode::Timeout, message),
             // Same recovery contract as a timeout — the answer arrives once
             // the server warms up — so it shares the retryable code.
@@ -137,6 +143,7 @@ impl From<LspError> for OutputError {
             LspError::FileTooLarge { .. } => Self::new(ErrorCode::FileTooLarge, message),
             LspError::ServerError { code, message: m } => classify_server_error(code, &m, message),
             LspError::Protocol(_) => Self::new(ErrorCode::Internal, message),
+            LspError::UnsupportedEdit(_) => Self::new(ErrorCode::Unsupported, message),
             LspError::Io(_) => Self::new(ErrorCode::Io, message),
             LspError::Json(_) => Self::new(ErrorCode::ParseError, message),
         }
@@ -221,13 +228,17 @@ impl From<StoreError> for OutputError {
         match err {
             StoreError::NotInitialized => Self::new(ErrorCode::StoreNotInitialized, message)
                 .with_hint("Run: symora search index build"),
-            StoreError::AlreadyIndexing => {
-                Self::new(ErrorCode::Internal, message).with_hint("Wait a moment and retry.")
+            StoreError::AlreadyIndexing | StoreError::Busy | StoreError::Rebuilding => {
+                Self::new(ErrorCode::Conflict, message).with_hint("Wait a moment and retry.")
             }
-            StoreError::Database(_) | StoreError::SchemaMismatch { .. } => {
-                Self::new(ErrorCode::Internal, message)
-            }
+            StoreError::Database(_)
+            | StoreError::SchemaMismatch { .. }
+            | StoreError::Corrupt(_) => Self::new(ErrorCode::Internal, message),
+            StoreError::EmptyScope => Self::new(ErrorCode::InvalidArgument, message).with_hint(
+                "Name at least one language, or omit --lang to cover every indexed one.",
+            ),
             StoreError::Io(_) => Self::new(ErrorCode::Io, message),
+            StoreError::Unreachable(err) => Self::from(*err),
         }
     }
 }
@@ -310,6 +321,16 @@ impl From<serde_json::Error> for OutputError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server answered well; symora declines to apply the answer's shape.
+    /// That is `unsupported` — the agent picks another route — never
+    /// `internal`, which reads as a broken tool.
+    #[test]
+    fn unsupported_edit_maps_to_unsupported() {
+        let err: OutputError = LspError::UnsupportedEdit("command-only action".into()).into();
+        assert!(matches!(err.code, ErrorCode::Unsupported));
+        assert_eq!(err.message, "command-only action");
+    }
 
     #[test]
     fn lsp_error_maps_to_install_hint() {

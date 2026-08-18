@@ -1,6 +1,6 @@
 //! AST Query Service
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -23,6 +23,65 @@ pub struct AstMatch {
     pub captures: Vec<(String, String)>,
 }
 
+/// The roots to search, given what the caller asked for.
+///
+/// Every named path is a root of its own, because naming one is what reaches
+/// a corner the ignore policy excludes: a directory walked as a root applies
+/// that policy relative to ITSELF, so `--path build` searches a `build/` the
+/// project ignores. Dropping it because another argument contains it would
+/// make the same argument mean different things depending on what stands
+/// beside it, and answer a smaller domain than the caller named without
+/// saying so.
+///
+/// What overlap must not do is count twice, and that is settled per FILE (see
+/// `query`) rather than by discarding a root. Resolving to canonical paths is
+/// what makes both possible: it collapses spellings of one path into one, and
+/// gives the walk absolute names a later file can be compared against. A path
+/// that will not resolve is counted as unread here, because it is a path the
+/// search could not read.
+fn search_roots(paths: &[PathBuf], unread: &mut Vec<PathBuf>) -> Vec<PathBuf> {
+    // Deduplicate what was ASKED FOR before resolving it, so a path repeated
+    // verbatim is one path even when it does not resolve. Two different
+    // spellings of the same unresolvable path stay two: nothing can tell them
+    // apart, precisely because nothing can resolve them.
+    let mut given: Vec<&PathBuf> = paths.iter().collect();
+    given.sort();
+    given.dedup();
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for path in given {
+        match std::fs::canonicalize(path) {
+            Ok(path) => roots.push(path),
+            Err(e) => {
+                if crate::infra::hides_content(&e) {
+                    unread.push(path.clone());
+                }
+            }
+        }
+    }
+    // `Ord for Path` compares components, not bytes, so the order is
+    // structural rather than by spelling, and an ancestor precedes what it
+    // contains — which keeps the emitted matches in one order however the
+    // arguments were given.
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// A query's answer: the matches, and how many paths it could not search.
+///
+/// A pattern search over a tree is only exact over the files it actually read,
+/// so the two travel together — a caller publishing `matches.len()` as the
+/// count has to know whether it is the whole one. A file excluded by the
+/// configured size cap is not counted here: that is a stated policy with a
+/// user-facing knob (`search.max_file_size_mb`), the same way a binary file is
+/// outside a content search's domain. Only failures are.
+#[derive(Debug, Default)]
+pub struct AstAnswer {
+    pub matches: Vec<AstMatch>,
+    pub unread_paths: Vec<std::path::PathBuf>,
+}
+
 #[async_trait]
 pub trait AstQueryService: Send + Sync {
     async fn query(
@@ -30,7 +89,7 @@ pub trait AstQueryService: Send + Sync {
         pattern: &str,
         language: SymbolLanguage,
         paths: &[PathBuf],
-    ) -> Result<Vec<AstMatch>, SearchError>;
+    ) -> Result<AstAnswer, SearchError>;
 }
 
 struct ParserEntry {
@@ -236,6 +295,50 @@ impl DefaultAstQueryService {
 
         Ok(results)
     }
+    /// Search one file, once, recording what the answer ends up short of.
+    ///
+    /// An explicit path and one the walk found reach this the same way, so the
+    /// two cannot draw the domain differently: a file over the size cap is
+    /// outside the search rather than a hole in it, while a read that fails
+    /// leaves what the file holds unknown and shortens the answer. `searched`
+    /// is what keeps overlapping roots from matching one file twice.
+    async fn search_one(
+        &self,
+        path: &Path,
+        query: &Query,
+        language: SymbolLanguage,
+        searched: &mut HashSet<PathBuf>,
+        answer: &mut AstAnswer,
+    ) {
+        if !searched.insert(path.to_path_buf()) {
+            return;
+        }
+        if let Ok(meta) = tokio::fs::metadata(path).await
+            && meta.len() > self.max_file_size_bytes
+        {
+            tracing::warn!(
+                "Skipping large file ({}MB): {}",
+                meta.len() / 1024 / 1024,
+                path.display()
+            );
+            return;
+        }
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => match self.search_file(path, &content, query, language) {
+                Ok(matches) => answer.matches.extend(matches),
+                Err(e) => {
+                    answer.unread_paths.push(path.to_path_buf());
+                    tracing::debug!("Search failed {}: {}", path.display(), e);
+                }
+            },
+            Err(e) => {
+                if crate::infra::hides_text(&e) {
+                    answer.unread_paths.push(path.to_path_buf());
+                }
+                tracing::debug!("Cannot read {}: {}", path.display(), e);
+            }
+        }
+    }
 }
 
 /// Convert a tree-sitter position (0-indexed byte column within a line) to
@@ -264,7 +367,7 @@ impl AstQueryService for DefaultAstQueryService {
         pattern: &str,
         language: SymbolLanguage,
         paths: &[PathBuf],
-    ) -> Result<Vec<AstMatch>, SearchError> {
+    ) -> Result<AstAnswer, SearchError> {
         let entry = self
             .parsers
             .get(&language)
@@ -279,70 +382,255 @@ impl AstQueryService for DefaultAstQueryService {
         let query = Query::new(&entry.ts_language, &pattern_with_capture)
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
 
-        let mut all_results = Vec::new();
+        let mut answer = AstAnswer::default();
         let extensions: Vec<&str> = language.extensions().to_vec();
+        // Roots can overlap — `--path pkg --path pkg/inner`, or a directory
+        // spelled two ways — and a file reached from two of them would be
+        // matched twice. `count` is the number of matches found, so that is
+        // wrong in the output before it is wasted work. Canonical names make
+        // one file one entry however it was reached.
+        let mut searched: HashSet<PathBuf> = HashSet::new();
 
-        let max_size = self.max_file_size_bytes;
-
-        for path in paths {
-            if path.is_file() {
+        for path in search_roots(paths, &mut answer.unread_paths) {
+            let path = path.as_path();
+            // A metadata error makes both predicates false, so an explicit
+            // path the query could not stat would otherwise fall through
+            // every branch and leave an unqualified zero behind — unless the
+            // path went away between the walk and the stat, which leaves
+            // nothing for the answer to be short of.
+            let metadata = match std::fs::metadata(path) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    if crate::infra::hides_content(&e) {
+                        answer.unread_paths.push(path.to_path_buf());
+                    }
+                    continue;
+                }
+            };
+            if metadata.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str())
                     && extensions.contains(&ext)
                 {
-                    if let Ok(meta) = tokio::fs::metadata(path).await
-                        && meta.len() > max_size
-                    {
-                        tracing::warn!(
-                            "Skipping large file ({}MB): {}",
-                            meta.len() / 1024 / 1024,
-                            path.display()
-                        );
-                        continue;
-                    }
-                    match tokio::fs::read_to_string(path).await {
-                        Ok(content) => match self.search_file(path, &content, &query, language) {
-                            Ok(matches) => all_results.extend(matches),
-                            Err(e) => tracing::debug!("Search failed {}: {}", path.display(), e),
-                        },
-                        Err(e) => tracing::debug!("Cannot read {}: {}", path.display(), e),
-                    }
+                    self.search_one(path, &query, language, &mut searched, &mut answer)
+                        .await;
                 }
-            } else if path.is_dir() {
+            } else if metadata.is_dir() {
                 let filter = FileFilter::new(path);
-                let files = filter.discover_files(&extensions);
+                let discovery = filter.discover_files(&extensions);
+                answer.unread_paths.extend(discovery.unreadable);
 
-                for file_path in files {
-                    if let Ok(meta) = tokio::fs::metadata(&file_path).await
-                        && meta.len() > max_size
-                    {
-                        tracing::warn!(
-                            "Skipping large file ({}MB): {}",
-                            meta.len() / 1024 / 1024,
-                            file_path.display()
-                        );
-                        continue;
-                    }
-                    match tokio::fs::read_to_string(&file_path).await {
-                        Ok(content) => {
-                            match self.search_file(&file_path, &content, &query, language) {
-                                Ok(matches) => all_results.extend(matches),
-                                Err(e) => {
-                                    tracing::debug!("Search failed {}: {}", file_path.display(), e)
-                                }
-                            }
-                        }
-                        Err(e) => tracing::debug!("Cannot read {}: {}", file_path.display(), e),
-                    }
+                for file_path in discovery.files {
+                    self.search_one(&file_path, &query, language, &mut searched, &mut answer)
+                        .await;
                 }
             }
         }
 
-        Ok(all_results)
+        // One total order over the matches, because the emitted page is a
+        // prefix of them: a walk hands back whatever order the filesystem
+        // stored a directory in, so without this `--limit 5` means a different
+        // five on another machine, and a different five here as soon as an
+        // unrelated file is added. By file, then by position — which is also
+        // the order a reader expects to read them in.
+        answer.matches.sort_by(|a, b| {
+            a.file
+                .cmp(&b.file)
+                .then_with(|| (a.start_line, a.start_column).cmp(&(b.start_line, b.start_column)))
+                .then_with(|| (a.end_line, a.end_column).cmp(&(b.end_line, b.end_column)))
+        });
+        // Two roots that both reach a directory nobody can enter each report
+        // it, and one hole is one hole.
+        answer.unread_paths.sort();
+        answer.unread_paths.dedup();
+        Ok(answer)
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// A named path is a root of its own — that is what reaches a corner the
+    /// ignore policy excludes — so none is dropped for standing under another.
+    /// Overlap is settled per file instead, because `count` is the number of
+    /// matches found and one file matched twice is wrong in the output before
+    /// it is wasted work.
+    #[test]
+    fn every_named_path_is_a_root_and_no_file_is_searched_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("pkg/inner")).unwrap();
+        std::fs::write(root.join("pkg/inner/a.rs"), "fn a() {}\n").unwrap();
+
+        let mut unread = Vec::new();
+        let roots = search_roots(
+            &[
+                root.join("pkg"),
+                root.join("pkg/inner"),
+                root.join("./pkg"),
+                root.join("pkg/inner/a.rs"),
+            ],
+            &mut unread,
+        );
+        assert_eq!(
+            roots.len(),
+            3,
+            "one spelling each, and a nested name is still its own root: {roots:?}"
+        );
+        assert!(roots[0].ends_with("pkg"), "an ancestor leads: {roots:?}");
+        assert!(unread.is_empty());
+
+        // The file under both of them is matched once, not once per root.
+        let service = DefaultAstQueryService::default();
+        let answer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(service.query(
+                "(function_item) @f",
+                SymbolLanguage::Rust,
+                &[
+                    root.join("pkg"),
+                    root.join("pkg/inner"),
+                    root.join("pkg/inner/a.rs"),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(answer.matches.len(), 1, "one file, one match: {answer:?}");
+
+        // Two trees that do not contain each other stay two, and a name that
+        // shares a prefix without being under it is not swallowed.
+        std::fs::create_dir_all(root.join("pkgtools")).unwrap();
+        let mut unread = Vec::new();
+        let roots = search_roots(&[root.join("pkg"), root.join("pkgtools")], &mut unread);
+        assert_eq!(roots.len(), 2, "{roots:?}");
+
+        // A path that is simply not there settles the domain: the caller is
+        // told so before the walk starts, and one that vanishes after holds
+        // nothing for the answer to be short of.
+        let mut unread = Vec::new();
+        let roots = search_roots(&[root.join("nope")], &mut unread);
+        assert!(roots.is_empty());
+        assert!(unread.is_empty());
+
+        // A path the walk cannot resolve MIGHT hold matches, so it is the
+        // shortfall it looks like — and one asked for twice is still one path.
+        use std::os::unix::fs::PermissionsExt;
+        let blocked = root.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("b.rs"), "fn b() {}\n").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let hidden = blocked.join("b.rs");
+
+        // Probed against the tree, never read off the value under test: a guard
+        // that consults the answer would take a defect for the environment.
+        let mode_bites = std::fs::read_to_string(&hidden).is_err();
+
+        let mut unread = Vec::new();
+        search_roots(std::slice::from_ref(&hidden), &mut unread);
+        let mut twice = Vec::new();
+        search_roots(&[hidden.clone(), hidden], &mut twice);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if mode_bites {
+            assert_eq!(unread.len(), 1);
+            assert_eq!(twice.len(), 1, "one path asked for twice is one path");
+        }
+    }
+
+    /// A capped page is a prefix, so the order it is a prefix OF has to be the
+    /// answer's own and not the filesystem's. Directory read order is neither
+    /// alphabetical nor stable across machines, which would make `--limit N`
+    /// mean a different N in each place the same repository is checked out.
+    #[test]
+    fn matches_are_emitted_in_one_order_whatever_order_the_walk_found_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = root.as_path();
+        // Created out of alphabetical order on purpose.
+        for name in ["c", "a", "b"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(
+                root.join(name).join("x.rs"),
+                format!("fn {name}1() {{}}\nfn {name}2() {{}}\n"),
+            )
+            .unwrap();
+        }
+
+        let service = DefaultAstQueryService::default();
+        let answer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(service.query(
+                "(function_item) @f",
+                SymbolLanguage::Rust,
+                &[root.to_path_buf()],
+            ))
+            .unwrap();
+
+        let emitted: Vec<(String, u32)> = answer
+            .matches
+            .iter()
+            .map(|m| {
+                (
+                    m.file.strip_prefix(root).unwrap().display().to_string(),
+                    m.start_line,
+                )
+            })
+            .collect();
+        let mut expected = emitted.clone();
+        expected.sort();
+        assert_eq!(emitted, expected, "by file, then by position");
+    }
+
+    /// Naming a path the project ignores is how a caller reaches it, and that
+    /// cannot depend on what else was named: dropping it because another
+    /// argument contains it answers a smaller domain than was asked for and
+    /// says nothing about having done so.
+    #[test]
+    fn a_named_path_the_ignore_policy_excludes_is_searched_beside_its_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("generated")).unwrap();
+        std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+        std::fs::write(root.join("src/kept.rs"), "fn kept() {}\n").unwrap();
+        std::fs::write(root.join("generated/g.rs"), "fn generated() {}\n").unwrap();
+
+        let service = DefaultAstQueryService::default();
+        let run = |paths: Vec<PathBuf>| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(service.query("(function_item) @f", SymbolLanguage::Rust, &paths))
+                .unwrap()
+        };
+
+        let alone = run(vec![root.join("generated")]);
+        assert_eq!(
+            alone.matches.len(),
+            1,
+            "naming an ignored directory is what reaches it: {alone:?}"
+        );
+
+        let beside = run(vec![root.join("."), root.join("generated")]);
+        let files: Vec<String> = beside
+            .matches
+            .iter()
+            .map(|m| m.file.display().to_string())
+            .collect();
+        assert!(
+            files.iter().any(|f| f.ends_with("generated/g.rs")),
+            "an ancestor standing beside it must not swallow it: {files:?}"
+        );
+        assert!(
+            files.iter().any(|f| f.ends_with("src/kept.rs")),
+            "{files:?}"
+        );
+        assert_eq!(files.len(), 2, "and neither is counted twice: {files:?}");
+    }
+
     use super::*;
 
     #[test]

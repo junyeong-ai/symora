@@ -8,7 +8,9 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::cli::response::disclosure::{as_paths, relative_paths};
 use crate::cli::response::{Section, SymbolOutput};
+use crate::cli::symbol_discovery::is_code_language;
 use crate::cli::utils::extract_signature;
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
@@ -79,6 +81,14 @@ struct FileRecord {
 #[derive(Debug, Serialize)]
 struct MapSummaryOutput {
     root: String,
+    /// Present (true) only when the walk could not read part of the tree, so
+    /// every count below — and the language list itself — is a lower bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+    /// The paths that flag stands for, so the shortfall can be checked rather
+    /// than only noted.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unread_paths: Vec<String>,
     total_files: usize,
     code_files: usize,
     support_files: usize,
@@ -123,6 +133,19 @@ struct MapFileOutput {
     file: String,
     language: String,
     test_file: bool,
+    /// Present (true) only when the walk could not read somewhere those lists
+    /// draw from, so `siblings` and `counterpart_files` — read as "this file
+    /// has no others beside it" and "this file has no test" — are a lower
+    /// bound. They enumerate rather than rank, which is what makes their
+    /// emptiness a claim the walk has to have earned. `siblings` asks about
+    /// one directory; `counterpart_files` searches the whole project, so a
+    /// hole anywhere bounds it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+    /// The paths that flag stands for, so the shortfall can be checked rather
+    /// than only noted.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unread_paths: Vec<String>,
     focus_symbols: Vec<FocusSymbolOutput>,
     siblings: Vec<String>,
     counterpart_files: Vec<String>,
@@ -132,6 +155,14 @@ struct MapFileOutput {
 
 #[derive(Debug, Serialize)]
 struct MapDirOutput {
+    /// Present (true) only when the walk could not read part of the tree, so
+    /// the counts below are a lower bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incomplete: bool,
+    /// The paths that flag stands for, scoped to this directory as the flag
+    /// is, so the shortfall can be checked rather than only noted.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    unread_paths: Vec<String>,
     path: String,
     file_count: usize,
     test_files: usize,
@@ -196,7 +227,9 @@ pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
 
 async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     let ctx = &app.output;
-    let records = scan_project_files(app);
+    let scan = scan_project_files(app);
+    let unread_paths = scan.unread_at(ctx, app.root());
+    let records = scan.records;
     let code_records: Vec<_> = records
         .iter()
         .filter(|record| is_code_language(record.language))
@@ -255,6 +288,8 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
 
     let response = MapSummaryOutput {
         root: ctx.root().display().to_string(),
+        incomplete: !unread_paths.is_empty(),
+        unread_paths,
         total_files: records.len(),
         code_files: code_records.len(),
         support_files: records.len().saturating_sub(code_records.len()),
@@ -272,12 +307,16 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
 
 async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -> Result<()> {
     let ctx = &app.output;
-    let records = scan_project_files(app);
+    let scan = scan_project_files(app);
+    let unread_paths = scan.unread_at(ctx, app.root());
+    let records = scan.records.clone();
     let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(OutputError::not_found(format!(
-            "File not found in project: {}",
-            path
-        )));
+        ctx.print_error(
+            scan.unreachable_target(app.root(), path)
+                .unwrap_or_else(|| {
+                    OutputError::not_found(format!("File not found in project: {path}"))
+                }),
+        );
         return Ok(());
     };
 
@@ -291,6 +330,8 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
             file,
             language: target.language.lsp_id().to_string(),
             test_file: target.is_test,
+            incomplete: !unread_paths.is_empty(),
+            unread_paths,
             focus_symbols: Vec::new(),
             siblings: records
                 .iter()
@@ -368,6 +409,8 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         file: target.rel_path,
         language: target.language.lsp_id().to_string(),
         test_file: target.is_test,
+        incomplete: !unread_paths.is_empty(),
+        unread_paths,
         focus_symbols,
         siblings,
         counterpart_files,
@@ -379,14 +422,32 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
 
 async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
     let ctx = &app.output;
-    let records = scan_project_files(app);
+    let scan = scan_project_files(app);
     let dir = normalize_dir_arg(path);
 
-    let records_in_dir: Vec<_> = records
+    let records_in_dir: Vec<_> = scan
+        .records
         .iter()
         .filter(|r| is_under_dir(&r.rel_path, &dir))
         .cloned()
         .collect();
+
+    // "No source files here" is a claim about the directory, and a walk that
+    // could not enter part of it never learned that. Saying so would turn a
+    // permission problem into a fact about the code.
+    if records_in_dir.is_empty() && scan.missed_anything_at(&app.root().join(&dir)) {
+        ctx.print_error(
+            OutputError::new(
+                crate::cli::errors::ErrorCode::Io,
+                format!(
+                "Directory could not be read whole, so it has no readable source files to list: {}",
+                    if dir.is_empty() { "." } else { &dir }
+                ),
+            )
+            .with_hint("Check the permissions on that directory and retry."),
+        );
+        return Ok(());
+    }
 
     if records_in_dir.is_empty() {
         ctx.print_error(OutputError::not_found(format!(
@@ -453,7 +514,10 @@ async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
     files.sort_by(|a, b| a.path.cmp(&b.path));
     files.truncate(limit);
 
+    let unread_paths = scan.unread_at(ctx, &app.root().join(&dir));
     ctx.print_success(MapDirOutput {
+        incomplete: !unread_paths.is_empty(),
+        unread_paths,
         path: if dir.is_empty() { ".".to_string() } else { dir },
         file_count: records_in_dir.len(),
         test_files: records_in_dir.iter().filter(|r| r.is_test).count(),
@@ -466,12 +530,15 @@ async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
 
 async fn execute_related(app: &App, path: &str, limit: usize) -> Result<()> {
     let ctx = &app.output;
-    let records = scan_project_files(app);
+    let scan = scan_project_files(app);
+    let records = scan.records.clone();
     let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(OutputError::not_found(format!(
-            "File not found in project: {}",
-            path
-        )));
+        ctx.print_error(
+            scan.unreachable_target(app.root(), path)
+                .unwrap_or_else(|| {
+                    OutputError::not_found(format!("File not found in project: {path}"))
+                }),
+        );
         return Ok(());
     };
 
@@ -482,19 +549,81 @@ async fn execute_related(app: &App, path: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn scan_project_files(app: &App) -> Vec<FileRecord> {
+fn scan_project_files(app: &App) -> ProjectScan {
     let extensions: Vec<&str> = Language::all()
         .into_iter()
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
     let filter = FileFilter::new(app.root());
-    let mut files = filter.discover_files(&extensions);
+    let discovery = filter.discover_files(&extensions);
+    let mut files = discovery.files;
     files.sort();
 
-    files
-        .into_iter()
-        .filter_map(|path| build_file_record(&path, app))
-        .collect()
+    ProjectScan {
+        records: files
+            .into_iter()
+            .filter_map(|path| build_file_record(&path, app))
+            .collect(),
+        unread_paths: discovery.unreadable,
+    }
+}
+
+/// The project as one walk saw it, and WHERE it could not read.
+///
+/// `map`'s counts are read as facts about the project — a language absent from
+/// `languages` is taken to mean the project has none — so a walk that could
+/// not enter part of the tree has to say so. Paths rather than a tally because
+/// `map dir` answers about one subtree: a count alone would mark it incomplete
+/// for a failure that happened somewhere else entirely.
+struct ProjectScan {
+    records: Vec<FileRecord>,
+    unread_paths: Vec<PathBuf>,
+}
+
+impl ProjectScan {
+    /// The walk's failures that touch `target` — in either direction. A path
+    /// it could not read may sit UNDER what was asked about, or may be the
+    /// ancestor that hides it; both mean the answer about `target` was
+    /// assembled from an incomplete view of it, and checking only one
+    /// direction leaves the other reading as a fact about the tree.
+    ///
+    /// Named rather than counted: an answer that says only "part of the tree
+    /// could not be read" leaves a reader with nowhere to check, and `map` has
+    /// no rebuild to prescribe — the paths are the whole remedy. The flag
+    /// beside them is read off this same list, so the two cannot disagree.
+    fn unread_at(&self, ctx: &crate::cli::OutputContext, target: &Path) -> Vec<String> {
+        relative_paths(
+            ctx,
+            &as_paths(
+                &self
+                    .unread_paths
+                    .iter()
+                    .filter(|unread| unread.starts_with(target) || target.starts_with(*unread))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    }
+
+    fn missed_anything_at(&self, target: &Path) -> bool {
+        self.unread_paths
+            .iter()
+            .any(|unread| unread.starts_with(target) || target.starts_with(unread))
+    }
+
+    /// The error for a path the walk never reached. "Not in this project" is a
+    /// claim about the tree, and a walk turned away from the subtree the path
+    /// lives in never learned it — the I/O failure is the answer, not the
+    /// conclusion drawn from an incomplete list.
+    fn unreachable_target(&self, root: &Path, path: &str) -> Option<OutputError> {
+        self.missed_anything_at(&root.join(path)).then(|| {
+            OutputError::new(
+                crate::cli::errors::ErrorCode::Io,
+                format!("Part of the tree holding {path} could not be read"),
+            )
+            .with_hint("Check the permissions on that path and retry.")
+        })
+    }
 }
 
 fn build_file_record(path: &Path, app: &App) -> Option<FileRecord> {
@@ -1034,13 +1163,6 @@ fn map_summary_next_commands(
     }
     commands.truncate(3);
     commands
-}
-
-fn is_code_language(language: Language) -> bool {
-    !matches!(
-        language,
-        Language::Markdown | Language::Toml | Language::Yaml
-    )
 }
 
 #[cfg(test)]

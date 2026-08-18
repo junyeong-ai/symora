@@ -21,7 +21,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
-use crate::cli::commands::common::{execute_list, snap_to_symbol_anchor};
+use crate::cli::commands::common::{anchor_of, execute_list};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput, Section};
 use crate::cli::{LocationArg, ParsedLocation};
 use crate::constants::defaults::IMPACT_MAX_DEPTH;
@@ -69,11 +69,12 @@ struct CalleesReachOutput {
     /// reachable set is a lower bound.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incomplete: bool,
-    /// The anchor (from-position) did not resolve to a verified symbol:
-    /// "not_a_symbol" (read OK, not a symbol) or "unavailable" (the symbol read
-    /// failed). Omitted when resolved. The reachable set is then not
-    /// authoritatively "no callees". One shared `*_status` vocabulary across
-    /// every surface (`AnchorResolution::as_status`).
+    /// The anchor (from-position) did not resolve to a listed symbol:
+    /// "binding" (a declaration the tree does not list; the set is exactly
+    /// its), "not_a_symbol" (read OK, denotes nothing), or "unavailable" (a
+    /// read failed). Omitted when resolved. For the last two the reachable set
+    /// is not authoritatively "no callees". One shared `*_status` vocabulary
+    /// across every surface (`AnchorResolution::as_status`).
     #[serde(skip_serializing_if = "Option::is_none")]
     anchor_status: Option<&'static str>,
 }
@@ -98,7 +99,7 @@ enum Reachability {
 /// Shortest-call-chain answer for a `--to` query.
 #[derive(Debug, Serialize)]
 struct CalleesPathOutput {
-    /// The (snapped) target the chain was sought to.
+    /// The (resolved) target the chain was sought to.
     target: LocationOutput,
     reachability: Reachability,
     /// Present (and always true) only when `reachability` is `no_static_path`:
@@ -186,15 +187,9 @@ async fn probe_outgoing(app: &App, file: &std::path::Path, line: u32, column: u3
 async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) -> Result<()> {
     let ctx = &app.output;
     let loc = loc.parse()?.to_absolute()?;
-    let anchor = snap_to_symbol_anchor(
-        app.lsp.as_ref(),
-        &loc.file,
-        loc.line,
-        loc.column_explicit.then_some(loc.column),
-    )
-    .await;
+    let anchor = anchor_of(app.lsp.as_ref(), &loc).await;
 
-    if probe_outgoing(app, &loc.file, anchor.line, anchor.column)
+    if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
         .await
         .is_err()
     {
@@ -203,7 +198,7 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
 
     let walk = call_graph::walk(
         app.lsp.as_ref(),
-        (loc.file.clone(), anchor.line, anchor.column),
+        (anchor.file.clone(), anchor.line, anchor.column),
         Direction::Outgoing,
         &WalkConfig {
             max_depth: depth,
@@ -220,7 +215,7 @@ async fn execute_reach(app: &App, loc: LocationArg, depth: u32, limit: usize) ->
         .map(|c| CallHierarchyOutput::from_item(c, ctx.root()))
         .collect();
 
-    let hints = anchor.anchor_hints(&ctx.relative_path(&loc.file), "callees");
+    let hints = anchor.anchor_hints(ctx.root(), "callees");
 
     ctx.print_success(CalleesReachOutput {
         section: Section::with_total(items, total)
@@ -241,30 +236,18 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     let loc = loc.parse()?.to_absolute()?;
     let target_loc = ParsedLocation::parse(to)?.to_absolute()?;
 
-    let anchor = snap_to_symbol_anchor(
-        app.lsp.as_ref(),
-        &loc.file,
-        loc.line,
-        loc.column_explicit.then_some(loc.column),
-    )
-    .await;
-    let target = snap_to_symbol_anchor(
-        app.lsp.as_ref(),
-        &target_loc.file,
-        target_loc.line,
-        target_loc.column_explicit.then_some(target_loc.column),
-    )
-    .await;
+    let anchor = anchor_of(app.lsp.as_ref(), &loc).await;
+    let target = anchor_of(app.lsp.as_ref(), &target_loc).await;
 
-    if probe_outgoing(app, &loc.file, anchor.line, anchor.column)
+    if probe_outgoing(app, &anchor.file, anchor.line, anchor.column)
         .await
         .is_err()
     {
         return Ok(());
     }
 
-    let anchor_key: NodeKey = (loc.file.clone(), anchor.line, anchor.column);
-    let target_key: NodeKey = (target_loc.file.clone(), target.line, target.column);
+    let anchor_key: NodeKey = (anchor.file.clone(), anchor.line, anchor.column);
+    let target_key: NodeKey = (target.file.clone(), target.line, target.column);
 
     let walk = call_graph::walk(
         app.lsp.as_ref(),
@@ -277,13 +260,18 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     )
     .await;
 
-    // Only look up a path when both endpoints snapped cleanly to a symbol. An
-    // endpoint that is not a symbol has a phantom key (it could coincidentally
-    // read as `found`); one whose symbols could not be read was never snapped to
-    // its declaration, so a path from it would not be the path the user meant.
-    // Either way the `!is_resolved()` terms below keep the verdict off the
-    // absolute `no_static_path`.
-    let chain_keys = if target.is_resolved() && anchor.is_resolved() {
+    // Two questions, two predicates. Looking a path UP needs an exact key, so
+    // a binding qualifies: the tree does not list it, but the position names
+    // it precisely. An endpoint that is not a symbol has a phantom key that
+    // could coincidentally read as `found`, and one whose symbols could not be
+    // read was never resolved to its declaration, so a path from it would not
+    // be the path the user meant.
+    //
+    // Calling the absence of a path ABSOLUTE needs more: an endpoint that is
+    // actually a node in the graph. A binding never is, so an empty answer
+    // about one says nothing about reachability, which is why the `bounded`
+    // terms below turn on `!is_resolved()` rather than on this.
+    let chain_keys = if target.is_declaration() && anchor.is_declaration() {
         walk.path_to(&anchor_key, &target_key)
     } else {
         None
@@ -333,12 +321,12 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
 
     let mut hints = anchor.verdict_hints(
         "from-position",
-        &ctx.relative_path(&loc.file),
+        ctx.root(),
         "anchor at a declaration (e.g. a search_symbols result)",
     );
     hints.extend(target.verdict_hints(
         "--to target",
-        &ctx.relative_path(&target_loc.file),
+        ctx.root(),
         "point --to at a declaration (e.g. a search_symbols result)",
     ));
 
@@ -352,7 +340,7 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     }
 
     ctx.print_success(CalleesPathOutput {
-        target: LocationOutput::from_path(&target_loc.file, target.line, target.column, ctx.root()),
+        target: LocationOutput::from_path(&target.file, target.line, target.column, ctx.root()),
         reachability,
         dynamic_dispatch_possible,
         chain,

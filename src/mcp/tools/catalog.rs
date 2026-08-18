@@ -59,10 +59,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             &[(
                 "coverage_gaps",
                 "array",
-                "Present only when an explicitly requested --lang is outside the index's \
-                 extractor set: [{language, reason: \"not_indexed\"}]. An empty items with a \
-                 coverage_gap means \"not indexed here — try search_content/AST\", not \"no \
-                 such symbol\"",
+                "Languages this answer could not vouch for: [{language, reason}], reason one of \
+                 not_indexed | server_not_installed | unavailable | timed_out | unsupported | \
+                 not_searched. Present whether items is empty or partial — a language listed \
+                 here was not covered, so its absence from items proves nothing. Reach it with \
+                 search_content/AST, or fix what the reason names",
             )],
         )),
         ToolDefinition::read_only(
@@ -127,13 +128,24 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )
         .with_output_schema(with_extra(
             section_output_schema("Reference locations: file, line, column"),
-            &[(
-                "target",
-                "object",
-                "The symbol the position resolved to: { name, kind, file, line, signature?, \
-                 anchor_status? } — anchor_status is \"not_a_symbol\" or \"unavailable\" only \
-                 when the position did not resolve to a symbol, omitted when resolved",
-            )],
+            &[
+                (
+                    "target",
+                    "object",
+                    "The symbol the position resolved to: { name, kind, file, line, signature?, \
+                     anchor_status? } — anchor_status is \"binding\" (a local or parameter \
+                     the symbol tree does not list; the list is exactly its), \
+                     \"not_a_symbol\", or \"unavailable\" only when the position did not \
+                     resolve to a listed symbol, omitted when resolved",
+                ),
+                (
+                    "incomplete",
+                    "boolean",
+                    "Present (true) only when the language server's reference set omits the \
+                     very usage the query was made from; the list and count are then a lower \
+                     bound",
+                ),
+            ],
         )),
         ToolDefinition::read_only(
             "find_callers",
@@ -206,9 +218,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 (
                     "anchor_status",
                     "string",
-                    "Present when the from-position did not resolve to a verified symbol: \
-                     \"not_a_symbol\" (read OK, not a symbol) or \"unavailable\" (the symbol \
-                     read failed); an empty set is then not authoritative (depth>1 only)",
+                    "Present when the from-position did not resolve to a listed symbol: \
+                     \"binding\" (a local or parameter; the set is exactly its), \
+                     \"not_a_symbol\" (read OK, denotes nothing) or \"unavailable\" (a read \
+                     failed); for the last two an empty set is not authoritative (depth>1 only)",
                 ),
             ],
         )),
@@ -280,15 +293,17 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             (
                 "target_status",
                 "string",
-                "Present when the `to` target did not resolve to a verified symbol: \
-                     \"not_a_symbol\" or \"unavailable\"; the verdict is not authoritative \
-                     (forced to not_reached_within_bound)",
+                "Present when the `to` target did not resolve to a listed symbol: \
+                     \"binding\" (the verdict is about that binding), \"not_a_symbol\" or \
+                     \"unavailable\" (the verdict is not authoritative, forced to \
+                     not_reached_within_bound)",
             ),
             (
                 "anchor_status",
                 "string",
-                "Present when the from-position did not resolve to a verified symbol: \
-                     \"not_a_symbol\" or \"unavailable\"; the verdict is not authoritative",
+                "Present when the from-position did not resolve to a listed symbol: \
+                     \"binding\" (the verdict is about that binding), \"not_a_symbol\" or \
+                     \"unavailable\" (the verdict is not authoritative)",
             ),
             (
                 "indexing",

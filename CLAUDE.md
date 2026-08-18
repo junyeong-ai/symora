@@ -30,6 +30,8 @@ cargo test
 
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 
+Two ways a test here passes without testing anything, both worth checking for by injecting the defect and watching it fail. A test that skips itself when the environment cannot produce the condition — most of them, since permission bits do not constrain root — must decide that by probing the environment directly (`read_dir` on the blocked path, `cfg!(feature = ...)`), never by reading the output under test; a guard that consults the answer takes a defect for the environment and passes in silence. And an assertion that a field is ABSENT must first establish the command succeeded (`json_ok`), because an `{"error": ...}` response is missing every field and satisfies it just as well.
+
 ## Anti-goals
 
 - Adding parallel command surfaces when an existing one can be extended.
