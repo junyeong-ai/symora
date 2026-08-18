@@ -1,13 +1,21 @@
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 pub const INIT_SCHEMA: &str = r#"
+-- Incremental auto-vacuum, set before the file is a WAL database and before
+-- it holds a table, which are the only moments SQLite lets it be chosen. It
+-- is what allows a rebuild to hand the pages it freed back to the filesystem
+-- at a point of its choosing; without it those pages stay allocated to the
+-- file for good, and an index rebuilt often grows without holding more.
+-- Incremental rather than FULL so the relocation is one step after a build
+-- rather than work charged to every commit during one.
+PRAGMA auto_vacuum = INCREMENTAL;
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA cache_size = -16384;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 134217728;
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,

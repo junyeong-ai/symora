@@ -751,6 +751,17 @@ impl Store {
                 tx.execute("DELETE FROM unread_paths", [])?;
                 if reindex == Reindex::FromScratch {
                     tx.execute("DELETE FROM content_lines", [])?;
+                    // The text index derives from those rows, and its delete
+                    // trigger records one removal per row — the right shape
+                    // for a file, and a whole index's worth of tombstones
+                    // when the table is emptied. Discarding it wholesale is
+                    // what leaves nothing behind: tombstones are rows like
+                    // any other, so an index cleared without this keeps most
+                    // of its size while holding nothing.
+                    tx.execute(
+                        "INSERT INTO content_lines_fts(content_lines_fts) VALUES ('delete-all')",
+                        [],
+                    )?;
                     tx.execute("DELETE FROM symbols", [])?;
                     tx.execute("DELETE FROM files", [])?;
                 }
@@ -840,6 +851,29 @@ impl Store {
 
     pub async fn checkpoint(&self) -> Result<(), StoreError> {
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE);").await
+    }
+
+    /// Hand the pages a build freed back to the filesystem. A build rewrites
+    /// the rows it deleted, and the pages in between are the store's to
+    /// return: kept, they would leave the index's size a record of how often
+    /// it was rebuilt rather than of what it holds, and the disk a rebuild
+    /// borrowed would never come back. The operation that rewrites the index
+    /// is the one that settles its storage — a per-file refresh leaves its
+    /// pages for the next build, which pays the relocation once instead of on
+    /// every edit.
+    ///
+    /// Stepped to exhaustion, because the pragma yields a row per page it
+    /// moves: run as a plain statement it gives back one page and leaves the
+    /// rest, which is the shape of a build that reclaims nothing at all.
+    async fn reclaim_free_pages(&self) -> Result<(), StoreError> {
+        self.db
+            .call(|conn| {
+                let mut reclaim = conn.prepare("PRAGMA incremental_vacuum")?;
+                let mut pages = reclaim.query([])?;
+                while pages.next()?.is_some() {}
+                Ok(())
+            })
+            .await
     }
 
     /// The index's scope, row counts, and size, read in one transaction so
@@ -1030,6 +1064,7 @@ impl Store {
         unread_paths.dedup_by(|a, b| a.path == b.path);
 
         self.publish_build(epoch, &scope, unread_paths).await?;
+        let _ = self.reclaim_free_pages().await;
         let _ = self.checkpoint().await;
         self.stats().await
     }
@@ -2400,6 +2435,140 @@ mod tests {
                 .await
                 .unwrap()
                 .stale()
+        );
+    }
+
+    /// A build rewrites the rows it deleted, and the pages in between belong
+    /// back with the filesystem. Kept, they make the index's size a record of
+    /// how many times it was rebuilt rather than of what it holds, and the
+    /// disk a rebuild borrowed never comes back — on a tree under ordinary
+    /// churn the freed pages outgrow the live ones.
+    #[tokio::test]
+    async fn a_build_hands_back_the_pages_it_freed() {
+        async fn free_pages(store: &Store) -> i64 {
+            store
+                .db
+                .call(|conn| conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)))
+                .await
+                .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for module in 0..24 {
+            let mut source = String::new();
+            for item in 0..40 {
+                source.push_str(&format!(
+                    "pub fn sample_{module}_{item}(alpha: i32) -> i32 {{ alpha + {item} }}\n"
+                ));
+            }
+            tokio::fs::write(root.join(format!("mod_{module}.rs")), source)
+                .await
+                .unwrap();
+        }
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        assert_eq!(
+            store
+                .db
+                .call(|conn| conn.query_row("PRAGMA auto_vacuum", [], |r| r.get::<_, i64>(0)))
+                .await
+                .unwrap(),
+            2,
+            "the store is created in incremental auto-vacuum mode, which is the only \
+             moment SQLite lets that be chosen"
+        );
+
+        store.index(IndexOptions::default()).await.unwrap();
+        store
+            .index(IndexOptions {
+                force: true,
+                languages: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            free_pages(&store).await,
+            0,
+            "a build leaves no page allocated to nothing"
+        );
+
+        // A zero would say nothing about a tree too small to free a page in the
+        // first place, so the same release the rebuild performs is made here by
+        // hand: it has to leave pages behind for the rebuild to have reclaimed.
+        store
+            .db
+            .call(|conn| {
+                conn.execute_batch(
+                    "DELETE FROM content_lines; DELETE FROM symbols; DELETE FROM files;",
+                )
+            })
+            .await
+            .unwrap();
+        assert!(
+            free_pages(&store).await > 0,
+            "the fixture has to be one whose rebuild frees pages"
+        );
+    }
+
+    /// Clearing an index is the one operation whose whole result is the space
+    /// it gives back. The text index is derived data whose delete trigger
+    /// records a removal per row, so emptying the table it reads leaves a
+    /// tombstone for every line — and an index that holds nothing keeps most
+    /// of the disk of one that held everything.
+    #[tokio::test]
+    async fn a_cleared_index_holds_no_more_disk_than_one_never_built() {
+        async fn pages(store: &Store) -> i64 {
+            store
+                .db
+                .call(|conn| conn.query_row("PRAGMA page_count", [], |r| r.get(0)))
+                .await
+                .unwrap()
+        }
+
+        let untouched = tempfile::tempdir().unwrap();
+        let fresh = Store::open(untouched.path(), StoreConfig::default())
+            .await
+            .unwrap();
+        let never_built = pages(&fresh).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for module in 0..24 {
+            let mut source = String::new();
+            for item in 0..40 {
+                source.push_str(&format!(
+                    "pub fn sample_{module}_{item}(alpha: i32) -> i32 {{ alpha + {item} }}\n"
+                ));
+            }
+            tokio::fs::write(root.join(format!("mod_{module}.rs")), source)
+                .await
+                .unwrap();
+        }
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(
+            pages(&store).await > never_built,
+            "the fixture has to be one whose index outgrows an empty store"
+        );
+
+        store.clear().await.unwrap();
+        assert!(
+            pages(&store).await <= never_built,
+            "a cleared index keeps no more pages than a store that never held anything"
+        );
+
+        // And what it gave back it can take again: the text index is derived,
+        // so discarding it wholesale must leave a rebuild finding everything.
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(
+            store
+                .search_content("alpha + 7", 50, &[Language::Rust])
+                .await
+                .unwrap()
+                .total,
+            24,
+            "a rebuild after a clear searches the text it re-indexed"
         );
     }
 }
