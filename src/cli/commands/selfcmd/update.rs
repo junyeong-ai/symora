@@ -8,8 +8,9 @@ use serde::Serialize;
 
 use crate::cli::utils::ui::{Step, confirm, section, step};
 use crate::services::dist::{
-    TempDir, current_target, download_release, extract_symora_archive, is_valid_version,
-    resolve_latest_version, verify_attestation, verify_sha256,
+    AttestationPolicy, TempDir, attestation_policy, current_target, download_release,
+    extract_symora_archive, have, is_valid_version, resolve_latest_version, verify_attestation,
+    verify_sha256,
 };
 
 #[derive(Args, Debug)]
@@ -27,7 +28,8 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Verify GitHub build provenance with the `gh` CLI.
+    /// Refuse to install unless GitHub build provenance is verified. Without
+    /// it, provenance is still checked whenever the `gh` CLI is installed.
     #[arg(long)]
     pub verify_attestations: bool,
 }
@@ -127,13 +129,43 @@ pub fn run_update(args: UpdateArgs, assume_yes: bool) -> Result<UpdateOutcome> {
     verify_sha256(&asset.archive)?;
     step(Step::Ok, "checksum OK");
 
-    let attestation_verified = if args.verify_attestations {
-        step(Step::Run, "verifying GitHub attestation");
-        verify_attestation(&asset.archive)?;
-        step(Step::Ok, "attestation OK");
-        true
-    } else {
-        false
+    let attestation_verified = match attestation_policy(
+        have("gh"),
+        asset.attestation.is_some(),
+        args.verify_attestations,
+    ) {
+        AttestationPolicy::Verify => {
+            step(Step::Run, "verifying GitHub attestation");
+            let bundle = asset
+                .attestation
+                .as_ref()
+                .expect("the policy saw a downloaded bundle");
+            verify_attestation(&asset.archive, bundle)?;
+            step(Step::Ok, "attestation OK");
+            true
+        }
+        AttestationPolicy::Skip => {
+            step(
+                Step::Skip,
+                "gh is not installed — provenance unverified, the download \
+                 rests on its checksum alone",
+            );
+            false
+        }
+        AttestationPolicy::ToolMissing => {
+            return Err(anyhow!(
+                "--verify-attestations requires the 'gh' CLI (https://cli.github.com)"
+            ));
+        }
+        AttestationPolicy::BundleMissing => {
+            return Err(anyhow!(
+                "release v{target_version} publishes no attestation bundle ({}), \
+                 so its provenance cannot be checked. Releases carry one from the \
+                 version that introduced it onward; install an earlier one with \
+                 scripts/install.sh if you mean to.",
+                crate::services::dist::attestation_name(&target_version)
+            ));
+        }
     };
 
     let extract_root = workspace.path().join("extract");

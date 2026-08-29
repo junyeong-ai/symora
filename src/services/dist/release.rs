@@ -17,6 +17,15 @@ pub struct ReleaseAsset {
     pub target: String,
     pub archive: PathBuf,
     pub checksum: PathBuf,
+    /// The release's attestation bundle, absent on releases published before
+    /// it was one. Verification is the caller's decision, not this one's.
+    pub attestation: Option<PathBuf>,
+}
+
+/// One bundle covers every archive in a release, so it is named for the
+/// version rather than the target.
+pub fn attestation_name(version: &str) -> String {
+    format!("symora-v{version}.attestation.jsonl")
 }
 
 /// The version a release tag names, or `None` for a tag that names none.
@@ -113,11 +122,21 @@ pub fn download_release(version: &str, target: &str, dest_dir: &Path) -> Result<
     curl_download(&format!("{archive_url}.sha256"), &checksum)
         .with_context(|| format!("downloading {archive_name}.sha256"))?;
 
+    let attestation_name = attestation_name(version);
+    let attestation = dest_dir.join(&attestation_name);
+    let attestation = curl_download(
+        &format!("{RELEASES_URL}/download/v{version}/{attestation_name}"),
+        &attestation,
+    )
+    .is_ok()
+    .then_some(attestation);
+
     Ok(ReleaseAsset {
         version: version.to_string(),
         target: target.to_string(),
         archive,
         checksum,
+        attestation,
     })
 }
 
