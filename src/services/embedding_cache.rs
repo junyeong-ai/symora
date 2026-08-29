@@ -363,8 +363,11 @@ fn encode_vector(vector: &[f32]) -> Vec<u8> {
 /// `f32` are dropped (a corrupt row simply ranks as a zero vector).
 fn decode_vector(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(f32::from_le_bytes)
         .collect()
 }
 
