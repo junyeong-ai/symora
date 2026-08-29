@@ -431,8 +431,17 @@ symora setup skill                    # skill only
 symora setup deps --group core        # dependencies only (core / core-jvm / core-web / core-systems / all)
 symora self update                    # in-place upgrade to the latest release
 symora self update --version <version>
+symora self update --verify-attestations   # refuse to install without gh
 symora self uninstall                 # remove binary + skill + config + daemon data
 ```
+
+An update always verifies the SHA-256, and when `gh` is installed it also
+verifies build provenance against the attestation bundle published with the
+release. Reading the bundle from a file means `gh` needs no login. With `gh`
+installed, a release that publishes no bundle is refused — the checksum is
+produced by whoever produced the archive, so it says nothing about origin.
+Bundles are published from the version that introduced them onward; use
+`scripts/install.sh` to install an earlier release.
 
 ---
 

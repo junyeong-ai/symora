@@ -4,6 +4,10 @@
 //! `shasum` / `gh attestation verify`. Keeping these out of the dependency
 //! tree means the binary stays focused on code intelligence and the
 //! verification path is the same one users would invoke by hand.
+//!
+//! Provenance is verified against the attestation bundle published with the
+//! release rather than the attestations API, so `gh` needs no authentication
+//! and `self update` works for anyone who has the tool installed.
 
 pub mod archive;
 pub mod paths;
@@ -17,11 +21,13 @@ pub mod verify;
 pub use archive::extract_symora_archive;
 pub use paths::{config_dir, daemon_dir, display, home, skill_dir};
 pub use process::{have, run_streaming, run_streaming_in};
-pub use release::{ReleaseAsset, download_release, is_valid_version, resolve_latest_version};
+pub use release::{
+    ReleaseAsset, attestation_name, download_release, is_valid_version, resolve_latest_version,
+};
 pub use skill::{
     SKILL_NAME, SkillOrigin, SkillSource, SkillVersionDelta, compare_skill_versions,
     prepare_skill_source, read_skill_version,
 };
 pub use target::current_target;
 pub use tempdir::TempDir;
-pub use verify::{verify_attestation, verify_sha256};
+pub use verify::{AttestationPolicy, attestation_policy, verify_attestation, verify_sha256};

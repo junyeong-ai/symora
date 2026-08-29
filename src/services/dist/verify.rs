@@ -31,21 +31,58 @@ pub fn verify_sha256(archive: &Path) -> Result<()> {
     .with_context(|| format!("checksum verification failed for {archive_name}"))
 }
 
-/// Verify GitHub build provenance with the `gh` CLI. Hard-required when the
-/// caller asks for it — this is opt-in security, so a missing `gh` or a
-/// failed attestation must abort the install.
-pub fn verify_attestation(archive: &Path) -> Result<()> {
-    if !have("gh") {
-        return Err(anyhow!(
-            "attestation verification requires the 'gh' CLI (https://cli.github.com)"
-        ));
+/// Whether provenance can and must be checked for this install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationPolicy {
+    Verify,
+    Skip,
+    ToolMissing,
+    BundleMissing,
+}
+
+/// Provenance is checked whenever `gh` can check it. Only a missing `gh`
+/// skips the step, and `--verify-attestations` refuses even that. A release
+/// whose bundle cannot be fetched is refused rather than installed unchecked:
+/// the checksum beside the archive is published by whoever published the
+/// archive.
+pub fn attestation_policy(
+    gh_installed: bool,
+    bundle_available: bool,
+    required: bool,
+) -> AttestationPolicy {
+    match (gh_installed, bundle_available, required) {
+        (false, _, true) => AttestationPolicy::ToolMissing,
+        (false, _, false) => AttestationPolicy::Skip,
+        (true, true, _) => AttestationPolicy::Verify,
+        (true, false, _) => AttestationPolicy::BundleMissing,
     }
+}
+
+/// Verify GitHub build provenance against the bundle published with the
+/// release. Reading the bundle from disk keeps this offline: the attestations
+/// API needs an authenticated `gh`, a file does not. The signer is pinned to
+/// this repository's release workflow.
+pub fn verify_attestation(archive: &Path, bundle: &Path) -> Result<()> {
     let archive_str = archive
         .to_str()
         .ok_or_else(|| anyhow!("non-UTF-8 archive path"))?;
+    let bundle_str = bundle
+        .to_str()
+        .ok_or_else(|| anyhow!("non-UTF-8 bundle path"))?;
+    let signer = format!("{REPO}/.github/workflows/release.yml");
     run_streaming(
         "gh",
-        &["attestation", "verify", archive_str, "--repo", REPO],
+        &[
+            "attestation",
+            "verify",
+            archive_str,
+            "--bundle",
+            bundle_str,
+            "--repo",
+            REPO,
+            "--signer-workflow",
+            &signer,
+        ],
     )
     .with_context(|| {
         format!(
@@ -56,4 +93,49 @@ pub fn verify_attestation(archive: &Path) -> Result<()> {
                 .unwrap_or("archive")
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provenance_is_checked_whenever_gh_can_check_it() {
+        assert_eq!(
+            attestation_policy(true, true, false),
+            AttestationPolicy::Verify
+        );
+        assert_eq!(
+            attestation_policy(true, true, true),
+            AttestationPolicy::Verify
+        );
+    }
+
+    #[test]
+    fn only_a_missing_gh_skips_the_check() {
+        assert_eq!(
+            attestation_policy(false, true, false),
+            AttestationPolicy::Skip
+        );
+        assert_eq!(
+            attestation_policy(false, false, false),
+            AttestationPolicy::Skip
+        );
+        assert_eq!(
+            attestation_policy(false, true, true),
+            AttestationPolicy::ToolMissing
+        );
+    }
+
+    #[test]
+    fn a_release_without_a_bundle_is_refused_rather_than_installed_unchecked() {
+        assert_eq!(
+            attestation_policy(true, false, false),
+            AttestationPolicy::BundleMissing
+        );
+        assert_eq!(
+            attestation_policy(true, false, true),
+            AttestationPolicy::BundleMissing
+        );
+    }
 }

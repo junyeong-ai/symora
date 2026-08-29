@@ -431,8 +431,11 @@ symora setup skill                    # 스킬만
 symora setup deps --group core        # 의존성만 (core / core-jvm / core-web / core-systems / all)
 symora self update                    # 최신 릴리스로 in-place 업그레이드
 symora self update --version <version>
+symora self update --verify-attestations   # gh 없으면 설치하지 않음
 symora self uninstall                 # 바이너리 + 스킬 + 설정 + daemon 데이터 제거
 ```
+
+업데이트는 항상 SHA-256을 검증하고, `gh`가 설치돼 있으면 릴리스와 함께 게시된 attestation 번들로 빌드 출처까지 검증합니다. 번들을 파일에서 읽으므로 `gh` 로그인이 필요 없습니다. `gh`가 있는데 번들이 없는 릴리스는 설치를 거부합니다 — 체크섬은 아카이브를 올린 쪽이 함께 만들 수 있어 출처를 증명하지 않습니다. 번들은 이를 도입한 버전부터 게시되므로, 그 이전 릴리스를 지정하려면 `scripts/install.sh`를 쓰세요.
 
 ---
 
