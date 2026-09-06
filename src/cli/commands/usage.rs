@@ -95,7 +95,7 @@ pub enum UsageFilter {
     NoDocs,
     /// Exclude symbols defined in test files
     NotTestFile,
-    /// Only show symbols with zero references (dead code detection)
+    /// Only show symbols nothing in the project references
     ZeroRefs,
 }
 
@@ -265,6 +265,31 @@ fn usage_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScope) -
 /// Hints about how the query was ASKED. What the analysis could not reach is a
 /// lower bound rather than advice, and `LowerBound::AnalysisCapped` states it
 /// once — including on the empty answer, which needs it most.
+/// What a zero leaves unsaid for the rows this filter keeps.
+///
+/// A call reaches a member through the type that declares it, and none of
+/// those name the member — so this list holds the members a type reaches as
+/// readily as the ones nothing reaches, and it is a list an agent deletes
+/// from. Read off the kinds already in hand: naming the hazard costs no
+/// further lookup, and `refs` on a row settles which kind of zero it is.
+fn member_zero_hint(items: &[UsageResult]) -> Option<String> {
+    let members = items
+        .iter()
+        .filter(|item| {
+            item.kind
+                .parse::<crate::models::symbol::SymbolKind>()
+                .is_ok_and(|kind| kind.is_member())
+        })
+        .count();
+    (members > 0).then(|| {
+        format!(
+            "{members} of these are declared in a type; a call reaches a member through the type \
+             and never names it, so their zero is not evidence that nothing reaches them — \
+             `symora refs <file>:<line>:<col>` on one says which kind of zero it is"
+        )
+    })
+}
+
 fn usage_hints(query: &str, auto_lang: bool) -> Vec<String> {
     let mut hints = Vec::new();
     if is_generic_broad_query(query) {
@@ -562,7 +587,10 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         // merely from this page.
         .chain(analyzed.map(LowerBound::AnalysisCapped))
         .collect();
-    let hints = usage_hints(&resolved.query, resolved.language_override.is_none());
+    let mut hints = usage_hints(&resolved.query, resolved.language_override.is_none());
+    if filters.contains(&UsageFilter::ZeroRefs) {
+        hints.extend(member_zero_hint(&items));
+    }
 
     let response = UsageOutput {
         query: resolved.query,
@@ -787,7 +815,7 @@ async fn fetch_single_symbol_refs(
         return (Analysed::FilteredOut, indexing);
     }
 
-    // Filter: only symbols with zero references (dead code detection)
+    // Filter: only symbols nothing in the project references
     if filters.contains(&UsageFilter::ZeroRefs) && ref_count > 0 {
         return (Analysed::FilteredOut, indexing);
     }
@@ -919,6 +947,33 @@ enum Analysed {
 
 #[cfg(test)]
 mod tests {
+    /// The zero-reference list is one an agent deletes from, so it has to say
+    /// which of its rows a type still reaches. Read off the kinds already in
+    /// hand, and silent when the list holds no member at all.
+    #[test]
+    fn a_zero_reference_list_names_the_rows_a_type_still_reaches() {
+        let row = |name: &str, kind: &str| UsageResult {
+            name: name.to_string(),
+            file: "src/lib.rs".to_string(),
+            line: 1,
+            kind: kind.to_string(),
+            signature: None,
+            metrics: None,
+            snippet: None,
+        };
+
+        let hint = member_zero_hint(&[row("build", "method"), row("helper", "function")])
+            .expect("a member is present");
+        assert!(
+            hint.starts_with("1 of these"),
+            "only the member counts: {hint}"
+        );
+        assert!(
+            member_zero_hint(&[row("helper", "function"), row("PI", "constant")]).is_none(),
+            "a list of free items needs no such qualifier"
+        );
+    }
+
     use super::*;
 
     /// A hover that could not be read leaves documentation unknown, and

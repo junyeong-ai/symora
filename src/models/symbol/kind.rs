@@ -113,6 +113,16 @@ impl SymbolKind {
     /// module-level item bare, matching the LSP workspace-symbol container
     /// (which never reports an enclosing module), so a `name_path` round-trips
     /// across the index, documentSymbol, and workspace surfaces.
+    /// Declared inside a type, so a call reaches it through that type — by
+    /// construction, dispatch, or a protocol satisfied structurally — and
+    /// never has to name it.
+    pub fn is_member(&self) -> bool {
+        matches!(
+            self,
+            Self::Method | Self::Constructor | Self::Property | Self::Field | Self::EnumMember
+        )
+    }
+
     pub fn is_namespace_like(&self) -> bool {
         matches!(self, Self::Module | Self::Namespace | Self::Package)
     }
