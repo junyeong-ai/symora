@@ -1481,3 +1481,55 @@ fn both_symbol_surfaces_order_a_query_the_same_way() {
         "one question, two orders: {searched} vs {named}"
     );
 }
+
+/// A row's published relevance is the value that ordered it, so a caller can
+/// cut a tail by number instead of guessing where the answer stops being
+/// good. Two numbers — one deciding the order, another printed beside it —
+/// let a threshold discard the very rows it was meant to keep.
+#[test]
+fn a_symbol_answer_publishes_the_relevance_it_was_ordered_by() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    // A named value spelled exactly as the query, against a type the term only
+    // opens: the ranking leads with the type, while the textual tiers alone
+    // rank the value higher. The two orders disagree, which is what a single
+    // published number has to survive.
+    std::fs::write(
+        dir.path().join("src/settings.py"),
+        "config = {}\n\n\nclass ConfigLoader:\n    def load(self):\n        pass\n",
+    )
+    .unwrap();
+    json_ok(dir.path(), &["search", "index", "build"]);
+
+    let page = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "symbols",
+            "config",
+            "--lang",
+            "python",
+            "--deterministic",
+        ],
+    );
+    let leading = page["items"][0]["name"].as_str().unwrap_or_default();
+    assert_eq!(
+        leading, "ConfigLoader",
+        "the fixture must make the two orders disagree: {page}"
+    );
+    let scores: Vec<f64> = page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|i| i["score"].as_f64())
+        .collect();
+    assert!(
+        scores.len() >= 2,
+        "the fixture matches several rows: {page}"
+    );
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "the published relevance must not climb as the answer descends: {page}"
+    );
+}

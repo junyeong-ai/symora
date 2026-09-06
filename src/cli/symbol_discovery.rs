@@ -95,6 +95,14 @@ pub fn low_signal_kind(kind: &str) -> bool {
     )
 }
 
+/// A rank as a published relevance: its share of an exact match, which is the
+/// most any match scores. Monotone in the rank, so the number a row carries
+/// and the position it holds cannot disagree.
+pub fn relevance_of(rank: i32) -> f64 {
+    let share = f64::from(rank) / f64::from(EXACT_MATCH_PRIORITY);
+    (share.clamp(0.0, 1.0) * 100.0).round() / 100.0
+}
+
 /// Where a match ranks against the others for this query.
 ///
 /// One function over every symbol surface: a second copy answering the same
@@ -190,6 +198,11 @@ pub fn is_single_file_concentration(unique_files: usize, total: usize) -> bool {
 /// coarse — exact (40) > anchored path suffix (34) > prefix (24) > substring
 /// (16) > no match (0) — so penalties and bonuses (expressed relative to these
 /// steps) can reorder within a tier without crossing it.
+/// The top of the ladder: a name spelled exactly as the query asked. Nothing
+/// scores above it — the broad-query bonus needs a name the term only appears
+/// inside — so it is what a published relevance reads as whole.
+pub const EXACT_MATCH_PRIORITY: i32 = 40;
+
 pub fn symbol_match_priority(query: &str, name: &str, path: &str) -> i32 {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
@@ -197,7 +210,7 @@ pub fn symbol_match_priority(query: &str, name: &str, path: &str) -> i32 {
     let leaf = path.rsplit('/').next().unwrap_or(&path);
 
     if leaf == q || name == q || path == q {
-        40
+        EXACT_MATCH_PRIORITY
     } else if path.ends_with(&format!("/{q}")) {
         34
     } else if name.starts_with(&q) {

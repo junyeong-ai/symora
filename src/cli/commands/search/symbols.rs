@@ -14,7 +14,7 @@ use crate::cli::response::disclosure::{
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    DetectedLanguages, RankedSymbol, candidate_budget, no_languages_error,
+    DetectedLanguages, RankedSymbol, candidate_budget, no_languages_error, relevance_of,
     resolve_search_languages, symbol_lookup_hints, symbol_rank,
 };
 use crate::error::{LspError, StoreError};
@@ -614,7 +614,7 @@ fn finish_symbol_search(
     test_scope: &TestScope,
     shortfall: &[Uncovered],
 ) -> Section<SymbolResultOutput> {
-    sort_symbol_results(&mut candidates, query, test_scope);
+    rank_symbol_results(&mut candidates, query, test_scope);
     candidates.truncate(limit);
 
     let truncated = candidates.len() < count;
@@ -786,7 +786,7 @@ async fn collect_workspace_symbol_results(
             }
         })
         .collect();
-    sort_symbol_results(&mut outputs, query, app.test_scope());
+    rank_symbol_results(&mut outputs, query, app.test_scope());
     WorkspaceSymbolLookup {
         results: outputs,
         total,
@@ -1003,7 +1003,7 @@ async fn collect_document_path_results(
         }
     }
 
-    sort_symbol_results(&mut expanded, query, app.test_scope());
+    rank_symbol_results(&mut expanded, query, app.test_scope());
     capped |= expanded.len() > limit;
     expanded.truncate(limit);
     DocumentExpansion {
@@ -1046,20 +1046,18 @@ fn rank_of(result: &SymbolResultOutput, query: &str, test_scope: &TestScope) -> 
     )
 }
 
-fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_scope: &TestScope) {
+fn rank_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_scope: &TestScope) {
     results.sort_by(|a, b| {
         rank_of(b, query, test_scope)
             .cmp(&rank_of(a, query, test_scope))
-            .then_with(|| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.line.cmp(&b.line))
             .then_with(|| a.column.cmp(&b.column))
     });
+    for result in results.iter_mut() {
+        result.score = relevance_of(rank_of(result, query, test_scope));
+    }
 }
 
 fn workspace_query_from_pattern(pattern: &str) -> String {
