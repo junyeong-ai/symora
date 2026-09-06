@@ -235,3 +235,69 @@ fn context_with_bodies_attaches_whole_type_bodies() {
         "starving the budget must not change the items themselves"
     );
 }
+
+/// An empty reference set means different things for a member and for a free
+/// item. A call reaches a member through the type that declares it —
+/// construction, dispatch, a protocol satisfied structurally — and none of
+/// those name the member, so its zero is not reachability. `Circle.__init__`
+/// is the ordinary case: the fixture builds a `Circle`, which names the class
+/// and never the constructor. A free item has no such route, so its zero
+/// stands bare rather than being qualified into uselessness.
+#[test]
+#[ignore = "requires pyright + a built fixture venv; run: cargo test --test lang_fixtures -- --ignored"]
+fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
+    if !prerequisites_ready() {
+        return;
+    }
+    let geometry = fixture_root().join("packages/core/src/fixture_core/geometry.py");
+    let at = |ident: &str, occurrence: usize| {
+        let (line, column) = find_identifier(&geometry, ident, occurrence);
+        run_in_fixture(&[
+            "refs".to_string(),
+            format!("packages/core/src/fixture_core/geometry.py:{line}:{column}"),
+        ])
+    };
+
+    let constructor = at("__init__", 1);
+    assert_eq!(
+        constructor["count"], 0,
+        "the fixture never names the constructor: {constructor}"
+    );
+    let hints = constructor["hints"].as_array().expect("hints");
+    assert!(
+        hints.iter().any(|h| {
+            h.as_str()
+                .is_some_and(|h| h.contains("Circle") && h.contains("not evidence"))
+        }),
+        "a member of a referenced type must say its zero is not reachability: {constructor}"
+    );
+
+    let free_function = at("area", 1);
+    assert!(
+        free_function["count"].as_u64().is_some_and(|n| n > 0),
+        "the fixture calls `area` across the package boundary: {free_function}"
+    );
+
+    let class = at("Circle", 1);
+    assert!(
+        class["hints"].as_array().is_none_or(|h| h
+            .iter()
+            .all(|x| !x.as_str().is_some_and(|s| s.contains("not evidence")))),
+        "a type that IS referenced needs no such qualifier: {class}"
+    );
+
+    // `impact` publishes a `risk` verdict derived from the same count, so it
+    // is the surface where an unqualified zero does the most damage.
+    let (line, column) = find_identifier(&geometry, "__init__", 1);
+    let loc = format!("packages/core/src/fixture_core/geometry.py:{line}:{column}");
+    for command in ["impact", "context"] {
+        let page = run_in_fixture(&[command.to_string(), loc.clone()]);
+        assert_eq!(page["refs"]["total"], 0, "{command}: {page}");
+        assert!(
+            page["hints"].as_array().is_some_and(|h| h
+                .iter()
+                .any(|x| x.as_str().is_some_and(|s| s.contains("Circle")))),
+            "{command} publishes the same zero and must qualify it the same way: {page}"
+        );
+    }
+}

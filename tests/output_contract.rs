@@ -629,6 +629,7 @@ fn impact_output_full() {
         12,
     );
     let out = ImpactOutput {
+        hints: Vec::new(),
         target,
         refs: RefOutput {
             total: 10,
@@ -684,6 +685,7 @@ fn impact_output_full() {
 #[test]
 fn impact_output_without_blast_radius() {
     let out = ImpactOutput {
+        hints: Vec::new(),
         target: TargetOutput::new(
             "process".to_string(),
             "function".to_string(),

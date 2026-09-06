@@ -105,6 +105,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
             );
 
             let response = ImpactOutput {
+                hints: analysis.member_reach_hint().into_iter().collect(),
                 target,
                 refs: RefOutput {
                     total: classified.total,

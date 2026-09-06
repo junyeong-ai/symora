@@ -70,6 +70,9 @@ pub struct ContextOutput {
     pub target: TargetOutput,
     /// Reference summary (pure fact)
     pub refs: RefOutput,
+    /// What the reference summary does not settle. Omitted when it settles it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
     /// Callers (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callers: Option<Section<CallHierarchyOutput>>,
@@ -247,6 +250,7 @@ async fn fetch_context(
     ContextOutput {
         target,
         refs: refs_summary,
+        hints: analysis.member_reach_hint().into_iter().collect(),
         callers,
         callees,
         types,
