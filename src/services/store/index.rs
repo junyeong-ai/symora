@@ -48,6 +48,13 @@ const META_BUILD_EPOCH: &str = "build_epoch";
 /// "nothing declares this" and one that means "nothing declared it then".
 const META_TREE_FINGERPRINT: &str = "tree_fingerprint";
 
+/// What produced the rows: the extraction queries of the binary that wrote
+/// them. A build skips a file whose bytes have not changed, so without this an
+/// index would keep serving rows an older set of queries produced — short by
+/// the declaration forms the newer set was written to reach, and saying
+/// nothing about it.
+const META_EXTRACTOR: &str = "extractor";
+
 /// How long opening a store waits for a build to release the index before
 /// giving up on replacing a database it cannot read. Long enough to cover
 /// an ordinary build, short enough that a command never looks hung.
@@ -199,6 +206,11 @@ fn read_meta(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, r
     .optional()
 }
 
+/// The extraction this binary performs, as the index records it.
+fn extraction_digest() -> String {
+    format!("{:016x}", SymbolExtractor::extraction_digest())
+}
+
 /// A fingerprint of the tree a build read: the path, size, and modification
 /// time of every file it discovered, in one stable order.
 ///
@@ -285,6 +297,12 @@ fn read_completed_build(
     else {
         return Ok(None);
     };
+    // Rows this binary would not have produced answer for nothing: the build
+    // reads as one that never completed, which is the state whose remedy is
+    // already a build.
+    if read_meta(conn, META_EXTRACTOR)? != Some(extraction_digest()) {
+        return Ok(None);
+    }
     Ok(Some(CompletedBuild {
         scope,
         unread_paths: read_unread_paths(conn)?,
@@ -882,6 +900,7 @@ impl Store {
                 if owned {
                     write_meta(&tx, META_BUILD_SCOPE, &value)?;
                     write_meta(&tx, META_TREE_FINGERPRINT, &fingerprint)?;
+                    write_meta(&tx, META_EXTRACTOR, &extraction_digest())?;
                     // The rows qualify exactly the marker written beside them,
                     // so they are replaced wholesale in the same transaction:
                     // what an earlier build could not read says nothing about
@@ -1089,13 +1108,14 @@ impl Store {
             .collect();
         let fingerprint = tree_fingerprint(&self.project_root, &files);
 
-        let epoch = self
-            .begin_build(if options.force {
-                Reindex::FromScratch
-            } else {
-                Reindex::InPlace
-            })
-            .await?;
+        // Rows an older set of queries produced cannot be refreshed in place:
+        // a file whose bytes are unchanged is skipped, so the only pass that
+        // reaches them is one that starts with none.
+        let reindex = match options.force || !self.extraction_matches().await? {
+            true => Reindex::FromScratch,
+            false => Reindex::InPlace,
+        };
+        let epoch = self.begin_build(reindex).await?;
         // Pruning reads "absent from the walk" as "gone from the tree", which
         // holds only where the walk went. It is scoped to that rather than
         // refused outright: a single directory the walk could not enter would
@@ -1164,6 +1184,12 @@ impl Store {
         let _ = self.reclaim_free_pages().await;
         let _ = self.checkpoint().await;
         self.stats().await
+    }
+
+    /// Whether the rows in the store were produced by this binary's queries.
+    async fn extraction_matches(&self) -> Result<bool, StoreError> {
+        let recorded = self.db.call(|conn| read_meta(conn, META_EXTRACTOR)).await?;
+        Ok(recorded == Some(extraction_digest()))
     }
 
     /// Whether the tree still looks the way the last completed build read it.
@@ -2155,6 +2181,48 @@ mod tests {
                 "`{suffix}` did not travel with the database it completes"
             );
         }
+    }
+
+    /// Rows only mean what the queries that produced them meant. A rebuild
+    /// skips a file whose bytes have not changed, so an index carried across
+    /// an extraction change would keep answering with the forms the old
+    /// queries reached — and a search would read that as the file declaring
+    /// nothing else. The recorded digest retires such a build, and the pass
+    /// that replaces it starts from none.
+    #[tokio::test]
+    async fn rows_an_earlier_extractor_produced_do_not_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join("lib.rs"), "pub fn alpha() {}\n")
+            .await
+            .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(store.build_scope().await.unwrap().is_some());
+
+        // Stand in for what an extraction change does: rows the current
+        // queries would produce are not there, while the file they come from
+        // is untouched.
+        store
+            .db
+            .call(|conn| {
+                conn.execute("DELETE FROM symbols", [])?;
+                write_meta(conn, META_EXTRACTOR, "written-by-another-binary")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            store.build_scope().await.unwrap().is_none(),
+            "an index this binary's queries did not produce must not answer"
+        );
+
+        // The remedy has to reach the rows: an in-place pass would find the
+        // file's bytes unchanged and skip it, leaving the store as it was.
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(store.build_scope().await.unwrap().is_some());
+        assert_eq!(store.stats().await.unwrap().symbol_count, 1);
     }
 
     /// The classification the replacement decision rests on: only SQLite's
