@@ -358,6 +358,15 @@ fn extract_name_and_kind(
     Some((name, node_kind(node)))
 }
 
+/// The single name a binding introduces, where the grammar states bindings and
+/// destructuring with one node: a `left` that is one identifier names one
+/// symbol, and anything else names several or none, which this shape cannot
+/// carry.
+fn bound_name<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+    node.child_by_field_name("left")
+        .filter(|left| kinds.contains(&left.kind()))
+}
+
 /// The first child of `node` with the given grammar kind. Grammars that wrap a
 /// declaration's name in unnamed intermediate nodes are read through this
 /// rather than by position, which moves whenever modifiers or attributes are
@@ -390,15 +399,35 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
                     .unwrap_or(declarator)
             })
             .or_else(|| node.child_by_field_name("name")),
+        Language::Python => node
+            .child_by_field_name("name")
+            .or_else(|| bound_name(node, &["identifier"])),
+        Language::Ruby => node
+            .child_by_field_name("name")
+            .or_else(|| bound_name(node, &["constant", "identifier"])),
+        Language::Dart => node.child_by_field_name("name").or_else(|| {
+            child_of_kind(node, "initialized_identifier_list")
+                .and_then(|list| child_of_kind(list, "initialized_identifier"))
+                .or_else(|| {
+                    child_of_kind(node, "static_final_declaration_list")
+                        .and_then(|list| child_of_kind(list, "static_final_declaration"))
+                })
+                .and_then(|bound| child_of_kind(bound, "identifier"))
+        }),
         Language::Java => node.child_by_field_name("name").or_else(|| {
             node.child_by_field_name("declarator")
                 .and_then(|d| d.child_by_field_name("name"))
         }),
-        Language::PHP => node.child_by_field_name("name").or_else(|| {
-            child_of_kind(node, "property_element")
-                .and_then(|e| child_of_kind(e, "variable_name"))
-                .and_then(|v| child_of_kind(v, "name"))
-        }),
+        Language::PHP => node
+            .child_by_field_name("name")
+            .or_else(|| {
+                child_of_kind(node, "property_element")
+                    .and_then(|e| child_of_kind(e, "variable_name"))
+                    .and_then(|v| child_of_kind(v, "name"))
+            })
+            .or_else(|| {
+                child_of_kind(node, "const_element").and_then(|e| child_of_kind(e, "name"))
+            }),
         Language::CSharp => node.child_by_field_name("name").or_else(|| {
             child_of_kind(node, "variable_declaration")
                 .and_then(|d| child_of_kind(d, "variable_declarator"))
@@ -472,6 +501,8 @@ fn node_kind(node: Node) -> SymbolKind {
 
         "enum_item" | "enum_declaration" | "enum_specifier" => SymbolKind::Enum,
 
+        "enum_variant" => SymbolKind::EnumMember,
+
         "interface_declaration"
         | "interface_type"
         | "trait_item"
@@ -501,7 +532,9 @@ fn node_kind(node: Node) -> SymbolKind {
         // A named type alias introduces a type, not a generic `<T>` param.
         "type_item" | "type_alias_declaration" | "type_alias" => SymbolKind::Class,
 
-        "const_item" | "const_spec" | "val_definition" => SymbolKind::Constant,
+        "const_item" | "const_spec" | "val_definition" | "const_declaration" => {
+            SymbolKind::Constant
+        }
 
         "static_item" | "var_spec" | "var_definition" => SymbolKind::Variable,
 
@@ -510,8 +543,15 @@ fn node_kind(node: Node) -> SymbolKind {
         // drop under exclude_low_level).
         "variable_declarator" => declarator_kind(node),
 
-        "property_declaration" => SymbolKind::Property,
-        "field_declaration" => field_kind(node),
+        // Python states a named value with a bare binding: no keyword separates
+        // a constant from a variable, so nothing structural does either.
+        "assignment" => SymbolKind::Variable,
+
+        "property_declaration"
+        | "public_field_definition"
+        | "field_definition"
+        | "property_signature" => SymbolKind::Property,
+        "field_declaration" | "declaration" => field_kind(node),
 
         _ => SymbolKind::Variable,
     }
@@ -559,6 +599,9 @@ const RUST_QUERY: &str = r#"
 (macro_definition) @symbol
 (struct_item) @symbol
 (union_item) @symbol
+(struct_item (field_declaration_list (field_declaration) @symbol))
+(union_item (field_declaration_list (field_declaration) @symbol))
+(enum_item (enum_variant_list (enum_variant) @symbol))
 (enum_item) @symbol
 (trait_item) @symbol
 (impl_item) @symbol
@@ -573,13 +616,21 @@ const GO_QUERY: &str = r#"
 (method_declaration) @symbol
 (type_declaration (type_spec) @symbol)
 (type_declaration (type_alias) @symbol)
+(type_spec (struct_type (field_declaration_list (field_declaration) @symbol)))
 (const_declaration (const_spec) @symbol)
 (var_declaration (var_spec) @symbol)
 "#;
 
+// A binding's node is the same at module scope, in a class body, and inside a
+// function, so members are matched where they are declared. The name is read
+// from the assignment's `left` only where that is a single identifier: a
+// destructuring bind states several names in one node, and this shape carries
+// one.
 const PYTHON_QUERY: &str = r#"
 (function_definition) @symbol
 (class_definition) @symbol
+(module (expression_statement (assignment) @symbol))
+(class_definition (block (expression_statement (assignment) @symbol)))
 "#;
 
 // Module-scope `const f = () => {}` / `export const f = function () {}` is the
@@ -599,7 +650,9 @@ const TYPESCRIPT_QUERY: &str = r#"
 (enum_declaration) @symbol
 (method_definition) @symbol
 (interface_declaration (interface_body (method_signature) @symbol))
+(interface_declaration (interface_body (property_signature) @symbol))
 (class_body (abstract_method_signature) @symbol)
+(class_body (public_field_definition) @symbol)
 (program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
 (program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
 (program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
@@ -611,6 +664,7 @@ const JAVASCRIPT_QUERY: &str = r#"
 (generator_function_declaration) @symbol
 (class_declaration) @symbol
 (method_definition) @symbol
+(class_body (field_definition) @symbol)
 (program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
 (program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
 (program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
@@ -663,6 +717,9 @@ const RUBY_QUERY: &str = r#"
 (class) @symbol
 (method) @symbol
 (singleton_method) @symbol
+(program (assignment) @symbol)
+(module (body_statement (assignment) @symbol))
+(class (body_statement (assignment) @symbol))
 "#;
 
 const BASH_QUERY: &str = r#"
@@ -706,12 +763,14 @@ const DART_QUERY: &str = r#"
 (extension_declaration) @symbol
 (function_signature) @symbol
 (constructor_signature) @symbol
+(class_body (_ (declaration) @symbol))
 "#;
 
 const PHP_QUERY: &str = r#"
 (namespace_definition) @symbol
 (function_definition) @symbol
 (class_declaration) @symbol
+(class_declaration (declaration_list (const_declaration) @symbol))
 (enum_declaration) @symbol
 (interface_declaration) @symbol
 (trait_declaration) @symbol
@@ -758,7 +817,7 @@ pub const CX: u32 = 1;
 pub static ST: u32 = 2;
 pub enum E { A }
 pub mod inner { pub fn nested() {} }
-pub struct S;
+pub struct S { pub inner_field: u32 }
 impl S { pub fn m(&self) { let local = 1; } }
 "#,
             declares: &[
@@ -770,9 +829,12 @@ impl S { pub fn m(&self) { let local = 1; } }
                 "constant:CX",
                 "variable:ST",
                 "enum:E",
+                "enum_member:E/A",
+                "field:U/a",
                 "module:inner",
                 "function:nested",
                 "struct:S",
+                "field:S/inner_field",
                 "class:S",
                 "function:S/m",
             ],
@@ -796,6 +858,7 @@ func (s *S) M() {}
             declares: &[
                 "class:Al",
                 "struct:S",
+                "field:S/F",
                 "interface:I",
                 "constant:CX",
                 "variable:VY",
@@ -807,14 +870,32 @@ func (s *S) M() {}
             language: Language::Python,
             path: "a.py",
             source: r#"
+MODULE_CONST = 2
+annotated: int = 3
+bare_ann: int
+first, second = pair()
+
 class A:
-    def m(self): pass
+    attr: int = 1
+
+    def m(self):
+        local = 5
+        return local
 
 def f(): pass
 
 async def af(): pass
 "#,
-            declares: &["class:A", "function:A/m", "function:f", "function:af"],
+            declares: &[
+                "variable:MODULE_CONST",
+                "variable:annotated",
+                "variable:bare_ann",
+                "class:A",
+                "variable:A/attr",
+                "function:A/m",
+                "function:f",
+                "function:af",
+            ],
         },
         DeclarationFixture {
             language: Language::TypeScript,
@@ -822,10 +903,17 @@ async def af(): pass
             source: r#"
 export abstract class Abs { abstract doIt(): void; }
 export namespace NS {}
-export interface Shape { area(): number; }
+export interface Shape {
+    area(): number;
+    readonly id: string;
+}
 export type Alias = string;
 export enum Color { Red }
-export class C { m(): void {} }
+export class C {
+    static SC = 1;
+    private priv: number = 2;
+    m(): void {}
+}
 export function f(): void {}
 export const arrow = () => 1;
 "#,
@@ -835,9 +923,12 @@ export const arrow = () => 1;
                 "module:NS",
                 "interface:Shape",
                 "method:Shape/area",
+                "property:Shape/id",
                 "class:Alias",
                 "enum:Color",
                 "class:C",
+                "property:C/SC",
+                "property:C/priv",
                 "method:C/m",
                 "function:f",
                 "function:arrow",
@@ -847,13 +938,19 @@ export const arrow = () => 1;
             language: Language::JavaScript,
             path: "a.js",
             source: r#"
-export class C { m() {} }
+export class C {
+    static SC = 1;
+    inst = 2;
+    m() {}
+}
 export function f() {}
 export const arrow = () => 1;
 function* gen() {}
 "#,
             declares: &[
                 "class:C",
+                "property:C/SC",
+                "property:C/inst",
                 "method:C/m",
                 "function:f",
                 "function:arrow",
@@ -935,6 +1032,7 @@ trait T { public function tm() {} }
 interface I { public function im(); }
 
 abstract class A {
+    const AX = 1;
     public $prop;
     abstract public function am();
 }
@@ -949,6 +1047,7 @@ function f() {}
                 "interface:I",
                 "method:I/im",
                 "class:A",
+                "constant:A/AX",
                 "property:A/prop",
                 "method:A/am",
                 "function:f",
@@ -1019,14 +1118,28 @@ void f() {}
             language: Language::Ruby,
             path: "a.rb",
             source: r#"
+TOP_CONST = 1
+
 module M
+  IN_MODULE = 2
+
   class C
+    IN_CLASS = 3
+
     def m; end
     def self.cm; end
   end
 end
 "#,
-            declares: &["module:M", "class:C", "method:C/m", "method:C/cm"],
+            declares: &[
+                "variable:TOP_CONST",
+                "module:M",
+                "variable:IN_MODULE",
+                "class:C",
+                "variable:C/IN_CLASS",
+                "method:C/m",
+                "method:C/cm",
+            ],
         },
         DeclarationFixture {
             language: Language::Bash,
@@ -1110,6 +1223,8 @@ abstract class A {
 }
 
 class C {
+  int field = 1;
+  static const sc = 2;
   C();
   void cm() {}
 }
@@ -1122,6 +1237,8 @@ void top() {}
                 "class:A",
                 "function:A/am",
                 "class:C",
+                "field:C/field",
+                "field:C/sc",
                 "constructor:C/C",
                 "function:C/cm",
                 "function:top",
