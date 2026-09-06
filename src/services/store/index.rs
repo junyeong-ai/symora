@@ -36,6 +36,13 @@ fn indexed_languages() -> Vec<Language> {
 /// a 1-file index inside it.
 const META_BUILD_SCOPE: &str = "build_scope";
 
+/// When the build behind [`META_BUILD_SCOPE`] published, in Unix seconds.
+/// Written and cleared with the scope, so what an index covers and when it
+/// came to cover it can never describe two different builds — and a scope
+/// found without it is a record this store cannot describe whole, which
+/// reads as no completion at all.
+const META_BUILD_COMPLETED_AT: &str = "build_completed_at";
+
 /// Meta key holding the monotonic build epoch. Every operation that
 /// destroys index rows advances it, and a build may publish its completion
 /// marker only while the epoch it opened with still stands — so a build
@@ -277,6 +284,10 @@ fn write_meta(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<(),
 /// paths reads a partial index as a whole one.
 struct CompletedBuild {
     scope: BuildScope,
+    /// Unix seconds at which this build published. It dates the completion,
+    /// never the newest row: a build that wrote rows and stopped published
+    /// nothing, and a per-file refresh afterwards is not a build.
+    completed_at: u64,
     /// Paths the build could not read — a file it could not open or a
     /// directory it could not enter. Their symbols and text are absent from
     /// an index whose scope names their language, so anything counted out of
@@ -297,6 +308,11 @@ fn read_completed_build(
     else {
         return Ok(None);
     };
+    let Some(completed_at) =
+        read_meta(conn, META_BUILD_COMPLETED_AT)?.and_then(|value| value.parse().ok())
+    else {
+        return Ok(None);
+    };
     // Rows this binary would not have produced answer for nothing: the build
     // reads as one that never completed, which is the state whose remedy is
     // already a build.
@@ -305,6 +321,7 @@ fn read_completed_build(
     }
     Ok(Some(CompletedBuild {
         scope,
+        completed_at,
         unread_paths: read_unread_paths(conn)?,
     }))
 }
@@ -857,8 +874,8 @@ impl Store {
                 // they were about, and `clear` would leave some for an index
                 // that no longer holds anything.
                 tx.execute(
-                    "DELETE FROM meta WHERE key = ?1",
-                    rusqlite::params![META_BUILD_SCOPE],
+                    "DELETE FROM meta WHERE key IN (?1, ?2)",
+                    rusqlite::params![META_BUILD_SCOPE, META_BUILD_COMPLETED_AT],
                 )?;
                 tx.execute("DELETE FROM unread_paths", [])?;
                 if reindex == Reindex::FromScratch {
@@ -900,6 +917,7 @@ impl Store {
                 let owned = read_build_epoch(&tx)? == epoch;
                 if owned {
                     write_meta(&tx, META_BUILD_SCOPE, &value)?;
+                    write_meta(&tx, META_BUILD_COMPLETED_AT, &now_unix().to_string())?;
                     write_meta(&tx, META_TREE_FINGERPRINT, &fingerprint)?;
                     write_meta(&tx, META_EXTRACTOR, &extraction_digest())?;
                     // The rows qualify exactly the marker written beside them,
@@ -1018,6 +1036,7 @@ impl Store {
                     .as_ref()
                     .map(|build| build.scope.languages())
                     .unwrap_or_default();
+                let last_indexed = build.as_ref().map(|build| build.completed_at).unwrap_or(0);
                 let unread_paths = build.map(|build| build.unread_paths).unwrap_or_default();
                 let count_of = |table: &str| {
                     tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
@@ -1034,11 +1053,7 @@ impl Store {
                     symbol_count: count_of("symbols"),
                     content_line_count: count_of("content_lines"),
                     index_size_bytes: pragma("page_count") * pragma("page_size"),
-                    last_indexed: tx
-                        .query_row("SELECT COALESCE(MAX(indexed_at), 0) FROM files", [], |r| {
-                            r.get::<_, i64>(0)
-                        })
-                        .unwrap_or(0) as u64,
+                    last_indexed,
                     is_indexing: false,
                     languages,
                     unread_paths,
@@ -1550,6 +1565,47 @@ mod tests {
     /// holds no rows for it — and a build that meets one after a smaller past
     /// drops the rows that past left, or a search keeps answering from
     /// content the domain no longer covers.
+    /// `last_indexed` dates the completion the answer stands on, so it is
+    /// read from the same record as `languages` and the two cannot describe
+    /// different builds. A build that wrote rows and stopped published no
+    /// completion, and a date taken from the newest row would report that
+    /// build as the index's currency — which is how row counts beside a
+    /// recent date read as a whole index.
+    #[tokio::test]
+    async fn a_build_that_never_published_dates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.py"), "def kept():\n    return 1\n").unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let complete = store.stats().await.unwrap();
+        assert!(complete.file_count > 0);
+        assert!(!complete.languages.is_empty());
+        assert!(
+            complete.last_indexed > 0,
+            "a completed build carries its date"
+        );
+
+        store.begin_build(Reindex::InPlace).await.unwrap();
+
+        let interrupted = store.stats().await.unwrap();
+        assert_eq!(
+            interrupted.file_count, complete.file_count,
+            "an interrupted build leaves the rows it did not prune"
+        );
+        assert!(
+            interrupted.languages.is_empty(),
+            "no completion stands: {:?}",
+            interrupted.languages
+        );
+        assert_eq!(
+            interrupted.last_indexed, 0,
+            "rows without a completion date nothing"
+        );
+    }
+
     #[tokio::test]
     async fn a_file_over_the_ceiling_is_outside_the_index() {
         let dir = tempfile::tempdir().unwrap();

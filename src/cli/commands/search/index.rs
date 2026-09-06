@@ -20,6 +20,10 @@ struct IndexStatusOutput {
     /// build that happened to write it — a size named beside a build reads
     /// as that build's cost, when what it measures keeps moving afterwards.
     index_size_bytes: u64,
+    /// When the build behind `languages` published, in Unix seconds, and 0
+    /// when no completed build stands. Read from that build's own record, so
+    /// a date here always dates the coverage listed beside it — row counts
+    /// move with any build, finished or not, and cannot date one.
     last_indexed: u64,
     is_indexing: bool,
     /// Paths the last completed build could not read — files it could not
