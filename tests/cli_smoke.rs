@@ -1533,3 +1533,49 @@ fn a_symbol_answer_publishes_the_relevance_it_was_ordered_by() {
         "the published relevance must not climb as the answer descends: {page}"
     );
 }
+
+/// `map` answers orientation questions — what a project's entrypoints are,
+/// what a directory holds, what sits beside a file — and each is a list the
+/// `--limit` cuts. A list that reports only what survived reads as the whole
+/// set, and the cut is invisible precisely when it matters: the reader who
+/// would have raised the limit is the one who cannot tell there is more.
+#[cfg(unix)]
+#[test]
+fn a_map_list_says_how_much_the_limit_cut_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..15 {
+        let pkg = root.join(format!("pkg_{i:02}"));
+        std::fs::create_dir(&pkg).unwrap();
+        std::fs::write(pkg.join("main.py"), "def run():\n    return 1\n").unwrap();
+    }
+    let flat = root.join("flat");
+    std::fs::create_dir(&flat).unwrap();
+    for i in 0..20 {
+        std::fs::write(flat.join(format!("f_{i:02}.py")), "VALUE = 1\n").unwrap();
+    }
+
+    let summary = json_ok(
+        root,
+        &["--format", "compact", "map", "summary", "--limit", "5"],
+    );
+    assert_eq!(summary["entrypoints"]["count"], 15, "{summary}");
+    assert_eq!(summary["entrypoints"]["showing"], 5, "{summary}");
+    assert_eq!(summary["entrypoints"]["truncated"], true, "{summary}");
+    assert_eq!(summary["top_directories"]["count"], 16, "{summary}");
+    assert_eq!(summary["top_directories"]["showing"], 5, "{summary}");
+
+    let listing = json_ok(
+        root,
+        &["--format", "compact", "map", "dir", "flat", "--limit", "6"],
+    );
+    assert_eq!(listing["files"]["count"], 20, "{listing}");
+    assert_eq!(listing["files"]["showing"], 6, "{listing}");
+
+    let file = json_ok(
+        root,
+        &["--format", "compact", "map", "file", "flat/f_00.py"],
+    );
+    assert_eq!(file["siblings"]["count"], 19, "{file}");
+    assert_eq!(file["siblings"]["showing"], 8, "{file}");
+}
