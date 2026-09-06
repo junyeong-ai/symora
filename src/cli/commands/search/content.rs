@@ -60,23 +60,15 @@ pub async fn execute_content_search(
         );
         return Ok(());
     }
-    // The languages this search covers: the one named, or every code
-    // language. The index answers for the languages it holds content for;
-    // the rest — and, on a miss, all of them, since text written since the
-    // last build is in the working tree and not in the index — are read
-    // from the tree itself. A zero is thus always confirmed against disk.
-    // A covered-language HIT answers from the index alone: edits made
-    // outside symora since the last build surface through `stale` on the
-    // files the rows came from, and through the next `index build` —
-    // that snapshot semantic is the price of not re-walking the tree on
-    // every query.
-    let scope: Vec<Language> = match language_filter {
-        Some(lang) => vec![lang],
-        None => Language::all()
-            .into_iter()
-            .filter(|lang| lang.is_code())
-            .collect(),
-    };
+    // The index answers for the languages it holds content for; the rest —
+    // and, on a miss, all of them, since text written since the last build is
+    // in the working tree and not in the index — are read from the tree
+    // itself. A zero is thus always confirmed against disk. A covered-language
+    // HIT answers from the index alone: edits made outside symora since the
+    // last build surface through `stale` on the files the rows came from, and
+    // through the next `index build` — that snapshot semantic is the price of
+    // not re-walking the tree on every query.
+    let scope = content_scope(language_filter);
 
     match app.store.search_content(query, limit, &scope).await {
         Ok(page) => {
@@ -116,7 +108,7 @@ pub async fn execute_content_search(
             let index_bounds = index_holes_bound(ctx, &page.unread_paths, &answered_from_index);
             let mut scan_bound = None;
             if !live.is_empty() {
-                let scanned = scan_content(app, query, &live, language, limit).await;
+                let scanned = scan_content(app, query, &live, limit).await;
                 count += scanned.total;
                 items.extend(scanned.rows);
                 let unread = relative_paths(ctx, &as_paths(&scanned.unreadable_paths));
@@ -151,7 +143,7 @@ pub async fn execute_content_search(
         // and says nothing, while one that could not be opened is a fact about
         // the store that only the surfaces reading it can report.
         Err(e) => {
-            let scanned = scan_content(app, query, &scope, language, limit).await;
+            let scanned = scan_content(app, query, &scope, limit).await;
             ctx.print_success(finish_after_index_failure(
                 ctx, scanned, &e, query, language, limit,
             ));
@@ -189,8 +181,8 @@ fn finish_after_index_failure(
     )
 }
 
-/// Final shaping shared by the index and scan paths: prioritize code-file
-/// matches, cap emission at `limit`, and derive `truncated`/hints from the
+/// Final shaping shared by the index and scan paths: rank the merged rows,
+/// cap emission at `limit`, and derive `truncated`/hints from the
 /// match count — never from limit saturation. `lower_bounds` is a parameter
 /// because no route may publish a count without stating whether it is the
 /// whole one; each reason it is not leads the hints, ahead of the advice for
@@ -208,7 +200,7 @@ fn finish_content_search(
     route_facts: &[(String, String)],
 ) -> Section<ContentResultOutput> {
     let count = count.max(candidates.len());
-    let items = prioritize_code_content_results(candidates, language, limit);
+    let items = rank_content_results(candidates, limit);
 
     let truncated = items.len() < count;
     let mut hints: Vec<String> = route_facts.iter().map(|(fact, _)| fact.clone()).collect();
@@ -248,7 +240,6 @@ async fn scan_content(
     app: &App,
     query: &str,
     languages: &[Language],
-    language: Option<&str>,
     limit: usize,
 ) -> ScannedContent {
     let extensions: Vec<&str> = languages
@@ -312,7 +303,7 @@ async fn scan_content(
                         // SQL ORDER BY share, so dropping the tail here
                         // cannot drop a row the merge would have kept.
                         if matches.len() > limit.saturating_mul(2) {
-                            matches.sort_by(|a, b| rank(a, b, language));
+                            matches.sort_by(rank);
                             matches.truncate(limit);
                         }
                     }
@@ -331,7 +322,7 @@ async fn scan_content(
             Read::Whole => {
                 scanned.total += file_total;
                 scanned.rows.extend(matches);
-                scanned.rows.sort_by(|a, b| rank(a, b, language));
+                scanned.rows.sort_by(rank);
                 scanned.rows.truncate(limit);
             }
             Read::Failed => scanned.unreadable_paths.push(file.clone()),
@@ -435,53 +426,43 @@ fn content_search_next_commands(
     commands
 }
 
-fn prioritize_code_content_results(
+fn rank_content_results(
     mut results: Vec<ContentResultOutput>,
-    language: Option<&str>,
     limit: usize,
 ) -> Vec<ContentResultOutput> {
-    if language.is_none() {
-        let code_count = results
-            .iter()
-            .filter(|result| Language::from_path(std::path::Path::new(&result.file)).is_code())
-            .count();
-        if code_count >= limit {
-            results
-                .retain(|result| Language::from_path(std::path::Path::new(&result.file)).is_code());
-        }
-    }
-
-    results.sort_by(|a, b| rank(a, b, language));
+    results.sort_by(rank);
     results.truncate(limit);
     results
+}
+
+/// The languages a content search reads: the one named, or every code
+/// language. Documentation and configuration formats are outside an
+/// unscoped search's domain rather than ranked below it — which is why the
+/// comparator below needs no class key, and why an empty answer names them
+/// as reachable by `--lang`.
+fn content_scope(language_filter: Option<Language>) -> Vec<Language> {
+    match language_filter {
+        Some(lang) => vec![lang],
+        None => Language::all()
+            .into_iter()
+            .filter(|lang| lang.is_code())
+            .collect(),
+    }
 }
 
 /// The comparator the SQL pre-limit ORDER BY mirrors (score, line length
 /// in characters, path, line) — identical on both sides so the index and
 /// scan paths keep the same rows through a cap, and prefix-closed, so
 /// bounding either side to `limit` before merging cannot drop a row the
-/// merge would have kept. Code-class leads it only for an unscoped search;
-/// backend is not a rank signal, since a language is served by exactly one
-/// of the two.
-fn rank(
-    a: &ContentResultOutput,
-    b: &ContentResultOutput,
-    language: Option<&str>,
-) -> std::cmp::Ordering {
-    is_first_class(b, language)
-        .cmp(&is_first_class(a, language))
-        .then_with(|| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+/// merge would have kept. Backend is not a rank signal, since a language is
+/// served by exactly one of the two.
+fn rank(a: &ContentResultOutput, b: &ContentResultOutput) -> std::cmp::Ordering {
+    b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| a.content.chars().count().cmp(&b.content.chars().count()))
         .then_with(|| a.file.cmp(&b.file))
         .then_with(|| a.line.cmp(&b.line))
-}
-
-fn is_first_class(result: &ContentResultOutput, language: Option<&str>) -> bool {
-    language.is_some() || Language::from_path(std::path::Path::new(&result.file)).is_code()
 }
 
 /// Mirror of the SQL scoring in `build_content_search_query`, term for
@@ -683,6 +664,24 @@ mod tests {
         assert_eq!(score_content_line("a\t", "a\t"), 0.4);
     }
 
+    /// Every row the comparator orders comes from this scope, which is what
+    /// lets it rank on relevance alone. A non-code language admitted here
+    /// would reach the same list with nothing separating it from source.
+    #[test]
+    fn an_unscoped_content_search_reads_code_files_only() {
+        let scope = content_scope(None);
+        assert!(!scope.is_empty());
+        assert!(
+            scope.iter().all(|lang| lang.is_code()),
+            "non-code languages in the unscoped domain: {:?}",
+            scope.iter().filter(|l| !l.is_code()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            content_scope(Some(Language::Markdown)),
+            vec![Language::Markdown]
+        );
+    }
+
     /// The merged comparator is the SQL pre-limit ORDER BY, key for key:
     /// score, then line length in characters, then path, then line — so
     /// the row a cap keeps is the same row whichever backend served it.
@@ -695,12 +694,11 @@ mod tests {
             backend: Some("scan".to_string()),
             score: 1.0,
         };
-        let ranked = prioritize_code_content_results(
+        let ranked = rank_content_results(
             vec![
                 row("a.rs", "needle plus a long tail"),
                 row("z.rs", "needle"),
             ],
-            None,
             1,
         );
         assert_eq!(ranked.len(), 1);
