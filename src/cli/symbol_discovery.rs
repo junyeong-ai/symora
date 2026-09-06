@@ -27,16 +27,19 @@ use crate::services::test_scope::TestScope;
 pub const NOISY_SUFFIX_PENALTY: i32 = 6;
 
 /// A low-signal-kind symbol (variable/field/property/constant) whose name
-/// equals a short generic query (a local `user` for query `user`) is almost
-/// never the navigation target. Demoted past a high-signal prefix match
-/// (`symbol_match_priority` 24 plus `BROAD_QUERY_HIGH_SIGNAL_BONUS`) so the
-/// function or type carrying the term wins.
-pub const GENERIC_LOW_SIGNAL_EXACT_PENALTY: i32 = 24;
+/// equals a short generic query is rarely the navigation target when a
+/// declaration carrying the term exists. Added to `LOW_SIGNAL_KIND_PENALTY`,
+/// it must clear `BROAD_QUERY_HIGH_SIGNAL_BONUS` so a high-signal PREFIX match
+/// wins, and stay under the ladder's 16-point tier gap so a high-signal
+/// SUBSTRING match — a term the name merely contains — does not. A demotion
+/// that spans a whole tier cancels exactness itself: `TrendPoint` led a search
+/// for `endpoint` over the declaration spelled exactly that.
+pub const GENERIC_LOW_SIGNAL_EXACT_PENALTY: i32 = 8;
 
 /// An enum member exactly matching a short generic query is low-signal, but is
 /// at least a named, addressable declaration — so it is demoted less than a
 /// bare variable (`GENERIC_LOW_SIGNAL_EXACT_PENALTY`).
-pub const GENERIC_ENUM_MEMBER_EXACT_PENALTY: i32 = 18;
+pub const GENERIC_ENUM_MEMBER_EXACT_PENALTY: i32 = 6;
 
 /// For a broad single-word query, lifts a high-signal kind (class/struct/
 /// interface/enum/function/method/constructor) whose name *contains* the term
@@ -422,18 +425,40 @@ mod tests {
         assert!(!is_generic_broad_query(""));
     }
 
+    /// A broad query orders a low-signal exact match between the two
+    /// high-signal tiers, and the weights are what put it there. It loses to a
+    /// name the term OPENS, because that name is what the query was reaching
+    /// for; it beats a name the term merely appears inside, because a demotion
+    /// wide enough to span a whole tier cancels exactness itself and hands the
+    /// answer to an accidental substring.
     #[test]
-    fn ranking_weights_keep_high_signal_above_low_signal_exact_for_broad_query() {
-        // A broad query: a high-signal kind containing the term must outrank a
-        // low-signal exact match of the same query. This pins the relative
-        // magnitudes of the bonus and the penalty, not their absolute values.
-        let high = symbol_match_priority("user", "userservice", "userservice")
-            + broad_symbol_kind_bonus("user", "userservice", "class", false);
-        let low = symbol_match_priority("user", "user", "user")
-            - generic_exact_identifier_penalty("user", "user", "variable", true);
+    fn a_low_signal_exact_match_sits_between_the_high_signal_tiers() {
+        let scope = TestScope::new();
+        let rank = |name: &str, kind: &str| {
+            symbol_rank(
+                "user",
+                RankedSymbol {
+                    name,
+                    name_path: None,
+                    kind,
+                    file: Path::new("src/lib.rs"),
+                },
+                &scope,
+            )
+        };
+
+        let exact = rank("user", "variable");
+        let prefix = rank("userservice", "class");
+        let substring = rank("currentuser", "class");
+
         assert!(
-            high > low,
-            "high-signal {high} should beat low-signal {low}"
+            prefix > exact,
+            "a type the term opens is what the query reached for: {prefix} vs {exact}"
+        );
+        assert!(
+            exact > substring,
+            "the declaration spelled exactly as asked outranks a name that merely contains it: \
+             {exact} vs {substring}"
         );
     }
 
