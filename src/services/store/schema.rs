@@ -84,10 +84,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS content_lines_fts USING fts5(
     content_rowid='id',
     tokenize='trigram case_sensitive 0 remove_diacritics 0'
 );
+"#;
 
--- Keep the FTS index in lockstep with content_lines through every mutation
--- site automatically — including the bulk path (clear) that bypasses the
--- per-file delete helper — so the index can never desync.
+/// The triggers that keep the text index in lockstep with `content_lines`
+/// through every mutation site — including the bulk paths that bypass the
+/// per-file helpers — so it can never desync.
+///
+/// Applied on open, so a build that dropped them and did not finish has them
+/// back before anything else runs. Kept apart from `INIT_SCHEMA` because a
+/// build that writes most of the content table drops them for the duration:
+/// row by row the text index costs an order of magnitude more than built once
+/// from the rows themselves, and `REBUILD_TEXT_INDEX` is what it is left to.
+pub const TEXT_INDEX_TRIGGERS: &str = r#"
 CREATE TRIGGER IF NOT EXISTS content_lines_ai AFTER INSERT ON content_lines BEGIN
     INSERT INTO content_lines_fts(rowid, content) VALUES (new.id, new.content);
 END;
@@ -101,6 +109,16 @@ CREATE TRIGGER IF NOT EXISTS content_lines_au AFTER UPDATE ON content_lines BEGI
     INSERT INTO content_lines_fts(rowid, content) VALUES (new.id, new.content);
 END;
 "#;
+
+pub const DROP_TEXT_INDEX_TRIGGERS: &str = r#"
+DROP TRIGGER IF EXISTS content_lines_ai;
+DROP TRIGGER IF EXISTS content_lines_ad;
+DROP TRIGGER IF EXISTS content_lines_au;
+"#;
+
+/// Build the whole text index from `content_lines` in one pass.
+pub const REBUILD_TEXT_INDEX: &str =
+    "INSERT INTO content_lines_fts(content_lines_fts) VALUES ('rebuild')";
 
 /// `lang_count` is the number of language parameters bound after the query
 /// (?1), the limit (?2), and the optional kind — the search's domain,
