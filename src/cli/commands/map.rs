@@ -784,7 +784,6 @@ async fn collect_related_files(
         return results;
     }
 
-    let probe_limit = usize::min(usize::max(limit.saturating_mul(3), 12), 24);
     let target_profile = load_symbol_profile(app, &target.abs_path).await;
     if target_profile.names.is_empty()
         && target_profile.tokens.is_empty()
@@ -794,14 +793,20 @@ async fn collect_related_files(
         return results;
     }
 
-    let top_files: Vec<PathBuf> = results
+    // The symbol evidence below only raises a score, so it can promote a
+    // candidate the filename heuristic ranked low — which is why the window
+    // is wider than what gets published. Narrowing to it BEFORE the reads
+    // is what keeps `score` one measure: a row the window left out would
+    // reach the same sorted list carrying filename evidence alone.
+    results.truncate(rerank_window(limit));
+
+    let candidates: Vec<PathBuf> = results
         .iter()
-        .take(probe_limit)
         .map(|item| app.root().join(&item.file))
         .collect();
-    let profiles = join_all(top_files.iter().map(|path| load_symbol_profile(app, path))).await;
+    let profiles = join_all(candidates.iter().map(|path| load_symbol_profile(app, path))).await;
 
-    for (item, profile) in results.iter_mut().take(probe_limit).zip(profiles) {
+    for (item, profile) in results.iter_mut().zip(profiles) {
         let exact_shared = target_profile.names.intersection(&profile.names).count() as i32;
         if exact_shared > 0 {
             item.score += exact_shared.min(4) * 3;
@@ -848,6 +853,12 @@ async fn collect_related_files(
     results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.file.cmp(&b.file)));
     results.truncate(limit);
     results
+}
+
+/// How many candidates the symbol-profile stage reads. Wide enough to
+/// promote past the published window, and never narrower than it.
+fn rerank_window(limit: usize) -> usize {
+    limit.saturating_mul(3).max(12)
 }
 
 fn collect_related_files_heuristic(
@@ -1172,6 +1183,21 @@ mod tests {
             blocked.missing_target(root, "notes.txt").code,
             crate::cli::errors::ErrorCode::Io
         );
+    }
+
+    /// A candidate the profile stage never read carries filename evidence
+    /// alone, and it lands in the same list, ordered by the same `score`
+    /// column, as rows that were read. The window has to cover what gets
+    /// published — at every limit a caller can ask for, not just the
+    /// default.
+    #[test]
+    fn the_rerank_window_is_never_narrower_than_what_it_publishes() {
+        for limit in [1usize, 8, 10, 24, 25, 50, 200] {
+            assert!(
+                rerank_window(limit) >= limit,
+                "limit {limit} publishes rows the rerank never read"
+            );
+        }
     }
 
     #[test]
