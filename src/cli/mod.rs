@@ -96,9 +96,9 @@ pub struct Cli {
     pub check_version: Option<String>,
 
     /// Answer only from the index and the compiled-in grammars, never a
-    /// language server, so the same tree answers the same way on any machine.
-    /// A command with no such source fails instead of degrading to a weaker
-    /// answer wearing the same shape.
+    /// language server, so which servers a machine has installed cannot
+    /// change the answer. A command with no such source fails instead of
+    /// degrading to a weaker answer wearing the same shape.
     #[arg(long, global = true)]
     pub deterministic: bool,
 

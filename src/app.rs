@@ -193,3 +193,43 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::LspError;
+    use crate::models::lsp::FindSymbolsOptions;
+
+    /// Confinement is a property of the run, not of how the run reaches its
+    /// services, so it is applied above the daemon boundary. Wrapping only one
+    /// branch would leave `--deterministic` a silent no-op on the side that is
+    /// the default here — the answer would consult a server while claiming it
+    /// had not. Only the decorator raises `ServerNotConsulted`, so nothing
+    /// else can satisfy this.
+    #[tokio::test]
+    async fn confinement_holds_on_both_sides_of_the_mode_boundary() {
+        for use_daemon in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let app = App::new_at(
+                dir.path().to_path_buf(),
+                OutputOptions::default(),
+                Wiring {
+                    use_daemon,
+                    deterministic: true,
+                },
+            )
+            .await
+            .expect("app init");
+
+            let answer = app
+                .lsp
+                .find_symbols(&dir.path().join("a.rs"), FindSymbolsOptions::default())
+                .await;
+
+            assert!(
+                matches!(answer, Err(LspError::ServerNotConsulted)),
+                "a confined run reached past the decorator with use_daemon={use_daemon}"
+            );
+        }
+    }
+}
