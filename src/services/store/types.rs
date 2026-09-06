@@ -113,6 +113,11 @@ pub struct StoreConfig {
     /// gives better wall-clock time on cores but raises peak file-descriptor
     /// and SQLite write contention. 16 is a reasonable default.
     pub index_concurrency: usize,
+    /// The `search.max_file_size_mb` ceiling in bytes. A file over it is
+    /// outside the search's domain — the same verdict the AST and
+    /// language-server readers give it — so the index does not hold rows a
+    /// search would then have to explain away.
+    pub max_file_size_bytes: u64,
 }
 
 impl Default for StoreConfig {
@@ -120,6 +125,9 @@ impl Default for StoreConfig {
         Self {
             index_content: true,
             index_concurrency: crate::constants::defaults::STORE_INDEX_CONCURRENCY,
+            max_file_size_bytes: u64::from(crate::models::config::defaults::max_file_size_mb())
+                * 1024
+                * 1024,
         }
     }
 }

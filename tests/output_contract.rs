@@ -348,6 +348,7 @@ fn definition_output_with_location_only() {
     let out = DefinitionOutput {
         definition: Some(sample_location(20, 8)),
         message: None,
+        indexing: None,
     };
     assert_json_snapshot!(out);
 }
@@ -357,6 +358,20 @@ fn definition_output_with_message_only() {
     let out = DefinitionOutput {
         definition: None,
         message: Some("no definition found".to_string()),
+        indexing: None,
+    };
+    assert_json_snapshot!(out);
+}
+
+/// A scalar answer of "nothing here" computed while the server was still
+/// indexing is a lower bound, and says so in the same field every list
+/// surface uses. Without it the two are the same JSON.
+#[test]
+fn definition_output_absence_under_degraded_indexing() {
+    let out = DefinitionOutput {
+        definition: None,
+        message: Some("No definition found".to_string()),
+        indexing: Some(IndexingDegradation::TimedOut),
     };
     assert_json_snapshot!(out);
 }
@@ -367,6 +382,7 @@ fn hover_output_full() {
         content: Some("fn process(&self)".to_string()),
         range: Some(sample_location(12, 4)),
         message: None,
+        indexing: None,
     };
     assert_json_snapshot!(out);
 }
@@ -792,6 +808,7 @@ fn signature_help_output_full() {
         active_signature: Some(0),
         active_parameter: Some(1),
         message: None,
+        indexing: None,
     };
     assert_json_snapshot!(out);
 }

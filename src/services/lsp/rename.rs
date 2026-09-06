@@ -2,12 +2,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::LspError;
-use crate::models::lsp::{PrepareRenameResult, RenameResult, path_to_uri};
+use crate::models::lsp::{Indexed, PrepareRenameResult, RenameResult, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
 use super::position::encoded_offset_to_byte;
-use super::service::{DefaultLspService, ensure_indexed};
+use super::service::{DefaultLspService, degradation_of, ensure_indexed};
 use crate::infra::lsp::protocol::PositionEncoding;
 
 pub(super) async fn prepare_rename(
@@ -113,7 +113,7 @@ pub(super) async fn rename(
     line: u32,
     column: u32,
     new_name: &str,
-) -> Result<Option<RenameResult>, LspError> {
+) -> Result<Indexed<Option<RenameResult>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let content = read_file_validated(file, max_file_size).await?;
     let uri = path_to_uri(file);
@@ -121,7 +121,10 @@ pub(super) async fn rename(
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
 
-    let (result, encoding): (serde_json::Value, PositionEncoding) = service
+    let Indexed {
+        data: (result, encoding),
+        indexing,
+    }: Indexed<(serde_json::Value, PositionEncoding)> = service
         .execute_with_retry(&file, |client| {
             let uri = uri.clone();
             let content = content.clone();
@@ -134,6 +137,7 @@ pub(super) async fn rename(
                 // navigation queries use.
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
+                let ran_under = degradation_of(client.indexing_state());
 
                 client.sync_document(&uri, &content).await?;
                 let params = serde_json::json!({
@@ -142,13 +146,16 @@ pub(super) async fn rename(
                     "newName": new_name
                 });
                 let result = client.request("textDocument/rename", Some(params)).await?;
-                Ok((result, client.position_encoding().await))
+                Ok(Indexed::new(
+                    (result, client.position_encoding().await),
+                    ran_under,
+                ))
             }
         })
         .await?;
 
     if result.is_null() {
-        return Ok(None);
+        return Ok(Indexed::new(None, indexing));
     }
 
     if let Some(kind) = find_resource_operation(&result) {
@@ -160,5 +167,5 @@ pub(super) async fn rename(
     }
 
     let changes = parse_workspace_edit(&result, encoding)?;
-    Ok(Some(RenameResult { changes }))
+    Ok(Indexed::new(Some(RenameResult { changes }), indexing))
 }

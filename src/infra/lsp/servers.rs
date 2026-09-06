@@ -969,6 +969,118 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
     );
 
     configs.insert(
+        Language::Html,
+        ServerConfig {
+            display_name: "vscode-html-language-server",
+            command: "vscode-html-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g vscode-langservers-extracted",
+                linux: "npm install -g vscode-langservers-extracted",
+                windows: "npm install -g vscode-langservers-extracted",
+            },
+            tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
+        },
+    );
+
+    configs.insert(
+        Language::Css,
+        ServerConfig {
+            display_name: "vscode-css-language-server",
+            command: "vscode-css-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g vscode-langservers-extracted",
+                linux: "npm install -g vscode-langservers-extracted",
+                windows: "npm install -g vscode-langservers-extracted",
+            },
+            tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
+        },
+    );
+
+    configs.insert(
+        Language::Scss,
+        ServerConfig {
+            display_name: "vscode-css-language-server",
+            command: "vscode-css-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g vscode-langservers-extracted",
+                linux: "npm install -g vscode-langservers-extracted",
+                windows: "npm install -g vscode-langservers-extracted",
+            },
+            tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
+        },
+    );
+
+    configs.insert(
+        Language::Json,
+        ServerConfig {
+            display_name: "vscode-json-language-server",
+            command: "vscode-json-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g vscode-langservers-extracted",
+                linux: "npm install -g vscode-langservers-extracted",
+                windows: "npm install -g vscode-langservers-extracted",
+            },
+            tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
+        },
+    );
+
+    configs.insert(
+        Language::Sql,
+        ServerConfig {
+            display_name: "sql-language-server",
+            command: "sql-language-server".to_string(),
+            args: vec![
+                "up".to_string(),
+                "--method".to_string(),
+                "stdio".to_string(),
+            ],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g sql-language-server",
+                linux: "npm install -g sql-language-server",
+                windows: "npm install -g sql-language-server",
+            },
+            tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
+        },
+    );
+
+    configs.insert(
+        Language::Mdx,
+        ServerConfig {
+            display_name: "mdx-language-server",
+            command: "mdx-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g @mdx-js/language-server",
+                linux: "npm install -g @mdx-js/language-server",
+                windows: "npm install -g @mdx-js/language-server",
+            },
+            tier: ServerTier::Standard,
+            source: ServerSource::Builtin,
+        },
+    );
+
+    configs.insert(
         Language::Markdown,
         ServerConfig {
             display_name: "marksman",

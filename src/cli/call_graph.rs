@@ -370,7 +370,7 @@ pub(crate) mod test_support {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<crate::models::lsp::Definition>, LspError> {
+        ) -> Result<Indexed<Option<crate::models::lsp::Definition>>, LspError> {
             unreachable!()
         }
         async fn goto_type_definition(
@@ -378,7 +378,7 @@ pub(crate) mod test_support {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<Location>, LspError> {
+        ) -> Result<Indexed<Option<Location>>, LspError> {
             unreachable!()
         }
         async fn hover(
@@ -386,7 +386,7 @@ pub(crate) mod test_support {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<HoverInfo>, LspError> {
+        ) -> Result<Indexed<Option<HoverInfo>>, LspError> {
             unreachable!()
         }
         async fn signature_help(
@@ -394,7 +394,7 @@ pub(crate) mod test_support {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<SignatureHelp>, LspError> {
+        ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
             unreachable!()
         }
         async fn diagnostics(
@@ -417,7 +417,7 @@ pub(crate) mod test_support {
             _line: u32,
             _column: u32,
             _new_name: &str,
-        ) -> Result<Option<RenameResult>, LspError> {
+        ) -> Result<Indexed<Option<RenameResult>>, LspError> {
             unreachable!()
         }
         async fn supertypes(

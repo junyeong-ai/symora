@@ -35,6 +35,11 @@ struct IndexStatusOutput {
     /// a narrowed build or a per-file refresh left partial, and a symbol
     /// search reads as complete only for the languages listed here.
     languages: Vec<String>,
+    /// The build to run when no completed one stands behind these counts.
+    /// A never-built index is the one state every search reads as absence,
+    /// and it is the only state the remedy is unconditional in.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    next_commands: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -91,6 +96,18 @@ fn parse_build_languages(languages: Option<&str>) -> Result<Option<Vec<Language>
     Ok(Some(parsed))
 }
 
+/// The build to prescribe beside a status.
+///
+/// A never-built index answers every search as absence, and that is the one
+/// state whose remedy holds without qualification. A completed build needs no
+/// second one, and a build in flight is already the remedy running.
+fn status_next_commands(languages: &[Language], is_indexing: bool) -> Vec<String> {
+    match languages.is_empty() && !is_indexing {
+        true => vec!["symora search index build".to_string()],
+        false => Vec::new(),
+    }
+}
+
 pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<()> {
     let ctx = &app.output;
 
@@ -128,6 +145,7 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
                     .iter()
                     .map(|l| l.lsp_id().to_string())
                     .collect(),
+                next_commands: status_next_commands(&stats.languages, stats.is_indexing),
             }),
             Err(e) => ctx.print_error(OutputError::from(e)),
         },
@@ -143,6 +161,16 @@ pub async fn execute_index_command(app: &App, command: IndexCommand) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_never_built_index_prescribes_a_build() {
+        assert_eq!(
+            status_next_commands(&[], false),
+            ["symora search index build"]
+        );
+        assert!(status_next_commands(&[Language::Rust], false).is_empty());
+        assert!(status_next_commands(&[], true).is_empty());
+    }
 
     /// What a build covers is what every later search treats as authoritative,
     /// so a `--lang` that names no language must not quietly become a scope.

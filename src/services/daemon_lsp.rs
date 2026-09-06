@@ -94,16 +94,19 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Definition>, LspError> {
+    ) -> Result<Indexed<Option<Definition>>, LspError> {
         let result = self.client.goto_definition(file, line, column).await?;
 
         let response: DefinitionResponse = parse(result)?;
 
         let is_self = response.is_self;
-        Ok(response.definition.map(|location| Definition {
-            location: location.into(),
-            is_self,
-        }))
+        Ok(Indexed::new(
+            response.definition.map(|location| Definition {
+                location: location.into(),
+                is_self,
+            }),
+            response.indexing,
+        ))
     }
 
     async fn goto_type_definition(
@@ -111,12 +114,15 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Location>, LspError> {
+    ) -> Result<Indexed<Option<Location>>, LspError> {
         let result = self.client.goto_type_definition(file, line, column).await?;
 
         let response: DefinitionResponse = parse(result)?;
 
-        Ok(response.definition.map(Into::into))
+        Ok(Indexed::new(
+            response.definition.map(Into::into),
+            response.indexing,
+        ))
     }
 
     async fn find_implementations(
@@ -144,18 +150,22 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<HoverInfo>, LspError> {
+    ) -> Result<Indexed<Option<HoverInfo>>, LspError> {
         let result = self.client.hover(file, line, column).await?;
 
         let response: HoverResponse = parse(result)?;
 
-        Ok(response
-            .content
-            .filter(|c| !c.is_empty())
-            .map(|content| HoverInfo {
-                content,
-                range: response.range.map(Into::into),
-            }))
+        let range = response.range;
+        Ok(Indexed::new(
+            response
+                .content
+                .filter(|c| !c.is_empty())
+                .map(|content| HoverInfo {
+                    content,
+                    range: range.map(Into::into),
+                }),
+            response.indexing,
+        ))
     }
 
     async fn signature_help(
@@ -163,20 +173,23 @@ impl LspService for DaemonLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<SignatureHelp>, LspError> {
+    ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
         let result = self.client.signature_help(file, line, column).await?;
 
         let response: SignatureResponse = parse(result)?;
 
         if response.signatures.is_empty() {
-            return Ok(None);
+            return Ok(Indexed::new(None, response.indexing));
         }
 
-        Ok(Some(SignatureHelp {
-            signatures: response.signatures.into_iter().map(Into::into).collect(),
-            active_signature: response.active_signature,
-            active_parameter: response.active_parameter,
-        }))
+        Ok(Indexed::new(
+            Some(SignatureHelp {
+                signatures: response.signatures.into_iter().map(Into::into).collect(),
+                active_signature: response.active_signature,
+                active_parameter: response.active_parameter,
+            }),
+            response.indexing,
+        ))
     }
 
     async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError> {
@@ -255,14 +268,17 @@ impl LspService for DaemonLspService {
         line: u32,
         column: u32,
         new_name: &str,
-    ) -> Result<Option<RenameResult>, LspError> {
+    ) -> Result<Indexed<Option<RenameResult>>, LspError> {
         let result = self.client.rename(file, line, column, new_name).await?;
 
         let response: RenameResponse = parse(result)?;
 
-        Ok(response.changes.map(|changes| RenameResult {
-            changes: changes.into_iter().map(Into::into).collect(),
-        }))
+        Ok(Indexed::new(
+            response.changes.map(|changes| RenameResult {
+                changes: changes.into_iter().map(Into::into).collect(),
+            }),
+            response.indexing,
+        ))
     }
 
     async fn incoming_calls(

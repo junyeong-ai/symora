@@ -20,10 +20,12 @@ pub async fn execute(args: TypedefArgs, app: &App) -> Result<()> {
         |def, ctx| DefinitionOutput {
             definition: Some(LocationOutput::from_location(&def, ctx.root())),
             message: None,
+            indexing: None,
         },
         || DefinitionOutput {
             definition: None,
             message: Some("No type definition found".to_string()),
+            indexing: None,
         },
     )
     .await

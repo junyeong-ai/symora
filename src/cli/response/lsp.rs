@@ -6,6 +6,14 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::LocationOutput;
+use crate::models::lsp::IndexingDegradation;
+
+/// An answer whose completeness depends on workspace indexing. A scalar
+/// "nothing here" and a settled "nothing here" are the same JSON without
+/// this, so the helper that produces one attaches the state it ran under.
+pub trait DisclosesIndexing {
+    fn with_indexing(self, indexing: Option<IndexingDegradation>) -> Self;
+}
 
 #[derive(Debug, Serialize)]
 pub struct DefinitionOutput {
@@ -13,6 +21,8 @@ pub struct DefinitionOutput {
     pub definition: Option<LocationOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -23,6 +33,8 @@ pub struct HoverOutput {
     pub range: Option<LocationOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +130,8 @@ pub struct SignatureHelpOutput {
     pub active_parameter: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,3 +151,16 @@ pub struct ParameterOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
 }
+
+macro_rules! discloses_indexing {
+    ($($type:ty),+ $(,)?) => {
+        $(impl DisclosesIndexing for $type {
+            fn with_indexing(mut self, indexing: Option<IndexingDegradation>) -> Self {
+                self.indexing = indexing;
+                self
+            }
+        })+
+    };
+}
+
+discloses_indexing!(DefinitionOutput, HoverOutput, SignatureHelpOutput);

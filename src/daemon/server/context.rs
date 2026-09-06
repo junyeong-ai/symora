@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use crate::config::LspRuntimeConfig;
 use crate::daemon::protocol::RpcError;
 use crate::services::lsp::DefaultLspService;
-use crate::services::store::{DefaultStoreService, StoreConfig};
+use crate::services::store::DefaultStoreService;
 
 pub(super) type ProjectsMap = Arc<RwLock<HashMap<PathBuf, Arc<ProjectContext>>>>;
 
@@ -32,9 +32,10 @@ impl ProjectContext {
     /// lazily on its first use, so an LSP-only request never creates a
     /// `.symora` dir and a read-only project is served without error.
     pub(super) fn new(path: &std::path::Path, lsp_config: Arc<LspRuntimeConfig>) -> Self {
+        let store = DefaultStoreService::new(path, crate::app::store_config(&lsp_config));
         Self {
             lsp: Arc::new(DefaultLspService::new(path, lsp_config)),
-            store: DefaultStoreService::new(path, StoreConfig::default()),
+            store,
             last_used: AtomicU64::new(epoch_millis()),
             request_count: AtomicU64::new(0),
         }

@@ -181,17 +181,14 @@ impl OutputContext {
         // never dropped to fit; the fitter trims result items to stay under
         // budget instead.
         self.inject_config_errors(&mut response);
-        if self.max_response_chars > 0 {
-            // The ceiling guards the exact string emitted in the active
-            // format — host caps apply to emitted characters, so pretty
-            // output spends its budget on indentation by design.
+        if self.max_response_chars > 0 && !crate::cli::response::declares_budget(&response) {
+            // Measured on the compact form in every format: the ceiling bounds
+            // the answer, not its typography, so `--format` cannot decide which
+            // items a caller receives.
             let measure = |value: &serde_json::Value| -> usize {
-                match self.options.format {
-                    OutputFormat::Pretty => serde_json::to_string_pretty(value),
-                    OutputFormat::Compact => serde_json::to_string(value),
-                }
-                .map(|s| s.chars().count())
-                .unwrap_or(usize::MAX)
+                serde_json::to_string(value)
+                    .map(|s| s.chars().count())
+                    .unwrap_or(usize::MAX)
             };
             if crate::cli::response::fit_to_char_budget(
                 &mut response,

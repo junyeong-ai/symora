@@ -11,7 +11,7 @@ use crate::cli::response::Section;
 use crate::cli::utils::AnchorResolution;
 use crate::cli::{ErrorCode, LocationArg, OutputError, ParsedLocation};
 use crate::error::LspError;
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::lsp::{FindSymbolsOptions, Indexed};
 use crate::services::lsp::LspService;
 
 /// Map a position-anchored LSP failure, adding the recovery route that is
@@ -204,17 +204,22 @@ pub async fn execute_optional<T, O, F, Fut, M, N>(
 ) -> Result<()>
 where
     F: FnOnce(PathBuf, u32, u32) -> Fut,
-    Fut: Future<Output = Result<Option<T>, LspError>>,
+    Fut: Future<Output = Result<Indexed<Option<T>>, LspError>>,
     M: FnOnce(T, &crate::cli::output::OutputContext) -> O,
     N: FnOnce() -> O,
-    O: Serialize,
+    O: Serialize + crate::cli::response::DisclosesIndexing,
 {
     let ctx = &app.output;
     let loc = loc.parse()?.to_absolute()?;
 
     match lsp_call(loc.file, loc.line, loc.column).await {
-        Ok(Some(result)) => ctx.print_success(on_found(result, ctx)),
-        Ok(None) => ctx.print_success(on_not_found()),
+        Ok(answer) => {
+            let output = match answer.data {
+                Some(result) => on_found(result, ctx),
+                None => on_not_found(),
+            };
+            ctx.print_success(output.with_indexing(answer.indexing));
+        }
         Err(e) => ctx.print_error(e),
     }
 

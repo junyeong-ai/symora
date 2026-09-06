@@ -99,6 +99,42 @@ impl SymbolExtractor {
             tree_sitter_php::LANGUAGE_PHP.into(),
             PHP_QUERY,
         );
+        register(
+            &mut languages,
+            Language::Ruby,
+            tree_sitter_ruby::LANGUAGE.into(),
+            RUBY_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Bash,
+            tree_sitter_bash::LANGUAGE.into(),
+            BASH_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Lua,
+            tree_sitter_lua::LANGUAGE.into(),
+            LUA_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Swift,
+            tree_sitter_swift::LANGUAGE.into(),
+            SWIFT_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Scala,
+            tree_sitter_scala::LANGUAGE.into(),
+            SCALA_QUERY,
+        );
+        register(
+            &mut languages,
+            Language::Dart,
+            tree_sitter_dart::LANGUAGE.into(),
+            DART_QUERY,
+        );
         Self { languages }
     }
 
@@ -115,6 +151,12 @@ impl SymbolExtractor {
             Language::Cpp,
             Language::CSharp,
             Language::PHP,
+            Language::Ruby,
+            Language::Bash,
+            Language::Lua,
+            Language::Swift,
+            Language::Scala,
+            Language::Dart,
         ]
     }
 
@@ -323,11 +365,25 @@ fn node_kind(node: Node) -> SymbolKind {
         "function_item"
         | "function_definition"
         | "function_declaration"
-        | "generator_function_declaration" => SymbolKind::Function,
+        | "generator_function_declaration"
+        | "function_signature" => SymbolKind::Function,
 
-        "method_item" | "method_declaration" | "method_definition" => SymbolKind::Method,
+        "method_item"
+        | "method_declaration"
+        | "method_definition"
+        | "method"
+        | "singleton_method"
+        | "protocol_function_declaration" => SymbolKind::Method,
 
-        "class_declaration" | "class_definition" | "class_specifier" | "object_declaration"
+        "constructor_signature" => SymbolKind::Constructor,
+
+        "class_declaration"
+        | "class_definition"
+        | "class_specifier"
+        | "object_declaration"
+        | "object_definition"
+        | "extension_declaration"
+        | "class"
         | "impl_item" => SymbolKind::Class,
 
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration" => {
@@ -340,6 +396,8 @@ fn node_kind(node: Node) -> SymbolKind {
         | "interface_type"
         | "trait_item"
         | "trait_declaration"
+        | "trait_definition"
+        | "mixin_declaration"
         | "protocol_declaration" => SymbolKind::Interface,
 
         // Every grammar's namespace/module/package container. These organize
@@ -362,9 +420,9 @@ fn node_kind(node: Node) -> SymbolKind {
         // A named type alias introduces a type, not a generic `<T>` param.
         "type_item" | "type_alias_declaration" => SymbolKind::Class,
 
-        "const_item" | "const_spec" => SymbolKind::Constant,
+        "const_item" | "const_spec" | "val_definition" => SymbolKind::Constant,
 
-        "static_item" | "var_spec" => SymbolKind::Variable,
+        "static_item" | "var_spec" | "var_definition" => SymbolKind::Variable,
 
         // JS/TS `const f = () => {}` is a callable; classify by the
         // initializer rather than always Variable (which is_low_level would
@@ -493,6 +551,56 @@ const CSHARP_QUERY: &str = r#"
 (field_declaration) @symbol
 "#;
 
+const RUBY_QUERY: &str = r#"
+(module) @symbol
+(class) @symbol
+(method) @symbol
+(singleton_method) @symbol
+"#;
+
+const BASH_QUERY: &str = r#"
+(function_definition) @symbol
+"#;
+
+const LUA_QUERY: &str = r#"
+(function_declaration) @symbol
+"#;
+
+// A Swift `let`/`var` inside a function body parses as the same
+// `property_declaration` a stored property does, so members are matched
+// where they are declared — directly in a type body or at file scope.
+const SWIFT_QUERY: &str = r#"
+(class_declaration) @symbol
+(protocol_declaration) @symbol
+(function_declaration) @symbol
+(protocol_function_declaration) @symbol
+(class_body (property_declaration) @symbol)
+(source_file (property_declaration) @symbol)
+"#;
+
+// `val`/`var` share one node kind with their function-local counterparts;
+// the template body is what separates a member from a local.
+const SCALA_QUERY: &str = r#"
+(class_definition) @symbol
+(object_definition) @symbol
+(trait_definition) @symbol
+(function_definition) @symbol
+(function_declaration) @symbol
+(template_body (val_definition) @symbol)
+(template_body (var_definition) @symbol)
+"#;
+
+// Dart names a function on its signature, not on the declaration that
+// wraps it, and a method's signature nests the same node.
+const DART_QUERY: &str = r#"
+(class_declaration) @symbol
+(enum_declaration) @symbol
+(mixin_declaration) @symbol
+(extension_declaration) @symbol
+(function_signature) @symbol
+(constructor_signature) @symbol
+"#;
+
 const PHP_QUERY: &str = r#"
 (function_definition) @symbol
 (class_declaration) @symbol
@@ -524,11 +632,132 @@ mod tests {
         );
     }
 
+    /// Extraction reads a grammar's declaration nodes, so it can never reach
+    /// a language AST search does not parse. The converse is not an omission:
+    /// a grammar that states declarations as generic calls or blocks carries
+    /// no name for the shared resolution to read, and `doctor` says so per
+    /// language rather than the set being asserted here.
     #[test]
-    fn extractor_support_is_static_and_distinct_from_ast() {
-        assert!(SymbolExtractor::is_supported(Language::Rust));
-        assert!(!SymbolExtractor::is_supported(Language::Ruby));
-        assert!(crate::infra::ast::is_supported(Language::Ruby));
+    fn extraction_never_exceeds_ast_coverage() {
+        for language in SymbolExtractor::supported_languages() {
+            assert!(
+                crate::infra::ast::is_supported(*language),
+                "{language:?} extracts symbols from a grammar AST search does not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn ruby_symbols_carry_the_name_the_file_spells() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+module Billing
+  class Invoice
+    def valid?
+      true
+    end
+    def self.build(x) = new(x)
+  end
+end
+"#;
+        let symbols = extractor.extract(content, Language::Ruby);
+        let found = |path: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name_path.as_deref() == Some(path))
+                .map(|s| s.kind)
+        };
+        assert_eq!(found("Billing"), Some(SymbolKind::Module));
+        assert_eq!(found("Invoice"), Some(SymbolKind::Class));
+        assert_eq!(found("Invoice/valid?"), Some(SymbolKind::Method));
+        assert_eq!(found("Invoice/build"), Some(SymbolKind::Method));
+    }
+
+    #[test]
+    fn shell_and_lua_extract_their_function_forms() {
+        let extractor = SymbolExtractor::new();
+        let shell = extractor.extract(
+            "deploy() { :; }\nfunction rollback { :; }\n",
+            Language::Bash,
+        );
+        assert_eq!(shell.len(), 2);
+        assert!(shell.iter().all(|s| s.kind == SymbolKind::Function));
+
+        let lua = extractor.extract(
+            "local function helper() end\nfunction M.render() end\n",
+            Language::Lua,
+        );
+        let names: Vec<&str> = lua.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["helper", "M.render"]);
+    }
+
+    #[test]
+    fn dart_names_a_function_on_its_signature() {
+        let extractor = SymbolExtractor::new();
+        let content = r#"
+class Order {
+  Order(this.id);
+  void pay() {}
+}
+enum Status { open }
+mixin Loggable { void log() {} }
+void topLevel() {}
+"#;
+        let symbols = extractor.extract(content, Language::Dart);
+        let found = |path: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name_path.as_deref() == Some(path))
+                .map(|s| s.kind)
+        };
+        assert_eq!(found("Order"), Some(SymbolKind::Class));
+        assert_eq!(found("Order/Order"), Some(SymbolKind::Constructor));
+        assert_eq!(found("Order/pay"), Some(SymbolKind::Function));
+        assert_eq!(found("Status"), Some(SymbolKind::Enum));
+        assert_eq!(found("Loggable"), Some(SymbolKind::Interface));
+        assert_eq!(found("topLevel"), Some(SymbolKind::Function));
+    }
+
+    /// Swift and Scala give a function-local binding the same node kind as a
+    /// stored member, so the queries match members where they are declared.
+    /// Indexing a local would put a name in the index that names nothing a
+    /// caller can reach.
+    #[test]
+    fn a_function_local_binding_is_not_a_member() {
+        let extractor = SymbolExtractor::new();
+        let swift = extractor.extract(
+            r#"
+class Cart {
+    var items: [Int] = []
+    func total() -> Int {
+        let base = 10
+        return base
+    }
+}
+"#,
+            Language::Swift,
+        );
+        let swift_names: Vec<&str> = swift.iter().map(|s| s.name.as_str()).collect();
+        assert!(swift_names.contains(&"items"));
+        assert!(swift_names.contains(&"total"));
+        assert!(!swift_names.contains(&"base"));
+
+        let scala = extractor.extract(
+            r#"
+class Order {
+  val id = 1
+  def total(): Int = {
+    val base = 10
+    base
+  }
+}
+"#,
+            Language::Scala,
+        );
+        let scala_names: Vec<&str> = scala.iter().map(|s| s.name.as_str()).collect();
+        assert!(scala_names.contains(&"id"));
+        assert!(scala_names.contains(&"total"));
+        assert!(!scala_names.contains(&"base"));
     }
 
     #[test]

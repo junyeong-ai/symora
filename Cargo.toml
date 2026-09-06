@@ -50,6 +50,10 @@ toml = "1.1.4"
 # MCP installer's Codex config — the canonical crate for surgical TOML editing.
 toml_edit = "0.25.13"
 
+# Version pinning — the requirement grammar `--check-version` accepts, and
+# the ordering rules a hand-rolled comparison gets wrong on pre-releases.
+semver = "1.0.28"
+
 # Error Handling
 thiserror = "2.0.20"
 anyhow = "1.0.104"

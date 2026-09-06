@@ -1,0 +1,8 @@
+---
+source: tests/output_contract.rs
+expression: out
+---
+{
+  "message": "No definition found",
+  "indexing": "timed_out"
+}

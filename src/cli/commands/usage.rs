@@ -814,7 +814,7 @@ async fn fetch_single_symbol_refs(
             )
             .await
             .ok()
-            .map(|hover| hover.is_some_and(|h| !h.content.is_empty()))
+            .map(|hover| hover.data.is_some_and(|h| !h.content.is_empty()))
     } else {
         None
     };

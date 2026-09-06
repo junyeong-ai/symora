@@ -1718,7 +1718,11 @@ mod tests {
     /// the unbuilt-index route steers those to content search instead.
     #[test]
     fn index_not_built_route_never_suggests_index_build_for_extractor_less_language() {
-        let failures = vec![server_failure(Language::Lua)];
+        let language = Language::all()
+            .into_iter()
+            .find(|language| !crate::services::store::SymbolExtractor::is_supported(*language))
+            .expect("a language with no extraction query");
+        let failures = vec![server_failure(language)];
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
@@ -1728,12 +1732,12 @@ mod tests {
             &[],
         );
         assert_eq!(section.hints.len(), 1);
-        assert!(section.hints[0].contains("lua"));
+        assert!(section.hints[0].contains(language.lsp_id()));
         assert_eq!(
             section.next_commands,
             vec![
-                "symora search content 'alpha' --lang lua",
-                "symora doctor lua"
+                format!("symora search content 'alpha' --lang {language}"),
+                format!("symora doctor {language}"),
             ]
         );
     }

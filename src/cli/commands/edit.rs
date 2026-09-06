@@ -676,17 +676,6 @@ fn ensure_no_dangling_references(
     refs_command: &str,
     check: &ReferenceCheck,
 ) -> Result<()> {
-    use crate::models::lsp::IndexingDegradation;
-
-    // Exhaustive on purpose: a future degradation variant is a compile
-    // error here, never a silently wrong marker. The string matches the
-    // variant's snake_case wire form.
-    fn marker(degradation: IndexingDegradation) -> &'static str {
-        match degradation {
-            IndexingDegradation::TimedOut => "timed_out",
-        }
-    }
-
     fn refuse(message: String, hint: String) -> anyhow::Error {
         anyhow::Error::new(crate::cli::OutputError::precondition_failed(message).with_hint(hint))
     }
@@ -721,7 +710,7 @@ fn ensure_no_dangling_references(
                     "Delete of '{symbol_name}' refused: at least {count} dangling \
                      references outside the deleted span violate the no-references \
                      precondition (indexing: {} — the count is a lower bound)",
-                    marker(degradation),
+                    degradation.as_str(),
                 ),
             };
             anyhow::bail!(refuse(
@@ -738,7 +727,7 @@ fn ensure_no_dangling_references(
                     "Delete of '{symbol_name}' refused: the reference count of 0 is a \
                      lower bound under degraded indexing (indexing: {}), which does \
                      not verify the no-references precondition",
-                    marker(degradation),
+                    degradation.as_str(),
                 ),
                 "Wait for the language server to finish indexing (check 'symora \
                  status'), then retry; or verify manually and rerun without \

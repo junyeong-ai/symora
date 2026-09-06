@@ -48,15 +48,54 @@ fn main() {
     };
 
     if let Err(e) = runtime.block_on(async_main()) {
-        let err: symora::cli::OutputError = e.into();
-        let envelope = serde_json::json!({ "error": err });
-        eprintln!("{}", envelope);
-        std::process::exit(2);
+        refuse(e.into());
+    }
+}
+
+/// Report a failure that stopped the run before a command could answer.
+///
+/// The envelope goes to stdout because that is where every other failure this
+/// tool reports goes: a caller parsing one stream finds an unparseable empty
+/// response otherwise, which is the one shape it cannot act on. Logs stay on
+/// stderr.
+fn refuse(err: symora::cli::OutputError) -> ! {
+    println!("{}", serde_json::json!({ "error": err }));
+    std::process::exit(2);
+}
+
+/// Parse the command line, reporting a usage error the way every other
+/// failure is reported.
+///
+/// Clap's own rendering is prose on stderr with an empty stdout, which is the
+/// one failure an agent parsing this tool cannot read. `--help` and
+/// `--version` are not failures and keep clap's rendering.
+fn parse_cli() -> anyhow::Result<Cli> {
+    use clap::error::ErrorKind;
+
+    match Cli::try_parse() {
+        Ok(cli) => Ok(cli),
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            let _ = e.print();
+            std::process::exit(0);
+        }
+        Err(e) => {
+            let message = e
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or("invalid arguments")
+                .trim_start_matches("error: ")
+                .to_string();
+            refuse(
+                symora::cli::OutputError::invalid(message)
+                    .with_hint("Run the command with --help for its accepted arguments."),
+            )
+        }
     }
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli()?;
 
     let format =
         if std::env::var(symora::constants::env::FORMAT_OVERRIDE).as_deref() == Ok("compact") {
@@ -70,6 +109,12 @@ async fn async_main() -> anyhow::Result<()> {
         quiet: cli.quiet,
         token_estimate: cli.token_estimate,
     };
+
+    if let Some(requirement) = cli.check_version.as_deref()
+        && let Err(e) = symora::cli::check_version(requirement)
+    {
+        refuse(e);
+    }
 
     if let Some(name) = cli.workspace.as_deref() {
         return run_workspace_dispatch(name, output_options).await;

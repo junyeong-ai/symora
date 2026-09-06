@@ -134,7 +134,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Definition>, LspError> {
+    ) -> Result<Indexed<Option<Definition>>, LspError> {
         navigation::goto_definition(self, file, line, column).await
     }
 
@@ -143,7 +143,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Location>, LspError> {
+    ) -> Result<Indexed<Option<Location>>, LspError> {
         navigation::goto_type_definition(self, file, line, column).await
     }
 
@@ -161,7 +161,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<HoverInfo>, LspError> {
+    ) -> Result<Indexed<Option<HoverInfo>>, LspError> {
         info::hover(self, file, line, column).await
     }
 
@@ -170,7 +170,7 @@ impl LspService for DefaultLspService {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<SignatureHelp>, LspError> {
+    ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
         info::signature_help(self, file, line, column).await
     }
 
@@ -193,7 +193,7 @@ impl LspService for DefaultLspService {
         line: u32,
         column: u32,
         new_name: &str,
-    ) -> Result<Option<RenameResult>, LspError> {
+    ) -> Result<Indexed<Option<RenameResult>>, LspError> {
         rename::rename(self, file, line, column, new_name).await
     }
 

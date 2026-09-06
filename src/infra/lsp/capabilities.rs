@@ -203,68 +203,32 @@ pub fn language_display_name(language: Language) -> &'static str {
         Language::Terraform => "Terraform",
         Language::Yaml => "YAML",
         Language::Toml => "TOML",
+        Language::Json => "JSON",
         Language::Nix => "Nix",
         Language::Rego => "Rego",
+        // Web markup and data
+        Language::Html => "HTML",
+        Language::Css => "CSS",
+        Language::Scss => "Sass",
+        Language::Sql => "SQL",
         // Scientific
         Language::R => "R",
         Language::Julia => "Julia",
         Language::Fortran => "Fortran",
         // Documentation
         Language::Markdown => "Markdown",
+        Language::Mdx => "MDX",
         Language::Unknown => "Unknown",
     }
 }
 
-/// Get language server name
+/// The server a language is served by, read from the table that spawns it so
+/// a diagnostic never names a program Symora does not run.
 pub fn language_server_name(language: Language) -> &'static str {
-    match language {
-        // Systems
-        Language::Rust => "rust-analyzer",
-        Language::Cpp => "clangd",
-        Language::Zig => "zls",
-        // JVM
-        Language::Java => "jdtls",
-        Language::Kotlin => "kotlin-language-server",
-        Language::Scala => "metals",
-        Language::Clojure => "clojure-lsp",
-        // .NET
-        Language::CSharp => "csharp-ls",
-        Language::FSharp => "fsautocomplete",
-        // Web
-        Language::TypeScript | Language::JavaScript => "tsserver",
-        Language::Vue => "volar",
-        // Scripting
-        Language::Python => "pyright",
-        Language::Ruby => "ruby-lsp",
-        Language::PHP => "intelephense",
-        Language::Perl => "perlnavigator",
-        Language::Lua => "lua-language-server",
-        Language::Bash => "bash-language-server",
-        Language::PowerShell => "powershell-editor-services",
-        // Functional
-        Language::Haskell => "haskell-language-server",
-        Language::Elixir => "elixir-ls",
-        Language::Erlang => "erlang_ls",
-        Language::Elm => "elm-language-server",
-        Language::OCaml => "ocamllsp",
-        // Mobile/Application
-        Language::Go => "gopls",
-        Language::Swift => "sourcekit-lsp",
-        Language::Dart => "dart-language-server",
-        // Config/DevOps
-        Language::Terraform => "terraform-ls",
-        Language::Yaml => "yaml-language-server",
-        Language::Toml => "taplo",
-        Language::Nix => "nil",
-        Language::Rego => "regal",
-        // Scientific
-        Language::R => "languageserver",
-        Language::Julia => "LanguageServer.jl",
-        Language::Fortran => "fortls",
-        // Documentation
-        Language::Markdown => "marksman",
-        Language::Unknown => "unknown",
-    }
+    super::servers::defaults()
+        .get(&language)
+        .map(|config| config.display_name)
+        .unwrap_or("unknown")
 }
 
 /// Get alternative suggestion for unsupported features
@@ -339,5 +303,20 @@ mod tests {
         assert!(msg.contains("Python"));
         assert!(msg.contains("pyright"));
         assert!(msg.contains("find implementations"));
+    }
+
+    /// A diagnostic that names a program Symora does not run sends an agent
+    /// after the wrong binary at the moment it is trying to recover. The
+    /// spawn table is the only source for that name.
+    #[test]
+    fn every_language_is_named_by_the_server_it_spawns() {
+        let spawned = super::super::servers::defaults();
+        for language in Language::all() {
+            assert_eq!(
+                language_server_name(language),
+                spawned[&language].display_name,
+                "{language:?} is diagnosed under a name it is not spawned under"
+            );
+        }
     }
 }

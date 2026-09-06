@@ -176,7 +176,8 @@ pub async fn resolve_anchor(
     // is disclosed as that binding, never as "not a symbol".
     let definition = lsp
         .goto_definition(&input.file, input.line, input.column)
-        .await?;
+        .await?
+        .data;
     let self_declaration = definition
         .as_ref()
         .filter(|definition| definition.is_self)
@@ -612,11 +613,12 @@ mod tests {
             file: &Path,
             line: u32,
             column: u32,
-        ) -> Result<Option<Definition>, LspError> {
-            Ok(self
-                .definitions
-                .get(&(file.to_path_buf(), line, column))
-                .cloned())
+        ) -> Result<Indexed<Option<Definition>>, LspError> {
+            Ok(Indexed::complete(
+                self.definitions
+                    .get(&(file.to_path_buf(), line, column))
+                    .cloned(),
+            ))
         }
 
         async fn workspace_symbols(
@@ -639,7 +641,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<Location>, LspError> {
+        ) -> Result<Indexed<Option<Location>>, LspError> {
             unreachable!()
         }
         async fn find_implementations(
@@ -655,7 +657,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<HoverInfo>, LspError> {
+        ) -> Result<Indexed<Option<HoverInfo>>, LspError> {
             unreachable!()
         }
         async fn signature_help(
@@ -663,7 +665,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<SignatureHelp>, LspError> {
+        ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
             unreachable!()
         }
         async fn diagnostics(
@@ -686,7 +688,7 @@ mod tests {
             _line: u32,
             _column: u32,
             _new_name: &str,
-        ) -> Result<Option<RenameResult>, LspError> {
+        ) -> Result<Indexed<Option<RenameResult>>, LspError> {
             unreachable!()
         }
         async fn incoming_calls(

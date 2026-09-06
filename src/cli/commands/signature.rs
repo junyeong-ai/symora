@@ -38,12 +38,14 @@ pub async fn execute(args: SignatureArgs, app: &App) -> Result<()> {
             active_signature: help.active_signature,
             active_parameter: help.active_parameter,
             message: None,
+            indexing: None,
         },
         || SignatureHelpOutput {
             signatures: vec![],
             active_signature: None,
             active_parameter: None,
             message: Some("No signature help available".to_string()),
+            indexing: None,
         },
     )
     .await
