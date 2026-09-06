@@ -673,7 +673,7 @@ fn impact_output_full() {
                     prod: 3,
                 },
             ],
-            test_coverage_ratio: 0.33,
+            test_caller_ratio: Some(0.33),
             risk: RiskLevel::Medium,
             confidence: 0.9,
         }),
@@ -744,7 +744,7 @@ fn blast_radius_max_depth_reached_serializes() {
                 prod: 2,
             },
         ],
-        test_coverage_ratio: 0.14,
+        test_caller_ratio: Some(0.14),
         risk: RiskLevel::High,
         confidence: 1.0,
     };

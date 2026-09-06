@@ -48,7 +48,7 @@ expression: out
         "prod": 3
       }
     ],
-    "test_coverage_ratio": 0.33,
+    "test_caller_ratio": 0.33,
     "risk": "medium",
     "confidence": 0.9
   },
