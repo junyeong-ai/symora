@@ -78,6 +78,10 @@ struct PackFileOutput {
     language: String,
     rank: f64,
     symbols: Vec<PackSymbolOutput>,
+    /// How many the file states, when `--per-file` showed fewer. Absent when
+    /// the list above is all of them, so a shape and a whole one read apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_symbols: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +144,8 @@ fn into_file_output(file: PackedFile) -> PackFileOutput {
         path: file.path.display().to_string(),
         language: file.language.lsp_id().to_string(),
         rank: file.rank,
+        declared_symbols: (file.declared_symbols > file.symbols.len())
+            .then_some(file.declared_symbols),
         symbols: file.symbols.into_iter().map(into_symbol_output).collect(),
     }
 }
@@ -224,6 +230,7 @@ mod tests {
                 path: PathBuf::from("src/main.rs"),
                 language: Language::Rust,
                 rank: 0.123,
+                declared_symbols: 1,
                 symbols: vec![PackedSymbol {
                     name: "main".to_string(),
                     kind: "function".to_string(),
