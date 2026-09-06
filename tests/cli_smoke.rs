@@ -754,9 +754,10 @@ fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
             .cloned()
             .unwrap_or_default();
         assert!(
-            hints
-                .iter()
-                .any(|h| h.as_str().unwrap().contains("not authoritative for rust")),
+            hints.iter().any(|h| h
+                .as_str()
+                .unwrap()
+                .contains("confirmed that against the working tree")),
             "query '{query}': the index had no match and the server is dead, \
              yet the zero reads as complete: {hints:?}"
         );
@@ -766,8 +767,10 @@ fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
             .cloned()
             .unwrap_or_default();
         assert!(
-            gaps.iter().any(|g| g["language"] == "rust"),
-            "query '{query}': the structured gap must agree with the hint: {gaps:?}"
+            gaps.is_empty(),
+            "query '{query}': the build covers rust, so rust is not missing from the \
+             answer's domain — a gap here sends an agent to install a server it does \
+             not need: {gaps:?}"
         );
         let next = json
             .get("next_commands")
@@ -778,6 +781,12 @@ fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
             next.iter()
                 .all(|c| !c.as_str().unwrap().contains("search index build")),
             "query '{query}': index build is a no-op remedy here: {next:?}"
+        );
+        assert!(
+            next.iter()
+                .any(|c| c.as_str().unwrap().starts_with("symora search content ")),
+            "query '{query}': the remedy must read the tree the answer could not \
+             reach: {next:?}"
         );
     }
 }
