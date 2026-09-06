@@ -8,6 +8,8 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
+use crate::cli::declared_in;
+use crate::cli::response::disclosure::LowerBound;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::find_symbol_at_position;
 use crate::models::lsp::FindSymbolsOptions;
@@ -49,6 +51,14 @@ pub struct DiffImpactOutput {
     /// dropped. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
+    /// The analysis stopped before running out of changed symbols, so every
+    /// count here is a lower bound. Carried in the shared shape's words so a
+    /// reader treats it as it treats any other short answer. Omitted when the
+    /// whole diff was analysed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 /// Test coverage summary for diff analysis (aggregate over all changed symbols)
@@ -173,6 +183,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             },
             changes: vec![],
             unmeasured_files: vec![],
+            incomplete: false,
+            hints: vec![],
         });
         return Ok(());
     }
@@ -187,8 +199,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         args.revision.as_str()
     };
 
-    let (changes, unmeasured_files) = analyze_hunks(
-        app.lsp.as_ref(),
+    let (changes, unmeasured_files, stopped_at_cap) = analyze_hunks(
+        app,
         &hunks,
         root,
         preimage_ref,
@@ -229,6 +241,12 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         },
         changes,
         unmeasured_files,
+        incomplete: stopped_at_cap,
+        hints: if stopped_at_cap {
+            vec![LowerBound::AnalysisCapped(args.max_symbols).hint()]
+        } else {
+            Vec::new()
+        },
     };
 
     ctx.print_success(response);
@@ -407,7 +425,7 @@ fn line_attributes_to_symbol(sym: &crate::models::symbol::Symbol, line: u32) -> 
 
 #[allow(clippy::too_many_arguments)]
 async fn analyze_hunks(
-    lsp: &dyn LspService,
+    app: &App,
     hunks: &[DiffHunk],
     root: &Path,
     preimage_ref: &str,
@@ -415,7 +433,7 @@ async fn analyze_hunks(
     include_callers: bool,
     max_symbols: usize,
     calls_limit: usize,
-) -> (Vec<ChangedSymbolImpact>, Vec<String>) {
+) -> (Vec<ChangedSymbolImpact>, Vec<String>, bool) {
     // Group hunks by file
     let mut file_hunks: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
@@ -427,8 +445,10 @@ async fn analyze_hunks(
     let mut symbol_count = 0;
     let at_cap = |n: usize| max_symbols > 0 && n >= max_symbols;
 
+    let mut stopped_at_cap = false;
     for (file, hunks) in file_hunks {
         if at_cap(symbol_count) {
+            stopped_at_cap = true;
             break;
         }
 
@@ -437,9 +457,10 @@ async fn analyze_hunks(
         // removed body lines of a surviving symbol (a Modified, not a deletion).
         let file_exists = file.exists();
         let current_symbols = if file_exists {
-            lsp.find_symbols(file, FindSymbolsOptions::default())
+            declared_in(app, file, FindSymbolsOptions::default())
                 .await
                 .ok()
+                .map(|read| read.symbols)
         } else {
             None
         };
@@ -460,6 +481,7 @@ async fn analyze_hunks(
             .filter(|h| matches!(h.change_type, ChangeType::Deleted))
         {
             if at_cap(symbol_count) {
+                stopped_at_cap = true;
                 break;
             }
             let deleted_rows = resolve_deleted_hunk(root, preimage_ref, file, hunk);
@@ -492,7 +514,7 @@ async fn analyze_hunks(
             if let Some(sym) = enclosing {
                 if seen.insert((sym.location.line, sym.location.column)) {
                     let impact = analyze_symbol_impact(
-                        lsp,
+                        app.lsp.as_ref(),
                         file,
                         sym.clone(),
                         ChangeType::Modified,
@@ -510,6 +532,7 @@ async fn analyze_hunks(
 
             for row in deleted_rows {
                 if at_cap(symbol_count) {
+                    stopped_at_cap = true;
                     break;
                 }
                 changes.push(row);
@@ -543,6 +566,7 @@ async fn analyze_hunks(
 
         for hunk in live_hunks {
             if at_cap(symbol_count) {
+                stopped_at_cap = true;
                 break;
             }
 
@@ -565,6 +589,7 @@ async fn analyze_hunks(
                 }
 
                 if at_cap(symbol_count) {
+                    stopped_at_cap = true;
                     break;
                 }
 
@@ -576,7 +601,7 @@ async fn analyze_hunks(
                 );
 
                 let impact = analyze_symbol_impact(
-                    lsp,
+                    app.lsp.as_ref(),
                     file,
                     sym.clone(),
                     change_type,
@@ -593,7 +618,7 @@ async fn analyze_hunks(
         }
     }
 
-    (changes, unmeasured)
+    (changes, unmeasured, stopped_at_cap)
 }
 
 async fn analyze_symbol_impact(

@@ -1237,3 +1237,109 @@ fn a_symbol_search_emits_every_match_the_limit_admits() {
         "nothing was held back, so nothing claims it was: {page}"
     );
 }
+
+/// `diff-impact` stops at `--max-symbols` before it runs out of changed
+/// symbols, and every count it publishes is then a lower bound. Saying so is
+/// what lets a reviewer treat it as a gap to close rather than a population to
+/// reason from — the counts alone read as the whole blast radius.
+#[test]
+fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("a.py"), "def one():\n    pass\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "init"]);
+    std::fs::write(
+        repo.join("a.py"),
+        "def one():\n    return 1\n\n\ndef two():\n    pass\n\n\ndef three():\n    pass\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "change"]);
+
+    let capped = json_ok(repo, &["diff-impact", "HEAD~1", "--max-symbols", "1"]);
+    assert_eq!(
+        capped["incomplete"].as_bool(),
+        Some(true),
+        "a capped analysis publishes counts that are short: {capped}"
+    );
+    assert!(
+        capped["hints"].as_array().is_some_and(|h| h
+            .iter()
+            .any(|x| x.as_str().is_some_and(|s| s.contains("--max-symbols")))),
+        "the remedy names the cap that stopped it: {capped}"
+    );
+
+    let whole = json_ok(repo, &["diff-impact", "HEAD~1", "--max-symbols", "0"]);
+    assert_eq!(
+        whole["incomplete"].as_bool(),
+        None,
+        "an analysis that ran out of candidates claims no shortfall: {whole}"
+    );
+}
+
+/// A diff's changed symbols are read through the same reader every other
+/// surface uses, so a language with no server still reports WHAT changed.
+/// Reference counts stay absent and say so — a count no server can supply is
+/// never fabricated, and a file the grammar can read is never called
+/// unmeasured.
+#[test]
+fn a_diff_in_a_serverless_language_still_names_what_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("main.tf"),
+        "variable \"project_id\" {\n  type = string\n}\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "init"]);
+    std::fs::write(
+        repo.join("main.tf"),
+        "variable \"project_id\" {\n  type    = string\n  default = \"aix\"\n}\n\n         output \"bucket_url\" {\n  value = 1\n}\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "change"]);
+
+    let page = json_ok(repo, &["diff-impact", "HEAD~1"]);
+    let names: Vec<&str> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"project_id"),
+        "the grammar reads this file, so the diff names what it changed: {page}"
+    );
+    assert!(
+        page["unmeasured_files"].is_null(),
+        "a file the grammar read is not unmeasured: {page}"
+    );
+    for change in page["changes"].as_array().expect("changes") {
+        assert!(
+            change["refs"].is_null(),
+            "no server can count references here, so none are claimed: {page}"
+        );
+    }
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
