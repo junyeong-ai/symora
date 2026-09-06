@@ -62,7 +62,7 @@ symora map dir src/cli/commands
 symora map related src/cli/commands/search/mod.rs --limit 5
 ```
 
-`map file` is compact by design — use `symbols <file>` for the full tree. `map related` is a heuristic next-file hint, not a dependency graph.
+`map file` is compact by design — use `symbols <file>` for the full tree. `map related` is a heuristic next-file hint, not a dependency graph. Every list `--limit` cuts (`entrypoints`, `top_directories`, `child_directories`, `files`, `siblings`) carries its own `count`, so raise the limit rather than reading what fits as the whole set.
 
 ### Exact follow-up from a location
 

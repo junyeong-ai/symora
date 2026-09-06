@@ -28,7 +28,7 @@ pub struct MapArgs {
 pub enum MapCommand {
     /// High-level project map
     Summary {
-        /// Maximum directories to show
+        /// Maximum top-level directories and entrypoints to show
         #[arg(long, default_value = "10")]
         limit: usize,
     },
@@ -94,8 +94,8 @@ struct MapSummaryOutput {
     test_files: usize,
     directories: usize,
     languages: Vec<LanguageMapOutput>,
-    top_directories: Vec<DirectoryMapOutput>,
-    entrypoints: Vec<EntryPointOutput>,
+    top_directories: Section<DirectoryMapOutput>,
+    entrypoints: Section<EntryPointOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     next_commands: Vec<String>,
 }
@@ -152,7 +152,7 @@ struct MapFileOutput {
     /// What produced `symbols` and `focus_symbols`, omitted with them.
     #[serde(skip_serializing_if = "Option::is_none")]
     backend: Option<crate::cli::SymbolBackend>,
-    siblings: Vec<String>,
+    siblings: Section<String>,
     counterpart_files: Vec<String>,
     symbols: Section<SymbolOutput>,
     related_files: Vec<RelatedFileOutput>,
@@ -172,8 +172,8 @@ struct MapDirOutput {
     file_count: usize,
     test_files: usize,
     languages: Vec<LanguageMapOutput>,
-    child_directories: Vec<DirectoryMapOutput>,
-    files: Vec<DirFileOutput>,
+    child_directories: Section<DirectoryMapOutput>,
+    files: Section<DirFileOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -215,6 +215,16 @@ struct SymbolProfile {
     names: HashSet<String>,
     tokens: HashSet<String>,
     import_tokens: HashSet<String>,
+}
+
+/// A list a limit cut, carrying the size of what it cut from. Truncating
+/// here and nowhere else keeps `count` describing the set the items were
+/// drawn from — a list that reports only what survived reads as the whole
+/// of a directory, of a project's entrypoints, or of a file's neighbours.
+fn limited<T>(mut items: Vec<T>, limit: usize) -> Section<T> {
+    let total = items.len();
+    items.truncate(limit);
+    Section::with_total(items, total)
 }
 
 pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
@@ -273,7 +283,7 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
         })
         .collect();
 
-    let mut top_directories: Vec<_> = by_dir
+    let mut directories: Vec<_> = by_dir
         .into_iter()
         .map(|(path, (file_count, test_files))| DirectoryMapOutput {
             path,
@@ -281,15 +291,15 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
             test_files,
         })
         .collect();
-    top_directories.sort_by(|a, b| {
+    directories.sort_by(|a, b| {
         b.file_count
             .cmp(&a.file_count)
             .then_with(|| a.path.cmp(&b.path))
     });
-    top_directories.truncate(limit);
 
-    let entrypoints = detect_entrypoints(&code_records, limit);
-    let next_commands = map_summary_next_commands(&top_directories, &entrypoints);
+    let top_directories = limited(directories, limit);
+    let entrypoints = limited(detect_entrypoints(&code_records), limit);
+    let next_commands = map_summary_next_commands(&top_directories.items, &entrypoints.items);
 
     let response = MapSummaryOutput {
         root: ctx.root().display().to_string(),
@@ -360,7 +370,6 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         .iter()
         .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
         .map(|r| r.rel_path.clone())
-        .take(8)
         .collect();
     let counterpart_files = detect_counterparts(&target, &records)
         .into_iter()
@@ -375,7 +384,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         unread_paths,
         focus_symbols,
         backend,
-        siblings,
+        siblings: limited(siblings, 8),
         counterpart_files,
         symbols,
         related_files,
@@ -463,7 +472,6 @@ async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
             .cmp(&a.file_count)
             .then_with(|| a.path.cmp(&b.path))
     });
-    child_directories.truncate(limit);
 
     let mut files: Vec<_> = records_in_dir
         .iter()
@@ -475,7 +483,6 @@ async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
         })
         .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    files.truncate(limit);
 
     let unread_paths = scan.unread_at(ctx, &app.root().join(&dir));
     ctx.print_success(MapDirOutput {
@@ -485,8 +492,8 @@ async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
         file_count: records_in_dir.len(),
         test_files: records_in_dir.iter().filter(|r| r.is_test).count(),
         languages,
-        child_directories,
-        files,
+        child_directories: limited(child_directories, limit),
+        files: limited(files, limit),
     });
     Ok(())
 }
@@ -674,7 +681,7 @@ fn immediate_child_dir(dir: &str, rel_path: &str) -> Option<String> {
     })
 }
 
-fn detect_entrypoints(records: &[&FileRecord], limit: usize) -> Vec<EntryPointOutput> {
+fn detect_entrypoints(records: &[&FileRecord]) -> Vec<EntryPointOutput> {
     let mut candidates = Vec::new();
     for record in records {
         let file_name = Path::new(&record.rel_path)
@@ -717,9 +724,6 @@ fn detect_entrypoints(records: &[&FileRecord], limit: usize) -> Vec<EntryPointOu
             file: candidate.file,
             reason: candidate.reason,
         });
-        if filtered.len() >= limit {
-            break;
-        }
     }
 
     filtered

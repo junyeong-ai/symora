@@ -121,15 +121,23 @@ symora map summary
     { "language": "typescript", "file_count": 67, "test_files": 18 },
     { "language": "json", "file_count": 4, "test_files": 0 }
   ],
-  "top_directories": [
-    { "path": "src/services", "file_count": 14, "test_files": 0 },
-    { "path": "src/routes", "file_count": 9, "test_files": 0 },
-    { "path": "tests", "file_count": 18, "test_files": 18 }
-  ],
-  "entrypoints": [
-    { "file": "src/server.ts", "reason": "main entry file" },
-    { "file": "src/app.ts", "reason": "application bootstrap candidate" }
-  ],
+  "top_directories": {
+    "count": 3,
+    "showing": 3,
+    "items": [
+      { "path": "src/services", "file_count": 14, "test_files": 0 },
+      { "path": "src/routes", "file_count": 9, "test_files": 0 },
+      { "path": "tests", "file_count": 18, "test_files": 18 }
+    ]
+  },
+  "entrypoints": {
+    "count": 2,
+    "showing": 2,
+    "items": [
+      { "file": "src/server.ts", "reason": "main entry file" },
+      { "file": "src/app.ts", "reason": "application bootstrap candidate" }
+    ]
+  },
   "next_commands": [
     "symora map file src/server.ts --related-limit 5",
     "symora symbols src/server.ts --depth 1"
