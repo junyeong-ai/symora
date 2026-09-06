@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 pub const INIT_SCHEMA: &str = r#"
 -- Incremental auto-vacuum, set before the file is a WAL database and before
@@ -15,7 +15,7 @@ PRAGMA foreign_keys = ON;
 PRAGMA cache_size = -16384;
 PRAGMA temp_store = MEMORY;
 PRAGMA mmap_size = 134217728;
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
