@@ -404,11 +404,14 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         DisclosureRoute::WorkspaceOnly(reason)
     });
     let mut route_facts = Vec::from_iter(unavailable);
-    route_facts.extend(unconfirmed_zero_fact(
-        &query,
-        total,
-        &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
-    ));
+    route_facts.extend(
+        unconfirmed_zero_fact(
+            app.store.as_ref(),
+            total,
+            &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
+        )
+        .await,
+    );
     let section = with_coverage_disclosure(
         Section::with_total(items, total)
             .with_hints(workspace_symbol_hints(

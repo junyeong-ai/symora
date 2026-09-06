@@ -712,9 +712,16 @@ fn edit_reindexes_the_store_so_search_sees_the_new_content() {
 /// that is not authoritative for rust. The zero says so, and still does
 /// not offer `search index build`: the index is already built, so
 /// rebuilding it is a no-op remedy.
+/// A zero is the one answer read as "nothing exists", so what it rests on has
+/// to be checked rather than assumed. With no language server to confirm it,
+/// the index is the whole authority: current, and the zero is exact; behind the
+/// working tree, and a symbol written since the build has no row to match.
+///
+/// Both directions are pinned here, and so is the remedy — a disclosure whose
+/// fix does not clear it is worse than none, and this one prescribes a rebuild.
 #[cfg(unix)]
 #[test]
-fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
+fn a_symbol_zero_is_authoritative_until_the_tree_moves() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("main.rs"),
@@ -729,14 +736,15 @@ fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
     )
     .unwrap();
 
-    let out = run_in(dir.path(), &["search", "index", "build"]);
-    assert!(
-        out.status.success(),
-        "index build failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    for query in ["Nonexistent/missing_xyz", "nonexistent_missing_xyz"] {
+    let build = || {
+        let out = run_in(dir.path(), &["search", "index", "build"]);
+        assert!(
+            out.status.success(),
+            "index build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let zero = |query: &str| -> serde_json::Value {
         let out = run_in(
             dir.path(),
             &["--format", "compact", "search", "symbols", query],
@@ -748,47 +756,94 @@ fn pathlike_zero_with_a_dead_server_is_disclosed_not_authoritative() {
         );
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(json["count"], 0, "query '{query}' should find nothing");
-        let hints = json
-            .get("hints")
-            .and_then(|h| h.as_array())
-            .cloned()
-            .unwrap_or_default();
+        json
+    };
+    let disclosure = |json: &serde_json::Value| -> (Vec<String>, Vec<String>) {
+        let read = |key: &str| {
+            json.get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or_default().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        (read("hints"), read("next_commands"))
+    };
+
+    build();
+    // The build covers rust, so a dead rust server takes nothing out of the
+    // answer's domain — naming a gap here would send an agent to install a
+    // server the answer never needed.
+    for query in ["Nonexistent/missing_xyz", "nonexistent_missing_xyz"] {
+        let json = zero(query);
+        let (hints, next) = disclosure(&json);
         assert!(
-            hints.iter().any(|h| h
-                .as_str()
-                .unwrap()
-                .contains("confirmed that against the working tree")),
-            "query '{query}': the index had no match and the server is dead, \
-             yet the zero reads as complete: {hints:?}"
-        );
-        let gaps = json
-            .get("coverage_gaps")
-            .and_then(|g| g.as_array())
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            gaps.is_empty(),
-            "query '{query}': the build covers rust, so rust is not missing from the \
-             answer's domain — a gap here sends an agent to install a server it does \
-             not need: {gaps:?}"
-        );
-        let next = json
-            .get("next_commands")
-            .and_then(|n| n.as_array())
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            next.iter()
-                .all(|c| !c.as_str().unwrap().contains("search index build")),
-            "query '{query}': index build is a no-op remedy here: {next:?}"
+            json.get("coverage_gaps").is_none(),
+            "query '{query}': rust is in the build's scope, so its zero is not a coverage gap: {json}"
         );
         assert!(
-            next.iter()
-                .any(|c| c.as_str().unwrap().starts_with("symora search content ")),
-            "query '{query}': the remedy must read the tree the answer could not \
-             reach: {next:?}"
+            hints.is_empty() && next.is_empty(),
+            "query '{query}': a current index answers this zero outright: {hints:?} {next:?}"
         );
     }
+
+    // A rename to a name of the same length leaves the file exactly as long as
+    // the build found it. That is the shape of the edit these searches are run
+    // to check, so it is the one the currency question has to catch — size
+    // alone would read this tree as untouched.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() {}\nfn helper_omega() {}\n",
+    )
+    .unwrap();
+    let (renamed_hints, _) = disclosure(&zero("helper_omega"));
+    assert!(
+        renamed_hints
+            .iter()
+            .any(|h| h.contains("behind the working tree")),
+        "a same-size edit moves the tree as surely as any other: {renamed_hints:?}"
+    );
+
+    // The tree moves again, this time by growing. The same zero now rests on a
+    // build that never saw this declaration, and says so.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() {}\nfn helper_alpha() {}\nfn nonexistent_missing_xyz() {}\n",
+    )
+    .unwrap();
+
+    let (hints, next) = disclosure(&zero("nonexistent_missing_xyz"));
+    assert!(
+        hints.iter().any(|h| h.contains("behind the working tree")),
+        "a zero drawn from an index the tree has outrun must say so: {hints:?}"
+    );
+    assert!(
+        next.iter().any(|c| c == "symora search index build"),
+        "the remedy has to be the one that repairs the stated fact: {next:?}"
+    );
+
+    // And the remedy clears it: the rebuild sees the new declaration, so the
+    // query stops being a zero at all.
+    build();
+    let out = run_in(
+        dir.path(),
+        &[
+            "--format",
+            "compact",
+            "search",
+            "symbols",
+            "nonexistent_missing_xyz",
+        ],
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        json["count"], 1,
+        "the prescribed rebuild must reach the file the disclosure was about: {json}"
+    );
 }
 
 /// A file that holds no text is outside a search's domain, not a hole in its

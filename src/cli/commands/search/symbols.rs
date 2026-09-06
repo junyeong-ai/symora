@@ -190,10 +190,11 @@ pub async fn execute_symbol_search(
                 },
             );
             let unconfirmed_zero = unconfirmed_zero_fact(
-                query,
+                app.store.as_ref(),
                 count,
                 &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
-            );
+            )
+            .await;
             let section = with_coverage_disclosure(
                 with_emitted_stale(
                     finish_symbol_search(
@@ -561,11 +562,14 @@ async fn execute_workspace_symbol_search(
         },
     );
     let mut route_facts = Vec::from_iter(supplement_unavailable.or(index_unavailable));
-    route_facts.extend(unconfirmed_zero_fact(
-        query,
-        count,
-        &unconfirmed_by_live_lookup(&index_covered, &failures, &skipped),
-    ));
+    route_facts.extend(
+        unconfirmed_zero_fact(
+            app.store.as_ref(),
+            count,
+            &unconfirmed_by_live_lookup(&index_covered, &failures, &skipped),
+        )
+        .await,
+    );
     let section = with_coverage_disclosure(
         with_emitted_stale(
             finish_symbol_search(
@@ -1601,14 +1605,13 @@ mod tests {
         );
     }
 
-    /// A stale index plus a dead server must not publish a confident zero —
-    /// and must not publish a false gap either. The build covers rust, so
-    /// rust is not missing from the answer's domain; what the dead server
-    /// cost is the confirmation that the zero still holds on disk. Naming
-    /// that as a coverage gap sends an agent to install a server it does not
-    /// need, and saying nothing at all is the confident zero.
+    /// A dead server must not turn a covered language into a coverage gap.
+    /// The build covers rust, so rust is not missing from the answer's domain;
+    /// what the dead server cost is the confirmation that the zero still holds
+    /// on disk, which is a currency question and is answered against the tree
+    /// (`search_symbols_zero_is_authoritative_until_the_tree_moves`).
     #[test]
-    fn an_unconfirmed_zero_is_disclosed_as_currency_not_as_coverage() {
+    fn a_covered_language_is_never_a_gap_however_its_server_fared() {
         let failures = vec![(
             Language::Rust,
             LspError::ServerNotInstalled {
@@ -1617,33 +1620,27 @@ mod tests {
             },
         )];
         assert!(gaps(&failures, &[Language::Rust]).is_empty());
-
-        let unconfirmed = unconfirmed_by_live_lookup(&[Language::Rust], &failures, &[]);
-        assert_eq!(unconfirmed, vec![Language::Rust]);
-        let fact = unconfirmed_zero_fact("oldName", 0, &unconfirmed);
-        assert_eq!(fact.len(), 1);
-        assert_eq!(fact[0].1, "symora search content 'oldName' --lang rust");
-
         // A language the build does not cover is genuinely outside the
         // answer's domain, and stays a gap.
         assert_eq!(gaps(&failures, &[]).len(), 1);
     }
 
-    /// The disclosure is a property of the ZERO. A match is evidence on its
-    /// own terms, so a live lookup that failed beside one leaves nothing to
-    /// admit — and a live lookup that answered confirms the zero, which is
-    /// the one way this tool can state an absence outright.
+    /// What the live lookup left unsettled, which is one half of what decides
+    /// whether a zero can be published unqualified. A language it answered for
+    /// is settled whatever the index's currency.
     #[test]
-    fn only_an_unconfirmed_zero_carries_the_currency_fact() {
+    fn only_a_language_the_live_lookup_missed_is_left_unconfirmed() {
         let failures = vec![(Language::Rust, LspError::Timeout("rust".to_string()))];
-        let unconfirmed = unconfirmed_by_live_lookup(&[Language::Rust], &failures, &[]);
-        assert!(unconfirmed_zero_fact("oldName", 3, &unconfirmed).is_empty());
-        assert!(unconfirmed_zero_fact("oldName", 0, &[]).is_empty());
-        assert!(unconfirmed_by_live_lookup(&[Language::Rust], &[], &[]).is_empty());
+        assert_eq!(
+            unconfirmed_by_live_lookup(&[Language::Rust, Language::Go], &failures, &[]),
+            vec![Language::Rust]
+        );
         assert_eq!(
             unconfirmed_by_live_lookup(&[Language::Rust], &[], &[Language::Rust]),
             vec![Language::Rust]
         );
+        assert!(unconfirmed_by_live_lookup(&[Language::Rust], &[], &[]).is_empty());
+        assert!(unconfirmed_by_live_lookup(&[], &failures, &[]).is_empty());
     }
 
     /// A route that never asks a language server discloses what the index

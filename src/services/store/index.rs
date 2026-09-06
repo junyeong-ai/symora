@@ -42,6 +42,12 @@ const META_BUILD_SCOPE: &str = "build_scope";
 /// another operation superseded can never mark the index whole.
 const META_BUILD_EPOCH: &str = "build_epoch";
 
+/// The stat of every file the last completed build discovered, reduced to one
+/// value. What it answers is whether the tree still looks the way that build
+/// read it, which is the difference between an index-backed zero that means
+/// "nothing declares this" and one that means "nothing declared it then".
+const META_TREE_FINGERPRINT: &str = "tree_fingerprint";
+
 /// How long opening a store waits for a build to release the index before
 /// giving up on replacing a database it cannot read. Long enough to cover
 /// an ordinary build, short enough that a command never looks hung.
@@ -151,6 +157,55 @@ fn read_meta(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, r
         |r| r.get::<_, String>(0),
     )
     .optional()
+}
+
+/// A fingerprint of the tree a build read: the path, size, and modification
+/// time of every file it discovered, in one stable order.
+///
+/// Taken before any of those files is opened. A file written while the build
+/// runs then carries a modification time past the one recorded here, so the
+/// next comparison reports the index behind rather than current — the one
+/// direction this must never get wrong, since a false "current" publishes a
+/// confident zero over content nothing read.
+///
+/// A file the walk found and a stat cannot describe compares equal to itself
+/// and to nothing else. It is unreadable, so the build already recorded it in
+/// `unread_paths` and every answer drawn from the index is a lower bound on
+/// its account; saying the tree moved as well would name a second fact that
+/// no rebuild can clear.
+fn tree_fingerprint(root: &Path, files: &[PathBuf]) -> String {
+    let mut entries: Vec<String> = files
+        .iter()
+        .map(|path| {
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            match file_stamp(path) {
+                Some((size, modified)) => format!("{name}\u{1}{size}\u{1}{modified}"),
+                None => format!("{name}\u{1}?"),
+            }
+        })
+        .collect();
+    entries.sort();
+    format!(
+        "{:016x}",
+        crate::infra::hash_content(&entries.join("\u{2}"))
+    )
+}
+
+/// A file's size and modification time in nanoseconds, or `None` where the
+/// filesystem cannot express one of them.
+fn file_stamp(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((meta.len(), modified))
 }
 
 fn write_meta(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<(), rusqlite::Error> {
@@ -769,6 +824,7 @@ impl Store {
         &self,
         epoch: i64,
         scope: &BuildScope,
+        fingerprint: String,
         unread_paths: Vec<UnreadPath>,
     ) -> Result<(), StoreError> {
         let value = scope.meta_value();
@@ -780,6 +836,7 @@ impl Store {
                 let owned = read_build_epoch(&tx)? == epoch;
                 if owned {
                     write_meta(&tx, META_BUILD_SCOPE, &value)?;
+                    write_meta(&tx, META_TREE_FINGERPRINT, &fingerprint)?;
                     // The rows qualify exactly the marker written beside them,
                     // so they are replaced wholesale in the same transaction:
                     // what an earlier build could not read says nothing about
@@ -985,6 +1042,7 @@ impl Store {
             .iter()
             .map(|path| path.display().to_string())
             .collect();
+        let fingerprint = tree_fingerprint(&self.project_root, &files);
 
         let epoch = self
             .begin_build(if options.force {
@@ -1056,10 +1114,48 @@ impl Store {
         unread_paths.sort_by(|a, b| a.path.cmp(&b.path));
         unread_paths.dedup_by(|a, b| a.path == b.path);
 
-        self.publish_build(epoch, &scope, unread_paths).await?;
+        self.publish_build(epoch, &scope, fingerprint, unread_paths)
+            .await?;
         let _ = self.reclaim_free_pages().await;
         let _ = self.checkpoint().await;
         self.stats().await
+    }
+
+    /// Whether the tree still looks the way the last completed build read it.
+    ///
+    /// The walk is the build's own — same scope, so a language the build never
+    /// covered cannot make the index look behind — and the comparison is
+    /// stat-only: no file is opened. `false` wherever the question cannot be
+    /// settled: no build has completed, one is running now, or this binary
+    /// wrote no fingerprint. An index reported current is one whose zero can
+    /// be published without a language server to confirm it, so every
+    /// unsettled case has to fall on this side.
+    ///
+    /// A build is the only thing that records a fingerprint. A per-file
+    /// refresh deliberately does not: it brings the files it was given in
+    /// line, which is not the whole-tree correspondence this claims.
+    pub async fn tree_is_current(&self) -> Result<bool, StoreError> {
+        if self.build_in_progress() {
+            return Ok(false);
+        }
+        let recorded = self
+            .db
+            .call(|conn| {
+                Ok(read_completed_build(conn)?.zip(read_meta(conn, META_TREE_FINGERPRINT)?))
+            })
+            .await?;
+        let Some((build, fingerprint)) = recorded else {
+            return Ok(false);
+        };
+        let root = self.project_root.clone();
+        let current = tokio::task::spawn_blocking(move || {
+            let extensions = build.scope.extensions();
+            let Discovery { files, .. } = FileFilter::new(&root).discover_files(&extensions);
+            tree_fingerprint(&root, &files)
+        })
+        .await
+        .map_err(|e| StoreError::Database(e.to_string()))?;
+        Ok(current == fingerprint)
     }
 
     async fn index_file(&self, path: &Path) -> Result<(), StoreError> {
@@ -2060,7 +2156,7 @@ mod tests {
         store.clear().await.unwrap();
         assert!(matches!(
             store
-                .publish_build(overtaken, &BuildScope::All, Vec::new())
+                .publish_build(overtaken, &BuildScope::All, String::new(), Vec::new())
                 .await,
             Err(StoreError::AlreadyIndexing)
         ));
@@ -2068,7 +2164,7 @@ mod tests {
 
         let owned = store.begin_build(Reindex::InPlace).await.unwrap();
         store
-            .publish_build(owned, &BuildScope::All, Vec::new())
+            .publish_build(owned, &BuildScope::All, String::new(), Vec::new())
             .await
             .unwrap();
         assert_eq!(store.build_scope().await.unwrap(), Some(BuildScope::All));

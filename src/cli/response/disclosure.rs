@@ -605,11 +605,9 @@ pub fn relative_unread_paths(ctx: &OutputContext, paths: &[UnreadPath]) -> Vec<U
 
 /// The indexed languages whose zero no language server confirmed.
 ///
-/// An index that matched nothing answered for the build behind it, not for the
-/// working tree, and the live lookup is what settles the difference. Where it
-/// answered, the zero is exact; where it failed or never ran, the zero is the
-/// last build's — which is a statement about currency, not about coverage, and
-/// so is said as a fact of the route rather than as a language gap.
+/// The live lookup is what settles a zero against the working tree. Where it
+/// answered, the zero is exact for the tree as it is; where it failed or never
+/// ran, the zero rests on the index alone.
 pub fn unconfirmed_by_live_lookup(
     covered: &[Language],
     failures: &[(Language, LspError)],
@@ -624,24 +622,29 @@ pub fn unconfirmed_by_live_lookup(
         .collect()
 }
 
-/// What an unconfirmed zero owes its reader, in the shape the route states its
-/// own facts in. Only a zero has anything to admit here: a match is evidence
-/// on its own terms, and the rows carry `backend` to say what produced them.
+/// What a zero owes its reader, in the shape a route states its own facts in.
 ///
-/// The remedy reads the working tree, because that is the thing the answer
-/// could not reach — a rebuild is the durable repair but a no-op against an
-/// index that is already current, and prescribing it would send a reader who
-/// just built one around a loop. Narrowed to the first unconfirmed language,
-/// as every other first-gap remedy is.
-pub fn unconfirmed_zero_fact(
-    query: &str,
+/// A zero can be published unqualified on either of two grounds, and the
+/// cheaper one is checked second because it is the one that costs a walk: a
+/// language server that answered the same nothing against the working tree, or
+/// an index whose scope covered the question and whose tree has not moved
+/// since the build read it. Neither holding is the only case with anything to
+/// admit — and then the fact is about the index being behind, which a rebuild
+/// repairs, rather than about the server, which the answer did not need.
+///
+/// Only a zero reaches here. A match is evidence on its own terms, and its
+/// rows carry `backend` to say what produced them.
+pub async fn unconfirmed_zero_fact(
+    store: &dyn crate::services::store::StoreService,
     count: usize,
     unconfirmed: &[Language],
 ) -> Vec<(String, String)> {
-    let (Some(first), Some(literal)) = (unconfirmed.first(), literal_query(query)) else {
+    if count > 0 || unconfirmed.is_empty() {
         return Vec::new();
-    };
-    if count > 0 {
+    }
+    // A store that cannot answer has not established currency, which is the
+    // same standing as an index that is behind: both leave the zero qualified.
+    if store.index_is_current().await.unwrap_or(false) {
         return Vec::new();
     }
     let languages = unconfirmed
@@ -651,13 +654,10 @@ pub fn unconfirmed_zero_fact(
         .join(", ");
     vec![(
         format!(
-            "Nothing matched and no {languages} language server confirmed that against the \
-             working tree, so a symbol written since the last build has no row to match"
+            "The index is behind the working tree and no {languages} language server confirmed \
+             this against it, so a symbol written since the last build has no row to match"
         ),
-        format!(
-            "symora search content '{literal}' --lang {}",
-            first.lsp_id()
-        ),
+        "symora search index build".to_string(),
     )]
 }
 

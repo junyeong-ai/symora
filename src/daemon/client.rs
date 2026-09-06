@@ -574,6 +574,13 @@ impl DaemonClient {
             .and_then(Self::extract_result)
     }
 
+    pub async fn index_is_current(&self) -> Result<serde_json::Value, LspError> {
+        self.ensure_running().await?;
+        self.request_with_project(methods::INDEX_IS_CURRENT, serde_json::json!({}), None)
+            .await
+            .and_then(Self::extract_result)
+    }
+
     pub async fn indexed_languages(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
         self.request_with_project(methods::INDEXED_LANGUAGES, serde_json::json!({}), None)

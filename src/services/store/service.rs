@@ -53,6 +53,15 @@ pub trait StoreService: Send + Sync {
     /// result from an uncovered one is a lower bound no matter its size.
     async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError>;
 
+    /// Whether the tree still looks the way the last completed build read it.
+    ///
+    /// Stat-only over the build's own scope — no file is opened — and false
+    /// wherever the question cannot be settled. It is what separates an
+    /// index-backed zero that means "nothing declares this" from one that
+    /// means "nothing declared it at build time", so it is asked only where a
+    /// zero would otherwise have to be published unqualified.
+    async fn index_is_current(&self) -> Result<bool, StoreError>;
+
     async fn index_clear(&self) -> Result<(), StoreError>;
 
     /// Bring just-edited files' index rows in line with the bytes on disk
@@ -160,6 +169,10 @@ impl StoreService for DefaultStoreService {
 
     async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError> {
         self.store().await?.indexed_languages().await
+    }
+
+    async fn index_is_current(&self) -> Result<bool, StoreError> {
+        self.store().await?.tree_is_current().await
     }
 
     async fn index_status(&self) -> Result<IndexStats, StoreError> {

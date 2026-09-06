@@ -101,6 +101,11 @@ impl StoreService for DaemonStoreService {
         serde_json::from_value(response).map_err(|e| StoreError::Database(e.to_string()))
     }
 
+    async fn index_is_current(&self) -> Result<bool, StoreError> {
+        let response = self.client.index_is_current().await.map_err(store_error)?;
+        serde_json::from_value(response).map_err(|e| StoreError::Database(e.to_string()))
+    }
+
     async fn index_status(&self) -> Result<IndexStats, StoreError> {
         let response = self.client.index_status().await.map_err(store_error)?;
         serde_json::from_value(response).map_err(|e| StoreError::Database(e.to_string()))
