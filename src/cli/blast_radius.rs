@@ -183,7 +183,11 @@ pub async fn compute(
         // dynamic dispatch — it caps confidence rather than being presented
         // as an authoritative count.
         confidence: {
-            let c = compute_confidence(direct_callers, depth_reached, dynamic_dispatch.as_ref());
+            let c = compute_confidence(
+                direct_callers,
+                !walk.max_depth_reached && !walk.truncated,
+                dynamic_dispatch.as_ref(),
+            );
             if walk.incomplete {
                 c.min(INCOMPLETE_WALK_CONFIDENCE_CAP)
             } else {
@@ -273,22 +277,21 @@ fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f64) -> R
 
 fn compute_confidence(
     direct_callers: usize,
-    depth_reached: u32,
+    walk_finished: bool,
     dynamic_dispatch: Option<&DynamicDispatch>,
 ) -> f64 {
-    // Confidence is high when the LSP actually returned a call hierarchy
-    // (direct_callers > 0) AND we explored the requested depth without
-    // tripping the safety cap. Zero direct callers is the dominant
-    // false-negative case (LSP feature unsupported, or a true leaf).
+    // Confidence rests on a graph that exists and was exhausted. Zero direct
+    // callers is the dominant false-negative case — an unsupported capability
+    // or a true leaf, with no way to tell them apart — and a walk over nothing
+    // finishes trivially, so it earns neither. How DEEP the graph turned out
+    // to be earns nothing either: a walk that stopped at the depth cap has
+    // callers past it, and a shallow one that ran out has none.
     let mut score: f64 = 0.5;
     if direct_callers > 0 {
         score += 0.3;
-    }
-    if depth_reached >= 2 {
-        score += 0.1;
-    }
-    if depth_reached >= 3 {
-        score += 0.1;
+        if walk_finished {
+            score += 0.2;
+        }
     }
     let score = coarse(score.clamp(0.0, 1.0));
     // A dynamically-dispatched anchor's graph is a known lower bound, so it
@@ -374,6 +377,61 @@ mod tests {
         assert!(radius.callers_truncated);
     }
 
+    /// The walk's own bounds are what "unfinished" means here. A graph cut by
+    /// the depth limit or by a node's neighbour cap holds callers the counts
+    /// never saw, and both say so on the response — so neither may also read
+    /// as a complete answer.
+    #[test]
+    fn a_walk_stopped_by_its_own_bounds_is_not_certain() {
+        let complete = compute_with(
+            HashMap::from([((10, 5), vec![caller(20), caller(30)])]),
+            WalkConfig {
+                max_depth: 2,
+                max_neighbors_per_node: 8,
+            },
+        );
+        assert!(!complete.max_depth_reached && !complete.callers_truncated);
+        assert_eq!(complete.confidence, 1.0);
+
+        let depth_bound = compute_with(
+            HashMap::from([
+                ((10, 5), vec![caller(20)]),
+                ((20, 1), vec![caller(30)]),
+                ((30, 1), vec![caller(40)]),
+            ]),
+            WalkConfig {
+                max_depth: 2,
+                max_neighbors_per_node: 8,
+            },
+        );
+        assert!(
+            depth_bound.max_depth_reached,
+            "the fixture must trip the cap"
+        );
+        assert!(
+            depth_bound.confidence < 1.0,
+            "a depth-bounded graph is a lower bound: {}",
+            depth_bound.confidence
+        );
+
+        let neighbour_bound = compute_with(
+            HashMap::from([((10, 5), vec![caller(20), caller(30), caller(40)])]),
+            WalkConfig {
+                max_depth: 3,
+                max_neighbors_per_node: 2,
+            },
+        );
+        assert!(
+            neighbour_bound.callers_truncated && !neighbour_bound.max_depth_reached,
+            "the fixture must bound the walk by the neighbour cap alone"
+        );
+        assert!(
+            neighbour_bound.confidence < 1.0,
+            "a truncated caller list is a lower bound: {}",
+            neighbour_bound.confidence
+        );
+    }
+
     #[test]
     fn risk_zero_callers_is_low() {
         assert_eq!(compute_risk(0, Some(true), 0.0), RiskLevel::Low);
@@ -413,15 +471,20 @@ mod tests {
 
     #[test]
     fn confidence_zero_callers_stays_at_baseline() {
-        let c = compute_confidence(0, 1, None);
+        let c = compute_confidence(0, true, None);
         assert!(c < 0.7, "expected low confidence when no callers, got {c}");
     }
 
+    /// A graph the walk did not finish holds callers it never reached, and its
+    /// own `max_depth_reached`/`callers_truncated` say so. It can therefore
+    /// never read as certain — least of all more certain than the same graph
+    /// walked to exhaustion.
     #[test]
-    fn confidence_climbs_with_depth_and_callers() {
-        assert!(compute_confidence(5, 1, None) > compute_confidence(0, 1, None));
-        assert!(compute_confidence(5, 3, None) > compute_confidence(5, 1, None));
-        assert_eq!(compute_confidence(100, 5, None), 1.0);
+    fn an_unfinished_walk_never_reads_as_complete() {
+        assert!(compute_confidence(5, true, None) > compute_confidence(0, true, None));
+        assert!(compute_confidence(5, true, None) > compute_confidence(5, false, None));
+        assert_eq!(compute_confidence(100, true, None), 1.0);
+        assert!(compute_confidence(100, false, None) < 1.0);
     }
 
     #[test]
@@ -432,9 +495,9 @@ mod tests {
         };
         // Without the marker this anchor would score 1.0; the cap pulls it
         // down because the graph is a known lower bound.
-        assert_eq!(compute_confidence(100, 5, None), 1.0);
+        assert_eq!(compute_confidence(100, true, None), 1.0);
         assert_eq!(
-            compute_confidence(100, 5, Some(&dispatch)),
+            compute_confidence(100, true, Some(&dispatch)),
             DYNAMIC_DISPATCH_CONFIDENCE_CAP
         );
     }
