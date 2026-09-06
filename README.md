@@ -356,7 +356,7 @@ symora status                # 프로젝트 + language server 상태 (daemon은 
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
-  `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 두 가지는 예외입니다: 잘못된 CLI 인자는 평문 usage 에러를 출력하고 exit 2로, "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
+  `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 잘못된 CLI 인자도 같은 봉투로 나옵니다 — `invalid_argument` 코드에 clap의 산문이 아닌 JSON이라, 어떤 실패든 stdout 한 스트림만 파싱하면 됩니다. 예외는 하나뿐입니다: "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
 - **위치는 1-indexed** — 입력과 출력 모두이며, 하나의 주소는 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `context`, `impact`, `usage`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 출력 위치는 항상 line과 column을 함께 담습니다.
 - **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. 이는 소스가 뒤처졌다는 신호와는 다른 축입니다: `stale`과 `indexing: "timed_out"`은 소스가 뒤처졌다는 뜻이고, `incomplete`는 답이 짧다는 뜻입니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
 - **`--format compact`**는 단일 라인 JSON을 출력합니다. 응답 하나를 지배하는 예산은 하나입니다: `pack --tokens`처럼 호출자가 예산을 밝힌 응답(`budget_tokens`)은 그 예산이 전부이고, 나머지는 `output.max_response_chars`(기본 20,000자)로 상한이 걸립니다 — 항목 단위로 통째로 잘리고 `truncated`와 설정 키를 지목하는 hint로 공개됩니다. 상한은 어느 형식에서든 compact 직렬화로 재므로 `--format`이 받는 항목을 바꾸지 않습니다.
@@ -475,7 +475,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 - `symora setup skill`은 Claude Code 스킬(전체 CLI 플레이북)을 설치합니다.
 - `symora mcp serve`는 같은 내용을 MCP 도구 어휘로 옮긴 가이드를 `initialize` instructions로 반환합니다.
 
-요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 명령 실패는 0이 아닌 코드로 종료하는 구조화된 `{code, message, hint}`입니다(잘못된 CLI 인자는 평문 usage 에러).
+요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 명령 실패는 잘못된 CLI 인자까지 포함해 0이 아닌 코드로 종료하는 구조화된 `{code, message, hint}`입니다.
 
 ---
 
