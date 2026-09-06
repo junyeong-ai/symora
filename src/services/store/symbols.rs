@@ -28,106 +28,113 @@ impl Default for SymbolExtractor {
     }
 }
 
+/// Every language this binary extracts symbols from, with the grammar that
+/// parses it and the query that reads its declarations. One row per language:
+/// adding one is a row, and the digest below is taken from the same place, so
+/// a query cannot change without the indexes it produced being retired.
+const EXTRACTORS: &[(Language, fn() -> tree_sitter::Language, &str)] = &[
+    (
+        Language::Rust,
+        || tree_sitter_rust::LANGUAGE.into(),
+        RUST_QUERY,
+    ),
+    (Language::Go, || tree_sitter_go::LANGUAGE.into(), GO_QUERY),
+    (
+        Language::Python,
+        || tree_sitter_python::LANGUAGE.into(),
+        PYTHON_QUERY,
+    ),
+    (
+        Language::TypeScript,
+        || tree_sitter_typescript::LANGUAGE_TSX.into(),
+        TYPESCRIPT_QUERY,
+    ),
+    (
+        Language::JavaScript,
+        || tree_sitter_javascript::LANGUAGE.into(),
+        JAVASCRIPT_QUERY,
+    ),
+    (
+        Language::Java,
+        || tree_sitter_java::LANGUAGE.into(),
+        JAVA_QUERY,
+    ),
+    (
+        Language::Kotlin,
+        || tree_sitter_kotlin_sg::LANGUAGE.into(),
+        KOTLIN_QUERY,
+    ),
+    (
+        Language::Cpp,
+        || tree_sitter_cpp::LANGUAGE.into(),
+        CPP_QUERY,
+    ),
+    (
+        Language::CSharp,
+        || tree_sitter_c_sharp::LANGUAGE.into(),
+        CSHARP_QUERY,
+    ),
+    (
+        Language::PHP,
+        || tree_sitter_php::LANGUAGE_PHP.into(),
+        PHP_QUERY,
+    ),
+    (
+        Language::Ruby,
+        || tree_sitter_ruby::LANGUAGE.into(),
+        RUBY_QUERY,
+    ),
+    (
+        Language::Bash,
+        || tree_sitter_bash::LANGUAGE.into(),
+        BASH_QUERY,
+    ),
+    (
+        Language::Lua,
+        || tree_sitter_lua::LANGUAGE.into(),
+        LUA_QUERY,
+    ),
+    (
+        Language::Swift,
+        || tree_sitter_swift::LANGUAGE.into(),
+        SWIFT_QUERY,
+    ),
+    (
+        Language::Scala,
+        || tree_sitter_scala::LANGUAGE.into(),
+        SCALA_QUERY,
+    ),
+    (
+        Language::Dart,
+        || tree_sitter_dart::LANGUAGE.into(),
+        DART_QUERY,
+    ),
+];
+
 impl SymbolExtractor {
     pub fn new() -> Self {
         let mut languages = HashMap::new();
-        register(
-            &mut languages,
-            Language::Rust,
-            tree_sitter_rust::LANGUAGE.into(),
-            RUST_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Go,
-            tree_sitter_go::LANGUAGE.into(),
-            GO_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Python,
-            tree_sitter_python::LANGUAGE.into(),
-            PYTHON_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::TypeScript,
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            TYPESCRIPT_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::JavaScript,
-            tree_sitter_javascript::LANGUAGE.into(),
-            JAVASCRIPT_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Java,
-            tree_sitter_java::LANGUAGE.into(),
-            JAVA_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Kotlin,
-            tree_sitter_kotlin_sg::LANGUAGE.into(),
-            KOTLIN_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Cpp,
-            tree_sitter_cpp::LANGUAGE.into(),
-            CPP_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::CSharp,
-            tree_sitter_c_sharp::LANGUAGE.into(),
-            CSHARP_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::PHP,
-            tree_sitter_php::LANGUAGE_PHP.into(),
-            PHP_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Ruby,
-            tree_sitter_ruby::LANGUAGE.into(),
-            RUBY_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Bash,
-            tree_sitter_bash::LANGUAGE.into(),
-            BASH_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Lua,
-            tree_sitter_lua::LANGUAGE.into(),
-            LUA_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Swift,
-            tree_sitter_swift::LANGUAGE.into(),
-            SWIFT_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Scala,
-            tree_sitter_scala::LANGUAGE.into(),
-            SCALA_QUERY,
-        );
-        register(
-            &mut languages,
-            Language::Dart,
-            tree_sitter_dart::LANGUAGE.into(),
-            DART_QUERY,
-        );
+        for (language, grammar, query) in EXTRACTORS {
+            register(&mut languages, *language, grammar(), query);
+        }
         Self { languages }
+    }
+
+    /// What this binary's extraction would make of a file, as one value.
+    ///
+    /// The index records it, because rows are only as good as the queries that
+    /// produced them: a file whose bytes have not changed is skipped by a
+    /// rebuild, so an index built by an earlier extractor would keep serving
+    /// its rows — an answer short by exactly the declaration forms the new one
+    /// was written to reach, with nothing to say so. Changing a query is
+    /// therefore enough to retire a build, and no version has to be remembered.
+    pub fn extraction_digest() -> u64 {
+        let described = EXTRACTORS
+            .iter()
+            .map(|(language, _, query)| format!("{}\u{1}{query}", language.lsp_id()))
+            .collect::<Vec<_>>()
+            .join("\u{2}");
+        crate::infra::hash_content(&described)
     }
 
     /// Languages with a compiled-in index extractor.
