@@ -247,14 +247,14 @@ symora impact src/services/checkout.ts:48 --depth 2
       { "depth": 1, "count": 2, "test": 0, "prod": 2 },
       { "depth": 2, "count": 2, "test": 2, "prod": 0 }
     ],
-    "test_coverage_ratio": 0.5,
+    "test_caller_ratio": 0.5,
     "risk": "high",
-    "confidence": 0.9
+    "confidence": 0.8
   },
   "next_commands": ["symora impact src/services/checkout.ts:48 --depth 3"]
 }
 ```
-> `risk: "high"` with only half the call sites under test — change carefully. `next_commands` are ready-to-run follow-ups, emitted only when they'd help.
+> `risk: "high"` with only half the call sites under test — change carefully. `max_depth_reached` is true, so the graph is a lower bound and `confidence` says so — the `--depth 3` in `next_commands` is what lifts it.
 
 ### ⑥ Make the change — preview before you write
 
