@@ -1,5 +1,6 @@
 mod cache;
 mod converters;
+mod deterministic;
 mod editor;
 pub(crate) mod helpers;
 mod hierarchy;
@@ -27,6 +28,7 @@ use crate::models::lsp::{
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
+pub use deterministic::DeterministicLspService;
 pub use service::DefaultLspService;
 
 /// The LSP service every command speaks to. Workspace-dependent queries —

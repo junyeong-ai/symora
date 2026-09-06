@@ -1059,3 +1059,45 @@ fn stale_speaks_only_for_the_files_behind_the_items_emitted() {
         "and the row that did move still says so on its own"
     );
 }
+
+/// The tier a run answers from is an input, not an outcome. Without the flag
+/// `symbols` prefers a language server, so the same file reads differently on
+/// a machine that has one; with it the answer comes from the grammar and says
+/// so, which is what lets a caller gate on it. A command with no such source
+/// refuses instead of degrading into an answer wearing the same shape.
+#[test]
+fn a_confined_run_answers_from_the_grammar_or_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "pub struct Widget;
+impl Widget {
+    pub fn assemble(&self) {}
+}
+",
+    )
+    .unwrap();
+
+    let confined = json_ok(dir.path(), &["symbols", "main.rs", "--deterministic"]);
+    assert_eq!(
+        confined["backend"], "ast",
+        "a confined run must read the grammar, never a server: {confined}"
+    );
+    let names: Vec<&str> = confined["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|i| i["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"assemble"),
+        "the grammar answer is still a real one: {names:?}"
+    );
+
+    let out = run_in(dir.path(), &["refs", "main.rs:3:12", "--deterministic"]);
+    let refused: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+    assert_eq!(
+        refused["error"]["code"], "unsupported",
+        "references have no source that derives from the tree alone: {refused}"
+    );
+}

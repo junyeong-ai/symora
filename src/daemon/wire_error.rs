@@ -63,6 +63,7 @@ pub enum WireLspError {
     FileNotText {
         path: String,
     },
+    ServerNotConsulted,
     Other {
         message: String,
     },
@@ -130,6 +131,7 @@ impl From<&LspError> for WireLspError {
                 limit_mb: *limit_mb,
             },
             LspError::FileNotText { path } => Self::FileNotText { path: path.clone() },
+            LspError::ServerNotConsulted => Self::ServerNotConsulted,
             LspError::Io(e) => Self::Other {
                 message: e.to_string(),
             },
@@ -186,6 +188,7 @@ impl From<WireLspError> for LspError {
                 limit_mb,
             },
             WireLspError::FileNotText { path } => LspError::FileNotText { path },
+            WireLspError::ServerNotConsulted => LspError::ServerNotConsulted,
             WireLspError::Other { message } => LspError::Protocol(message),
         }
     }
@@ -328,6 +331,15 @@ mod tests {
             LspError::FileNotText { path } => assert_eq!(path, "/tmp/a.png"),
             other => panic!("did not round trip: {other:?}"),
         }
+    }
+
+    /// A confined run's refusal must arrive as itself: collapsed to `Other` it
+    /// maps back to a protocol failure, and the daemon would answer a question
+    /// the direct run refused.
+    #[test]
+    fn server_not_consulted_round_trips_as_itself() {
+        let wire = WireLspError::from(&LspError::ServerNotConsulted);
+        assert!(matches!(LspError::from(wire), LspError::ServerNotConsulted));
     }
 
     #[test]

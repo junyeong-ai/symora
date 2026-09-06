@@ -145,9 +145,12 @@ mod tests {
     use super::*;
 
     async fn dummy_app() -> App {
-        App::new(crate::cli::OutputOptions::default(), false)
-            .await
-            .expect("app init")
+        App::new(
+            crate::cli::OutputOptions::default(),
+            crate::app::Wiring::default(),
+        )
+        .await
+        .expect("app init")
     }
 
     #[tokio::test]

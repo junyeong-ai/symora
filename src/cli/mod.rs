@@ -95,6 +95,13 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "REQ")]
     pub check_version: Option<String>,
 
+    /// Answer only from the index and the compiled-in grammars, never a
+    /// language server, so the same tree answers the same way on any machine.
+    /// A command with no such source fails instead of degrading to a weaker
+    /// answer wearing the same shape.
+    #[arg(long, global = true)]
+    pub deterministic: bool,
+
     /// Quiet mode (errors only)
     #[arg(short, long, global = true)]
     pub quiet: bool,
