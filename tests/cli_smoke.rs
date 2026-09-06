@@ -1101,6 +1101,7 @@ impl Widget {
         "references have no source that derives from the tree alone: {refused}"
     );
 }
+
 /// A mutation addresses a declaration through the same reader every other
 /// surface does, so a file the grammar can read is editable whether or not a
 /// language server is installed. Resolving it through the server alone made
@@ -1302,7 +1303,7 @@ fn a_diff_in_a_serverless_language_still_names_what_changed() {
     git(repo, &["commit", "-qm", "init"]);
     std::fs::write(
         repo.join("main.tf"),
-        "variable \"project_id\" {\n  type    = string\n  default = \"aix\"\n}\n\n         output \"bucket_url\" {\n  value = 1\n}\n",
+        "variable \"project_id\" {\n  type    = string\n  default = \"aix\"\n}\n\noutput \"bucket_url\" {\n  value = 1\n}\n",
     )
     .unwrap();
     git(repo, &["add", "-A"]);

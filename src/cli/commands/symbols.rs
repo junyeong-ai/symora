@@ -463,12 +463,6 @@ fn workspace_dedup_key(symbol: &Symbol) -> String {
     )
 }
 
-/// Attach bodies to resolved workspace symbols. The index and `workspace/symbol`
-/// surfaces carry only a name-span location, so the body is read from each
-/// file's documentSymbol tree (which has the full range) — one request per
-/// distinct file, matched back by the canonical `name_path` every producer
-/// agrees on. A symbol the document tree does not surface keeps its bodiless
-/// row rather than a wrong slice.
 /// What produced a row of a merged answer: the index vouches for a symbol it
 /// held, and the live fan-out supplied every other one.
 fn producer(symbol: &Symbol, from_index: &HashMap<String, String>) -> &'static str {
@@ -478,6 +472,12 @@ fn producer(symbol: &Symbol, from_index: &HashMap<String, String>) -> &'static s
     }
 }
 
+/// Attach bodies to resolved workspace symbols. The index and `workspace/symbol`
+/// surfaces carry only a name-span location, so the body is read from each
+/// file's documentSymbol tree (which has the full range) — one request per
+/// distinct file, matched back by the canonical `name_path` every producer
+/// agrees on. A symbol the document tree does not surface keeps its bodiless
+/// row rather than a wrong slice.
 async fn workspace_symbol_bodies(
     app: &App,
     resolved: &[Symbol],
