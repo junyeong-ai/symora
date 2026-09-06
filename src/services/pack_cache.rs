@@ -2,7 +2,9 @@
 //!
 //! Each repo gets a `.symora/pack-cache.db` SQLite file keyed by the
 //! project-relative path. We store mtime + the derived artefacts (imports,
-//! signatures) per file. A `build_pack` run replays the cache when mtimes
+//! signatures) per file — what the file states, never what a request asked
+//! to see of it, or a later request would be answered in an earlier one's
+//! shape. A `build_pack` run replays the cache when mtimes
 //! match and re-extracts otherwise, so warm rebuilds skip the dominant
 //! `read_to_string` + per-language scan.
 //!
@@ -21,7 +23,7 @@ use crate::services::pack::PackedSymbol;
 /// Bumped whenever the on-disk layout changes shape (new column, changed
 /// JSON shape inside a TEXT column, etc.). Mismatched versions recreate the
 /// table rather than risking stale-decode bugs at read time.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct CachedEntry {

@@ -57,6 +57,9 @@ pub struct PackedFile {
     pub language: Language,
     pub rank: f64,
     pub symbols: Vec<PackedSymbol>,
+    /// How many the file states, so a caller reading a shape can tell it from
+    /// the whole one.
+    pub declared_symbols: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -128,7 +131,7 @@ pub fn build_pack(
     let graph = build_import_graph(&nodes, &declared_module_prefix(root));
     let personalization = personalization_vector(&nodes, focus);
     let ranks = page_rank(&graph, &personalization, cfg);
-    let fitted = fit_to_budget(&nodes, &ranks, budget_tokens);
+    let fitted = fit_to_budget(&nodes, &ranks, budget_tokens, cfg.max_symbols_per_file);
     Ok(PackResult {
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
@@ -222,7 +225,7 @@ fn collect_nodes(
             }
         };
         let imports = imports.extract(&contents, language);
-        let signatures = top_signatures_from(&contents, language, cfg);
+        let signatures = signatures_from(&contents, language);
 
         if let Some(cache) = cache {
             let entry = CachedEntry {
@@ -659,7 +662,12 @@ struct Fitted {
     estimated_tokens: usize,
 }
 
-fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) -> Fitted {
+fn fit_to_budget(
+    nodes: &[Node],
+    ranks: &BTreeMap<usize, f64>,
+    budget: usize,
+    per_file: usize,
+) -> Fitted {
     let mut ordered: Vec<&Node> = nodes.iter().collect();
     ordered.sort_by(|a, b| {
         let ra = ranks.get(&a.id).copied().unwrap_or(0.0);
@@ -680,7 +688,9 @@ fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) ->
         if node.signatures.is_empty() {
             continue;
         }
-        let tokens = estimate_tokens_for_file(&node.rel_path, &node.signatures);
+        let declared = node.signatures.len();
+        let shown: Vec<PackedSymbol> = node.signatures.iter().take(per_file).cloned().collect();
+        let tokens = estimate_tokens_for_file(&node.rel_path, &shown);
         if spent + tokens > budget && !packed.is_empty() {
             break;
         }
@@ -689,7 +699,8 @@ fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) ->
             path: PathBuf::from(&node.rel_path),
             language: node.language,
             rank: ranks.get(&node.id).copied().unwrap_or(0.0),
-            symbols: node.signatures.clone(),
+            symbols: shown,
+            declared_symbols: declared,
         });
         if spent >= budget {
             break;
@@ -702,20 +713,21 @@ fn fit_to_budget(nodes: &[Node], ranks: &BTreeMap<usize, f64>, budget: usize) ->
     }
 }
 
-fn top_signatures_from(source: &str, language: Language, cfg: &PackConfig) -> Vec<PackedSymbol> {
-    let mut out = Vec::new();
-    for (idx, line) in source.lines().enumerate() {
-        if let Some(symbol) = extract_signature(line, language) {
-            out.push(PackedSymbol {
+/// Every signature the file states. The per-file cap belongs to the request,
+/// not to the file, so it is applied where the answer is assembled — a cache
+/// holding a capped list would answer a later request with an earlier one's
+/// shape.
+fn signatures_from(source: &str, language: Language) -> Vec<PackedSymbol> {
+    source
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            extract_signature(line, language).map(|symbol| PackedSymbol {
                 line: (idx + 1) as u32,
                 ..symbol
-            });
-            if out.len() >= cfg.max_symbols_per_file {
-                break;
-            }
-        }
-    }
-    out
+            })
+        })
+        .collect()
 }
 
 /// Extract a top-level signature from a single line. Returns `None` when
@@ -1042,7 +1054,6 @@ mod tests {
     }
 
     fn node_in(id: usize, rel: &str, contents: &str, language: Language) -> Node {
-        let cfg = PackConfig::default();
         Node {
             id,
             rel_path: rel.to_string(),
@@ -1050,7 +1061,7 @@ mod tests {
             directory: directory_path(Path::new(rel), Path::new("")),
             module_path: module_path(Path::new(rel), Path::new(""), language),
             imports: ImportExtractor::new().extract(contents, language),
-            signatures: top_signatures_from(contents, language, &cfg),
+            signatures: signatures_from(contents, language),
         }
     }
 
@@ -1418,11 +1429,42 @@ mod tests {
             node(1, "src/b.rs", "pub fn small() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.6), (1, 0.4)].into();
-        let result = fit_to_budget(&nodes, &ranks, 50);
+        let result = fit_to_budget(&nodes, &ranks, 50, PACK_SYMBOLS_PER_FILE);
         // We always emit at least one file, but the second should be dropped
         // because the first already overflows the tiny 50-token budget.
         assert_eq!(result.files.len(), 1);
         assert!(result.estimated_tokens > 0);
+    }
+
+    /// The cap belongs to the request. A cache holding a list already cut to
+    /// one request's shape answers the next one with it, which is what left
+    /// `--per-file` working only on a cold cache.
+    #[test]
+    fn the_per_file_cap_is_applied_to_the_answer_not_stored_in_the_cache() {
+        let source = "pub fn one() {}\npub fn two() {}\npub fn three() {}\n";
+        let signatures = signatures_from(source, Language::Rust);
+        assert_eq!(
+            signatures.len(),
+            3,
+            "extraction states what the file has: {signatures:?}"
+        );
+
+        let nodes = vec![Node {
+            id: 0,
+            rel_path: "a.rs".to_string(),
+            directory: vec![],
+            module_path: vec!["a".to_string()],
+            language: Language::Rust,
+            imports: vec![],
+            signatures,
+        }];
+        let ranks = BTreeMap::from([(0usize, 1.0)]);
+        for cap in [1usize, 2, 3, 9] {
+            let fitted = fit_to_budget(&nodes, &ranks, 10_000, cap);
+            let file = &fitted.files[0];
+            assert_eq!(file.symbols.len(), cap.min(3), "cap {cap}");
+            assert_eq!(file.declared_symbols, 3, "the file states three either way");
+        }
     }
 
     #[test]
@@ -1432,7 +1474,7 @@ mod tests {
             node(1, "src/high.rs", "pub fn high() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.1), (1, 0.9)].into();
-        let result = fit_to_budget(&nodes, &ranks, 10_000);
+        let result = fit_to_budget(&nodes, &ranks, 10_000, PACK_SYMBOLS_PER_FILE);
         assert_eq!(result.files[0].path, PathBuf::from("src/high.rs"));
         assert_eq!(result.files[1].path, PathBuf::from("src/low.rs"));
     }
@@ -1448,7 +1490,7 @@ mod tests {
             node(1, "src/alpha.rs", "pub fn a() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.5), (1, 0.5)].into();
-        let result = fit_to_budget(&nodes, &ranks, 10_000);
+        let result = fit_to_budget(&nodes, &ranks, 10_000, PACK_SYMBOLS_PER_FILE);
         assert_eq!(result.files[0].path, PathBuf::from("src/alpha.rs"));
         assert_eq!(result.files[1].path, PathBuf::from("src/zebra.rs"));
     }
