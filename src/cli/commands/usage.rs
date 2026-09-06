@@ -365,6 +365,9 @@ pub struct UsageMetrics {
     /// that verdict, and `false` would publish it anyway.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_docs: Option<bool>,
+    /// Every distinct file whose test material references the symbol, so
+    /// how many are listed is how many there are. Omitted when there are
+    /// none, and when `--metrics` was not asked for.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub test_files: Vec<String>,
 }
@@ -852,21 +855,11 @@ async fn fetch_single_symbol_refs(
     }
 
     let metrics = if args.metrics {
-        // Only collect up to 3 test files (avoid allocating entire list)
-        let test_files: Vec<String> = classified
-            .test_refs
-            .iter()
-            .map(|r| OutputContext::format_path(&r.file, root))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .take(3)
-            .collect();
-
         Some(UsageMetrics {
             references: ref_count,
             has_tests,
             has_docs,
-            test_files,
+            test_files: classified.test_files(root),
         })
     } else {
         // Still need reference count for sorting

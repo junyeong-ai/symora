@@ -8,7 +8,7 @@
 //! it a production dependency deflates coverage and inflates risk on the
 //! very languages whose tests live beside the code they exercise.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::models::symbol::Location;
@@ -61,6 +61,18 @@ impl<'a> RefsClassification<'a> {
             test_refs,
             file_counts,
         }
+    }
+
+    /// Every distinct file holding test material that references the symbol.
+    /// Whole rather than sampled: a reader counts what is listed, and three
+    /// names out of fourteen read as thin coverage on a symbol that has it.
+    pub fn test_files(&self, root: &Path) -> Vec<String> {
+        self.test_refs
+            .iter()
+            .map(|usage| crate::cli::OutputContext::format_path(&usage.file, root))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -128,6 +140,35 @@ mod tests {
         assert_eq!(classified.test, 2);
         assert_eq!(classified.prod, 1);
         assert_eq!(classified.unique_files, 2);
+    }
+
+    /// A symbol whose tests outnumber the sample a listing would fit: what
+    /// the count of listed files says has to be the count that exists, or a
+    /// reader comparing two symbols compares two sample sizes.
+    #[test]
+    fn every_test_file_that_references_a_symbol_is_listed() {
+        let root = Path::new("/repo");
+        let files: Vec<PathBuf> = (0..5)
+            .map(|i| root.join(format!("tests/case_{i}_test.rs")))
+            .collect();
+        let usages: Vec<Location> = files
+            .iter()
+            .flat_map(|file| [at(file, 3), at(file, 9)])
+            .collect();
+
+        let classified = RefsClassification::of(&usages, &TestScope::new());
+
+        assert_eq!(classified.test, 10);
+        assert_eq!(
+            classified.test_files(root),
+            vec![
+                "tests/case_0_test.rs",
+                "tests/case_1_test.rs",
+                "tests/case_2_test.rs",
+                "tests/case_3_test.rs",
+                "tests/case_4_test.rs",
+            ]
+        );
     }
 
     /// The defect a path-only answer cannot see: a production file whose
