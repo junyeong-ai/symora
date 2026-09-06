@@ -9,7 +9,8 @@ use crate::cli::resolve_project_file;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, WorkspaceSearchRoute, coverage_shortfall,
     index_holes_bound, index_unavailable_disclosure, literal_query, ordered_bounds,
-    vouched_by_index, with_coverage_disclosure, workspace_route_for,
+    unconfirmed_by_live_lookup, unconfirmed_zero_fact, with_coverage_disclosure,
+    workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
@@ -254,7 +255,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let index_lang = lang
         .map(Language::parse_or_default)
         .filter(|l| *l != Language::Unknown);
-    let mut vouched: Vec<Language> = Vec::new();
+    let mut covered: Vec<Language> = Vec::new();
     let mut index_bounds: Vec<LowerBound> = Vec::new();
     let mut stale_files: Vec<String> = Vec::new();
     let mut from_index: HashMap<String, String> = HashMap::new();
@@ -271,20 +272,20 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         Ok(page) => {
             // A page is more than its rows: what the index could not see when it
             // was built, what it held past this page's cap, and whether the files
-            // behind these rows have moved since all qualify the answer they feed.
-            vouched = vouched_by_index(&page.covered, !page.rows.is_empty());
-            if !page.rows.is_empty() {
-                stale_files = page.stale_files.clone();
-                index_bounds = index_holes_bound(ctx, &page.unread_paths, &vouched);
-                // Said whether or not the rows past the cap would have survived
-                // this command's filters, because nothing here can tell: the store
-                // takes one kind and this route has lists of them. "Fewer rows
-                // than the index holds" keeps `count` a lower bound either way,
-                // and the alternative is the worse reading — `truncated` alone
-                // says "3 of 6", which an agent takes for a count of 6.
-                if page.rows.len() < page.total {
-                    index_bounds.push(LowerBound::IndexPageCapped);
-                }
+            // behind these rows have moved since all qualify the answer they feed
+            // — a zero among them, which its build scope speaks for exactly as it
+            // speaks for a match.
+            covered = page.covered.clone();
+            stale_files = page.stale_files.clone();
+            index_bounds = index_holes_bound(ctx, &page.unread_paths, &covered);
+            // Said whether or not the rows past the cap would have survived
+            // this command's filters, because nothing here can tell: the store
+            // takes one kind and this route has lists of them. "Fewer rows
+            // than the index holds" keeps `count` a lower bound either way,
+            // and the alternative is the worse reading — `truncated` alone
+            // says "3 of 6", which an agent takes for a count of 6.
+            if page.rows.len() < page.total {
+                index_bounds.push(LowerBound::IndexPageCapped);
             }
             for row in page.rows {
                 let file = row.file.display().to_string();
@@ -350,7 +351,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         }
     }
     let shortfall = coverage_shortfall(
-        &vouched,
+        &covered,
         LiveLookup::Ran {
             failures: &failures,
             skipped: &skipped,
@@ -402,6 +403,12 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let route = workspace_only.map_or(DisclosureRoute::IndexConsulted, |reason| {
         DisclosureRoute::WorkspaceOnly(reason)
     });
+    let mut route_facts = Vec::from_iter(unavailable);
+    route_facts.extend(unconfirmed_zero_fact(
+        &query,
+        total,
+        &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
+    ));
     let section = with_coverage_disclosure(
         Section::with_total(items, total)
             .with_hints(workspace_symbol_hints(
@@ -420,7 +427,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         &query,
         route,
         &bounds,
-        &Vec::from_iter(unavailable),
+        &route_facts,
     );
     ctx.print_success(section);
 

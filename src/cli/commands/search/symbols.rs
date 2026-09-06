@@ -9,7 +9,8 @@ use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
     index_holes_bound, index_unavailable_disclosure, ordered_bounds, relative_stale_files,
-    vouched_by_index, with_coverage_disclosure, workspace_route_for,
+    unconfirmed_by_live_lookup, unconfirmed_zero_fact, with_coverage_disclosure,
+    workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
@@ -155,12 +156,16 @@ pub async fn execute_symbol_search(
             let mut failures = Vec::new();
             let mut skipped = Vec::new();
             let mut workspace_indexing = None;
-            let vouched = vouched_by_index(&page.covered, !candidates.is_empty());
+            let covered = page.covered.clone();
             let lower_bounds = ordered_bounds(
                 detected.shortfall(ctx),
-                index_holes_bound(ctx, &page.unread_paths, &vouched),
+                index_holes_bound(ctx, &page.unread_paths, &covered),
             );
-            let uncovered = languages_needing_live_lookup(&detected.languages, &vouched);
+            let uncovered = languages_needing_live_lookup(
+                &detected.languages,
+                &covered,
+                !candidates.is_empty(),
+            );
             if !uncovered.is_empty() {
                 let lookup =
                     collect_workspace_symbol_results(app, query, kind, limit, &uncovered).await;
@@ -170,21 +175,24 @@ pub async fn execute_symbol_search(
                     merge_symbol_results(candidates, lookup.results, query, app.test_scope());
                 failures = lookup.failures;
                 skipped = lookup.skipped;
-                // The two sources cannot overlap: the live lookup runs for
-                // exactly the languages the index did not vouch for, and the
-                // index answered only for the ones it did. So the union is
-                // the sum, not the larger of the two — taking the larger
-                // would report a hundred Rust matches as the whole answer
-                // while a hundred Lua ones sat beside them, with nothing in
-                // the coverage gaps to say so.
+                // Disjoint by `languages_needing_live_lookup`, so the union
+                // is the sum rather than the larger of the two — taking the
+                // larger would report a hundred Rust matches as the whole
+                // answer while a hundred Lua ones sat beside them, with
+                // nothing in the coverage gaps to say so.
                 count += live_total;
             }
             let shortfall = coverage_shortfall(
-                &vouched,
+                &covered,
                 LiveLookup::Ran {
                     failures: &failures,
                     skipped: &skipped,
                 },
+            );
+            let unconfirmed_zero = unconfirmed_zero_fact(
+                query,
+                count,
+                &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
             );
             let section = with_coverage_disclosure(
                 with_emitted_stale(
@@ -205,7 +213,7 @@ pub async fn execute_symbol_search(
                 query,
                 DisclosureRoute::IndexConsulted,
                 &lower_bounds,
-                &[],
+                &unconfirmed_zero,
             );
             ctx.print_success(section);
         }
@@ -430,7 +438,7 @@ async fn execute_workspace_symbol_search(
     let mut count = lookup.total;
     let mut stale_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut index_consulted = false;
-    let mut index_vouched: Vec<Language> = Vec::new();
+    let mut index_covered: Vec<Language> = Vec::new();
     let mut index_bounds: Vec<LowerBound> = Vec::new();
     let mut lower_bounds: Vec<LowerBound> = Vec::new();
 
@@ -513,11 +521,11 @@ async fn execute_workspace_symbol_search(
     };
     if let Some(page) = page {
         index_consulted = true;
-        index_vouched = vouched_by_index(&page.covered, !page.rows.is_empty());
+        index_covered = page.covered.clone();
         // A vouched language is one this answer stopped asking about live, so
         // the index is its authority here exactly as on the plain route — a
         // path-like query does not change what the index's holes cost.
-        index_bounds = index_holes_bound(ctx, &page.unread_paths, &index_vouched);
+        index_bounds = index_holes_bound(ctx, &page.unread_paths, &index_covered);
         lower_bounds.extend(unmerged_overlap(
             live,
             Contribution {
@@ -546,12 +554,18 @@ async fn execute_workspace_symbol_search(
 
     count = count.max(candidates.len());
     let shortfall = coverage_shortfall(
-        &index_vouched,
+        &index_covered,
         LiveLookup::Ran {
             failures: &failures,
             skipped: &skipped,
         },
     );
+    let mut route_facts = Vec::from_iter(supplement_unavailable.or(index_unavailable));
+    route_facts.extend(unconfirmed_zero_fact(
+        query,
+        count,
+        &unconfirmed_by_live_lookup(&index_covered, &failures, &skipped),
+    ));
     let section = with_coverage_disclosure(
         with_emitted_stale(
             finish_symbol_search(
@@ -577,7 +591,7 @@ async fn execute_workspace_symbol_search(
             DisclosureRoute::WorkspaceOnly(route)
         },
         &lower_bounds,
-        &Vec::from_iter(supplement_unavailable.or(index_unavailable)),
+        &route_facts,
     );
     ctx.print_success(section);
     Ok(())
@@ -828,14 +842,26 @@ fn answers_for(file: &std::path::Path, languages: &[Language]) -> bool {
     }
 }
 
-/// The requested languages the index cannot answer for, which is also what
-/// makes the two result sets disjoint: nothing here was answered from the
-/// index, and nothing the index answered is here.
-fn languages_needing_live_lookup(requested: &[Language], vouched: &[Language]) -> Vec<Language> {
+/// The requested languages to ask a language server about.
+///
+/// Everything outside the index's scope, always. Plus everything inside it
+/// when the index matched nothing at all — a miss is the one result a server
+/// can still improve on, by naming a symbol written since the last build or
+/// one declared outside the indexed tree.
+///
+/// Escalating only from an empty page is also what keeps the two result sets
+/// countable as a sum: an index that contributed no rows has nothing for the
+/// live answer to overlap with, and one that did is asked about only the
+/// languages it does not hold.
+fn languages_needing_live_lookup(
+    requested: &[Language],
+    covered: &[Language],
+    index_matched: bool,
+) -> Vec<Language> {
     requested
         .iter()
         .copied()
-        .filter(|language| !vouched.contains(language))
+        .filter(|language| !index_matched || !covered.contains(language))
         .collect()
 }
 
@@ -1403,25 +1429,26 @@ mod tests {
     #[test]
     fn a_covered_language_that_matched_is_answered_from_the_index() {
         assert!(
-            languages_needing_live_lookup(&[Language::Rust], &[Language::Rust, Language::Go])
+            languages_needing_live_lookup(&[Language::Rust], &[Language::Rust, Language::Go], true)
                 .is_empty()
         );
         // An uncovered language has no other source, matched or not.
         assert_eq!(
-            languages_needing_live_lookup(&[Language::Lua], &[Language::Rust]),
+            languages_needing_live_lookup(&[Language::Lua], &[Language::Rust], true),
             vec![Language::Lua]
         );
         // A bare query spanning both narrows to the uncovered half.
         assert_eq!(
             languages_needing_live_lookup(
                 &[Language::Rust, Language::Lua, Language::Markdown],
-                &[Language::Rust]
+                &[Language::Rust],
+                true
             ),
             vec![Language::Lua, Language::Markdown]
         );
         // A build that covered nothing leaves every language to the server.
         assert_eq!(
-            languages_needing_live_lookup(&[Language::Rust], &[]),
+            languages_needing_live_lookup(&[Language::Rust], &[], true),
             vec![Language::Rust]
         );
     }
@@ -1434,7 +1461,8 @@ mod tests {
         assert_eq!(
             languages_needing_live_lookup(
                 &[Language::Rust, Language::Go],
-                &vouched_by_index(&[Language::Rust, Language::Go], false)
+                &[Language::Rust, Language::Go],
+                false
             ),
             vec![Language::Rust, Language::Go]
         );
@@ -1573,18 +1601,14 @@ mod tests {
         );
     }
 
-    /// An index that returned nothing vouches for nothing: the live recheck
-    /// it triggers is the answer, and its failure is a gap even in a
-    /// language the build covers. Otherwise a stale index plus a dead server
-    /// would publish a confident zero.
+    /// A stale index plus a dead server must not publish a confident zero —
+    /// and must not publish a false gap either. The build covers rust, so
+    /// rust is not missing from the answer's domain; what the dead server
+    /// cost is the confirmation that the zero still holds on disk. Naming
+    /// that as a coverage gap sends an agent to install a server it does not
+    /// need, and saying nothing at all is the confident zero.
     #[test]
-    fn an_empty_index_answer_vouches_for_no_language() {
-        assert!(vouched_by_index(&[Language::Rust], false).is_empty());
-        assert_eq!(
-            vouched_by_index(&[Language::Rust], true),
-            vec![Language::Rust]
-        );
-
+    fn an_unconfirmed_zero_is_disclosed_as_currency_not_as_coverage() {
         let failures = vec![(
             Language::Rust,
             LspError::ServerNotInstalled {
@@ -1592,9 +1616,34 @@ mod tests {
                 install_hint: "rustup component add rust-analyzer".to_string(),
             },
         )];
-        let shortfall = gaps(&failures, &vouched_by_index(&[Language::Rust], false));
-        assert_eq!(shortfall.len(), 1);
-        assert_eq!(shortfall[0].language, Language::Rust);
+        assert!(gaps(&failures, &[Language::Rust]).is_empty());
+
+        let unconfirmed = unconfirmed_by_live_lookup(&[Language::Rust], &failures, &[]);
+        assert_eq!(unconfirmed, vec![Language::Rust]);
+        let fact = unconfirmed_zero_fact("oldName", 0, &unconfirmed);
+        assert_eq!(fact.len(), 1);
+        assert_eq!(fact[0].1, "symora search content 'oldName' --lang rust");
+
+        // A language the build does not cover is genuinely outside the
+        // answer's domain, and stays a gap.
+        assert_eq!(gaps(&failures, &[]).len(), 1);
+    }
+
+    /// The disclosure is a property of the ZERO. A match is evidence on its
+    /// own terms, so a live lookup that failed beside one leaves nothing to
+    /// admit — and a live lookup that answered confirms the zero, which is
+    /// the one way this tool can state an absence outright.
+    #[test]
+    fn only_an_unconfirmed_zero_carries_the_currency_fact() {
+        let failures = vec![(Language::Rust, LspError::Timeout("rust".to_string()))];
+        let unconfirmed = unconfirmed_by_live_lookup(&[Language::Rust], &failures, &[]);
+        assert!(unconfirmed_zero_fact("oldName", 3, &unconfirmed).is_empty());
+        assert!(unconfirmed_zero_fact("oldName", 0, &[]).is_empty());
+        assert!(unconfirmed_by_live_lookup(&[Language::Rust], &[], &[]).is_empty());
+        assert_eq!(
+            unconfirmed_by_live_lookup(&[Language::Rust], &[], &[Language::Rust]),
+            vec![Language::Rust]
+        );
     }
 
     /// A route that never asks a language server discloses what the index

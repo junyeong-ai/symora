@@ -603,6 +603,64 @@ pub fn relative_unread_paths(ctx: &OutputContext, paths: &[UnreadPath]) -> Vec<U
         .collect()
 }
 
+/// The indexed languages whose zero no language server confirmed.
+///
+/// An index that matched nothing answered for the build behind it, not for the
+/// working tree, and the live lookup is what settles the difference. Where it
+/// answered, the zero is exact; where it failed or never ran, the zero is the
+/// last build's — which is a statement about currency, not about coverage, and
+/// so is said as a fact of the route rather than as a language gap.
+pub fn unconfirmed_by_live_lookup(
+    covered: &[Language],
+    failures: &[(Language, LspError)],
+    skipped: &[Language],
+) -> Vec<Language> {
+    covered
+        .iter()
+        .copied()
+        .filter(|language| {
+            failures.iter().any(|(failed, _)| failed == language) || skipped.contains(language)
+        })
+        .collect()
+}
+
+/// What an unconfirmed zero owes its reader, in the shape the route states its
+/// own facts in. Only a zero has anything to admit here: a match is evidence
+/// on its own terms, and the rows carry `backend` to say what produced them.
+///
+/// The remedy reads the working tree, because that is the thing the answer
+/// could not reach — a rebuild is the durable repair but a no-op against an
+/// index that is already current, and prescribing it would send a reader who
+/// just built one around a loop. Narrowed to the first unconfirmed language,
+/// as every other first-gap remedy is.
+pub fn unconfirmed_zero_fact(
+    query: &str,
+    count: usize,
+    unconfirmed: &[Language],
+) -> Vec<(String, String)> {
+    let (Some(first), Some(literal)) = (unconfirmed.first(), literal_query(query)) else {
+        return Vec::new();
+    };
+    if count > 0 {
+        return Vec::new();
+    }
+    let languages = unconfirmed
+        .iter()
+        .map(|language| language.lsp_id())
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![(
+        format!(
+            "Nothing matched and no {languages} language server confirmed that against the \
+             working tree, so a symbol written since the last build has no row to match"
+        ),
+        format!(
+            "symora search content '{literal}' --lang {}",
+            first.lsp_id()
+        ),
+    )]
+}
+
 /// What a rebuilding index costs an answer that could not consult it. Its
 /// remedy is to wait, which is the whole difference from an index that simply
 /// could not be read.
@@ -611,27 +669,6 @@ pub fn index_rebuilding_disclosure() -> (String, String) {
         "The search index is being rebuilt, so it took no part in this answer".to_string(),
         "symora search index status".to_string(),
     )
-}
-
-/// The languages the index's answer speaks for.
-///
-/// An index that returned nothing speaks for none of them, however wide its
-/// build scope: a hit is an answer while a miss is not evidence of absence —
-/// a symbol written since the last build is in neither the index nor, without
-/// asking, the result. That is why the live lookup then runs for every
-/// requested language, and why a failure there leaves a gap even in one the
-/// build covers.
-///
-/// What this deliberately does not do is route on how MANY rows came back. A
-/// specific name matches few symbols in any codebase, so a count under the
-/// limit is the normal shape of a complete answer, and paying for a live
-/// workspace query on every such search is what made the hot path slow.
-pub fn vouched_by_index(covered: &[Language], index_answered: bool) -> Vec<Language> {
-    if index_answered {
-        covered.to_vec()
-    } else {
-        Vec::new()
-    }
 }
 
 /// The reason an index-backed count is a lower bound, if it is one.
