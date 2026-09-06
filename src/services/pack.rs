@@ -167,7 +167,7 @@ fn collect_nodes(
     for abs_path in files {
         let abs_path = abs_path.as_path();
         let language = Language::from_path(abs_path);
-        if !is_indexable(language) {
+        if !language.is_code() {
             continue;
         }
         let metadata = match std::fs::metadata(abs_path) {
@@ -286,13 +286,6 @@ fn file_mtime(metadata: &std::fs::Metadata) -> Option<i64> {
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
-}
-
-fn is_indexable(language: Language) -> bool {
-    !matches!(
-        language,
-        Language::Unknown | Language::Yaml | Language::Toml | Language::Markdown
-    )
 }
 
 /// Components of the directory holding a file.

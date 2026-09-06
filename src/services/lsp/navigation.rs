@@ -79,7 +79,7 @@ pub(super) async fn goto_definition(
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Option<Definition>, LspError> {
+) -> Result<Indexed<Option<Definition>>, LspError> {
     let project_root = service.manager.root().to_path_buf();
     let chosen = goto_location(
         service,
@@ -91,26 +91,29 @@ pub(super) async fn goto_definition(
         |locs| select_best_definition(locs, &project_root).cloned(),
     )
     .await?;
-    Ok(chosen.map(|(wire, location)| {
-        // The server said the queried token is its own definition when the
-        // target starts inside the origin token it identified at the query
-        // position. A plain-Location server names no origin; the one thing
-        // it can still say that way is a definition of the exact queried
-        // position to itself. Same-file is judged on the PARSED path — a
-        // raw URI comparison would split on percent-encoding choices the
-        // two sides are free to make differently (`(`, `,`, `+`, …).
-        let is_self = location.file == file
-            && match &wire.origin {
-                Some(origin) => {
-                    (origin.start.line, origin.start.character)
-                        <= (wire.range.start.line, wire.range.start.character)
-                        && (wire.range.start.line, wire.range.start.character)
-                            < (origin.end.line, origin.end.character)
-                }
-                None => (location.line, location.column) == (line, column),
-            };
-        Definition { location, is_self }
-    }))
+    Ok(Indexed::new(
+        chosen.data.map(|(wire, location)| {
+            // The server said the queried token is its own definition when the
+            // target starts inside the origin token it identified at the query
+            // position. A plain-Location server names no origin; the one thing
+            // it can still say that way is a definition of the exact queried
+            // position to itself. Same-file is judged on the PARSED path — a
+            // raw URI comparison would split on percent-encoding choices the
+            // two sides are free to make differently (`(`, `,`, `+`, …).
+            let is_self = location.file == file
+                && match &wire.origin {
+                    Some(origin) => {
+                        (origin.start.line, origin.start.character)
+                            <= (wire.range.start.line, wire.range.start.character)
+                            && (wire.range.start.line, wire.range.start.character)
+                                < (origin.end.line, origin.end.character)
+                    }
+                    None => (location.line, location.column) == (line, column),
+                };
+            Definition { location, is_self }
+        }),
+        chosen.indexing,
+    ))
 }
 
 pub(super) async fn goto_type_definition(
@@ -118,7 +121,7 @@ pub(super) async fn goto_type_definition(
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Option<Location>, LspError> {
+) -> Result<Indexed<Option<Location>>, LspError> {
     let chosen = goto_location(
         service,
         file,
@@ -133,7 +136,10 @@ pub(super) async fn goto_type_definition(
         |locs| locs.first().cloned(),
     )
     .await?;
-    Ok(chosen.map(|(_, location)| location))
+    Ok(Indexed::new(
+        chosen.data.map(|(_, location)| location),
+        chosen.indexing,
+    ))
 }
 
 async fn goto_location(
@@ -144,7 +150,7 @@ async fn goto_location(
     method: &str,
     feature: Option<LspFeature>,
     select: impl Fn(&[LspLocation]) -> Option<LspLocation>,
-) -> Result<Option<(LspLocation, Location)>, LspError> {
+) -> Result<Indexed<Option<(LspLocation, Location)>>, LspError> {
     if let Some(feat) = feature {
         check_feature_support(file, feat)?;
     }
@@ -163,6 +169,7 @@ async fn goto_location(
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
                 client.sleep_for_cross_file_settle().await;
+                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -189,9 +196,9 @@ async fn goto_location(
                     Some(loc) => {
                         let mut conv = PositionConverter::new(client.position_encoding().await);
                         let converted = convert_location(&loc, &mut conv);
-                        Ok(Some((loc, converted)))
+                        Ok(Indexed::new(Some((loc, converted)), ran_under))
                     }
-                    None => Ok(None),
+                    None => Ok(Indexed::new(None, ran_under)),
                 }
             }
         })

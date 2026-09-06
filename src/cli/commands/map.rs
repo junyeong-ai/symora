@@ -10,7 +10,6 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{as_paths, relative_paths};
 use crate::cli::response::{Section, SymbolOutput};
-use crate::cli::symbol_discovery::is_code_language;
 use crate::cli::utils::extract_signature;
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
@@ -232,7 +231,7 @@ async fn execute_summary(app: &App, limit: usize) -> Result<()> {
     let records = scan.records;
     let code_records: Vec<_> = records
         .iter()
-        .filter(|record| is_code_language(record.language))
+        .filter(|record| record.language.is_code())
         .collect();
 
     let mut by_language: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -311,12 +310,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
     let unread_paths = scan.unread_at(ctx, app.root());
     let records = scan.records.clone();
     let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(
-            scan.unreachable_target(app.root(), path)
-                .unwrap_or_else(|| {
-                    OutputError::not_found(format!("File not found in project: {path}"))
-                }),
-        );
+        ctx.print_error(scan.missing_target(app.root(), path));
         return Ok(());
     };
 
@@ -533,12 +527,7 @@ async fn execute_related(app: &App, path: &str, limit: usize) -> Result<()> {
     let scan = scan_project_files(app);
     let records = scan.records.clone();
     let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(
-            scan.unreachable_target(app.root(), path)
-                .unwrap_or_else(|| {
-                    OutputError::not_found(format!("File not found in project: {path}"))
-                }),
-        );
+        ctx.print_error(scan.missing_target(app.root(), path));
         return Ok(());
     };
 
@@ -611,18 +600,29 @@ impl ProjectScan {
             .any(|unread| unread.starts_with(target) || target.starts_with(unread))
     }
 
-    /// The error for a path the walk never reached. "Not in this project" is a
-    /// claim about the tree, and a walk turned away from the subtree the path
-    /// lives in never learned it — the I/O failure is the answer, not the
-    /// conclusion drawn from an incomplete list.
-    fn unreachable_target(&self, root: &Path, path: &str) -> Option<OutputError> {
-        self.missed_anything_at(&root.join(path)).then(|| {
-            OutputError::new(
+    /// The error for a path the records do not hold. "Not in this project" is
+    /// a claim about the tree, and two other facts explain the absence first:
+    /// a walk turned away from the subtree the path lives in never learned
+    /// it, and a file whose extension names no language was never in the
+    /// domain to begin with — the same verdict `symbols` and `refs` give it.
+    fn missing_target(&self, root: &Path, path: &str) -> OutputError {
+        let full = root.join(path);
+        if self.missed_anything_at(&full) {
+            return OutputError::new(
                 crate::cli::errors::ErrorCode::Io,
                 format!("Part of the tree holding {path} could not be read"),
             )
-            .with_hint("Check the permissions on that path and retry.")
-        })
+            .with_hint("Check the permissions on that path and retry.");
+        }
+        if full.is_file() && Language::from_path(&full) == Language::Unknown {
+            return OutputError::from(crate::error::LspError::UnsupportedLanguage(
+                full.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+            ));
+        }
+        OutputError::not_found(format!("File not found in project: {path}"))
     }
 }
 
@@ -1168,6 +1168,38 @@ fn map_summary_next_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three ways a path can be absent from the records carry different
+    /// remedies, so they carry different verdicts: fix the path, fix the
+    /// permissions, or reach for a command that reads the file as text.
+    #[test]
+    fn a_missing_target_says_which_absence_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("notes.txt"), "text").unwrap();
+
+        let scan = ProjectScan {
+            records: Vec::new(),
+            unread_paths: Vec::new(),
+        };
+        assert_eq!(
+            scan.missing_target(root, "notes.txt").code,
+            crate::cli::errors::ErrorCode::LanguageNotConfigured
+        );
+        assert_eq!(
+            scan.missing_target(root, "nope.rs").code,
+            crate::cli::errors::ErrorCode::NotFound
+        );
+
+        let blocked = ProjectScan {
+            records: Vec::new(),
+            unread_paths: vec![root.join("notes.txt")],
+        };
+        assert_eq!(
+            blocked.missing_target(root, "notes.txt").code,
+            crate::cli::errors::ErrorCode::Io
+        );
+    }
 
     #[test]
     fn normalizes_dir_arg() {

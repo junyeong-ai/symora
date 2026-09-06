@@ -48,14 +48,21 @@ pub enum Language {
     Terraform,
     Yaml,
     Toml,
+    Json,
     Nix,
     Rego,
+
+    Html,
+    Css,
+    Scss,
+    Sql,
 
     R,
     Julia,
     Fortran,
 
     Markdown,
+    Mdx,
 
     #[default]
     Unknown,
@@ -102,14 +109,21 @@ impl Language {
             "tf" | "tfvars" | "hcl" => Self::Terraform,
             "yaml" | "yml" => Self::Yaml,
             "toml" => Self::Toml,
+            "json" | "jsonc" => Self::Json,
             "nix" => Self::Nix,
             "rego" => Self::Rego,
+
+            "html" | "htm" => Self::Html,
+            "css" => Self::Css,
+            "scss" => Self::Scss,
+            "sql" => Self::Sql,
 
             "r" | "rmd" => Self::R,
             "jl" => Self::Julia,
             "f" | "f90" | "f95" | "f03" | "f08" | "for" => Self::Fortran,
 
             "md" | "markdown" => Self::Markdown,
+            "mdx" => Self::Mdx,
 
             _ => Self::Unknown,
         }
@@ -168,14 +182,21 @@ impl Language {
             Self::Terraform => &["tf", "tfvars", "hcl"],
             Self::Yaml => &["yaml", "yml"],
             Self::Toml => &["toml"],
+            Self::Json => &["json", "jsonc"],
             Self::Nix => &["nix"],
             Self::Rego => &["rego"],
+
+            Self::Html => &["html", "htm"],
+            Self::Css => &["css"],
+            Self::Scss => &["scss"],
+            Self::Sql => &["sql"],
 
             Self::R => &["r", "rmd"],
             Self::Julia => &["jl"],
             Self::Fortran => &["f", "f90", "f95", "f03", "f08", "for"],
 
             Self::Markdown => &["md", "markdown"],
+            Self::Mdx => &["mdx"],
 
             Self::Unknown => &[],
         }
@@ -221,14 +242,21 @@ impl Language {
             Self::Terraform => "terraform",
             Self::Yaml => "yaml",
             Self::Toml => "toml",
+            Self::Json => "json",
             Self::Nix => "nix",
             Self::Rego => "rego",
+
+            Self::Html => "html",
+            Self::Css => "css",
+            Self::Scss => "scss",
+            Self::Sql => "sql",
 
             Self::R => "r",
             Self::Julia => "julia",
             Self::Fortran => "fortran",
 
             Self::Markdown => "markdown",
+            Self::Mdx => "mdx",
 
             Self::Unknown => "plaintext",
         }
@@ -267,13 +295,72 @@ impl Language {
             Self::Terraform,
             Self::Yaml,
             Self::Toml,
+            Self::Json,
             Self::Nix,
             Self::Rego,
+            Self::Html,
+            Self::Css,
+            Self::Scss,
+            Self::Sql,
             Self::R,
             Self::Julia,
             Self::Fortran,
             Self::Markdown,
+            Self::Mdx,
         ]
+    }
+
+    /// Whether an unscoped search covers this language — the fan-out it pays
+    /// for, the corpus it embeds, the files it ranks and scans. Documentation
+    /// and data formats are covered only when named: a symbol query has
+    /// nothing to ask one, and listing it as a language the answer could not
+    /// cover is noise rather than a gap. Narrowing this narrows every one of
+    /// those at once.
+    ///
+    /// The match is exhaustive so a new language cannot join the default
+    /// fan-out by omission.
+    pub fn is_code(self) -> bool {
+        match self {
+            Self::Markdown | Self::Mdx | Self::Yaml | Self::Toml | Self::Json => false,
+            Self::Unknown => false,
+            Self::Rust
+            | Self::Cpp
+            | Self::Zig
+            | Self::Java
+            | Self::Kotlin
+            | Self::Scala
+            | Self::Clojure
+            | Self::CSharp
+            | Self::FSharp
+            | Self::TypeScript
+            | Self::JavaScript
+            | Self::Vue
+            | Self::Python
+            | Self::Ruby
+            | Self::PHP
+            | Self::Perl
+            | Self::Lua
+            | Self::Bash
+            | Self::PowerShell
+            | Self::Haskell
+            | Self::Elixir
+            | Self::Erlang
+            | Self::Elm
+            | Self::OCaml
+            | Self::Go
+            | Self::Swift
+            | Self::Dart
+            | Self::Terraform
+            | Self::Nix
+            | Self::Rego
+            | Self::Html
+            | Self::Css
+            | Self::Scss
+            | Self::Sql
+            | Self::R
+            | Self::Julia
+            | Self::Fortran => true,
+        }
     }
 }
 
@@ -325,14 +412,21 @@ impl FromStr for Language {
             "terraform" | "tf" | "hcl" => Ok(Self::Terraform),
             "yaml" | "yml" => Ok(Self::Yaml),
             "toml" => Ok(Self::Toml),
+            "json" | "jsonc" => Ok(Self::Json),
             "nix" => Ok(Self::Nix),
             "rego" => Ok(Self::Rego),
+
+            "html" | "htm" => Ok(Self::Html),
+            "css" => Ok(Self::Css),
+            "scss" => Ok(Self::Scss),
+            "sql" => Ok(Self::Sql),
 
             "r" => Ok(Self::R),
             "julia" | "jl" => Ok(Self::Julia),
             "fortran" | "f90" => Ok(Self::Fortran),
 
             "markdown" | "md" => Ok(Self::Markdown),
+            "mdx" => Ok(Self::Mdx),
 
             _ => Err(format!("Unknown language: {}", s)),
         }

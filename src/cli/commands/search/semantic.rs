@@ -26,7 +26,6 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
 use crate::cli::response::disclosure::{LowerBound, relative_unread_paths, with_lower_bounds};
-use crate::cli::symbol_discovery::is_code_language;
 use crate::services::embedding_cache::{CachedChunk, EmbeddingCache, RankedChunk, TopK};
 use crate::services::embeddings::{EmbeddingError, EmbeddingProvider, cosine, default_provider};
 use crate::services::store::UnreadPath;
@@ -200,7 +199,7 @@ struct DiscoveredFile {
 fn discover_files(app: &App) -> DiscoveredCorpus {
     let extensions: Vec<&str> = Language::all()
         .into_iter()
-        .filter(|lang| is_code_language(*lang))
+        .filter(|lang| lang.is_code())
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
 

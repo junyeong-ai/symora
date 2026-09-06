@@ -410,6 +410,8 @@ pub struct DefinitionResponse {
     pub is_self: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -420,6 +422,8 @@ pub struct HoverResponse {
     pub range: Option<Location>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -454,6 +458,8 @@ pub struct SignatureResponse {
     pub active_parameter: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -466,6 +472,8 @@ pub struct PrepareRenameResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RenameResponse {
     pub changes: Option<Vec<FileChange>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<lsp::IndexingDegradation>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -770,45 +778,54 @@ impl_vec_response!(
 );
 
 impl DefinitionResponse {
-    pub fn from_definition(def: Option<lsp::Definition>) -> Self {
-        let message = def.is_none().then(|| "No definition found".to_string());
+    pub fn from_definition(def: lsp::Indexed<Option<lsp::Definition>>) -> Self {
+        let message = def
+            .data
+            .is_none()
+            .then(|| "No definition found".to_string());
         Self {
-            is_self: def.as_ref().is_some_and(|d| d.is_self),
-            definition: def.as_ref().map(|d| Location::from(&d.location)),
+            is_self: def.data.as_ref().is_some_and(|d| d.is_self),
+            definition: def.data.as_ref().map(|d| Location::from(&d.location)),
             message,
+            indexing: def.indexing,
         }
     }
 
-    pub fn from_type_definition(def: Option<symbol::Location>) -> Self {
+    pub fn from_type_definition(def: lsp::Indexed<Option<symbol::Location>>) -> Self {
         Self {
-            definition: def.as_ref().map(Location::from),
+            definition: def.data.as_ref().map(Location::from),
             is_self: false,
             message: def
+                .data
                 .is_none()
                 .then(|| "No type definition found".to_string()),
+            indexing: def.indexing,
         }
     }
 }
 
 impl HoverResponse {
-    pub fn from_hover(hover: Option<lsp::HoverInfo>) -> Self {
+    pub fn from_hover(hover: lsp::Indexed<Option<lsp::HoverInfo>>) -> Self {
         Self {
-            content: hover.as_ref().map(|h| h.content.clone()),
+            content: hover.data.as_ref().map(|h| h.content.clone()),
             range: hover
+                .data
                 .as_ref()
                 .and_then(|h| h.range.as_ref().map(Location::from)),
-            message: if hover.is_none() {
+            message: if hover.data.is_none() {
                 Some("No hover information".into())
             } else {
                 None
             },
+            indexing: hover.indexing,
         }
     }
 }
 
 impl SignatureResponse {
-    pub fn from_help(help: Option<lsp::SignatureHelp>) -> Self {
-        match help {
+    pub fn from_help(help: lsp::Indexed<Option<lsp::SignatureHelp>>) -> Self {
+        let indexing = help.indexing;
+        match help.data {
             Some(h) => Self {
                 signatures: h
                     .signatures
@@ -830,12 +847,14 @@ impl SignatureResponse {
                 active_signature: h.active_signature,
                 active_parameter: h.active_parameter,
                 message: None,
+                indexing,
             },
             None => Self {
                 signatures: vec![],
                 active_signature: None,
                 active_parameter: None,
                 message: Some("No signature help available".into()),
+                indexing,
             },
         }
     }

@@ -163,7 +163,10 @@ pub(super) async fn handle_rename(
         .map_err(RpcError::from)?;
 
     to_json(RenameResponse {
-        changes: result.map(|result| result.changes.iter().map(wire::FileChange::from).collect()),
+        changes: result
+            .data
+            .map(|result| result.changes.iter().map(wire::FileChange::from).collect()),
+        indexing: result.indexing,
     })
     .map_err(RpcError::from)
 }

@@ -24,6 +24,16 @@ pub enum IndexingDegradation {
     TimedOut,
 }
 
+impl IndexingDegradation {
+    /// The single wire spelling, shared by serde and by the prose that
+    /// names the marker in a refusal.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
 /// A workspace-dependent query result paired with the indexing state it
 /// was computed under, captured at computation time inside the service
 /// layer. Reading the state *after* the result returns is racy: a

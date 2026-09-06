@@ -8,7 +8,7 @@ use crate::cli::commands::edit::refresh_store_files;
 use crate::cli::response::FileChangeOutput;
 use crate::cli::utils::find_named_at_position;
 use crate::cli::{OutputError, ParsedLocation};
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 
 #[derive(Args, Debug)]
 pub struct RenameArgs {
@@ -32,6 +32,8 @@ struct RenameOutput {
     changes: Vec<FileChangeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indexing: Option<IndexingDegradation>,
 }
 
 pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
@@ -56,17 +58,31 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
             affected_files: 0,
             changes: vec![],
             message: Some("Symbol is already named the same. No changes needed.".to_string()),
+            indexing: None,
         };
         ctx.print_success(response);
         return Ok(());
     }
 
-    match app
+    let answer = match app
         .lsp
         .rename(&loc.file, loc.line, loc.column, &args.new_name)
         .await
     {
-        Ok(None) => ctx.print_error(
+        Ok(answer) => answer,
+        Err(e) => {
+            ctx.print_error(e);
+            return Ok(());
+        }
+    };
+
+    if let Some(refusal) = refuse_partial_rename(answer.indexing, args.dry_run) {
+        ctx.print_error(refusal);
+        return Ok(());
+    }
+
+    match answer.data {
+        None => ctx.print_error(
             OutputError::invalid(format!(
                 "No renameable symbol at {}:{}:{}",
                 ctx.relative_path(&loc.file),
@@ -79,7 +95,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                  declarations to target",
             ),
         ),
-        Ok(Some(result)) => {
+        Some(result) => {
             // Apply workspace edits to files
             match apply_workspace_edits(&result.changes, args.dry_run, app.root()) {
                 Ok(applied_changes) => {
@@ -110,16 +126,39 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                         } else {
                             None
                         },
+                        indexing: answer.indexing,
                     };
                     ctx.print_success(response);
                 }
                 Err(e) => ctx.print_error(e),
             }
         }
-        Err(e) => ctx.print_error(e),
     }
 
     Ok(())
+}
+
+/// A rename is the language server's reference set turned into edits, so a
+/// set computed while the workspace was still indexing renames some call
+/// sites and leaves the rest — a broken tree the disclosure cannot undo.
+/// A preview still runs: it shows what has been computed so far, marked as
+/// the lower bound it is.
+fn refuse_partial_rename(
+    indexing: Option<IndexingDegradation>,
+    dry_run: bool,
+) -> Option<OutputError> {
+    let degradation = indexing.filter(|_| !dry_run)?;
+    Some(
+        OutputError::precondition_failed(format!(
+            "Rename refused: the edit set is a lower bound under degraded indexing \
+             (indexing: {})",
+            degradation.as_str(),
+        ))
+        .with_hint(
+            "Wait for the language server to finish indexing (check `symora status`), \
+             then retry; `--dry-run` previews the edits computed so far.",
+        ),
+    )
 }
 
 async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<String> {
@@ -147,7 +186,24 @@ async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<
         .hover(&loc.file, loc.line, loc.column)
         .await
         .ok()
-        .flatten()
+        .and_then(|hover| hover.data)
         .and_then(|h| h.extract_symbol_name())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::errors::ErrorCode;
+
+    #[test]
+    fn a_rename_computed_under_degraded_indexing_applies_nothing() {
+        let degraded = Some(IndexingDegradation::TimedOut);
+        assert_eq!(
+            refuse_partial_rename(degraded, false).map(|e| e.code),
+            Some(ErrorCode::PreconditionFailed)
+        );
+        assert!(refuse_partial_rename(degraded, true).is_none());
+        assert!(refuse_partial_rename(None, false).is_none());
+    }
 }

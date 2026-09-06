@@ -5,19 +5,19 @@ use crate::error::LspError;
 use crate::infra::lsp::LspClient;
 use crate::infra::lsp::protocol::{Hover, TextDocumentIdentifier, TextDocumentPositionParams};
 use crate::models::diagnostic::{Diagnostic, DiagnosticsReport, DiagnosticsStatus};
-use crate::models::lsp::{HoverInfo, SignatureHelp, path_to_uri};
+use crate::models::lsp::{HoverInfo, Indexed, SignatureHelp, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
 use super::position::PositionConverter;
-use super::service::{DefaultLspService, ensure_indexed};
+use super::service::{DefaultLspService, degradation_of, ensure_indexed};
 
 pub(super) async fn hover(
     service: &DefaultLspService,
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Option<HoverInfo>, LspError> {
+) -> Result<Indexed<Option<HoverInfo>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -28,6 +28,7 @@ pub(super) async fn hover(
             let manager = Arc::clone(&manager);
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
+                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -49,14 +50,17 @@ pub(super) async fn hover(
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
-                Ok(result.map(|h| {
-                    let hover_text = extract_hover_content(&h.contents);
-                    let range = h.range.map(|r| range_to_location(&file, &r, &mut conv));
-                    HoverInfo {
-                        content: hover_text,
-                        range,
-                    }
-                }))
+                Ok(Indexed::new(
+                    result.map(|h| {
+                        let hover_text = extract_hover_content(&h.contents);
+                        let range = h.range.map(|r| range_to_location(&file, &r, &mut conv));
+                        HoverInfo {
+                            content: hover_text,
+                            range,
+                        }
+                    }),
+                    ran_under,
+                ))
             }
         })
         .await
@@ -67,7 +71,7 @@ pub(super) async fn signature_help(
     file: &Path,
     line: u32,
     column: u32,
-) -> Result<Option<SignatureHelp>, LspError> {
+) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
@@ -78,6 +82,7 @@ pub(super) async fn signature_help(
             let manager = Arc::clone(&manager);
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
+                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -101,7 +106,10 @@ pub(super) async fn signature_help(
                     .await?;
 
                 let encoding = client.position_encoding().await;
-                Ok(result.and_then(|v| parse_signature_help(&v, encoding)))
+                Ok(Indexed::new(
+                    result.and_then(|v| parse_signature_help(&v, encoding)),
+                    ran_under,
+                ))
             }
         })
         .await

@@ -65,14 +65,14 @@ pub trait LspService: Send + Sync {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Definition>, LspError>;
+    ) -> Result<Indexed<Option<Definition>>, LspError>;
 
     async fn goto_type_definition(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<Location>, LspError>;
+    ) -> Result<Indexed<Option<Location>>, LspError>;
 
     async fn find_implementations(
         &self,
@@ -86,14 +86,14 @@ pub trait LspService: Send + Sync {
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<HoverInfo>, LspError>;
+    ) -> Result<Indexed<Option<HoverInfo>>, LspError>;
 
     async fn signature_help(
         &self,
         file: &Path,
         line: u32,
         column: u32,
-    ) -> Result<Option<SignatureHelp>, LspError>;
+    ) -> Result<Indexed<Option<SignatureHelp>>, LspError>;
 
     async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError>;
 
@@ -110,7 +110,7 @@ pub trait LspService: Send + Sync {
         line: u32,
         column: u32,
         new_name: &str,
-    ) -> Result<Option<RenameResult>, LspError>;
+    ) -> Result<Indexed<Option<RenameResult>>, LspError>;
 
     async fn incoming_calls(
         &self,

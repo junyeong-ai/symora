@@ -478,27 +478,29 @@ async fn fetch_types(
     root: &Path,
 ) -> Section<TypeInfoOutput> {
     match lsp.goto_type_definition(file, line, column).await {
-        Ok(Some(type_loc)) => {
-            let type_symbols = lsp
-                .find_symbols(&type_loc.file, FindSymbolsOptions::default())
-                .await
-                .unwrap_or_default();
+        Ok(answer) => match answer.data {
+            Some(type_loc) => {
+                let type_symbols = lsp
+                    .find_symbols(&type_loc.file, FindSymbolsOptions::default())
+                    .await
+                    .unwrap_or_default();
 
-            let type_sym = find_symbol_at_position(&type_symbols, type_loc.line, None);
-            let items = vec![TypeInfoOutput {
-                name: type_sym
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                kind: type_sym
-                    .map(|s| s.kind.to_string())
-                    .unwrap_or_else(|| "type".to_string()),
-                location: LocationOutput::from_location(&type_loc, root),
-                detail: None,
-                body: None,
-            }];
-            Section::new(items)
-        }
-        Ok(None) => Section::new(vec![]),
+                let type_sym = find_symbol_at_position(&type_symbols, type_loc.line, None);
+                let items = vec![TypeInfoOutput {
+                    name: type_sym
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    kind: type_sym
+                        .map(|s| s.kind.to_string())
+                        .unwrap_or_else(|| "type".to_string()),
+                    location: LocationOutput::from_location(&type_loc, root),
+                    detail: None,
+                    body: None,
+                }];
+                Section::new(items).with_indexing(answer.indexing)
+            }
+            None => Section::new(vec![]).with_indexing(answer.indexing),
+        },
         Err(e) => Section::error(format_type_error(&e.to_string(), file, line, column)),
     }
 }
@@ -602,7 +604,7 @@ mod tests {
 
     use crate::error::LspError;
     use crate::models::lsp::{
-        ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, InlayHint,
+        ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, Indexed, InlayHint,
         PrepareRenameResult, RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit,
         TypeHierarchyItem,
     };
@@ -752,7 +754,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<crate::models::lsp::Definition>, LspError> {
+        ) -> Result<Indexed<Option<crate::models::lsp::Definition>>, LspError> {
             unreachable!()
         }
         async fn goto_type_definition(
@@ -760,7 +762,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<Location>, LspError> {
+        ) -> Result<Indexed<Option<Location>>, LspError> {
             unreachable!()
         }
         async fn find_implementations(
@@ -776,7 +778,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<HoverInfo>, LspError> {
+        ) -> Result<Indexed<Option<HoverInfo>>, LspError> {
             unreachable!()
         }
         async fn signature_help(
@@ -784,7 +786,7 @@ mod tests {
             _file: &Path,
             _line: u32,
             _column: u32,
-        ) -> Result<Option<SignatureHelp>, LspError> {
+        ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
             unreachable!()
         }
         async fn diagnostics(
@@ -807,7 +809,7 @@ mod tests {
             _line: u32,
             _column: u32,
             _new_name: &str,
-        ) -> Result<Option<RenameResult>, LspError> {
+        ) -> Result<Indexed<Option<RenameResult>>, LspError> {
             unreachable!()
         }
         async fn incoming_calls(

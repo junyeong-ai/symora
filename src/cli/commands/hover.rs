@@ -23,11 +23,13 @@ pub async fn execute(args: HoverArgs, app: &App) -> Result<()> {
                 .range
                 .map(|r| LocationOutput::from_location(&r, ctx.root())),
             message: None,
+            indexing: None,
         },
         || HoverOutput {
             content: None,
             range: None,
             message: Some("No hover information available".to_string()),
+            indexing: None,
         },
     )
     .await

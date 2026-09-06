@@ -221,24 +221,12 @@ pub fn resolve_search_languages(app: &App, language: Option<&str>) -> DetectedLa
                 languages: detected
                     .languages
                     .into_iter()
-                    .filter(|lang| is_code_language(*lang))
+                    .filter(|lang| lang.is_code())
                     .collect(),
                 unread_paths: detected.unread_paths,
             }
         }
     }
-}
-
-/// The languages an unscoped search covers — the fan-out it pays for, the
-/// corpus it embeds, the files it ranks and scans. Markup and configuration
-/// formats are covered only when named: a symbol query has nothing to ask one,
-/// and listing it as a language the answer could not cover is noise rather
-/// than a gap. Narrowing this narrows every one of those at once.
-pub fn is_code_language(language: Language) -> bool {
-    !matches!(
-        language,
-        Language::Markdown | Language::Toml | Language::Yaml
-    )
 }
 
 /// The error an empty language set is.

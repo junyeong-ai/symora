@@ -67,6 +67,114 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             )],
         )),
         ToolDefinition::read_only(
+            "check_language_support",
+            "What Symora can answer for in this workspace, per language: whether the \
+                          language server serves it, and whether the index extractor and \
+                          tree-sitter grammar cover it with no server installed. Branch on this \
+                          instead of discovering a language's limits by a failed call.",
+            schema_object(
+                &[(
+                    "language",
+                    "string",
+                    "Optional single language to report on (rust, python, ...)",
+                )],
+                &[],
+            ),
+        )
+        .with_output_schema(output_schema(&[
+            ("platform", "string", "Host platform the report was taken on"),
+            (
+                "languages",
+                "array",
+                "Per language: server, installed, serves, symbol_extraction, ast_search, and \
+                 install when it does not serve. `serves` is the capability — `installed` only \
+                 says a file resolves at that path, which a version-manager shim satisfies too",
+            ),
+            ("summary", "object", "total / serving / missing"),
+            (
+                "config_errors",
+                "array",
+                "Config problems affecting this report, omitted when there are none",
+            ),
+        ])),
+        ToolDefinition::read_only(
+            "search_ast",
+            "Structural search by tree-sitter query — the grammar's own node shapes, not \
+                          text. Answers for languages no symbol extractor or language server \
+                          covers, and finds forms a name cannot express.",
+            schema_object(
+                &[
+                    (
+                        "pattern",
+                        "string",
+                        "Tree-sitter query, e.g. \"(function_definition) @f\"",
+                    ),
+                    ("language", "string", "Language the grammar belongs to"),
+                    ("path", "string", "Optional project-relative path to search under"),
+                    ("limit", "integer", "Maximum results"),
+                ],
+                &["pattern", "language"],
+            ),
+        )
+        .with_output_schema(section_output_schema(
+            "Matches: file, start_line, end_line, start_column, end_column, text, captures",
+        )),
+        ToolDefinition::read_only(
+            "get_index_status",
+            "Whether the symbol/content index is built and what it covers. An unbuilt or \
+                          narrowed index changes what search_symbols and search_content can \
+                          answer, so read this before treating a zero as absence.",
+            schema_object(&[], &[]),
+        )
+        .with_output_schema(output_schema(&[
+            ("file_count", "integer", "Files the index holds rows for"),
+            ("symbol_count", "integer", "Symbol rows"),
+            ("content_line_count", "integer", "Content lines"),
+            ("index_size_bytes", "integer", "Logical size of the store"),
+            ("last_indexed", "integer", "Unix time of the last completed build, 0 if never"),
+            ("is_indexing", "boolean", "Whether a build is running now"),
+            (
+                "languages",
+                "array",
+                "What the last completed build extracts symbols for; empty means no build has \
+                 completed, and a symbol search is complete only for the languages listed",
+            ),
+            (
+                "unread_paths",
+                "array",
+                "Paths that build could not read, omitted when there were none",
+            ),
+        ])),
+        ToolDefinition::mutating(
+            "build_index",
+            "Mutates the project's search index (.symora/), never source. Build or refresh \
+                          it so symbol and content search answer from the index rather than a \
+                          live fan-out — the remedy get_index_status and a not_indexed coverage \
+                          gap both name.",
+            schema_object(
+                &[
+                    ("force", "boolean", "Rebuild from scratch instead of in place"),
+                    (
+                        "languages",
+                        "string",
+                        "Comma-separated languages to narrow the build to",
+                    ),
+                ],
+                &[],
+            ),
+        )
+        .with_output_schema(output_schema(&[
+            ("status", "string", "Build outcome"),
+            ("file_count", "integer", "Files indexed"),
+            ("symbol_count", "integer", "Symbol rows written"),
+            ("content_line_count", "integer", "Content lines written"),
+            (
+                "unread_paths",
+                "array",
+                "Paths the build could not read, omitted when there were none",
+            ),
+        ])),
+        ToolDefinition::read_only(
             "search_content",
             "Fast keyword/phrase search across indexed file contents.",
             schema_object(

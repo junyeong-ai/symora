@@ -27,6 +27,17 @@ pub struct App {
     test_scope: crate::services::TestScope,
 }
 
+/// The store's slice of the resolved configuration. The size ceiling is one
+/// user-facing knob (`search.max_file_size_mb`) and every reader takes it from
+/// the same place, so a file is never outside one surface's domain and inside
+/// another's.
+pub fn store_config(runtime: &LspRuntimeConfig) -> StoreConfig {
+    StoreConfig {
+        max_file_size_bytes: runtime.max_file_size_bytes,
+        ..StoreConfig::default()
+    }
+}
+
 impl App {
     pub async fn new(output_options: OutputOptions, use_daemon: bool) -> anyhow::Result<Self> {
         Self::new_at(std::env::current_dir()?, output_options, use_daemon).await
@@ -88,12 +99,17 @@ impl App {
         let store: Arc<dyn StoreService> = if use_daemon {
             Arc::new(DaemonStoreService::new(&root))
         } else {
-            Arc::new(DefaultStoreService::new(&root, StoreConfig::default()))
+            Arc::new(DefaultStoreService::new(
+                &root,
+                store_config(&runtime_config),
+            ))
         };
 
         #[cfg(not(unix))]
-        let store: Arc<dyn StoreService> =
-            Arc::new(DefaultStoreService::new(&root, StoreConfig::default()));
+        let store: Arc<dyn StoreService> = Arc::new(DefaultStoreService::new(
+            &root,
+            store_config(&runtime_config),
+        ));
 
         tracing::info!(
             "Symora initialized (daemon: {})",

@@ -18,21 +18,16 @@ use crate::models::symbol::{Language, SymbolKind};
 /// indexed for content, and those with an extractor for symbols too. Also
 /// the domain an unrestricted build's `refresh_files` honors, so an edit can
 /// never index a file kind a build wouldn't.
-const INDEXED_LANGUAGES: &[Language] = &[
-    Language::Rust,
-    Language::Go,
-    Language::Python,
-    Language::TypeScript,
-    Language::JavaScript,
-    Language::Java,
-    Language::Kotlin,
-    Language::Cpp,
-    Language::CSharp,
-    Language::Ruby,
-    Language::PHP,
-    Language::Lua,
-    Language::Bash,
-];
+///
+/// This is the domain an unscoped search asks of the index, so it is that
+/// domain: a documentation or data format is reached by naming it, and the
+/// working tree answers those directly.
+fn indexed_languages() -> Vec<Language> {
+    Language::all()
+        .into_iter()
+        .filter(|language| language.is_code())
+        .collect()
+}
 
 /// Meta key recording that a full build completed, and what it covered.
 /// Its presence IS the build-completed marker: a store without it was
@@ -66,7 +61,7 @@ const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50
 /// the DB file exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BuildScope {
-    /// Unrestricted build: every language in `INDEXED_LANGUAGES`.
+    /// Unrestricted build: every language [`indexed_languages`] names.
     All,
     Languages(Vec<Language>),
 }
@@ -88,7 +83,7 @@ impl BuildScope {
     /// content search's coverage.
     fn content_languages(&self) -> Vec<Language> {
         match self {
-            Self::All => INDEXED_LANGUAGES.to_vec(),
+            Self::All => indexed_languages(),
             Self::Languages(langs) => langs.clone(),
         }
     }
@@ -1070,6 +1065,22 @@ impl Store {
     }
 
     async fn index_file(&self, path: &Path) -> Result<(), StoreError> {
+        // A file over the configured ceiling is outside the search's domain,
+        // the same verdict the AST and language-server readers give it. Read
+        // before the bytes are: a generated data file is megabytes on one
+        // line, and parsing it to decide costs more than every file that
+        // belongs in the index put together.
+        if let Ok(meta) = tokio::fs::metadata(path).await
+            && meta.len() > self.config.max_file_size_bytes
+        {
+            tracing::debug!(
+                "Dropping file over search.max_file_size_mb ({}MB): {}",
+                meta.len() / 1024 / 1024,
+                path.display()
+            );
+            return self.remove_file_rows(path).await;
+        }
+
         let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
             // The tree settled this path: nothing is there, or what is there
@@ -1351,6 +1362,42 @@ mod tests {
     /// durable, so the wrong call here destroys indexed data that no retry
     /// brings back.
     #[cfg(unix)]
+    /// A file over the ceiling is outside the search's domain, so the index
+    /// holds no rows for it — and a build that meets one after a smaller past
+    /// drops the rows that past left, or a search keeps answering from
+    /// content the domain no longer covers.
+    #[tokio::test]
+    async fn a_file_over_the_ceiling_is_outside_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let small = root.join("small.py");
+        let large = root.join("large.py");
+        std::fs::write(&small, "def kept():\n    return 1\n").unwrap();
+        std::fs::write(&large, "def dropped():\n    return 1\n").unwrap();
+
+        let store = Store::open(
+            root,
+            StoreConfig {
+                max_file_size_bytes: 1024,
+                ..StoreConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let both = store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(both.file_count, 2);
+
+        std::fs::write(&large, "x".repeat(4096)).unwrap();
+        let after = store
+            .index(IndexOptions {
+                force: true,
+                languages: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(after.file_count, 1, "the oversized file keeps no rows");
+    }
+
     #[tokio::test]
     async fn a_refresh_that_cannot_tell_whether_a_file_exists_keeps_its_rows() {
         use std::os::unix::fs::PermissionsExt;

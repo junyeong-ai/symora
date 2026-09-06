@@ -335,7 +335,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 symora status                # 프로젝트 + language server 상태 (daemon은 `symora daemon status`)
 ```
 
-전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format compact search symbols X`(단일 라인 JSON), `symora -q rename …`(에러만), `symora -v status`(verbose). `--workspace <name>`과 `--token-estimate`도 전역입니다.
+전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format compact search symbols X`(단일 라인 JSON), `symora -q rename …`(에러만), `symora -v status`(verbose). `--workspace <name>`, `--token-estimate`, `--check-version <REQ>`도 전역입니다 — 마지막 것은 이 바이너리가 요구 버전(`0.21`, `>=0.21,<0.22`)을 만족하지 않으면 실행을 거부하므로, 출력을 파싱하는 호출자가 `--version` 문자열을 직접 비교할 필요가 없습니다.
 
 ---
 
@@ -351,7 +351,7 @@ symora status                # 프로젝트 + language server 상태 (daemon은 
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 두 가지는 예외입니다: 잘못된 CLI 인자는 평문 usage 에러를 출력하고 exit 2로, "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
 - **위치는 1-indexed** — 입력과 출력 모두이며, 하나의 주소는 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `context`, `impact`, `usage`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 출력 위치는 항상 line과 column을 함께 담습니다.
 - **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. 이는 소스가 뒤처졌다는 신호와는 다른 축입니다: `stale`과 `indexing: "timed_out"`은 소스가 뒤처졌다는 뜻이고, `incomplete`는 답이 짧다는 뜻입니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
-- **`--format compact`**는 단일 라인 JSON을 출력합니다. 모든 응답은 형식과 무관하게 `output.max_response_chars`(기본 20,000자)로 상한이 걸립니다: 항목 단위로 통째로 잘리고, `truncated`와 설정 키를 지목하는 hint로 공개됩니다 — compact는 더 촘촘한 인코딩이라 같은 상한 아래 더 많은 항목을 담습니다.
+- **`--format compact`**는 단일 라인 JSON을 출력합니다. 응답 하나를 지배하는 예산은 하나입니다: `pack --tokens`처럼 호출자가 예산을 밝힌 응답(`budget_tokens`)은 그 예산이 전부이고, 나머지는 `output.max_response_chars`(기본 20,000자)로 상한이 걸립니다 — 항목 단위로 통째로 잘리고 `truncated`와 설정 키를 지목하는 hint로 공개됩니다. 상한은 어느 형식에서든 compact 직렬화로 재므로 `--format`이 받는 항목을 바꾸지 않습니다.
 
 ---
 
@@ -509,7 +509,7 @@ symora daemon start | stop | restart | status
 | --- | --- |
 | `search …`가 `count: 0` | `symora search index status`; `languages`가 비었으면 빌드된 적이 없다는 뜻 — `symora search index build`. 검색한 언어가 목록에 없으면 그 답은 인덱스가 아니라 language server에서 온 것입니다. |
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. |
-| `indexing: "timed_out"` | language server가 아직 워밍업 중 — count는 하한. 따뜻해진 뒤 재시도. |
+| `indexing: "timed_out"` | language server가 아직 워크스페이스를 읽는 중입니다. 목록이면 count가 하한이고, `def`·`hover`처럼 답이 하나인 명령에서 비어 있으면 "아직 확정 안 됨"이지 "없음"이 아닙니다. 따뜻해진 뒤 재시도. `rename`은 이 상태에서 적용을 거부하고 미리보기만 합니다 — 편집 집합이 하한이면 일부 호출부만 바뀝니다. |
 | `incomplete: true` | count가 하한 — 답이 자기 소스가 가진 전부를 담지 못했습니다. 원인은 `hints`가 이름을 대고, 고칠 방법이 있으면 `next_commands`에 담깁니다. `unread_paths`가 함께 오면 그 경로들의 권한부터 확인하세요 — 읽히지 않는 경로에는 재빌드도 닿지 않습니다. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
 | `search index`의 `conflict` | 다른 프로세스가 인덱스를 다시 만드는 중 — 그대로 재시도. 절반만 적용된 상태는 남지 않습니다. |

@@ -52,6 +52,10 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "get_file_overview" => run_file_overview(arguments, app).await,
         "search_symbols" => run_search_symbols(arguments, app).await,
         "search_content" => run_search_content(arguments, app).await,
+        "check_language_support" => run_check_language_support(arguments, app).await,
+        "search_ast" => run_search_ast(arguments, app).await,
+        "get_index_status" => run_index_status(arguments, app).await,
+        "build_index" => run_build_index(arguments, app).await,
         "list_file_symbols" => run_list_file_symbols(arguments, app).await,
         "inspect_symbol" => run_inspect_symbol(arguments, app).await,
         "find_definition" => run_find_definition(arguments, app).await,
@@ -196,6 +200,97 @@ async fn run_search_content(args: Value, app: &App) -> Result<CapturedOutput> {
                     query: input.query,
                     language: input.language,
                     limit: input.limit,
+                },
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct CheckLanguageSupportInput {
+    language: Option<String>,
+}
+
+async fn run_check_language_support(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: CheckLanguageSupportInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::doctor::execute(
+            crate::cli::commands::doctor::DoctorArgs {
+                language: input.language,
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SearchAstInput {
+    pattern: String,
+    language: String,
+    path: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn run_search_ast(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: SearchAstInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::search::execute(
+            SearchArgs {
+                command: SearchCommand::Ast {
+                    pattern: input.pattern,
+                    language: input.language,
+                    path: input.path.map(|p| vec![std::path::PathBuf::from(p)]),
+                    limit: input.limit,
+                },
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct IndexStatusInput {}
+
+async fn run_index_status(args: Value, app: &App) -> Result<CapturedOutput> {
+    let _: IndexStatusInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::search::execute(
+            SearchArgs {
+                command: SearchCommand::Index {
+                    command: crate::cli::commands::search::IndexCommand::Status,
+                },
+            },
+            &a,
+        )
+        .await
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct BuildIndexInput {
+    #[serde(default)]
+    force: bool,
+    languages: Option<String>,
+}
+
+async fn run_build_index(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: BuildIndexInput = parse_args(args)?;
+    capture(app, move |a| async move {
+        crate::cli::commands::search::execute(
+            SearchArgs {
+                command: SearchCommand::Index {
+                    command: crate::cli::commands::search::IndexCommand::Build {
+                        force: input.force,
+                        languages: input.languages,
+                    },
                 },
             },
             &a,
@@ -801,6 +896,10 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "get_file_overview" => &["path", "depth", "related_limit"],
         "search_symbols" => &["query", "language", "kind", "limit"],
         "search_content" => &["query", "language", "limit"],
+        "check_language_support" => &["language"],
+        "search_ast" => &["pattern", "language", "path", "limit"],
+        "get_index_status" => &[],
+        "build_index" => &["force", "languages"],
         "list_file_symbols" => &["file", "depth", "body", "signature"],
         "inspect_symbol" => &["symbol_path", "language", "body"],
         "find_definition" | "get_hover" => &["file", "line", "column"],
@@ -884,6 +983,10 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "get_file_overview" => check::<FileOverviewInput>(args),
         "search_symbols" => check::<SearchSymbolsInput>(args),
         "search_content" => check::<SearchContentInput>(args),
+        "check_language_support" => check::<CheckLanguageSupportInput>(args),
+        "search_ast" => check::<SearchAstInput>(args),
+        "get_index_status" => check::<IndexStatusInput>(args),
+        "build_index" => check::<BuildIndexInput>(args),
         "list_file_symbols" => check::<ListFileSymbolsInput>(args),
         "inspect_symbol" => check::<InspectSymbolInput>(args),
         "find_definition" | "get_hover" => check::<LocationInput>(args),

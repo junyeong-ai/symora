@@ -211,7 +211,7 @@ async fn fetch_diagnostic_context(
     let mut context = Vec::new();
     let mut seen_locations: Vec<(std::path::PathBuf, u32)> = Vec::new();
 
-    if let Ok(Some(def)) = def_result.map(|d| d.map(|d| d.location))
+    if let Ok(Some(def)) = def_result.map(|d| d.data.map(|d| d.location))
         && (def.file != file || def.line != line)
         && let Ok(content) = tokio::fs::read_to_string(&def.file).await
     {
@@ -229,7 +229,7 @@ async fn fetch_diagnostic_context(
         });
     }
 
-    if let Ok(Some(type_def)) = type_def_result
+    if let Ok(Some(type_def)) = type_def_result.map(|d| d.data)
         && let Ok(content) = tokio::fs::read_to_string(&type_def.file).await
     {
         let is_duplicate = seen_locations

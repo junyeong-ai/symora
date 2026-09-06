@@ -226,19 +226,27 @@ mod tests {
     use super::*;
     use crate::models::symbol::Language;
 
+    /// A language whose grammar states declarations as generic calls or blocks
+    /// carries AST search without symbol extraction. The row must say both,
+    /// with `false` emitted rather than omitted.
     #[test]
     fn language_rows_always_carry_the_capability_booleans() {
-        // Ruby has a tree-sitter AST grammar but no index extractor — the
-        // row must say both, with `false` emitted rather than omitted.
+        let language = Language::all()
+            .into_iter()
+            .find(|language| {
+                crate::infra::ast::is_supported(*language)
+                    && !SymbolExtractor::is_supported(*language)
+            })
+            .expect("a grammar with AST search but no extraction query");
         let status = LanguageStatus {
-            language: "ruby".to_string(),
-            server: "ruby-lsp".to_string(),
+            language: language.to_string(),
+            server: "any".to_string(),
             installed: false,
             serves: false,
             version: None,
             tier: "fast".to_string(),
-            symbol_extraction: SymbolExtractor::is_supported(Language::Ruby),
-            ast_search: crate::infra::ast::is_supported(Language::Ruby),
+            symbol_extraction: SymbolExtractor::is_supported(language),
+            ast_search: crate::infra::ast::is_supported(language),
             source: None,
             command: None,
             install: None,

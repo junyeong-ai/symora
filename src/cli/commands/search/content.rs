@@ -12,7 +12,6 @@ use crate::cli::response::disclosure::{
     LowerBound, as_paths, index_holes_bound, index_unavailable_disclosure, ordered_bounds,
     relative_paths, relative_stale_files, with_lower_bounds,
 };
-use crate::cli::symbol_discovery::is_code_language;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct ContentResultOutput {
@@ -75,7 +74,7 @@ pub async fn execute_content_search(
         Some(lang) => vec![lang],
         None => Language::all()
             .into_iter()
-            .filter(|lang| is_code_language(*lang))
+            .filter(|lang| lang.is_code())
             .collect(),
     };
 
@@ -379,7 +378,7 @@ fn content_search_hints(
         if language.is_none() {
             let unsearched: Vec<&str> = Language::all()
                 .into_iter()
-                .filter(|lang| !is_code_language(*lang))
+                .filter(|lang| !lang.is_code())
                 .map(|lang| lang.lsp_id())
                 .collect();
             hints.push(format!(
@@ -444,14 +443,11 @@ fn prioritize_code_content_results(
     if language.is_none() {
         let code_count = results
             .iter()
-            .filter(|result| {
-                is_code_language(Language::from_path(std::path::Path::new(&result.file)))
-            })
+            .filter(|result| Language::from_path(std::path::Path::new(&result.file)).is_code())
             .count();
         if code_count >= limit {
-            results.retain(|result| {
-                is_code_language(Language::from_path(std::path::Path::new(&result.file)))
-            });
+            results
+                .retain(|result| Language::from_path(std::path::Path::new(&result.file)).is_code());
         }
     }
 
@@ -485,7 +481,7 @@ fn rank(
 }
 
 fn is_first_class(result: &ContentResultOutput, language: Option<&str>) -> bool {
-    language.is_some() || is_code_language(Language::from_path(std::path::Path::new(&result.file)))
+    language.is_some() || Language::from_path(std::path::Path::new(&result.file)).is_code()
 }
 
 /// Mirror of the SQL scoring in `build_content_search_query`, term for

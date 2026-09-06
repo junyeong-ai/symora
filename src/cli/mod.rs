@@ -86,6 +86,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub token_estimate: bool,
 
+    /// Refuse to run unless this binary's version satisfies the SemVer
+    /// requirement (e.g. `0.21`, `>=0.21,<0.22`). A pinned caller sets it so a
+    /// version whose output it was not written against fails loudly instead of
+    /// being parsed as if it were.
+    #[arg(long, global = true, value_name = "REQ")]
+    pub check_version: Option<String>,
+
     /// Quiet mode (errors only)
     #[arg(short, long, global = true)]
     pub quiet: bool,
@@ -93,6 +100,38 @@ pub struct Cli {
     /// Enable debug logging
     #[arg(short, long, global = true)]
     pub verbose: bool,
+}
+
+/// Hold the running binary to a caller's pinned requirement.
+///
+/// A consumer that parses this tool's JSON was written against a version of
+/// it. Checking that here rather than in each caller's shell is what keeps the
+/// check on the producing side of the contract, where the version is known
+/// exactly and the failure is one typed error rather than a parsed
+/// `--version` string.
+pub fn check_version(requirement: &str) -> Result<(), OutputError> {
+    let parsed = semver::VersionReq::parse(requirement).map_err(|e| {
+        OutputError::invalid(format!(
+            "--check-version `{requirement}` is not a SemVer requirement: {e}"
+        ))
+        .with_hint("Write a requirement such as `0.21`, `=0.21.0`, or `>=0.21,<0.22`.")
+    })?;
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| {
+        OutputError::new(
+            ErrorCode::Internal,
+            format!(
+                "this binary's version `{}` is not SemVer: {e}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+    })?;
+    if parsed.matches(&running) {
+        return Ok(());
+    }
+    Err(OutputError::precondition_failed(format!(
+        "symora {running} does not satisfy `{requirement}`"
+    ))
+    .with_hint("Install the version this caller was written against, or widen the requirement."))
 }
 
 #[derive(Subcommand, Debug)]
@@ -193,6 +232,23 @@ pub enum Commands {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The pin is checked where the version is known exactly, so a caller
+    /// never has to parse `--version` prose to enforce one.
+    #[test]
+    fn check_version_holds_the_binary_to_the_requirement() {
+        let running = env!("CARGO_PKG_VERSION");
+        assert!(check_version(&format!("={running}")).is_ok());
+        assert!(check_version(">=0.0.1").is_ok());
+
+        let refused = check_version("<0.0.1").expect_err("a version below the floor is refused");
+        assert_eq!(refused.code, ErrorCode::PreconditionFailed);
+        assert!(refused.message.contains(running));
+
+        let malformed = check_version("not-a-req").expect_err("a malformed requirement is refused");
+        assert_eq!(malformed.code, ErrorCode::InvalidArgument);
+    }
     use clap::CommandFactory;
 
     /// clap's internal consistency checks (duplicate flag names, conflicting
