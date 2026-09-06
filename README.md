@@ -247,14 +247,14 @@ symora impact src/services/checkout.ts:48 --depth 2
       { "depth": 1, "count": 2, "test": 0, "prod": 2 },
       { "depth": 2, "count": 2, "test": 2, "prod": 0 }
     ],
-    "test_coverage_ratio": 0.5,
+    "test_caller_ratio": 0.5,
     "risk": "high",
-    "confidence": 0.9
+    "confidence": 0.8
   },
   "next_commands": ["symora impact src/services/checkout.ts:48 --depth 3"]
 }
 ```
-> 호출 지점의 절반만 테스트되는데 `risk: "high"` — 조심해서 바꿔야 합니다. `next_commands`는 도움이 될 때만 나오는, 바로 실행 가능한 후속 명령입니다.
+> 호출 지점의 절반만 테스트되는데 `risk: "high"` — 조심해서 바꿔야 합니다. `max_depth_reached`가 true라 그래프는 하한이고 `confidence`가 그만큼 낮습니다 — `next_commands`가 제안하는 `--depth 3`이 그 하한을 걷어냅니다.
 
 ### ⑥ 변경 — 쓰기 전에 미리보기
 
