@@ -14,9 +14,8 @@ use crate::cli::response::disclosure::{
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    DetectedLanguages, LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
-    generic_exact_identifier_penalty, no_languages_error, noisy_suffix_penalty,
-    resolve_search_languages, symbol_lookup_hints, symbol_match_priority,
+    DetectedLanguages, RankedSymbol, candidate_budget, no_languages_error,
+    resolve_search_languages, symbol_lookup_hints, symbol_rank,
 };
 use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
@@ -139,7 +138,7 @@ pub async fn execute_symbol_search(
         .store
         .search_symbols(
             query,
-            limit,
+            candidate_budget(limit),
             kind.map(SymbolKind::parse_or_default),
             explicit_index_language(language),
         )
@@ -171,8 +170,7 @@ pub async fn execute_symbol_search(
                     collect_workspace_symbol_results(app, query, kind, limit, &uncovered).await;
                 workspace_indexing = lookup.indexing;
                 let live_total = lookup.total;
-                candidates =
-                    merge_symbol_results(candidates, lookup.results, query, app.test_scope());
+                candidates = merge_symbol_results(candidates, lookup.results);
                 failures = lookup.failures;
                 skipped = lookup.skipped;
                 // Disjoint by `languages_needing_live_lookup`, so the union
@@ -198,7 +196,14 @@ pub async fn execute_symbol_search(
             let section = with_coverage_disclosure(
                 with_emitted_stale(
                     finish_symbol_search(
-                        candidates, count, query, language, kind, limit, &shortfall,
+                        candidates,
+                        count,
+                        query,
+                        language,
+                        kind,
+                        limit,
+                        app.test_scope(),
+                        &shortfall,
                     ),
                     &stale_files,
                 )
@@ -349,7 +354,16 @@ async fn execute_glob_symbol_search(
         .collect();
     ctx.print_success(with_coverage_disclosure(
         with_emitted_stale(
-            finish_symbol_search(matches, count, query, language, kind, limit, &shortfall),
+            finish_symbol_search(
+                matches,
+                count,
+                query,
+                language,
+                kind,
+                limit,
+                app.test_scope(),
+                &shortfall,
+            ),
             &stale_files,
         ),
         &shortfall,
@@ -450,8 +464,7 @@ async fn execute_workspace_symbol_search(
             }
             failures.extend(expanded.failures);
             skipped.extend(expanded.skipped);
-            candidates =
-                merge_symbol_results(candidates, expanded.results, query, app.test_scope());
+            candidates = merge_symbol_results(candidates, expanded.results);
         } else {
             // The page filled before the widening ran, so it never ran at all.
             // That is the same fact the cap inside it states — files this
@@ -473,7 +486,7 @@ async fn execute_workspace_symbol_search(
             app.store
                 .search_symbols(
                     query,
-                    limit,
+                    candidate_budget(limit),
                     kind.map(SymbolKind::parse_or_default),
                     explicit_index_language(language),
                 )
@@ -527,7 +540,7 @@ async fn execute_workspace_symbol_search(
             .into_iter()
             .map(|r| index_result_output(r, ctx))
             .collect();
-        candidates = merge_symbol_results(candidates, index_results, query, app.test_scope());
+        candidates = merge_symbol_results(candidates, index_results);
     }
 
     let mut lower_bounds = {
@@ -563,6 +576,7 @@ async fn execute_workspace_symbol_search(
                 language,
                 kind,
                 limit,
+                app.test_scope(),
                 &shortfall,
             ),
             &stale_files,
@@ -597,8 +611,10 @@ fn finish_symbol_search(
     language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
+    test_scope: &TestScope,
     shortfall: &[Uncovered],
 ) -> Section<SymbolResultOutput> {
+    sort_symbol_results(&mut candidates, query, test_scope);
     candidates.truncate(limit);
 
     let truncated = candidates.len() < count;
@@ -849,14 +865,12 @@ fn languages_needing_live_lookup(
         .collect()
 }
 
-/// Dedup + rank the union of two result sets. Emission capping and noise
-/// suppression happen once, in `finish_symbol_search`, so the candidate
-/// count stays exact.
+/// The union of two result sets, each match kept once. Ranking and the
+/// emission cap happen together in `finish_symbol_search`, so the candidate
+/// count stays exact and no route can order an answer differently.
 fn merge_symbol_results(
     primary: Vec<SymbolResultOutput>,
     secondary: Vec<SymbolResultOutput>,
-    query: &str,
-    test_scope: &TestScope,
 ) -> Vec<SymbolResultOutput> {
     let mut seen = HashSet::new();
     let mut merged = Vec::new();
@@ -869,7 +883,6 @@ fn merge_symbol_results(
         }
     }
 
-    sort_symbol_results(&mut merged, query, test_scope);
     merged
 }
 
@@ -1020,10 +1033,23 @@ struct DocumentExpansion {
     skipped: Vec<Language>,
 }
 
+fn rank_of(result: &SymbolResultOutput, query: &str, test_scope: &TestScope) -> i32 {
+    symbol_rank(
+        query,
+        RankedSymbol {
+            name: &result.name,
+            name_path: result.name_path.as_deref(),
+            kind: &result.kind,
+            file: std::path::Path::new(&result.file),
+        },
+        test_scope,
+    )
+}
+
 fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_scope: &TestScope) {
     results.sort_by(|a, b| {
-        symbol_result_priority(query, b, test_scope)
-            .cmp(&symbol_result_priority(query, a, test_scope))
+        rank_of(b, query, test_scope)
+            .cmp(&rank_of(a, query, test_scope))
             .then_with(|| {
                 b.score
                     .partial_cmp(&a.score)
@@ -1034,57 +1060,6 @@ fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_sco
             .then_with(|| a.line.cmp(&b.line))
             .then_with(|| a.column.cmp(&b.column))
     });
-}
-
-fn symbol_result_priority(query: &str, result: &SymbolResultOutput, test_scope: &TestScope) -> i32 {
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    let name = result.name.to_ascii_lowercase();
-    let path = result
-        .name_path
-        .as_deref()
-        .unwrap_or(&result.name)
-        .to_ascii_lowercase();
-    let match_priority = symbol_match_priority(query, &name, &path);
-
-    // Test code is demoted by file path only. A container-name substring
-    // check ("test") would mis-fire on Fastest/Latest/Contest, and the file
-    // path already catches the real test code.
-    let test_penalty = if test_scope.is_test_file(std::path::Path::new(&result.file)) {
-        TEST_FILE_PENALTY
-    } else {
-        0
-    };
-    let kind_penalty = if is_low_signal_kind(&result.kind) {
-        LOW_SIGNAL_KIND_PENALTY
-    } else {
-        0
-    };
-    let suffix_penalty = noisy_suffix_penalty(&name, &q);
-    // For a broad single-word query, prefer a high-signal type/function
-    // whose name contains the term (+8) over a low-signal exact match such
-    // as a same-named variable or enum member (-24/-18), which is rarely
-    // what the agent is looking for.
-    let generic_exact_penalty = generic_exact_identifier_penalty(
-        query,
-        &name,
-        &result.kind,
-        is_low_signal_kind(&result.kind),
-    );
-    let kind_bonus =
-        broad_symbol_kind_bonus(query, &name, &result.kind, is_low_signal_kind(&result.kind));
-
-    match_priority + kind_bonus
-        - test_penalty
-        - kind_penalty
-        - suffix_penalty
-        - generic_exact_penalty
-}
-
-fn is_low_signal_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "variable" | "field" | "property" | "enum_member" | "constant"
-    )
 }
 
 fn workspace_query_from_pattern(pattern: &str) -> String {
@@ -1275,7 +1250,16 @@ mod tests {
             result("beta", "src/b.rs"),
             result("gamma", "src/c.rs"),
         ];
-        let section = finish_symbol_search(candidates, 3, "alpha", None, None, 2, &[]);
+        let section = finish_symbol_search(
+            candidates,
+            3,
+            "alpha",
+            None,
+            None,
+            2,
+            &TestScope::new(),
+            &[],
+        );
 
         assert_eq!(section.count, 3);
         assert_eq!(section.showing, 2);
@@ -1338,11 +1322,21 @@ mod tests {
             None,
             None,
             10,
+            &TestScope::new(),
             &shortfall,
         );
         assert_eq!(partial.coverage_gaps, published);
 
-        let empty = finish_symbol_search(vec![], 0, "foo", None, None, 10, &shortfall);
+        let empty = finish_symbol_search(
+            vec![],
+            0,
+            "foo",
+            None,
+            None,
+            10,
+            &TestScope::new(),
+            &shortfall,
+        );
         assert_eq!(empty.coverage_gaps, published);
 
         let complete = finish_symbol_search(
@@ -1352,6 +1346,7 @@ mod tests {
             None,
             None,
             10,
+            &TestScope::new(),
             &[],
         );
         assert!(complete.coverage_gaps.is_empty());
@@ -1402,7 +1397,16 @@ mod tests {
     #[test]
     fn finish_symbol_search_complete_results_are_not_truncated() {
         let candidates = vec![result("alpha", "src/a.rs")];
-        let section = finish_symbol_search(candidates, 1, "alpha", None, None, 10, &[]);
+        let section = finish_symbol_search(
+            candidates,
+            1,
+            "alpha",
+            None,
+            None,
+            10,
+            &TestScope::new(),
+            &[],
+        );
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);

@@ -1344,3 +1344,140 @@ fn git(dir: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// An answer is ranked before it is cut, so a small limit returns the best
+/// matches rather than whichever ones the index happened to page in. The
+/// index orders its page by textual relevance alone; the ranking that orders
+/// the answer also demotes test files, and below a cut a demotion is a
+/// removal — so a page selected without the ranking hands back rows the
+/// ranking would have put last.
+#[test]
+fn a_short_answer_holds_the_best_matches_not_the_first_page() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    // Bare `handler` at the top of each test file: the same textual relevance
+    // as the production method and a shorter symbol path, so the index pages
+    // every one of them in ahead of it.
+    for n in 0..6 {
+        std::fs::write(
+            dir.path().join(format!("tests/test_{n}.py")),
+            "def handler():\n    pass\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.path().join("src/api.py"),
+        "class RequestDispatcher:\n    def handler(self):\n        pass\n",
+    )
+    .unwrap();
+    json_ok(dir.path(), &["search", "index", "build"]);
+
+    let short = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "symbols",
+            "handler",
+            "--limit",
+            "2",
+            "--deterministic",
+        ],
+    );
+    let files: Vec<&str> = short["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|i| i["file"].as_str())
+        .collect();
+    assert_eq!(files.len(), 2, "the limit admits two rows: {short}");
+    assert!(
+        files[0].starts_with("src/"),
+        "the index pages the shorter test paths in first; the ranking leads with the production \
+         declaration: {short}"
+    );
+
+    let whole = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "symbols",
+            "handler",
+            "--limit",
+            "50",
+            "--deterministic",
+        ],
+    );
+    let head: Vec<&str> = whole["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .take(2)
+        .filter_map(|i| i["file"].as_str())
+        .collect();
+    assert_eq!(
+        files, head,
+        "a limit bounds the answer; it does not change which matches lead it: {whole}"
+    );
+}
+
+/// The two symbol surfaces answer one question, so they order it one way. Two
+/// copies of the ranking had already drifted apart on which kinds are
+/// low-signal, which put the same symbol at the head of one answer and the
+/// tail of the other.
+#[test]
+fn both_symbol_surfaces_order_a_query_the_same_way() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("tests/test_store.py"),
+        "def store():\n    pass\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/store.py"),
+        "class StoreService:\n    def store(self):\n        pass\n",
+    )
+    .unwrap();
+    json_ok(dir.path(), &["search", "index", "build"]);
+
+    let searched = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "symbols",
+            "store",
+            "--lang",
+            "python",
+            "--deterministic",
+        ],
+    );
+    let named = json_ok(
+        dir.path(),
+        &[
+            "symbols",
+            "--name",
+            "store",
+            "--lang",
+            "python",
+            "--deterministic",
+        ],
+    );
+
+    let lead = |v: &serde_json::Value, file_at: fn(&serde_json::Value) -> Option<&str>| {
+        v["items"]
+            .as_array()
+            .expect("items")
+            .first()
+            .and_then(file_at)
+            .map(str::to_string)
+    };
+    let searched_lead = lead(&searched, |i| i["file"].as_str());
+    let named_lead = lead(&named, |i| i["location"]["file"].as_str());
+    assert!(searched_lead.is_some(), "search found nothing: {searched}");
+    assert_eq!(
+        searched_lead, named_lead,
+        "one question, two orders: {searched} vs {named}"
+    );
+}

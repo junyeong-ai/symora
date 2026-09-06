@@ -14,9 +14,8 @@ use crate::cli::response::disclosure::{
 };
 use crate::cli::response::{CoverageGap, Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
-    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
-    generic_exact_identifier_penalty, no_languages_error, noisy_suffix_penalty,
-    resolve_search_languages, symbol_lookup_hints, symbol_match_priority,
+    RankedSymbol, candidate_budget, no_languages_error, resolve_search_languages,
+    symbol_lookup_hints, symbol_rank,
 };
 use crate::cli::utils::extract_signature;
 use crate::error::LspError;
@@ -266,7 +265,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let mut workspace_only: Option<WorkspaceSearchRoute> = None;
     match app
         .store
-        .search_symbols(&query, limit.saturating_mul(2), None, index_lang)
+        .search_symbols(&query, candidate_budget(limit), None, index_lang)
         .await
     {
         Ok(page) => {
@@ -552,52 +551,29 @@ fn workspace_symbol_hints(
     )
 }
 
+fn workspace_rank(symbol: &Symbol, query: &str, test_scope: &TestScope) -> i32 {
+    let kind = symbol.kind.to_string();
+    symbol_rank(
+        query,
+        RankedSymbol {
+            name: &symbol.name,
+            name_path: Some(symbol.path()),
+            kind: &kind,
+            file: &symbol.location.file,
+        },
+        test_scope,
+    )
+}
+
 fn sort_workspace_symbols(symbols: &mut [Symbol], query: &str, test_scope: &TestScope) {
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     symbols.sort_by(|a, b| {
-        workspace_symbol_priority(b, &q, test_scope)
-            .cmp(&workspace_symbol_priority(a, &q, test_scope))
+        workspace_rank(b, query, test_scope)
+            .cmp(&workspace_rank(a, query, test_scope))
             .then_with(|| a.name.len().cmp(&b.name.len()))
             .then_with(|| a.location.file.cmp(&b.location.file))
             .then_with(|| a.location.line.cmp(&b.location.line))
             .then_with(|| a.location.column.cmp(&b.location.column))
     });
-}
-
-fn workspace_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScope) -> i32 {
-    let name = symbol.name.to_ascii_lowercase();
-    let path = symbol.path().to_ascii_lowercase();
-    let match_priority = symbol_match_priority(query, &name, &path);
-
-    let test_penalty = if test_scope.is_test_file(&symbol.location.file) {
-        TEST_FILE_PENALTY
-    } else {
-        0
-    };
-    let kind_penalty = if symbol.kind.is_low_level() {
-        LOW_SIGNAL_KIND_PENALTY
-    } else {
-        0
-    };
-    let suffix_penalty = noisy_suffix_penalty(&name, query);
-    let generic_exact_penalty = generic_exact_identifier_penalty(
-        query,
-        &name,
-        &symbol.kind.to_string(),
-        symbol.kind.is_low_level(),
-    );
-    let kind_bonus = broad_symbol_kind_bonus(
-        query,
-        &name,
-        &symbol.kind.to_string(),
-        symbol.kind.is_low_level(),
-    );
-
-    match_priority + kind_bonus
-        - test_penalty
-        - kind_penalty
-        - suffix_penalty
-        - generic_exact_penalty
 }
 
 fn effective_workspace_query(name_query: Option<&str>, symbol_query: Option<&str>) -> String {
