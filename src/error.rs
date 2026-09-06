@@ -79,6 +79,14 @@ pub enum LspError {
         limit_mb: u64,
     },
 
+    /// The file's bytes are not UTF-8 text, so nothing that reads source can
+    /// read it — an image or archive, or source in an encoding this tool does
+    /// not transcode. Named rather than folded into a protocol failure because
+    /// there is nothing here to retry or install: a caller walking a tree skips
+    /// the file, where an internal error would have it retry or report a bug.
+    #[error("Not UTF-8 text: {path}")]
+    FileNotText { path: String },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

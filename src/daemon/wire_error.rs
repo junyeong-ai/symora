@@ -60,6 +60,9 @@ pub enum WireLspError {
         size_mb: u64,
         limit_mb: u64,
     },
+    FileNotText {
+        path: String,
+    },
     Other {
         message: String,
     },
@@ -126,6 +129,7 @@ impl From<&LspError> for WireLspError {
                 size_mb: *size_mb,
                 limit_mb: *limit_mb,
             },
+            LspError::FileNotText { path } => Self::FileNotText { path: path.clone() },
             LspError::Io(e) => Self::Other {
                 message: e.to_string(),
             },
@@ -181,6 +185,7 @@ impl From<WireLspError> for LspError {
                 size_mb,
                 limit_mb,
             },
+            WireLspError::FileNotText { path } => LspError::FileNotText { path },
             WireLspError::Other { message } => LspError::Protocol(message),
         }
     }
@@ -308,6 +313,20 @@ mod tests {
         match recovered {
             LspError::Protocol(msg) => assert!(!msg.is_empty()),
             other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
+    /// A non-text file reaches the caller as itself rather than collapsing to
+    /// `Other` — which the wire maps back to `Protocol`, and the CLI to an
+    /// internal error — so the daemon and a direct run classify it the same.
+    #[test]
+    fn file_not_text_round_trips_as_itself() {
+        let wire = WireLspError::from(&LspError::FileNotText {
+            path: "/tmp/a.png".to_string(),
+        });
+        match LspError::from(wire) {
+            LspError::FileNotText { path } => assert_eq!(path, "/tmp/a.png"),
+            other => panic!("did not round trip: {other:?}"),
         }
     }
 

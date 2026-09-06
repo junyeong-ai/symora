@@ -144,6 +144,7 @@ impl From<LspError> for OutputError {
                 .with_hint("The language server is still indexing; retry shortly."),
             LspError::RequestCancelled => Self::new(ErrorCode::Cancelled, message),
             LspError::FileTooLarge { .. } => Self::new(ErrorCode::FileTooLarge, message),
+            LspError::FileNotText { .. } => Self::new(ErrorCode::Unsupported, message),
             LspError::ServerError { code, message: m } => classify_server_error(code, &m, message),
             LspError::Protocol(_) => Self::new(ErrorCode::Internal, message),
             LspError::UnsupportedEdit(_) => Self::new(ErrorCode::Unsupported, message),
