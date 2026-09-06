@@ -135,9 +135,15 @@ async fn async_main() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     let use_daemon = true;
 
-    let app = App::new(output_options, use_daemon)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
+    let app = App::new(
+        output_options,
+        symora::app::Wiring {
+            use_daemon,
+            deterministic: cli.deterministic,
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
 
     tokio::select! {
         result = execute_command(cli.command, &app) => result,

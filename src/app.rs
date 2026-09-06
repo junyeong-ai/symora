@@ -11,7 +11,7 @@ use crate::services::config::{ConfigService, DefaultConfigService};
 use crate::services::daemon_lsp::DaemonLspService;
 #[cfg(unix)]
 use crate::services::daemon_store::DaemonStoreService;
-use crate::services::lsp::{DefaultLspService, LspService};
+use crate::services::lsp::{DefaultLspService, DeterministicLspService, LspService};
 use crate::services::project::{DefaultProjectService, ProjectService};
 use crate::services::store::{DefaultStoreService, StoreConfig, StoreService};
 
@@ -38,9 +38,21 @@ pub fn store_config(runtime: &LspRuntimeConfig) -> StoreConfig {
     }
 }
 
+/// How a run reaches the services it answers from.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wiring {
+    /// Forward to a `symora daemon` rather than opening servers and the store
+    /// in this process.
+    pub use_daemon: bool,
+    /// Answer only from the index and the compiled-in grammars. The tier is
+    /// then an input rather than an outcome, which is what makes two machines
+    /// with different servers installed agree on the same tree.
+    pub deterministic: bool,
+}
+
 impl App {
-    pub async fn new(output_options: OutputOptions, use_daemon: bool) -> anyhow::Result<Self> {
-        Self::new_at(std::env::current_dir()?, output_options, use_daemon).await
+    pub async fn new(output_options: OutputOptions, wiring: Wiring) -> anyhow::Result<Self> {
+        Self::new_at(std::env::current_dir()?, output_options, wiring).await
     }
 
     /// Build an `App` rooted at an explicit path. `new` is this seeded with
@@ -49,8 +61,12 @@ impl App {
     pub(crate) async fn new_at(
         root: std::path::PathBuf,
         output_options: OutputOptions,
-        use_daemon: bool,
+        wiring: Wiring,
     ) -> anyhow::Result<Self> {
+        let Wiring {
+            use_daemon,
+            deterministic,
+        } = wiring;
         tracing::debug!("Initializing Symora at {:?}", root);
 
         let config_service = Arc::new(DefaultConfigService::new(&root));
@@ -93,6 +109,12 @@ impl App {
         let lsp: Arc<dyn LspService + Send + Sync> = {
             let _ = use_daemon;
             Arc::new(DefaultLspService::new(&root, Arc::clone(&runtime_config)))
+        };
+
+        let lsp = if deterministic {
+            Arc::new(DeterministicLspService::new(lsp)) as Arc<dyn LspService + Send + Sync>
+        } else {
+            lsp
         };
 
         #[cfg(unix)]

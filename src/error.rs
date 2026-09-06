@@ -87,6 +87,16 @@ pub enum LspError {
     #[error("Not UTF-8 text: {path}")]
     FileNotText { path: String },
 
+    /// The request confined itself to what this binary and the index carry, so
+    /// no language server was asked. Distinct from one being absent: the answer
+    /// is the same on a machine that has the server and one that does not,
+    /// which is the property the caller asked for.
+    #[error(
+        "No language server was consulted: --deterministic confines the answer to the index \
+         and the compiled-in grammars"
+    )]
+    ServerNotConsulted,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

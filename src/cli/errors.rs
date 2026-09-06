@@ -145,6 +145,10 @@ impl From<LspError> for OutputError {
             LspError::RequestCancelled => Self::new(ErrorCode::Cancelled, message),
             LspError::FileTooLarge { .. } => Self::new(ErrorCode::FileTooLarge, message),
             LspError::FileNotText { .. } => Self::new(ErrorCode::Unsupported, message),
+            LspError::ServerNotConsulted => Self::new(ErrorCode::Unsupported, message).with_hint(
+                "This command has no answer that derives from the tree alone. Drop --deterministic \
+                 to let a language server answer it.",
+            ),
             LspError::ServerError { code, message: m } => classify_server_error(code, &m, message),
             LspError::Protocol(_) => Self::new(ErrorCode::Internal, message),
             LspError::UnsupportedEdit(_) => Self::new(ErrorCode::Unsupported, message),

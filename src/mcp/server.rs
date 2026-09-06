@@ -416,7 +416,7 @@ mod tests {
         let mut app = App::new_at(
             dir.path().to_path_buf(),
             crate::cli::OutputOptions::default(),
-            false,
+            crate::app::Wiring::default(),
         )
         .await
         .expect("app init");
@@ -450,8 +450,11 @@ mod tests {
 
     async fn dummy_app() -> App {
         // No daemon, no real LSP needed for the protocol-level tests above.
-        App::new(crate::cli::OutputOptions::default(), false)
-            .await
-            .expect("app init")
+        App::new(
+            crate::cli::OutputOptions::default(),
+            crate::app::Wiring::default(),
+        )
+        .await
+        .expect("app init")
     }
 }

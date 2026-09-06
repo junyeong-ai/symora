@@ -34,6 +34,10 @@ pub enum CoverageReason {
     /// index alone and so cannot ask anything else.
     NotIndexed,
     ServerNotInstalled,
+    /// The run confined itself to the index and the compiled-in grammars, so
+    /// no server was asked for the languages they do not reach. The remedy is
+    /// the caller's own constraint, not the environment.
+    NotConsulted,
     TimedOut,
     /// A capability gap — `is_unsupported` covers both the static table and
     /// a runtime JSON-RPC method-not-found — matching the central error
@@ -49,6 +53,7 @@ impl CoverageReason {
     pub fn of(err: &LspError) -> Self {
         match err {
             LspError::ServerNotInstalled { .. } => Self::ServerNotInstalled,
+            LspError::ServerNotConsulted => Self::NotConsulted,
             LspError::Timeout(_) => Self::TimedOut,
             LspError::UnsupportedLanguage(_) => Self::Unsupported,
             e if e.is_unsupported() => Self::Unsupported,
@@ -60,6 +65,7 @@ impl CoverageReason {
         match self {
             Self::NotIndexed => "not_indexed",
             Self::ServerNotInstalled => "server_not_installed",
+            Self::NotConsulted => "not_consulted",
             Self::TimedOut => "timed_out",
             Self::Unsupported => "unsupported",
             Self::Unavailable => "unavailable",
@@ -336,6 +342,9 @@ pub fn symbol_coverage_hints(shortfall: &[Uncovered], route: DisclosureRoute) ->
                 CoverageReason::NotSearched => format!(
                     "This result is not authoritative for {lang}: enough matches came from other languages, so it was never searched — narrow the query with --lang {lang}"
                 ),
+                CoverageReason::NotConsulted => format!(
+                    "This result is not authoritative for {lang}: the index does not extract it, and --deterministic asked no language server"
+                ),
                 reason => match route {
                     DisclosureRoute::IndexConsulted => format!(
                         "This result is not authoritative for {lang}: the index did not answer for it and its language server is unavailable ({reason})",
@@ -384,6 +393,12 @@ pub fn symbol_coverage_next_commands(
     let lang = gap.language.lsp_id();
     if gap.reason == CoverageReason::NotSearched {
         return vec![format!("symora search symbols '{query}' --lang {lang}")];
+    }
+    if gap.reason == CoverageReason::NotConsulted {
+        return literal_query(query)
+            .map(|literal| format!("symora search content '{literal}' --lang {lang}"))
+            .into_iter()
+            .collect();
     }
     match route {
         DisclosureRoute::IndexConsulted => literal_query(query)
