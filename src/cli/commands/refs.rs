@@ -111,6 +111,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                     analysis.anchor().input.column,
                 ));
             }
+            hints.extend(analysis.member_reach_hint());
             hints.extend(analysis.anchor().anchor_hints(root, "references"));
             ctx.print_success(RefsOutput {
                 target,

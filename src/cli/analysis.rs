@@ -22,7 +22,7 @@ use crate::cli::utils::{
 };
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
-use crate::models::symbol::{Language, Location, Symbol};
+use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 use crate::services::lsp::LspService;
 use crate::services::test_scope::TestScope;
 
@@ -230,6 +230,19 @@ pub async fn resolve_anchor(
     })
 }
 
+/// The type that declares the anchored symbol, and how often that type is
+/// referenced.
+///
+/// A call reaches a member through the type — construction, dispatch, a
+/// protocol satisfied structurally — and none of those name the member. So an
+/// empty reference set is reachability for a free item and a weaker claim for
+/// a member, and the two must not read alike. Read only when the set IS empty,
+/// which is the only time a caller reads it as absence.
+pub struct DeclaringType {
+    pub name: String,
+    pub references: usize,
+}
+
 pub struct LocationAnalysis {
     /// The declaration the input addressed — target, position, and how it
     /// resolved. Its `resolution.as_status()` is the `anchor_status` marker
@@ -241,6 +254,7 @@ pub struct LocationAnalysis {
     /// computation time by the service layer — the `indexing` output
     /// marker derives from this, never from a racy after-the-fact read.
     pub(crate) indexing: Option<IndexingDegradation>,
+    pub(crate) declaring_type: Option<DeclaringType>,
 }
 
 impl LocationAnalysis {
@@ -262,6 +276,27 @@ impl LocationAnalysis {
 
     pub fn indexing(&self) -> Option<IndexingDegradation> {
         self.indexing
+    }
+
+    /// What an empty reference set leaves unsaid, when the anchor is a member.
+    ///
+    /// One sentence for every surface, because the reading it corrects is the
+    /// same one: a zero taken for "nothing reaches this".
+    pub fn member_reach_hint(&self) -> Option<String> {
+        let declaring = self.declaring_type.as_ref()?;
+        let name = self.anchor.symbol.as_ref().map(|s| s.name.as_str())?;
+        Some(match declaring.references {
+            0 => format!(
+                "Nothing names `{name}`, and nothing names `{}`, which declares it",
+                declaring.name
+            ),
+            n => format!(
+                "Nothing names `{name}`, but `{}`, which declares it, is used {n} time(s) — a \
+                 call through the type does not name the member, so this is not evidence that \
+                 `{name}` is unreachable",
+                declaring.name
+            ),
+        })
     }
 
     /// How the anchor resolved — see [`AnchorResolution`]. Surfaces render
@@ -296,6 +331,67 @@ impl LocationAnalysis {
     }
 }
 
+/// The type a member is declared in, found by tree parentage rather than by
+/// its name — an outer function declares a nested one, and a call there has to
+/// name it, so only a type weakens the member's zero.
+fn declaring_type_of(symbols: &[Symbol], anchor: &Anchor) -> Option<Symbol> {
+    fn walk(nodes: &[Symbol], parent: Option<&Symbol>, at: (u32, u32)) -> Option<Symbol> {
+        for node in nodes {
+            if (node.location.line, node.location.column) == at {
+                return parent
+                    .filter(|p| {
+                        matches!(
+                            p.kind,
+                            SymbolKind::Class
+                                | SymbolKind::Struct
+                                | SymbolKind::Interface
+                                | SymbolKind::Enum
+                        )
+                    })
+                    .cloned();
+            }
+            if let Some(found) = walk(&node.children, Some(node), at) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    walk(symbols, None, (anchor.line, anchor.column))
+}
+
+/// How often the type declaring the anchor is referenced, asked only when the
+/// member's own set is empty — the one answer a caller reads as absence.
+async fn declaring_type_reach(
+    lsp: &dyn LspService,
+    anchor: &Anchor,
+    root: &Path,
+) -> Option<DeclaringType> {
+    let symbols = lsp
+        .find_symbols(&anchor.file, FindSymbolsOptions::default().with_depth(10))
+        .await
+        .ok()?;
+    let declaring = declaring_type_of(&symbols, anchor)?;
+    let references = lsp
+        .find_references(
+            &anchor.file,
+            declaring.location.line,
+            declaring.location.column,
+        )
+        .await
+        .ok()?;
+    let declaration = ParsedLocation {
+        file: anchor.file.clone(),
+        line: declaring.location.line,
+        column: declaring.location.column,
+        column_explicit: true,
+    };
+    Some(DeclaringType {
+        name: declaring.name,
+        references: usages_of(references.data, root, Some(&declaration)).len(),
+    })
+}
+
 impl LocationAnalysis {
     /// Resolve the anchor and then fetch references from it.
     ///
@@ -328,11 +424,16 @@ impl LocationAnalysis {
             root,
             anchor.is_declaration().then_some(&declaration),
         );
+        let declaring_type = match usages.is_empty() {
+            true => declaring_type_reach(lsp, &anchor, root).await,
+            false => None,
+        };
         Ok(Self {
             anchor,
             language,
             references: usages,
             indexing: references.indexing,
+            declaring_type,
         })
     }
 
@@ -362,6 +463,7 @@ impl LocationAnalysis {
             language,
             references: usages,
             indexing: references.indexing,
+            declaring_type: None,
         })
     }
 
@@ -1091,6 +1193,7 @@ mod tests {
 
     fn analysis_of(anchor: Anchor, references: Vec<Location>) -> LocationAnalysis {
         LocationAnalysis {
+            declaring_type: None,
             anchor,
             language: Language::Rust,
             references,
