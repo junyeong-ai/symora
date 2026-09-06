@@ -235,7 +235,7 @@ mod tests {
                 },
             }),
             callers_by_depth: vec![],
-            test_coverage_ratio: 0.0,
+            test_caller_ratio: None,
             risk: RiskLevel::Low,
             confidence: 0.8,
         }

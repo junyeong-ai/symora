@@ -29,7 +29,7 @@ expression: radius
       "prod": 2
     }
   ],
-  "test_coverage_ratio": 0.14,
+  "test_caller_ratio": 0.14,
   "risk": "high",
   "confidence": 1.0
 }

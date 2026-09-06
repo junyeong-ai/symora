@@ -60,7 +60,12 @@ pub struct BlastRadius {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dynamic_dispatch: Option<DynamicDispatch>,
     pub callers_by_depth: Vec<DepthBucket>,
-    pub test_coverage_ratio: f64,
+    /// What share of the callers above are test code. Absent when there are
+    /// none: a share of nothing is not zero, and `impact`'s `coverage` counts
+    /// the test REFERENCES to this symbol, which a caller graph does not see —
+    /// a type is referenced but never called.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_caller_ratio: Option<f64>,
     pub risk: RiskLevel,
     pub confidence: f64,
 }
@@ -156,11 +161,8 @@ pub async fn compute(
     let direct_callers = buckets.first().map(|b| b.count).unwrap_or(0);
     let transitive_callers: usize = buckets.iter().map(|b| b.count).sum();
     let total_test: usize = buckets.iter().map(|b| b.test).sum();
-    let test_ratio = if transitive_callers == 0 {
-        0.0
-    } else {
-        coarse(total_test as f64 / transitive_callers as f64)
-    };
+    let test_ratio =
+        (transitive_callers > 0).then(|| coarse(total_test as f64 / transitive_callers as f64));
     let depth_reached = buckets.last().map(|b| b.depth).unwrap_or(0);
 
     Ok(BlastRadius {
@@ -173,7 +175,7 @@ pub async fn compute(
         incomplete: walk.incomplete,
         dynamic_dispatch,
         callers_by_depth: buckets,
-        test_coverage_ratio: test_ratio,
+        test_caller_ratio: test_ratio,
         // Risk is computed from the *verified* call-hierarchy count only.
         // Dynamic-dispatch incompleteness is disclosed via `dynamic_dispatch`
         // + a capped `confidence`, never by inflating the risk label off a
@@ -249,7 +251,7 @@ fn coarse(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f64) -> RiskLevel {
+fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: Option<f64>) -> RiskLevel {
     let exported = exported.unwrap_or(false);
     if transitive == 0 {
         return RiskLevel::Low;
@@ -266,7 +268,7 @@ fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: f64) -> R
     // For internal symbols, high test coverage genuinely lowers risk:
     // well-exercised paths guard behavior, so a breaking change is more likely
     // to surface as a failing test.
-    if test_ratio > 0.8 {
+    if test_ratio.is_some_and(|ratio| ratio > 0.8) {
         return RiskLevel::Low;
     }
     if transitive > 5 {
@@ -432,41 +434,73 @@ mod tests {
         );
     }
 
+    /// A share of nothing is not zero. An anchor with no callers has no
+    /// composition to report, and publishing `0.0` reads as "none of them are
+    /// tests" beside an `impact` whose `coverage` counts the test references
+    /// a caller graph never sees.
+    #[test]
+    fn a_ratio_over_no_callers_is_absent_rather_than_zero() {
+        let empty = compute_with(
+            HashMap::new(),
+            WalkConfig {
+                max_depth: 2,
+                max_neighbors_per_node: 8,
+            },
+        );
+        assert_eq!(empty.transitive_callers, 0);
+        assert_eq!(empty.test_caller_ratio, None);
+
+        let called = compute_with(
+            HashMap::from([((10, 5), vec![caller(20), caller(30)])]),
+            WalkConfig {
+                max_depth: 2,
+                max_neighbors_per_node: 8,
+            },
+        );
+        assert!(
+            called.test_caller_ratio.is_some(),
+            "callers exist, so their composition does"
+        );
+    }
+
     #[test]
     fn risk_zero_callers_is_low() {
-        assert_eq!(compute_risk(0, Some(true), 0.0), RiskLevel::Low);
-        assert_eq!(compute_risk(0, Some(false), 0.0), RiskLevel::Low);
+        assert_eq!(compute_risk(0, Some(true), Some(0.0)), RiskLevel::Low);
+        assert_eq!(compute_risk(0, Some(false), Some(0.0)), RiskLevel::Low);
     }
 
     #[test]
     fn risk_high_test_coverage_lowers_internal_only() {
         // Internal symbol with strong tests is genuinely Low.
-        assert_eq!(compute_risk(20, Some(false), 0.95), RiskLevel::Low);
+        assert_eq!(compute_risk(20, Some(false), Some(0.95)), RiskLevel::Low);
         // Exported API is still a breaking-change risk regardless of tests:
         // downstream consumers can't see those tests.
-        assert_eq!(compute_risk(20, Some(true), 0.95), RiskLevel::High);
-        assert_eq!(compute_risk(60, Some(true), 0.95), RiskLevel::Critical);
+        assert_eq!(compute_risk(20, Some(true), Some(0.95)), RiskLevel::High);
+        assert_eq!(
+            compute_risk(60, Some(true), Some(0.95)),
+            RiskLevel::Critical
+        );
     }
 
     #[test]
     fn risk_exported_and_many_callers_is_critical() {
-        assert_eq!(compute_risk(60, Some(true), 0.0), RiskLevel::Critical);
+        assert_eq!(compute_risk(60, Some(true), Some(0.0)), RiskLevel::Critical);
     }
 
     #[test]
     fn risk_exported_or_many_is_high() {
-        assert_eq!(compute_risk(10, Some(true), 0.0), RiskLevel::High);
-        assert_eq!(compute_risk(60, Some(false), 0.0), RiskLevel::High);
+        assert_eq!(compute_risk(10, Some(true), Some(0.0)), RiskLevel::High);
+        assert_eq!(compute_risk(60, Some(false), Some(0.0)), RiskLevel::High);
     }
 
     #[test]
     fn risk_moderate_internal_is_medium() {
-        assert_eq!(compute_risk(10, Some(false), 0.0), RiskLevel::Medium);
+        assert_eq!(compute_risk(10, Some(false), Some(0.0)), RiskLevel::Medium);
     }
 
     #[test]
     fn risk_few_internal_is_low() {
-        assert_eq!(compute_risk(3, Some(false), 0.0), RiskLevel::Low);
+        assert_eq!(compute_risk(3, Some(false), Some(0.0)), RiskLevel::Low);
     }
 
     #[test]
