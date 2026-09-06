@@ -371,7 +371,6 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let mut filtered = filtered;
     if name_query.is_some() && symbol_query.is_none() {
         sort_workspace_symbols(&mut filtered, &query, app.test_scope());
-        prune_low_value_workspace_symbols(&mut filtered, &query, limit, app.test_scope());
     }
 
     let total = filtered.len();
@@ -599,30 +598,6 @@ fn workspace_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScop
         - kind_penalty
         - suffix_penalty
         - generic_exact_penalty
-}
-
-fn prune_low_value_workspace_symbols(
-    symbols: &mut Vec<Symbol>,
-    query: &str,
-    limit: usize,
-    test_scope: &TestScope,
-) {
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    let high_value_count = symbols
-        .iter()
-        .filter(|symbol| is_high_value_workspace_symbol(symbol, &q, test_scope))
-        .count();
-
-    if high_value_count >= usize::min(limit, 3) {
-        symbols.retain(|symbol| is_high_value_workspace_symbol(symbol, &q, test_scope));
-    }
-}
-
-fn is_high_value_workspace_symbol(symbol: &Symbol, query: &str, test_scope: &TestScope) -> bool {
-    let name = symbol.name.to_ascii_lowercase();
-    !test_scope.is_test_file(&symbol.location.file)
-        && !symbol.kind.is_low_level()
-        && noisy_suffix_penalty(&name, query) == 0
 }
 
 fn effective_workspace_query(name_query: Option<&str>, symbol_query: Option<&str>) -> String {
