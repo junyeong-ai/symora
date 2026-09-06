@@ -406,6 +406,7 @@ impl Store {
         }
 
         db.execute(INIT_SCHEMA).await?;
+        db.execute(TEXT_INDEX_TRIGGERS).await?;
         db.call(|conn| {
             conn.query_row("SELECT 1", [], |_r| Ok(()))?;
             Ok(())
@@ -1111,7 +1112,20 @@ impl Store {
         // Rows an older set of queries produced cannot be refreshed in place:
         // a file whose bytes are unchanged is skipped, so the only pass that
         // reaches them is one that starts with none.
-        let reindex = match options.force || !self.extraction_matches().await? {
+        let from_scratch = options.force || !self.extraction_matches().await?;
+
+        // A build with no published index behind it writes most of the content
+        // table, and row by row the text index costs an order of magnitude
+        // more than built once from the rows themselves. It is left to the end
+        // of such a build — which is also what repairs a predecessor that
+        // dropped the triggers and did not finish, since not having published
+        // is exactly what says one did.
+        let defer_text_index = from_scratch || self.build_scope().await?.is_none();
+        if defer_text_index {
+            self.db.execute(DROP_TEXT_INDEX_TRIGGERS).await?;
+        }
+
+        let reindex = match from_scratch {
             true => Reindex::FromScratch,
             false => Reindex::InPlace,
         };
@@ -1178,6 +1192,11 @@ impl Store {
         }
         unread_paths.sort_by(|a, b| a.path.cmp(&b.path));
         unread_paths.dedup_by(|a, b| a.path == b.path);
+
+        if defer_text_index {
+            self.db.execute(REBUILD_TEXT_INDEX).await?;
+            self.db.execute(TEXT_INDEX_TRIGGERS).await?;
+        }
 
         self.publish_build(epoch, &scope, fingerprint, unread_paths)
             .await?;
@@ -2223,6 +2242,106 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
         assert!(store.build_scope().await.unwrap().is_some());
         assert_eq!(store.stats().await.unwrap().symbol_count, 1);
+    }
+
+    impl Store {
+        /// FTS5's own verdict on whether the text index still describes the
+        /// rows it derives from.
+        async fn text_index_integrity(&self) -> Result<(), StoreError> {
+            self.db
+                .call(|conn| {
+                    conn.execute(
+                        "INSERT INTO content_lines_fts(content_lines_fts, rank) \
+                         VALUES ('integrity-check', 1)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+        }
+
+        async fn text_index_trigger_count(&self) -> i64 {
+            self.db
+                .call(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' \
+                         AND name LIKE 'content_lines_a%'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                })
+                .await
+                .unwrap()
+        }
+
+        async fn matching_lines(&self, query: &str) -> usize {
+            self.search_content(query, 10, &[Language::Rust])
+                .await
+                .unwrap()
+                .total
+        }
+    }
+
+    /// The text index is built once from the rows rather than a row at a
+    /// time, which is an order of magnitude cheaper and is the whole reason a
+    /// build drops its triggers. What that costs is a window in which nothing
+    /// maintains it, so the properties that make the window safe are pinned
+    /// here: a published build leaves the index matching its rows, the
+    /// triggers are back for the per-file writes that follow, and a build
+    /// that did not finish is repaired by the next one rather than answering
+    /// with a hole.
+    #[tokio::test]
+    async fn a_deferred_text_index_matches_the_rows_it_was_built_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tokio::fs::write(
+            root.join("lib.rs"),
+            "pub fn alpha() {}\n// findable_token\n",
+        )
+        .await
+        .unwrap();
+
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        store
+            .text_index_integrity()
+            .await
+            .expect("a published build's text index matches its rows");
+        assert_eq!(store.text_index_trigger_count().await, 3);
+        assert_eq!(store.matching_lines("findable_token").await, 1);
+
+        // Exactly what an interrupted build leaves behind: the triggers it
+        // dropped, rows nothing indexed, and no published build.
+        store
+            .db
+            .call(|conn| {
+                conn.execute_batch(DROP_TEXT_INDEX_TRIGGERS)?;
+                conn.execute(
+                    "INSERT INTO content_lines(file_id, line_num, content) \
+                     SELECT id, 9999, '// orphan_token' FROM files",
+                    [],
+                )?;
+                conn.execute(
+                    "DELETE FROM meta WHERE key = ?1",
+                    rusqlite::params![META_BUILD_SCOPE],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            store.text_index_integrity().await.is_err(),
+            "the state under test is a desynced one"
+        );
+
+        store.index(IndexOptions::default()).await.unwrap();
+        store
+            .text_index_integrity()
+            .await
+            .expect("the next build repairs what an interrupted one left");
+        assert_eq!(store.text_index_trigger_count().await, 3);
+        assert_eq!(store.matching_lines("findable_token").await, 1);
     }
 
     /// The classification the replacement decision rests on: only SQLite's
