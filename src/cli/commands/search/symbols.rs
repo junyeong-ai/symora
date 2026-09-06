@@ -198,14 +198,7 @@ pub async fn execute_symbol_search(
             let section = with_coverage_disclosure(
                 with_emitted_stale(
                     finish_symbol_search(
-                        candidates,
-                        count,
-                        query,
-                        language,
-                        kind,
-                        limit,
-                        app.test_scope(),
-                        &shortfall,
+                        candidates, count, query, language, kind, limit, &shortfall,
                     ),
                     &stale_files,
                 )
@@ -356,16 +349,7 @@ async fn execute_glob_symbol_search(
         .collect();
     ctx.print_success(with_coverage_disclosure(
         with_emitted_stale(
-            finish_symbol_search(
-                matches,
-                count,
-                query,
-                language,
-                kind,
-                limit,
-                app.test_scope(),
-                &shortfall,
-            ),
+            finish_symbol_search(matches, count, query, language, kind, limit, &shortfall),
             &stale_files,
         ),
         &shortfall,
@@ -579,7 +563,6 @@ async fn execute_workspace_symbol_search(
                 language,
                 kind,
                 limit,
-                app.test_scope(),
                 &shortfall,
             ),
             &stale_files,
@@ -614,10 +597,8 @@ fn finish_symbol_search(
     language: Option<&str>,
     kind: Option<&str>,
     limit: usize,
-    test_scope: &TestScope,
     shortfall: &[Uncovered],
 ) -> Section<SymbolResultOutput> {
-    prune_low_value_symbol_results(&mut candidates, query, limit, test_scope);
     candidates.truncate(limit);
 
     let truncated = candidates.len() < count;
@@ -790,7 +771,6 @@ async fn collect_workspace_symbol_results(
         })
         .collect();
     sort_symbol_results(&mut outputs, query, app.test_scope());
-    prune_low_value_symbol_results(&mut outputs, query, limit, app.test_scope());
     WorkspaceSymbolLookup {
         results: outputs,
         total,
@@ -1011,7 +991,6 @@ async fn collect_document_path_results(
     }
 
     sort_symbol_results(&mut expanded, query, app.test_scope());
-    prune_low_value_symbol_results(&mut expanded, query, limit, app.test_scope());
     capped |= expanded.len() > limit;
     expanded.truncate(limit);
     DocumentExpansion {
@@ -1057,27 +1036,6 @@ fn sort_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_sco
     });
 }
 
-fn prune_low_value_symbol_results(
-    results: &mut Vec<SymbolResultOutput>,
-    query: &str,
-    limit: usize,
-    test_scope: &TestScope,
-) {
-    if looks_like_symbol_path(query) || results.is_empty() {
-        return;
-    }
-
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    let high_value_count = results
-        .iter()
-        .filter(|result| is_high_value_symbol_result(result, &q, test_scope))
-        .count();
-
-    if high_value_count >= usize::min(limit, 3) {
-        results.retain(|result| is_high_value_symbol_result(result, &q, test_scope));
-    }
-}
-
 fn symbol_result_priority(query: &str, result: &SymbolResultOutput, test_scope: &TestScope) -> i32 {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let name = result.name.to_ascii_lowercase();
@@ -1120,17 +1078,6 @@ fn symbol_result_priority(query: &str, result: &SymbolResultOutput, test_scope: 
         - kind_penalty
         - suffix_penalty
         - generic_exact_penalty
-}
-
-fn is_high_value_symbol_result(
-    result: &SymbolResultOutput,
-    query: &str,
-    test_scope: &TestScope,
-) -> bool {
-    let name = result.name.to_ascii_lowercase();
-    !test_scope.is_test_file(std::path::Path::new(&result.file))
-        && !is_low_signal_kind(&result.kind)
-        && noisy_suffix_penalty(&name, query) == 0
 }
 
 fn is_low_signal_kind(kind: &str) -> bool {
@@ -1328,16 +1275,7 @@ mod tests {
             result("beta", "src/b.rs"),
             result("gamma", "src/c.rs"),
         ];
-        let section = finish_symbol_search(
-            candidates,
-            3,
-            "alpha",
-            None,
-            None,
-            2,
-            &TestScope::new(),
-            &[],
-        );
+        let section = finish_symbol_search(candidates, 3, "alpha", None, None, 2, &[]);
 
         assert_eq!(section.count, 3);
         assert_eq!(section.showing, 2);
@@ -1400,21 +1338,11 @@ mod tests {
             None,
             None,
             10,
-            &TestScope::new(),
             &shortfall,
         );
         assert_eq!(partial.coverage_gaps, published);
 
-        let empty = finish_symbol_search(
-            vec![],
-            0,
-            "foo",
-            None,
-            None,
-            10,
-            &TestScope::new(),
-            &shortfall,
-        );
+        let empty = finish_symbol_search(vec![], 0, "foo", None, None, 10, &shortfall);
         assert_eq!(empty.coverage_gaps, published);
 
         let complete = finish_symbol_search(
@@ -1424,7 +1352,6 @@ mod tests {
             None,
             None,
             10,
-            &TestScope::new(),
             &[],
         );
         assert!(complete.coverage_gaps.is_empty());
@@ -1475,16 +1402,7 @@ mod tests {
     #[test]
     fn finish_symbol_search_complete_results_are_not_truncated() {
         let candidates = vec![result("alpha", "src/a.rs")];
-        let section = finish_symbol_search(
-            candidates,
-            1,
-            "alpha",
-            None,
-            None,
-            10,
-            &TestScope::new(),
-            &[],
-        );
+        let section = finish_symbol_search(candidates, 1, "alpha", None, None, 10, &[]);
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);

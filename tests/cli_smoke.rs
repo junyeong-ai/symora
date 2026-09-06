@@ -1191,3 +1191,49 @@ fn a_merged_symbol_answer_names_each_row_producer() {
         );
     }
 }
+
+/// Ranking orders an answer; it does not decide which declarations a caller
+/// is allowed to see. A query that matches both callables and named values
+/// returns all of them up to the limit asked for, ranked — dropping the rest
+/// would report `truncated`, whose remedy is a larger limit, for rows no
+/// limit brings back.
+#[test]
+fn a_symbol_search_emits_every_match_the_limit_admits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("mod.py"),
+        "def alpha_one():\n    pass\n\n\ndef alpha_two():\n    pass\n\n\ndef alpha_three():\n    pass\n\n\nALPHA_LEFT = 1\nALPHA_RIGHT = 2\n",
+    )
+    .unwrap();
+    json_ok(dir.path(), &["search", "index", "build"]);
+
+    let page = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "symbols",
+            "alpha",
+            "--lang",
+            "python",
+            "--limit",
+            "10",
+            "--deterministic",
+        ],
+    );
+    let rows = page["items"].as_array().expect("items");
+    let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert_eq!(
+        rows.len(),
+        5,
+        "three callables and two named values all match under the limit: {page}"
+    );
+    assert!(
+        names.contains(&"ALPHA_LEFT") && names.contains(&"ALPHA_RIGHT"),
+        "a named value is a declaration, not noise to drop: {names:?}"
+    );
+    assert_eq!(
+        page["truncated"].as_bool(),
+        None,
+        "nothing was held back, so nothing claims it was: {page}"
+    );
+}
