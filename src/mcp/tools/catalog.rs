@@ -178,11 +178,22 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "search_content",
-            "Fast keyword/phrase search across indexed file contents.",
+            "Keyword/phrase search over file contents. Without `language` it reads \
+                          code files only, so a zero there means no CODE match — \
+                          documentation and configuration formats are reached by naming \
+                          one. The index answers for what it covers and the working tree \
+                          for the rest, so a zero is confirmed against disk rather than \
+                          being a stale index's guess.",
             schema_object(
                 &[
                     ("query", "string", "Keyword or phrase"),
-                    ("language", "string", "Optional language filter"),
+                    (
+                        "language",
+                        "string",
+                        "One language to search. Narrows a code search, and is the only \
+                         way to reach documentation and configuration formats, which an \
+                         unscoped search does not read.",
+                    ),
                     ("limit", "integer", "Maximum results"),
                 ],
                 &["query"],
@@ -506,9 +517,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "get_impact",
             "Change-impact analysis at file:line[:column]: reference counts split by \
-                          test vs prod, affected files, exported-API signal, and a transitive \
-                          caller graph with risk + confidence (`blast_radius`). Use depth=1 for \
-                          quick surveys, depth=2-3 when ranking blast radius matters.",
+                          test vs prod, affected files, and a transitive caller graph with \
+                          risk + confidence (`blast_radius`). `is_exported` appears only for \
+                          languages whose compiler decides visibility, and is absent \
+                          elsewhere rather than read off a naming convention. Use depth=1 \
+                          for quick surveys, depth=2-3 when ranking blast radius matters.",
             with_extra(
                 location_schema(),
                 &[
