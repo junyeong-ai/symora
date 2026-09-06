@@ -17,7 +17,7 @@ Use `symora` when semantic code navigation is more useful than text search. Outp
 
 `--deterministic` confines a run to the index and the compiled-in grammars, so the same tree answers the same way on a machine that has language servers and one that does not — what a check that gates on the answer needs. `symbols` then reports `backend: "ast"`, `search symbols` skips the live lookup and discloses the languages it does not extract as `not_consulted`, and a command with no such source (`refs`, `callers`, `hover`, `rename`, `diagnostics`) fails with `unsupported` rather than degrading.
 
-Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`.
+Failures are structured: `{"error": {"code": "server_not_installed", "message": ..., "hint": ...}}` means the language server is missing — fall back to index-backed commands and follow the `hint`. Every failure takes that envelope, a bad flag included, on stdout with a non-zero exit — stderr carries logs only, so parsing stdout covers every outcome. A clean "nothing found" is not one: `{"message": ...}` at exit 0.
 
 ## Workflow
 
