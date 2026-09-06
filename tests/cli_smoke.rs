@@ -1144,3 +1144,50 @@ fn a_declaration_the_grammar_reads_is_editable_without_a_server() {
         "the edit took a neighbouring block with it: {after}"
     );
 }
+
+/// A symbol-path answer merges the index with a live lookup, so each row says
+/// which one produced it — the word `search symbols` already uses. Without it
+/// a caller cannot tell a row the index vouches for from one a language server
+/// supplied, which is the difference between a checkable answer and a guess.
+#[test]
+fn a_merged_symbol_answer_names_each_row_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("mod.py"),
+        "class Holder:\n    def existing(self):\n        pass\n",
+    )
+    .unwrap();
+    json_ok(dir.path(), &["search", "index", "build"]);
+
+    let page = json_ok(
+        dir.path(),
+        &["symbols", "--symbol", "Holder/existing", "--lang", "python"],
+    );
+    let rows = page["items"].as_array().expect("items");
+    assert!(!rows.is_empty(), "the index holds this symbol: {page}");
+    for row in rows {
+        assert!(
+            row["backend"].is_string(),
+            "a merged answer must name each row's producer: {page}"
+        );
+    }
+    assert_eq!(rows[0]["backend"], "index");
+
+    let confined = json_ok(
+        dir.path(),
+        &[
+            "symbols",
+            "--symbol",
+            "Holder/existing",
+            "--lang",
+            "python",
+            "--deterministic",
+        ],
+    );
+    for row in confined["items"].as_array().expect("items") {
+        assert_eq!(
+            row["backend"], "index",
+            "a confined answer holds no row a server supplied: {confined}"
+        );
+    }
+}
