@@ -202,6 +202,9 @@ pub(super) async fn dispatch(
         methods::SEARCH_CONTENT => store_handlers::handle_search_content(&params, projects).await,
         methods::INDEX_BUILD => store_handlers::handle_index_build(&params, projects).await,
         methods::INDEX_STATUS => store_handlers::handle_index_status(&params, projects).await,
+        methods::INDEX_IS_CURRENT => {
+            store_handlers::handle_index_is_current(&params, projects).await
+        }
         methods::INDEXED_LANGUAGES => {
             store_handlers::handle_indexed_languages(&params, projects).await
         }
