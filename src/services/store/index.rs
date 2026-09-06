@@ -150,6 +150,46 @@ enum Reindex {
     FromScratch,
 }
 
+/// The files one SQLite database occupies: the database itself and the two the
+/// write-ahead log keeps beside it.
+const SQLITE_SIDECARS: [&str; 3] = ["", "-wal", "-shm"];
+
+/// A database file's companion, named the way SQLite names it — by appending
+/// to the whole file name, extension included.
+fn sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    match suffix.is_empty() {
+        true => db_path.to_path_buf(),
+        false => {
+            let mut name = db_path.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        }
+    }
+}
+
+/// Move a database out of the way, all of it.
+///
+/// A write-ahead-log database is three files that only mean anything together:
+/// a `-wal` left where the database used to be holds committed pages the
+/// database no longer beside it is missing, and SQLite refuses to open the
+/// fresh file that takes its place. Moving the set keeps the replacement
+/// openable and the copy left behind readable.
+///
+/// Best effort per file: this runs to make room for a database that can be
+/// opened, and a name that could not be moved is reported by the open that
+/// follows rather than pre-empting it.
+async fn move_database_aside(db_path: &Path, backup_path: &Path) {
+    for suffix in SQLITE_SIDECARS {
+        let from = sidecar_path(db_path, suffix);
+        if !from.exists() {
+            continue;
+        }
+        if let Err(e) = tokio::fs::rename(&from, sidecar_path(backup_path, suffix)).await {
+            tracing::debug!("Failed to move {} aside: {e}", from.display());
+        }
+    }
+}
+
 fn read_meta(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>, rusqlite::Error> {
     conn.query_row(
         "SELECT value FROM meta WHERE key = ?1",
@@ -393,12 +433,17 @@ impl Store {
         }
     }
 
+    /// Replace a database this binary cannot use, keeping the old one beside
+    /// it under `.bak`.
+    ///
+    /// A WAL database is three files, and they only mean anything together: a
+    /// `-wal` left behind belongs to the database that was moved away, and
+    /// SQLite refuses the fresh file it now sits next to. So the set moves as
+    /// one — which also leaves the backup openable rather than half of a
+    /// database whose committed pages went elsewhere.
     async fn recover_db(db_path: &Path) -> Result<SqliteDb, StoreError> {
         if db_path.exists() {
-            let backup_path = db_path.with_extension("db.bak");
-            if let Err(e) = tokio::fs::rename(db_path, &backup_path).await {
-                tracing::debug!("Failed to backup corrupt DB: {e}");
-            }
+            move_database_aside(db_path, &db_path.with_extension("db.bak")).await;
         }
         let db = SqliteDb::open(db_path).await?;
         db.execute(INIT_SCHEMA).await?;
@@ -2071,8 +2116,45 @@ mod tests {
             .await
             .unwrap();
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
-        assert!(db_path.with_extension("db.bak").exists());
+        let backup = db_path.with_extension("db.bak");
+        assert!(backup.exists());
         assert!(store.build_scope().await.unwrap().is_none());
+        // The replacement is usable, which is what the stale sidecars prevented.
+        store.index(IndexOptions::default()).await.unwrap();
+    }
+
+    /// A write-ahead-log database is three files. Moving only the one named
+    /// `.db` leaves a `-wal` holding committed pages next to a database that
+    /// no longer has them, which SQLite reads as an I/O error on the
+    /// replacement — so the store cannot be rebuilt at exactly the moment a
+    /// schema change says it must be.
+    #[tokio::test]
+    async fn a_database_moved_aside_takes_its_write_ahead_log_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("store.db");
+        let backup_path = db_path.with_extension("db.bak");
+        for suffix in SQLITE_SIDECARS {
+            tokio::fs::write(sidecar_path(&db_path, suffix), suffix.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        move_database_aside(&db_path, &backup_path).await;
+
+        for suffix in SQLITE_SIDECARS {
+            assert!(
+                !sidecar_path(&db_path, suffix).exists(),
+                "`{suffix}` was left where the replacement is about to be created"
+            );
+            assert_eq!(
+                tokio::fs::read(sidecar_path(&backup_path, suffix))
+                    .await
+                    .ok()
+                    .as_deref(),
+                Some(suffix.as_bytes()),
+                "`{suffix}` did not travel with the database it completes"
+            );
+        }
     }
 
     /// The classification the replacement decision rests on: only SQLite's
