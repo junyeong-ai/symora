@@ -19,6 +19,7 @@ use clap::{Args, Subcommand};
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
+use crate::cli::declared_in;
 use crate::cli::response::{EditOutput, LineRange, Section};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
@@ -1381,10 +1382,9 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
 /// symbols; `unique_symbol_by_path` owns the dispatch, so the destructive
 /// resolution stays unit-tested without an LSP round-trip.
 async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
-    let mut symbols = app
-        .lsp
-        .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
-        .await?;
+    let mut symbols = declared_in(app, file, FindSymbolsOptions::default().with_depth(10))
+        .await?
+        .symbols;
     Symbol::compute_paths_for_all(&mut symbols);
     unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(file))
 }
@@ -1418,10 +1418,9 @@ async fn find_symbol_at_location(
 ) -> Result<Symbol> {
     use crate::cli::utils::{SymbolResolution, column_addressed_symbol, line_addressed_symbol};
 
-    let symbols = app
-        .lsp
-        .find_symbols(file, FindSymbolsOptions::default())
-        .await?;
+    let symbols = declared_in(app, file, FindSymbolsOptions::default())
+        .await?
+        .symbols;
 
     let resolution = match column {
         Some(col) => column_addressed_symbol(&symbols, line, col),

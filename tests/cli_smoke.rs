@@ -1101,3 +1101,46 @@ impl Widget {
         "references have no source that derives from the tree alone: {refused}"
     );
 }
+/// A mutation addresses a declaration through the same reader every other
+/// surface does, so a file the grammar can read is editable whether or not a
+/// language server is installed. Resolving it through the server alone made
+/// `edit` refuse the languages `symbols` had just answered for.
+#[test]
+fn a_declaration_the_grammar_reads_is_editable_without_a_server() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.tf"),
+        "terraform {\n  required_version = \">= 1.0\"\n}\n\nvariable \"project_id\" {\n  type = string\n}\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.terraform]\ncommand = \"/nonexistent/terraform-ls\"\n",
+    )
+    .unwrap();
+
+    json_ok(
+        dir.path(),
+        &[
+            "edit",
+            "replace-body",
+            "main.tf",
+            "--symbol",
+            "project_id",
+            "--body",
+            "variable \"project_id\" {\n  type    = string\n  default = \"aix\"\n}",
+        ],
+    );
+
+    let after = std::fs::read_to_string(dir.path().join("main.tf")).unwrap();
+    assert!(
+        after.contains("default = \"aix\""),
+        "the edit did not land: {after}"
+    );
+    assert!(
+        after.contains("required_version"),
+        "the edit took a neighbouring block with it: {after}"
+    );
+}
