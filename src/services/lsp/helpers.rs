@@ -38,18 +38,17 @@ pub(super) async fn read_file_validated(
     let mut bytes = Vec::with_capacity(file_size as usize);
     f.read_to_end(&mut bytes).await?;
 
-    // Check for null bytes in first 8KB (binary file indicator)
+    // A null byte in the first 8KB is the same cheap test git uses to call a
+    // file binary, and it settles the common case without decoding megabytes.
     let check_len = bytes.len().min(8192);
+    let not_text = || LspError::FileNotText {
+        path: file.display().to_string(),
+    };
     if bytes[..check_len].contains(&0) {
-        return Err(LspError::Protocol(format!(
-            "Cannot process binary file: {}",
-            file.display()
-        )));
+        return Err(not_text());
     }
 
-    // Convert to string (validates UTF-8)
-    String::from_utf8(bytes)
-        .map_err(|_| LspError::Protocol(format!("Cannot process binary file: {}", file.display())))
+    String::from_utf8(bytes).map_err(|_| not_text())
 }
 
 pub(super) async fn read_line_streaming(file: &Path, target_line: u32) -> Option<String> {
@@ -617,5 +616,38 @@ mod tests {
         let kept = filter_locations_within_project(locations, root);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].file, PathBuf::from("/proj/src/lib.rs"));
+    }
+
+    /// Bytes that are not UTF-8 text are named as that, not reported as a
+    /// protocol failure: an agent walking a tree has to be able to tell a file
+    /// it should skip from a tool that broke. Source carrying multibyte text is
+    /// the case the check must not take for one.
+    #[tokio::test]
+    async fn bytes_that_are_not_text_are_named_rather_than_called_a_protocol_failure() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let utf8 = dir.path().join("ok.py");
+        std::fs::write(&utf8, "def 처리():\n    return '값'\n").unwrap();
+        assert_eq!(
+            read_file_validated(&utf8, u64::MAX).await.unwrap(),
+            "def 처리():\n    return '값'\n"
+        );
+
+        for (name, bytes) in [
+            (
+                "legacy.py",
+                b"# \xc7\xd1\xb1\xdb\ndef a():\n    pass\n".to_vec(),
+            ),
+            ("image.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec()),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, &bytes).unwrap();
+            match read_file_validated(&path, u64::MAX).await {
+                Err(LspError::FileNotText { path: reported }) => {
+                    assert_eq!(reported, path.display().to_string())
+                }
+                other => panic!("{name} was not reported as non-text: {other:?}"),
+            }
+        }
     }
 }
