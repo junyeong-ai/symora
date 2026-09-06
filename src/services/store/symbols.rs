@@ -109,6 +109,11 @@ const EXTRACTORS: &[(Language, fn() -> tree_sitter::Language, &str)] = &[
         || tree_sitter_dart::LANGUAGE.into(),
         DART_QUERY,
     ),
+    (
+        Language::Terraform,
+        || tree_sitter_hcl::LANGUAGE.into(),
+        TERRAFORM_QUERY,
+    ),
 ];
 
 impl SymbolExtractor {
@@ -139,24 +144,13 @@ impl SymbolExtractor {
 
     /// Languages with a compiled-in index extractor.
     pub fn supported_languages() -> &'static [Language] {
-        &[
-            Language::Rust,
-            Language::Go,
-            Language::Python,
-            Language::TypeScript,
-            Language::JavaScript,
-            Language::Java,
-            Language::Kotlin,
-            Language::Cpp,
-            Language::CSharp,
-            Language::PHP,
-            Language::Ruby,
-            Language::Bash,
-            Language::Lua,
-            Language::Swift,
-            Language::Scala,
-            Language::Dart,
-        ]
+        static LANGUAGES: std::sync::LazyLock<Vec<Language>> = std::sync::LazyLock::new(|| {
+            EXTRACTORS
+                .iter()
+                .map(|(language, _, _)| *language)
+                .collect()
+        });
+        &LANGUAGES
     }
 
     pub fn is_supported(language: Language) -> bool {
@@ -305,6 +299,13 @@ fn name_position_node<'a>(node: Node<'a>, language: Language) -> Option<Node<'a>
 }
 
 fn extract_container_path(mut node: Node, content: &str, language: Language) -> Option<String> {
+    // HCL qualifies a name with the type label written before it
+    // (`google_storage_bucket.logs`), which is what tells two resources named
+    // `this` apart. Nothing encloses a top-level block to walk up to.
+    if language == Language::Terraform {
+        return hcl_type_label(node, content);
+    }
+
     // A symbol is keyed by its IMMEDIATE container only — the nearest enclosing
     // type/impl — so a method reads `Type/method`, an enclosing outer type or
     // module never widens it to `Outer/Inner/method`, and a module-level item
@@ -345,6 +346,16 @@ fn extract_name_and_kind(
         return (!name.is_empty()).then(|| (name, node_kind(node)));
     }
 
+    // HCL names a declaration with a quoted label rather than an identifier,
+    // and states what it declares in the block type written before that label
+    // — neither of which the shared identifier scan and node-kind table read.
+    if language == Language::Terraform {
+        let kind = hcl_kind(node, content)?;
+        let name_node = hcl_declared_name(node)?;
+        let name = content.get(name_node.start_byte()..name_node.end_byte())?;
+        return (!name.is_empty()).then(|| (name.to_string(), kind));
+    }
+
     // Resolve the name first: nameless parents (blocks, lists, the source
     // root) are walked during container resolution and must be skipped
     // before a kind is ever assigned to them.
@@ -375,6 +386,86 @@ fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     (0..node.child_count()).find_map(|i| node.child(i as u32).filter(|c| c.kind() == kind))
 }
 
+/// The last child of `node` with the given grammar kind, for grammars that
+/// state a declaration as a run of same-kind children whose last one names it.
+fn last_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    (0..node.child_count())
+        .rev()
+        .find_map(|i| node.child(i as u32).filter(|c| c.kind() == kind))
+}
+
+/// The node an HCL declaration is named by.
+///
+/// A block carries its name in quoted labels: `resource "google_storage_bucket"
+/// "logs"` is addressed as `google_storage_bucket.logs`, so the last label
+/// names it and an earlier one qualifies it. A label's `template_literal` is
+/// the text inside the quotes, which is what the name has to be for its span
+/// to be the name's span. An attribute is named by its identifier, and a block
+/// with no label — `terraform`, `locals`, a resource's nested argument block —
+/// declares nothing to name.
+fn hcl_declared_name(node: Node) -> Option<Node> {
+    match node.kind() {
+        "block" => last_child_of_kind(node, "string_lit")
+            .and_then(|label| child_of_kind(label, "template_literal")),
+        "attribute" => child_of_kind(node, "identifier"),
+        _ => None,
+    }
+}
+
+/// Whether an HCL attribute's own name is addressable, which is what separates
+/// a declaration from an argument. A file's top-level attributes are what it
+/// declares (a `.tfvars` setting), and a `locals` block's are addressed as
+/// `local.x`. Everywhere else an attribute configures the block around it, and
+/// `name = "x"` inside a resource declares no `name`.
+fn hcl_attribute_declares(node: Node, content: &str) -> bool {
+    let Some(container) = node.parent().and_then(|body| body.parent()) else {
+        return false;
+    };
+    match container.kind() {
+        "config_file" => true,
+        "block" => {
+            child_of_kind(container, "identifier")
+                .and_then(|id| content.get(id.start_byte()..id.end_byte()))
+                == Some("locals")
+        }
+        _ => false,
+    }
+}
+
+/// The label qualifying an HCL block's name: the first of two or more, which
+/// is the type a resource or data source is an instance of. A block with a
+/// single label is named outright and qualified by nothing.
+fn hcl_type_label(node: Node, content: &str) -> Option<String> {
+    let first = child_of_kind(node, "string_lit")?;
+    if first.id() == last_child_of_kind(node, "string_lit")?.id() {
+        return None;
+    }
+    let text = child_of_kind(first, "template_literal")?;
+    content
+        .get(text.start_byte()..text.end_byte())
+        .map(str::to_string)
+}
+
+/// What an HCL declaration states, read from the block type it opens with: a
+/// `variable` or `output` declares a value and a `module` a unit of
+/// composition. Every other labeled block — a resource, a data source, a
+/// provider, another HCL dialect's own type — declares a named typed object,
+/// and a file-level attribute a setting.
+fn hcl_kind(node: Node, content: &str) -> Option<SymbolKind> {
+    if node.kind() == "attribute" {
+        return hcl_attribute_declares(node, content).then_some(SymbolKind::Property);
+    }
+    Some(
+        match child_of_kind(node, "identifier")
+            .and_then(|id| content.get(id.start_byte()..id.end_byte()))
+        {
+            Some("variable" | "output") => SymbolKind::Property,
+            Some("module") => SymbolKind::Module,
+            _ => SymbolKind::Struct,
+        },
+    )
+}
+
 /// The identifier a captured declaration is named by.
 ///
 /// A node this cannot name is dropped from extraction without a trace, so a
@@ -383,6 +474,12 @@ fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
 /// one of those read as a language simply not declaring that form. The
 /// declaration fixtures are what hold the two together.
 fn find_name_node(node: Node, language: Language) -> Option<Node> {
+    // An HCL block's identifier child is its type, so the shared scan below
+    // would read `resource` as the name of every resource in the file.
+    if language == Language::Terraform {
+        return hcl_declared_name(node);
+    }
+
     let name_field = match language {
         Language::Kotlin => node
             .child_by_field_name("name")
@@ -764,6 +861,15 @@ const DART_QUERY: &str = r#"
 (function_signature) @symbol
 (constructor_signature) @symbol
 (class_body (_ (declaration) @symbol))
+"#;
+
+// HCL states a declaration as a block carrying quoted labels — `variable "x"`,
+// `resource "type" "name"` — at any depth. A block with no label configures its
+// parent rather than declaring anything. Which attributes declare is not a
+// shape (see `hcl_attribute_declares`), so they are all offered and read there.
+const TERRAFORM_QUERY: &str = r#"
+(block (string_lit)) @symbol
+(body (attribute) @symbol)
 "#;
 
 const PHP_QUERY: &str = r#"
@@ -1244,6 +1350,64 @@ void top() {}
                 "function:top",
             ],
         },
+        DeclarationFixture {
+            language: Language::Terraform,
+            path: "a.tf",
+            source: r#"
+terraform {
+  backend "gcs" {
+    prefix = "state"
+  }
+}
+
+provider "google" {
+  region = "us-central1"
+}
+
+variable "project_id" {
+  type = string
+}
+
+locals {
+  name_prefix = "aix"
+}
+
+data "google_project" "current" {}
+
+resource "google_storage_bucket" "logs" {
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+module "network" {
+  source = "./modules/network"
+}
+
+output "bucket_url" {
+  value = google_storage_bucket.logs.url
+}
+"#,
+            declares: &[
+                "struct:gcs",
+                "struct:google",
+                "property:project_id",
+                "property:name_prefix",
+                "struct:google_project/current",
+                "struct:google_storage_bucket/logs",
+                "module:network",
+                "property:bucket_url",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Terraform,
+            path: "a.tfvars",
+            source: r#"
+project_id = "aix"
+region     = "us-central1"
+"#,
+            declares: &["property:project_id", "property:region"],
+        },
     ];
 
     /// Pins the static `supported_languages` answer to runtime registration:
@@ -1289,6 +1453,43 @@ void top() {}
     /// A language whose extractor no fixture describes is one whose gaps
     /// nothing can find, so registering a grammar and writing its tour are
     /// one step.
+    /// `file:line:col` on a symbol has to land on the symbol's name — it is
+    /// what `refs`, `def` and `edit` resolve from, and a position on a leading
+    /// keyword resolves to something else or to nothing. The name is read
+    /// through one path and the anchor through another, so each language's
+    /// tour of declaration forms is also what proves the two agree.
+    #[test]
+    fn every_extracted_symbol_is_anchored_at_its_name() {
+        let extractor = SymbolExtractor::new();
+        for fixture in DECLARATION_FIXTURES {
+            for symbol in
+                extractor.extract(Path::new(fixture.path), fixture.source, fixture.language)
+            {
+                let line = fixture
+                    .source
+                    .lines()
+                    .nth((symbol.location.line - 1) as usize)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} line {} is past the source",
+                            fixture.path, symbol.location.line
+                        )
+                    });
+                let column = (symbol.location.column - 1) as usize;
+                let at_name = line
+                    .chars()
+                    .skip(column)
+                    .take(symbol.name.chars().count())
+                    .eq(symbol.name.chars());
+                assert!(
+                    at_name,
+                    "{:?} anchors {} off its name: {}:{} is {line:?}",
+                    fixture.language, symbol.name, symbol.location.line, symbol.location.column
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_extractor_language_has_a_declaration_fixture() {
         for language in SymbolExtractor::supported_languages() {
@@ -1301,17 +1502,39 @@ void top() {}
         }
     }
 
-    /// Extraction reads a grammar's declaration nodes, so it can never reach
-    /// a language AST search does not parse. The converse is not an omission:
-    /// a grammar that states declarations as generic calls or blocks carries
-    /// no name for the shared resolution to read, and `doctor` says so per
-    /// language rather than the set being asserted here.
+    /// The grammars in the binary that read no declarations, and why. Elixir
+    /// states every one of them as a generic `call`, so which calls declare is
+    /// its macro vocabulary rather than anything the grammar marks — and a
+    /// `def` written inside `quote` is the same node as one that declares.
+    const NO_EXTRACTOR: &[Language] = &[Language::Elixir];
+
+    /// Extraction reads a grammar's declaration nodes, so it can never reach a
+    /// language AST search does not parse. Which of those it does reach is a
+    /// decision, and every grammar in the binary makes it here: a new one
+    /// either extracts declarations or is named above with the reason it
+    /// cannot. Left implicit, a grammar added for `search ast` answers
+    /// `symbols` and `search symbols` with nothing and says only that its
+    /// language server is missing.
     #[test]
-    fn extraction_never_exceeds_ast_coverage() {
-        for language in SymbolExtractor::supported_languages() {
+    fn every_parsed_language_decides_whether_it_extracts() {
+        let extracts = SymbolExtractor::supported_languages();
+        let parsed = crate::infra::ast::node_types::supported_languages();
+
+        for language in extracts {
             assert!(
-                crate::infra::ast::is_supported(*language),
+                parsed.contains(language),
                 "{language:?} extracts symbols from a grammar AST search does not parse"
+            );
+            assert!(
+                !NO_EXTRACTOR.contains(language),
+                "{language:?} both extracts declarations and declines to"
+            );
+        }
+        for language in parsed {
+            assert!(
+                extracts.contains(language) || NO_EXTRACTOR.contains(language),
+                "{language:?} parses for AST search but neither extracts declarations nor \
+                 says why it cannot"
             );
         }
     }
