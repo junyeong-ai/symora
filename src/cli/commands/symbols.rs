@@ -137,12 +137,10 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
         options
     };
 
-    match app.lsp.find_symbols(&abs_path, options).await {
-        Ok(mut symbols) => {
-            Symbol::compute_paths_for_all(&mut symbols);
-
+    match crate::cli::declared_in(app, &abs_path, options).await {
+        Ok(answer) => {
             let filtered = Symbol::filter_advanced(
-                &symbols,
+                &answer.symbols,
                 args.symbol.as_deref(),
                 args.substring,
                 include_kinds.as_deref(),
@@ -165,12 +163,25 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 })
                 .collect();
 
-            ctx.print_success(Section::with_total(items, total));
+            ctx.print_success(FileSymbolsOutput {
+                backend: answer.backend,
+                symbols: Section::with_total(items, total),
+            });
         }
         Err(e) => ctx.print_error(e),
     }
 
     Ok(())
+}
+
+/// A file's symbol list beside what produced it: an AST answer is flat and
+/// carries no server-assigned kinds, so a caller reads `backend` before it
+/// reads absence as structure.
+#[derive(serde::Serialize)]
+struct FileSymbolsOutput {
+    backend: crate::cli::SymbolBackend,
+    #[serde(flatten)]
+    symbols: Section<SymbolOutput>,
 }
 
 struct WorkspaceParams<'a> {

@@ -33,6 +33,28 @@ pub struct Symbol {
 }
 
 impl Symbol {
+    /// Fill each symbol's `body` from the file it was read out of, spanning
+    /// its declaration.
+    ///
+    /// A body is text, not a language-server answer: every producer of a
+    /// `Symbol` fills it the same way, from the same two ends of the same
+    /// location.
+    pub fn attach_bodies(symbols: &mut [Symbol], content: &str) {
+        for symbol in symbols {
+            let start = symbol.location.line.saturating_sub(1) as usize;
+            let end = symbol
+                .location
+                .end_line
+                .unwrap_or(symbol.location.line)
+                .saturating_sub(1) as usize;
+            let lines: Vec<&str> = content.lines().skip(start).take(end - start + 1).collect();
+            if !lines.is_empty() {
+                symbol.body = Some(lines.join("\n"));
+            }
+            Self::attach_bodies(&mut symbol.children, content);
+        }
+    }
+
     pub fn new(name: String, kind: SymbolKind, location: Location) -> Self {
         Self {
             name,

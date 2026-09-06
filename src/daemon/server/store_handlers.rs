@@ -1,6 +1,3 @@
-use std::sync::Arc;
-
-use crate::config::LspRuntimeConfig;
 use crate::daemon::params::{
     EditedFilesParams, IndexBuildParams, ProjectParams, SearchContentParams, SearchSymbolsParams,
 };
@@ -19,10 +16,9 @@ use super::dispatch::parse_params;
 pub(super) async fn handle_refresh_files(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: EditedFilesParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
     let paths: Vec<std::path::PathBuf> = p.files.iter().map(std::path::PathBuf::from).collect();
     ctx.store
@@ -35,10 +31,9 @@ pub(super) async fn handle_refresh_files(
 pub(super) async fn handle_search_symbols(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: SearchSymbolsParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
 
     let kind_filter = p.kind.as_ref().map(|k| SymbolKind::parse_or_default(k));
@@ -76,10 +71,9 @@ pub(super) async fn handle_search_symbols(
 pub(super) async fn handle_search_content(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: SearchContentParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
 
     let languages: Vec<Language> = p
@@ -137,10 +131,9 @@ fn search_response<T>(
 pub(super) async fn handle_index_build(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: IndexBuildParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
 
     let languages: Option<Vec<Language>> = p.languages.as_ref().map(|langs| {
@@ -162,10 +155,9 @@ pub(super) async fn handle_index_build(
 pub(super) async fn handle_index_status(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
 
     let stats = ctx.store.index_status().await.map_err(RpcError::from)?;
@@ -175,10 +167,9 @@ pub(super) async fn handle_index_status(
 pub(super) async fn handle_indexed_languages(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
 
     let languages = ctx
@@ -192,10 +183,9 @@ pub(super) async fn handle_indexed_languages(
 pub(super) async fn handle_index_clear(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<serde_json::Value, RpcError> {
     let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
 
     ctx.store.index_clear().await.map_err(RpcError::from)?;

@@ -194,23 +194,6 @@ fn extract_lines(content: &str, start: usize, end: usize) -> Option<String> {
     Some(selected.join("\n"))
 }
 
-pub(super) fn apply_body_recursive(symbols: &mut [Symbol], content: &str) {
-    for sym in symbols {
-        if let Some(body) = extract_body(content, &sym.location) {
-            sym.body = Some(body);
-        }
-        if !sym.children.is_empty() {
-            apply_body_recursive(&mut sym.children, content);
-        }
-    }
-}
-
-pub(super) fn extract_body(content: &str, location: &Location) -> Option<String> {
-    let start = location.line.saturating_sub(1) as usize;
-    let end = location.end_line.unwrap_or(location.line).saturating_sub(1) as usize;
-    extract_lines(content, start, end)
-}
-
 pub(super) fn extract_body_from_range(content: &str, range: &Range) -> Option<String> {
     extract_lines(content, range.start.line as usize, range.end.line as usize)
 }

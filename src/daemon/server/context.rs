@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use tokio::sync::RwLock;
 
-use crate::config::LspRuntimeConfig;
+use super::config::DaemonRuntimeConfig;
 use crate::daemon::protocol::RpcError;
 use crate::services::lsp::DefaultLspService;
 use crate::services::store::DefaultStoreService;
@@ -28,10 +28,17 @@ pub(super) struct ProjectContext {
 }
 
 impl ProjectContext {
-    /// Construct a project's services without touching disk. The store opens
-    /// lazily on its first use, so an LSP-only request never creates a
-    /// `.symora` dir and a read-only project is served without error.
-    pub(super) fn new(path: &std::path::Path, lsp_config: Arc<LspRuntimeConfig>) -> Self {
+    /// Construct a project's services from that project's own configuration.
+    ///
+    /// A daemon serves many projects and their settings are theirs — a server
+    /// override, a timeout, a size ceiling — so the config is read from the
+    /// path being served, never from wherever the daemon happened to start.
+    /// Reading it here is what makes a daemon answer agree with a direct one.
+    ///
+    /// The store opens lazily on its first use, so an LSP-only request never
+    /// creates a `.symora` dir and a read-only project is served without error.
+    pub(super) fn new(path: &std::path::Path) -> Self {
+        let lsp_config = DaemonRuntimeConfig::load_lsp_config(path);
         let store = DefaultStoreService::new(path, crate::app::store_config(&lsp_config));
         Self {
             lsp: Arc::new(DefaultLspService::new(path, lsp_config)),
@@ -55,7 +62,6 @@ impl ProjectContext {
 pub(super) async fn get_context(
     projects: &ProjectsMap,
     project: &str,
-    lsp_config: &Arc<LspRuntimeConfig>,
 ) -> Result<Arc<ProjectContext>, RpcError> {
     let path = PathBuf::from(project);
 
@@ -66,7 +72,7 @@ pub(super) async fn get_context(
         }
     }
 
-    let ctx = Arc::new(ProjectContext::new(&path, Arc::clone(lsp_config)));
+    let ctx = Arc::new(ProjectContext::new(&path));
 
     let mut guard = projects.write().await;
     if let Some(existing) = guard.get(&path) {

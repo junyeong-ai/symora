@@ -858,6 +858,7 @@ impl LspClient {
         if self.terminated.load(Ordering::Acquire) {
             return Err(LspError::ServerTerminated {
                 language: self.language,
+                established: self.capabilities.read().await.is_some(),
             });
         }
 
@@ -905,6 +906,7 @@ impl LspClient {
                 Err(err) if err.code == super::protocol::error_codes::SERVER_TERMINATED => {
                     Err(LspError::ServerTerminated {
                         language: self.language,
+                        established: self.capabilities.read().await.is_some(),
                     })
                 }
                 Err(err) => Err(err.into()),

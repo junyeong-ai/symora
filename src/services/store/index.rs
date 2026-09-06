@@ -219,7 +219,6 @@ pub struct Store {
     db: SqliteDb,
     project_root: PathBuf,
     config: StoreConfig,
-    symbol_extractor: SymbolExtractor,
 }
 
 impl Store {
@@ -276,7 +275,6 @@ impl Store {
             db,
             project_root: project_root.to_path_buf(),
             config,
-            symbol_extractor: SymbolExtractor::new(),
         })
     }
 
@@ -1121,7 +1119,7 @@ impl Store {
             return Ok(());
         }
 
-        let symbols = self.symbol_extractor.extract(&content, language);
+        let symbols = SymbolExtractor::shared().extract(path, &content, language);
         let content_lines: Vec<(i32, String)> = if self.config.index_content {
             content
                 .lines()
@@ -1167,8 +1165,8 @@ impl Store {
                             s.name_path,
                             s.kind.to_string(),
                             s.container,
-                            s.line as i32,
-                            s.column as i32
+                            s.location.line as i32,
+                            s.location.column as i32
                         ])?;
                     }
                 }

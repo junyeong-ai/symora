@@ -16,7 +16,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::read_only(
             "get_file_overview",
             "Compact map for one file: focus symbols, sibling/counterpart files, \
-                          shallow symbol tree, and related-file ranking.",
+                          shallow symbol tree, and related-file ranking. `focus_symbols` and \
+                          `backend` are omitted together when nothing read the file's \
+                          declarations — an empty list would say the file declares none.",
             schema_object(
                 &[
                     ("path", "string", "Project-relative file path"),
@@ -203,7 +205,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 &["file"],
             ),
         )
-        .with_output_schema(section_output_schema("Symbols defined in the file")),
+        .with_output_schema(with_extra(
+            section_output_schema("Symbols defined in the file"),
+            &[(
+                "backend",
+                "string",
+                "What read the file: `document` (the language server, nested, its own kinds) or \
+                 `ast` (the compiled-in grammar, flat, containment in name_path). Read it before \
+                 taking absent nesting for structure",
+            )],
+        )),
         ToolDefinition::read_only(
             "inspect_symbol",
             "Resolve a symbol path (e.g., 'Handler/process', a bare name, or a '*/method' \

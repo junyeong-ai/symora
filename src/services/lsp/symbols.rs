@@ -73,7 +73,7 @@ pub(super) async fn find_symbols(
     let mut symbols: Vec<Symbol> = (*cached_symbols).clone();
 
     if options.include_body {
-        apply_body_recursive(&mut symbols, &content);
+        Symbol::attach_bodies(&mut symbols, &content);
     }
 
     if options.depth < u32::MAX {

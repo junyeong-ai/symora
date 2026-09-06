@@ -434,6 +434,7 @@ mod tests {
         let dropped = lsp_error_at(
             LspError::ServerTerminated {
                 language: crate::models::symbol::Language::Rust,
+                established: false,
             },
             path,
             10,

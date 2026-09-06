@@ -145,7 +145,13 @@ struct MapFileOutput {
     /// than only noted.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
-    focus_symbols: Vec<FocusSymbolOutput>,
+    /// Omitted when nothing read the file's declarations — an empty list is
+    /// a file that declares none, which is a different fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_symbols: Option<Vec<FocusSymbolOutput>>,
+    /// What produced `symbols` and `focus_symbols`, omitted with them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<crate::cli::SymbolBackend>,
     siblings: Vec<String>,
     counterpart_files: Vec<String>,
     symbols: Section<SymbolOutput>,
@@ -314,57 +320,15 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         return Ok(());
     };
 
-    let language_status = app.lsp.server_status(target.language).await;
-    if matches!(
-        language_status,
-        crate::models::lsp::ServerStatus::NotInstalled { .. }
-    ) {
-        let file = target.rel_path.clone();
-        ctx.print_success(MapFileOutput {
-            file,
-            language: target.language.lsp_id().to_string(),
-            test_file: target.is_test,
-            incomplete: !unread_paths.is_empty(),
-            unread_paths,
-            focus_symbols: Vec::new(),
-            siblings: records
-                .iter()
-                .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
-                .map(|r| r.rel_path.clone())
-                .take(8)
-                .collect(),
-            counterpart_files: detect_counterparts(&target, &records)
-                .into_iter()
-                .map(|r| r.rel_path.clone())
-                .collect(),
-            symbols: Section::error(
-                OutputError::new(
-                    crate::cli::ErrorCode::ServerNotInstalled,
-                    format!(
-                        "Language server is not installed for {}",
-                        target.language.lsp_id()
-                    ),
-                )
-                .with_hint(format!(
-                    "Run `symora doctor {}` for installation help",
-                    target.language.lsp_id()
-                )),
-            ),
-            related_files: collect_related_files(app, &target, &records, related_limit).await,
-        });
-        return Ok(());
-    }
-
-    let (focus_symbols, symbols) = match app
-        .lsp
-        .find_symbols(
-            &target.abs_path,
-            FindSymbolsOptions::default().with_depth(depth).with_body(),
-        )
-        .await
+    let (backend, focus_symbols, symbols) = match crate::cli::declared_in(
+        app,
+        &target.abs_path,
+        FindSymbolsOptions::default().with_depth(depth).with_body(),
+    )
+    .await
     {
-        Ok(mut symbols) => {
-            Symbol::compute_paths_for_all(&mut symbols);
+        Ok(answer) => {
+            let symbols = answer.symbols;
             let focus_symbols = build_focus_symbols(&symbols, ctx.root());
             // `count` must describe the same domain as `items`: focus
             // candidates, not every symbol in the file.
@@ -382,9 +346,13 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                     out.without_children()
                 })
                 .collect();
-            (focus_symbols, Section::with_total(items, total))
+            (
+                Some(answer.backend),
+                Some(focus_symbols),
+                Section::with_total(items, total),
+            )
         }
-        Err(e) => (Vec::new(), Section::error(e)),
+        Err(e) => (None, None, Section::error(e)),
     };
 
     let related_files = collect_related_files(app, &target, &records, related_limit).await;
@@ -406,6 +374,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         incomplete: !unread_paths.is_empty(),
         unread_paths,
         focus_symbols,
+        backend,
         siblings,
         counterpart_files,
         symbols,

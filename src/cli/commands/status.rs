@@ -31,6 +31,27 @@ struct ProjectInfo {
     languages: Vec<String>,
 }
 
+/// A server's state as this overview can know it, which is not the same as
+/// what it can do.
+///
+/// `status` reads the table and the session; it does not spawn a server to
+/// find out whether it serves this workspace. So a resolved binary is
+/// reported as installed — the fact this command established — and the
+/// capability question belongs to `doctor`, which probes for it.
+fn describe(status: &ServerStatus) -> (&'static str, Option<String>, Option<String>) {
+    match status {
+        ServerStatus::Running => ("running", None, None),
+        ServerStatus::Stopped => ("installed", None, None),
+        ServerStatus::NotInstalled { hint } => ("not_installed", hint.clone(), None),
+        // The give-up reason is always surfaced (not detailed-gated): a
+        // broken server is an error an agent must see to stop retrying.
+        ServerStatus::CriticalFailure { reason } => {
+            ("critical_failure", None, Some(reason.clone()))
+        }
+        ServerStatus::NotSupported => ("not_supported", None, None),
+    }
+}
+
 pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
     let status = app.project.status().await?;
@@ -46,15 +67,8 @@ pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
         let server_status = app.lsp.server_status(lang).await;
 
         let (status_str, install_hint, error) = match &server_status {
-            ServerStatus::Running => ("running", None, None),
-            ServerStatus::Stopped => ("available", None, None),
-            ServerStatus::NotInstalled { hint } => ("not_installed", hint.clone(), None),
             ServerStatus::NotSupported => continue,
-            // The give-up reason is always surfaced (not detailed-gated): a
-            // broken server is an error an agent must see to stop retrying.
-            ServerStatus::CriticalFailure { reason } => {
-                ("critical_failure", None, Some(reason.clone()))
-            }
+            other => describe(other),
         };
 
         lsp_servers.push(ServerStatusOutput {
@@ -82,4 +96,29 @@ pub async fn execute(args: StatusArgs, app: &App) -> Result<()> {
 
     ctx.print_success(response);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A binary that resolves and a server that answers are different facts,
+    /// and this command only ever established the first. Reporting the second
+    /// would send an agent into a language it cannot navigate.
+    #[test]
+    fn a_resolved_binary_is_never_reported_as_a_capability() {
+        assert_eq!(describe(&ServerStatus::Stopped).0, "installed");
+        assert_eq!(describe(&ServerStatus::Running).0, "running");
+        assert_eq!(
+            describe(&ServerStatus::NotInstalled { hint: None }).0,
+            "not_installed"
+        );
+        assert_eq!(
+            describe(&ServerStatus::CriticalFailure {
+                reason: "stayed unhealthy".to_string()
+            })
+            .0,
+            "critical_failure"
+        );
+    }
 }

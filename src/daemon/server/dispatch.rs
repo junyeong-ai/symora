@@ -5,7 +5,6 @@ use std::time::Instant;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::config::LspRuntimeConfig;
 use crate::daemon::params::{FileParams, PositionParams};
 use crate::daemon::protocol::{Request, RpcError, methods};
 use crate::daemon::wire;
@@ -21,7 +20,6 @@ pub(super) async fn dispatch(
     request: Request,
     projects: &ProjectsMap,
     config: &DaemonRuntimeConfig,
-    lsp_config: &Arc<LspRuntimeConfig>,
     start_time: Instant,
 ) -> Result<serde_json::Value, RpcError> {
     let params = request.params.unwrap_or(serde_json::json!({}));
@@ -40,14 +38,12 @@ pub(super) async fn dispatch(
         methods::SHUTDOWN => Ok(serde_json::json!({"shutting_down": true})),
 
         // Symbol operations
-        methods::FIND_SYMBOLS => handlers::handle_find_symbols(&params, projects, lsp_config).await,
-        methods::WORKSPACE_SYMBOLS => {
-            handlers::handle_workspace_symbols(&params, projects, lsp_config).await
-        }
+        methods::FIND_SYMBOLS => handlers::handle_find_symbols(&params, projects).await,
+        methods::WORKSPACE_SYMBOLS => handlers::handle_workspace_symbols(&params, projects).await,
 
         // Position-based operations
         methods::FIND_REFERENCES => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::ReferencesResponse::from(
                     ctx.lsp.find_references(&f, l, c).await?,
                 ))
@@ -56,7 +52,7 @@ pub(super) async fn dispatch(
         }
 
         methods::GOTO_DEFINITION => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::DefinitionResponse::from_definition(
                     ctx.lsp.goto_definition(&f, l, c).await?,
                 ))
@@ -65,7 +61,7 @@ pub(super) async fn dispatch(
         }
 
         methods::GOTO_TYPE_DEFINITION => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::DefinitionResponse::from_type_definition(
                     ctx.lsp.goto_type_definition(&f, l, c).await?,
                 ))
@@ -74,7 +70,7 @@ pub(super) async fn dispatch(
         }
 
         methods::FIND_IMPLEMENTATIONS => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::ImplementationsResponse::from(
                     ctx.lsp.find_implementations(&f, l, c).await?,
                 ))
@@ -83,7 +79,7 @@ pub(super) async fn dispatch(
         }
 
         methods::HOVER => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::HoverResponse::from_hover(
                     ctx.lsp.hover(&f, l, c).await?,
                 ))
@@ -92,7 +88,7 @@ pub(super) async fn dispatch(
         }
 
         methods::SIGNATURE_HELP => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::SignatureResponse::from_help(
                     ctx.lsp.signature_help(&f, l, c).await?,
                 ))
@@ -101,7 +97,7 @@ pub(super) async fn dispatch(
         }
 
         methods::INCOMING_CALLS => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::CallsResponse::from(
                     ctx.lsp.incoming_calls(&f, l, c).await?,
                 ))
@@ -110,7 +106,7 @@ pub(super) async fn dispatch(
         }
 
         methods::OUTGOING_CALLS => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::CallsResponse::from(
                     ctx.lsp.outgoing_calls(&f, l, c).await?,
                 ))
@@ -119,7 +115,7 @@ pub(super) async fn dispatch(
         }
 
         methods::SUPERTYPES => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::TypeHierarchyResponse::from(
                     ctx.lsp.supertypes(&f, l, c).await?,
                 ))
@@ -128,7 +124,7 @@ pub(super) async fn dispatch(
         }
 
         methods::SUBTYPES => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::TypeHierarchyResponse::from(
                     ctx.lsp.subtypes(&f, l, c).await?,
                 ))
@@ -137,7 +133,7 @@ pub(super) async fn dispatch(
         }
 
         methods::PREPARE_RENAME => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 let result = ctx.lsp.prepare_rename(&f, l, c).await?;
                 to_json(wire::PrepareRenameResponse {
                     placeholder: result.map(|r| r.placeholder),
@@ -147,7 +143,7 @@ pub(super) async fn dispatch(
         }
 
         methods::CODE_ACTIONS => {
-            handle_position(&params, projects, lsp_config, |ctx, f, l, c| async move {
+            handle_position(&params, projects, |ctx, f, l, c| async move {
                 to_json(wire::CodeActionsResponse::from_actions(
                     ctx.lsp.code_actions(&f, l, c).await?,
                 ))
@@ -157,7 +153,7 @@ pub(super) async fn dispatch(
 
         // File-based operations
         methods::DIAGNOSTICS => {
-            handle_file(&params, projects, lsp_config, |ctx, f| async move {
+            handle_file(&params, projects, |ctx, f| async move {
                 to_json(wire::DiagnosticsResponse::from(
                     ctx.lsp.diagnostics(&f).await?,
                 ))
@@ -166,7 +162,7 @@ pub(super) async fn dispatch(
         }
 
         methods::FOLDING_RANGES => {
-            handle_file(&params, projects, lsp_config, |ctx, f| async move {
+            handle_file(&params, projects, |ctx, f| async move {
                 to_json(wire::FoldingRangesResponse::from(
                     ctx.lsp.folding_ranges(&f).await?,
                 ))
@@ -175,61 +171,41 @@ pub(super) async fn dispatch(
         }
 
         methods::CODE_LENSES => {
-            handle_file(&params, projects, lsp_config, |ctx, f| async move {
+            handle_file(&params, projects, |ctx, f| async move {
                 to_json(wire::CodeLensResponse::from(ctx.lsp.code_lenses(&f).await?))
             })
             .await
         }
 
         methods::FORMAT => {
-            handle_file(&params, projects, lsp_config, |ctx, f| async move {
+            handle_file(&params, projects, |ctx, f| async move {
                 to_json(wire::FormatResponse::from(ctx.lsp.format(&f).await?))
             })
             .await
         }
 
         // Special operations
-        methods::RENAME => handlers::handle_rename(&params, projects, lsp_config).await,
-        methods::INLAY_HINTS => handlers::handle_inlay_hints(&params, projects, lsp_config).await,
-        methods::SELECTION_RANGES => {
-            handlers::handle_selection_ranges(&params, projects, lsp_config).await
-        }
-        methods::APPLY_CODE_ACTION => {
-            handlers::handle_apply_action(&params, projects, lsp_config).await
-        }
+        methods::RENAME => handlers::handle_rename(&params, projects).await,
+        methods::INLAY_HINTS => handlers::handle_inlay_hints(&params, projects).await,
+        methods::SELECTION_RANGES => handlers::handle_selection_ranges(&params, projects).await,
+        methods::APPLY_CODE_ACTION => handlers::handle_apply_action(&params, projects).await,
 
         // Language status
-        methods::LANGUAGE_STATUS => {
-            handlers::handle_language_status(&params, projects, lsp_config).await
-        }
+        methods::LANGUAGE_STATUS => handlers::handle_language_status(&params, projects).await,
 
         // Post-edit notes
-        methods::NOTE_FILES_EDITED => {
-            handlers::handle_note_files_edited(&params, projects, lsp_config).await
-        }
+        methods::NOTE_FILES_EDITED => handlers::handle_note_files_edited(&params, projects).await,
 
         // Store operations
-        methods::REFRESH_FILES => {
-            store_handlers::handle_refresh_files(&params, projects, lsp_config).await
-        }
-        methods::SEARCH_SYMBOLS => {
-            store_handlers::handle_search_symbols(&params, projects, lsp_config).await
-        }
-        methods::SEARCH_CONTENT => {
-            store_handlers::handle_search_content(&params, projects, lsp_config).await
-        }
-        methods::INDEX_BUILD => {
-            store_handlers::handle_index_build(&params, projects, lsp_config).await
-        }
-        methods::INDEX_STATUS => {
-            store_handlers::handle_index_status(&params, projects, lsp_config).await
-        }
+        methods::REFRESH_FILES => store_handlers::handle_refresh_files(&params, projects).await,
+        methods::SEARCH_SYMBOLS => store_handlers::handle_search_symbols(&params, projects).await,
+        methods::SEARCH_CONTENT => store_handlers::handle_search_content(&params, projects).await,
+        methods::INDEX_BUILD => store_handlers::handle_index_build(&params, projects).await,
+        methods::INDEX_STATUS => store_handlers::handle_index_status(&params, projects).await,
         methods::INDEXED_LANGUAGES => {
-            store_handlers::handle_indexed_languages(&params, projects, lsp_config).await
+            store_handlers::handle_indexed_languages(&params, projects).await
         }
-        methods::INDEX_CLEAR => {
-            store_handlers::handle_index_clear(&params, projects, lsp_config).await
-        }
+        methods::INDEX_CLEAR => store_handlers::handle_index_clear(&params, projects).await,
 
         _ => Err(RpcError::method_not_found(&request.method)),
     }
@@ -246,7 +222,6 @@ pub(super) fn to_json<T: Serialize>(value: T) -> Result<serde_json::Value, LspEr
 async fn handle_position<F, Fut>(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
     handler: F,
 ) -> Result<serde_json::Value, RpcError>
 where
@@ -254,7 +229,7 @@ where
     Fut: std::future::Future<Output = Result<serde_json::Value, LspError>>,
 {
     let p: PositionParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
     handler(ctx, PathBuf::from(p.file), p.line, p.column)
         .await
@@ -264,7 +239,6 @@ where
 async fn handle_file<F, Fut>(
     params: &serde_json::Value,
     projects: &ProjectsMap,
-    lsp_config: &Arc<LspRuntimeConfig>,
     handler: F,
 ) -> Result<serde_json::Value, RpcError>
 where
@@ -272,7 +246,7 @@ where
     Fut: std::future::Future<Output = Result<serde_json::Value, LspError>>,
 {
     let p: FileParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project, lsp_config).await?;
+    let ctx = get_context(projects, &p.project).await?;
     ctx.touch();
     handler(ctx, PathBuf::from(p.file))
         .await
