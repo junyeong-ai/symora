@@ -25,9 +25,19 @@ pub struct SymbolOutput {
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<SymbolOutput>>,
+    /// What produced this row, where an answer merges two producers: `index`
+    /// or `workspace`, the words `search symbols` uses. Omitted where one
+    /// producer answered the whole response and a top-level `backend` says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 impl SymbolOutput {
+    pub fn produced_by(mut self, backend: &str) -> Self {
+        self.backend = Some(backend.to_string());
+        self
+    }
+
     pub fn from_symbol(symbol: &Symbol, root: &Path) -> Self {
         Self {
             name: symbol.name.clone(),
@@ -46,6 +56,7 @@ impl SymbolOutput {
                 )
             }),
             container: symbol.container.clone(),
+            backend: None,
             signature: None,
             documentation: None,
             body: symbol.body.clone(),

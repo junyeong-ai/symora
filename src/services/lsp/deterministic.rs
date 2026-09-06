@@ -12,19 +12,17 @@ use super::LspService;
 
 /// Confines answers to what this binary and the index carry.
 ///
-/// A language server's answer depends on which servers a machine has, so two
-/// checkouts of the same tree can disagree — the same file reads 26 symbols
-/// where a server answered and 36 where the grammar did. A caller that gates
-/// on the answer needs the reading that does not move: the index and the
-/// compiled-in grammars, which derive from the tree alone.
+/// A server and a grammar do not read a file the same way, so which one
+/// answered decides what comes back — and that is a fact about the machine,
+/// not the tree. A caller that gates on the answer needs the reading that
+/// derives from the tree alone.
 ///
-/// So this declines every request that would produce an answer, and the
-/// commands that have a second source take it — `symbols` reads the grammar,
-/// `search symbols` the index — while the commands that have none fail rather
-/// than degrade into something weaker wearing the same shape. Whether the
-/// environment HAS a server is a different question from whether this answer
-/// used one, so status and edit notification pass through: a warm server that
-/// is never asked still must not outlive an edit this tool made.
+/// So every request that would produce an answer is declined here, and the
+/// commands with a second source take it while the commands with none fail
+/// rather than degrade into something weaker wearing the same shape. Whether
+/// the environment HAS a server is a different question from whether this
+/// answer used one, so status and edit notification pass through: a warm
+/// server that is never asked still must not outlive an edit this tool made.
 pub struct DeterministicLspService {
     inner: Arc<dyn LspService + Send + Sync>,
 }

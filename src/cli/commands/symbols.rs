@@ -387,11 +387,11 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     });
 
     let items: Vec<SymbolOutput> = if body || signature {
-        workspace_symbol_bodies(app, &limited, signature).await
+        workspace_symbol_bodies(app, &limited, signature, &from_index).await
     } else {
         limited
             .iter()
-            .map(|s| SymbolOutput::from_symbol(s, ctx.root()))
+            .map(|s| SymbolOutput::from_symbol(s, ctx.root()).produced_by(producer(s, &from_index)))
             .collect()
     };
     let item_count = items.len();
@@ -470,10 +470,20 @@ fn workspace_dedup_key(symbol: &Symbol) -> String {
 /// distinct file, matched back by the canonical `name_path` every producer
 /// agrees on. A symbol the document tree does not surface keeps its bodiless
 /// row rather than a wrong slice.
+/// What produced a row of a merged answer: the index vouches for a symbol it
+/// held, and the live fan-out supplied every other one.
+fn producer(symbol: &Symbol, from_index: &HashMap<String, String>) -> &'static str {
+    match from_index.contains_key(&workspace_dedup_key(symbol)) {
+        true => "index",
+        false => "workspace",
+    }
+}
+
 async fn workspace_symbol_bodies(
     app: &App,
     resolved: &[Symbol],
     signature: bool,
+    from_index: &HashMap<String, String>,
 ) -> Vec<SymbolOutput> {
     let ctx = &app.output;
     let options = FindSymbolsOptions::default()
@@ -498,7 +508,8 @@ async fn workspace_symbol_bodies(
         .map(|symbol| {
             let key = (symbol.location.file.clone(), symbol.path().to_string());
             let source = bodied.get(&key).unwrap_or(symbol);
-            let mut output = SymbolOutput::from_symbol(source, ctx.root());
+            let mut output = SymbolOutput::from_symbol(source, ctx.root())
+                .produced_by(producer(symbol, from_index));
             if signature {
                 let sig = extract_signature(source.body.as_deref());
                 output = output.with_signature(sig).without_body();
