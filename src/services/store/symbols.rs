@@ -351,15 +351,55 @@ fn extract_name_and_kind(
     Some((name, node_kind(node)))
 }
 
+/// The first child of `node` with the given grammar kind. Grammars that wrap a
+/// declaration's name in unnamed intermediate nodes are read through this
+/// rather than by position, which moves whenever modifiers or attributes are
+/// written before it.
+fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    (0..node.child_count()).find_map(|i| node.child(i as u32).filter(|c| c.kind() == kind))
+}
+
+/// The identifier a captured declaration is named by.
+///
+/// A node this cannot name is dropped from extraction without a trace, so a
+/// query and this function are one decision: several grammars spell a member's
+/// name behind wrappers their neighbours do not use, and a query that captured
+/// one of those read as a language simply not declaring that form. The
+/// declaration fixtures are what hold the two together.
 fn find_name_node(node: Node, language: Language) -> Option<Node> {
     let name_field = match language {
         Language::Kotlin => node
             .child_by_field_name("name")
-            .or_else(|| node.child_by_field_name("simple_identifier")),
+            .or_else(|| node.child_by_field_name("simple_identifier"))
+            .or_else(|| {
+                child_of_kind(node, "variable_declaration")
+                    .and_then(|d| child_of_kind(d, "simple_identifier"))
+            }),
         Language::Cpp => node
             .child_by_field_name("declarator")
-            .and_then(|d| d.child_by_field_name("declarator"))
+            .map(|declarator| {
+                declarator
+                    .child_by_field_name("declarator")
+                    .unwrap_or(declarator)
+            })
             .or_else(|| node.child_by_field_name("name")),
+        Language::Java => node.child_by_field_name("name").or_else(|| {
+            node.child_by_field_name("declarator")
+                .and_then(|d| d.child_by_field_name("name"))
+        }),
+        Language::PHP => node.child_by_field_name("name").or_else(|| {
+            child_of_kind(node, "property_element")
+                .and_then(|e| child_of_kind(e, "variable_name"))
+                .and_then(|v| child_of_kind(v, "name"))
+        }),
+        Language::CSharp => node.child_by_field_name("name").or_else(|| {
+            child_of_kind(node, "variable_declaration")
+                .and_then(|d| child_of_kind(d, "variable_declarator"))
+                .and_then(|d| {
+                    d.child_by_field_name("name")
+                        .or_else(|| child_of_kind(d, "identifier"))
+                })
+        }),
         _ => node.child_by_field_name("name"),
     };
 
@@ -393,18 +433,25 @@ fn node_kind(node: Node) -> SymbolKind {
         | "function_definition"
         | "function_declaration"
         | "generator_function_declaration"
-        | "function_signature" => SymbolKind::Function,
+        | "function_signature"
+        | "function_signature_item"
+        | "macro_definition" => SymbolKind::Function,
 
         "method_item"
         | "method_declaration"
         | "method_definition"
         | "method"
         | "singleton_method"
+        | "method_signature"
+        | "abstract_method_signature"
         | "protocol_function_declaration" => SymbolKind::Method,
 
         "constructor_signature" => SymbolKind::Constructor,
 
         "class_declaration"
+        | "abstract_class_declaration"
+        | "record_declaration"
+        | "delegate_declaration"
         | "class_definition"
         | "class_specifier"
         | "object_declaration"
@@ -413,9 +460,8 @@ fn node_kind(node: Node) -> SymbolKind {
         | "class"
         | "impl_item" => SymbolKind::Class,
 
-        "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration" => {
-            SymbolKind::Struct
-        }
+        "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
+        | "union_item" => SymbolKind::Struct,
 
         "enum_item" | "enum_declaration" | "enum_specifier" => SymbolKind::Enum,
 
@@ -425,6 +471,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "trait_declaration"
         | "trait_definition"
         | "mixin_declaration"
+        | "annotation_type_declaration"
         | "protocol_declaration" => SymbolKind::Interface,
 
         // Every grammar's namespace/module/package container. These organize
@@ -445,7 +492,7 @@ fn node_kind(node: Node) -> SymbolKind {
         "type_spec" => go_type_kind(node),
 
         // A named type alias introduces a type, not a generic `<T>` param.
-        "type_item" | "type_alias_declaration" => SymbolKind::Class,
+        "type_item" | "type_alias_declaration" | "type_alias" => SymbolKind::Class,
 
         "const_item" | "const_spec" | "val_definition" => SymbolKind::Constant,
 
@@ -457,7 +504,7 @@ fn node_kind(node: Node) -> SymbolKind {
         "variable_declarator" => declarator_kind(node),
 
         "property_declaration" => SymbolKind::Property,
-        "field_declaration" => SymbolKind::Field,
+        "field_declaration" => field_kind(node),
 
         _ => SymbolKind::Variable,
     }
@@ -470,6 +517,17 @@ fn go_type_kind(node: Node) -> SymbolKind {
         Some("struct_type") => SymbolKind::Struct,
         Some("interface_type") => SymbolKind::Interface,
         _ => SymbolKind::Class,
+    }
+}
+
+/// Classify a member declaration by its declarator: C++ states a method
+/// declaration with the same `field_declaration` node it states a data member
+/// with, and only the declarator separates them. Java, whose fields use the
+/// same node kind, declares methods elsewhere and is unaffected.
+fn field_kind(node: Node) -> SymbolKind {
+    match node.child_by_field_name("declarator").map(|d| d.kind()) {
+        Some("function_declarator") => SymbolKind::Method,
+        _ => SymbolKind::Field,
     }
 }
 
@@ -490,7 +548,10 @@ fn declarator_kind(node: Node) -> SymbolKind {
 
 const RUST_QUERY: &str = r#"
 (function_item) @symbol
+(function_signature_item) @symbol
+(macro_definition) @symbol
 (struct_item) @symbol
+(union_item) @symbol
 (enum_item) @symbol
 (trait_item) @symbol
 (impl_item) @symbol
@@ -504,6 +565,7 @@ const GO_QUERY: &str = r#"
 (function_declaration) @symbol
 (method_declaration) @symbol
 (type_declaration (type_spec) @symbol)
+(type_declaration (type_alias) @symbol)
 (const_declaration (const_spec) @symbol)
 (var_declaration (var_spec) @symbol)
 "#;
@@ -523,10 +585,14 @@ const TYPESCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
 (generator_function_declaration) @symbol
 (class_declaration) @symbol
+(abstract_class_declaration) @symbol
+(internal_module) @symbol
 (interface_declaration) @symbol
 (type_alias_declaration) @symbol
 (enum_declaration) @symbol
 (method_definition) @symbol
+(interface_declaration (interface_body (method_signature) @symbol))
+(class_body (abstract_method_signature) @symbol)
 (program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
 (program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
 (program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
@@ -545,8 +611,11 @@ const JAVASCRIPT_QUERY: &str = r#"
 "#;
 
 const JAVA_QUERY: &str = r#"
+(package_declaration) @symbol
 (class_declaration) @symbol
+(record_declaration) @symbol
 (interface_declaration) @symbol
+(annotation_type_declaration) @symbol
 (enum_declaration) @symbol
 (method_declaration) @symbol
 (field_declaration) @symbol
@@ -569,7 +638,11 @@ const CPP_QUERY: &str = r#"
 "#;
 
 const CSHARP_QUERY: &str = r#"
+(namespace_declaration) @symbol
+(file_scoped_namespace_declaration) @symbol
 (class_declaration) @symbol
+(record_declaration) @symbol
+(delegate_declaration) @symbol
 (interface_declaration) @symbol
 (struct_declaration) @symbol
 (enum_declaration) @symbol
@@ -629,8 +702,10 @@ const DART_QUERY: &str = r#"
 "#;
 
 const PHP_QUERY: &str = r#"
+(namespace_definition) @symbol
 (function_definition) @symbol
 (class_declaration) @symbol
+(enum_declaration) @symbol
 (interface_declaration) @symbol
 (trait_declaration) @symbol
 (method_declaration) @symbol
@@ -640,6 +715,412 @@ const PHP_QUERY: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a language declares, written from the LANGUAGE rather than from
+    /// the query that reads it.
+    ///
+    /// Every other extraction test states the forms its query already
+    /// captures, so a declaration form nobody thought of is invisible to all
+    /// of them — which is how abstract classes, records, unions, namespaces
+    /// and trait method signatures went missing at once. A source here is a
+    /// tour of one grammar's declaration forms, and `declares` is the whole
+    /// answer, so a form that stops being extracted fails rather than
+    /// quietly narrowing what a search speaks for.
+    ///
+    /// The set is types, callables, and the module/namespace declarations
+    /// that hold them — the categories every language here already claims.
+    /// Which named VALUES a language admits differs between them and is
+    /// recorded as each one behaves, not levelled.
+    struct DeclarationFixture {
+        language: Language,
+        path: &'static str,
+        source: &'static str,
+        declares: &'static [&'static str],
+    }
+
+    const DECLARATION_FIXTURES: &[DeclarationFixture] = &[
+        DeclarationFixture {
+            language: Language::Rust,
+            path: "a.rs",
+            source: r#"
+pub trait T { fn tm(&self); }
+pub union U { a: u32 }
+macro_rules! mac { () => {} }
+pub type Al = u32;
+pub const CX: u32 = 1;
+pub static ST: u32 = 2;
+pub enum E { A }
+pub mod inner { pub fn nested() {} }
+pub struct S;
+impl S { pub fn m(&self) { let local = 1; } }
+"#,
+            declares: &[
+                "interface:T",
+                "function:T/tm",
+                "struct:U",
+                "function:mac",
+                "class:Al",
+                "constant:CX",
+                "variable:ST",
+                "enum:E",
+                "module:inner",
+                "function:nested",
+                "struct:S",
+                "class:S",
+                "function:S/m",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Go,
+            path: "a.go",
+            source: r#"
+package m
+
+type Al = int
+type S struct{ F int }
+type I interface{ Do() }
+
+const CX = 1
+var VY = 2
+
+func F() {}
+func (s *S) M() {}
+"#,
+            declares: &[
+                "class:Al",
+                "struct:S",
+                "interface:I",
+                "constant:CX",
+                "variable:VY",
+                "function:F",
+                "method:M",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Python,
+            path: "a.py",
+            source: r#"
+class A:
+    def m(self): pass
+
+def f(): pass
+
+async def af(): pass
+"#,
+            declares: &["class:A", "function:A/m", "function:f", "function:af"],
+        },
+        DeclarationFixture {
+            language: Language::TypeScript,
+            path: "a.ts",
+            source: r#"
+export abstract class Abs { abstract doIt(): void; }
+export namespace NS {}
+export interface Shape { area(): number; }
+export type Alias = string;
+export enum Color { Red }
+export class C { m(): void {} }
+export function f(): void {}
+export const arrow = () => 1;
+"#,
+            declares: &[
+                "class:Abs",
+                "method:Abs/doIt",
+                "module:NS",
+                "interface:Shape",
+                "method:Shape/area",
+                "class:Alias",
+                "enum:Color",
+                "class:C",
+                "method:C/m",
+                "function:f",
+                "function:arrow",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::JavaScript,
+            path: "a.js",
+            source: r#"
+export class C { m() {} }
+export function f() {}
+export const arrow = () => 1;
+function* gen() {}
+"#,
+            declares: &[
+                "class:C",
+                "method:C/m",
+                "function:f",
+                "function:arrow",
+                "function:gen",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Java,
+            path: "A.java",
+            source: r#"
+package p;
+
+record R(int a) {}
+
+@interface Ann {}
+
+interface I { void im(); }
+
+enum E { X }
+
+class C {
+    int field;
+    void m() {}
+}
+"#,
+            declares: &[
+                "module:p",
+                "class:R",
+                "interface:Ann",
+                "interface:I",
+                "method:I/im",
+                "enum:E",
+                "class:C",
+                "field:C/field",
+                "method:C/m",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::CSharp,
+            path: "a.cs",
+            source: r#"
+namespace N {
+    public record Rec(int A);
+    public delegate void D();
+    public interface I { void M(); }
+    public struct St { public int F; }
+    public enum E { X }
+    class C {
+        public int P { get; set; }
+        void M() {}
+    }
+}
+"#,
+            declares: &[
+                "module:N",
+                "class:Rec",
+                "class:D",
+                "interface:I",
+                "method:I/M",
+                "struct:St",
+                "field:St/F",
+                "enum:E",
+                "class:C",
+                "property:C/P",
+                "method:C/M",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::PHP,
+            path: "a.php",
+            source: r#"
+<?php
+namespace N;
+
+enum E { case X; }
+
+trait T { public function tm() {} }
+
+interface I { public function im(); }
+
+abstract class A {
+    public $prop;
+    abstract public function am();
+}
+
+function f() {}
+"#,
+            declares: &[
+                "module:N",
+                "enum:E",
+                "interface:T",
+                "method:T/tm",
+                "interface:I",
+                "method:I/im",
+                "class:A",
+                "property:A/prop",
+                "method:A/am",
+                "function:f",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Kotlin,
+            path: "a.kt",
+            source: r#"
+package demo
+
+interface I {
+    fun im()
+}
+
+object Registry {
+    fun register() {}
+}
+
+class Widget {
+    val name = "w"
+    fun render() {}
+}
+
+fun top() {}
+"#,
+            declares: &[
+                "class:I",
+                "function:I/im",
+                "class:Registry",
+                "function:Registry/register",
+                "class:Widget",
+                "property:Widget/name",
+                "function:Widget/render",
+                "function:top",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Cpp,
+            path: "a.cpp",
+            source: r#"
+namespace N {
+
+struct S { int f; };
+
+class C {
+public:
+    void m();
+};
+
+enum E { X };
+
+void f() {}
+
+}
+"#,
+            declares: &[
+                "module:N",
+                "struct:S",
+                "field:S/f",
+                "class:C",
+                "method:C/m",
+                "enum:E",
+                "function:f",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Ruby,
+            path: "a.rb",
+            source: r#"
+module M
+  class C
+    def m; end
+    def self.cm; end
+  end
+end
+"#,
+            declares: &["module:M", "class:C", "method:C/m", "method:C/cm"],
+        },
+        DeclarationFixture {
+            language: Language::Bash,
+            path: "a.sh",
+            source: r#"
+greet() { echo hi; }
+
+function other { echo hi; }
+"#,
+            declares: &["function:greet", "function:other"],
+        },
+        DeclarationFixture {
+            language: Language::Lua,
+            path: "a.lua",
+            source: r#"
+function top() end
+
+local function helper() end
+"#,
+            declares: &["function:top", "function:helper"],
+        },
+        DeclarationFixture {
+            language: Language::Swift,
+            path: "a.swift",
+            source: r#"
+protocol P {
+    func pm()
+}
+
+class C {
+    var p = 1
+    func cm() {}
+}
+
+func top() {}
+"#,
+            declares: &[
+                "interface:P",
+                "method:P/pm",
+                "class:C",
+                "property:C/p",
+                "function:C/cm",
+                "function:top",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Scala,
+            path: "a.scala",
+            source: r#"
+trait T {
+  def tm(): Unit
+}
+
+object O {
+  val v = 1
+}
+
+class C {
+  def cm(): Unit = {}
+}
+"#,
+            declares: &[
+                "interface:T",
+                "function:T/tm",
+                "class:O",
+                "constant:O/v",
+                "class:C",
+                "function:C/cm",
+            ],
+        },
+        DeclarationFixture {
+            language: Language::Dart,
+            path: "a.dart",
+            source: r#"
+mixin M {}
+
+enum E { x }
+
+abstract class A {
+  void am();
+}
+
+class C {
+  C();
+  void cm() {}
+}
+
+void top() {}
+"#,
+            declares: &[
+                "interface:M",
+                "enum:E",
+                "class:A",
+                "function:A/am",
+                "class:C",
+                "constructor:C/C",
+                "function:C/cm",
+                "function:top",
+            ],
+        },
+    ];
 
     /// Pins the static `supported_languages` answer to runtime registration:
     /// a grammar bump that breaks one language's ABI or extraction query
@@ -657,6 +1138,43 @@ mod tests {
             extractor.languages.len(),
             SymbolExtractor::supported_languages().len()
         );
+    }
+
+    #[test]
+    fn every_declaration_form_a_fixture_writes_is_extracted() {
+        let extractor = SymbolExtractor::new();
+        for fixture in DECLARATION_FIXTURES {
+            let symbols =
+                extractor.extract(Path::new(fixture.path), fixture.source, fixture.language);
+            let mut found: Vec<String> = symbols
+                .iter()
+                .map(|s| format!("{}:{}", s.kind, s.name_path.as_deref().unwrap_or(&s.name)))
+                .collect();
+            let mut expected: Vec<String> =
+                fixture.declares.iter().map(|d| d.to_string()).collect();
+            found.sort();
+            expected.sort();
+            assert_eq!(
+                found, expected,
+                "{:?} extraction does not match what {} declares",
+                fixture.language, fixture.path
+            );
+        }
+    }
+
+    /// A language whose extractor no fixture describes is one whose gaps
+    /// nothing can find, so registering a grammar and writing its tour are
+    /// one step.
+    #[test]
+    fn every_extractor_language_has_a_declaration_fixture() {
+        for language in SymbolExtractor::supported_languages() {
+            assert!(
+                DECLARATION_FIXTURES
+                    .iter()
+                    .any(|fixture| fixture.language == *language),
+                "{language:?} extracts symbols with no fixture saying which forms it must reach"
+            );
+        }
     }
 
     /// Extraction reads a grammar's declaration nodes, so it can never reach
