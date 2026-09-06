@@ -706,16 +706,21 @@ fn resolve_deleted_hunk(
     let language = crate::models::symbol::Language::from_path(file);
     let lo = hunk.old_start;
     let hi = hunk.old_start.saturating_add(hunk.old_count.max(1));
-    let matched: Vec<ChangedSymbolImpact> = SymbolExtractor::new()
-        .extract(&content, language)
+    let matched: Vec<ChangedSymbolImpact> = SymbolExtractor::shared()
+        .extract(file, &content, language)
         .into_iter()
-        .filter(|s| s.line >= lo && s.line < hi)
+        .filter(|s| s.location.line >= lo && s.location.line < hi)
         .map(|s| ChangedSymbolImpact {
             name: Some(s.name),
             kind: Some(s.kind.to_string()),
             // Old-file coordinates: the only honest position for a symbol that
             // no longer exists in the current tree.
-            location: Some(LocationOutput::from_path(file, s.line, s.column, root)),
+            location: Some(LocationOutput::from_path(
+                file,
+                s.location.line,
+                s.location.column,
+                root,
+            )),
             change_type: ChangeType::Deleted,
             refs: None,
             test_refs: None,

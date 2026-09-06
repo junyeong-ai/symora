@@ -28,7 +28,7 @@ pub(super) async fn handle_connection(
     projects: ProjectsMap,
     semaphore: Arc<Semaphore>,
     config: Arc<DaemonRuntimeConfig>,
-    lsp_config: Arc<LspRuntimeConfig>,
+    request_timeouts: Arc<LspRuntimeConfig>,
     start_time: Instant,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), std::io::Error> {
@@ -114,10 +114,10 @@ pub(super) async fn handle_connection(
         };
 
         let request_id = request.id.clone();
-        let timeout = estimate_request_timeout(&request, &lsp_config);
+        let timeout = estimate_request_timeout(&request, &request_timeouts);
         let result = tokio::time::timeout(
             timeout,
-            process_request(request, &projects, &config, &lsp_config, start_time),
+            process_request(request, &projects, &config, start_time),
         )
         .await;
 
@@ -165,13 +165,12 @@ async fn process_request(
     request: Request,
     projects: &ProjectsMap,
     config: &DaemonRuntimeConfig,
-    lsp_config: &Arc<LspRuntimeConfig>,
     start_time: Instant,
 ) -> (Response, bool) {
     let id = request.id.clone();
     let is_shutdown = request.method == methods::SHUTDOWN;
 
-    let result = dispatch(request, projects, config, lsp_config, start_time).await;
+    let result = dispatch(request, projects, config, start_time).await;
     let response = match result {
         Ok(v) => Response::success(id, v),
         Err(e) => Response::error(id, e),

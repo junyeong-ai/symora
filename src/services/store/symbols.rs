@@ -1,19 +1,11 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
-use crate::models::symbol::{Language, Symbol, SymbolKind};
-
-pub struct ExtractedSymbol {
-    pub name: String,
-    pub container: Option<String>,
-    pub name_path: Option<String>,
-    pub kind: SymbolKind,
-    pub line: u32,
-    pub column: u32,
-}
+use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
 /// A parser and its pre-compiled extraction query for one language. The
 /// query is compiled once at startup, not per file — query compilation is
@@ -164,7 +156,22 @@ impl SymbolExtractor {
         Self::supported_languages().contains(&language)
     }
 
-    pub fn extract(&self, content: &str, language: Language) -> Vec<ExtractedSymbol> {
+    /// The process-wide extractor. Grammars and their queries are compiled
+    /// into the binary and their compilation is the dominant per-call cost,
+    /// so they are built once rather than per store or per call.
+    pub fn shared() -> &'static Self {
+        static SHARED: std::sync::LazyLock<SymbolExtractor> =
+            std::sync::LazyLock::new(SymbolExtractor::new);
+        &SHARED
+    }
+
+    /// The declarations `content` makes, as the same [`Symbol`] a language
+    /// server's document-symbol answer produces — one shape, so a caller
+    /// reads either source through the same fields.
+    ///
+    /// The list is flat: containment is carried by `container` and
+    /// `name_path`, which is what addresses a symbol everywhere else.
+    pub fn extract(&self, path: &Path, content: &str, language: Language) -> Vec<Symbol> {
         let Some(entry) = self.languages.get(&language) else {
             return Vec::new();
         };
@@ -183,7 +190,7 @@ impl SymbolExtractor {
         let mut symbols = Vec::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
-            if let Some(symbol) = extract_from_match(m, content, language) {
+            if let Some(symbol) = extract_from_match(m, path, content, language) {
                 symbols.push(symbol);
             }
         }
@@ -222,9 +229,10 @@ fn register(
 
 fn extract_from_match(
     m: &tree_sitter::QueryMatch,
+    path: &Path,
     content: &str,
     language: Language,
-) -> Option<ExtractedSymbol> {
+) -> Option<Symbol> {
     let node = m.captures.first()?.node;
 
     let (name, kind) = extract_name_and_kind(node, content, language)?;
@@ -238,26 +246,45 @@ fn extract_from_match(
     // leading keyword (`pub`, `fn`, an attribute line) resolve to the wrong
     // symbol or nothing, and a name-span position also lets the index and the
     // LSP workspace pass dedup to a single row (both then point at the same
-    // identifier). tree-sitter reports the column as a byte offset within the
-    // line, but CLI/JSON positions are character columns (matching the LSP
-    // side); count characters across the line prefix so multibyte text before a
-    // symbol doesn't misplace follow-up `file:line:col` navigation.
+    // identifier). The declaration node supplies the surrounding range, so a
+    // body is sliced from the same two fields a document-symbol answer fills.
     let anchor = name_position_node(node, language).unwrap_or(node);
-    let start = anchor.start_position();
-    let line_start = anchor.start_byte() - start.column;
-    let column = content
-        .get(line_start..anchor.start_byte())
-        .map(|prefix| prefix.chars().count() as u32)
-        .unwrap_or(start.column as u32)
-        + 1;
-    Some(ExtractedSymbol {
-        name,
-        container,
-        name_path,
-        kind,
-        line: start.row as u32 + 1,
+    let (line, column) = scalar_position(content, anchor.start_byte(), anchor.start_position());
+    let (name_end_line, name_end_column) =
+        scalar_position(content, anchor.end_byte(), anchor.end_position());
+    let (range_start_line, range_start_column) =
+        scalar_position(content, node.start_byte(), node.start_position());
+    let (end_line, end_column) = scalar_position(content, node.end_byte(), node.end_position());
+
+    let location = Location::full(
+        path.to_path_buf(),
+        line,
         column,
-    })
+        range_start_line,
+        range_start_column,
+        end_line,
+        end_column,
+    )
+    .with_name_end(name_end_line, name_end_column);
+
+    let mut symbol = Symbol::new(name, kind, location);
+    symbol.name_path = name_path;
+    symbol.container = container;
+    Some(symbol)
+}
+
+/// A tree-sitter position as CLI/JSON positions are spelled: 1-indexed line,
+/// 1-indexed Unicode-scalar column. tree-sitter reports the column as a byte
+/// offset within the line, so multibyte text before a symbol would otherwise
+/// misplace every follow-up `file:line:col`.
+fn scalar_position(content: &str, byte: usize, position: tree_sitter::Point) -> (u32, u32) {
+    let line_start = byte.saturating_sub(position.column);
+    let column = content
+        .get(line_start..byte)
+        .map(|prefix| prefix.chars().count() as u32)
+        .unwrap_or(position.column as u32)
+        + 1;
+    (position.row as u32 + 1, column)
 }
 
 /// The node whose start position the symbol should be addressed by — its name
@@ -647,6 +674,33 @@ mod tests {
         }
     }
 
+    /// Every position the extractor emits is a character column, not a byte
+    /// offset — the two agree for ASCII, so only a line carrying multibyte
+    /// text before a symbol can tell a missed conversion from a correct one.
+    /// A wrong column here misplaces every `file:line:col` taken from it.
+    #[test]
+    fn positions_are_character_columns_on_every_span() {
+        let extractor = SymbolExtractor::new();
+        let content = "class 주문Handler:\n    def 처리(self):\n        return 1\n";
+        let symbols = extractor.extract(Path::new("a.py"), content, Language::Python);
+
+        let class = symbols.iter().find(|s| s.name == "주문Handler").unwrap();
+        assert_eq!((class.location.line, class.location.column), (1, 7));
+        assert_eq!(class.location.name_end_column, Some(16));
+
+        let method = symbols.iter().find(|s| s.name == "처리").unwrap();
+        assert_eq!((method.location.line, method.location.column), (2, 9));
+        assert_eq!(method.location.range_start_column, Some(5));
+        assert_eq!(method.location.end_line, Some(3));
+
+        let mut with_body = vec![method.clone()];
+        Symbol::attach_bodies(&mut with_body, content);
+        assert_eq!(
+            with_body[0].body.as_deref(),
+            Some("    def 처리(self):\n        return 1")
+        );
+    }
+
     #[test]
     fn ruby_symbols_carry_the_name_the_file_spells() {
         let extractor = SymbolExtractor::new();
@@ -660,7 +714,7 @@ module Billing
   end
 end
 "#;
-        let symbols = extractor.extract(content, Language::Ruby);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Ruby);
         let found = |path: &str| {
             symbols
                 .iter()
@@ -677,6 +731,7 @@ end
     fn shell_and_lua_extract_their_function_forms() {
         let extractor = SymbolExtractor::new();
         let shell = extractor.extract(
+            Path::new("a"),
             "deploy() { :; }\nfunction rollback { :; }\n",
             Language::Bash,
         );
@@ -684,6 +739,7 @@ end
         assert!(shell.iter().all(|s| s.kind == SymbolKind::Function));
 
         let lua = extractor.extract(
+            Path::new("a"),
             "local function helper() end\nfunction M.render() end\n",
             Language::Lua,
         );
@@ -703,7 +759,7 @@ enum Status { open }
 mixin Loggable { void log() {} }
 void topLevel() {}
 "#;
-        let symbols = extractor.extract(content, Language::Dart);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Dart);
         let found = |path: &str| {
             symbols
                 .iter()
@@ -726,6 +782,7 @@ void topLevel() {}
     fn a_function_local_binding_is_not_a_member() {
         let extractor = SymbolExtractor::new();
         let swift = extractor.extract(
+            Path::new("a"),
             r#"
 class Cart {
     var items: [Int] = []
@@ -743,6 +800,7 @@ class Cart {
         assert!(!swift_names.contains(&"base"));
 
         let scala = extractor.extract(
+            Path::new("a"),
             r#"
 class Order {
   val id = 1
@@ -770,7 +828,7 @@ enum Bar { A, B }
 trait Baz {}
 type Alias = Foo;
 "#;
-        let symbols = extractor.extract(content, Language::Rust);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Rust);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("main"), Some(SymbolKind::Function));
         assert_eq!(kind("Foo"), Some(SymbolKind::Struct));
@@ -861,7 +919,7 @@ type Alias = Foo;
             ("impl Tr for () { fn m(&self) {} }", "impl Tr for ()", None),
         ];
         for (src, ra_label, expected) in cases {
-            let symbols = extractor.extract(src, Language::Rust);
+            let symbols = extractor.extract(Path::new("a"), src, Language::Rust);
             let method = symbols
                 .iter()
                 .find(|s| s.name == "m")
@@ -899,7 +957,7 @@ type Alias = Foo;
     fn index_drops_enclosing_module_from_name_path() {
         let extractor = SymbolExtractor::new();
         let src = "mod a { mod b { struct Deep; impl Deep { fn m(&self) {} } fn free() {} } }";
-        let symbols = extractor.extract(src, Language::Rust);
+        let symbols = extractor.extract(Path::new("a"), src, Language::Rust);
         let path = |name: &str| {
             symbols
                 .iter()
@@ -931,7 +989,7 @@ type Alias = Foo;
     fn index_keys_nested_type_member_by_immediate_container() {
         let extractor = SymbolExtractor::new();
         let src = "namespace ns { class Outer { class Inner { void method(); }; void om(); }; }";
-        let symbols = extractor.extract(src, Language::Cpp);
+        let symbols = extractor.extract(Path::new("a"), src, Language::Cpp);
         let path = |name: &str| {
             symbols
                 .iter()
@@ -962,7 +1020,7 @@ type Alias = Foo;
     #[test]
     fn index_keeps_namespace_path_transparent_across_languages() {
         let extractor = SymbolExtractor::new();
-        let path = |symbols: &[ExtractedSymbol], name: &str| {
+        let path = |symbols: &[Symbol], name: &str| {
             symbols
                 .iter()
                 .find(|s| s.name == name)
@@ -973,7 +1031,7 @@ type Alias = Foo;
         let ts = "namespace NS { export class Outer { method(): void {} } \
                   export function freeFn(): void {} } \
                   module Ambient { export class Thing { go(): void {} } }";
-        let ts_syms = extractor.extract(ts, Language::TypeScript);
+        let ts_syms = extractor.extract(Path::new("a"), ts, Language::TypeScript);
         assert_eq!(path(&ts_syms, "Outer"), Some("Outer".to_string()));
         assert_eq!(path(&ts_syms, "method"), Some("Outer/method".to_string()));
         assert_eq!(path(&ts_syms, "freeFn"), Some("freeFn".to_string()));
@@ -983,7 +1041,7 @@ type Alias = Foo;
         // inner type, but the namespace never does.
         let cs = "namespace MyApp { public class Outer { public void Method() {} \
                   public class Inner { public void InnerMethod() {} } } }";
-        let cs_syms = extractor.extract(cs, Language::CSharp);
+        let cs_syms = extractor.extract(Path::new("a"), cs, Language::CSharp);
         assert_eq!(path(&cs_syms, "Outer"), Some("Outer".to_string()));
         assert_eq!(path(&cs_syms, "Method"), Some("Outer/Method".to_string()));
         assert_eq!(path(&cs_syms, "Inner"), Some("Outer/Inner".to_string()));
@@ -1009,14 +1067,14 @@ type Alias = Foo;
     fn index_anchors_symbols_at_their_name() {
         let extractor = SymbolExtractor::new();
         let src = "pub fn alpha() {}\nstruct Bravo;\nimpl Bravo { pub fn charlie(&self) {} }\n";
-        let syms = extractor.extract(src, Language::Rust);
+        let syms = extractor.extract(Path::new("a"), src, Language::Rust);
         let on_name = |name: &str| {
             let s = syms
                 .iter()
                 .find(|s| s.name == name)
                 .unwrap_or_else(|| panic!("{name} not extracted"));
-            let line = src.lines().nth((s.line - 1) as usize).unwrap();
-            let col0 = (s.column - 1) as usize;
+            let line = src.lines().nth((s.location.line - 1) as usize).unwrap();
+            let col0 = (s.location.column - 1) as usize;
             line[col0..].starts_with(name)
         };
         assert!(on_name("alpha"), "function anchored off its name");
@@ -1033,7 +1091,7 @@ type Config struct {}
 type Reader interface {}
 type Celsius float64
 "#;
-        let symbols = extractor.extract(content, Language::Go);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Go);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("main"), Some(SymbolKind::Function));
         assert_eq!(kind("Config"), Some(SymbolKind::Struct));
@@ -1049,7 +1107,7 @@ class Widget {}
 object Singleton {}
 fun build() {}
 "#;
-        let symbols = extractor.extract(content, Language::Kotlin);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Kotlin);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("Widget"), Some(SymbolKind::Class));
         assert_eq!(kind("Singleton"), Some(SymbolKind::Class));
@@ -1066,7 +1124,7 @@ def hello():
 class MyClass:
     pass
 "#;
-        let symbols = extractor.extract(content, Language::Python);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Python);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("hello"), Some(SymbolKind::Function));
         assert_eq!(kind("MyClass"), Some(SymbolKind::Class));
@@ -1081,7 +1139,7 @@ class Service {}
 interface Shape {}
 enum Color { Red, Blue }
 "#;
-        let symbols = extractor.extract(content, Language::TypeScript);
+        let symbols = extractor.extract(Path::new("a"), content, Language::TypeScript);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("greet"), Some(SymbolKind::Function));
         assert_eq!(kind("Service"), Some(SymbolKind::Class));
@@ -1109,7 +1167,7 @@ function outer() {
     for (let i = 0; i < 10; i++) {}
 }
 "#;
-        let symbols = extractor.extract(content, Language::TypeScript);
+        let symbols = extractor.extract(Path::new("a"), content, Language::TypeScript);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         // Module-scope function-valued declarators are Functions (callable),
         // not low-level Variables.
@@ -1152,7 +1210,7 @@ function outer() {
     const inner = () => {};
 }
 "#;
-        let symbols = extractor.extract(content, Language::JavaScript);
+        let symbols = extractor.extract(Path::new("a"), content, Language::JavaScript);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("greet"), Some(SymbolKind::Function));
         assert_eq!(kind("handler"), Some(SymbolKind::Function));
@@ -1167,7 +1225,7 @@ function outer() {
 function greet() {}
 class Service {}
 "#;
-        let symbols = extractor.extract(content, Language::JavaScript);
+        let symbols = extractor.extract(Path::new("a"), content, Language::JavaScript);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("greet"), Some(SymbolKind::Function));
         assert_eq!(kind("Service"), Some(SymbolKind::Class));
@@ -1181,7 +1239,7 @@ class Service {}
 interface Shape {}
 enum Color { RED, BLUE }
 "#;
-        let symbols = extractor.extract(content, Language::Java);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Java);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("Service"), Some(SymbolKind::Class));
         assert_eq!(kind("Shape"), Some(SymbolKind::Interface));
@@ -1196,7 +1254,7 @@ class Widget {};
 struct Point {};
 void run() {}
 "#;
-        let symbols = extractor.extract(content, Language::Cpp);
+        let symbols = extractor.extract(Path::new("a"), content, Language::Cpp);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("Widget"), Some(SymbolKind::Class));
         assert_eq!(kind("Point"), Some(SymbolKind::Struct));
@@ -1212,7 +1270,7 @@ interface IShape {}
 struct Point {}
 enum Color { Red }
 "#;
-        let symbols = extractor.extract(content, Language::CSharp);
+        let symbols = extractor.extract(Path::new("a"), content, Language::CSharp);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("Service"), Some(SymbolKind::Class));
         assert_eq!(kind("IShape"), Some(SymbolKind::Interface));
@@ -1228,7 +1286,7 @@ function greet() {}
 class Service {}
 interface Shape {}
 "#;
-        let symbols = extractor.extract(content, Language::PHP);
+        let symbols = extractor.extract(Path::new("a"), content, Language::PHP);
         let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
         assert_eq!(kind("greet"), Some(SymbolKind::Function));
         assert_eq!(kind("Service"), Some(SymbolKind::Class));

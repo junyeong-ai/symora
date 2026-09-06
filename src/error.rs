@@ -33,8 +33,15 @@ pub enum LspError {
         suggestion: String,
     },
 
+    /// `established` says whether the session answered `initialize` before it
+    /// died. A dropped session comes back when the server is restarted; one
+    /// that never established fails the same way every time, and the route out
+    /// of it runs through the surfaces that need no language server.
     #[error("{language:?} language server terminated unexpectedly")]
-    ServerTerminated { language: Language },
+    ServerTerminated {
+        language: Language,
+        established: bool,
+    },
 
     /// The server declined to answer because its workspace analysis is
     /// still incomplete (cold session, large project). Distinct from
@@ -146,7 +153,7 @@ impl LspError {
 
     pub fn affected_language(&self) -> Option<Language> {
         match self {
-            Self::ServerTerminated { language } => Some(*language),
+            Self::ServerTerminated { language, .. } => Some(*language),
             Self::FeatureNotSupported { language, .. } => Some(*language),
             Self::Indexing { language } => Some(*language),
             _ => None,
@@ -394,6 +401,7 @@ mod tests {
     fn test_server_terminated_error() {
         let err = LspError::ServerTerminated {
             language: Language::Rust,
+            established: false,
         };
         assert!(err.is_recoverable());
         assert_eq!(err.affected_language(), Some(Language::Rust));
@@ -448,6 +456,7 @@ mod tests {
     fn test_server_terminated_needs_restart() {
         let err = LspError::ServerTerminated {
             language: Language::Rust,
+            established: false,
         };
         assert!(err.is_recoverable());
         assert!(err.needs_restart());

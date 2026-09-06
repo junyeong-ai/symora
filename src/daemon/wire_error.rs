@@ -35,6 +35,8 @@ pub enum WireLspError {
     },
     ServerTerminated {
         language: Language,
+        #[serde(default)]
+        established: bool,
     },
     Indexing {
         language: Language,
@@ -91,8 +93,12 @@ impl From<&LspError> for WireLspError {
                 feature: feature.clone(),
                 suggestion: suggestion.clone(),
             },
-            LspError::ServerTerminated { language } => Self::ServerTerminated {
+            LspError::ServerTerminated {
+                language,
+                established,
+            } => Self::ServerTerminated {
                 language: *language,
+                established: *established,
             },
             LspError::Indexing { language } => Self::Indexing {
                 language: *language,
@@ -153,7 +159,13 @@ impl From<WireLspError> for LspError {
                 feature,
                 suggestion,
             },
-            WireLspError::ServerTerminated { language } => LspError::ServerTerminated { language },
+            WireLspError::ServerTerminated {
+                language,
+                established,
+            } => LspError::ServerTerminated {
+                language,
+                established,
+            },
             WireLspError::Indexing { language } => LspError::Indexing { language },
             WireLspError::Timeout { message } => LspError::Timeout(message),
             WireLspError::RequestCancelled => LspError::RequestCancelled,
@@ -239,14 +251,26 @@ mod tests {
         }
     }
 
+    /// The two terminations carry opposite advice — retry, or stop retrying
+    /// and take a route that needs no server — so the fact that tells them
+    /// apart has to survive the socket, not just the language.
     #[test]
-    fn server_terminated_round_trips_language() {
-        let recovered = round_trip(LspError::ServerTerminated {
-            language: Language::Rust,
-        });
-        match recovered {
-            LspError::ServerTerminated { language } => assert_eq!(language, Language::Rust),
-            other => panic!("expected ServerTerminated, got {other:?}"),
+    fn server_terminated_round_trips_whether_the_session_ever_existed() {
+        for established in [true, false] {
+            let recovered = round_trip(LspError::ServerTerminated {
+                language: Language::Rust,
+                established,
+            });
+            match recovered {
+                LspError::ServerTerminated {
+                    language,
+                    established: recovered,
+                } => {
+                    assert_eq!(language, Language::Rust);
+                    assert_eq!(recovered, established);
+                }
+                other => panic!("expected ServerTerminated, got {other:?}"),
+            }
         }
     }
 
