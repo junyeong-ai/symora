@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,6 +14,7 @@ use crate::cli::response::disclosure::LowerBound;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::find_symbol_at_position;
 use crate::models::lsp::FindSymbolsOptions;
+use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::TestScope;
 use crate::services::lsp::LspService;
 use crate::services::store::SymbolExtractor;
@@ -46,14 +47,14 @@ pub struct DiffImpactOutput {
     pub total_references: usize,
     pub coverage: DiffCoverage,
     pub changes: Vec<ChangedSymbolImpact>,
-    /// Files whose changes could not be measured: nothing could read the
-    /// symbols of their changed lines (deleted lines are read by the grammar
-    /// compiled into symora alone), they are symbolic links, whose lines are
-    /// a path rather than source, git reports them as binary and names no
-    /// lines, or — with `--staged` — unstaged edits sit over the staged ones,
-    /// so the lines the diff names are not the lines on disk. Their changes
-    /// are absent from `changes`, so the result is a lower bound for these
-    /// files. `hints` names the binary and staged causes; a file listed
+    /// Files whose changes could not be measured in full: nothing could read
+    /// the symbols of their changed lines (removed lines are read by the
+    /// grammar compiled into symora alone), they are symbolic links, whose
+    /// lines are a path rather than source, git reports them as binary and
+    /// names no lines, or — with `--staged` — unstaged edits sit over the
+    /// staged ones, so the lines the diff names are not the lines on disk.
+    /// What was not measured is absent from `changes`, so the result is a
+    /// lower bound for these files. `hints` names the binary and staged causes; a file listed
     /// without one is a link or one whose symbols could not be read. Omitted
     /// when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -139,17 +140,20 @@ pub enum ChangeType {
 /// `IndexingDegradation` disclosure idiom: a typed enum naming the state,
 /// omitted when not applicable. The two non-`Resolved` states are kept distinct
 /// because they license different claims: `NoSymbolInRange` was checked against
-/// the pre-image (only body lines were removed), so the enclosing current symbol
-/// can be reclassified to `Modified`; `PreimageUnavailable` could not be checked
-/// at all, so what was deleted is unknown and the row stays a disclosed deletion.
+/// the pre-image, so lines removed inside a surviving callable are reported as
+/// that callable's `Modified` instead; `PreimageUnavailable` could not be
+/// checked at all, so what was deleted is unknown and the row stays a disclosed
+/// deletion.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeletionResolution {
     /// The deleted symbol was identified from the pre-image (old git tree); its
     /// references are not recomputed (it no longer exists).
     Resolved,
-    /// The pre-image was read but declared no symbol in the deleted range — only
-    /// body lines were removed, not a declaration.
+    /// The built-in grammar read the pre-image and found no declaration in the
+    /// removed lines. The grammars read functions, methods, types and the like,
+    /// not every declaration form (a TypeScript `const` holding a value, a C
+    /// prototype), so this is not proof that none was removed.
     NoSymbolInRange,
     /// The pre-image itself could not be read (the `git show` of the old tree
     /// failed), so what was deleted is unknown — never guessed from diff text or
@@ -893,75 +897,169 @@ async fn analyze_hunks(
         // counts once. Spans deletion-derived and live rows alike.
         let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
 
-        // Deletion hunks. A deletion whose old range held an actual declaration
-        // is a deleted symbol, resolved against the pre-image. A deletion that
-        // removed only body lines of a surviving symbol MODIFIED that symbol —
-        // resolve it against the current tree instead of emitting a useless
-        // Unresolved deletion (a still-existing function is not "deleted").
-        for hunk in hunks
-            .iter()
-            .filter(|h| matches!(h.change_type, ChangeType::Deleted))
+        // Removed lines are read from the base's version of the file, never the
+        // current tree, and by the built-in grammar alone.
+        let removing: Vec<&DiffHunk> = hunks.iter().filter(|h| h.old_count > 0).copied().collect();
+        match removing
+            .first()
+            .map(|hunk| read_preimage(root, preimage_ref, &hunk.old_file))
         {
-            if at_cap(symbol_count) {
-                stopped_at_cap = true;
-                break;
-            }
-            let Some(deleted_rows) = resolve_deleted_hunk(root, preimage_ref, hunk) else {
-                unmeasured.push(file.clone());
-                continue;
-            };
-            // Reclassify ONLY a verified body-line deletion: the pre-image was
-            // read and declared no symbol in the deleted range, so a surviving
-            // symbol was Modified. A `PreimageUnavailable` row is NOT eligible —
-            // we could not check what was deleted, so guessing a live Modified
-            // would paper over the gap; it stays a disclosed deletion.
-            let body_only_deletion = deleted_rows.len() == 1
-                && deleted_rows[0].deletion == Some(DeletionResolution::NoSymbolInRange);
-
-            // Reclassify a body-line deletion as a Modified of the enclosing
-            // CURRENT symbol, using the shared `line_attributes_to_symbol` rule
-            // (callable body / leaf / own declaration line — never a container's
-            // inter-member gap) plus a strict-interior check: the deletion point
-            // must be before the symbol's last line, so a blank line AFTER it
-            // (new_start == f_end) is not attributed. Both guard against a false
-            // `Modified <container>` row that would carry the container's
-            // irrelevant references.
-            let enclosing = if body_only_deletion {
-                current_symbols.as_ref().and_then(|s| {
-                    let f = find_symbol_at_position(s, hunk.start_line, None)?;
-                    let f_end = f.location.end_line.unwrap_or(f.location.line);
-                    (line_attributes_to_symbol(f, hunk.start_line) && hunk.start_line < f_end)
-                        .then_some(f)
-                })
-            } else {
-                None
-            };
-            if let Some(sym) = enclosing {
-                if seen.insert((sym.location.line, sym.location.column)) {
-                    let impact = analyze_symbol_impact(
-                        app.lsp.as_ref(),
-                        file,
-                        sym.clone(),
-                        ChangeType::Modified,
-                        root,
-                        test_scope,
-                        include_callers,
-                        calls_limit,
-                    )
-                    .await;
-                    changes.push(impact);
+            None => {}
+            Some(Preimage::Unparsed) => unmeasured.push(file.clone()),
+            Some(Preimage::Unavailable) => {
+                for _ in &removing {
+                    if at_cap(symbol_count) {
+                        stopped_at_cap = true;
+                        break;
+                    }
+                    changes.push(unresolved_deletion(DeletionResolution::PreimageUnavailable));
                     symbol_count += 1;
                 }
-                continue;
             }
+            Some(Preimage::Parsed(before)) => {
+                let declared_in_removed = |hunk: &DiffHunk| {
+                    let (lo, hi) = (
+                        hunk.old_start,
+                        hunk.old_start.saturating_add(hunk.old_count),
+                    );
+                    before
+                        .iter()
+                        .filter(move |s| s.location.line >= lo && s.location.line < hi)
+                };
 
-            for row in deleted_rows {
-                if at_cap(symbol_count) {
-                    stopped_at_cap = true;
-                    break;
+                // A pure deletion removed every declaration in its range from
+                // where it stood.
+                let mut deleted: Vec<Identity> = Vec::new();
+                for hunk in removing
+                    .iter()
+                    .filter(|h| matches!(h.change_type, ChangeType::Deleted))
+                {
+                    if at_cap(symbol_count) {
+                        stopped_at_cap = true;
+                        break;
+                    }
+                    let declared: Vec<&Symbol> = declared_in_removed(hunk).collect();
+                    if declared.is_empty() {
+                        // No declaration the grammar reads was removed. Lines
+                        // removed strictly inside a surviving callable's body
+                        // modified it, whatever they held; the shared
+                        // `line_attributes_to_symbol` rule (callable body /
+                        // leaf / own declaration line, never a container's
+                        // inter-member gap) and the strict-interior check (a
+                        // blank line AFTER the symbol, new_start == f_end, is
+                        // not attributed) keep a container's references off a
+                        // row that is not about it.
+                        let enclosing = current_symbols.as_ref().and_then(|s| {
+                            let f = find_symbol_at_position(s, hunk.start_line, None)?;
+                            let f_end = f.location.end_line.unwrap_or(f.location.line);
+                            (line_attributes_to_symbol(f, hunk.start_line)
+                                && hunk.start_line < f_end)
+                                .then_some(f)
+                        });
+                        match enclosing {
+                            Some(sym) => {
+                                if seen.insert((sym.location.line, sym.location.column)) {
+                                    let impact = analyze_symbol_impact(
+                                        app.lsp.as_ref(),
+                                        file,
+                                        sym.clone(),
+                                        ChangeType::Modified,
+                                        root,
+                                        test_scope,
+                                        include_callers,
+                                        calls_limit,
+                                    )
+                                    .await;
+                                    changes.push(impact);
+                                    symbol_count += 1;
+                                }
+                            }
+                            None => {
+                                changes
+                                    .push(unresolved_deletion(DeletionResolution::NoSymbolInRange));
+                                symbol_count += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    for symbol in declared {
+                        if at_cap(symbol_count) {
+                            stopped_at_cap = true;
+                            break;
+                        }
+                        deleted.push(identity(symbol));
+                        changes.push(deleted_row(symbol, &hunk.old_file, root));
+                        symbol_count += 1;
+                    }
                 }
-                changes.push(row);
-                symbol_count += 1;
+
+                // Lines replaced in place may hold a declaration the change
+                // kept (an edited signature) or one it removed (a rename). It
+                // was removed when the file now declares fewer of its identity
+                // than before, counting both versions with the same grammar,
+                // and a pure deletion has not already accounted for it. When
+                // more replaced declarations share such an identity than were
+                // removed (overloads; same-named Go methods, whose receiver the
+                // grammar does not record), a declaration edited in place is
+                // declared again in the lines that replaced it, so those that
+                // are not are the removed ones; past them, the first in file
+                // order are reported.
+                let replacing: Vec<&DiffHunk> = removing
+                    .iter()
+                    .filter(|h| matches!(h.change_type, ChangeType::Modified))
+                    .copied()
+                    .collect();
+                if !replacing.is_empty() && !at_cap(symbol_count) {
+                    match current_declarations(file) {
+                        None => unmeasured.push(file.clone()),
+                        Some(after) => {
+                            let mut removed = counts(before.iter().map(identity));
+                            for id in after.iter().map(identity).chain(deleted) {
+                                if let Some(n) = removed.get_mut(&id) {
+                                    *n = n.saturating_sub(1);
+                                }
+                            }
+                            let replaced: Vec<(&DiffHunk, &Symbol)> = replacing
+                                .iter()
+                                .flat_map(|&hunk| {
+                                    declared_in_removed(hunk).map(move |symbol| (hunk, symbol))
+                                })
+                                .collect();
+                            let declared_again = |hunk: &DiffHunk, symbol: &Symbol| {
+                                let end = hunk.start_line.saturating_add(hunk.line_count);
+                                after.iter().any(|kept| {
+                                    (hunk.start_line..end).contains(&kept.location.line)
+                                        && identity(kept) == identity(symbol)
+                                })
+                            };
+                            let mut chosen = vec![false; replaced.len()];
+                            for again in [false, true] {
+                                for (i, (hunk, symbol)) in replaced.iter().enumerate() {
+                                    if declared_again(hunk, symbol) != again {
+                                        continue;
+                                    }
+                                    if let Some(n) = removed.get_mut(&identity(symbol))
+                                        && *n > 0
+                                    {
+                                        *n -= 1;
+                                        chosen[i] = true;
+                                    }
+                                }
+                            }
+                            for ((hunk, symbol), chosen) in replaced.into_iter().zip(chosen) {
+                                if !chosen {
+                                    continue;
+                                }
+                                if at_cap(symbol_count) {
+                                    stopped_at_cap = true;
+                                    break;
+                                }
+                                changes.push(deleted_row(symbol, &hunk.old_file, root));
+                                symbol_count += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1119,23 +1217,85 @@ async fn analyze_symbol_impact(
     }
 }
 
-/// Resolve a deleted hunk against the pre-image (old git tree) — never the
-/// current tree. Returns one row per symbol declared inside the deleted line
-/// range, or one row saying the range declared none or the pre-image could
-/// not be read, so a deletion is disclosed rather than silently dropped.
-/// `None` when no grammar compiled into this binary reads the pre-image's
-/// language: what was deleted is then unknown, not "no symbol".
-fn resolve_deleted_hunk(
-    root: &Path,
-    preimage_ref: &str,
-    hunk: &DiffHunk,
-) -> Option<Vec<ChangedSymbolImpact>> {
-    let file = &hunk.old_file;
-    let language = crate::models::symbol::Language::from_path(file);
+/// What the built-in grammar reads in the base's version of a file.
+enum Preimage {
+    /// No grammar compiled into this binary reads the file's language, so what
+    /// its removed lines declared is unknown.
+    Unparsed,
+    /// The base's version could not be read (`git show` failed).
+    Unavailable,
+    Parsed(Vec<Symbol>),
+}
+
+fn read_preimage(root: &Path, preimage_ref: &str, file: &Path) -> Preimage {
+    let language = Language::from_path(file);
+    if !SymbolExtractor::is_supported(language) {
+        return Preimage::Unparsed;
+    }
+    let relpath = file.strip_prefix(root).unwrap_or(file);
+    match git_show(root, preimage_ref, relpath) {
+        Some(content) => {
+            Preimage::Parsed(SymbolExtractor::shared().extract(file, &content, language))
+        }
+        None => Preimage::Unavailable,
+    }
+}
+
+/// What tells a declaration apart from the others in its file, as far as
+/// whether a change removed it goes. Overloads share one.
+type Identity = (Option<String>, String, SymbolKind);
+
+fn identity(symbol: &Symbol) -> Identity {
+    (symbol.container.clone(), symbol.name.clone(), symbol.kind)
+}
+
+fn counts(identities: impl Iterator<Item = Identity>) -> HashMap<Identity, usize> {
+    let mut counts = HashMap::new();
+    for id in identities {
+        *counts.entry(id).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// The declarations the built-in grammar reads in the file on disk, or `None`
+/// when it cannot: no grammar reads the file's language, or it is not text.
+fn current_declarations(file: &Path) -> Option<Vec<Symbol>> {
+    let language = Language::from_path(file);
     if !SymbolExtractor::is_supported(language) {
         return None;
     }
-    let deletion_row = |resolution| ChangedSymbolImpact {
+    let content = std::fs::read_to_string(file).ok()?;
+    Some(SymbolExtractor::shared().extract(file, &content, language))
+}
+
+/// A declaration the change removed, read from the pre-image. Its position is
+/// in the base's version of `old_file`: the only honest position for a symbol
+/// that no longer exists in the current tree.
+fn deleted_row(symbol: &Symbol, old_file: &Path, root: &Path) -> ChangedSymbolImpact {
+    ChangedSymbolImpact {
+        name: Some(symbol.name.clone()),
+        kind: Some(symbol.kind.to_string()),
+        location: Some(LocationOutput::from_path(
+            old_file,
+            symbol.location.line,
+            symbol.location.column,
+            root,
+        )),
+        change_type: ChangeType::Deleted,
+        refs: None,
+        test_refs: None,
+        prod_refs: None,
+        refs_status: None,
+        callers: vec![],
+        callers_status: None,
+        deletion: Some(DeletionResolution::Resolved),
+    }
+}
+
+/// A removal whose declarations were not identified, disclosed rather than
+/// dropped.
+fn unresolved_deletion(resolution: DeletionResolution) -> ChangedSymbolImpact {
+    ChangedSymbolImpact {
         name: None,
         kind: None,
         location: None,
@@ -1147,46 +1307,7 @@ fn resolve_deleted_hunk(
         callers: vec![],
         callers_status: None,
         deletion: Some(resolution),
-    };
-
-    let relpath = file.strip_prefix(root).unwrap_or(file);
-    let Some(content) = git_show(root, preimage_ref, relpath) else {
-        return Some(vec![deletion_row(DeletionResolution::PreimageUnavailable)]);
-    };
-
-    let lo = hunk.old_start;
-    let hi = hunk.old_start.saturating_add(hunk.old_count.max(1));
-    let matched: Vec<ChangedSymbolImpact> = SymbolExtractor::shared()
-        .extract(file, &content, language)
-        .into_iter()
-        .filter(|s| s.location.line >= lo && s.location.line < hi)
-        .map(|s| ChangedSymbolImpact {
-            name: Some(s.name),
-            kind: Some(s.kind.to_string()),
-            // Old-file coordinates: the only honest position for a symbol that
-            // no longer exists in the current tree.
-            location: Some(LocationOutput::from_path(
-                file,
-                s.location.line,
-                s.location.column,
-                root,
-            )),
-            change_type: ChangeType::Deleted,
-            refs: None,
-            test_refs: None,
-            prod_refs: None,
-            refs_status: None,
-            callers: vec![],
-            callers_status: None,
-            deletion: Some(DeletionResolution::Resolved),
-        })
-        .collect();
-
-    Some(if matched.is_empty() {
-        vec![deletion_row(DeletionResolution::NoSymbolInRange)]
-    } else {
-        matched
-    })
+    }
 }
 
 /// `git show <ref>:./<relpath>` — the file content at the pre-image revision.
