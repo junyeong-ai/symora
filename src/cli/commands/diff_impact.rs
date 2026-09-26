@@ -184,6 +184,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         ));
     }
 
+    let changed_files: HashSet<PathBuf> = hunks.iter().map(|h| h.file.clone()).collect();
+
     if args.staged {
         let unstaged = unstaged_files(root)?;
         let (overlaid, staged): (Vec<_>, Vec<_>) =
@@ -223,7 +225,6 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         hints.push(LowerBound::AnalysisCapped(args.max_symbols).hint());
     }
 
-    let changed_files: HashSet<_> = hunks.iter().map(|h| &h.file).collect();
     // Coverage is measured only over rows that have reference counts
     // (Added/Modified). Deleted rows carry no refs — counting them as
     // "without tests" would pollute the ratio with symbols that have no live
