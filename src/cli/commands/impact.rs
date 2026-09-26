@@ -143,8 +143,8 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 
 /// Gated follow-up commands, in fixed priority order. Every gate keys off
 /// a disclosure the output already carries: `max_depth_reached` means the
-/// final frontier still had unexplored callers, so one more depth widens a
-/// graph known incomplete (silent at `IMPACT_MAX_DEPTH`); an `incomplete`
+/// walk did not look past its final level, so one more depth widens a graph
+/// not known to be complete (silent at `IMPACT_MAX_DEPTH`); an `incomplete`
 /// dynamic dispatch means `find_implementations` returned a non-empty set,
 /// so the steered command enumerates exactly the unfolded implementations
 /// (`unavailable` is excluded — that lookup already failed, steering to it

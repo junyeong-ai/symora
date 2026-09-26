@@ -37,6 +37,9 @@ pub struct BlastRadius {
     pub direct_callers: usize,
     pub transitive_callers: usize,
     pub depth: u32,
+    /// The walk stopped at `depth` with callers there it did not look past,
+    /// so `transitive_callers` is a lower bound. `direct_callers` does not
+    /// depend on depth.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub max_depth_reached: bool,
     /// True when at least one node's caller list was cut at
