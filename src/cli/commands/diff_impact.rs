@@ -47,8 +47,9 @@ pub struct DiffImpactOutput {
     pub coverage: DiffCoverage,
     pub changes: Vec<ChangedSymbolImpact>,
     /// Files whose changes could not be measured: nothing could read their
-    /// symbols, or — with `--staged` — unstaged edits sit over the staged
-    /// ones, so the lines the diff names are not the lines on disk. Their
+    /// symbols, git reports them as binary and names no lines, or — with
+    /// `--staged` — unstaged edits sit over the staged ones, so the lines the
+    /// diff names are not the lines on disk. Their
     /// changes are absent from `changes`, so the result is a lower bound for
     /// these files; `hints` says which cause applies. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -172,6 +173,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 
     let base = resolve_base(root, &args.revision)?;
     let mut hunks = parse_git_diff(root, base.tree_ish(), args.staged)?;
+    let changed_files = changed_files(root, base.tree_ish(), args.staged)?;
     let mut hints = Vec::new();
     let mut unmeasured_files = Vec::new();
 
@@ -186,7 +188,19 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         ));
     }
 
-    let changed_files: HashSet<PathBuf> = hunks.iter().map(|h| h.file.clone()).collect();
+    let binary: BTreeSet<String> = changed_files
+        .iter()
+        .filter(|file| file.binary)
+        .map(|file| relative_display(&file.path, root))
+        .collect();
+    if !binary.is_empty() {
+        hints.push(format!(
+            "git reports {} as binary, so which of their lines changed is not known; a `-diff` \
+             or `binary` attribute does this to a text file.",
+            binary.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+        unmeasured_files.extend(binary);
+    }
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
@@ -444,6 +458,75 @@ fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Vec<DiffHunk>
 
     let diff_output = String::from_utf8_lossy(&output.stdout);
     Ok(parse_diff_output(&diff_output, root))
+}
+
+/// A file the diff changes. `binary` when git diffs it as binary, so its
+/// patch names no lines.
+struct ChangedFile {
+    path: PathBuf,
+    binary: bool,
+}
+
+/// Every file the diff changes, from the same diff's `--numstat`. The patch
+/// alone would miss those it names no lines for: an empty file, a mode
+/// change, a pure rename, and a file git diffs as binary.
+fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<ChangedFile>> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root);
+    cmd.args([
+        "diff",
+        "--relative",
+        "--numstat",
+        "-z",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]);
+    if staged {
+        cmd.arg("--cached");
+    }
+    cmd.args([base, "--"]);
+
+    let output = cmd.output().context("Failed to run git diff")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(parse_numstat(&output.stdout, root))
+}
+
+/// `--numstat -z` writes `added<TAB>deleted<TAB>path<NUL>`, or for a rename
+/// `added<TAB>deleted<TAB><NUL>old<NUL>new<NUL>`; a binary file counts `-`
+/// for both.
+fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<ChangedFile> {
+    let mut fields = numstat.split(|&b| b == 0);
+    let mut files = Vec::new();
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let record = String::from_utf8_lossy(record);
+        let mut columns = record.splitn(3, '\t');
+        let (added, deleted) = (columns.next(), columns.next());
+        let binary = added == Some("-") && deleted == Some("-");
+        let path = match columns.next() {
+            Some("") | None => {
+                fields.next();
+                fields
+                    .next()
+                    .map(|new| String::from_utf8_lossy(new).into_owned())
+            }
+            Some(path) => Some(path.to_string()),
+        };
+        if let Some(path) = path {
+            files.push(ChangedFile {
+                path: root.join(path),
+                binary,
+            });
+        }
+    }
+    files
 }
 
 fn parse_diff_output(diff: &str, root: &Path) -> Vec<DiffHunk> {
@@ -948,6 +1031,26 @@ fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_changed_file_is_read_from_numstat_and_binary_ones_marked() {
+        let root = Path::new("/r");
+        let numstat = b"1\t1\tm.py\x000\t0\tempty.py\x00-\t-\tlogo.png\x00-\t-\t\x00old.bin\x00new.bin\x002\t0\t\x00a.py\x00b.py\x00";
+        let files: Vec<(PathBuf, bool)> = parse_numstat(numstat, root)
+            .into_iter()
+            .map(|file| (file.path, file.binary))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                (root.join("m.py"), false),
+                (root.join("empty.py"), false),
+                (root.join("logo.png"), true),
+                (root.join("new.bin"), true),
+                (root.join("b.py"), false),
+            ]
+        );
+    }
 
     // ---------------------------------------------------------------
     // parse_range tests

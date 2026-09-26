@@ -1450,6 +1450,65 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
     assert_eq!(changed, ["a", "c"], "GIT_DIFF_OPTS=-u5: {page}");
 }
 
+/// A change the patch names no lines for, an empty file or a mode change,
+/// is still a changed file, with nothing in it left unmeasured.
+#[cfg(unix)]
+#[test]
+fn a_change_that_names_no_lines_is_still_counted() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("run.py"), "def run():\n    return 1\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::set_permissions(repo.join("run.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(repo.join("empty.py"), "").unwrap();
+    git(repo, &["add", "-A"]);
+
+    let page = json_ok(repo, &["diff-impact"]);
+    assert_eq!(page["changed_files_count"], 2, "{page}");
+    assert_eq!(page["changed_symbols_count"], 0, "{page}");
+    assert!(page["unmeasured_files"].is_null(), "{page}");
+    assert!(page["hints"].is_null(), "{page}");
+}
+
+/// A file git reports as binary names no changed lines, so it is counted
+/// and disclosed rather than dropped.
+#[cfg(unix)]
+#[test]
+fn a_file_git_reports_as_binary_is_counted_and_disclosed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("gen.py"), "def g():\n    return 1\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 2\n").unwrap();
+    std::fs::write(repo.join("gen.py"), "def g():\n    return 2\n").unwrap();
+    std::fs::write(repo.join(".git/info/attributes"), "gen.py -diff\n").unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    assert_eq!(page["changed_files_count"], 2, "{page}");
+    assert_eq!(page["changes"][0]["name"], "a", "{page}");
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["gen.py"]),
+        "{page}"
+    );
+    assert!(
+        page["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("gen.py as binary")),
+        "{page}"
+    );
+}
+
 /// The other side of a diff is always read from the working tree, so a range
 /// names a second tree nothing reads. git answers `git show A..B:path` with an
 /// empty file, which turned every deletion into "no symbol in range"; the

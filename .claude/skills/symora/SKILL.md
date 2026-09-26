@@ -104,7 +104,7 @@ symora diff-impact
 symora diff-impact $(git merge-base main HEAD)   # one base revision, never a range
 ```
 
-`diff-impact [REV]` measures the tracked working tree — staged and unstaged — against one revision (default `HEAD`); run from a subdirectory, it measures that subdirectory. `--staged` measures the index instead, and lists in `unmeasured_files` the files whose staged lines sit under unstaged edits. A base that is not an ancestor of `HEAD` gets a hint: the diff also takes back what the base gained.
+`diff-impact [REV]` measures the tracked working tree — staged and unstaged — against one revision (default `HEAD`); run from a subdirectory, it measures that subdirectory. `--staged` measures the index instead. `unmeasured_files` lists the changed files whose symbols it could not measure — none could be read, git reports the file as binary, or (with `--staged`) the staged lines sit under unstaged edits — and `hints` names the cause. A base that is not an ancestor of `HEAD` gets a hint: the diff also takes back what the base gained.
 
 Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run`.
 
