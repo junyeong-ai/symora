@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +99,16 @@ impl Location {
             self.range_start_column.unwrap_or(self.column),
         )
     }
+
+    /// Whether this location covers a position in `file`: from its start
+    /// through its end, or only its start when it has no end.
+    pub fn covers(&self, file: &Path, line: u32, column: u32) -> bool {
+        let end = (
+            self.end_line.unwrap_or(self.line),
+            self.end_column.unwrap_or(self.column),
+        );
+        self.file == file && self.effective_start() <= (line, column) && (line, column) <= end
+    }
 }
 
 impl fmt::Display for Location {
@@ -115,6 +125,21 @@ mod tests {
     fn location_display_uses_file_line_column() {
         let loc = Location::point(PathBuf::from("/test/file.rs"), 10, 5);
         assert_eq!(loc.to_string(), "/test/file.rs:10:5");
+    }
+
+    #[test]
+    fn a_location_covers_the_positions_within_its_span_in_its_own_file() {
+        let span = Location::full(PathBuf::from("a.ts"), 48, 9, 48, 3, 52, 4);
+        assert!(span.covers(Path::new("a.ts"), 48, 9));
+        assert!(span.covers(Path::new("a.ts"), 48, 3));
+        assert!(span.covers(Path::new("a.ts"), 52, 4));
+        assert!(!span.covers(Path::new("a.ts"), 48, 2));
+        assert!(!span.covers(Path::new("a.ts"), 52, 5));
+        assert!(!span.covers(Path::new("b.ts"), 48, 9));
+
+        let point = Location::point(PathBuf::from("a.ts"), 48, 9);
+        assert!(point.covers(Path::new("a.ts"), 48, 9));
+        assert!(!point.covers(Path::new("a.ts"), 48, 30));
     }
 
     #[test]

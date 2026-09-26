@@ -231,7 +231,7 @@ async fn detect_dynamic_dispatch(
             let implementations = impls
                 .data
                 .iter()
-                .filter(|location| location.file != file || location.line != line)
+                .filter(|location| !location.covers(file, line, column))
                 .count();
             (implementations > 0).then_some(DynamicDispatch {
                 status: DispatchStatus::Incomplete,
@@ -585,16 +585,33 @@ mod tests {
         );
         assert!(radius.dynamic_dispatch.is_none());
 
+        let whole_declaration = compute_for(
+            HashMap::new(),
+            Ok(vec![Location::full(
+                PathBuf::from("src/lib.rs"),
+                10,
+                1,
+                10,
+                1,
+                14,
+                2,
+            )]),
+            Some(SymbolKind::Method),
+            WalkConfig::default(),
+        );
+        assert!(whole_declaration.dynamic_dispatch.is_none());
+
         let overridden = compute_for(
             HashMap::new(),
             Ok(vec![
                 Location::point(PathBuf::from("src/lib.rs"), 10, 5),
+                Location::point(PathBuf::from("src/lib.rs"), 10, 40),
                 impl_at(40),
             ]),
             Some(SymbolKind::Method),
             WalkConfig::default(),
         );
-        assert_eq!(overridden.dynamic_dispatch.unwrap().implementations, 1);
+        assert_eq!(overridden.dynamic_dispatch.unwrap().implementations, 2);
     }
 
     #[test]
