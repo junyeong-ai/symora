@@ -36,8 +36,8 @@ pub(crate) fn lsp_error_at(err: LspError, file: &str, line: u32, column: u32) ->
     }
     if recoverable {
         return mapped.with_hint(format!(
-            "Retry after `symora daemon restart`, or use `symora symbols {file}` and \
-             `symora usage {file}:{line}:{column}` to continue from file-level analysis.",
+            "Retry, or use `symora symbols {file}` and `symora usage {file}:{line}:{column}` \
+             to continue from file-level analysis.",
         ));
     }
     mapped.with_hint(format!(

@@ -117,7 +117,8 @@ impl From<LspError> for OutputError {
             }
             LspError::ServerTerminated { established, .. } => {
                 Self::new(ErrorCode::LspUnavailable, message).with_hint(match established {
-                    true => "The session dropped — retry, or `symora daemon restart`.".to_string(),
+                    true => "The session dropped — retry; the next request starts a new server."
+                        .to_string(),
                     false => "The server never answered initialize, so restarting repeats it — \
                               run `symora doctor` for what it does on this workspace. \
                               `symora symbols`, `symora search` and `symora map` answer without \
