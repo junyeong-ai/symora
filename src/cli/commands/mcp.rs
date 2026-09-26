@@ -38,8 +38,8 @@ pub enum McpCommand {
     },
 
     /// Print the tool catalog as JSON — names, descriptions, input
-    /// schemas, mutation annotations, and, on list-shaped tools, output
-    /// schemas. The exact payload `tools/list` serves; a tool's output
+    /// schemas, mutation annotations, and output schemas where a tool
+    /// declares one. The exact payload `tools/list` serves; a tool's output
     /// schema also describes the JSON the matching CLI command emits.
     Tools {
         /// Profile whose visible catalog to print.
