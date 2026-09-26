@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{RwLock, mpsc, watch};
+use tokio::sync::{OnceCell, RwLock, mpsc, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
@@ -128,8 +128,10 @@ pub struct LspManager {
     runtime_config: Arc<crate::config::LspRuntimeConfig>,
     file_watch: FileWatch,
     /// Started with the first server, so every server that registers file
-    /// watchers is told about changes from its start on.
-    watcher: Mutex<Option<WorkspaceWatcher>>,
+    /// watchers is told about changes from its start on. Servers starting
+    /// together share one start: two walks of the tree would compete for the
+    /// same watch budget.
+    watcher: OnceCell<Mutex<WorkspaceWatcher>>,
     /// Languages the health monitor abandoned auto-restart on, with the
     /// reason. `server_status` reports these as `CriticalFailure` so a broken
     /// server is an honest terminal state, not a perpetual `Stopped`. Cleared
@@ -149,7 +151,7 @@ impl LspManager {
             clients: Mutex::new(HashMap::new()),
             configs: servers::merged(&runtime_config.servers),
             runtime_config,
-            watcher: Mutex::new(None),
+            watcher: OnceCell::new(),
             critical_failures: RwLock::new(HashMap::new()),
         }
     }
@@ -331,31 +333,30 @@ impl LspManager {
         if self.file_watch == FileWatch::Off {
             return false;
         }
-        if self
+        let mut installed = None;
+        let started = self
             .watcher
-            .lock()
-            .expect("watcher lock poisoned")
-            .is_some()
-        {
-            return true;
+            .get_or_try_init(|| async {
+                let root = self.root.clone();
+                let (watcher, events, watch_root) =
+                    tokio::task::spawn_blocking(move || WorkspaceWatcher::start(&root))
+                        .await
+                        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()))?;
+                installed = Some((events, watch_root));
+                Ok::<_, notify::Error>(Mutex::new(watcher))
+            })
+            .await;
+        // Forwarding begins once the watcher is in place to follow what the
+        // events report; until then they wait in the channel.
+        if let Some((events, watch_root)) = installed {
+            tokio::spawn(forward_file_changes(
+                Arc::downgrade(self),
+                events,
+                watch_root,
+            ));
         }
-        let root = self.root.clone();
-        let started = tokio::task::spawn_blocking(move || WorkspaceWatcher::start(&root))
-            .await
-            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
         match started {
-            Ok((started, events, watch_root)) => {
-                let mut watcher = self.watcher.lock().expect("watcher lock poisoned");
-                if watcher.is_none() {
-                    tokio::spawn(forward_file_changes(
-                        Arc::downgrade(self),
-                        events,
-                        watch_root,
-                    ));
-                    *watcher = Some(started);
-                }
-                true
-            }
+            Ok(_) => true,
             Err(e) => {
                 tracing::warn!(
                     "Cannot watch {} ({e}); language servers will not see files change on disk",
@@ -369,8 +370,12 @@ impl LspManager {
     /// Keep the watch over what changed, and report the files of each
     /// directory that appeared (`WorkspaceWatcher::follow`).
     fn follow(&self, mut changes: Vec<FileChange>, watch_root: &Path) -> Vec<FileChange> {
-        if let Some(watcher) = self.watcher.lock().expect("watcher lock poisoned").as_mut() {
-            watcher.follow(&mut changes, watch_root, &self.root);
+        if let Some(watcher) = self.watcher.get() {
+            watcher.lock().expect("watcher lock poisoned").follow(
+                &mut changes,
+                watch_root,
+                &self.root,
+            );
         }
         changes
     }
@@ -1118,7 +1123,7 @@ exec sleep 600
             let manager = fake.manager_watching("serve", 0, FileWatch::Off);
             let client = bounded(manager.get_client(Language::Go)).await.unwrap();
 
-            assert!(manager.watcher.lock().unwrap().is_none());
+            assert!(manager.watcher.get().is_none());
 
             drop((client, manager));
             fake.assert_all_gone().await;
