@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{RwLock, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
@@ -12,7 +12,9 @@ use crate::error::LspError;
 use crate::models::symbol::Language;
 
 enum ClientState {
-    Initializing(Arc<Notify>),
+    /// A start is in flight. Its `StartSlot` holds the sending half; the
+    /// channel closes when the slot drops, whatever ended the start.
+    Initializing(watch::Receiver<()>),
     Live {
         client: Arc<LspClient>,
         last_used: Instant,
@@ -48,9 +50,77 @@ impl ClientState {
     }
 }
 
+enum Reservation {
+    /// Another caller holds the entry; read it again.
+    Taken,
+    /// The pool is at capacity and every entry is mid-start.
+    Full(watch::Receiver<()>),
+    Granted {
+        done: watch::Sender<()>,
+        evict: Option<Language>,
+    },
+}
+
+/// A start's claim on its pool entry. The start runs as its own task, so a
+/// caller that stops waiting neither cancels it nor strands the entry: the
+/// slot either fills the entry with the started client or, dropped without
+/// filling it — failure, panic, runtime shutdown — clears it. Either way the
+/// channel closes and every waiter re-reads the pool.
+struct StartSlot {
+    manager: Arc<LspManager>,
+    language: Language,
+    done: watch::Sender<()>,
+}
+
+impl StartSlot {
+    async fn run(self, evict: Option<Language>) -> Result<Arc<LspClient>, LspError> {
+        if let Some(victim) = evict
+            && let Err(e) = self.manager.shutdown_client(victim).await
+        {
+            tracing::warn!(
+                "Failed to evict {:?} before starting {:?}: {}",
+                victim,
+                self.language,
+                e
+            );
+        }
+        let client = self.manager.spawn_server(self.language).await?;
+        self.fill(&client);
+        Ok(client)
+    }
+
+    /// Hand the started client to the pool — unless a shutdown or restart
+    /// took the entry meanwhile. Then the caller keeps the only handle, and
+    /// the server stops when that caller is done with it.
+    fn fill(&self, client: &Arc<LspClient>) {
+        let mut clients = self.manager.pool();
+        if self.holds(&clients) {
+            clients.insert(self.language, ClientState::live(Arc::clone(client)));
+        }
+    }
+
+    fn holds(&self, clients: &HashMap<Language, ClientState>) -> bool {
+        matches!(
+            clients.get(&self.language),
+            Some(ClientState::Initializing(done)) if done.same_channel(&self.done.subscribe())
+        )
+    }
+}
+
+impl Drop for StartSlot {
+    fn drop(&mut self) {
+        let mut clients = self.manager.pool();
+        if self.holds(&clients) {
+            clients.remove(&self.language);
+        }
+    }
+}
+
 pub struct LspManager {
     root: PathBuf,
-    clients: RwLock<HashMap<Language, ClientState>>,
+    /// Every section under this lock is synchronous, so a `StartSlot` can
+    /// release its entry from `Drop`.
+    clients: Mutex<HashMap<Language, ClientState>>,
     configs: HashMap<Language, ServerConfig>,
     runtime_config: Arc<crate::config::LspRuntimeConfig>,
     /// Languages the health monitor abandoned auto-restart on, with the
@@ -64,11 +134,15 @@ impl LspManager {
     pub fn new(root: PathBuf, runtime_config: Arc<crate::config::LspRuntimeConfig>) -> Self {
         Self {
             root,
-            clients: RwLock::new(HashMap::new()),
+            clients: Mutex::new(HashMap::new()),
             configs: servers::merged(&runtime_config.servers),
             runtime_config,
             critical_failures: RwLock::new(HashMap::new()),
         }
+    }
+
+    fn pool(&self) -> MutexGuard<'_, HashMap<Language, ClientState>> {
+        self.clients.lock().expect("client pool lock poisoned")
     }
 
     /// Record that auto-restart was abandoned for a language. Called by the
@@ -90,80 +164,96 @@ impl LspManager {
         self.critical_failures.read().await.get(&language).cloned()
     }
 
-    /// Get or start a client for a language (race-safe, deadlock-free)
-    pub async fn get_client(&self, language: Language) -> Result<Arc<LspClient>, LspError> {
+    /// The pooled client for a language, starting one when there is none.
+    ///
+    /// A client whose process has exited is replaced. Concurrent callers share
+    /// one start; the caller that triggered it receives its error, and a caller
+    /// that only waited on a failed start makes its own attempt.
+    pub async fn get_client(
+        self: &Arc<Self>,
+        language: Language,
+    ) -> Result<Arc<LspClient>, LspError> {
         loop {
-            // Phase 1: Get client or notify under lock, release immediately
-            let (client_opt, notify_opt) = {
-                let clients = self.clients.read().await;
-                match clients.get(&language) {
-                    Some(ClientState::Live { client, .. }) => (Some(Arc::clone(client)), None),
-                    Some(ClientState::Initializing(notify)) => (None, Some(Arc::clone(notify))),
-                    None => (None, None),
-                }
-            };
+            let pooled = self.pool().get(&language).map(|state| match state {
+                ClientState::Live { client, .. } => Ok(Arc::clone(client)),
+                ClientState::Initializing(done) => Err(done.clone()),
+            });
 
-            // Phase 2: Check if running outside lock
-            if let Some(client) = client_opt
-                && client.is_running().await
-            {
-                let mut clients = self.clients.write().await;
-                if let Some(state) = clients.get_mut(&language) {
-                    state.touch();
-                }
-                return Ok(client);
-            }
-            // Dead client - need to restart
-
-            // Phase 3: Wait for initialization or start new
-            if let Some(notify) = notify_opt {
-                notify.notified().await;
-                continue;
-            }
-
-            // Phase 4: Start new client (with LRU eviction if pool full)
-            let notify = Arc::new(Notify::new());
-            let evict = {
-                let mut clients = self.clients.write().await;
-                if clients.contains_key(&language) {
-                    continue; // Race: another thread started, retry
-                }
-                let cap = self.runtime_config.max_concurrent_servers.max(1);
-                let evict = self.pick_eviction_target(&clients);
-                if clients.len() >= cap && evict.is_none() {
-                    // At capacity with nothing evictable: every occupant
-                    // is mid-startup. Wait for one to settle instead of
-                    // exceeding the cap with another Initializing entry.
-                    let waiter = clients.values().find_map(|state| match state {
-                        ClientState::Initializing(n) => Some(Arc::clone(n)),
-                        _ => None,
-                    });
-                    drop(clients);
-                    if let Some(waiter) = waiter {
-                        // Timeout guards the registration race between
-                        // releasing the lock and polling the Notified
-                        // future; the loop re-checks either way.
-                        let _ = tokio::time::timeout(Duration::from_millis(250), waiter.notified())
-                            .await;
+            match pooled {
+                Some(Ok(client)) => {
+                    if client.is_running().await {
+                        if let Some(state) = self.pool().get_mut(&language) {
+                            state.touch();
+                        }
+                        return Ok(client);
                     }
+                    self.retire(language, &client);
                     continue;
                 }
-                clients.insert(language, ClientState::Initializing(Arc::clone(&notify)));
-                evict
-            };
-
-            if let Some(victim) = evict
-                && let Err(e) = self.shutdown_client(victim).await
-            {
-                tracing::warn!(
-                    "Failed to evict {:?} before starting {:?}: {}",
-                    victim,
-                    language,
-                    e
-                );
+                Some(Err(mut starting)) => {
+                    let _ = starting.changed().await;
+                    continue;
+                }
+                None => {}
             }
 
-            return self.start_client_internal(language, notify).await;
+            let (done, evict) = match self.reserve(language) {
+                Reservation::Taken => continue,
+                Reservation::Full(mut settling) => {
+                    let _ = settling.changed().await;
+                    continue;
+                }
+                Reservation::Granted { done, evict } => (done, evict),
+            };
+
+            let slot = StartSlot {
+                manager: Arc::clone(self),
+                language,
+                done,
+            };
+            return match tokio::spawn(slot.run(evict)).await {
+                Ok(started) => started,
+                Err(e) => std::panic::resume_unwind(e.into_panic()),
+            };
+        }
+    }
+
+    /// Claim the entry for a new start, choosing the least-recently-used
+    /// client to evict when the pool is at capacity.
+    fn reserve(&self, language: Language) -> Reservation {
+        let mut clients = self.pool();
+        if clients.contains_key(&language) {
+            return Reservation::Taken;
+        }
+        let cap = self.runtime_config.max_concurrent_servers.max(1);
+        let evict = self.pick_eviction_target(&clients);
+        if clients.len() >= cap && evict.is_none() {
+            // At capacity with nothing evictable: every occupant is
+            // mid-startup. Wait for one to settle instead of exceeding the
+            // cap with another Initializing entry.
+            let settling = clients.values().find_map(|state| match state {
+                ClientState::Initializing(done) => Some(done.clone()),
+                ClientState::Live { .. } => None,
+            });
+            return Reservation::Full(
+                settling.expect("a full pool with nothing to evict holds only starts"),
+            );
+        }
+        let (done, starting) = watch::channel(());
+        clients.insert(language, ClientState::Initializing(starting));
+        Reservation::Granted { done, evict }
+    }
+
+    /// Drop a pooled client whose server exited, unless it was already
+    /// replaced.
+    fn retire(&self, language: Language, dead: &Arc<LspClient>) {
+        let mut clients = self.pool();
+        if matches!(
+            clients.get(&language),
+            Some(ClientState::Live { client, .. }) if Arc::ptr_eq(client, dead)
+        ) {
+            clients.remove(&language);
+            tracing::warn!("{:?} language server exited; starting a new one", language);
         }
     }
 
@@ -194,28 +284,7 @@ impl LspManager {
             .map(|(lang, _)| lang)
     }
 
-    async fn start_client_internal(
-        &self,
-        language: Language,
-        notify: Arc<Notify>,
-    ) -> Result<Arc<LspClient>, LspError> {
-        let result = self.do_start_client(language).await;
-
-        let mut clients = self.clients.write().await;
-        match &result {
-            Ok(client) => {
-                clients.insert(language, ClientState::live(Arc::clone(client)));
-            }
-            Err(_) => {
-                clients.remove(&language);
-            }
-        }
-        notify.notify_waiters();
-
-        result
-    }
-
-    async fn do_start_client(&self, language: Language) -> Result<Arc<LspClient>, LspError> {
+    async fn spawn_server(&self, language: Language) -> Result<Arc<LspClient>, LspError> {
         let config = self
             .configs
             .get(&language)
@@ -239,10 +308,10 @@ impl LspManager {
     }
 
     pub async fn shutdown_client(&self, language: Language) -> Result<(), LspError> {
-        let client = {
-            let mut clients = self.clients.write().await;
-            clients.remove(&language).and_then(|s| s.client())
-        };
+        let client = self
+            .pool()
+            .remove(&language)
+            .and_then(|state| state.client());
 
         if let Some(client) = client {
             client.shutdown().await?;
@@ -252,7 +321,10 @@ impl LspManager {
         Ok(())
     }
 
-    pub async fn restart_client(&self, language: Language) -> Result<Arc<LspClient>, LspError> {
+    pub async fn restart_client(
+        self: &Arc<Self>,
+        language: Language,
+    ) -> Result<Arc<LspClient>, LspError> {
         if let Err(e) = self.shutdown_client(language).await {
             tracing::warn!("Error shutting down {:?} before restart: {}", language, e);
         }
@@ -261,13 +333,11 @@ impl LspManager {
     }
 
     pub async fn shutdown_all(&self) {
-        let clients_to_shutdown: Vec<(Language, Arc<LspClient>)> = {
-            let mut clients = self.clients.write().await;
-            clients
-                .drain()
-                .filter_map(|(lang, state)| state.client().map(|c| (lang, c)))
-                .collect()
-        };
+        let clients_to_shutdown: Vec<(Language, Arc<LspClient>)> = self
+            .pool()
+            .drain()
+            .filter_map(|(lang, state)| state.client().map(|c| (lang, c)))
+            .collect();
 
         for (lang, client) in clients_to_shutdown {
             if let Err(e) = client.shutdown().await {
@@ -279,14 +349,12 @@ impl LspManager {
     }
 
     pub async fn cleanup_idle(&self, timeout: Duration) -> usize {
-        let idle_languages: Vec<Language> = {
-            let clients = self.clients.read().await;
-            clients
-                .iter()
-                .filter(|(_, state)| state.idle_duration() > timeout)
-                .filter_map(|(lang, state)| state.client().map(|_| *lang))
-                .collect()
-        };
+        let idle_languages: Vec<Language> = self
+            .pool()
+            .iter()
+            .filter(|(_, state)| state.idle_duration() > timeout)
+            .filter_map(|(lang, state)| state.client().map(|_| *lang))
+            .collect();
 
         let mut stopped = 0;
         for lang in idle_languages {
@@ -308,18 +376,12 @@ impl LspManager {
 
     /// Read-only peek at a pooled client — never starts one. Status
     /// queries must not have the side effect of booting a server.
-    pub async fn peek_client(&self, language: Language) -> Option<Arc<LspClient>> {
-        let clients = self.clients.read().await;
-        clients.get(&language).and_then(|state| state.client())
+    pub fn peek_client(&self, language: Language) -> Option<Arc<LspClient>> {
+        self.pool().get(&language).and_then(|state| state.client())
     }
 
     pub async fn is_running(&self, language: Language) -> bool {
-        let client = {
-            let clients = self.clients.read().await;
-            clients.get(&language).and_then(|s| s.client())
-        };
-
-        if let Some(client) = client {
+        if let Some(client) = self.peek_client(language) {
             client.is_running().await
         } else {
             false
@@ -384,13 +446,7 @@ impl LspManager {
     }
 
     pub async fn running_languages(&self) -> Vec<Language> {
-        let candidates: Vec<(Language, Arc<LspClient>)> = {
-            let clients = self.clients.read().await;
-            clients
-                .iter()
-                .filter_map(|(lang, state)| state.client().map(|c| (*lang, c)))
-                .collect()
-        };
+        let candidates = self.pooled_clients();
 
         let mut running = Vec::new();
         for (lang, client) in candidates {
@@ -402,13 +458,7 @@ impl LspManager {
     }
 
     pub async fn unhealthy_servers(&self) -> Vec<Language> {
-        let candidates: Vec<(Language, Arc<LspClient>)> = {
-            let clients = self.clients.read().await;
-            clients
-                .iter()
-                .filter_map(|(lang, state)| state.client().map(|c| (*lang, c)))
-                .collect()
-        };
+        let candidates = self.pooled_clients();
 
         let mut unhealthy = Vec::new();
         for (lang, client) in candidates {
@@ -417,6 +467,13 @@ impl LspManager {
             }
         }
         unhealthy
+    }
+
+    fn pooled_clients(&self) -> Vec<(Language, Arc<LspClient>)> {
+        self.pool()
+            .iter()
+            .filter_map(|(lang, state)| state.client().map(|c| (*lang, c)))
+            .collect()
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -432,7 +489,7 @@ impl LspManager {
     }
 
     pub async fn execute_with_retry<F, T, Fut>(
-        &self,
+        self: &Arc<Self>,
         language: Language,
         op: F,
     ) -> Result<T, LspError>
@@ -565,7 +622,7 @@ mod tests {
         let mut clients = HashMap::new();
         clients.insert(
             Language::Rust,
-            ClientState::Initializing(Arc::new(Notify::new())),
+            ClientState::Initializing(watch::channel(()).1),
         );
         assert_eq!(manager.pick_eviction_target(&clients), None);
     }
@@ -576,7 +633,7 @@ mod tests {
         let mut clients = HashMap::new();
         clients.insert(
             Language::Rust,
-            ClientState::Initializing(Arc::new(Notify::new())),
+            ClientState::Initializing(watch::channel(()).1),
         );
         // Pool is at capacity but the only occupant is mid-startup:
         // nothing is evictable.
@@ -694,6 +751,16 @@ exec sleep 600
                 !Self::stat(pid).is_empty()
             }
 
+            async fn kill(pid: u32) {
+                std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .status()
+                    .unwrap();
+                while !Self::stat(pid).is_empty() && !Self::stat(pid).starts_with('Z') {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
             /// Every server this fake ever started has exited AND been
             /// reaped — a zombie still counts as a leak.
             async fn assert_all_gone(&self) {
@@ -727,6 +794,55 @@ exec sleep 600
                 assert!(bounded(manager.get_client(Language::Go)).await.is_err());
             }
             assert_eq!(fake.pids().len(), 3);
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn an_abandoned_start_neither_leaks_nor_blocks_the_next_caller() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("hang", 0);
+            let abandoned =
+                tokio::time::timeout(Duration::from_millis(200), manager.get_client(Language::Go))
+                    .await;
+            assert!(abandoned.is_err());
+
+            assert!(bounded(manager.get_client(Language::Go)).await.is_err());
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn a_start_outlives_the_caller_that_triggered_it() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 1);
+            let abandoned =
+                tokio::time::timeout(Duration::from_millis(200), manager.get_client(Language::Go))
+                    .await;
+            assert!(abandoned.is_err());
+
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert!(client.is_running().await);
+            assert_eq!(
+                fake.pids().len(),
+                1,
+                "the second caller joined the first start"
+            );
+
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn a_dead_server_is_replaced() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            bounded(manager.get_client(Language::Go)).await.unwrap();
+            FakeServer::kill(fake.pids()[0]).await;
+
+            let replacement = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert!(replacement.is_running().await);
+            assert_eq!(fake.pids().len(), 2);
+
+            drop((replacement, manager));
             fake.assert_all_gone().await;
         }
 
