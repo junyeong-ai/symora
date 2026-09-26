@@ -140,6 +140,28 @@ impl Anchor {
         hints
     }
 
+    /// [`Self::anchor_hints`] for a query answered by searching the project —
+    /// references, callers, implementations — which also says when the
+    /// position given lies outside it: such a set holds what was found from
+    /// this project, and a zero there says nothing about the file's own.
+    pub(crate) fn inbound_hints(&self, root: &Path, subject: &str) -> Vec<String> {
+        let mut hints = self.anchor_hints(root, subject);
+        hints.extend(self.outside_project_hint(root, subject));
+        hints
+    }
+
+    pub(crate) fn outside_project_hint(&self, root: &Path, subject: &str) -> Option<String> {
+        (!self.input.file.starts_with(root)).then(|| {
+            format!(
+                "{} lies outside this project ({}), so the {subject} shown are those found from \
+                 this project, not from the file's own; run symora from the file's project for \
+                 those",
+                self.describe(root),
+                root.display(),
+            )
+        })
+    }
+
     /// Disclosure hints for this anchor as a reachability-verdict endpoint (the
     /// `--to` path query): the ambiguity hint (always) plus — when the endpoint
     /// is not a listed symbol — a marker that the verdict about it is not
@@ -226,6 +248,15 @@ where
     Ok(())
 }
 
+/// Where a list query's answers are found.
+#[derive(Clone, Copy)]
+pub enum Reach {
+    /// Across the project — implementations, subtypes.
+    Inbound,
+    /// In the declaration itself — callees, supertypes.
+    Outbound,
+}
+
 /// Execute a command that returns `Indexed<Vec<T>>` from an LSP call,
 /// wrapping in `Section`. Used by implementations, callees, supertypes,
 /// subtypes — all cross-file graph queries, so each carries the
@@ -235,6 +266,7 @@ pub async fn execute_list<T, O, F, Fut, M>(
     loc: LocationArg,
     limit: usize,
     subject: &str,
+    reach: Reach,
     lsp_call: F,
     mapper: M,
 ) -> Result<()>
@@ -257,9 +289,13 @@ where
                 .take(limit)
                 .map(|item| mapper(item, ctx.root()))
                 .collect();
+            let hints = match reach {
+                Reach::Inbound => anchor.inbound_hints(ctx.root(), subject),
+                Reach::Outbound => anchor.anchor_hints(ctx.root(), subject),
+            };
             ctx.print_success(
                 Section::with_total(output, total)
-                    .with_hints(anchor.anchor_hints(ctx.root(), subject))
+                    .with_hints(hints)
                     .with_indexing(result.indexing),
             );
         }
@@ -294,6 +330,26 @@ mod tests {
 
     fn root() -> PathBuf {
         PathBuf::from("/repo")
+    }
+
+    /// A position in another project is answered from this one: its
+    /// references are the ones found from here, and saying so is what keeps
+    /// a zero from reading as "nothing uses it". A query read from the
+    /// declaration itself — callees, supertypes — is the file's own answer
+    /// wherever it lives, and says nothing.
+    #[test]
+    fn a_position_outside_the_project_says_whose_answer_it_is() {
+        let mut elsewhere = anchor(AnchorResolution::Resolved, None);
+        elsewhere.input.file = PathBuf::from("/other/src/lib.rs");
+        elsewhere.file = elsewhere.input.file.clone();
+
+        let inbound = elsewhere.inbound_hints(&root(), "references");
+        assert_eq!(inbound.len(), 1, "{inbound:?}");
+        assert!(inbound[0].contains("outside this project"), "{inbound:?}");
+        assert!(elsewhere.anchor_hints(&root(), "callees").is_empty());
+
+        let here = anchor(AnchorResolution::Resolved, None);
+        assert!(here.inbound_hints(&root(), "references").is_empty());
     }
 
     #[test]

@@ -21,7 +21,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
-use crate::cli::commands::common::{anchor_of, execute_list};
+use crate::cli::commands::common::{Reach, anchor_of, execute_list};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput, Section};
 use crate::cli::{LocationArg, ParsedLocation};
 use crate::constants::defaults::IMPACT_MAX_DEPTH;
@@ -164,6 +164,7 @@ pub async fn execute(args: CalleesArgs, app: &App) -> Result<()> {
                 args.loc,
                 limit,
                 "callees",
+                Reach::Outbound,
                 |file, line, col| async move { app.lsp.outgoing_calls(&file, line, col).await },
                 |c, root| CallHierarchyOutput::from_item(&c, root),
             )
