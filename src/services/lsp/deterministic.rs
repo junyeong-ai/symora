@@ -237,6 +237,7 @@ mod tests {
         let inner = DefaultLspService::new(
             std::path::Path::new("/"),
             Arc::new(LspRuntimeConfig::default()),
+            crate::infra::lsp::watch::FileWatch::Off,
         );
         DeterministicLspService::new(Arc::new(inner))
     }

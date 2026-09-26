@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use super::LspService;
 use super::cache::{SymbolCache, WorkspaceSymbolCache};
 use crate::error::LspError;
+use crate::infra::lsp::watch::FileWatch;
 use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
@@ -28,8 +29,16 @@ pub struct DefaultLspService {
 }
 
 impl DefaultLspService {
-    pub fn new(root: &Path, config: Arc<crate::config::LspRuntimeConfig>) -> Self {
-        Self::init_with_manager(Arc::new(LspManager::new(root.to_path_buf(), config)))
+    pub fn new(
+        root: &Path,
+        config: Arc<crate::config::LspRuntimeConfig>,
+        file_watch: FileWatch,
+    ) -> Self {
+        Self::init_with_manager(Arc::new(LspManager::new(
+            root.to_path_buf(),
+            config,
+            file_watch,
+        )))
     }
 
     fn init_with_manager(manager: Arc<LspManager>) -> Self {

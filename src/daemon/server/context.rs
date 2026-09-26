@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 use super::config::DaemonRuntimeConfig;
 use crate::daemon::protocol::RpcError;
+use crate::infra::lsp::watch::FileWatch;
 use crate::services::lsp::DefaultLspService;
 use crate::services::store::DefaultStoreService;
 
@@ -41,7 +42,7 @@ impl ProjectContext {
         let lsp_config = DaemonRuntimeConfig::load_lsp_config(path);
         let store = DefaultStoreService::new(path, crate::app::store_config(&lsp_config));
         Self {
-            lsp: Arc::new(DefaultLspService::new(path, lsp_config)),
+            lsp: Arc::new(DefaultLspService::new(path, lsp_config, FileWatch::On)),
             store,
             last_used: AtomicU64::new(epoch_millis()),
             request_count: AtomicU64::new(0),

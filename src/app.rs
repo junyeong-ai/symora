@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::cli::output::OutputSink;
 use crate::cli::{OutputContext, OutputOptions};
 use crate::config::LspRuntimeConfig;
+use crate::infra::lsp::watch::FileWatch;
 use crate::models::config::SymoraConfig;
 use crate::services::ast_query::{AstQueryService, DefaultAstQueryService};
 use crate::services::config::{ConfigService, DefaultConfigService};
@@ -48,6 +49,10 @@ pub struct Wiring {
     /// then an input rather than an outcome, which is what makes two machines
     /// with different servers installed agree on the same tree.
     pub deterministic: bool,
+    /// Whether language servers started in this process follow the disk: on
+    /// for a process that answers until stopped (`mcp serve`), off for one
+    /// command.
+    pub file_watch: FileWatch,
 }
 
 impl App {
@@ -66,6 +71,7 @@ impl App {
         let Wiring {
             use_daemon,
             deterministic,
+            file_watch,
         } = wiring;
         tracing::debug!("Initializing Symora at {:?}", root);
 
@@ -102,13 +108,21 @@ impl App {
         let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
             Arc::new(DaemonLspService::new(&root))
         } else {
-            Arc::new(DefaultLspService::new(&root, Arc::clone(&runtime_config)))
+            Arc::new(DefaultLspService::new(
+                &root,
+                Arc::clone(&runtime_config),
+                file_watch,
+            ))
         };
 
         #[cfg(not(unix))]
         let lsp: Arc<dyn LspService + Send + Sync> = {
             let _ = use_daemon;
-            Arc::new(DefaultLspService::new(&root, Arc::clone(&runtime_config)))
+            Arc::new(DefaultLspService::new(
+                &root,
+                Arc::clone(&runtime_config),
+                file_watch,
+            ))
         };
 
         let lsp = if deterministic {
@@ -216,6 +230,7 @@ mod tests {
                 Wiring {
                     use_daemon,
                     deterministic: true,
+                    ..Wiring::default()
                 },
             )
             .await

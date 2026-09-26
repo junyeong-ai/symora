@@ -19,6 +19,18 @@ use crate::models::lsp::{path_to_uri, uri_to_path};
 
 pub const WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
 
+/// Whether a manager keeps the servers it starts current with the disk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FileWatch {
+    /// Its owner answers until stopped — the daemon, `mcp serve` — so a file
+    /// that changes on disk meanwhile has to reach the servers.
+    On,
+    /// Its owner answers one command and exits. Its servers read the disk as
+    /// it is, and a watch would cost a walk of the whole tree for nothing.
+    #[default]
+    Off,
+}
+
 /// Paths no server is told about: VCS object stores (the reference client's
 /// default exclusions — a `**` watcher would otherwise receive every object a
 /// git operation writes) and symora's own state directory.
@@ -148,9 +160,14 @@ impl WorkspaceWatcher {
     ) -> notify::Result<(Self, mpsc::UnboundedReceiver<RawEvent>, PathBuf)> {
         let watch_root = root.canonicalize()?;
         let (sender, events) = mpsc::unbounded_channel();
-        let mut watcher = notify::recommended_watcher(move |event: RawEvent| {
-            let _ = sender.send(event);
-        })?;
+        let mut watcher = RecommendedWatcher::new(
+            move |event: RawEvent| {
+                let _ = sender.send(event);
+            },
+            // A link out of the project would widen the watch to whatever it
+            // points at; the tree the servers were given is the project's.
+            notify::Config::default().with_follow_symlinks(false),
+        )?;
         watcher.watch(&watch_root, RecursiveMode::Recursive)?;
         Ok((Self { _watcher: watcher }, events, watch_root))
     }
