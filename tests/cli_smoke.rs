@@ -1699,6 +1699,41 @@ fn two_files_whose_names_render_alike_are_each_unmeasured() {
     );
 }
 
+/// Deleted lines are read by the grammar compiled into symora. In a language
+/// without one, what was deleted is unknown, so the file is listed as
+/// unmeasured rather than reported as having lost no declaration.
+#[cfg(unix)]
+#[test]
+fn a_deletion_no_grammar_reads_is_unmeasured() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 1\n").unwrap();
+    std::fs::write(
+        repo.join("lib.ex"),
+        "defmodule M do\n  def gone, do: 2\nend\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("notes.txt"), "one\ntwo\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 2\n").unwrap();
+    std::fs::remove_file(repo.join("lib.ex")).unwrap();
+    std::fs::write(repo.join("notes.txt"), "one\n").unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    assert_eq!(page["changed_files_count"], 3, "{page}");
+    assert_eq!(page["changed_symbols_count"], 1, "{page}");
+    assert_eq!(page["changes"][0]["name"], "a", "{page}");
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["lib.ex", "notes.txt"]),
+        "{page}"
+    );
+}
+
 /// A symbolic link's lines are where it points, not source, so a link that
 /// appears or is retargeted is counted but no symbol is taken from the
 /// file it points to.

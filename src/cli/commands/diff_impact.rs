@@ -903,7 +903,10 @@ async fn analyze_hunks(
                 stopped_at_cap = true;
                 break;
             }
-            let deleted_rows = resolve_deleted_hunk(root, preimage_ref, hunk);
+            let Some(deleted_rows) = resolve_deleted_hunk(root, preimage_ref, hunk) else {
+                unmeasured.push(file.clone());
+                continue;
+            };
             // Reclassify ONLY a verified body-line deletion: the pre-image was
             // read and declared no symbol in the deleted range, so a surviving
             // symbol was Modified. A `PreimageUnavailable` row is NOT eligible —
@@ -1115,14 +1118,20 @@ async fn analyze_symbol_impact(
 
 /// Resolve a deleted hunk against the pre-image (old git tree) — never the
 /// current tree. Returns one row per symbol declared inside the deleted line
-/// range; if the pre-image is unavailable or declares no symbol there, one
-/// `Unresolved` row, so a deletion is disclosed rather than silently dropped.
+/// range, or one row saying the range declared none or the pre-image could
+/// not be read, so a deletion is disclosed rather than silently dropped.
+/// `None` when no grammar compiled into this binary reads the pre-image's
+/// language: what was deleted is then unknown, not "no symbol".
 fn resolve_deleted_hunk(
     root: &Path,
     preimage_ref: &str,
     hunk: &DiffHunk,
-) -> Vec<ChangedSymbolImpact> {
+) -> Option<Vec<ChangedSymbolImpact>> {
     let file = &hunk.old_file;
+    let language = crate::models::symbol::Language::from_path(file);
+    if !SymbolExtractor::is_supported(language) {
+        return None;
+    }
     let deletion_row = |resolution| ChangedSymbolImpact {
         name: None,
         kind: None,
@@ -1139,10 +1148,9 @@ fn resolve_deleted_hunk(
 
     let relpath = file.strip_prefix(root).unwrap_or(file);
     let Some(content) = git_show(root, preimage_ref, relpath) else {
-        return vec![deletion_row(DeletionResolution::PreimageUnavailable)];
+        return Some(vec![deletion_row(DeletionResolution::PreimageUnavailable)]);
     };
 
-    let language = crate::models::symbol::Language::from_path(file);
     let lo = hunk.old_start;
     let hi = hunk.old_start.saturating_add(hunk.old_count.max(1));
     let matched: Vec<ChangedSymbolImpact> = SymbolExtractor::shared()
@@ -1171,11 +1179,11 @@ fn resolve_deleted_hunk(
         })
         .collect();
 
-    if matched.is_empty() {
+    Some(if matched.is_empty() {
         vec![deletion_row(DeletionResolution::NoSymbolInRange)]
     } else {
         matched
-    }
+    })
 }
 
 /// `git show <ref>:./<relpath>` — the file content at the pre-image revision.
