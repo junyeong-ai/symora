@@ -137,6 +137,9 @@ pub struct Section<T> {
 pub struct CoverageGap {
     pub language: String,
     pub reason: String,
+    /// Why, in the failure's own words; present for `unavailable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl<T> Section<T> {
@@ -574,6 +577,7 @@ mod tests {
             .with_coverage_gaps(vec![CoverageGap {
                 language: "rust".to_string(),
                 reason: "not_indexed".to_string(),
+                message: None,
             }]);
         section.error = Some(crate::cli::OutputError::not_found("e"));
 

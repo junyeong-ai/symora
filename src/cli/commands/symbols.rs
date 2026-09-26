@@ -423,7 +423,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
             ))
             .with_indexing(indexing)
             .with_stale(stale)
-            .with_coverage_gaps(shortfall.iter().copied().map(CoverageGap::from).collect()),
+            .with_coverage_gaps(shortfall.iter().map(CoverageGap::from).collect()),
         &shortfall,
         &query,
         route,

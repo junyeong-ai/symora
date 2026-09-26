@@ -623,7 +623,7 @@ fn finish_symbol_search(
     Section::with_total(candidates, count)
         .with_hints(hints)
         .with_next_commands(next_commands)
-        .with_coverage_gaps(shortfall.iter().copied().map(CoverageGap::from).collect())
+        .with_coverage_gaps(shortfall.iter().map(CoverageGap::from).collect())
 }
 
 /// The single language to scope an index `search_symbols` query to: `Some` only
@@ -1308,10 +1308,12 @@ mod tests {
         let shortfall = vec![Uncovered {
             language: Language::Go,
             reason: CoverageReason::ServerNotInstalled,
+            message: None,
         }];
         let published = vec![CoverageGap {
             language: "go".to_string(),
             reason: "server_not_installed".to_string(),
+            message: None,
         }];
         let partial = finish_symbol_search(
             vec![result("foo", "src/a.rs")],
