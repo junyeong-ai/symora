@@ -227,7 +227,8 @@ impl WorkspaceWatcher {
     /// them. Its watch is extended first and its files listed after, so a
     /// file written in between is seen by one or the other.
     pub fn follow(&mut self, changes: &mut Vec<FileChange>, watch_root: &Path, root: &Path) {
-        let mut reported: HashSet<PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
+        let mut reported: HashSet<(PathBuf, FileChangeType)> =
+            changes.iter().map(|c| (c.path.clone(), c.change)).collect();
         let mut found = Vec::new();
         for change in changes.iter() {
             let Ok(relative) = change.path.strip_prefix(root) else {
@@ -244,15 +245,13 @@ impl WorkspaceWatcher {
                 self.extend(&path, watch_root);
                 for file in files_under(&path, watch_root) {
                     let path = root.join(file.strip_prefix(watch_root).unwrap_or(&file));
-                    if reported.insert(path.clone()) {
-                        found.push(FileChange {
-                            path: path.clone(),
-                            change: FileChangeType::Created,
-                        });
-                        found.push(FileChange {
-                            path,
-                            change: FileChangeType::Changed,
-                        });
+                    for change in [FileChangeType::Created, FileChangeType::Changed] {
+                        if reported.insert((path.clone(), change)) {
+                            found.push(FileChange {
+                                path: path.clone(),
+                                change,
+                            });
+                        }
                     }
                 }
             }
@@ -762,6 +761,29 @@ mod tests {
                 ("pkg/sub/b.go".to_string(), Changed),
             ]
         );
+    }
+
+    #[test]
+    fn a_file_already_in_the_batch_is_still_reported_created_with_its_directory() {
+        use FileChangeType::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut watcher, _events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/a.go"), "").unwrap();
+
+        let mut changes = vec![
+            change(root.join("pkg").to_str().unwrap(), Created),
+            change(root.join("pkg/a.go").to_str().unwrap(), Changed),
+        ];
+        watcher.follow(&mut changes, &watch_root, &root);
+
+        let file: Vec<FileChangeType> = changes
+            .iter()
+            .filter(|c| c.path == root.join("pkg/a.go"))
+            .map(|c| c.change)
+            .collect();
+        assert_eq!(file, [Changed, Created]);
     }
 
     #[cfg(target_os = "linux")]
