@@ -260,7 +260,7 @@ impl DefaultAstQueryService {
         let mut query_matches = cursor.matches(query, tree.root_node(), content.as_bytes());
 
         while let Some(query_match) = query_matches.next() {
-            let Some(capture) = query_match.captures.first() else {
+            let Some(capture) = query_match.captures().first() else {
                 continue;
             };
 
@@ -270,7 +270,7 @@ impl DefaultAstQueryService {
             let text = content[node.start_byte()..node.end_byte()].to_string();
 
             let captures: Vec<(String, String)> = query_match
-                .captures
+                .captures()
                 .iter()
                 .map(|c| {
                     let name = capture_names

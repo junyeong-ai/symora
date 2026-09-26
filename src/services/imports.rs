@@ -171,7 +171,7 @@ impl ImportExtractor {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), source);
         while let Some(m) = matches.next() {
-            references.extend(references_of(m.captures, source, entry));
+            references.extend(references_of(m.captures(), source, entry));
         }
         references
     }
