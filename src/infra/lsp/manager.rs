@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -8,7 +8,7 @@ use tokio::sync::{RwLock, mpsc, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
-use super::watch::{Batch, FileWatch, RawEvent, WorkspaceWatcher};
+use super::watch::{Batch, FileChange, FileWatch, RawEvent, WorkspaceWatcher};
 use crate::error::LspError;
 use crate::models::symbol::Language;
 
@@ -366,6 +366,15 @@ impl LspManager {
         }
     }
 
+    /// Keep the watch over what changed, and report the files of each
+    /// directory that appeared (`WorkspaceWatcher::follow`).
+    fn follow(&self, mut changes: Vec<FileChange>, watch_root: &Path) -> Vec<FileChange> {
+        if let Some(watcher) = self.watcher.lock().expect("watcher lock poisoned").as_mut() {
+            watcher.follow(&mut changes, watch_root, &self.root);
+        }
+        changes
+    }
+
     async fn apply_file_changes(&self, batch: Batch) {
         match batch {
             Batch::Changes(changes) if changes.is_empty() => {}
@@ -609,7 +618,18 @@ async fn forward_file_changes(
         let Some(manager) = manager.upgrade() else {
             break;
         };
-        let reduced = super::watch::reduce(batch, &watch_root, &manager.root);
+        let reduced = match super::watch::reduce(batch, &watch_root, &manager.root) {
+            Batch::Changes(changes) => {
+                let following = Arc::clone(&manager);
+                let watch_root = watch_root.clone();
+                Batch::Changes(
+                    tokio::task::spawn_blocking(move || following.follow(changes, &watch_root))
+                        .await
+                        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic())),
+                )
+            }
+            rescan => rescan,
+        };
         manager.apply_file_changes(reduced).await;
     }
 }
@@ -1058,6 +1078,23 @@ exec sleep 600
             let client = bounded(manager.get_client(Language::Go)).await.unwrap();
 
             assert!(manager.watcher.lock().unwrap().is_none());
+
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn a_directory_moved_in_reaches_the_server_file_by_file() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("watch", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            bounded(fake.until_received("\"id\":\"w1\"")).await;
+
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir(outside.path().join("pkg")).unwrap();
+            std::fs::write(outside.path().join("pkg/main.go"), "package pkg\n").unwrap();
+            std::fs::rename(outside.path().join("pkg"), fake.dir.path().join("pkg")).unwrap();
+            bounded(fake.until_received("pkg/main.go")).await;
 
             drop((client, manager));
             fake.assert_all_gone().await;
