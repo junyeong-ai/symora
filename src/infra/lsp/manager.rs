@@ -56,9 +56,11 @@ enum Reservation {
     Taken,
     /// The pool is at capacity and every entry is mid-start.
     Full(watch::Receiver<()>),
+    /// The entry is claimed. `evict` has already left the pool, so the
+    /// claim never counts against capacity beside the client it replaces.
     Granted {
         done: watch::Sender<()>,
-        evict: Option<Language>,
+        evict: Option<Arc<LspClient>>,
     },
 }
 
@@ -74,13 +76,13 @@ struct StartSlot {
 }
 
 impl StartSlot {
-    async fn run(self, evict: Option<Language>) -> Result<Arc<LspClient>, LspError> {
+    async fn run(self, evict: Option<Arc<LspClient>>) -> Result<Arc<LspClient>, LspError> {
         if let Some(victim) = evict
-            && let Err(e) = self.manager.shutdown_client(victim).await
+            && let Err(e) = victim.shutdown().await
         {
             tracing::warn!(
                 "Failed to evict {:?} before starting {:?}: {}",
-                victim,
+                victim.language(),
                 self.language,
                 e
             );
@@ -250,6 +252,7 @@ impl LspManager {
                 settling.expect("a full pool with nothing to evict holds only starts"),
             );
         }
+        let evict = evict.and_then(|victim| clients.remove(&victim)?.client());
         let (done, starting) = watch::channel(());
         clients.insert(language, ClientState::Initializing(starting));
         Reservation::Granted { done, evict }
@@ -770,7 +773,8 @@ mod tests {
 
     /// A stand-in language server that records its pid and, like a real
     /// server, ignores stdin EOF — so a process that goes away was stopped
-    /// by the client, never by its own shutdown logic.
+    /// by the client, never by its own shutdown logic. `exits` is the one
+    /// exception, for a test about the pool rather than about stopping.
     #[cfg(unix)]
     mod server_lifetime {
         use super::*;
@@ -780,7 +784,7 @@ mod tests {
 echo $$ >> "$1"
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
-  serve|watch) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  serve|watch|exits) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
@@ -791,6 +795,7 @@ if [ "$2" = watch ]; then
   printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
   exec cat > "$4"
 fi
+[ "$2" = exits ] && exec cat > /dev/null
 exec sleep 600
 "#;
 
@@ -823,24 +828,52 @@ exec sleep 600
             ) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
                 config.lsp.timeout_secs = 1;
-                config.lsp.servers.insert(
-                    "go".to_string(),
-                    crate::models::config::ServerOverride {
-                        command: Some(self.dir.path().join("fake-ls").display().to_string()),
-                        args: Some(vec![
-                            self.dir.path().join("pids").display().to_string(),
-                            behavior.to_string(),
-                            delay_secs.to_string(),
-                            self.received().display().to_string(),
-                        ]),
-                        tier: None,
-                    },
-                );
+                config
+                    .lsp
+                    .servers
+                    .insert("go".to_string(), self.server(behavior, delay_secs));
                 Arc::new(LspManager::new(
                     self.dir.path().to_path_buf(),
                     Arc::new(crate::config::LspRuntimeConfig::from(&config)),
                     file_watch,
                 ))
+            }
+
+            /// A pool holding at most `cap` servers, each of `languages`
+            /// served by the fake.
+            fn capped(&self, languages: &[&str], cap: usize) -> Arc<LspManager> {
+                let mut config = crate::models::config::SymoraConfig::default();
+                config.lsp.timeout_secs = 1;
+                for language in languages {
+                    config
+                        .lsp
+                        .servers
+                        .insert(language.to_string(), self.server("exits", 0));
+                }
+                let mut runtime = crate::config::LspRuntimeConfig::from(&config);
+                runtime.max_concurrent_servers = cap;
+                Arc::new(LspManager::new(
+                    self.dir.path().to_path_buf(),
+                    Arc::new(runtime),
+                    FileWatch::Off,
+                ))
+            }
+
+            fn server(
+                &self,
+                behavior: &str,
+                delay_secs: u32,
+            ) -> crate::models::config::ServerOverride {
+                crate::models::config::ServerOverride {
+                    command: Some(self.dir.path().join("fake-ls").display().to_string()),
+                    args: Some(vec![
+                        self.dir.path().join("pids").display().to_string(),
+                        behavior.to_string(),
+                        delay_secs.to_string(),
+                        self.received().display().to_string(),
+                    ]),
+                    tier: None,
+                }
             }
 
             /// Everything the client wrote to a `watch` server after it
@@ -993,6 +1026,27 @@ exec sleep 600
             );
 
             drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn concurrent_starts_stay_within_the_server_limit() {
+            let fake = FakeServer::new();
+            let manager = fake.capped(&["go", "python", "rust"], 1);
+            bounded(manager.get_client(Language::Go)).await.unwrap();
+
+            let (python, rust) = bounded(async {
+                tokio::join!(
+                    manager.get_client(Language::Python),
+                    manager.get_client(Language::Rust)
+                )
+            })
+            .await;
+            let clients = (python.unwrap(), rust.unwrap());
+
+            assert_eq!(manager.pooled_clients().len(), 1);
+
+            drop((clients, manager));
             fake.assert_all_gone().await;
         }
 
