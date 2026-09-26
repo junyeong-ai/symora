@@ -88,7 +88,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(feature = "embeddings")]
 mod fastembed_backend {
     use super::{EmbeddingError, EmbeddingProvider};
-    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
     use std::sync::Mutex;
 
     pub struct Fastembed {
@@ -100,7 +100,7 @@ mod fastembed_backend {
     impl Fastembed {
         pub fn default_model() -> Result<Self, EmbeddingError> {
             let model_kind = EmbeddingModel::BGEBaseENV15;
-            let model = TextEmbedding::try_new(InitOptions::new(model_kind.clone()))
+            let model = TextEmbedding::try_new(TextInitOptions::new(model_kind.clone()))
                 .map_err(|e| EmbeddingError::ModelLoad(e.to_string()))?;
             Ok(Self {
                 model: Mutex::new(model),

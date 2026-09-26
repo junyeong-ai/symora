@@ -234,7 +234,7 @@ fn extract_from_match(
     content: &str,
     language: Language,
 ) -> Option<Symbol> {
-    let node = m.captures.first()?.node;
+    let node = m.captures().first()?.node;
 
     let (name, kind) = extract_name_and_kind(node, content, language)?;
     let container = extract_container_path(node, content, language);
@@ -383,7 +383,7 @@ fn bound_name<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
 /// rather than by position, which moves whenever modifiers or attributes are
 /// written before it.
 fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    (0..node.child_count()).find_map(|i| node.child(i as u32).filter(|c| c.kind() == kind))
+    (0..node.child_count()).find_map(|i| node.child(i).filter(|c| c.kind() == kind))
 }
 
 /// The last child of `node` with the given grammar kind, for grammars that
@@ -391,7 +391,7 @@ fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
 fn last_child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     (0..node.child_count())
         .rev()
-        .find_map(|i| node.child(i as u32).filter(|c| c.kind() == kind))
+        .find_map(|i| node.child(i).filter(|c| c.kind() == kind))
 }
 
 /// The node an HCL declaration is named by.
@@ -539,7 +539,7 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     name_field.or_else(|| {
         let count = node.child_count();
         for i in 0..count {
-            if let Some(child) = node.child(i as u32) {
+            if let Some(child) = node.child(i) {
                 let kind = child.kind();
                 if matches!(
                     kind,
