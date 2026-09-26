@@ -250,7 +250,11 @@ async fn fetch_context(
     ContextOutput {
         target,
         refs: refs_summary,
-        hints: analysis.member_reach_hint().into_iter().collect(),
+        hints: analysis
+            .member_reach_hint()
+            .into_iter()
+            .chain(analysis.anchor().outside_project_hint(root, "references"))
+            .collect(),
         callers,
         callees,
         types,

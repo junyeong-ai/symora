@@ -112,7 +112,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 ));
             }
             hints.extend(analysis.member_reach_hint());
-            hints.extend(analysis.anchor().anchor_hints(root, "references"));
+            hints.extend(analysis.anchor().inbound_hints(root, "references"));
             ctx.print_success(RefsOutput {
                 target,
                 references: Section::with_total(items, total)

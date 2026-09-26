@@ -3,7 +3,7 @@ use clap::Args;
 
 use crate::app::App;
 use crate::cli::LocationArg;
-use crate::cli::commands::common::execute_list;
+use crate::cli::commands::common::{Reach, execute_list};
 use crate::cli::response::TypeInfoOutput;
 
 #[derive(Args, Debug)]
@@ -24,6 +24,7 @@ pub async fn execute(args: SubtypesArgs, app: &App) -> Result<()> {
         args.loc,
         limit,
         "subtypes",
+        Reach::Inbound,
         |file, line, col| async move { app.lsp.subtypes(&file, line, col).await },
         |t, root| TypeInfoOutput::from_item(&t, root),
     )

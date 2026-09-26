@@ -440,11 +440,11 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             coverage_gaps: gaps,
             section: with_lower_bounds(
                 Section::new(vec![])
-                    .with_hints(usage_hints_for_empty(
+                    .with_hints(resolved.hints(usage_hints_for_empty(
                         &resolved.query,
                         resolved.language_override.is_none(),
                         resolved_from.as_deref(),
-                    ))
+                    )))
                     .with_indexing(indexing),
                 &Vec::from_iter(bound),
             ),
@@ -590,7 +590,10 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         // merely from this page.
         .chain(analyzed.map(LowerBound::AnalysisCapped))
         .collect();
-    let mut hints = usage_hints(&resolved.query, resolved.language_override.is_none());
+    let mut hints = resolved.hints(usage_hints(
+        &resolved.query,
+        resolved.language_override.is_none(),
+    ));
     if filters.contains(&UsageFilter::ZeroRefs) {
         hints.extend(member_zero_hint(&items));
     }
@@ -618,6 +621,19 @@ struct ResolvedUsageQuery {
     query: String,
     language_override: Option<String>,
     resolved_from: Option<String>,
+    /// Set when the position given lies outside the project the name is
+    /// searched in.
+    outside_project: Option<String>,
+}
+
+impl ResolvedUsageQuery {
+    /// The disclosure leads the tips and is never cut with them.
+    fn hints(&self, mut tips: Vec<String>) -> Vec<String> {
+        if let Some(outside) = &self.outside_project {
+            tips.insert(0, outside.clone());
+        }
+        tips
+    }
 }
 
 async fn resolve_usage_query(
@@ -630,6 +646,7 @@ async fn resolve_usage_query(
             query: input.to_string(),
             language_override: lang.map(str::to_string),
             resolved_from: None,
+            outside_project: None,
         });
     }
 
@@ -649,6 +666,7 @@ async fn resolve_usage_query(
     } else {
         format!("{}:{}", ctx_rel(app, &loc.file), loc.line)
     };
+    let outside_project = anchor.outside_project_hint(app.root(), "usages");
     let Some(symbol) = anchor.symbol else {
         // `usage` analyzes symbols by name across the workspace; a position
         // that denotes an unlisted binding, or nothing, has no such name — say
@@ -693,6 +711,7 @@ async fn resolve_usage_query(
             (inferred_lang != Language::Unknown).then(|| inferred_lang.lsp_id().to_string())
         }),
         resolved_from: Some(position),
+        outside_project,
     })
 }
 

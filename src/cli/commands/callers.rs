@@ -62,7 +62,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
             ctx.print_success(CallersOutput {
                 section: Section::with_total(items, total)
-                    .with_hints(anchor.anchor_hints(ctx.root(), "callers"))
+                    .with_hints(anchor.inbound_hints(ctx.root(), "callers"))
                     .with_indexing(calls.indexing),
                 callers_status: None,
             });
@@ -81,7 +81,7 @@ pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {
 
                     ctx.print_success(CallersOutput {
                         section: Section::with_total(items, total_refs)
-                            .with_hints(anchor.anchor_hints(ctx.root(), "callers"))
+                            .with_hints(anchor.inbound_hints(ctx.root(), "callers"))
                             .with_indexing(indexing),
                         callers_status: Some("references_derived"),
                     });
