@@ -1699,12 +1699,12 @@ fn two_files_whose_names_render_alike_are_each_unmeasured() {
     );
 }
 
-/// Deleted lines are read by the grammar compiled into symora. In a language
-/// without one, what was deleted is unknown, so the file is listed as
+/// Removed lines are read by the grammar compiled into symora. In a language
+/// without one, what they declared is unknown, so the file is listed as
 /// unmeasured rather than reported as having lost no declaration.
 #[cfg(unix)]
 #[test]
-fn a_deletion_no_grammar_reads_is_unmeasured() {
+fn removed_lines_no_grammar_reads_are_unmeasured() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     git(repo, &["init", "-q"]);
@@ -1717,19 +1717,166 @@ fn a_deletion_no_grammar_reads_is_unmeasured() {
     )
     .unwrap();
     std::fs::write(repo.join("notes.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(
+        repo.join("was.txt"),
+        "def b():\n    return 1\n\n\ndef c():\n    return 2\n",
+    )
+    .unwrap();
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "one"]);
     std::fs::write(repo.join("m.py"), "def a():\n    return 2\n").unwrap();
     std::fs::remove_file(repo.join("lib.ex")).unwrap();
     std::fs::write(repo.join("notes.txt"), "one\n").unwrap();
+    // A rename to a language with a grammar: its current lines are read,
+    // the lines it replaced from the base's `.txt` are not.
+    git(repo, &["mv", "was.txt", "now.py"]);
+    std::fs::write(
+        repo.join("now.py"),
+        "def b():\n    return 1\n\n\ndef c():\n    return 3\n",
+    )
+    .unwrap();
 
     let page = json_ok(repo, &["diff-impact"]);
-    assert_eq!(page["changed_files_count"], 3, "{page}");
-    assert_eq!(page["changed_symbols_count"], 1, "{page}");
-    assert_eq!(page["changes"][0]["name"], "a", "{page}");
+    assert_eq!(page["changed_files_count"], 4, "{page}");
+    let names: Vec<&str> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| c["name"].as_str().expect("every row is named"))
+        .collect();
+    assert_eq!(names, ["a", "c"], "{page}");
     assert_eq!(
         page["unmeasured_files"],
-        serde_json::json!(["lib.ex", "notes.txt"]),
+        serde_json::json!(["lib.ex", "notes.txt", "now.py"]),
+        "{page}"
+    );
+}
+
+/// Lines replaced in place can remove a declaration, as a rename does, or
+/// keep it, as a signature edit does; only the one the file no longer
+/// declares is reported deleted, read from the base's version. A same-named
+/// declaration a pure deletion removed is not counted again against one
+/// edited in place.
+#[cfg(unix)]
+#[test]
+fn a_declaration_replaced_in_place_is_deleted_only_when_it_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def old_name():\n    return 1\n\n\ndef keep():\n    return 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("twice.py"),
+        "def twice():\n    return 3\n\n\ndef keep():\n    return 2\n\n\ndef twice():\n    return 4\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def new_name():\n    return 1\n\n\ndef keep(x=0):\n    return 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("twice.py"),
+        "def keep():\n    return 2\n\n\ndef twice(x=0):\n    return 4\n",
+    )
+    .unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let deleted: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter(|c| c["change_type"] == "deleted")
+        .map(|c| {
+            format!(
+                "{} {} {}",
+                c["name"], c["location"]["file"], c["location"]["line"]
+            )
+        })
+        .collect();
+    assert_eq!(
+        deleted,
+        [r#""old_name" "m.py" 1"#, r#""twice" "twice.py" 1"#],
+        "{page}"
+    );
+    assert!(page["unmeasured_files"].is_null(), "{page}");
+}
+
+/// Declarations of one identity — Java overloads, or same-named Go methods,
+/// whose receiver the grammar does not record — are told apart by the lines
+/// that replaced them: one edited in place is declared there again, so the
+/// one that is not is the one removed, wherever it stands in the file.
+#[cfg(unix)]
+#[test]
+fn of_same_named_declarations_the_one_not_declared_again_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.go]\ncommand = \"/nonexistent/gopls\"\n\n\
+         [lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+    let go = |first: &str, second: &str| {
+        format!(
+            "package m\n\ntype A struct{{}}\n\ntype B struct{{}}\n\n{first} string {{\n\
+             \treturn \"a\"\n}}\n\n{second} string {{\n\treturn \"b\"\n}}\n"
+        )
+    };
+    let java = |first: &str, second: &str| {
+        format!(
+            "class K {{\n    {first} {{\n        return 1;\n    }}\n\n    {second} {{\n        \
+             return 0;\n    }}\n}}\n"
+        )
+    };
+    std::fs::write(
+        repo.join("m.go"),
+        go("func (a A) String()", "func (b B) String()"),
+    )
+    .unwrap();
+    std::fs::write(repo.join("K.java"), java("int f(int a)", "int f(String s)")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.go"),
+        go("func (a *A) String()", "func (b B) Label()"),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("K.java"),
+        java("int f(long a)", "int g(String s)"),
+    )
+    .unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let mut deleted: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter(|c| c["change_type"] == "deleted")
+        .map(|c| {
+            format!(
+                "{} {} {}",
+                c["name"], c["location"]["file"], c["location"]["line"]
+            )
+        })
+        .collect();
+    deleted.sort();
+    assert_eq!(
+        deleted,
+        [r#""String" "m.go" 11"#, r#""f" "K.java" 6"#],
         "{page}"
     );
 }
