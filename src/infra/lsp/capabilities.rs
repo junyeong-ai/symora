@@ -50,25 +50,6 @@ impl LspFeature {
             Self::InlayHints => "inlay hints",
         }
     }
-
-    /// Get the CLI command name for this feature
-    pub fn command_name(&self) -> &'static str {
-        match self {
-            Self::FindSymbol => "find symbol",
-            Self::FindReferences => "find refs",
-            Self::GotoDefinition => "find def",
-            Self::GotoTypeDefinition => "find typedef",
-            Self::FindImplementations => "find impl",
-            Self::Hover => "hover",
-            Self::Diagnostics => "diagnostics",
-            Self::Rename => "rename",
-            Self::IncomingCalls => "calls incoming",
-            Self::OutgoingCalls => "calls outgoing",
-            Self::CodeActions => "actions list",
-            Self::TypeHierarchy => "types",
-            Self::InlayHints => "hints",
-        }
-    }
 }
 
 /// Support level for a feature
@@ -231,45 +212,43 @@ pub fn language_server_name(language: Language) -> &'static str {
         .unwrap_or("unknown")
 }
 
-/// Get alternative suggestion for unsupported features
+/// What to run instead when a server cannot answer a feature. It is followed
+/// as written, so every command it names must be one the CLI accepts.
 pub fn get_alternative_suggestion(language: Language, feature: LspFeature) -> String {
     use LspFeature::*;
 
     match (language, feature) {
         // PHP alternatives
         (Language::PHP, Rename) => {
-            "Rename requires Intelephense Premium. Try: symora search text \"<symbol>\"".into()
+            "Rename requires Intelephense Premium. Try: symora search content \"<symbol>\"".into()
         }
-        (Language::PHP, FindImplementations) => "Try: symora find refs <location>".into(),
+        (Language::PHP, FindImplementations) => "Try: symora refs <location>".into(),
 
         // Python alternatives
         (Language::Python, FindImplementations | IncomingCalls | OutgoingCalls) => {
-            "Try: symora find refs <location> or symora search text \"<symbol>\"".into()
+            "Try: symora refs <location> or symora search content \"<symbol>\"".into()
         }
 
         // Kotlin alternatives
         (Language::Kotlin, FindSymbol) => {
-            "Only class-level symbols. Try: symora search ast \"class_declaration\" -l kotlin"
+            "Only class-level symbols. Try: symora search ast \"(class_declaration)\" -l kotlin"
                 .into()
         }
         (Language::Kotlin, FindReferences) => {
-            "References may be incomplete. Try: symora search text \"<symbol>\"".into()
+            "References may be incomplete. Try: symora search content \"<symbol>\"".into()
         }
         (Language::Kotlin, FindImplementations | IncomingCalls | OutgoingCalls) => {
-            "Try: symora find refs <location>".into()
+            "Try: symora refs <location>".into()
         }
 
         // TypeScript/JavaScript alternatives
-        (Language::TypeScript | Language::JavaScript, Hover | Rename) => {
-            "May timeout on large projects. Try: symora daemon restart".into()
-        }
         (Language::TypeScript | Language::JavaScript, FindReferences) => {
-            "May return incomplete results. Try: symora search text \"<symbol>\"".into()
+            "May return incomplete results. Try: symora search content \"<symbol>\"".into()
         }
 
         // C/C++ alternatives
         (Language::Cpp, OutgoingCalls) => {
-            "Outgoing calls not supported by clangd. Try: symora find refs <location>".into()
+            "Outgoing calls not supported by clangd. Try: symora refs <location>".into()
         }
 
         // Default
@@ -303,6 +282,34 @@ mod tests {
         assert!(msg.contains("Python"));
         assert!(msg.contains("pyright"));
         assert!(msg.contains("find implementations"));
+    }
+
+    #[test]
+    fn every_suggested_command_parses() {
+        use LspFeature::*;
+
+        let features = [
+            FindSymbol,
+            FindReferences,
+            GotoDefinition,
+            GotoTypeDefinition,
+            FindImplementations,
+            Hover,
+            Diagnostics,
+            Rename,
+            IncomingCalls,
+            OutgoingCalls,
+            CodeActions,
+            TypeHierarchy,
+            InlayHints,
+        ];
+        for language in Language::all() {
+            for feature in features {
+                crate::cli::assert_named_commands_parse(&get_alternative_suggestion(
+                    language, feature,
+                ));
+            }
+        }
     }
 
     /// A diagnostic that names a program Symora does not run sends an agent

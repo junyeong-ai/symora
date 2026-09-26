@@ -239,6 +239,28 @@ pub enum Commands {
     Selfcmd(SelfcmdArgs),
 }
 
+/// Parse every `symora …` command a piece of advice names, as an agent would
+/// run it: `<location>` and `"<symbol>"` are the placeholders it fills, and a
+/// named command ends at ` or ` or at the end of the advice.
+#[cfg(test)]
+pub(crate) fn assert_named_commands_parse(advice: &str) {
+    use clap::Parser;
+
+    for named in advice.split("symora ").skip(1) {
+        let command = named
+            .split(" or ")
+            .next()
+            .unwrap_or(named)
+            .replace("<location>", "src/lib.rs:1:1")
+            .replace("\"<symbol>\"", "name");
+        let args = std::iter::once("symora")
+            .chain(command.split_whitespace().map(|arg| arg.trim_matches('"')));
+        if let Err(err) = Cli::try_parse_from(args) {
+            panic!("`{advice}` names `symora {command}`: {err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
