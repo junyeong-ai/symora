@@ -1273,7 +1273,9 @@ impl LspClient {
     ) -> Result<(u32, SyncOutcome), LspError> {
         let (version, outcome, evicted) = {
             let mut cache = self.document_cache.write().await;
-            let language_id = self.language.to_string().to_lowercase();
+            let language_id = self
+                .language
+                .document_id(&crate::models::lsp::uri_to_path(uri));
 
             if let Some(state) = cache.get_mut(uri) {
                 state.disk = disk;

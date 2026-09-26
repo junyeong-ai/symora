@@ -202,6 +202,24 @@ impl Language {
         }
     }
 
+    /// The `textDocument.languageId` a file of this language at `path` is
+    /// opened with: [`lsp_id`](Self::lsp_id), except the JSX dialects, which
+    /// LSP names apart (`typescriptreact`, `javascriptreact`). A server reads
+    /// a document by this name, not by its file's extension: tsserver given a
+    /// `.tsx` file as `typescript` parses its JSX as TypeScript and misplaces
+    /// its declarations and references.
+    pub fn document_id(&self, path: &Path) -> &'static str {
+        let jsx = |dialect: &str| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case(dialect))
+        };
+        match self {
+            Self::TypeScript if jsx("tsx") => "typescriptreact",
+            Self::JavaScript if jsx("jsx") => "javascriptreact",
+            _ => self.lsp_id(),
+        }
+    }
+
     /// LSP language identifier (matches the `textDocument.languageId` wire value).
     pub fn lsp_id(&self) -> &'static str {
         match self {
@@ -436,6 +454,17 @@ impl FromStr for Language {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_jsx_dialect_is_opened_under_its_own_language_id() {
+        let id = |language: Language, file: &str| language.document_id(Path::new(file));
+        assert_eq!(id(Language::TypeScript, "a.tsx"), "typescriptreact");
+        assert_eq!(id(Language::TypeScript, "a.TSX"), "typescriptreact");
+        assert_eq!(id(Language::TypeScript, "a.ts"), "typescript");
+        assert_eq!(id(Language::JavaScript, "a.jsx"), "javascriptreact");
+        assert_eq!(id(Language::JavaScript, "a.js"), "javascript");
+        assert_eq!(id(Language::Rust, "a.rs"), "rust");
+    }
 
     #[test]
     fn from_extension_recognises_common_languages() {
