@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::declared_in;
+use crate::cli::errors::{ErrorCode, OutputError};
 use crate::cli::response::disclosure::LowerBound;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::find_symbol_at_position;
@@ -19,11 +20,12 @@ use crate::services::store::SymbolExtractor;
 
 #[derive(Args, Debug)]
 pub struct DiffImpactArgs {
-    /// Git revision to compare against (default: HEAD)
+    /// The commit the working tree is compared with — one revision, not a
+    /// range (default: HEAD)
     #[arg(default_value = "HEAD")]
     pub revision: String,
 
-    /// Only analyze staged changes
+    /// Compare the staged index, instead of the working tree, with the revision
     #[arg(long)]
     pub staged: bool,
 
@@ -44,11 +46,11 @@ pub struct DiffImpactOutput {
     pub total_references: usize,
     pub coverage: DiffCoverage,
     pub changes: Vec<ChangedSymbolImpact>,
-    /// Files whose changes could not be measured because the language server
-    /// failed to return symbols for them (Added/Modified hunks present but
-    /// `find_symbols` errored). Their changes are absent from `changes`, so the
-    /// result is a lower bound for these files — disclosed, never silently
-    /// dropped. Omitted when empty.
+    /// Files whose changes could not be measured: nothing could read their
+    /// symbols, or — with `--staged` — unstaged edits sit over the staged
+    /// ones, so the lines the diff names are not the lines on disk. Their
+    /// changes are absent from `changes`, so the result is a lower bound for
+    /// these files; `hints` says which cause applies. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
     /// The analysis stopped before running out of changed symbols, so every
@@ -168,50 +170,60 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let root = ctx.root();
     let test_scope = app.test_scope();
 
-    let hunks = parse_git_diff(root, &args.revision, args.staged)?;
+    let base = resolve_base(root, &args.revision)?;
+    let mut hunks = parse_git_diff(root, &base, args.staged)?;
+    let mut hints = Vec::new();
+    let mut unmeasured_files = Vec::new();
 
-    if hunks.is_empty() {
-        ctx.print_success(DiffImpactOutput {
-            revision: args.revision,
-            changed_files_count: 0,
-            changed_symbols_count: 0,
-            total_references: 0,
-            coverage: DiffCoverage {
-                with_tests: 0,
-                without_tests: 0,
-                ratio: None,
-            },
-            changes: vec![],
-            unmeasured_files: vec![],
-            incomplete: false,
-            hints: vec![],
-        });
-        return Ok(());
+    if !is_ancestor_of_head(root, &base) {
+        hints.push(format!(
+            "`{rev}` is not an ancestor of HEAD, so this diff also takes back what `{rev}` \
+             gained after this branch left it; `symora diff-impact $(git merge-base {rev} HEAD)` \
+             measures this branch alone.",
+            rev = args.revision
+        ));
     }
 
-    let calls_limit = app.config().lsp.calls_limit;
+    if args.staged {
+        let unstaged = unstaged_files(root)?;
+        let (overlaid, staged): (Vec<_>, Vec<_>) =
+            hunks.into_iter().partition(|h| unstaged.contains(&h.file));
+        hunks = staged;
+        let overlaid: BTreeSet<String> = overlaid
+            .iter()
+            .map(|h| relative_display(&h.file, root))
+            .collect();
+        if !overlaid.is_empty() {
+            hints.push(format!(
+                "Unstaged edits sit over the staged ones in {}, so the staged lines are not the \
+                 lines on disk; stage or stash those edits to measure them.",
+                overlaid.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+            unmeasured_files.extend(overlaid);
+        }
+    }
 
-    // The pre-image (where a deleted symbol still exists): the revision being
-    // diffed against, or HEAD when diffing the staged index.
-    let preimage_ref = if args.staged {
-        "HEAD"
+    let (changes, unreadable, stopped_at_cap) = if hunks.is_empty() {
+        (Vec::new(), Vec::new(), false)
     } else {
-        args.revision.as_str()
+        analyze_hunks(
+            app,
+            &hunks,
+            root,
+            &base,
+            test_scope,
+            args.callers,
+            args.max_symbols,
+            app.config().lsp.calls_limit,
+        )
+        .await
     };
+    unmeasured_files.extend(unreadable);
+    if stopped_at_cap {
+        hints.push(LowerBound::AnalysisCapped(args.max_symbols).hint());
+    }
 
-    let (changes, unmeasured_files, stopped_at_cap) = analyze_hunks(
-        app,
-        &hunks,
-        root,
-        preimage_ref,
-        test_scope,
-        args.callers,
-        args.max_symbols,
-        calls_limit,
-    )
-    .await;
-
-    let changed_files: std::collections::HashSet<_> = hunks.iter().map(|h| &h.file).collect();
+    let changed_files: HashSet<_> = hunks.iter().map(|h| &h.file).collect();
     // Coverage is measured only over rows that have reference counts
     // (Added/Modified). Deleted rows carry no refs — counting them as
     // "without tests" would pollute the ratio with symbols that have no live
@@ -229,7 +241,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         Some(with_tests as f32 / measurable as f32)
     };
 
-    let response = DiffImpactOutput {
+    ctx.print_success(DiffImpactOutput {
         revision: args.revision,
         changed_files_count: changed_files.len(),
         changed_symbols_count: changes.len(),
@@ -242,33 +254,119 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         changes,
         unmeasured_files,
         incomplete: stopped_at_cap,
-        hints: if stopped_at_cap {
-            vec![LowerBound::AnalysisCapped(args.max_symbols).hint()]
-        } else {
-            Vec::new()
-        },
-    };
-
-    ctx.print_success(response);
+        hints,
+    });
     Ok(())
 }
 
-fn parse_git_diff(root: &Path, revision: &str, staged: bool) -> Result<Vec<DiffHunk>> {
+/// The commit the diff is measured from, resolved once so the diff and every
+/// pre-image read name the same tree. Only a single commit is accepted: the
+/// other side is always read from the working tree (or the index), so a
+/// range's second revision would name a tree nothing reads.
+fn resolve_base(root: &Path, revision: &str) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{revision}^{{commit}}"),
+        ])
+        .output()
+        .context("Failed to run git rev-parse")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    // `--verify --quiet` exits 1 for an argument that is not one commit; any
+    // other failure is git's own (no repository, a broken one).
+    if output.status.code() != Some(1) {
+        anyhow::bail!(
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Err(unresolvable_revision(revision).into())
+}
+
+/// A ref name cannot contain `..`, so a revision that does is range syntax.
+fn unresolvable_revision(revision: &str) -> OutputError {
+    match revision.split_once("..") {
+        Some((left, _)) => {
+            let from = if left.is_empty() { "HEAD" } else { left };
+            OutputError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "`{revision}` is a range; diff-impact compares the working tree with one revision"
+                ),
+            )
+            .with_hint(format!(
+                "`symora diff-impact {from}` measures everything since {from}; \
+                 `symora diff-impact $(git merge-base {from} HEAD)` measures what this branch \
+                 changed after it left {from}."
+            ))
+        }
+        None => OutputError::new(
+            ErrorCode::InvalidArgument,
+            format!("`{revision}` does not name a commit in this repository"),
+        )
+        .with_hint("Pass a branch, tag, or commit id; `git log --oneline` lists recent commits."),
+    }
+}
+
+fn is_ancestor_of_head(root: &Path, commit: &str) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+        .status()
+        .is_ok_and(|status| status.code() != Some(1))
+}
+
+/// Files whose working-tree content differs from the index.
+fn unstaged_files(root: &Path) -> Result<HashSet<PathBuf>> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["diff", "--relative", "--name-only", "-z"])
+        .output()
+        .context("Failed to run git diff")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| root.join(String::from_utf8_lossy(name).as_ref()))
+        .collect())
+}
+
+fn relative_display(file: &Path, root: &Path) -> String {
+    file.strip_prefix(root)
+        .unwrap_or(file)
+        .display()
+        .to_string()
+}
+
+/// Paths are relative to `root` and limited to it (`--relative`), which need
+/// not be the repository's top level.
+fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Vec<DiffHunk>> {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
     cmd.args([
         "-c",
         "core.quotepath=false",
         "diff",
+        "--relative",
         "--unified=0",
         "--no-color",
     ]);
-
     if staged {
         cmd.arg("--cached");
-    } else {
-        cmd.arg(revision);
     }
+    cmd.args([base, "--"]);
 
     let output = cmd.output().context("Failed to run git diff")?;
 
@@ -554,12 +652,7 @@ async fn analyze_hunks(
             // present, find_symbols errored — disclose it as an unmeasured file
             // (a lower bound) instead of silently dropping its changes.
             if file_exists {
-                unmeasured.push(
-                    file.strip_prefix(root)
-                        .unwrap_or(file)
-                        .display()
-                        .to_string(),
-                );
+                unmeasured.push(relative_display(file, root));
             }
             continue;
         };
@@ -764,12 +857,13 @@ fn resolve_deleted_hunk(
     }
 }
 
-/// `git show <ref>:<relpath>` — the file content at the pre-image revision.
+/// `git show <ref>:./<relpath>` — the file content at the pre-image revision.
+/// The `./` resolves the path from `root` rather than the repository's top.
 fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
     // git pathspecs use forward slashes on every platform; relpath.display()
     // would emit backslashes on Windows and break `git show <ref>:<path>`.
     let spec = format!(
-        "{reference}:{}",
+        "{reference}:./{}",
         relpath.to_string_lossy().replace('\\', "/")
     );
     let output = Command::new("git")

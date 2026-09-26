@@ -101,6 +101,7 @@ symora edit delete src/main.rs:42:4 --expect-no-references
 symora diagnostics src/main.rs --with-context --with-suggestions
 symora impact src/main.rs:42
 symora diff-impact
+symora diff-impact $(git merge-base main HEAD)   # one base revision, never a range
 ```
 
 Mutating commands (`actions apply`, `rename`, and the `edit` subcommands) accept `--dry-run`.

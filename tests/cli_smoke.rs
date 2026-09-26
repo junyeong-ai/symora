@@ -1332,6 +1332,156 @@ fn a_diff_in_a_serverless_language_still_names_what_changed() {
     }
 }
 
+/// A repository whose second commit deletes `gone` from `pkg/m.py` and edits
+/// `top.py` beside `pkg`.
+#[cfg(unix)]
+fn repo_with_a_deleted_function() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::create_dir(repo.join("pkg")).unwrap();
+    std::fs::write(
+        repo.join("pkg/m.py"),
+        "def keep():\n    return 1\n\ndef gone():\n    return 2\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("top.py"), "x = 1\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("pkg/m.py"), "def keep():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("top.py"), "x = 2\n").unwrap();
+    git(repo, &["commit", "-qam", "two"]);
+    dir
+}
+
+/// The other side of a diff is always read from the working tree, so a range
+/// names a second tree nothing reads. git answers `git show A..B:path` with an
+/// empty file, which turned every deletion into "no symbol in range"; the
+/// range is refused instead, with the single revisions that say what was meant.
+#[cfg(unix)]
+#[test]
+fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
+    let repo = repo_with_a_deleted_function();
+    for range in ["HEAD~1..HEAD", "HEAD~1...HEAD"] {
+        let out = run_in(repo.path(), &["diff-impact", range]);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
+        assert!(
+            json["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("$(git merge-base HEAD~1 HEAD)")),
+            "the refusal names the revision that measures the branch: {json}"
+        );
+    }
+
+    let single = json_ok(repo.path(), &["diff-impact", "HEAD~1"]);
+    assert!(
+        single["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .any(|c| c["name"] == "gone" && c["deletion"] == "resolved"),
+        "a single revision reads the deletion from its own tree: {single}"
+    );
+}
+
+/// git names paths from the repository's top, while the project is the
+/// directory symora runs in. Run from a subdirectory, the diff covers that
+/// subdirectory and names its files from there.
+#[cfg(unix)]
+#[test]
+fn a_diff_run_from_a_subdirectory_measures_that_subdirectory() {
+    let repo = repo_with_a_deleted_function();
+    let page = json_ok(&repo.path().join("pkg"), &["diff-impact", "HEAD~1"]);
+    assert_eq!(
+        page["changed_files_count"], 1,
+        "top.py lies outside the project: {page}"
+    );
+    let gone = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .find(|c| c["name"] == "gone")
+        .unwrap_or_else(|| panic!("the deletion is found: {page}"));
+    assert_eq!(gone["deletion"], "resolved", "{page}");
+    assert_eq!(gone["location"]["file"], "m.py", "{page}");
+}
+
+/// With `--staged` the diff describes the index while symbols are read from
+/// disk. Where unstaged edits sit on top of staged ones those are different
+/// lines, so the file is reported as unmeasured rather than misattributed.
+#[cfg(unix)]
+#[test]
+fn staged_lines_under_unstaged_edits_are_unmeasured_and_say_why() {
+    let repo = repo_with_a_deleted_function();
+    let repo = repo.path();
+    std::fs::write(
+        repo.join("pkg/m.py"),
+        "def keep():\n    return 1\n\ndef added():\n    return 3\n",
+    )
+    .unwrap();
+    git(repo, &["add", "pkg/m.py"]);
+    std::fs::write(
+        repo.join("pkg/m.py"),
+        "def later():\n    return 4\n\ndef keep():\n    return 1\n\ndef added():\n    return 3\n",
+    )
+    .unwrap();
+
+    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["pkg/m.py"]),
+        "{page}"
+    );
+    assert_eq!(page["changed_symbols_count"], 0, "{page}");
+    assert!(
+        page["hints"].as_array().is_some_and(|hints| hints
+            .iter()
+            .any(|h| h.as_str().is_some_and(|h| h.contains("stage or stash")))),
+        "the cause and its remedy are named: {page}"
+    );
+
+    git(repo, &["add", "pkg/m.py"]);
+    let staged = json_ok(repo, &["diff-impact", "--staged"]);
+    assert!(
+        staged["unmeasured_files"].is_null(),
+        "fully staged, the index is what is on disk: {staged}"
+    );
+}
+
+/// A base that is not an ancestor of HEAD makes the diff also take back what
+/// the base gained after the branch left it. Valid, but rarely what a review
+/// of the branch means, so it is said.
+#[cfg(unix)]
+#[test]
+fn a_base_off_the_branch_says_what_else_the_diff_takes_back() {
+    let repo = repo_with_a_deleted_function();
+    let repo = repo.path();
+    git(repo, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+    std::fs::write(repo.join("side.py"), "y = 1\n").unwrap();
+    git(repo, &["add", "side.py"]);
+    git(repo, &["commit", "-qm", "side"]);
+    git(repo, &["checkout", "-q", "-"]);
+
+    let off = json_ok(repo, &["diff-impact", "side"]);
+    assert!(
+        off["hints"]
+            .as_array()
+            .is_some_and(|hints| hints.iter().any(|h| h
+                .as_str()
+                .is_some_and(|h| h.contains("$(git merge-base side HEAD)")))),
+        "{off}"
+    );
+
+    let on = json_ok(repo, &["diff-impact", "HEAD~1"]);
+    assert!(
+        on["hints"].is_null(),
+        "an ancestor base needs no warning: {on}"
+    );
+}
+
 fn git(dir: &std::path::Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
