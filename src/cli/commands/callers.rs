@@ -123,7 +123,7 @@ async fn fallback_from_refs(
     let mut symbol_cache: HashMap<PathBuf, Vec<crate::models::symbol::Symbol>> = HashMap::new();
 
     for ref_loc in refs.data {
-        if ref_loc.file == file && ref_loc.line == line {
+        if ref_loc.covers(file, line, column) {
             continue;
         }
 
