@@ -2329,6 +2329,46 @@ fn named_rows(page: &serde_json::Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// git reads a base whose bytes are not UTF-8 as well as any other; only the
+/// grammar cannot, so the file is unmeasured, as its current version is,
+/// rather than reported as a deletion per hunk that no base could be read for.
+#[cfg(unix)]
+#[test]
+fn a_base_that_is_not_text_leaves_its_file_unmeasured() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("m.py"),
+        b"def a():\n    return \"caf\xe9\"\n\n\ndef b():\n    return 1\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.py"),
+        b"def a():\n    return \"th\xe9\"\n\n\ndef b():\n    return 2\n",
+    )
+    .unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    assert!(
+        page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .all(|c| c["change_type"] != "deleted"),
+        "{page}"
+    );
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["m.py"]),
+        "{page}"
+    );
+}
+
 /// A symbolic link's lines are where it points, not source, so a link that
 /// appears or is retargeted is counted but no symbol is taken from the
 /// file it points to.
