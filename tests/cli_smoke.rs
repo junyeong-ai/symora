@@ -1380,6 +1380,76 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
     assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
 }
 
+/// diff-impact reads the patch git prints, which a user's diff configuration
+/// can reshape. None of it may change what is measured.
+#[cfg(unix)]
+#[test]
+fn a_users_diff_configuration_does_not_change_what_is_measured() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def a():\n    return 1\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 3\n",
+    )
+    .unwrap();
+    git(repo, &["add", "m.py"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def a():\n    return 10\n\n\ndef b():\n    return 2\n\n\ndef c():\n    return 30\n",
+    )
+    .unwrap();
+    let shift = dir.path().join(".git/shift.sh");
+    std::fs::write(&shift, "#!/bin/sh\necho header\ncat \"$1\"\n").unwrap();
+    std::fs::set_permissions(&shift, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(repo.join(".git/info/attributes"), "*.py diff=shift\n").unwrap();
+    let shift = shift.to_str().unwrap();
+
+    for (key, value) in [
+        ("diff.external", "true"),
+        ("diff.shift.textconv", shift),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.noprefix", "true"),
+        ("diff.srcPrefix", "x/"),
+        ("diff.dstPrefix", "y/"),
+        ("diff.interHunkContext", "10"),
+    ] {
+        git(repo, &["config", key, value]);
+        let page = json_ok(repo, &["diff-impact"]);
+        git(repo, &["config", "--unset", key]);
+
+        let mut changed: Vec<&str> = page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .filter_map(|change| change["name"].as_str())
+            .collect();
+        changed.sort_unstable();
+        assert_eq!(changed, ["a", "c"], "{key}={value}: {page}");
+    }
+
+    let out = Command::new(SYMORA)
+        .arg("diff-impact")
+        .env("SYMORA_NO_DAEMON", "1")
+        .env("GIT_DIFF_OPTS", "-u5")
+        .current_dir(repo)
+        .output()
+        .expect("symora binary should exist");
+    let page: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+    let mut changed: Vec<&str> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|change| change["name"].as_str())
+        .collect();
+    changed.sort_unstable();
+    assert_eq!(changed, ["a", "c"], "GIT_DIFF_OPTS=-u5: {page}");
+}
+
 /// The other side of a diff is always read from the working tree, so a range
 /// names a second tree nothing reads. git answers `git show A..B:path` with an
 /// empty file, which turned every deletion into "no symbol in range"; the

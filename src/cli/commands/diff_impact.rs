@@ -411,13 +411,24 @@ fn relative_display(file: &Path, root: &Path) -> String {
 fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Vec<DiffHunk>> {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
+    // Every option that shapes the patch text is set here, so the user's
+    // diff configuration cannot reshape what the parser reads: an external
+    // diff prints no patch, textconv moves lines off the file's own, other
+    // prefixes rename the files, and inter-hunk context — or context from
+    // GIT_DIFF_OPTS, which outranks `--unified` — takes in unchanged lines.
+    cmd.env_remove("GIT_DIFF_OPTS");
     cmd.args([
         "-c",
         "core.quotepath=false",
         "diff",
         "--relative",
         "--unified=0",
+        "--inter-hunk-context=0",
         "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
     ]);
     if staged {
         cmd.arg("--cached");
