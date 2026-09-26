@@ -1227,6 +1227,36 @@ exec sleep 600
         }
 
         #[tokio::test]
+        async fn a_tsx_file_is_opened_as_typescriptreact() {
+            let fake = FakeServer::new();
+            let mut config = crate::models::config::SymoraConfig::default();
+            config.lsp.timeout_secs = 1;
+            config
+                .lsp
+                .servers
+                .insert("typescript".to_string(), fake.server("watch", 0));
+            let manager = Arc::new(LspManager::new(
+                fake.dir.path().to_path_buf(),
+                Arc::new(crate::config::LspRuntimeConfig::from(&config)),
+                FileWatch::Off,
+            ));
+            let client = bounded(manager.get_client(Language::TypeScript))
+                .await
+                .unwrap();
+            let file = fake.dir.path().join("badge.tsx");
+            let content = "export const Badge = () => <span />;\n";
+            std::fs::write(&file, content).unwrap();
+
+            bounded(client.sync_document(&crate::models::lsp::path_to_uri(&file), content))
+                .await
+                .unwrap();
+            bounded(fake.until_received("\"languageId\":\"typescriptreact\"")).await;
+
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
         async fn a_one_shot_pool_offers_file_watching_without_watching() {
             let fake = FakeServer::new();
             let manager = fake.manager_watching("watch", 0, FileWatch::Off);
