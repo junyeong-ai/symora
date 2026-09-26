@@ -8,7 +8,7 @@ use tokio::sync::{RwLock, mpsc, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
-use super::watch::{Batch, RawEvent, WorkspaceWatcher};
+use super::watch::{Batch, FileWatch, RawEvent, WorkspaceWatcher};
 use crate::error::LspError;
 use crate::models::symbol::Language;
 
@@ -124,6 +124,7 @@ pub struct LspManager {
     clients: Mutex<HashMap<Language, ClientState>>,
     configs: HashMap<Language, ServerConfig>,
     runtime_config: Arc<crate::config::LspRuntimeConfig>,
+    file_watch: FileWatch,
     /// Started with the first server, so every server that registers file
     /// watchers is told about changes from its start on.
     watcher: Mutex<Option<WorkspaceWatcher>>,
@@ -135,9 +136,14 @@ pub struct LspManager {
 }
 
 impl LspManager {
-    pub fn new(root: PathBuf, runtime_config: Arc<crate::config::LspRuntimeConfig>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        runtime_config: Arc<crate::config::LspRuntimeConfig>,
+        file_watch: FileWatch,
+    ) -> Self {
         Self {
             root,
+            file_watch,
             clients: Mutex::new(HashMap::new()),
             configs: servers::merged(&runtime_config.servers),
             runtime_config,
@@ -319,6 +325,9 @@ impl LspManager {
     /// Whether the workspace is watched, starting the watch if it is not yet.
     /// A server is only offered file watching while a watch stands behind it.
     async fn watch_workspace(self: &Arc<Self>) -> bool {
+        if self.file_watch == FileWatch::Off {
+            return false;
+        }
         if self
             .watcher
             .lock()
@@ -660,7 +669,7 @@ mod tests {
     fn manager_with_cap(cap: usize) -> LspManager {
         let mut config = crate::config::LspRuntimeConfig::default();
         config.max_concurrent_servers = cap;
-        LspManager::new(PathBuf::from("/test"), Arc::new(config))
+        LspManager::new(PathBuf::from("/test"), Arc::new(config), FileWatch::Off)
     }
 
     #[test]
@@ -803,6 +812,15 @@ exec sleep 600
             /// per `behavior` after `delay_secs`. Go's profile makes the
             /// handshake budget 2s at `timeout_secs = 1`.
             fn manager(&self, behavior: &str, delay_secs: u32) -> Arc<LspManager> {
+                self.manager_watching(behavior, delay_secs, FileWatch::On)
+            }
+
+            fn manager_watching(
+                &self,
+                behavior: &str,
+                delay_secs: u32,
+                file_watch: FileWatch,
+            ) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
                 config.lsp.timeout_secs = 1;
                 config.lsp.servers.insert(
@@ -821,6 +839,7 @@ exec sleep 600
                 Arc::new(LspManager::new(
                     self.dir.path().to_path_buf(),
                     Arc::new(crate::config::LspRuntimeConfig::from(&config)),
+                    file_watch,
                 ))
             }
 
@@ -972,6 +991,18 @@ exec sleep 600
                 !received.contains("notes.txt"),
                 "only what the watcher registered for is sent"
             );
+
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn a_one_shot_pool_starts_servers_without_watching() {
+            let fake = FakeServer::new();
+            let manager = fake.manager_watching("serve", 0, FileWatch::Off);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+
+            assert!(manager.watcher.lock().unwrap().is_none());
 
             drop((client, manager));
             fake.assert_all_gone().await;

@@ -4,7 +4,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use symora::app::App;
 #[cfg(unix)]
 use symora::cli::commands::daemon::{DaemonArgs, DaemonCommand};
+use symora::cli::commands::mcp::{McpArgs, McpCommand};
 use symora::cli::{Cli, Commands, OutputOptions};
+use symora::infra::lsp::watch::FileWatch;
 
 // jemalloc keeps fragmentation flat under the SQLite batch + LSP fan-out
 // workload that dominates Symora. The cfg gate matches the optional
@@ -140,6 +142,12 @@ async fn async_main() -> anyhow::Result<()> {
         symora::app::Wiring {
             use_daemon,
             deterministic: cli.deterministic,
+            file_watch: match &cli.command {
+                Commands::Mcp(McpArgs {
+                    command: McpCommand::Serve { .. },
+                }) => FileWatch::On,
+                _ => FileWatch::Off,
+            },
         },
     )
     .await
