@@ -390,7 +390,11 @@ impl LspManager {
                     self.root.display()
                 );
                 super::client::note_workspace_content_changed();
-                self.shutdown_all().await;
+                // A start still in flight is spared: a server registers its
+                // file watchers only once `initialize` has returned, so none
+                // of the lost events was its to receive.
+                self.stop(|state| matches!(state, ClientState::Live { .. }))
+                    .await;
             }
         }
     }
@@ -421,13 +425,18 @@ impl LspManager {
     }
 
     pub async fn shutdown_all(&self) {
-        let clients_to_shutdown: Vec<(Language, Arc<LspClient>)> = self
+        self.stop(|_| true).await;
+    }
+
+    /// Take every entry `which` selects out of the pool and stop its server.
+    async fn stop(&self, mut which: impl FnMut(&ClientState) -> bool) {
+        let stopping: Vec<(Language, Arc<LspClient>)> = self
             .pool()
-            .drain()
+            .extract_if(|_, state| which(state))
             .filter_map(|(lang, state)| state.client().map(|c| (lang, c)))
             .collect();
 
-        for (lang, client) in clients_to_shutdown {
+        for (lang, client) in stopping {
             if let Err(e) = client.shutdown().await {
                 tracing::warn!("Error shutting down {:?} server: {}", lang, e);
             } else {
@@ -1010,6 +1019,38 @@ exec sleep 600
             );
 
             drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn lost_events_restart_started_servers_but_not_one_still_starting() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("exits", 1);
+            let started = bounded(manager.get_client(Language::Go)).await.unwrap();
+            manager.apply_file_changes(Batch::Rescan).await;
+            assert!(!started.is_running().await, "a started server is stopped");
+
+            let starting = tokio::spawn({
+                let manager = Arc::clone(&manager);
+                async move { manager.get_client(Language::Go).await }
+            });
+            bounded(async {
+                while fake.pids().len() < 2 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            manager.apply_file_changes(Batch::Rescan).await;
+            let finished = bounded(starting).await.unwrap().unwrap();
+
+            let next = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert!(
+                Arc::ptr_eq(&finished, &next),
+                "the start in flight joined the pool"
+            );
+            assert_eq!(fake.pids().len(), 2);
+
+            drop((started, finished, next, manager));
             fake.assert_all_gone().await;
         }
 
