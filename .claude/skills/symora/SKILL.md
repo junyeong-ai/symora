@@ -150,7 +150,7 @@ symora daemon restart
 symora doctor                          # check environment; pass <language> to check one
 ```
 
-Use these when search results are unexpectedly empty, a language server is unresponsive, or daemon/index state needs confirmation. Reserve `--force` for full rebuilds. A daemon or `mcp serve` tells its language servers about files that change on disk, so LSP-backed answers follow edits without a restart; only index rows (`backend: "index"`, `stale: true`) wait for `symora search index build`.
+Use these when search results are unexpectedly empty, a language server is unresponsive, or daemon/index state needs confirmation. Reserve `--force` for full rebuilds. A daemon or `mcp serve` tells its language servers about files that change on disk, so LSP-backed answers follow edits without a restart — except, on Linux, under a directory the watch cannot cover (unreadable, or past `fs.inotify.max_user_watches`), which catches up when that process restarts; only index rows (`backend: "index"`, `stale: true`) wait for `symora search index build`.
 
 ## When commands fail
 
