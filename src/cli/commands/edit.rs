@@ -37,8 +37,10 @@ pub struct EditArgs {
 #[derive(Subcommand, Debug)]
 pub enum EditCommand {
     /// Replace a symbol's ENTIRE definition span (whole lines, signature
-    /// through closing brace) — pass the complete definition, not just
-    /// the inner code. For a raw character range use `replace`.
+    /// through closing brace, and any doc-comment or attribute lines the
+    /// server's range opens with — `--dry-run` shows them) — pass the
+    /// complete definition, not just the inner code. For a raw character
+    /// range use `replace`.
     ReplaceBody {
         /// Target: `file:line[:col]` (location) or file path (with --symbol)
         target: String,
