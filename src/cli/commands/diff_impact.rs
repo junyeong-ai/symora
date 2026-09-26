@@ -1209,8 +1209,9 @@ async fn analyze_symbol_impact(
 
 /// What the built-in grammar reads in the base's version of a file.
 enum Preimage {
-    /// No grammar compiled into this binary reads the file's language, so what
-    /// its removed lines declared is unknown.
+    /// What its removed lines declared is unknown: no grammar compiled into
+    /// this binary reads the file's language, or the base's version is not
+    /// text, as the current one is not when it cannot be read either.
     Unparsed,
     /// The base's version could not be read (`git show` failed).
     Unavailable,
@@ -1223,11 +1224,14 @@ fn read_preimage(root: &Path, preimage_ref: &str, file: &Path) -> Preimage {
         return Preimage::Unparsed;
     }
     let relpath = file.strip_prefix(root).unwrap_or(file);
-    match git_show(root, preimage_ref, relpath) {
-        Some(content) => {
+    let Some(bytes) = git_show(root, preimage_ref, relpath) else {
+        return Preimage::Unavailable;
+    };
+    match String::from_utf8(bytes) {
+        Ok(content) => {
             Preimage::Parsed(SymbolExtractor::shared().extract_members(file, &content, language))
         }
-        None => Preimage::Unavailable,
+        Err(_) => Preimage::Unparsed,
     }
 }
 
@@ -1421,7 +1425,7 @@ fn unresolved_deletion(resolution: DeletionResolution) -> ChangedSymbolImpact {
 
 /// `git show <ref>:./<relpath>` — the file content at the pre-image revision.
 /// The `./` resolves the path from `root` rather than the repository's top.
-fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
+fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<Vec<u8>> {
     // git names paths with forward slashes on every platform, and a Unix
     // file name may itself hold a backslash, so the components are joined.
     let mut spec = std::ffi::OsString::from(format!("{reference}:."));
@@ -1435,10 +1439,7 @@ fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
         .arg(&spec)
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+    output.status.success().then_some(output.stdout)
 }
 
 #[cfg(test)]
