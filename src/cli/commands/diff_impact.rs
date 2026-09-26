@@ -46,13 +46,16 @@ pub struct DiffImpactOutput {
     pub total_references: usize,
     pub coverage: DiffCoverage,
     pub changes: Vec<ChangedSymbolImpact>,
-    /// Files whose changes could not be measured: nothing could read their
-    /// symbols, git reports them as binary and names no lines, or — with
-    /// `--staged` — unstaged edits sit over the staged ones, so the lines the
-    /// diff names are not the lines on disk. Their changes are absent from
-    /// `changes`, so the result is a lower bound for these files. `hints`
-    /// names the binary and staged causes; a file listed without one is one
-    /// whose symbols could not be read. Omitted when empty.
+    /// Files whose changes could not be measured: nothing could read the
+    /// symbols of their changed lines (deleted lines are read by the grammar
+    /// compiled into symora alone), they are symbolic links, whose lines are
+    /// a path rather than source, git reports them as binary and names no
+    /// lines, or — with `--staged` — unstaged edits sit over the staged ones,
+    /// so the lines the diff names are not the lines on disk. Their changes
+    /// are absent from `changes`, so the result is a lower bound for these
+    /// files. `hints` names the binary and staged causes; a file listed
+    /// without one is a link or one whose symbols could not be read. Omitted
+    /// when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
     /// The analysis stopped before running out of changed symbols, so every
