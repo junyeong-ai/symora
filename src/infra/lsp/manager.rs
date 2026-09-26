@@ -49,6 +49,13 @@ impl ClientState {
             Self::Initializing(_) => None,
         }
     }
+
+    /// Whether this entry's server may be following the disk through file
+    /// watchers: one it registers only once told `initialized`, which a
+    /// start tells it after the client has joined the pool.
+    fn follows_the_disk(&self) -> bool {
+        matches!(self, Self::Live { client, .. } if client.initialized())
+    }
 }
 
 enum Reservation {
@@ -87,14 +94,28 @@ impl StartSlot {
                 e
             );
         }
-        let client = self.manager.spawn_server(self.language).await?;
-        self.fill(&client);
-        Ok(client)
+        let mut admitted = None;
+        let started = self
+            .manager
+            .spawn_server(self.language, |client| {
+                self.fill(client);
+                admitted = Some(Arc::clone(client));
+            })
+            .await;
+        // A handshake that fails after the client joined the pool takes it
+        // back out, so the next request starts another server.
+        if started.is_err()
+            && let Some(client) = admitted
+        {
+            self.manager.withdraw(self.language, &client);
+        }
+        started
     }
 
-    /// Hand the started client to the pool — unless a shutdown or restart
-    /// took the entry meanwhile. Then the caller keeps the only handle, and
-    /// the server stops when that caller is done with it.
+    /// Hand the client to the pool as its server is about to be told
+    /// `initialized` — unless a shutdown or restart took the entry
+    /// meanwhile. Then the caller keeps the only handle, and the server stops
+    /// when that caller is done with it.
     fn fill(&self, client: &Arc<LspClient>) {
         let mut clients = self.manager.pool();
         if self.holds(&clients) {
@@ -263,14 +284,23 @@ impl LspManager {
     /// Drop a pooled client whose server exited, unless it was already
     /// replaced.
     fn retire(&self, language: Language, dead: &Arc<LspClient>) {
-        let mut clients = self.pool();
-        if matches!(
-            clients.get(&language),
-            Some(ClientState::Live { client, .. }) if Arc::ptr_eq(client, dead)
-        ) {
-            clients.remove(&language);
+        if self.withdraw(language, dead) {
             tracing::warn!("{:?} language server exited; starting a new one", language);
         }
+    }
+
+    /// Take `client` out of the pool if it is still the one pooled for
+    /// `language`.
+    fn withdraw(&self, language: Language, client: &Arc<LspClient>) -> bool {
+        let mut clients = self.pool();
+        let pooled = matches!(
+            clients.get(&language),
+            Some(ClientState::Live { client: pooled, .. }) if Arc::ptr_eq(pooled, client)
+        );
+        if pooled {
+            clients.remove(&language);
+        }
+        pooled
     }
 
     /// Pick the least-recently-used Ready client when the pool is full.
@@ -300,9 +330,12 @@ impl LspManager {
             .map(|(lang, _)| lang)
     }
 
+    /// Start `language`'s server, handing its client to `admit` before the
+    /// server is told `initialized` (`LspClient::start`).
     async fn spawn_server(
         self: &Arc<Self>,
         language: Language,
+        admit: impl FnOnce(&Arc<LspClient>),
     ) -> Result<Arc<LspClient>, LspError> {
         let config = self
             .configs
@@ -320,7 +353,7 @@ impl LspManager {
             self.watch_workspace().await,
         );
         client
-            .start(&command.to_string_lossy(), &config.args)
+            .start(&command.to_string_lossy(), &config.args, || admit(&client))
             .await?;
 
         tracing::info!("{:?} language server started", language);
@@ -408,11 +441,10 @@ impl LspManager {
                     self.root.display()
                 );
                 super::client::note_workspace_content_changed();
-                // A start still in flight is spared: a server registers its
-                // file watchers only once `initialize` has returned, so none
-                // of the lost events was its to receive.
-                self.stop(|state| matches!(state, ClientState::Live { .. }))
-                    .await;
+                // A start still in flight is spared, in the pool or not: its
+                // server has registered no file watcher, so none of the lost
+                // events was its to receive.
+                self.stop(ClientState::follows_the_disk).await;
             }
         }
     }
@@ -816,6 +848,8 @@ mod tests {
     /// server, ignores stdin EOF — so a process that goes away was stopped
     /// by the client, never by its own shutdown logic. `exits` is the one
     /// exception, for a test about the pool rather than about stopping.
+    /// `deaf` stops reading before it answers `initialize`, so the client's
+    /// `initialized` meets a closed pipe.
     #[cfg(unix)]
     mod server_lifetime {
         use super::*;
@@ -825,11 +859,12 @@ mod tests {
 echo $$ >> "$1"
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
-  serve|watch|exits) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  serve|watch|exits|deaf) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
 sleep "$3"
+[ "$2" = deaf ] && exec 0<&-
 printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
 if [ "$2" = watch ]; then
   body='{"jsonrpc":"2.0","id":"w1","method":"client/registerCapability","params":{"registrations":[{"id":"go-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.go"}]}}]}}'
@@ -1063,6 +1098,70 @@ exec sleep 600
             assert_eq!(fake.pids().len(), 2);
 
             drop((started, finished, next, manager));
+            fake.assert_all_gone().await;
+        }
+
+        /// A server that registers file watchers once told `initialized`
+        /// finds its client in the pool already, so no change is forwarded
+        /// past it. Holding `admit` open shows whether `initialized` was
+        /// written first.
+        #[tokio::test]
+        async fn a_server_is_told_initialized_only_once_its_client_is_admitted() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("watch", 0);
+            let received = fake.received();
+            let mut told_before_admitted = None;
+            let client = bounded(manager.spawn_server(Language::Go, |_| {
+                // Long enough for the server to record anything sent to it.
+                std::thread::sleep(Duration::from_millis(300));
+                told_before_admitted = Some(
+                    std::fs::read_to_string(&received)
+                        .unwrap_or_default()
+                        .contains("\"method\":\"initialized\""),
+                );
+            }))
+            .await
+            .unwrap();
+
+            assert_eq!(told_before_admitted, Some(false));
+            bounded(fake.until_received("\"method\":\"initialized\"")).await;
+
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn a_handshake_that_fails_after_admission_leaves_no_client_pooled() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("deaf", 0);
+            assert!(bounded(manager.get_client(Language::Go)).await.is_err());
+            assert!(
+                manager.peek_client(Language::Go).is_none(),
+                "the failed start left its client in the pool"
+            );
+
+            drop(manager);
+            fake.assert_all_gone().await;
+        }
+
+        /// A rescan stops the servers that may have missed events, and a
+        /// client admitted to the pool is not one until its server is told
+        /// `initialized`.
+        #[tokio::test]
+        async fn a_client_follows_the_disk_only_once_its_server_is_told_initialized() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let mut while_admitted = None;
+            let client = bounded(manager.spawn_server(Language::Go, |client| {
+                while_admitted = Some(ClientState::live(Arc::clone(client)).follows_the_disk());
+            }))
+            .await
+            .unwrap();
+
+            assert_eq!(while_admitted, Some(false));
+            assert!(ClientState::live(Arc::clone(&client)).follows_the_disk());
+
+            drop((client, manager));
             fake.assert_all_gone().await;
         }
 
