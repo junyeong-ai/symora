@@ -1578,6 +1578,50 @@ fn a_binary_file_whose_content_is_unchanged_is_not_unmeasured() {
     assert!(page["hints"].is_null(), "{page}");
 }
 
+/// git quotes a file name holding a double quote or a backslash; the
+/// file is measured under the name it has, and a deletion in it is read
+/// from the base under that name.
+#[cfg(unix)]
+#[test]
+fn a_file_name_git_quotes_is_measured_under_its_own_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("we\"ird.py"), "def w():\n    return 1\n").unwrap();
+    std::fs::write(
+        repo.join("back\\slash.py"),
+        "def keep():\n    return 1\n\n\ndef gone():\n    return 2\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("we\"ird.py"), "def w():\n    return 2\n").unwrap();
+    std::fs::write(repo.join("back\\slash.py"), "def keep():\n    return 1\n").unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let rows: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {} {}",
+                c["name"], c["change_type"], c["location"]["file"]
+            )
+        })
+        .collect();
+    assert!(
+        rows.contains(&r#""w" "modified" "we\"ird.py""#.to_string()),
+        "{page}"
+    );
+    assert!(
+        rows.contains(&r#""gone" "deleted" "back\\slash.py""#.to_string()),
+        "{page}"
+    );
+}
+
 /// A file git reports as binary names no changed lines, so it is counted
 /// and disclosed rather than dropped.
 #[cfg(unix)]

@@ -549,7 +549,7 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
             current_file = None;
             block_file = same_path_header(rest).map(|p| root.join(p));
         } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
-            block_file = Some(root.join(rest));
+            block_file = git_path(rest).map(|(path, _)| root.join(path));
         } else if in_header && line.starts_with("Binary files ") {
             binary.extend(block_file.clone());
         } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
@@ -580,26 +580,83 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
 /// The path of a `diff --git a/X b/X` header whose two sides are the same
 /// path, as every block's are but a rename's (whose `rename to` line names
 /// it). Split at its middle, a path holding spaces is still unambiguous.
-fn same_path_header(rest: &str) -> Option<&str> {
+fn same_path_header(rest: &str) -> Option<String> {
+    if rest.starts_with('"') {
+        let (old, after) = git_path(rest)?;
+        let (new, _) = git_path(after.strip_prefix(' ')?)?;
+        let old = old.strip_prefix("a/")?;
+        return (new.strip_prefix("b/")? == old).then(|| old.to_string());
+    }
     let rest = rest.strip_prefix("a/")?;
     let half = rest.len().checked_sub(3)? / 2;
     let (old, new) = (rest.get(..half)?, rest.get(half..)?);
-    (new.strip_prefix(" b/")? == old).then_some(old)
+    (new.strip_prefix(" b/")? == old).then(|| old.to_string())
+}
+
+/// A path as git prints it, and what follows it: verbatim, or — when the
+/// path holds a double quote, a backslash or a control character, which
+/// `core.quotepath=false` still quotes — in double quotes with C escapes.
+/// A verbatim path runs to the end of `field`.
+fn git_path(field: &str) -> Option<(String, &str)> {
+    let Some(quoted) = field.strip_prefix('"') else {
+        return Some((field.to_string(), ""));
+    };
+    let mut bytes = Vec::new();
+    let mut chars = quoted.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' => {
+                let path = String::from_utf8_lossy(&bytes).into_owned();
+                return Some((path, &quoted[at + 1..]));
+            }
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                bytes.push(match escaped {
+                    'a' => 0x07,
+                    'b' => 0x08,
+                    't' => b'\t',
+                    'n' => b'\n',
+                    'v' => 0x0b,
+                    'f' => 0x0c,
+                    'r' => b'\r',
+                    '"' => b'"',
+                    '\\' => b'\\',
+                    '0'..='3' => {
+                        let digit = |c: char| c.to_digit(8);
+                        let (high, mid, low) = (
+                            digit(escaped)?,
+                            digit(chars.next()?.1)?,
+                            digit(chars.next()?.1)?,
+                        );
+                        (high * 64 + mid * 8 + low) as u8
+                    }
+                    _ => return None,
+                });
+            }
+            c => bytes.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        }
+    }
+    None
 }
 
 /// The path inside a `--- `/`+++ ` diff header: strips the `a/`/`b/` prefix and
 /// any trailing tab-separated metadata (git appends a tab when the path holds a
 /// space). `None` for `/dev/null`. Paths are literal because the diff is
 /// produced with `core.quotepath=false`.
-fn diff_header_path(rest: &str) -> Option<&str> {
-    let path = rest.split('\t').next().unwrap_or(rest);
+fn diff_header_path(rest: &str) -> Option<String> {
+    let path = if rest.starts_with('"') {
+        git_path(rest)?.0
+    } else {
+        rest.split('\t').next().unwrap_or(rest).to_string()
+    };
     if path == "/dev/null" {
         return None;
     }
     Some(
         path.strip_prefix("a/")
             .or_else(|| path.strip_prefix("b/"))
-            .unwrap_or(path),
+            .unwrap_or(&path)
+            .to_string(),
     )
 }
 
@@ -1032,11 +1089,15 @@ fn resolve_deleted_hunk(
 /// `git show <ref>:./<relpath>` — the file content at the pre-image revision.
 /// The `./` resolves the path from `root` rather than the repository's top.
 fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
-    // git pathspecs use forward slashes on every platform; relpath.display()
-    // would emit backslashes on Windows and break `git show <ref>:<path>`.
+    // git names paths with forward slashes on every platform, and a Unix
+    // file name may itself hold a backslash, so the components are joined.
     let spec = format!(
         "{reference}:./{}",
-        relpath.to_string_lossy().replace('\\', "/")
+        relpath
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
     );
     let output = Command::new("git")
         .current_dir(root)
@@ -1090,6 +1151,31 @@ mod tests {
             parse_diff_output(diff, root).binary,
             ["logo.png", "new.bin", "my file.png", "add.png"].map(|p| root.join(p))
         );
+    }
+
+    #[test]
+    fn a_path_git_quotes_is_read_as_the_file_it_names() {
+        let root = Path::new("/r");
+        let diff = "diff --git \"a/we\\\"ird.py\" \"b/we\\\"ird.py\"\n\
+                    index 1111111..2222222 100644\n\
+                    --- \"a/we\\\"ird.py\"\n\
+                    +++ \"b/we\\\"ird.py\"\n\
+                    @@ -1 +1 @@\n\
+                    diff --git \"a/bin\\\"ary.py\" \"b/bin\\\"ary.py\"\n\
+                    index 3333333..4444444 100644\n\
+                    Binary files \"a/bin\\\"ary.py\" and \"b/bin\\\"ary.py\" differ\n\
+                    diff --git \"a/old\\\\x.py\" \"b/tab\\there.py\"\n\
+                    similarity index 90%\n\
+                    rename from \"old\\\\x.py\"\n\
+                    rename to \"tab\\there.py\"\n\
+                    --- \"a/old\\\\x.py\"\n\
+                    +++ \"b/tab\\there.py\"\n\
+                    @@ -3 +3 @@\n";
+        let parsed = parse_diff_output(diff, root);
+        assert_eq!(parsed.hunks[0].file, root.join("we\"ird.py"));
+        assert_eq!(parsed.binary, [root.join("bin\"ary.py")]);
+        assert_eq!(parsed.hunks[1].file, root.join("tab\there.py"));
+        assert_eq!(parsed.hunks[1].old_file, root.join("old\\x.py"));
     }
 
     #[test]
