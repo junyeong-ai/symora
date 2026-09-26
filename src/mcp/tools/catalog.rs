@@ -61,9 +61,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             &[(
                 "coverage_gaps",
                 "array",
-                "Languages this answer could not vouch for: [{language, reason}], reason one of \
-                 not_indexed | server_not_installed | unavailable | timed_out | unsupported | \
-                 not_searched. Present whether items is empty or partial — a language listed \
+                "Languages this answer could not vouch for: [{language, reason, message?}], \
+                 reason one of not_indexed | server_not_installed | not_consulted | unavailable | \
+                 timed_out | unsupported | not_searched; an unavailable gap carries message, the \
+                 failure's first line. Present whether items is empty or partial — a language listed \
                  here was not covered, so its absence from items proves nothing. Reach it with \
                  search_content/AST, or fix what the reason names",
             )],

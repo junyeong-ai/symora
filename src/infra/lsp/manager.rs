@@ -900,12 +900,13 @@ exec sleep 600
             }
 
             /// The process state `ps` reports, empty once the pid is reaped.
+            /// A `ps` that cannot run would read as every process reaped.
             fn stat(pid: u32) -> String {
-                std::process::Command::new("ps")
+                let out = std::process::Command::new("ps")
                     .args(["-o", "stat=", "-p", &pid.to_string()])
                     .output()
-                    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-                    .unwrap_or_default()
+                    .expect("ps observes the fake server's processes");
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
 
             fn alive(pid: u32) -> bool {
