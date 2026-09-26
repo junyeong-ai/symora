@@ -131,11 +131,16 @@ impl From<&Uncovered> for CoverageGap {
 }
 
 /// The gaps in the order they are worth reading: a server whose lookup
-/// failed is a problem to fix, while a language no server is installed for
-/// is usually just one the project does not work in.
+/// failed is a problem to fix, and a language the index could hold but was
+/// not asked about is one a build cures, while a language no server is
+/// installed for is usually just one the project does not work in.
 fn by_consequence(shortfall: &[Uncovered]) -> Vec<&Uncovered> {
     let mut ordered: Vec<&Uncovered> = shortfall.iter().collect();
-    ordered.sort_by_key(|gap| !gap.lookup_failed());
+    ordered.sort_by_key(|gap| {
+        let index_cures = gap.reason == CoverageReason::NotConsulted
+            && crate::services::store::SymbolExtractor::is_supported(gap.language);
+        (!gap.lookup_failed(), !index_cures)
+    });
     ordered
 }
 
@@ -964,6 +969,20 @@ mod tests {
         assert!(
             symbol_coverage_hints(&other, not_built)[0].contains("the index does not extract it")
         );
+
+        let mixed = [
+            Uncovered::not_reached(Language::Css, CoverageReason::NotConsulted),
+            Uncovered::not_reached(Language::Html, CoverageReason::NotConsulted),
+            Uncovered::not_reached(Language::Rust, CoverageReason::NotConsulted),
+        ];
+        assert!(!SymbolExtractor::is_supported(Language::Css));
+        assert!(!SymbolExtractor::is_supported(Language::Html));
+        assert_eq!(
+            symbol_coverage_next_commands("alpha", &mixed, not_built),
+            ["symora search index build"],
+            "the build that cures the project's own language leads"
+        );
+        assert!(symbol_coverage_hints(&mixed, not_built)[0].contains("for rust"));
     }
 
     #[test]
