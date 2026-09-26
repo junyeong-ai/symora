@@ -8,7 +8,7 @@ use tokio::sync::{OnceCell, RwLock, mpsc, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
-use super::watch::{Batch, FileChange, FileWatch, RawEvent, WorkspaceWatcher};
+use super::watch::{Batch, FileWatch, RawEvent, WorkspaceWatcher};
 use crate::error::LspError;
 use crate::models::symbol::Language;
 
@@ -367,17 +367,30 @@ impl LspManager {
         }
     }
 
-    /// Keep the watch over what changed, and report the files of each
-    /// directory that appeared (`WorkspaceWatcher::follow`).
-    fn follow(&self, mut changes: Vec<FileChange>, watch_root: &Path) -> Vec<FileChange> {
-        if let Some(watcher) = self.watcher.get() {
-            watcher.lock().expect("watcher lock poisoned").follow(
-                &mut changes,
-                watch_root,
-                &self.root,
-            );
+    /// Keep the watch over what a batch reports: follow what changed and
+    /// report the files of each directory that appeared
+    /// (`WorkspaceWatcher::follow`), or watch the tree afresh after a loss.
+    fn follow(&self, batch: Batch, watch_root: &Path) -> Batch {
+        let Some(watcher) = self.watcher.get() else {
+            return batch;
+        };
+        let mut watcher = watcher.lock().expect("watcher lock poisoned");
+        match batch {
+            Batch::Changes(mut changes) => {
+                watcher.follow(&mut changes, watch_root, &self.root);
+                Batch::Changes(changes)
+            }
+            Batch::Rescan => {
+                if let Err(e) = watcher.rewatch(watch_root) {
+                    tracing::warn!(
+                        "Cannot watch {} again ({e}); language servers will not see files \
+                         change on disk",
+                        self.root.display()
+                    );
+                }
+                Batch::Rescan
+            }
         }
-        changes
     }
 
     async fn apply_file_changes(&self, batch: Batch) {
@@ -632,19 +645,13 @@ async fn forward_file_changes(
         let Some(manager) = manager.upgrade() else {
             break;
         };
-        let reduced = match super::watch::reduce(batch, &watch_root, &manager.root) {
-            Batch::Changes(changes) => {
-                let following = Arc::clone(&manager);
-                let watch_root = watch_root.clone();
-                Batch::Changes(
-                    tokio::task::spawn_blocking(move || following.follow(changes, &watch_root))
-                        .await
-                        .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic())),
-                )
-            }
-            rescan => rescan,
-        };
-        manager.apply_file_changes(reduced).await;
+        let reduced = super::watch::reduce(batch, &watch_root, &manager.root);
+        let following = Arc::clone(&manager);
+        let root = watch_root.clone();
+        let followed = tokio::task::spawn_blocking(move || following.follow(reduced, &root))
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+        manager.apply_file_changes(followed).await;
     }
 }
 
