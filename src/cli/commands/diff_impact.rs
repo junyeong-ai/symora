@@ -171,11 +171,13 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let test_scope = app.test_scope();
 
     let base = resolve_base(root, &args.revision)?;
-    let mut hunks = parse_git_diff(root, &base, args.staged)?;
+    let mut hunks = parse_git_diff(root, base.tree_ish(), args.staged)?;
     let mut hints = Vec::new();
     let mut unmeasured_files = Vec::new();
 
-    if !is_ancestor_of_head(root, &base) {
+    if let Base::Commit(commit) = &base
+        && !is_ancestor_of_head(root, commit)
+    {
         hints.push(format!(
             "`{rev}` is not an ancestor of HEAD, so this diff also takes back what `{rev}` \
              gained after this branch left it; `symora diff-impact $(git merge-base {rev} HEAD)` \
@@ -212,7 +214,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             app,
             &hunks,
             root,
-            &base,
+            base.tree_ish(),
             test_scope,
             args.callers,
             args.max_symbols,
@@ -264,7 +266,23 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 /// pre-image read name the same tree. Only a single commit is accepted: the
 /// other side is always read from the working tree (or the index), so a
 /// range's second revision would name a tree nothing reads.
-fn resolve_base(root: &Path, revision: &str) -> Result<String> {
+/// What the working tree is measured against.
+enum Base {
+    Commit(String),
+    /// `HEAD` on a branch with no commit yet. Git diffs such a repository
+    /// against the empty tree, so everything tracked reads as added.
+    Unborn(String),
+}
+
+impl Base {
+    fn tree_ish(&self) -> &str {
+        match self {
+            Self::Commit(id) | Self::Unborn(id) => id,
+        }
+    }
+}
+
+fn resolve_base(root: &Path, revision: &str) -> Result<Base> {
     let output = Command::new("git")
         .current_dir(root)
         .args([
@@ -277,7 +295,9 @@ fn resolve_base(root: &Path, revision: &str) -> Result<String> {
         .output()
         .context("Failed to run git rev-parse")?;
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        return Ok(Base::Commit(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
     }
     // `--verify --quiet` exits 1 for an argument that is not one commit; any
     // other failure is git's own (no repository, a broken one).
@@ -287,7 +307,42 @@ fn resolve_base(root: &Path, revision: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    if revision == "HEAD" && head_names_a_branch(root) {
+        return Ok(Base::Unborn(git_stdout(
+            root,
+            &["hash-object", "-t", "tree", "--stdin"],
+        )?));
+    }
     Err(unresolvable_revision(revision).into())
+}
+
+/// Whether `HEAD` is a symbolic ref to a branch — which, for a `HEAD` that
+/// names no commit, is a branch with no commit yet.
+fn head_names_a_branch(root: &Path) -> bool {
+    Command::new("git")
+        .current_dir(root)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// A git command's trimmed stdout, with empty stdin.
+fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("Failed to run git {}", args[0]))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// A ref name cannot contain `..`, so a revision that does is range syntax.
