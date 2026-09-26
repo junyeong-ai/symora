@@ -4,7 +4,7 @@
 //! disk itself, so without this half it answers from the tree it saw at
 //! startup.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
@@ -144,10 +144,18 @@ pub enum Batch {
     Rescan,
 }
 
-/// A recursive watch on the workspace root. Dropping it stops the watch and
-/// closes the event channel.
+/// A watch on the workspace tree. Dropping it stops the watch and closes the
+/// event channel.
 pub struct WorkspaceWatcher {
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
+    /// inotify watches one directory at a time, and notify's recursive watch
+    /// fails as a whole on the first directory it cannot watch — one the
+    /// user cannot read, or one past the per-user watch limit. On Linux the
+    /// tree is therefore watched a directory at a time here, skipping those.
+    #[cfg(target_os = "linux")]
+    watched: std::collections::BTreeSet<PathBuf>,
+    #[cfg(target_os = "linux")]
+    warned: bool,
 }
 
 pub type RawEvent = notify::Result<notify::Event>;
@@ -160,7 +168,7 @@ impl WorkspaceWatcher {
     ) -> notify::Result<(Self, mpsc::UnboundedReceiver<RawEvent>, PathBuf)> {
         let watch_root = root.canonicalize()?;
         let (sender, events) = mpsc::unbounded_channel();
-        let mut watcher = RecommendedWatcher::new(
+        let watcher = RecommendedWatcher::new(
             move |event: RawEvent| {
                 let _ = sender.send(event);
             },
@@ -168,9 +176,155 @@ impl WorkspaceWatcher {
             // points at; the tree the servers were given is the project's.
             notify::Config::default().with_follow_symlinks(false),
         )?;
-        watcher.watch(&watch_root, RecursiveMode::Recursive)?;
-        Ok((Self { _watcher: watcher }, events, watch_root))
+        let mut this = Self {
+            watcher,
+            #[cfg(target_os = "linux")]
+            watched: std::collections::BTreeSet::new(),
+            #[cfg(target_os = "linux")]
+            warned: false,
+        };
+        this.watch_root(&watch_root)?;
+        Ok((this, events, watch_root))
     }
+
+    /// Keep the watch over the tree `changes` describe, and add to them the
+    /// files inside each directory that appeared. A directory moved in, or
+    /// created before a watch covered it, is reported as the directory
+    /// alone, and a server that registered for its files would not hear of
+    /// them. Its watch is extended first and its files listed after, so a
+    /// file written in between is seen by one or the other.
+    pub fn follow(&mut self, changes: &mut Vec<FileChange>, watch_root: &Path, root: &Path) {
+        let mut reported: HashSet<PathBuf> = changes.iter().map(|c| c.path.clone()).collect();
+        let mut found = Vec::new();
+        for change in changes.iter() {
+            let Ok(relative) = change.path.strip_prefix(root) else {
+                continue;
+            };
+            let path = watch_root.join(relative);
+            if change.change == FileChangeType::Deleted {
+                self.retract(&path);
+            } else if change.change == FileChangeType::Created
+                && path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+            {
+                // A directory created where one was removed is a new one.
+                self.retract(&path);
+                self.extend(&path, watch_root);
+                for file in files_under(&path, watch_root) {
+                    let path = root.join(file.strip_prefix(watch_root).unwrap_or(&file));
+                    if reported.insert(path.clone()) {
+                        found.push(FileChange {
+                            path: path.clone(),
+                            change: FileChangeType::Created,
+                        });
+                        found.push(FileChange {
+                            path,
+                            change: FileChangeType::Changed,
+                        });
+                    }
+                }
+            }
+        }
+        changes.extend(found);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn watch_root(&mut self, watch_root: &Path) -> notify::Result<()> {
+        self.watcher.watch(watch_root, RecursiveMode::Recursive)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn extend(&mut self, _dir: &Path, _watch_root: &Path) {}
+
+    #[cfg(not(target_os = "linux"))]
+    fn retract(&mut self, _dir: &Path) {}
+
+    #[cfg(target_os = "linux")]
+    fn watch_root(&mut self, watch_root: &Path) -> notify::Result<()> {
+        self.watcher
+            .watch(watch_root, RecursiveMode::NonRecursive)?;
+        self.watched.insert(watch_root.to_path_buf());
+        for dir in subdirectories(watch_root, watch_root) {
+            self.extend(&dir, watch_root);
+        }
+        Ok(())
+    }
+
+    /// Watch `top` and every directory below it that can be watched. One
+    /// that cannot is skipped — its changes reach no server — and said once
+    /// per watch.
+    #[cfg(target_os = "linux")]
+    fn extend(&mut self, top: &Path, watch_root: &Path) {
+        let mut pending = vec![top.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            if !self.watched.contains(&dir) {
+                if let Err(e) = self.watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                    if !std::mem::replace(&mut self.warned, true) {
+                        tracing::warn!(
+                            "Cannot watch every directory under {} ({e}); language servers \
+                             will not see files change in those",
+                            watch_root.display()
+                        );
+                    }
+                    continue;
+                }
+                self.watched.insert(dir.clone());
+            }
+            pending.extend(subdirectories(&dir, watch_root));
+        }
+    }
+
+    /// Drop the watches at and below `dir`, which is gone from that path.
+    #[cfg(target_os = "linux")]
+    fn retract(&mut self, dir: &Path) {
+        let stale: Vec<PathBuf> = self
+            .watched
+            .range(dir.to_path_buf()..)
+            .take_while(|path| path.starts_with(dir))
+            .cloned()
+            .collect();
+        for path in stale {
+            let _ = self.watcher.unwatch(&path);
+            self.watched.remove(&path);
+        }
+    }
+}
+
+/// The directories directly in `dir` a watch covers: not through a link,
+/// and not into a store no server is told about.
+#[cfg(target_os = "linux")]
+fn subdirectories(dir: &Path, watch_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .filter(|path| !path.strip_prefix(watch_root).is_ok_and(is_excluded))
+        .collect()
+}
+
+/// Every file below `dir`, not through a link and not into an excluded store.
+fn files_under(dir: &Path, watch_root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.strip_prefix(watch_root).is_ok_and(is_excluded) {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(path),
+                Ok(_) => files.push(path),
+                Err(_) => {}
+            }
+        }
+    }
+    files
 }
 
 #[derive(Default, Clone, Copy)]
@@ -195,12 +349,14 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
     let mut seen: HashMap<PathBuf, Seen> = HashMap::new();
 
     for event in events {
+        // An error is a path the watch could not cover, not an event it
+        // lost: what it does cover is still reported in full.
         let event = match event {
             Ok(event) if !event.need_rescan() => event,
             Ok(_) => return Batch::Rescan,
             Err(e) => {
                 tracing::warn!("File watcher error: {e}");
-                return Batch::Rescan;
+                continue;
             }
         };
         let mark: fn(&mut Seen) = match event.kind {
@@ -517,13 +673,145 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_event_or_a_watcher_error_demands_a_rescan() {
+    fn only_a_dropped_event_demands_a_rescan() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        std::fs::write(root.join("a.py"), "").unwrap();
         let dropped =
             Ok(notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan));
         assert_eq!(reduce(vec![dropped], root, root), Batch::Rescan);
-        let failed = Err(notify::Error::generic("inotify queue overflow"));
-        assert_eq!(reduce(vec![failed], root, root), Batch::Rescan);
+
+        let uncovered = Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
+        assert_eq!(
+            reduce(
+                vec![
+                    uncovered,
+                    event(EventKind::Modify(ModifyKind::Any), &root.join("a.py"))
+                ],
+                root,
+                root
+            ),
+            Batch::Changes(vec![FileChange {
+                path: root.join("a.py"),
+                change: FileChangeType::Changed,
+            }])
+        );
+    }
+
+    #[test]
+    fn a_directory_that_appears_brings_its_files() {
+        use FileChangeType::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut watcher, _events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::create_dir_all(root.join("pkg/sub")).unwrap();
+        std::fs::write(root.join("pkg/a.go"), "").unwrap();
+        std::fs::write(root.join("pkg/sub/b.go"), "").unwrap();
+
+        let mut changes = vec![change(root.join("pkg").to_str().unwrap(), Created)];
+        watcher.follow(&mut changes, &watch_root, &root);
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let names: Vec<(String, FileChangeType)> = changes
+            .into_iter()
+            .map(|c| {
+                let name = c.path.strip_prefix(&root).unwrap().display().to_string();
+                (name, c.change)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("pkg".to_string(), Created),
+                ("pkg/a.go".to_string(), Created),
+                ("pkg/a.go".to_string(), Changed),
+                ("pkg/sub/b.go".to_string(), Created),
+                ("pkg/sub/b.go".to_string(), Changed),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_that_cannot_be_watched_leaves_the_rest_watched() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("locked/inner")).unwrap();
+        std::fs::create_dir_all(root.join("open/inner")).unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        if std::fs::read_dir(root.join("locked")).is_ok() {
+            // Permission bits do not constrain this user (root).
+            std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            return;
+        }
+
+        let started = WorkspaceWatcher::start(&root);
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let (watcher, _events, _) = started.expect("one unreadable directory fails nothing");
+        assert!(watcher.watched.contains(&root.join("open/inner")));
+        assert!(!watcher.watched.contains(&root.join("locked")));
+    }
+
+    /// Whether an event naming `path` arrives within a few seconds.
+    #[cfg(target_os = "linux")]
+    fn arrives(events: &mut mpsc::UnboundedReceiver<RawEvent>, path: &Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                if event.is_ok_and(|event| event.paths.iter().any(|p| p == path)) {
+                    return true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_recreated_at_the_same_path_is_watched_again() {
+        use FileChangeType::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+        let (mut watcher, mut events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::remove_dir(root.join("pkg")).unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+
+        let mut changes = vec![change(root.join("pkg").to_str().unwrap(), Created)];
+        watcher.follow(&mut changes, &watch_root, &root);
+        std::fs::write(root.join("pkg/a.go"), "").unwrap();
+
+        assert!(arrives(&mut events, &root.join("pkg/a.go")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_renamed_directory_is_watched_at_its_new_path() {
+        use FileChangeType::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("old/inner")).unwrap();
+        let (mut watcher, mut events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::rename(root.join("old"), root.join("new")).unwrap();
+
+        let mut changes = vec![
+            change(root.join("old").to_str().unwrap(), Deleted),
+            change(root.join("new").to_str().unwrap(), Created),
+        ];
+        watcher.follow(&mut changes, &watch_root, &root);
+        std::fs::write(root.join("new/inner/a.go"), "").unwrap();
+
+        assert!(arrives(&mut events, &root.join("new/inner/a.go")));
+        assert!(
+            !watcher
+                .watched
+                .iter()
+                .any(|path| path.starts_with(root.join("old")))
+        );
     }
 }
