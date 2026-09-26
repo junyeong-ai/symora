@@ -1625,6 +1625,49 @@ fn a_file_name_git_quotes_is_measured_under_its_own_name() {
     );
 }
 
+/// A Linux file name need not be UTF-8; such a file is measured under its
+/// own bytes, and a deletion in it is read from the base under them.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_name_that_is_not_utf8_is_measured() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.py");
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join(name),
+        "def f():\n    return 1\n\n\ndef keep():\n    return 0\n\n\ndef gone():\n    return 2\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join(name),
+        "def f():\n    return 3\n\n\ndef keep():\n    return 0\n",
+    )
+    .unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let rows: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| format!("{} {} {}", c["name"], c["change_type"], c["deletion"]))
+        .collect();
+    assert!(
+        rows.contains(&r#""f" "modified" null"#.to_string()),
+        "{page}"
+    );
+    assert!(
+        rows.contains(&r#""gone" "deleted" "resolved""#.to_string()),
+        "{page}"
+    );
+    assert!(page["unmeasured_files"].is_null(), "{page}");
+}
+
 /// A symbolic link's lines are where it points, not source, so a link that
 /// appears or is retargeted is counted but no symbol is taken from the
 /// file it points to.
