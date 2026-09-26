@@ -5,6 +5,7 @@
 //! startup.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
@@ -446,14 +447,14 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
 }
 
 fn is_excluded(relative: &Path) -> bool {
-    let parts: Vec<&str> = relative
+    let parts: Vec<&OsStr> = relative
         .components()
         .filter_map(|component| match component {
-            Component::Normal(part) => part.to_str(),
+            Component::Normal(part) => Some(part),
             _ => None,
         })
         .collect();
-    parts.first() == Some(&STATE_DIR)
+    parts.first().is_some_and(|first| *first == STATE_DIR)
         || EXCLUDED.iter().any(|excluded| {
             parts
                 .windows(excluded.len())
@@ -676,6 +677,18 @@ mod tests {
                 (".git/HEAD".to_string(), FileChangeType::Changed),
             ]
         );
+    }
+
+    /// A file name need not be UTF-8 on Linux; such a component keeps its
+    /// place, so a directory below it is not taken for one at the root.
+    #[cfg(unix)]
+    #[test]
+    fn a_component_that_is_not_utf8_keeps_its_place() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = Path::new(OsStr::from_bytes(b"caf\xe9"));
+        assert!(!is_excluded(&odd.join(".symora/store.db")));
+        assert!(!is_excluded(&Path::new(".git").join(odd).join("objects")));
+        assert!(is_excluded(&odd.join(".git/objects/ab")));
     }
 
     #[test]
