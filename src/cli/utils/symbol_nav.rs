@@ -1,6 +1,7 @@
 //! Position-driven navigation over a `documentSymbol` tree.
 
 use crate::models::symbol::{Symbol, SymbolKind};
+use crate::services::store::TypeHeaders;
 
 /// Whether a symbol's declared range covers a position. The one reading of
 /// containment every navigator here shares, so two of them can never disagree
@@ -162,6 +163,110 @@ pub fn enclosing_callable(symbols: &[Symbol], line: u32, column: Option<u32>) ->
         found
     }
     search(symbols, line, column, None)
+}
+
+/// The members a line belongs to: the innermost symbol over it that code
+/// outside can name — a top-level item, or a member of a type or namespace
+/// ([`SymbolKind::holds_members`]). Any other symbol owns every line inside
+/// it, so a parameter or local listed inside a body (pyright and tsserver
+/// list them, and the grammar reads a Go `var` or a Kotlin `val` there) hands
+/// the line to the declaration it sits in. A container owns each of its lines
+/// that no member covers — its decorators or attributes, its name, bases and
+/// clauses, and what lies between and after its members — since an answer
+/// need not list every member: the grammar reads no Java constructor, and a
+/// Dart method's range ends with its signature. A line holding a container's
+/// declaration and a member (a container written on one line) belongs to
+/// both. Siblings that overlap — the grammar's flat answer, whose nesting
+/// is in `name_path` alone — are read outermost first: by where they begin,
+/// and the longer first among those that begin alike. `headers` are where the
+/// file's types are declared outside their bodies, which tells a type's
+/// parameter from a type declared of its own.
+pub fn members_at_line<'a>(
+    symbols: &'a [Symbol],
+    headers: &TypeHeaders,
+    line: u32,
+) -> Vec<&'a Symbol> {
+    members_where(symbols, headers, line, &|_| true)
+}
+
+/// The members a deletion made just after `line` lies inside, read as
+/// [`members_at_line`] reads that line among the symbols whose range
+/// continues past it: lines removed right after a member's last line are its
+/// container's, not the member's.
+pub fn members_at_deletion<'a>(
+    symbols: &'a [Symbol],
+    headers: &TypeHeaders,
+    line: u32,
+) -> Vec<&'a Symbol> {
+    members_where(symbols, headers, line, &|symbol| {
+        line < symbol.location.end_line.unwrap_or(symbol.location.line)
+    })
+}
+
+fn members_where<'a>(
+    symbols: &'a [Symbol],
+    headers: &TypeHeaders,
+    line: u32,
+    within: &dyn Fn(&Symbol) -> bool,
+) -> Vec<&'a Symbol> {
+    let mut over: Vec<&Symbol> = symbols
+        .iter()
+        .filter(|symbol| contains_position(symbol, line, None) && within(symbol))
+        .collect();
+    over.sort_by_key(|symbol| {
+        let (start, end) = span(symbol);
+        (start, std::cmp::Reverse(end))
+    });
+    let mut owners = Vec::new();
+    let mut container = None;
+    for symbol in over {
+        // A symbol the server names nothing — a function called where it is
+        // written, an anonymous namespace — or gives no kind — clangd's group
+        // of what a macro expands to, named after the macro — declares
+        // nothing itself: what is declared in it stands for itself, and the
+        // rest of it belongs to what encloses it. A type parameter written in
+        // another type's header is a parameter of that type (sourcekit-lsp
+        // lists a generic type's `T` there), and no more an owner than a
+        // function's; one declared anywhere else declares a type of its own
+        // (rust-analyzer and sourcekit-lsp give a type alias and an
+        // associated type that kind).
+        let declares = !symbol.name.is_empty()
+            && symbol.kind != SymbolKind::Null
+            && !(symbol.kind == SymbolKind::TypeParameter
+                && headers.holds_parameter((symbol.location.line, symbol.location.column)));
+        if declares && symbol.kind.holds_members() && line == symbol.location.line {
+            owners.push(symbol);
+        }
+        if declares && !symbol.kind.holds_members() {
+            owners.push(symbol);
+            return owners;
+        }
+        let members = members_where(&symbol.children, headers, line, within);
+        if !members.is_empty() {
+            owners.extend(members);
+            return owners;
+        }
+        if declares && symbol.kind.holds_members() {
+            container = Some(symbol);
+        }
+    }
+    if let Some(container) = container
+        && !owners.iter().any(|owner| std::ptr::eq(*owner, container))
+    {
+        owners.push(container);
+    }
+    owners
+}
+
+/// A symbol's declared range as (line, column) ends; a range without an end
+/// column runs to the end of its last line.
+fn span(symbol: &Symbol) -> ((u32, u32), (u32, u32)) {
+    let start = symbol.location.effective_start();
+    let end = (
+        symbol.location.end_line.unwrap_or(start.0),
+        symbol.location.end_column.unwrap_or(u32::MAX),
+    );
+    (start, end)
 }
 
 /// How a target position resolved against the symbol tree. Both
@@ -603,6 +708,295 @@ mod tests {
 
         let owner = enclosing_callable(&symbols, 34, Some(20)).expect("a callable owns the line");
         assert_eq!(owner.name, "test_retries");
+    }
+
+    fn owners(symbols: &[Symbol], line: u32) -> Vec<&str> {
+        members_at_line(symbols, &TypeHeaders::default(), line)
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect()
+    }
+
+    /// A function called where it is written has no name, and is no identity:
+    /// a line in a function declared inside it is that function's.
+    #[test]
+    fn a_nameless_frame_hands_its_lines_to_what_is_declared_in_it() {
+        let symbols = vec![nest(
+            declared("", SymbolKind::Function, 1, 6),
+            vec![declared("helper", SymbolKind::Function, 2, 4)],
+        )];
+
+        assert_eq!(owners(&symbols, 3), ["helper"]);
+        assert!(owners(&symbols, 5).is_empty());
+    }
+
+    /// A container written on one line holds its header and a member on
+    /// that line, and a change there may be to either: the line is both of
+    /// theirs, in a server's tree and in the grammar's flat answer alike.
+    #[test]
+    fn a_one_line_containers_line_is_its_own_and_its_members() {
+        let file = || std::path::PathBuf::from("a.ts");
+        let order = Symbol::new(
+            "Order".to_string(),
+            SymbolKind::Interface,
+            Location::full(file(), 1, 18, 1, 1, 1, 40),
+        );
+        let id = Symbol::new(
+            "id".to_string(),
+            SymbolKind::Property,
+            Location::full(file(), 1, 26, 1, 26, 1, 37),
+        );
+
+        let tree = vec![nest(order.clone(), vec![id.clone()])];
+        assert_eq!(owners(&tree, 1), ["Order", "id"]);
+        let flat = vec![order, id];
+        assert_eq!(owners(&flat, 1), ["Order", "id"]);
+    }
+
+    fn declared(name: &str, kind: SymbolKind, line: u32, end_line: u32) -> Symbol {
+        Symbol::new(
+            name.to_string(),
+            kind,
+            Location::full(
+                std::path::PathBuf::from("x.py"),
+                line,
+                5,
+                line,
+                1,
+                end_line,
+                1,
+            ),
+        )
+    }
+
+    /// A server that lists a function's parameters and locals (pyright,
+    /// tsserver) hands a line among them to the function, as one that lists
+    /// none (rust-analyzer, gopls) does.
+    #[test]
+    fn a_line_among_a_functions_locals_belongs_to_the_function() {
+        let symbols = vec![nest(
+            declared("compute", SymbolKind::Function, 1, 3),
+            vec![
+                declared("a", SymbolKind::Variable, 1, 1),
+                declared("total", SymbolKind::Variable, 2, 2),
+            ],
+        )];
+
+        assert_eq!(owners(&symbols, 1), ["compute"]);
+        assert_eq!(owners(&symbols, 2), ["compute"]);
+    }
+
+    /// A container's members own their lines, and the container owns the
+    /// rest of its own: its header, and what lies between and after its
+    /// members, which may be a member the answer does not list.
+    #[test]
+    fn a_containers_members_own_their_lines_and_it_owns_the_rest() {
+        let symbols = vec![nest(
+            declared("Foo", SymbolKind::Class, 1, 14),
+            vec![
+                nest(
+                    declared("bar", SymbolKind::Method, 3, 5),
+                    vec![declared("x", SymbolKind::Variable, 4, 4)],
+                ),
+                declared("FIELD", SymbolKind::Field, 12, 13),
+            ],
+        )];
+
+        assert_eq!(owners(&symbols, 4), ["bar"]);
+        assert_eq!(owners(&symbols, 13), ["FIELD"]);
+        for own in [1, 2, 7, 14] {
+            assert_eq!(owners(&symbols, own), ["Foo"], "line {own}");
+        }
+        assert!(owners(&symbols, 20).is_empty());
+    }
+
+    /// A decorated container's range opens on its decorator, above its name,
+    /// and the lines down to its first member are the container's.
+    #[test]
+    fn a_containers_header_lines_are_its_own() {
+        let class = Symbol::new(
+            "Service".to_string(),
+            SymbolKind::Class,
+            Location::full(std::path::PathBuf::from("x.py"), 2, 7, 1, 1, 9, 1),
+        );
+        let symbols = vec![nest(class, vec![declared("run", SymbolKind::Method, 5, 6)])];
+
+        for header in 1..=4 {
+            assert_eq!(owners(&symbols, header), ["Service"]);
+        }
+        assert_eq!(owners(&symbols, 6), ["run"]);
+    }
+
+    /// The grammar's answer is flat: a class, its methods and a method's
+    /// local are siblings, read outermost first by the lines they span.
+    #[test]
+    fn in_a_flat_answer_the_outermost_non_container_owns_a_line() {
+        let symbols = vec![
+            declared("Foo", SymbolKind::Class, 1, 14),
+            declared("bar", SymbolKind::Method, 3, 5),
+            declared("total", SymbolKind::Variable, 4, 4),
+        ];
+
+        assert_eq!(owners(&symbols, 4), ["bar"]);
+        assert_eq!(owners(&symbols, 7), ["Foo"]);
+    }
+
+    /// clangd groups what a macro expands to under a symbol of no kind named
+    /// after the macro: the declarations in it own their lines, the macro's
+    /// own invocation line included.
+    #[test]
+    fn a_macros_group_hands_its_lines_to_what_it_declares() {
+        let symbols = vec![
+            nest(
+                declared("TEST", SymbolKind::Null, 15, 18),
+                vec![declared(
+                    "Math_Adds_Test::TestBody",
+                    SymbolKind::Method,
+                    15,
+                    18,
+                )],
+            ),
+            nest(
+                declared("REGISTER", SymbolKind::Null, 20, 20),
+                vec![declared("reg_beta", SymbolKind::Variable, 20, 20)],
+            ),
+        ];
+
+        assert_eq!(owners(&symbols, 16), ["Math_Adds_Test::TestBody"]);
+        assert_eq!(owners(&symbols, 20), ["reg_beta"]);
+    }
+
+    /// sourcekit-lsp lists a generic type's parameter in its header: the line
+    /// is the type's, not the parameter's. A type alias or an associated
+    /// type, which rust-analyzer and sourcekit-lsp give the same kind, is
+    /// declared in a body or on its own and owns its line.
+    #[test]
+    fn a_type_parameter_owns_no_line_of_its_types_header() {
+        use crate::models::symbol::Language;
+        use crate::services::store::SymbolExtractor;
+        use std::path::{Path, PathBuf};
+
+        let at = |name: &str, kind, line, column, end| {
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(PathBuf::from("f"), line, column, line, 1, end, 2),
+            )
+        };
+        let owners = |symbols: &[Symbol], headers: &TypeHeaders, line| -> Vec<String> {
+            members_at_line(symbols, headers, line)
+                .iter()
+                .map(|symbol| symbol.name.clone())
+                .collect()
+        };
+
+        let swift = "struct Box<T> {\n    typealias Element = T\n    var value: T\n}\n\n\
+                     typealias Alias = Int\n";
+        let headers =
+            SymbolExtractor::new().type_headers(Path::new("a.swift"), swift, Language::Swift);
+        let symbols = vec![
+            nest(
+                at("Box", SymbolKind::Struct, 1, 8, 4),
+                vec![
+                    at("T", SymbolKind::TypeParameter, 1, 12, 1),
+                    at("Element", SymbolKind::TypeParameter, 2, 15, 2),
+                    at("value", SymbolKind::Property, 3, 9, 3),
+                ],
+            ),
+            at("Alias", SymbolKind::TypeParameter, 6, 11, 6),
+        ];
+        assert_eq!(owners(&symbols, &headers, 1), ["Box"]);
+        assert_eq!(owners(&symbols, &headers, 2), ["Element"]);
+        assert_eq!(owners(&symbols, &headers, 6), ["Alias"]);
+
+        let rust = "pub type Alias = Vec<u32>;\n\npub struct Store;\n\nimpl Named for Store {\n    \
+                    type Out = u32;\n}\n";
+        let headers = SymbolExtractor::new().type_headers(Path::new("a.rs"), rust, Language::Rust);
+        let symbols = vec![
+            at("Alias", SymbolKind::TypeParameter, 1, 10, 1),
+            nest(
+                at("Store", SymbolKind::Object, 5, 16, 7),
+                vec![at("Out", SymbolKind::TypeParameter, 6, 10, 6)],
+            ),
+        ];
+        assert_eq!(owners(&symbols, &headers, 1), ["Alias"]);
+        assert_eq!(owners(&symbols, &headers, 6), ["Out"]);
+
+        let trait_only = "pub trait Tr {\n    type Out;\n}\n";
+        let headers =
+            SymbolExtractor::new().type_headers(Path::new("a.rs"), trait_only, Language::Rust);
+        let symbols = vec![nest(
+            at("Tr", SymbolKind::Interface, 1, 11, 3),
+            vec![at("Out", SymbolKind::TypeParameter, 2, 10, 2)],
+        )];
+        assert_eq!(owners(&symbols, &headers, 2), ["Out"]);
+
+        let protocol = "protocol Keyed {\n    associatedtype Key: Hashable\n}\n";
+        let headers =
+            SymbolExtractor::new().type_headers(Path::new("a.swift"), protocol, Language::Swift);
+        let symbols = vec![nest(
+            at("Keyed", SymbolKind::Interface, 1, 10, 3),
+            vec![at("Key", SymbolKind::TypeParameter, 2, 20, 2)],
+        )];
+        assert_eq!(owners(&symbols, &headers, 2), ["Key"]);
+    }
+
+    /// A container the server names nothing (an anonymous namespace) is no
+    /// identity: its members own their lines, and the rest of it belongs to
+    /// what encloses it.
+    #[test]
+    fn a_nameless_container_owns_no_line() {
+        let symbols = vec![nest(
+            declared("", SymbolKind::Namespace, 1, 10),
+            vec![nest(
+                declared("Money", SymbolKind::Class, 3, 8),
+                vec![declared("value", SymbolKind::Method, 4, 6)],
+            )],
+        )];
+
+        assert_eq!(owners(&symbols, 5), ["value"]);
+        assert_eq!(owners(&symbols, 7), ["Money"]);
+        assert!(owners(&symbols, 2).is_empty());
+        assert!(owners(&symbols, 9).is_empty());
+    }
+
+    /// Lines removed right after a member's last line lie in its container,
+    /// as lines added there do; lines removed inside it are its own.
+    #[test]
+    fn a_deletion_right_after_a_member_is_its_containers() {
+        let symbols = vec![nest(
+            declared("Foo", SymbolKind::Class, 1, 14),
+            vec![declared("bar", SymbolKind::Method, 3, 5)],
+        )];
+        let deleted_after = |line| -> Vec<&str> {
+            members_at_deletion(&symbols, &TypeHeaders::default(), line)
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect()
+        };
+
+        assert_eq!(deleted_after(4), ["bar"]);
+        assert_eq!(deleted_after(5), ["Foo"]);
+        assert!(deleted_after(14).is_empty());
+    }
+
+    /// A function written on one line holds its local on that same line; the
+    /// columns tell which encloses which.
+    #[test]
+    fn a_local_on_its_functions_one_line_is_still_its_functions() {
+        let on_line = |name: &str, kind, start: u32, end: u32| {
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(std::path::PathBuf::from("m.go"), 3, start, 3, start, 3, end),
+            )
+        };
+        let symbols = vec![
+            on_line("k", SymbolKind::Function, 1, 38),
+            on_line("y", SymbolKind::Variable, 20, 25),
+        ];
+
+        assert_eq!(owners(&symbols, 3), ["k"]);
     }
 
     /// A position no callable contains has no owner to report; the caller is

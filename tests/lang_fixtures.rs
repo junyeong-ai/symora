@@ -77,14 +77,7 @@ fn run_in_fixture(args: &[String]) -> Value {
 /// returns false otherwise — a missing prerequisite is a skip, not a
 /// failure (surface "unsupported", don't fake an outcome either way).
 fn prerequisites_ready() -> bool {
-    let pyright = Command::new("pyright-langserver")
-        .arg("--help")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok();
-    if !pyright {
-        eprintln!("SKIP: pyright-langserver not on PATH (npm install -g pyright)");
+    if !pyright_on_path() {
         return false;
     }
     let venv = fixture_root().join(".venv/bin/python");
@@ -96,6 +89,21 @@ fn prerequisites_ready() -> bool {
         return false;
     }
     true
+}
+
+fn pyright_on_path() -> bool {
+    // `pyright-langserver` exits non-zero on any flag it is not serving
+    // with; the package's `pyright` answers `--version` only when it runs.
+    let found = Command::new("pyright")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !found {
+        eprintln!("SKIP: pyright does not run here (npm install -g pyright)");
+    }
+    found
 }
 
 #[test]
@@ -298,6 +306,142 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
                 .iter()
                 .any(|x| x.as_str().is_some_and(|s| s.contains("Circle")))),
             "{command} publishes the same zero and must qualify it the same way: {page}"
+        );
+    }
+}
+
+/// pyright lists a function's parameters and locals among its symbols. A
+/// changed line among them belongs to the function, which is what callers
+/// and tests name and what `diff-impact` counts references for; a function
+/// renamed with its parameters is the old name deleted and the new one
+/// changed.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn diff_impact_hands_a_changed_local_to_its_function() {
+    if !pyright_on_path() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .stdout(Stdio::null())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def compute(a):\n    total = a + 1\n    return total\n\n\n\
+         def old_name(a):\n    return a\n\n\n\
+         def use():\n    return compute(1) + old_name(2)\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def compute(a, b=0):\n    total = a + 2\n    return total\n\n\n\
+         def new_name(a):\n    return a\n\n\n\
+         def use():\n    return compute(1) + old_name(2)\n",
+    )
+    .unwrap();
+
+    let output = Command::new(SYMORA)
+        .args(["diff-impact", "--format", "compact"])
+        .current_dir(repo)
+        .env("SYMORA_NO_DAEMON", "1")
+        .stderr(Stdio::null())
+        .output()
+        .expect("run symora");
+    let page: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+    let rows: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| format!("{} {}", c["name"], c["change_type"]))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            r#""old_name" "deleted""#,
+            r#""compute" "modified""#,
+            r#""new_name" "modified""#
+        ],
+        "{page}"
+    );
+    assert!(
+        page["changes"][1]["refs"].is_u64(),
+        "pyright answered, so the function's references are counted: {page}"
+    );
+}
+
+/// A class's lines that none of its members covers — its decorator, its
+/// bases, a comment between its members — are the class's: a change to any
+/// one of them modifies the class, as pyright's range for it says.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn diff_impact_gives_a_class_the_lines_no_member_covers() {
+    if !pyright_on_path() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .stdout(Stdio::null())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    let service = |decorator: &str, bases: &str, between: &str| {
+        format!(
+            "import dataclasses\n\n\nclass Base:\n    pass\n\n\nclass Mixin:\n    pass\n\n\n\
+             @dataclasses.dataclass{decorator}\nclass Service(\n{bases}):\n    \
+             name: str = \"\"\n{between}\n    def run(self):\n        return self.name\n"
+        )
+    };
+    std::fs::write(repo.join("svc.py"), service("", "    Base,\n", "")).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "one"]);
+
+    for (change, content) in [
+        ("decorator", service("(frozen=True)", "    Base,\n", "")),
+        ("bases", service("", "    Base,\n    Mixin,\n", "")),
+        (
+            "between members",
+            service("", "    Base,\n", "    # runs it\n"),
+        ),
+    ] {
+        std::fs::write(repo.join("svc.py"), content).unwrap();
+        let output = Command::new(SYMORA)
+            .args(["diff-impact", "--format", "compact"])
+            .current_dir(repo)
+            .env("SYMORA_NO_DAEMON", "1")
+            .stderr(Stdio::null())
+            .output()
+            .expect("run symora");
+        let page: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+        let rows: Vec<String> = page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .map(|c| format!("{} {}", c["name"], c["change_type"]))
+            .collect();
+        assert_eq!(rows, [r#""Service" "modified""#], "{change}: {page}");
+        assert!(
+            page["changes"][0]["refs"].is_u64(),
+            "{change}: pyright answered, so the class's references are counted: {page}"
         );
     }
 }
