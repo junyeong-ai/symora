@@ -1764,6 +1764,30 @@ fn a_staged_change_with_no_lines_is_not_unmeasured_under_edits() {
     assert!(page["hints"].is_null(), "{page}");
 }
 
+/// A change of the executable bit alone leaves the lines on disk the staged
+/// ones, so the staged change under it is measured.
+#[cfg(unix)]
+#[test]
+fn a_staged_change_under_a_mode_change_alone_is_measured() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 1\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 2\n").unwrap();
+    git(repo, &["add", "-A"]);
+    std::fs::set_permissions(repo.join("m.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    assert_eq!(page["changes"][0]["name"], "a", "{page}");
+    assert!(page["unmeasured_files"].is_null(), "{page}");
+    assert!(page["hints"].is_null(), "{page}");
+}
+
 /// A file in an unresolved merge conflict has no single staged version, so
 /// `--staged` discloses it rather than counting it with nothing measured.
 #[cfg(unix)]
