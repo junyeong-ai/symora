@@ -682,8 +682,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ToolDefinition::mutating(
             "replace_symbol_body",
             "Replace the symbol's ENTIRE definition span — signature, \
-                          braces/decorators, and body. Pass the complete definition as \
-                          body, not just the inner code. Target by file + symbol path \
+                          braces/decorators, and body, and any doc-comment lines the \
+                          server's range opens with (the dry_run preview shows them). \
+                          Pass the complete definition as body, not just the inner code. Target by file + symbol path \
                           (e.g. 'Class/method') or by file:line[:column] — exactly one of \
                           symbol or line. \
                           ⚠ Mutates source files when dry_run is false.",
