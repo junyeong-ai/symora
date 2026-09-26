@@ -238,7 +238,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     };
     unmeasured_files.extend(unreadable);
     if stopped_at_cap {
-        hints.push(LowerBound::AnalysisCapped(args.max_symbols).hint());
+        // The cause of `incomplete` leads the hints.
+        hints.insert(0, LowerBound::AnalysisCapped(args.max_symbols).hint());
     }
 
     // Coverage is measured only over rows that have reference counts
