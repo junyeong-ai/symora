@@ -224,11 +224,20 @@ async fn detect_dynamic_dispatch(
         return None;
     }
     match lsp.find_implementations(file, line, column).await {
-        Ok(impls) if !impls.data.is_empty() => Some(DynamicDispatch {
-            status: DispatchStatus::Incomplete,
-            implementations: impls.data.len(),
-        }),
-        Ok(_) => None,
+        Ok(impls) => {
+            // A server may list a method nothing overrides as its own
+            // implementation (tsserver does). That entry is the anchor, not a
+            // second target a call could dispatch to.
+            let implementations = impls
+                .data
+                .iter()
+                .filter(|location| location.file != file || location.line != line)
+                .count();
+            (implementations > 0).then_some(DynamicDispatch {
+                status: DispatchStatus::Incomplete,
+                implementations,
+            })
+        }
         // `Unavailable` means a genuine capability gap — the server does not
         // implement `textDocument/implementation`, whether declared statically
         // or answered as MethodNotFound at runtime — on an interface anchor.
@@ -564,6 +573,28 @@ mod tests {
         // The verified caller count is untouched — widening is not done.
         assert_eq!(radius.direct_callers, 1);
         assert!(radius.confidence <= DYNAMIC_DISPATCH_CONFIDENCE_CAP);
+    }
+
+    #[test]
+    fn a_method_listed_as_its_own_implementation_is_not_dispatched() {
+        let radius = compute_for(
+            HashMap::new(),
+            Ok(vec![Location::point(PathBuf::from("src/lib.rs"), 10, 5)]),
+            Some(SymbolKind::Method),
+            WalkConfig::default(),
+        );
+        assert!(radius.dynamic_dispatch.is_none());
+
+        let overridden = compute_for(
+            HashMap::new(),
+            Ok(vec![
+                Location::point(PathBuf::from("src/lib.rs"), 10, 5),
+                impl_at(40),
+            ]),
+            Some(SymbolKind::Method),
+            WalkConfig::default(),
+        );
+        assert_eq!(overridden.dynamic_dispatch.unwrap().implementations, 1);
     }
 
     #[test]
