@@ -325,6 +325,7 @@ symora context src/services/checkout.ts:48 --with-bodies   # 피호출자/타입
 symora usage processOrder --lang typescript         # 이름 또는 위치로 사용처
 symora impact src/services/checkout.ts:48           # 변경 영향 범위
 symora diff-impact                                  # 현재 git diff의 영향
+symora diff-impact $(git merge-base main HEAD)      # 이 브랜치가 바꾼 것의 영향 (범위 A..B는 받지 않음)
 
 # 편집 & 리팩터링 (변경 작업은 --dry-run으로 미리보기)
 symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
