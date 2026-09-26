@@ -1699,6 +1699,33 @@ fn a_symbolic_link_is_counted_but_not_read_through() {
     );
 }
 
+/// A staged change with no lines, a pure rename or a mode change, leaves
+/// nothing unmeasured under the unstaged edits made after it.
+#[cfg(unix)]
+#[test]
+fn a_staged_change_with_no_lines_is_not_unmeasured_under_edits() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("old.py"), "def o():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("mode.py"), "def m():\n    return 1\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    git(repo, &["mv", "old.py", "new.py"]);
+    std::fs::set_permissions(repo.join("mode.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(repo, &["add", "-A"]);
+    std::fs::write(repo.join("new.py"), "def o():\n    return 2\n").unwrap();
+    std::fs::write(repo.join("mode.py"), "def m():\n    return 2\n").unwrap();
+
+    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    assert_eq!(page["changed_files_count"], 2, "{page}");
+    assert!(page["unmeasured_files"].is_null(), "{page}");
+    assert!(page["hints"].is_null(), "{page}");
+}
+
 /// A file in an unresolved merge conflict has no single staged version, so
 /// `--staged` discloses it rather than counting it with nothing measured.
 #[cfg(unix)]

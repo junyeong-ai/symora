@@ -209,13 +209,19 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
-        hunks.retain(|h| !unstaged.contains(&h.file));
-        let overlaid: BTreeSet<String> = changed_files
+        let unmerged = unmerged_files(root, base.tree_ish())?;
+        // A file with no staged lines, a pure rename or a mode change, has
+        // nothing under the unstaged edits; a conflicted file has no staged
+        // lines of its own to measure.
+        let overlaid: BTreeSet<String> = hunks
             .iter()
+            .map(|h| &h.file)
+            .chain(&unmerged)
             .filter(|file| unstaged.contains(*file))
             .map(|file| relative_display(file, root))
             .filter(|file| !unmeasured_files.contains(file))
             .collect();
+        hunks.retain(|h| !unstaged.contains(&h.file));
         if !overlaid.is_empty() {
             hints.push(format!(
                 "Unstaged edits sit over the staged ones in {}, so the staged lines are not the \
@@ -400,9 +406,21 @@ fn is_ancestor_of_head(root: &Path, commit: &str) -> bool {
 
 /// Files whose working-tree content differs from the index.
 fn unstaged_files(root: &Path) -> Result<HashSet<PathBuf>> {
+    diff_names(root, &[])
+}
+
+/// Files in an unresolved merge conflict, which have no single staged
+/// version.
+fn unmerged_files(root: &Path, base: &str) -> Result<HashSet<PathBuf>> {
+    diff_names(root, &["--cached", "--diff-filter=U", base, "--"])
+}
+
+/// The files a `git diff --name-only` with `args` lists.
+fn diff_names(root: &Path, args: &[&str]) -> Result<HashSet<PathBuf>> {
     let output = Command::new("git")
         .current_dir(root)
         .args(["diff", "--relative", "--name-only", "-z"])
+        .args(args)
         .output()
         .context("Failed to run git diff")?;
     if !output.status.success() {
