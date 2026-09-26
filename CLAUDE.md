@@ -24,9 +24,11 @@ Before finishing any change:
 
 ```bash
 cargo fmt
-cargo clippy --all-targets --features embeddings -- -D warnings
-cargo test
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
 ```
+
+A change to the language-server layer or the daemon also runs the suites CI runs against real servers — rust-analyzer, and pyright with `uv sync --frozen` in `tests/fixtures/python/monorepo`: `cargo test --test lang_fixtures --test parity -- --include-ignored`.
 
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 

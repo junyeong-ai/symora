@@ -32,8 +32,8 @@ const MAX_DIAGNOSTICS_CACHE: usize = 200;
 
 /// Monotonic workspace-content generation. Bumped whenever any client
 /// learns that content changed — a `didChange` from our own edits or the
-/// drift sweep, a `didClose` of a vanished file — and when a client
-/// session starts (a fresh server is a fresh world). Caches of
+/// drift sweep, a `didClose` of a vanished file — when the workspace watcher
+/// reports a change on disk, and when a client session starts (a fresh server is a fresh world). Caches of
 /// workspace-wide answers validate against it, so no cached answer ever
 /// outlives the content it was computed from. Starts at 1: cache layers
 /// reserve 0 as their "no validation" sentinel.
@@ -49,7 +49,8 @@ fn bump_content_generation() {
 }
 
 /// Record a workspace content change that happened outside any client's
-/// overlay — symora's own write to a file no server has open. Caches of
+/// overlay — symora's own write to a file no server has open, or a change the
+/// workspace watcher saw on disk. Caches of
 /// workspace-wide answers validate against the generation, so the bump
 /// must not depend on a live client having the file open.
 pub fn note_workspace_content_changed() {

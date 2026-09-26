@@ -130,9 +130,8 @@ pub struct Section<T> {
 
 /// A language a search did not cover, with a stable machine-branchable reason.
 /// The shared shape for both `search`'s `Section.coverage_gaps` and `usage`'s
-/// `coverage_gaps`, and the emitted form of `symbol_discovery::Uncovered`,
-/// which owns the reason set: `not_indexed`, `server_not_installed`,
-/// `timed_out`, `unsupported`, `unavailable`, `not_searched`.
+/// `coverage_gaps`, and the emitted form of `disclosure::Uncovered`, whose
+/// `CoverageReason` owns the reason set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageGap {
     pub language: String,
