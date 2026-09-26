@@ -1258,6 +1258,9 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
         "def one():\n    return 1\n\n\ndef two():\n    pass\n\n\ndef three():\n    pass\n",
     )
     .unwrap();
+    // A second cause of a hint, so the order of the hints is tested.
+    std::fs::write(repo.join("gen.py"), "x = 1\n").unwrap();
+    std::fs::write(repo.join(".git/info/attributes"), "gen.py -diff\n").unwrap();
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "change"]);
 
@@ -1268,10 +1271,10 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
         "a capped analysis publishes counts that are short: {capped}"
     );
     assert!(
-        capped["hints"].as_array().is_some_and(|h| h
-            .iter()
-            .any(|x| x.as_str().is_some_and(|s| s.contains("--max-symbols")))),
-        "the remedy names the cap that stopped it: {capped}"
+        capped["hints"][0]
+            .as_str()
+            .is_some_and(|s| s.contains("--max-symbols")),
+        "the cause of `incomplete`, the cap, leads the hints: {capped}"
     );
 
     let whole = json_ok(repo, &["diff-impact", "HEAD~1", "--max-symbols", "0"]);
