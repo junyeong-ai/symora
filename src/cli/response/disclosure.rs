@@ -379,9 +379,16 @@ pub fn symbol_coverage_hints(shortfall: &[Uncovered], route: DisclosureRoute) ->
                 CoverageReason::NotSearched => format!(
                     "This result is not authoritative for {lang}: enough matches came from other languages, so it was never searched — narrow the query with --lang {lang}"
                 ),
-                CoverageReason::NotConsulted => format!(
-                    "This result is not authoritative for {lang}: the index does not extract it, and --deterministic asked no language server"
-                ),
+                CoverageReason::NotConsulted => {
+                    let index = match UnconsultedIndex::of(gap.language, route) {
+                        UnconsultedIndex::NoExtractor => "the index does not extract it",
+                        UnconsultedIndex::Skipped => "--workspace-symbols skipped the index",
+                        UnconsultedIndex::NotHeld => "the index does not hold it",
+                    };
+                    format!(
+                        "This result is not authoritative for {lang}: {index}, and --deterministic asked no language server"
+                    )
+                }
                 reason => {
                     let why = match &gap.message {
                         Some(message) => format!(": {message}"),
@@ -401,6 +408,31 @@ pub fn symbol_coverage_hints(shortfall: &[Uncovered], route: DisclosureRoute) ->
         .collect();
     hints.truncate(2);
     hints
+}
+
+/// Why the index did not answer for a language `--deterministic` asked no
+/// server about — which decides whether the index is the cure. A language
+/// without an extractor never enters the index, a skipped index was the
+/// caller's choice, and otherwise a build can put it there.
+enum UnconsultedIndex {
+    NoExtractor,
+    Skipped,
+    NotHeld,
+}
+
+impl UnconsultedIndex {
+    fn of(language: Language, route: DisclosureRoute) -> Self {
+        if !crate::services::store::SymbolExtractor::is_supported(language) {
+            Self::NoExtractor
+        } else if matches!(
+            route,
+            DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced)
+        ) {
+            Self::Skipped
+        } else {
+            Self::NotHeld
+        }
+    }
 }
 
 /// The part of a symbol query a literal text search can look for.
@@ -436,10 +468,19 @@ pub fn symbol_coverage_next_commands(
         return vec![format!("symora search symbols '{query}' --lang {lang}")];
     }
     if gap.reason == CoverageReason::NotConsulted {
-        return literal_query(query)
-            .map(|literal| format!("symora search content '{literal}' --lang {lang}"))
-            .into_iter()
-            .collect();
+        return match UnconsultedIndex::of(gap.language, route) {
+            UnconsultedIndex::NoExtractor => literal_query(query)
+                .map(|literal| format!("symora search content '{literal}' --lang {lang}"))
+                .into_iter()
+                .collect(),
+            UnconsultedIndex::Skipped => vec![format!("symora search symbols '{query}'")],
+            UnconsultedIndex::NotHeld => match route {
+                DisclosureRoute::WorkspaceOnly(
+                    WorkspaceSearchRoute::IndexRebuilding | WorkspaceSearchRoute::IndexUnreadable,
+                ) => Vec::new(),
+                _ => vec!["symora search index build".to_string()],
+            },
+        };
     }
     match route {
         DisclosureRoute::IndexConsulted => literal_query(query)
@@ -874,6 +915,57 @@ mod tests {
     /// A server that is installed and fails is the gap to read first, in its
     /// own words: languages with no server at all sort ahead of it by name,
     /// and would otherwise fill the hints and pick the remedy.
+    #[test]
+    fn an_unconsulted_language_is_cured_by_the_index_only_where_it_can_hold_it() {
+        use crate::services::store::SymbolExtractor;
+
+        let gap = |language| {
+            [Uncovered::not_reached(
+                language,
+                CoverageReason::NotConsulted,
+            )]
+        };
+        let route = |route| DisclosureRoute::WorkspaceOnly(route);
+        assert!(SymbolExtractor::is_supported(Language::Rust));
+        let rust = gap(Language::Rust);
+
+        let not_built = route(WorkspaceSearchRoute::IndexNotBuilt);
+        assert_eq!(
+            symbol_coverage_next_commands("alpha", &rust, not_built),
+            ["symora search index build"]
+        );
+        assert!(symbol_coverage_hints(&rust, not_built)[0].contains("the index does not hold it"));
+
+        let forced = route(WorkspaceSearchRoute::Forced);
+        assert_eq!(
+            symbol_coverage_next_commands("alpha", &rust, forced),
+            ["symora search symbols 'alpha'"]
+        );
+        assert!(
+            symbol_coverage_hints(&rust, forced)[0]
+                .contains("--workspace-symbols skipped the index")
+        );
+
+        let rebuilding = route(WorkspaceSearchRoute::IndexRebuilding);
+        assert!(symbol_coverage_next_commands("alpha", &rust, rebuilding).is_empty());
+
+        let unextracted = Language::all()
+            .into_iter()
+            .find(|language| !SymbolExtractor::is_supported(*language))
+            .expect("a language the index does not extract");
+        let other = gap(unextracted);
+        assert_eq!(
+            symbol_coverage_next_commands("alpha", &other, not_built),
+            [format!(
+                "symora search content 'alpha' --lang {}",
+                unextracted.lsp_id()
+            )]
+        );
+        assert!(
+            symbol_coverage_hints(&other, not_built)[0].contains("the index does not extract it")
+        );
+    }
+
     #[test]
     fn a_failed_server_leads_the_disclosure_and_says_why() {
         let failures = [
