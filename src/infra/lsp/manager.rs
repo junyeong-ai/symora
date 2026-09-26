@@ -346,11 +346,15 @@ impl LspManager {
         // resolve is "installed", and spawning it is the truth test.
         let command = config.resolve()?;
 
+        let offers_file_watching = match self.file_watch {
+            FileWatch::Off => true,
+            FileWatch::On => self.watch_workspace().await,
+        };
         let client = LspClient::new(
             language,
             self.root.clone(),
             Arc::clone(&self.runtime_config),
-            self.watch_workspace().await,
+            offers_file_watching,
         );
         client
             .start(&command.to_string_lossy(), &config.args, || admit(&client))
@@ -361,11 +365,10 @@ impl LspManager {
     }
 
     /// Whether the workspace is watched, starting the watch if it is not yet.
-    /// A server is only offered file watching while a watch stands behind it.
+    /// A server that answers for as long as this pool stands is offered file
+    /// watching only while a watch stands behind it, because a server offered
+    /// it leaves the watching to the client.
     async fn watch_workspace(self: &Arc<Self>) -> bool {
-        if self.file_watch == FileWatch::Off {
-            return false;
-        }
         let mut installed = None;
         let started = self
             .watcher
@@ -1224,10 +1227,13 @@ exec sleep 600
         }
 
         #[tokio::test]
-        async fn a_one_shot_pool_starts_servers_without_watching() {
+        async fn a_one_shot_pool_offers_file_watching_without_watching() {
             let fake = FakeServer::new();
-            let manager = fake.manager_watching("serve", 0, FileWatch::Off);
+            let manager = fake.manager_watching("watch", 0, FileWatch::Off);
             let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            bounded(fake.until_received("\"didChangeWatchedFiles\":{\"dynamicRegistration\":true"))
+                .await;
+            bounded(fake.until_received("\"id\":\"w1\"")).await;
 
             assert!(manager.watcher.get().is_none());
 

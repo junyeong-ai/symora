@@ -342,8 +342,8 @@ pub struct LspClient {
     /// Progress tokens whose `begin` looked like indexing and that have not
     /// yet ended; see `observe_progress`.
     indexing_tokens: std::sync::Mutex<HashSet<String>>,
-    /// Whether this client's workspace is watched, and so whether it may
-    /// offer `workspace.didChangeWatchedFiles` to the server.
+    /// Whether the server is offered `workspace.didChangeWatchedFiles`; the
+    /// manager decides, by [`FileWatch`](super::watch::FileWatch).
     file_watching: bool,
     watched_files: std::sync::Mutex<WatchRegistry>,
     /// The initializationOptions payload, kept as the single source of
@@ -1910,7 +1910,7 @@ mod tests {
     }
 
     #[test]
-    fn file_watching_is_offered_only_when_the_workspace_is_watched() {
+    fn file_watching_is_offered_only_when_asked() {
         let offered = |watching| {
             LspClient::client_capabilities(Language::Python, watching)
                 .workspace
