@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -24,7 +24,6 @@ use crate::models::lsp::path_to_uri;
 use crate::models::symbol::Language;
 
 type PendingRequest = oneshot::Sender<Response>;
-type NotificationHandler = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 
 const MAX_OPEN_DOCUMENTS: usize = 100;
 const MAX_DIAGNOSTICS_CACHE: usize = 200;
@@ -301,6 +300,9 @@ impl IndexingState {
 
 pub struct LspClient {
     language: Language,
+    /// Spawned `kill_on_drop`, so the server process lives exactly as long as
+    /// this client. Nothing the client starts may hold it strongly — a task
+    /// or handler that did would keep an abandoned server running forever.
     process: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
     next_id: AtomicU64,
@@ -308,7 +310,6 @@ pub struct LspClient {
     diagnostics: RwLock<HashMap<String, PublishedDiagnostics>>,
     publish_seq: AtomicU64,
     document_cache: RwLock<DocumentCache>,
-    notification_handlers: RwLock<HashMap<String, NotificationHandler>>,
     root: PathBuf,
     config: Arc<crate::config::LspRuntimeConfig>,
     capabilities: RwLock<Option<InitializeResult>>,
@@ -332,6 +333,9 @@ pub struct LspClient {
     /// log-line readiness heuristics stand down — a heuristic must never
     /// overrule a server that can state readiness precisely.
     status_channel_seen: AtomicBool,
+    /// Progress tokens whose `begin` looked like indexing and that have not
+    /// yet ended; see `observe_progress`.
+    indexing_tokens: std::sync::Mutex<HashSet<String>>,
     /// The initializationOptions payload, kept as the single source of
     /// truth for settings: servers that pull configuration at runtime
     /// (`workspace/configuration` — pyright reads `python.pythonPath`
@@ -366,7 +370,6 @@ impl LspClient {
             diagnostics: RwLock::new(HashMap::new()),
             publish_seq: AtomicU64::new(0),
             document_cache: RwLock::new(DocumentCache::new()),
-            notification_handlers: RwLock::new(HashMap::new()),
             root,
             config,
             capabilities: RwLock::new(None),
@@ -378,6 +381,7 @@ impl LspClient {
             terminated: AtomicBool::new(false),
             cross_file_waited: AtomicBool::new(false),
             status_channel_seen: AtomicBool::new(false),
+            indexing_tokens: std::sync::Mutex::new(HashSet::new()),
             settings: RwLock::new(None),
         })
     }
@@ -424,11 +428,10 @@ impl LspClient {
         *self.process.lock().await = Some(child);
         *self.stdin.lock().await = Some(stdin);
 
-        // Start response reader task
-        let client = Arc::clone(self);
-        tokio::spawn(async move {
-            client.read_responses(Transport::new(stdout)).await;
-        });
+        tokio::spawn(Self::read_responses(
+            Arc::downgrade(self),
+            Transport::new(stdout),
+        ));
 
         // Drain the server's stderr continuously: an undrained pipe
         // eventually fills and deadlocks the server, and a crashing
@@ -441,9 +444,6 @@ impl LspClient {
                 tracing::debug!("LSP {language} stderr: {line}");
             }
         });
-
-        // Register notification handlers before initialization
-        self.register_default_handlers().await;
 
         // Initialize the server
         self.initialize().await?;
@@ -943,21 +943,24 @@ impl LspClient {
         Ok(())
     }
 
-    /// Background task that reads and dispatches responses
-    async fn read_responses(self: Arc<Self>, mut transport: Transport) {
+    /// Background task that reads and dispatches responses. It holds the
+    /// client weakly and only for one message at a time, so the reader never
+    /// keeps the server process alive past its last owner.
+    async fn read_responses(client: Weak<Self>, mut transport: Transport) {
         loop {
-            if *self.shutdown.read().await {
+            let message = transport.read_message().await;
+            let Some(client) = client.upgrade() else {
                 break;
-            }
+            };
 
-            match transport.read_message().await {
+            match message {
                 Ok(message) => {
-                    self.handle_message(message).await;
+                    client.handle_message(message).await;
                 }
                 Err(e) => {
-                    if !*self.shutdown.read().await {
-                        tracing::error!("{} LSP read error: {}", self.language, e);
-                        self.cancel_pending_requests_terminated().await;
+                    if !*client.shutdown.read().await {
+                        tracing::error!("{} LSP read error: {}", client.language, e);
+                        client.cancel_pending_requests_terminated().await;
                     }
                     break;
                 }
@@ -1056,14 +1059,6 @@ impl LspClient {
                     .clone()
                     .unwrap_or(serde_json::Value::Null);
 
-                // Check registered handlers first
-                {
-                    let handlers = self.notification_handlers.read().await;
-                    if let Some(handler) = handlers.get(method) {
-                        handler(params.clone());
-                    }
-                }
-
                 // Built-in notification handling
                 match method {
                     "textDocument/publishDiagnostics" => {
@@ -1100,8 +1095,14 @@ impl LspClient {
                             tracing::debug!("Cached {} diagnostics for {}", count, uri);
                         }
                     }
+                    "experimental/serverStatus" => self.observe_server_status(&params),
+                    "language/status" => self.observe_language_status(&params),
+                    "$/progress" => self.observe_progress(&params),
                     "window/logMessage" | "window/showMessage" => {
                         if let Some(msg) = params.get("message").and_then(|m| m.as_str()) {
+                            if method == "window/logMessage" {
+                                self.observe_log_message(msg);
+                            }
                             let msg_type = params.get("type").and_then(|t| t.as_u64());
                             match Self::classify_log_level(self.language, msg, msg_type) {
                                 LogLevel::Error => {
@@ -1514,113 +1515,85 @@ impl LspClient {
         self.config.indexing_wait(self.language)
     }
 
-    /// Register a notification handler for a specific method
-    pub async fn on_notification<F>(&self, method: &str, handler: F)
-    where
-        F: Fn(serde_json::Value) + Send + Sync + 'static,
-    {
-        self.notification_handlers
-            .write()
-            .await
-            .insert(method.to_string(), Box::new(handler));
+    /// The authoritative quiescence channel (rust-analyzer's
+    /// `experimental/serverStatus`, requested via the matching client
+    /// capability): quiescent=true means the workspace is fully analyzed,
+    /// false that the server is (re)working — including after edits, so
+    /// readiness re-evaluates instead of latching. Once a server demonstrates
+    /// this channel, the fuzzy progress and log heuristics stand down for good.
+    fn observe_server_status(&self, params: &Value) {
+        if let Some(quiescent) = params.get("quiescent").and_then(|v| v.as_bool()) {
+            self.status_channel_seen.store(true, Ordering::Release);
+            self.apply_indexing_event(if quiescent {
+                IndexingEvent::ServerQuiescent
+            } else {
+                IndexingEvent::ServerBusy
+            });
+        }
     }
 
-    pub async fn register_default_handlers(self: &Arc<Self>) {
-        // The authoritative quiescence channel (rust-analyzer's
-        // `experimental/serverStatus`, requested via the matching client
-        // capability): quiescent=true means the workspace is fully
-        // analyzed, false that the server is (re)working — including
-        // after edits, so readiness re-evaluates instead of latching.
-        // Once a server demonstrates this channel, the fuzzy progress and
-        // log heuristics below stand down for good.
-        let client_status = Arc::clone(self);
-        self.on_notification("experimental/serverStatus", move |params| {
-            if let Some(quiescent) = params.get("quiescent").and_then(|v| v.as_bool()) {
-                client_status
-                    .status_channel_seen
-                    .store(true, Ordering::Release);
-                client_status.apply_indexing_event(if quiescent {
-                    IndexingEvent::ServerQuiescent
-                } else {
-                    IndexingEvent::ServerBusy
-                });
-            }
-        })
-        .await;
+    fn observe_language_status(&self, params: &Value) {
+        if params.get("type").and_then(|v| v.as_str()) == Some("ProjectStatus")
+            && params.get("message").and_then(|v| v.as_str()) == Some("OK")
+        {
+            self.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        }
+    }
 
-        let client_lang = Arc::clone(self);
-        self.on_notification("language/status", move |params| {
-            if params.get("type").and_then(|v| v.as_str()) == Some("ProjectStatus")
-                && params.get("message").and_then(|v| v.as_str()) == Some("OK")
-            {
-                client_lang.apply_indexing_event(IndexingEvent::ServerQuiescent);
-            }
-        })
-        .await;
-
-        let client_progress = Arc::clone(self);
-        // Heuristic for servers without a status protocol.
-        // `WorkDoneProgressBegin` carries the `title`; `End` carries only
-        // the token. Remember which tokens began an indexing-shaped task
-        // and flip readiness only when the LAST of them ends — flipping
-        // on the first end would present a half-built index as
-        // authoritative while a sibling phase is still running. A server
-        // that leaks a begin-token never reaches a heuristic Ready;
-        // that fails toward the disclosed `timed_out` marker, never
-        // toward a false "complete".
-        let indexing_tokens: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
-            Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        self.on_notification("$/progress", move |params| {
-            if client_progress.status_channel_seen.load(Ordering::Acquire) {
-                return;
-            }
-            let Some(token) = params.get("token").map(|t| t.to_string()) else {
-                return;
-            };
-            let Some(value) = params.get("value") else {
-                return;
-            };
-            match value.get("kind").and_then(|k| k.as_str()) {
-                Some("begin") => {
-                    if let Some(title) = value.get("title").and_then(|t| t.as_str()) {
-                        let t = title.to_lowercase();
-                        if t.contains("index") || t.contains("load") || t.contains("analyz") {
-                            indexing_tokens
-                                .lock()
-                                .expect("indexing token set poisoned")
-                                .insert(token);
-                            // Real activity: the server told us it is indexing,
-                            // so a later timeout is a genuine lower bound rather
-                            // than the silence of a server with no indexing phase.
-                            client_progress.apply_indexing_event(IndexingEvent::ServerBusy);
-                        }
+    /// Heuristic for servers without a status protocol.
+    /// `WorkDoneProgressBegin` carries the `title`; `End` carries only the
+    /// token. Remember which tokens began an indexing-shaped task and flip
+    /// readiness only when the LAST of them ends — flipping on the first end
+    /// would present a half-built index as authoritative while a sibling phase
+    /// is still running. A server that leaks a begin-token never reaches a
+    /// heuristic Ready; that fails toward the disclosed `timed_out` marker,
+    /// never toward a false "complete".
+    fn observe_progress(&self, params: &Value) {
+        if self.status_channel_seen.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(token) = params.get("token").map(|t| t.to_string()) else {
+            return;
+        };
+        let Some(value) = params.get("value") else {
+            return;
+        };
+        match value.get("kind").and_then(|k| k.as_str()) {
+            Some("begin") => {
+                if let Some(title) = value.get("title").and_then(|t| t.as_str()) {
+                    let t = title.to_lowercase();
+                    if t.contains("index") || t.contains("load") || t.contains("analyz") {
+                        self.indexing_tokens
+                            .lock()
+                            .expect("indexing token set poisoned")
+                            .insert(token);
+                        // Real activity: the server told us it is indexing,
+                        // so a later timeout is a genuine lower bound rather
+                        // than the silence of a server with no indexing phase.
+                        self.apply_indexing_event(IndexingEvent::ServerBusy);
                     }
                 }
-                Some("end") => {
-                    let mut tokens = indexing_tokens.lock().expect("indexing token set poisoned");
-                    if tokens.remove(&token) && tokens.is_empty() {
-                        drop(tokens);
-                        client_progress.apply_indexing_event(IndexingEvent::ServerQuiescent);
-                    }
+            }
+            Some("end") => {
+                let mut tokens = self
+                    .indexing_tokens
+                    .lock()
+                    .expect("indexing token set poisoned");
+                if tokens.remove(&token) && tokens.is_empty() {
+                    drop(tokens);
+                    self.apply_indexing_event(IndexingEvent::ServerQuiescent);
                 }
-                _ => {}
             }
-        })
-        .await;
+            _ => {}
+        }
+    }
 
-        let client_log = Arc::clone(self);
-        let language = self.language;
-        self.on_notification("window/logMessage", move |params| {
-            if client_log.status_channel_seen.load(Ordering::Acquire) {
-                return;
-            }
-            if let Some(msg) = params.get("message").and_then(|m| m.as_str())
-                && Self::is_readiness_signal(language, msg)
-            {
-                client_log.apply_indexing_event(IndexingEvent::ServerQuiescent);
-            }
-        })
-        .await;
+    fn observe_log_message(&self, message: &str) {
+        if !self.status_channel_seen.load(Ordering::Acquire)
+            && Self::is_readiness_signal(self.language, message)
+        {
+            self.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        }
     }
 
     fn is_readiness_signal(language: Language, message: &str) -> bool {
@@ -1869,7 +1842,6 @@ mod tests {
     #[tokio::test]
     async fn server_status_drives_readiness_in_both_directions() {
         let client = test_client();
-        client.register_default_handlers().await;
 
         notify_client(
             &client,
@@ -1901,7 +1873,6 @@ mod tests {
     #[tokio::test]
     async fn server_status_clears_a_timed_out_verdict() {
         let client = test_client();
-        client.register_default_handlers().await;
         client.force_indexing_state(IndexingState::TimedOut);
 
         notify_client(
@@ -1920,7 +1891,6 @@ mod tests {
     #[tokio::test]
     async fn server_busy_does_not_clear_a_timed_out_verdict() {
         let client = test_client();
-        client.register_default_handlers().await;
         client.force_indexing_state(IndexingState::TimedOut);
 
         notify_client(
@@ -1999,7 +1969,6 @@ mod tests {
     #[tokio::test]
     async fn progress_heuristic_waits_for_all_indexing_tokens_to_drain() {
         let client = test_client();
-        client.register_default_handlers().await;
 
         notify_client(
             &client,
@@ -2031,7 +2000,6 @@ mod tests {
     #[tokio::test]
     async fn indexing_progress_begin_opens_in_progress() {
         let client = test_client();
-        client.register_default_handlers().await;
         assert_eq!(client.indexing_state(), IndexingState::NotStarted);
 
         notify_client(
@@ -2049,7 +2017,6 @@ mod tests {
     #[tokio::test]
     async fn progress_heuristic_stands_down_once_the_status_channel_speaks() {
         let client = test_client();
-        client.register_default_handlers().await;
 
         notify_client(
             &client,

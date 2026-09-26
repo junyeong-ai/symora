@@ -614,6 +614,133 @@ mod tests {
         );
     }
 
+    /// A stand-in language server that records its pid and, like a real
+    /// server, ignores stdin EOF — so a process that goes away was stopped
+    /// by the client, never by its own shutdown logic.
+    #[cfg(unix)]
+    mod server_lifetime {
+        use super::*;
+        use std::time::Duration;
+
+        const FAKE_SERVER: &str = r#"#!/bin/sh
+echo $$ >> "$1"
+case "$2" in
+  reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
+  serve) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  hang) exec sleep 600 ;;
+esac
+IFS= read -r _
+sleep "$3"
+printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+exec sleep 600
+"#;
+
+        struct FakeServer {
+            dir: tempfile::TempDir,
+        }
+
+        impl FakeServer {
+            fn new() -> Self {
+                use std::os::unix::fs::PermissionsExt;
+                let dir = tempfile::tempdir().unwrap();
+                let script = dir.path().join("fake-ls");
+                std::fs::write(&script, FAKE_SERVER).unwrap();
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                Self { dir }
+            }
+
+            /// A pool whose Go server is the fake, answering `initialize`
+            /// per `behavior` after `delay_secs`. Go's profile makes the
+            /// handshake budget 2s at `timeout_secs = 1`.
+            fn manager(&self, behavior: &str, delay_secs: u32) -> Arc<LspManager> {
+                let mut config = crate::models::config::SymoraConfig::default();
+                config.lsp.timeout_secs = 1;
+                config.lsp.servers.insert(
+                    "go".to_string(),
+                    crate::models::config::ServerOverride {
+                        command: Some(self.dir.path().join("fake-ls").display().to_string()),
+                        args: Some(vec![
+                            self.dir.path().join("pids").display().to_string(),
+                            behavior.to_string(),
+                            delay_secs.to_string(),
+                        ]),
+                        tier: None,
+                    },
+                );
+                Arc::new(LspManager::new(
+                    self.dir.path().to_path_buf(),
+                    Arc::new(crate::config::LspRuntimeConfig::from(&config)),
+                ))
+            }
+
+            fn pids(&self) -> Vec<u32> {
+                std::fs::read_to_string(self.dir.path().join("pids"))
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|line| line.parse().unwrap())
+                    .collect()
+            }
+
+            /// The process state `ps` reports, empty once the pid is reaped.
+            fn stat(pid: u32) -> String {
+                std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                    .unwrap_or_default()
+            }
+
+            fn alive(pid: u32) -> bool {
+                !Self::stat(pid).is_empty()
+            }
+
+            /// Every server this fake ever started has exited AND been
+            /// reaped — a zombie still counts as a leak.
+            async fn assert_all_gone(&self) {
+                let pids = self.pids();
+                assert!(!pids.is_empty(), "the fake server never started");
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                while pids.iter().any(|pid| Self::alive(*pid)) {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "server processes outlived their handles: {:?}",
+                        pids.iter()
+                            .filter(|pid| Self::alive(**pid))
+                            .collect::<Vec<_>>()
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+
+        async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
+            tokio::time::timeout(Duration::from_secs(15), future)
+                .await
+                .expect("the pool stopped making progress")
+        }
+
+        #[tokio::test]
+        async fn a_server_that_rejects_initialize_is_terminated() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("reject", 0);
+            for _ in 0..3 {
+                assert!(bounded(manager.get_client(Language::Go)).await.is_err());
+            }
+            assert_eq!(fake.pids().len(), 3);
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn dropping_the_pool_terminates_its_servers() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            bounded(manager.get_client(Language::Go)).await.unwrap();
+
+            drop(manager);
+            fake.assert_all_gone().await;
+        }
+    }
+
     #[test]
     fn test_server_status_display() {
         let status = ServerStatusDetail::Running {
