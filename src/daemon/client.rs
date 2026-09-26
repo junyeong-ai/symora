@@ -278,7 +278,7 @@ impl DaemonClient {
             .await
             .map_err(|_| {
                 LspError::Timeout(format!(
-                    "Operation '{}' timed out after {}s. Try 'symora daemon restart'",
+                    "Operation '{}' timed out after {}s",
                     method,
                     timeout_duration.as_secs()
                 ))
