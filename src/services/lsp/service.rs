@@ -303,7 +303,7 @@ impl LspService for DefaultLspService {
             let Ok(language) = Self::language_for_file(file) else {
                 continue;
             };
-            let Some(client) = self.manager.peek_client(language).await else {
+            let Some(client) = self.manager.peek_client(language) else {
                 continue;
             };
             if let Err(e) = client.sync_edited_document(file).await {
