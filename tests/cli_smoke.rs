@@ -1668,6 +1668,37 @@ fn a_file_name_that_is_not_utf8_is_measured() {
     assert!(page["unmeasured_files"].is_null(), "{page}");
 }
 
+/// Two file names that are not UTF-8 can render alike; each is still
+/// listed, since they are two files.
+#[cfg(target_os = "linux")]
+#[test]
+fn two_files_whose_names_render_alike_are_each_unmeasured() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let names =
+        [b"caf\xe9.py".as_slice(), b"caf\xea.py".as_slice()].map(std::ffi::OsStr::from_bytes);
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    for name in names {
+        std::fs::write(repo.join(name), b"\0one").unwrap();
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    for name in names {
+        std::fs::write(repo.join(name), b"\0two").unwrap();
+    }
+
+    let page = json_ok(repo, &["diff-impact"]);
+    assert_eq!(page["changed_files_count"], 2, "{page}");
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["caf\u{FFFD}.py", "caf\u{FFFD}.py"]),
+        "{page}"
+    );
+}
+
 /// A symbolic link's lines are where it points, not source, so a link that
 /// appears or is retargeted is counted but no symbol is taken from the
 /// file it points to.

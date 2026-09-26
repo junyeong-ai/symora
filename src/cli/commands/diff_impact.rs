@@ -183,7 +183,9 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     } = parse_git_diff(root, base.tree_ish(), args.staged)?;
     let changed_files = changed_files(root, base.tree_ish(), args.staged)?;
     let mut hints = Vec::new();
-    let mut unmeasured_files = Vec::new();
+    // Files are told apart by path until they are rendered: two names that
+    // are not UTF-8 can render alike.
+    let mut unmeasured: Vec<PathBuf> = Vec::new();
 
     if let Base::Commit(commit) = &base
         && !is_ancestor_of_head(root, commit)
@@ -196,16 +198,16 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         ));
     }
 
-    let binary: BTreeSet<String> = binary.iter().map(|f| relative_display(f, root)).collect();
+    let binary: BTreeSet<PathBuf> = binary.into_iter().collect();
     if !binary.is_empty() {
         hints.push(format!(
             "git reports {} as binary, so which of their lines changed is not known; a `-diff` \
              or `binary` attribute does this to a text file.",
-            binary.iter().cloned().collect::<Vec<_>>().join(", ")
+            displayed(&binary, root)
         ));
-        unmeasured_files.extend(binary);
+        unmeasured.extend(binary);
     }
-    unmeasured_files.extend(links.iter().map(|link| relative_display(link, root)));
+    unmeasured.extend(links);
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
@@ -213,22 +215,21 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         // A file with no staged lines, a pure rename or a mode change, has
         // nothing under the unstaged edits; a conflicted file has no staged
         // lines of its own to measure.
-        let overlaid: BTreeSet<String> = hunks
+        let overlaid: BTreeSet<PathBuf> = hunks
             .iter()
             .map(|h| &h.file)
             .chain(&unmerged)
-            .filter(|file| unstaged.contains(*file))
-            .map(|file| relative_display(file, root))
-            .filter(|file| !unmeasured_files.contains(file))
+            .filter(|file| unstaged.contains(*file) && !unmeasured.contains(file))
+            .cloned()
             .collect();
         hunks.retain(|h| !unstaged.contains(&h.file));
         if !overlaid.is_empty() {
             hints.push(format!(
                 "Unstaged edits sit over the staged ones in {}, so the staged lines are not the \
                  lines on disk; stage or stash those edits to measure them.",
-                overlaid.iter().cloned().collect::<Vec<_>>().join(", ")
+                displayed(&overlaid, root)
             ));
-            unmeasured_files.extend(overlaid);
+            unmeasured.extend(overlaid);
         }
     }
 
@@ -247,9 +248,9 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         )
         .await
     };
-    unmeasured_files.extend(unreadable);
+    unmeasured.extend(unreadable);
     let mut listed = HashSet::new();
-    unmeasured_files.retain(|file| listed.insert(file.clone()));
+    unmeasured.retain(|file| listed.insert(file.clone()));
     if stopped_at_cap {
         // The cause of `incomplete` leads the hints.
         hints.insert(0, LowerBound::AnalysisCapped(args.max_symbols).hint());
@@ -283,7 +284,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
             ratio: coverage_ratio,
         },
         changes,
-        unmeasured_files,
+        unmeasured_files: unmeasured
+            .iter()
+            .map(|file| relative_display(file, root))
+            .collect(),
         incomplete: stopped_at_cap,
         hints,
     });
@@ -459,6 +463,14 @@ fn relative_display(file: &Path, root: &Path) -> String {
         .unwrap_or(file)
         .display()
         .to_string()
+}
+
+fn displayed(files: &BTreeSet<PathBuf>, root: &Path) -> String {
+    files
+        .iter()
+        .map(|file| relative_display(file, root))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Paths are relative to `root` and limited to it (`--relative`), which need
@@ -838,7 +850,7 @@ async fn analyze_hunks(
     include_callers: bool,
     max_symbols: usize,
     calls_limit: usize,
-) -> (Vec<ChangedSymbolImpact>, Vec<String>, bool) {
+) -> (Vec<ChangedSymbolImpact>, Vec<PathBuf>, bool) {
     // Group hunks by file
     let mut file_hunks: BTreeMap<&PathBuf, Vec<&DiffHunk>> = BTreeMap::new();
     for hunk in hunks {
@@ -959,7 +971,7 @@ async fn analyze_hunks(
             // present, find_symbols errored — disclose it as an unmeasured file
             // (a lower bound) instead of silently dropping its changes.
             if file_exists {
-                unmeasured.push(relative_display(file, root));
+                unmeasured.push(file.clone());
             }
             continue;
         };
