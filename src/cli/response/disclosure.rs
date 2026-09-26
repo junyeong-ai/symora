@@ -917,9 +917,6 @@ pub fn relative_paths(ctx: &OutputContext, paths: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// A server that is installed and fails is the gap to read first, in its
-    /// own words: languages with no server at all sort ahead of it by name,
-    /// and would otherwise fill the hints and pick the remedy.
     #[test]
     fn an_unconsulted_language_is_cured_by_the_index_only_where_it_can_hold_it() {
         use crate::services::store::SymbolExtractor;
@@ -985,6 +982,9 @@ mod tests {
         assert!(symbol_coverage_hints(&mixed, not_built)[0].contains("for rust"));
     }
 
+    /// A server that is installed and fails is the gap to read first, in its
+    /// own words: languages with no server at all sort ahead of it by name,
+    /// and would otherwise fill the hints and pick the remedy.
     #[test]
     fn a_failed_server_leads_the_disclosure_and_says_why() {
         let failures = [
