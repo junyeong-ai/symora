@@ -67,8 +67,10 @@ pub struct CallGraphWalk {
     pub predecessor: HashMap<NodeKey, NodeKey>,
     /// Every node reached, including the anchor.
     pub visited: HashSet<NodeKey>,
-    /// The final depth still had unexplored neighbours — the walk stopped at
-    /// the cap, not from exhaustion, so the graph is a lower bound.
+    /// The walk stopped at the depth cap with nodes on its last level whose
+    /// own neighbours it did not ask for, so the graph past the cap is
+    /// unknown and the discovered one a lower bound. A graph that ends
+    /// exactly at the cap reads the same; only a deeper walk tells them apart.
     pub max_depth_reached: bool,
     /// At least one node's neighbour list was cut at `max_neighbors_per_node`,
     /// so the discovered set is a lower bound.
@@ -207,10 +209,11 @@ pub async fn walk(
         let level_count = level_items.len();
         levels.push(level_items);
 
-        // A node discovered at the final depth still has unexplored
-        // neighbours — the walk stopped at the cap, not from exhaustion. (The
-        // frontier guard above never queues final-depth nodes, so this is
-        // decided from the discovered count, not the frontier.)
+        // The final level's neighbours are never asked for, so whether any
+        // lie past the cap is unknown and a non-empty final level counts as
+        // reaching it. (The frontier guard above never queues final-depth
+        // nodes, so this is decided from the discovered count, not the
+        // frontier.)
         if depth == max_depth {
             max_depth_reached = level_count > 0;
             break;
