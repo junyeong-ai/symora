@@ -12,13 +12,15 @@ use tokio::time::timeout;
 
 use super::init_options::init_options;
 use super::protocol::{
-    ClientCapabilities, ClientInfo, GeneralClientCapabilities, InitializeParams, InitializeResult,
-    LspDiagnostic, Message, Notification, Position, PositionEncoding, RegularExpressionsCapability,
-    Request, RequestId, Response, ResponseError, StaleRequestSupport,
-    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentPositionParams,
+    ClientCapabilities, ClientInfo, DidChangeWatchedFilesParams, GeneralClientCapabilities,
+    InitializeParams, InitializeResult, LspDiagnostic, Message, Notification, Position,
+    PositionEncoding, RegistrationParams, RegularExpressionsCapability, Request, RequestId,
+    Response, ResponseError, StaleRequestSupport, TextDocumentClientCapabilities,
+    TextDocumentIdentifier, TextDocumentPositionParams, UnregistrationParams,
     WindowClientCapabilities, WorkspaceClientCapabilities, error_codes,
 };
 use super::transport::{Transport, write_notification, write_request, write_response};
+use super::watch::{FileChange, WATCHED_FILES_METHOD, WatchRegistry};
 use crate::error::LspError;
 use crate::models::lsp::path_to_uri;
 use crate::models::symbol::Language;
@@ -336,6 +338,10 @@ pub struct LspClient {
     /// Progress tokens whose `begin` looked like indexing and that have not
     /// yet ended; see `observe_progress`.
     indexing_tokens: std::sync::Mutex<HashSet<String>>,
+    /// Whether this client's workspace is watched, and so whether it may
+    /// offer `workspace.didChangeWatchedFiles` to the server.
+    file_watching: bool,
+    watched_files: std::sync::Mutex<WatchRegistry>,
     /// The initializationOptions payload, kept as the single source of
     /// truth for settings: servers that pull configuration at runtime
     /// (`workspace/configuration` — pyright reads `python.pythonPath`
@@ -359,6 +365,7 @@ impl LspClient {
         language: Language,
         root: PathBuf,
         config: Arc<crate::config::LspRuntimeConfig>,
+        file_watching: bool,
     ) -> Arc<Self> {
         bump_content_generation();
         Arc::new(Self {
@@ -382,6 +389,8 @@ impl LspClient {
             cross_file_waited: AtomicBool::new(false),
             status_channel_seen: AtomicBool::new(false),
             indexing_tokens: std::sync::Mutex::new(HashSet::new()),
+            file_watching,
+            watched_files: std::sync::Mutex::new(WatchRegistry::default()),
             settings: RwLock::new(None),
         })
     }
@@ -501,7 +510,7 @@ impl LspClient {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "workspace".to_string()),
             }]),
-            capabilities: Self::client_capabilities(self.language),
+            capabilities: Self::client_capabilities(self.language, self.file_watching),
             client_info: Some(ClientInfo {
                 name: "symora".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -555,7 +564,7 @@ impl LspClient {
     }
 
     /// Build client capabilities optimized for the target language server (LSP 3.17 complete)
-    fn client_capabilities(language: Language) -> ClientCapabilities {
+    fn client_capabilities(language: Language, file_watching: bool) -> ClientCapabilities {
         let general = GeneralClientCapabilities {
             position_encodings: Some(vec!["utf-8".to_string(), "utf-16".to_string()]),
             stale_request_support: Some(StaleRequestSupport {
@@ -759,10 +768,12 @@ impl LspClient {
             did_change_configuration: Some(serde_json::json!({
                 "dynamicRegistration": true
             })),
-            did_change_watched_files: Some(serde_json::json!({
-                "dynamicRegistration": true,
-                "relativePatternSupport": true
-            })),
+            did_change_watched_files: file_watching.then(|| {
+                serde_json::json!({
+                    "dynamicRegistration": true,
+                    "relativePatternSupport": true
+                })
+            }),
             symbol: Some(serde_json::json!({
                 "dynamicRegistration": true,
                 "symbolKind": {
@@ -1656,8 +1667,8 @@ impl LspClient {
     async fn handle_server_request(&self, request: Request) {
         let response_result = match request.method.as_str() {
             "workspace/configuration" => self.handle_workspace_configuration(&request.params).await,
-            "client/registerCapability" => Ok(serde_json::Value::Null),
-            "client/unregisterCapability" => Ok(serde_json::Value::Null),
+            "client/registerCapability" => self.register_capabilities(&request.params),
+            "client/unregisterCapability" => self.unregister_capabilities(&request.params),
             "window/workDoneProgress/create" => Ok(serde_json::Value::Null),
             // Null = "no action item chosen" — spec-valid and the only
             // honest answer a headless client can give.
@@ -1745,6 +1756,59 @@ impl LspClient {
         Ok(Value::Array(items))
     }
 
+    /// Accepted even when unreadable, like every other registration: an
+    /// error answer makes some servers exit.
+    fn register_capabilities(&self, params: &Option<Value>) -> Result<Value, ResponseError> {
+        match params
+            .clone()
+            .map(serde_json::from_value::<RegistrationParams>)
+        {
+            Some(Ok(params)) => {
+                let mut watched = self.watched_files.lock().expect("watch registry poisoned");
+                for registration in &params.registrations {
+                    if registration.method == WATCHED_FILES_METHOD {
+                        watched.register(registration);
+                    }
+                }
+            }
+            _ => tracing::debug!("{} sent an unreadable registration", self.language),
+        }
+        Ok(Value::Null)
+    }
+
+    fn unregister_capabilities(&self, params: &Option<Value>) -> Result<Value, ResponseError> {
+        match params
+            .clone()
+            .map(serde_json::from_value::<UnregistrationParams>)
+        {
+            Some(Ok(params)) => {
+                let mut watched = self.watched_files.lock().expect("watch registry poisoned");
+                for unregistration in &params.unregisterations {
+                    watched.unregister(&unregistration.id);
+                }
+            }
+            _ => tracing::debug!("{} sent an unreadable unregistration", self.language),
+        }
+        Ok(Value::Null)
+    }
+
+    /// Tell the server about the changes on disk its watchers asked for.
+    pub async fn did_change_watched_files(&self, changes: &[FileChange]) {
+        let events = self
+            .watched_files
+            .lock()
+            .expect("watch registry poisoned")
+            .select(changes);
+        if events.is_empty() {
+            return;
+        }
+        let params = serde_json::to_value(DidChangeWatchedFilesParams { changes: events })
+            .expect("watched-file events serialize");
+        if let Err(e) = self.notify(WATCHED_FILES_METHOD, Some(params)).await {
+            tracing::debug!("{} missed watched-file changes: {e}", self.language);
+        }
+    }
+
     pub fn position_params(uri: &str, line: u32, column: u32) -> TextDocumentPositionParams {
         TextDocumentPositionParams {
             text_document: TextDocumentIdentifier::new(uri),
@@ -1816,7 +1880,20 @@ mod tests {
             Language::Rust,
             PathBuf::from("/tmp"),
             Arc::new(crate::config::LspRuntimeConfig::default()),
+            false,
         )
+    }
+
+    #[test]
+    fn file_watching_is_offered_only_when_the_workspace_is_watched() {
+        let offered = |watching| {
+            LspClient::client_capabilities(Language::Python, watching)
+                .workspace
+                .and_then(|workspace| workspace.did_change_watched_files)
+                .is_some()
+        };
+        assert!(offered(true));
+        assert!(!offered(false));
     }
 
     async fn notify_client(client: &Arc<LspClient>, method: &str, params: serde_json::Value) {

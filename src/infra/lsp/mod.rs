@@ -6,6 +6,7 @@ pub mod manager;
 pub mod protocol;
 pub mod servers;
 pub mod transport;
+pub mod watch;
 
 pub use capabilities::{
     LspFeature, SupportLevel, get_alternative_suggestion, get_support_level,

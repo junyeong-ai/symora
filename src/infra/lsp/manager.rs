@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{RwLock, mpsc, watch};
 
 use super::client::LspClient;
 use super::servers::{self, ServerConfig};
+use super::watch::{Batch, RawEvent, WorkspaceWatcher};
 use crate::error::LspError;
 use crate::models::symbol::Language;
 
@@ -123,6 +124,9 @@ pub struct LspManager {
     clients: Mutex<HashMap<Language, ClientState>>,
     configs: HashMap<Language, ServerConfig>,
     runtime_config: Arc<crate::config::LspRuntimeConfig>,
+    /// Started with the first server, so every server that registers file
+    /// watchers is told about changes from its start on.
+    watcher: Mutex<Option<WorkspaceWatcher>>,
     /// Languages the health monitor abandoned auto-restart on, with the
     /// reason. `server_status` reports these as `CriticalFailure` so a broken
     /// server is an honest terminal state, not a perpetual `Stopped`. Cleared
@@ -137,6 +141,7 @@ impl LspManager {
             clients: Mutex::new(HashMap::new()),
             configs: servers::merged(&runtime_config.servers),
             runtime_config,
+            watcher: Mutex::new(None),
             critical_failures: RwLock::new(HashMap::new()),
         }
     }
@@ -284,7 +289,10 @@ impl LspManager {
             .map(|(lang, _)| lang)
     }
 
-    async fn spawn_server(&self, language: Language) -> Result<Arc<LspClient>, LspError> {
+    async fn spawn_server(
+        self: &Arc<Self>,
+        language: Language,
+    ) -> Result<Arc<LspClient>, LspError> {
         let config = self
             .configs
             .get(&language)
@@ -298,6 +306,7 @@ impl LspManager {
             language,
             self.root.clone(),
             Arc::clone(&self.runtime_config),
+            self.watch_workspace().await,
         );
         client
             .start(&command.to_string_lossy(), &config.args)
@@ -305,6 +314,64 @@ impl LspManager {
 
         tracing::info!("{:?} language server started", language);
         Ok(client)
+    }
+
+    /// Whether the workspace is watched, starting the watch if it is not yet.
+    /// A server is only offered file watching while a watch stands behind it.
+    async fn watch_workspace(self: &Arc<Self>) -> bool {
+        if self
+            .watcher
+            .lock()
+            .expect("watcher lock poisoned")
+            .is_some()
+        {
+            return true;
+        }
+        let root = self.root.clone();
+        let started = tokio::task::spawn_blocking(move || WorkspaceWatcher::start(&root))
+            .await
+            .unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic()));
+        match started {
+            Ok((started, events, watch_root)) => {
+                let mut watcher = self.watcher.lock().expect("watcher lock poisoned");
+                if watcher.is_none() {
+                    tokio::spawn(forward_file_changes(
+                        Arc::downgrade(self),
+                        events,
+                        watch_root,
+                    ));
+                    *watcher = Some(started);
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Cannot watch {} ({e}); language servers will not see files change on disk",
+                    self.root.display()
+                );
+                false
+            }
+        }
+    }
+
+    async fn apply_file_changes(&self, batch: Batch) {
+        match batch {
+            Batch::Changes(changes) if changes.is_empty() => {}
+            Batch::Changes(changes) => {
+                super::client::note_workspace_content_changed();
+                for (_, client) in self.pooled_clients() {
+                    client.did_change_watched_files(&changes).await;
+                }
+            }
+            Batch::Rescan => {
+                tracing::warn!(
+                    "File watcher lost events under {}; restarting language servers",
+                    self.root.display()
+                );
+                super::client::note_workspace_content_changed();
+                self.shutdown_all().await;
+            }
+        }
     }
 
     pub async fn shutdown_client(&self, language: Language) -> Result<(), LspError> {
@@ -514,6 +581,27 @@ impl LspManager {
     }
 }
 
+/// Forward each batch of watcher events to the pool until the watcher or the
+/// pool is gone. Holds the pool weakly, so an idle project is not kept alive
+/// by its own watch.
+async fn forward_file_changes(
+    manager: Weak<LspManager>,
+    mut events: mpsc::UnboundedReceiver<RawEvent>,
+    watch_root: PathBuf,
+) {
+    while let Some(first) = events.recv().await {
+        let mut batch = vec![first];
+        while let Ok(next) = events.try_recv() {
+            batch.push(next);
+        }
+        let Some(manager) = manager.upgrade() else {
+            break;
+        };
+        let reduced = super::watch::reduce(batch, &watch_root, &manager.root);
+        manager.apply_file_changes(reduced).await;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ServerStatusDetail {
     Running {
@@ -683,12 +771,17 @@ mod tests {
 echo $$ >> "$1"
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
-  serve) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  serve|watch) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
 sleep "$3"
 printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+if [ "$2" = watch ]; then
+  body='{"jsonrpc":"2.0","id":"w1","method":"client/registerCapability","params":{"registrations":[{"id":"go-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.go"}]}}]}}'
+  printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+  exec cat > "$4"
+fi
 exec sleep 600
 "#;
 
@@ -720,6 +813,7 @@ exec sleep 600
                             self.dir.path().join("pids").display().to_string(),
                             behavior.to_string(),
                             delay_secs.to_string(),
+                            self.received().display().to_string(),
                         ]),
                         tier: None,
                     },
@@ -728,6 +822,21 @@ exec sleep 600
                     self.dir.path().to_path_buf(),
                     Arc::new(crate::config::LspRuntimeConfig::from(&config)),
                 ))
+            }
+
+            /// Everything the client wrote to a `watch` server after it
+            /// registered its watcher.
+            fn received(&self) -> PathBuf {
+                self.dir.path().join("received")
+            }
+
+            async fn until_received(&self, needle: &str) {
+                while !std::fs::read_to_string(self.received())
+                    .unwrap_or_default()
+                    .contains(needle)
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
 
             fn pids(&self) -> Vec<u32> {
@@ -843,6 +952,28 @@ exec sleep 600
             assert_eq!(fake.pids().len(), 2);
 
             drop((replacement, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn a_change_on_disk_reaches_the_server_watching_for_it() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("watch", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            bounded(fake.until_received("\"id\":\"w1\"")).await;
+
+            std::fs::write(fake.dir.path().join("notes.txt"), "").unwrap();
+            std::fs::write(fake.dir.path().join("main.go"), "package main\n").unwrap();
+            bounded(fake.until_received("main.go")).await;
+
+            let received = std::fs::read_to_string(fake.received()).unwrap();
+            assert!(received.contains("\"method\":\"workspace/didChangeWatchedFiles\""));
+            assert!(
+                !received.contains("notes.txt"),
+                "only what the watcher registered for is sent"
+            );
+
+            drop((client, manager));
             fake.assert_all_gone().await;
         }
 
