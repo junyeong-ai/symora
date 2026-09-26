@@ -1356,6 +1356,30 @@ fn repo_with_a_deleted_function() -> tempfile::TempDir {
     dir
 }
 
+#[cfg(unix)]
+#[test]
+fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    std::fs::write(repo.join("m.py"), "def added():\n    return 1\n").unwrap();
+    git(repo, &["add", "m.py"]);
+
+    for args in [&["diff-impact"][..], &["diff-impact", "--staged"]] {
+        let page = json_ok(repo, args);
+        assert_eq!(page["changes"][0]["name"], "added", "{args:?}: {page}");
+        assert_eq!(
+            page["changes"][0]["change_type"], "added",
+            "{args:?}: {page}"
+        );
+        assert!(page["hints"].is_null(), "{args:?}: {page}");
+    }
+
+    let out = run_in(repo, &["diff-impact", "main"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
+}
+
 /// The other side of a diff is always read from the working tree, so a range
 /// names a second tree nothing reads. git answers `git show A..B:path` with an
 /// empty file, which turned every deletion into "no symbol in range"; the
