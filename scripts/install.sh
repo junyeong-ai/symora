@@ -47,9 +47,7 @@ VERIFY_ATTESTATIONS=false
 NO_COLOR="${NO_COLOR:-}"
 
 
-SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
-ORIGINAL_DIR="$(pwd)"
-SCRIPT_DIR=""
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
 PROJECT_ROOT=""
 TMP_ROOT=""
 
@@ -183,13 +181,13 @@ parse_args() {
 # ─── path resolution ────────────────────────────────────────────────────────
 
 resolve_paths() {
-    if SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd -P)"; then
-        :
-    else
-        SCRIPT_DIR="$ORIGINAL_DIR"
-    fi
-    if [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
-        PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+    # Piped (`curl … | bash`), the script is no file and no checkout surrounds
+    # it, whatever the current directory holds.
+    [ -f "$SCRIPT_PATH" ] || return 0
+    local script_dir
+    script_dir="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)"
+    if [ -f "$script_dir/../Cargo.toml" ]; then
+        PROJECT_ROOT="$(cd "$script_dir/.." && pwd -P)"
     fi
 }
 
