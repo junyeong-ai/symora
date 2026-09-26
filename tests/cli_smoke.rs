@@ -1436,6 +1436,10 @@ fn staged_lines_under_unstaged_edits_are_unmeasured_and_say_why() {
         "{page}"
     );
     assert_eq!(page["changed_symbols_count"], 0, "{page}");
+    assert_eq!(
+        page["changed_files_count"], 1,
+        "an unmeasured file is still a changed one: {page}"
+    );
     assert!(
         page["hints"].as_array().is_some_and(|hints| hints
             .iter()
