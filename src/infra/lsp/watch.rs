@@ -28,6 +28,10 @@ pub enum FileWatch {
     On,
     /// Its owner answers one command and exits. Its servers read the disk as
     /// it is, and a watch would cost a walk of the whole tree for nothing.
+    /// They are still offered file watching, so none watches the tree itself
+    /// for changes the one answer could not use: a server not offered it
+    /// starts its own watcher, which held rust-analyzer's readiness past the
+    /// indexing wait a command allows.
     #[default]
     Off,
 }
