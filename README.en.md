@@ -538,7 +538,7 @@ Run `symora <command> --help` for any command's flags. Output fields are describ
 | `incomplete: true` | The count is a lower bound — the answer does not hold everything its own sources held. The leading `hints` name the cause; `next_commands` carries the fix where one exists. If `unread_paths` came with it, check those paths' permissions — no rebuild reaches a path nothing can read. |
 | `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
 | `conflict` from `search index` | Another process is rebuilding the index — retry as-is; nothing is left half-applied. |
-| Stale results after edits | Rows from the index (`backend: "index"`, `stale: true`) are a snapshot of the last build — `symora search index build` (incremental). LSP-backed answers follow edits: the daemon and `mcp serve` watch the project and pass on-disk changes to the language servers. On Linux a directory the watch cannot cover (unreadable, or past `fs.inotify.max_user_watches`) is skipped, and changes under it show after `symora daemon restart`. |
+| Stale results after edits | Rows from the index (`backend: "index"`, `stale: true`) are a snapshot of the last build — `symora search index build` (incremental). LSP-backed answers follow edits: the daemon and `mcp serve` watch the project and pass on-disk changes to the language servers. On Linux a directory the watch cannot cover (unreadable, or past `fs.inotify.max_user_watches`) is skipped, and changes under it show once the process holding the watch restarts: `symora daemon restart`, or the `mcp serve` process itself under `SYMORA_NO_DAEMON=1`. |
 | Debugging | `symora -v <command>` for verbose logs. |
 
 ---
