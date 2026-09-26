@@ -209,12 +209,12 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
-        let (overlaid, staged): (Vec<_>, Vec<_>) =
-            hunks.into_iter().partition(|h| unstaged.contains(&h.file));
-        hunks = staged;
-        let overlaid: BTreeSet<String> = overlaid
+        hunks.retain(|h| !unstaged.contains(&h.file));
+        let overlaid: BTreeSet<String> = changed_files
             .iter()
-            .map(|h| relative_display(&h.file, root))
+            .filter(|file| unstaged.contains(*file))
+            .map(|file| relative_display(file, root))
+            .filter(|file| !unmeasured_files.contains(file))
             .collect();
         if !overlaid.is_empty() {
             hints.push(format!(
