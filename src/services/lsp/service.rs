@@ -322,7 +322,7 @@ impl Drop for DefaultLspService {
 
 /// Map a computation-time indexing snapshot to the output marker. Readiness
 /// is strictly signal-driven (`Ready` only ever follows an explicit server
-/// signal — see `register_default_handlers`), so an unmarked answer was
+/// signal — see `LspClient::handle_message`), so an unmarked answer was
 /// genuinely served from a complete index; `TimedOut` — the wait budget
 /// expired before any signal — is the one degraded state a result can be
 /// computed under.
