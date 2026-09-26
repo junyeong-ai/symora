@@ -1656,6 +1656,46 @@ fn a_symbolic_link_is_counted_but_not_read_through() {
     );
 }
 
+/// A file in an unresolved merge conflict has no single staged version, so
+/// `--staged` discloses it rather than counting it with nothing measured.
+#[cfg(unix)]
+#[test]
+fn a_conflicted_file_is_disclosed_by_a_staged_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 1\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    git(repo, &["checkout", "-qb", "side"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 2\n").unwrap();
+    git(repo, &["commit", "-qam", "side"]);
+    git(repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("m.py"), "def a():\n    return 3\n").unwrap();
+    git(repo, &["commit", "-qam", "main"]);
+    let merge = Command::new("git")
+        .args(["merge", "-q", "side"])
+        .current_dir(repo)
+        .output()
+        .expect("git");
+    assert!(!merge.status.success(), "the merge conflicts");
+
+    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    assert_eq!(
+        page["unmeasured_files"],
+        serde_json::json!(["m.py"]),
+        "{page}"
+    );
+    assert!(
+        page["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.contains("m.py")),
+        "{page}"
+    );
+}
+
 /// A file git reports as binary names no changed lines, so it is counted
 /// and disclosed rather than dropped.
 #[cfg(unix)]
