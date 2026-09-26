@@ -330,6 +330,9 @@ pub struct LspClient {
     /// allows true concurrency), which is why the gate exists.
     dispatch_gate: RwLock<()>,
     terminated: AtomicBool,
+    /// Set as the server is sent `initialized`, before the write, so it
+    /// stands by the time the server can register a file watcher.
+    initialized: AtomicBool,
     cross_file_waited: AtomicBool,
     /// Set once the server demonstrates an explicit status protocol
     /// (`experimental/serverStatus`). From then on the fuzzy progress and
@@ -387,6 +390,7 @@ impl LspClient {
             indexing_notify: Notify::new(),
             dispatch_gate: RwLock::new(()),
             terminated: AtomicBool::new(false),
+            initialized: AtomicBool::new(false),
             cross_file_waited: AtomicBool::new(false),
             status_channel_seen: AtomicBool::new(false),
             indexing_tokens: std::sync::Mutex::new(HashSet::new()),
@@ -396,8 +400,17 @@ impl LspClient {
         })
     }
 
-    /// Start the language server
-    pub async fn start(self: &Arc<Self>, command: &str, args: &[String]) -> Result<(), LspError> {
+    /// Start the language server. `admit` runs once the server has answered
+    /// `initialize` and before it is told `initialized`, with its input held:
+    /// whoever `admit` hands the client to writes nothing ahead of
+    /// `initialized`, and a server that registers file watchers once told
+    /// registers them with the client already handed on.
+    pub async fn start(
+        self: &Arc<Self>,
+        command: &str,
+        args: &[String],
+        admit: impl FnOnce(),
+    ) -> Result<(), LspError> {
         // Check if already running
         if self.is_running().await {
             return Ok(());
@@ -456,10 +469,15 @@ impl LspClient {
         });
 
         // Initialize the server
-        self.initialize().await?;
+        self.initialize(admit).await?;
 
         tracing::info!("{} language server started successfully", self.language);
         Ok(())
+    }
+
+    /// Whether the server has been, or is being, sent `initialized`.
+    pub fn initialized(&self) -> bool {
+        self.initialized.load(Ordering::Acquire)
     }
 
     /// Check if server is running
@@ -496,7 +514,7 @@ impl LspClient {
     }
 
     /// Initialize the language server
-    async fn initialize(&self) -> Result<(), LspError> {
+    async fn initialize(&self, admit: impl FnOnce()) -> Result<(), LspError> {
         let init_options = init_options(self.language, &self.root);
         *self.settings.write().await = init_options.clone();
 
@@ -544,10 +562,16 @@ impl LspClient {
         // Store capabilities
         *self.capabilities.write().await = Some(result);
 
-        // Send initialized notification
-        self.notify("initialized", Some(serde_json::json!({})))
+        let initialized = Notification::new("initialized", Some(serde_json::json!({})));
+        let mut stdin_guard = self.stdin.lock().await;
+        let stdin = stdin_guard
+            .as_mut()
+            .ok_or_else(|| self.handshake_failure(LspError::NotConnected))?;
+        admit();
+        self.initialized.store(true, Ordering::Release);
+        write_notification(stdin, &initialized)
             .await
-            .map_err(|e| self.handshake_failure(e))?;
+            .map_err(|e| self.handshake_failure(e.into()))?;
 
         Ok(())
     }

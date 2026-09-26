@@ -26,7 +26,7 @@ pub async fn serves_workspace(
     timeout: Duration,
 ) -> bool {
     let client = LspClient::new(language, root.to_path_buf(), config, false);
-    let started = tokio::time::timeout(timeout, client.start(command, args)).await;
+    let started = tokio::time::timeout(timeout, client.start(command, args, || {})).await;
     let _ = client.shutdown().await;
     matches!(started, Ok(Ok(())))
 }
