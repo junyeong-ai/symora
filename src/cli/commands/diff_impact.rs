@@ -415,8 +415,23 @@ fn unstaged_files(root: &Path) -> Result<HashSet<PathBuf>> {
         .stdout
         .split(|&b| b == 0)
         .filter(|name| !name.is_empty())
-        .map(|name| root.join(String::from_utf8_lossy(name).as_ref()))
+        .map(|name| root.join(path_from_git(name)))
         .collect())
+}
+
+/// A path from the bytes git prints for it: exact on Unix, where a file
+/// name is any bytes, and decoded as UTF-8 elsewhere, where names are
+/// Unicode.
+fn path_from_git(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
 }
 
 fn relative_display(file: &Path, root: &Path) -> String {
@@ -438,11 +453,12 @@ fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<ParsedDiff> {
     // GIT_DIFF_OPTS, which outranks `--unified` — takes in unchanged lines,
     // copy or no rename detection changes which files are new, and a
     // submodule setting hides a changed submodule or prints it as a log.
-    // The rename and submodule choices are git's defaults.
+    // The rename and submodule choices are git's defaults. Quoting every
+    // byte past ASCII keeps a file name exact whatever its encoding.
     cmd.env_remove("GIT_DIFF_OPTS");
     cmd.args([
         "-c",
-        "core.quotepath=false",
+        "core.quotepath=true",
         "diff",
         "--relative",
         "--unified=0",
@@ -512,18 +528,15 @@ fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<PathBuf> {
         if record.is_empty() {
             continue;
         }
-        let record = String::from_utf8_lossy(record);
-        let path = match record.splitn(3, '\t').nth(2) {
-            Some("") | None => {
+        let path = match record.splitn(3, |&b| b == b'\t').nth(2) {
+            Some([]) | None => {
                 fields.next();
-                fields
-                    .next()
-                    .map(|new| String::from_utf8_lossy(new).into_owned())
+                fields.next()
             }
-            Some(path) => Some(path.to_string()),
+            Some(path) => Some(path),
         };
         if let Some(path) = path {
-            files.push(root.join(path));
+            files.push(root.join(path_from_git(path)));
         }
     }
     files
@@ -558,22 +571,22 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
             in_link = false;
             old_file = None;
             current_file = None;
-            block_file = same_path_header(rest).map(|p| root.join(p));
+            block_file = same_path_header(rest).map(|p| root.join(path_from_git(&p)));
         } else if in_header && !in_link && names_a_link(line) {
             in_link = true;
             links.extend(block_file.clone());
         } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
-            block_file = git_path(rest).map(|(path, _)| root.join(path));
+            block_file = git_path(rest).map(|(path, _)| root.join(path_from_git(&path)));
         } else if in_header && line.starts_with("Binary files ") {
             binary.extend(block_file.clone());
         } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
-            old_file = diff_header_path(rest).map(|p| root.join(p));
+            old_file = diff_header_path(rest).map(|p| root.join(path_from_git(&p)));
         } else if in_header && let Some(rest) = line.strip_prefix("+++ ") {
             // A fully deleted file's new side is `/dev/null`; fall back to the
             // old-side path so its hunk is attributed and the pre-image can be
             // read — never silently dropped.
             current_file = diff_header_path(rest)
-                .map(|p| root.join(p))
+                .map(|p| root.join(path_from_git(&p)))
                 .or_else(|| old_file.clone());
         } else if line.starts_with("@@ ") {
             in_header = false;
@@ -611,35 +624,32 @@ fn names_a_link(line: &str) -> bool {
 /// The path of a `diff --git a/X b/X` header whose two sides are the same
 /// path, as every block's are but a rename's (whose `rename to` line names
 /// it). Split at its middle, a path holding spaces is still unambiguous.
-fn same_path_header(rest: &str) -> Option<String> {
+fn same_path_header(rest: &str) -> Option<Vec<u8>> {
     if rest.starts_with('"') {
         let (old, after) = git_path(rest)?;
         let (new, _) = git_path(after.strip_prefix(' ')?)?;
-        let old = old.strip_prefix("a/")?;
-        return (new.strip_prefix("b/")? == old).then(|| old.to_string());
+        let old = old.strip_prefix(b"a/")?;
+        return (new.strip_prefix(b"b/")? == old).then(|| old.to_vec());
     }
     let rest = rest.strip_prefix("a/")?;
     let half = rest.len().checked_sub(3)? / 2;
     let (old, new) = (rest.get(..half)?, rest.get(half..)?);
-    (new.strip_prefix(" b/")? == old).then(|| old.to_string())
+    (new.strip_prefix(" b/")? == old).then(|| old.as_bytes().to_vec())
 }
 
-/// A path as git prints it, and what follows it: verbatim, or — when the
-/// path holds a double quote, a backslash or a control character, which
-/// `core.quotepath=false` still quotes — in double quotes with C escapes.
-/// A verbatim path runs to the end of `field`.
-fn git_path(field: &str) -> Option<(String, &str)> {
+/// The bytes of a path as git prints it with `core.quotepath` on, and what
+/// follows it: verbatim when the path is printable ASCII, or else in double
+/// quotes with C escapes, a byte past ASCII in octal. A verbatim path runs
+/// to the end of `field`.
+fn git_path(field: &str) -> Option<(Vec<u8>, &str)> {
     let Some(quoted) = field.strip_prefix('"') else {
-        return Some((field.to_string(), ""));
+        return Some((field.as_bytes().to_vec(), ""));
     };
     let mut bytes = Vec::new();
     let mut chars = quoted.char_indices();
     while let Some((at, c)) = chars.next() {
         match c {
-            '"' => {
-                let path = String::from_utf8_lossy(&bytes).into_owned();
-                return Some((path, &quoted[at + 1..]));
-            }
+            '"' => return Some((bytes, &quoted[at + 1..])),
             '\\' => {
                 let (_, escaped) = chars.next()?;
                 bytes.push(match escaped {
@@ -672,22 +682,21 @@ fn git_path(field: &str) -> Option<(String, &str)> {
 
 /// The path inside a `--- `/`+++ ` diff header: strips the `a/`/`b/` prefix and
 /// any trailing tab-separated metadata (git appends a tab when the path holds a
-/// space). `None` for `/dev/null`. Paths are literal because the diff is
-/// produced with `core.quotepath=false`.
-fn diff_header_path(rest: &str) -> Option<String> {
+/// space). `None` for `/dev/null`.
+fn diff_header_path(rest: &str) -> Option<Vec<u8>> {
     let path = if rest.starts_with('"') {
         git_path(rest)?.0
     } else {
-        rest.split('\t').next().unwrap_or(rest).to_string()
+        rest.split('\t').next().unwrap_or(rest).as_bytes().to_vec()
     };
-    if path == "/dev/null" {
+    if path == b"/dev/null" {
         return None;
     }
     Some(
-        path.strip_prefix("a/")
-            .or_else(|| path.strip_prefix("b/"))
+        path.strip_prefix(b"a/")
+            .or_else(|| path.strip_prefix(b"b/"))
             .unwrap_or(&path)
-            .to_string(),
+            .to_vec(),
     )
 }
 
@@ -1122,17 +1131,15 @@ fn resolve_deleted_hunk(
 fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
     // git names paths with forward slashes on every platform, and a Unix
     // file name may itself hold a backslash, so the components are joined.
-    let spec = format!(
-        "{reference}:./{}",
-        relpath
-            .components()
-            .map(|part| part.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
-    );
+    let mut spec = std::ffi::OsString::from(format!("{reference}:."));
+    for part in relpath.components() {
+        spec.push("/");
+        spec.push(part.as_os_str());
+    }
     let output = Command::new("git")
         .current_dir(root)
-        .args(["show", &spec])
+        .arg("show")
+        .arg(&spec)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1238,6 +1245,10 @@ mod tests {
         assert_eq!(parsed.binary, [root.join("bin\"ary.py")]);
         assert_eq!(parsed.hunks[1].file, root.join("tab\there.py"));
         assert_eq!(parsed.hunks[1].old_file, root.join("old\\x.py"));
+        assert_eq!(
+            git_path("\"caf\\351.py\"").map(|(bytes, _)| bytes),
+            Some(b"caf\xe9.py".to_vec())
+        );
     }
 
     #[test]
