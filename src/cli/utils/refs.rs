@@ -76,14 +76,13 @@ impl<'a> RefsClassification<'a> {
     }
 }
 
-/// Derive a module-path-style identifier from a file path so refs can be
-/// counted per logical module rather than per file (folder names like
-/// `src`, `lib`, `test` are stripped to keep the prefix meaningful).
-pub fn extract_module(path: &Path) -> String {
-    let components: Vec<_> = path
-        .components()
-        .filter_map(|c| c.as_os_str().to_str())
-        .collect();
+/// The module a file belongs to, so refs can be counted per logical module
+/// rather than per file: the directories between the first well-known root
+/// (`src`, `lib`, `test`, ...) and the file, empty for a file directly under
+/// one. A path, not a string, so two directories whose names are not UTF-8
+/// stay two modules.
+pub fn extract_module(path: &Path) -> PathBuf {
+    let components: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
 
     let start = components
         .iter()
@@ -94,9 +93,9 @@ pub fn extract_module(path: &Path) -> String {
     let end = components.len().saturating_sub(1);
 
     if start < end {
-        components[start..end].join("/")
+        components[start..end].iter().collect()
     } else {
-        "root".to_string()
+        PathBuf::new()
     }
 }
 
@@ -113,17 +112,40 @@ mod tests {
     #[test]
     fn extract_module_strips_well_known_root_dirs() {
         assert_eq!(
-            extract_module(&PathBuf::from("src/services/lsp.rs")),
-            "services"
+            extract_module(Path::new("src/services/lsp.rs")),
+            Path::new("services")
         );
         assert_eq!(
-            extract_module(&PathBuf::from("src/cli/commands/impact.rs")),
-            "cli/commands"
+            extract_module(Path::new("src/cli/commands/impact.rs")),
+            Path::new("cli/commands")
         );
-        assert_eq!(extract_module(&PathBuf::from("src/main.rs")), "root");
+        assert_eq!(extract_module(Path::new("src/main.rs")), Path::new(""));
+        assert_ne!(
+            extract_module(Path::new("src/root/a.rs")),
+            extract_module(Path::new("src/main.rs"))
+        );
         assert_eq!(
-            extract_module(&PathBuf::from("lib/utils/helpers.py")),
-            "utils"
+            extract_module(Path::new("lib/utils/helpers.py")),
+            Path::new("utils")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directories_whose_names_are_not_utf8_are_distinct_modules() {
+        use std::os::unix::ffi::OsStrExt;
+        let under = |name: &[u8]| {
+            Path::new("src")
+                .join(std::ffi::OsStr::from_bytes(name))
+                .join("a.rs")
+        };
+        assert_ne!(
+            extract_module(&under(b"caf\xe9")),
+            extract_module(&under(b"caf\xea"))
+        );
+        assert_ne!(
+            extract_module(&under(b"caf\xe9")),
+            extract_module(Path::new("src/a.rs"))
         );
     }
 
