@@ -410,21 +410,23 @@ fn is_ancestor_of_head(root: &Path, commit: &str) -> bool {
         .is_ok_and(|status| status.code() != Some(1))
 }
 
-/// Files whose working-tree content differs from the index.
+/// Files whose working-tree content differs from the index. A change of the
+/// executable bit alone leaves the lines on disk the staged ones.
 fn unstaged_files(root: &Path) -> Result<HashSet<PathBuf>> {
-    diff_names(root, &[])
+    diff_names(root, &["-c", "core.fileMode=false"], &[])
 }
 
 /// Files in an unresolved merge conflict, which have no single staged
 /// version.
 fn unmerged_files(root: &Path, base: &str) -> Result<HashSet<PathBuf>> {
-    diff_names(root, &["--cached", "--diff-filter=U", base, "--"])
+    diff_names(root, &[], &["--cached", "--diff-filter=U", base, "--"])
 }
 
-/// The files a `git diff --name-only` with `args` lists.
-fn diff_names(root: &Path, args: &[&str]) -> Result<HashSet<PathBuf>> {
+/// The files a `git diff --name-only` with `config` and `args` lists.
+fn diff_names(root: &Path, config: &[&str], args: &[&str]) -> Result<HashSet<PathBuf>> {
     let output = Command::new("git")
         .current_dir(root)
+        .args(config)
         .args(["diff", "--relative", "--name-only", "-z"])
         .args(args)
         .output()
