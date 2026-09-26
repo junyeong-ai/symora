@@ -123,6 +123,24 @@ impl SymbolKind {
         )
     }
 
+    /// A kind whose children are its members, each one code outside it can
+    /// name. The children of any other kind — a function's parameters and
+    /// locals, the bindings inside a variable's value — are internal to it.
+    pub fn holds_members(&self) -> bool {
+        matches!(
+            self,
+            Self::File
+                | Self::Module
+                | Self::Namespace
+                | Self::Package
+                | Self::Class
+                | Self::Interface
+                | Self::Struct
+                | Self::Enum
+                | Self::Object
+        )
+    }
+
     pub fn is_namespace_like(&self) -> bool {
         matches!(self, Self::Module | Self::Namespace | Self::Package)
     }

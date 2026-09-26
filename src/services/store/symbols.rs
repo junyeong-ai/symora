@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -173,30 +173,220 @@ impl SymbolExtractor {
     /// The list is flat: containment is carried by `container` and
     /// `name_path`, which is what addresses a symbol everywhere else.
     pub fn extract(&self, path: &Path, content: &str, language: Language) -> Vec<Symbol> {
-        let Some(entry) = self.languages.get(&language) else {
-            return Vec::new();
-        };
+        self.extract_where(path, content, language, |_, _| true)
+    }
 
-        let tree = {
-            let Ok(mut parser) = entry.parser.lock() else {
-                return Vec::new();
-            };
-            match parser.parse(content, None) {
-                Some(tree) => tree,
-                None => return Vec::new(),
+    /// The declarations of [`extract`](Self::extract) that stand for
+    /// themselves: none that belongs to a body a declaration stands for
+    /// ([`is_local`]). What is declared inside such a body is its own, and a
+    /// change to it is a change to the body.
+    pub fn extract_members(&self, path: &Path, content: &str, language: Language) -> Vec<Symbol> {
+        self.extract_where(path, content, language, |node, declared| {
+            !is_local(node, declared)
+        })
+    }
+
+    /// Where each type's own declaration is written, outside the body that
+    /// holds its members ([`type_body`]): its decorators or attributes, name,
+    /// parameters, bases and clauses, on one line or several. A comment is
+    /// part of neither, and a type with no body (an alias, a unit struct) is
+    /// all header.
+    pub fn type_headers(&self, path: &Path, content: &str, language: Language) -> TypeHeaders {
+        self.with_declarations(path, content, language, |read| {
+            let mut headers = TypeHeaders::default();
+            for (node, symbol) in &read {
+                if !symbol.kind.holds_members() {
+                    continue;
+                }
+                let body = type_body(*node, language);
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if !child.is_extra() && body.is_none_or(|body| body.id() != child.id()) {
+                        headers
+                            .lines
+                            .extend(line_span(child.start_position(), child.end_position()));
+                    }
+                }
+                let (to_byte, to_point) = body
+                    .map_or((node.end_byte(), node.end_position()), |body| {
+                        (body.start_byte(), body.start_position())
+                    });
+                headers.spans.push(HeaderSpan {
+                    name: (symbol.location.line, symbol.location.column),
+                    from: scalar_position(content, node.start_byte(), node.start_position()),
+                    to: scalar_position(content, to_byte, to_point),
+                });
             }
-        };
+            headers
+        })
+        .unwrap_or_default()
+    }
 
+    /// The declarations `keep` accepts, given each one's node and the nodes
+    /// every declaration was read from.
+    fn extract_where(
+        &self,
+        path: &Path,
+        content: &str,
+        language: Language,
+        keep: impl Fn(Node, &HashSet<usize>) -> bool,
+    ) -> Vec<Symbol> {
+        self.with_declarations(path, content, language, |read| {
+            let declared = read.iter().map(|(node, _)| node.id()).collect();
+            read.into_iter()
+                .filter(|(node, _)| keep(*node, &declared))
+                .map(|(_, symbol)| symbol)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Every declaration the grammar reads in `content`, with the node it was
+    /// read from, handed to `read` while the tree they belong to is alive.
+    /// `None` when the language has no grammar here or the parse failed.
+    fn with_declarations<R>(
+        &self,
+        path: &Path,
+        content: &str,
+        language: Language,
+        read: impl FnOnce(Vec<(Node, Symbol)>) -> R,
+    ) -> Option<R> {
+        let entry = self.languages.get(&language)?;
+        let tree = entry.parser.lock().ok()?.parse(content, None)?;
         let mut cursor = QueryCursor::new();
-        let mut symbols = Vec::new();
+        let mut declarations = Vec::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
-            if let Some(symbol) = extract_from_match(m, path, content, language) {
-                symbols.push(symbol);
+            if let Some(capture) = m.captures().first()
+                && let Some(symbol) = extract_from_match(m, path, content, language)
+            {
+                declarations.push((capture.node, symbol));
             }
         }
-        symbols
+        Some(read(declarations))
     }
+}
+
+/// Where a file's types are declared outside their bodies
+/// ([`SymbolExtractor::type_headers`]), in CLI positions.
+#[derive(Debug, Default)]
+pub struct TypeHeaders {
+    /// The lines the headers are written on.
+    pub lines: BTreeSet<u32>,
+    spans: Vec<HeaderSpan>,
+}
+
+/// One type's header: from where its declaration opens to where its body
+/// does, and where its name stands.
+#[derive(Debug)]
+struct HeaderSpan {
+    name: (u32, u32),
+    from: (u32, u32),
+    to: (u32, u32),
+}
+
+impl TypeHeaders {
+    /// Whether a name at `at` is written in the header of a type other than
+    /// the one it names — a generic type's parameter — rather than declared
+    /// in a body or on its own, as a type alias or an associated type is.
+    pub fn holds_parameter(&self, at: (u32, u32)) -> bool {
+        self.spans
+            .iter()
+            .any(|span| span.name != at && span.from <= at && at < span.to)
+    }
+}
+
+/// The child of a type's node that holds its members, whether or not the
+/// grammar reads any of them (it reads no TypeScript enum member and no Rust
+/// associated type): the grammar's `body`, or where a grammar gives it no
+/// field, a Go type's literal (`struct {…}`, `interface {…}`), a Kotlin
+/// class's or object's body and an HCL block's.
+fn type_body(node: Node, language: Language) -> Option<Node> {
+    match language {
+        Language::Go => node.child_by_field_name("type"),
+        Language::Terraform => child_of_kind(node, "body"),
+        Language::Kotlin => {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|child| matches!(child.kind(), "class_body" | "enum_class_body"))
+        }
+        _ => node.child_by_field_name("body"),
+    }
+}
+
+/// The 1-indexed lines a node spans from `start` to its exclusive `end`: an
+/// end at the start of a line leaves the node on the line before it.
+fn line_span(start: tree_sitter::Point, end: tree_sitter::Point) -> std::ops::RangeInclusive<u32> {
+    let last = if end.column == 0 && end.row > start.row {
+        end.row - 1
+    } else {
+        end.row
+    };
+    start.row as u32 + 1..=last as u32 + 1
+}
+
+/// Node kinds that open a body of code without being a declaration the
+/// grammars read as callable: closures, lambdas, function expressions,
+/// constructors, accessors and initializer blocks. A kind is listed once for
+/// every grammar that names a body by it; a kind some grammar uses for
+/// anything else (`block`, a Python class body too) is not, and neither is a
+/// Ruby block, whose `def` defines a method on the class that runs it.
+const ANONYMOUS_BODIES: &[&str] = &[
+    // TypeScript, JavaScript, PHP
+    "arrow_function",
+    "function_expression",
+    "generator_function",
+    "class_static_block",
+    // PHP, Kotlin
+    "anonymous_function",
+    // Java, C++, C#
+    "lambda_expression",
+    "anonymous_method_expression",
+    "local_function_statement",
+    // Go, Rust
+    "func_literal",
+    "closure_expression",
+    // Java, C#, Kotlin
+    "constructor_declaration",
+    "static_initializer",
+    "accessor_declaration",
+    "anonymous_initializer",
+    "secondary_constructor",
+    "lambda_literal",
+    "getter",
+    "setter",
+];
+
+/// Whether a declaration belongs to a body rather than standing for itself:
+/// a function or method encloses it, or an [`ANONYMOUS_BODIES`] body does that
+/// a declaration in turn encloses (a const's arrow function, a class's `init`
+/// block). A body no declaration encloses (a callback passed at the top of a
+/// file, a function called where it is written) absorbs nothing, since
+/// nothing would stand for what it holds. Callable nodes reached from the
+/// declaration through callable nodes alone are the declaration itself —
+/// Dart's query reads a method's signature, which its method signature and
+/// declaration wrap — while a body holds a declaration in a block of
+/// statements.
+fn is_local(node: Node, declared: &std::collections::HashSet<usize>) -> bool {
+    let mut own = true;
+    let mut in_body = false;
+    let mut ancestor = node.parent();
+    while let Some(outer) = ancestor {
+        if node_kind(outer).is_callable() {
+            if !own {
+                return true;
+            }
+        } else {
+            own = false;
+            if ANONYMOUS_BODIES.contains(&outer.kind()) {
+                in_body = true;
+            } else if in_body && declared.contains(&outer.id()) {
+                return true;
+            }
+        }
+        ancestor = outer.parent();
+    }
+    false
 }
 
 fn register(
@@ -1567,6 +1757,71 @@ region     = "us-central1"
     }
 
     #[test]
+    fn a_types_header_is_its_declaration_outside_the_body() {
+        let extractor = SymbolExtractor::new();
+        let headers = |path: &str, content: &str, language: Language| {
+            extractor
+                .type_headers(Path::new(path), content, language)
+                .lines
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+
+        let java = "@Entity\npublic class Service\n        implements Runnable {\n    // First.\n    \
+                    public void run() {\n    }\n}\n";
+        assert_eq!(headers("A.java", java, Language::Java), [1, 2, 3]);
+
+        let python =
+            "class Service(\n    Base,\n):\n    # First.\n    def run(self):\n        pass\n";
+        assert_eq!(headers("a.py", python, Language::Python), [1, 2, 3]);
+
+        let kotlin = "class Service(\n    val a: Int,\n) : Base(),\n    Runnable {\n    // First.\n    \
+                      fun run() {}\n}\n";
+        assert_eq!(headers("a.kt", kotlin, Language::Kotlin), [1, 2, 3, 4]);
+
+        let rust = "impl<T> Run for Service<T>\nwhere\n    T: Clone,\n{\n    /// Runs.\n    \
+                    fn run(&self) {}\n}\n";
+        assert_eq!(headers("a.rs", rust, Language::Rust), [1, 2, 3]);
+
+        for (path, content, language) in [
+            ("a.rs", "pub trait Tr {\n    type Out;\n}\n", Language::Rust),
+            (
+                "a.ts",
+                "export enum Mode {\n  Fast,\n\n  Slow,\n}\n",
+                Language::TypeScript,
+            ),
+            (
+                "a.cpp",
+                "enum class Mode {\n    Fast,\n    Slow,\n};\n",
+                Language::Cpp,
+            ),
+            (
+                "a.swift",
+                "protocol Keyed {\n    associatedtype Key: Hashable\n    var key: Key { get }\n}\n",
+                Language::Swift,
+            ),
+            (
+                "a.go",
+                "package p\n\ntype Empty interface {\n\tany\n}\n",
+                Language::Go,
+            ),
+        ] {
+            let first = content.lines().position(|line| line.contains('{')).unwrap() as u32 + 1;
+            assert_eq!(headers(path, content, language), [first], "{path}");
+        }
+        let alias = "pub type Alias =\n    Vec<u32>;\n";
+        assert_eq!(headers("a.rs", alias, Language::Rust), [1, 2]);
+    }
+
+    #[test]
+    fn a_node_ending_at_a_line_start_spans_the_lines_before_it() {
+        let point = |row, column| tree_sitter::Point { row, column };
+        assert_eq!(line_span(point(0, 4), point(2, 0)), 1..=2);
+        assert_eq!(line_span(point(0, 4), point(2, 3)), 1..=3);
+        assert_eq!(line_span(point(1, 0), point(1, 0)), 2..=2);
+    }
+
+    #[test]
     fn ruby_symbols_carry_the_name_the_file_spells() {
         let extractor = SymbolExtractor::new();
         let content = r#"
@@ -2156,5 +2411,90 @@ interface Shape {}
         assert_eq!(kind("greet"), Some(SymbolKind::Function));
         assert_eq!(kind("Service"), Some(SymbolKind::Class));
         assert_eq!(kind("Shape"), Some(SymbolKind::Interface));
+    }
+
+    /// A declaration inside a function or a method, or inside a body a
+    /// declaration encloses (a const's closure, a class's initializer block),
+    /// is that body's; one in a body nothing declared encloses (a top-level
+    /// callback, a function called where it is written) stands for itself.
+    /// The index keeps reading every one; the member reading leaves the
+    /// body's own out.
+    #[test]
+    fn members_leave_out_what_is_declared_inside_a_body() {
+        let extractor = SymbolExtractor::new();
+        let cases: &[(Language, &str, &str, &[&str], &[&str])] = &[
+            (
+                Language::Kotlin,
+                "a.kt",
+                "class Svc(val id: Int) {\n    val size = 1\n    init {\n        val doubled = id * 2\n    }\n    constructor(n: String) : this(n.length) {\n        val parsed = n\n    }\n    val label: String\n        get() {\n            val prefix = \"x\"\n            return prefix\n        }\n    fun run(): Int {\n        val total = 1\n        val f = { val inner = 2; inner }\n        return total\n    }\n}\n\nfun top(): Int {\n    val local = 2\n    return local\n}\n",
+                &["Svc", "size", "label", "run", "top"],
+                &["doubled", "parsed", "prefix", "total", "local"],
+            ),
+            (
+                Language::TypeScript,
+                "a.ts",
+                "export class C {\n  static {\n    function boot() {}\n  }\n  method() {\n    function helper() {}\n  }\n}\n\ndescribe(\"x\", () => {\n  function makeInput() {}\n});\n\n(function () {\n  function once() {}\n})();\n\nexport const handler = () => {\n  function inner() {}\n};\n\nconst f = function () {\n  function nested() {}\n};\n",
+                &["C", "method", "makeInput", "once", "handler", "f"],
+                &["boot", "helper", "inner", "nested"],
+            ),
+            (
+                Language::Go,
+                "a.go",
+                "package main\n\nvar Top = 1\n\nfunc f() int {\n\tvar total = 1\n\treturn total\n}\n\nvar handler = func() int {\n\tvar x = 1\n\treturn x\n}\n",
+                &["Top", "f", "handler"],
+                &["total", "x"],
+            ),
+            (
+                Language::Python,
+                "a.py",
+                "class A:\n    def m(self):\n        def helper():\n            pass\n        return helper\n\n\ndef outer():\n    class Local:\n        pass\n    return Local\n",
+                &["A", "m", "outer"],
+                &["helper", "Local"],
+            ),
+            (
+                Language::Java,
+                "A.java",
+                "class A {\n    void m() {\n        Runnable r = () -> {\n            class InLambda {}\n        };\n    }\n    static {\n        class InStatic {}\n    }\n    A() {\n        class InCtor {}\n    }\n}\n",
+                &["A", "m"],
+                &["InLambda", "InStatic", "InCtor"],
+            ),
+            (
+                Language::Dart,
+                "a.dart",
+                "int add(int a, int b) {\n  int twice(int x) => x * 2;\n  return twice(a) + b;\n}\n\nclass Cart {\n  int total = 0;\n\n  static Cart empty() => Cart();\n\n  void put(int n) {\n    total += n;\n  }\n}\n",
+                &["add", "Cart", "total", "empty", "put"],
+                &["twice"],
+            ),
+            (
+                Language::Ruby,
+                "a.rb",
+                "module Concern\n  class_methods do\n    def build\n    end\n  end\n\n  def run\n    [1].map do |x|\n      x\n    end\n  end\nend\n",
+                &["Concern", "build", "run"],
+                &[],
+            ),
+            (
+                Language::Rust,
+                "a.rs",
+                "fn outer() {\n    fn inner() {}\n    let c = || {\n        fn in_closure() {}\n    };\n}\n\nstruct S;\n\nimpl S {\n    fn m(&self) {}\n}\n",
+                &["outer", "S", "m"],
+                &["inner", "in_closure"],
+            ),
+        ];
+        for (language, path, source, members, locals) in cases {
+            let names = |symbols: Vec<Symbol>| -> std::collections::BTreeSet<String> {
+                symbols.into_iter().map(|symbol| symbol.name).collect()
+            };
+            let every = names(extractor.extract(Path::new(path), source, *language));
+            let kept = names(extractor.extract_members(Path::new(path), source, *language));
+            for local in *locals {
+                assert!(
+                    every.contains(*local),
+                    "{language:?} reads {local}: {every:?}"
+                );
+            }
+            let expected: std::collections::BTreeSet<String> =
+                members.iter().map(|m| m.to_string()).collect();
+            assert_eq!(kept, expected, "{language:?}");
+        }
     }
 }

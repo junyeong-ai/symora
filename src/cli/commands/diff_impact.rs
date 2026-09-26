@@ -8,16 +8,16 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
-use crate::cli::declared_in;
 use crate::cli::errors::{ErrorCode, OutputError};
 use crate::cli::response::disclosure::LowerBound;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
-use crate::cli::utils::find_symbol_at_position;
+use crate::cli::utils::{members_at_deletion, members_at_line};
+use crate::cli::{SymbolBackend, declared_in};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::TestScope;
 use crate::services::lsp::LspService;
-use crate::services::store::SymbolExtractor;
+use crate::services::store::{SymbolExtractor, TypeHeaders};
 
 #[derive(Args, Debug)]
 pub struct DiffImpactArgs {
@@ -836,19 +836,6 @@ fn parse_range(range: &str) -> Option<(u32, u32)> {
     Some((start, count))
 }
 
-/// Whether a changed line at `line` meaningfully attributes to `sym`. A callable
-/// (Function/Method/Constructor) owns its whole body; a leaf symbol (no
-/// children) owns all its lines; any symbol owns its own declaration line. A
-/// non-callable CONTAINER (impl/class/module/namespace) spans its whole block
-/// with members as children, so a line in the gap BETWEEN members resolves
-/// innermost to the container yet carries none of its meaning — attributing it,
-/// and the container's full reference set, to that line would be a false
-/// positive, so it is excluded. Shared by the deletion and live (Added/Modified)
-/// hunk paths so both attribute identically.
-fn line_attributes_to_symbol(sym: &crate::models::symbol::Symbol, line: u32) -> bool {
-    sym.kind.is_callable() || sym.children.is_empty() || line == sym.location.line
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn analyze_hunks(
     app: &App,
@@ -881,15 +868,29 @@ async fn analyze_hunks(
         // Current-tree symbols, loaded once when the file survives — needed both
         // for live (Added/Modified) hunks and to recognise a deletion that only
         // removed body lines of a surviving symbol (a Modified, not a deletion).
+        // Where the grammar answers, it is asked for members alone: it also
+        // reads declarations inside bodies it lists no symbol for (a Kotlin
+        // `init` block, a callback), whose lines are the enclosing member's.
         let file_exists = file.exists();
-        let current_symbols = if file_exists {
-            declared_in(app, file, FindSymbolsOptions::default())
-                .await
-                .ok()
-                .map(|read| read.symbols)
+        let on_disk = if file_exists {
+            read_on_disk(file)
         } else {
             None
         };
+        let served = if file_exists {
+            Some(declared_in(app, file, FindSymbolsOptions::default()).await)
+        } else {
+            None
+        };
+        let current_symbols: Option<&[Symbol]> = match &served {
+            Some(Ok(read)) if read.backend == SymbolBackend::Ast => {
+                on_disk.as_ref().map(|now| now.members.as_slice())
+            }
+            Some(Ok(read)) => Some(read.symbols.as_slice()),
+            _ => None,
+        };
+        let no_headers = TypeHeaders::default();
+        let headers_now = on_disk.as_ref().map_or(&no_headers, |now| &now.headers);
 
         // One dedup set per file, keyed by declaration identity (line, column),
         // NOT name: two distinct same-named declarations (impl A::new vs
@@ -900,10 +901,10 @@ async fn analyze_hunks(
         // Removed lines are read from the base's version of the file, never the
         // current tree, and by the built-in grammar alone.
         let removing: Vec<&DiffHunk> = hunks.iter().filter(|h| h.old_count > 0).copied().collect();
-        match removing
+        let preimage = removing
             .first()
-            .map(|hunk| read_preimage(root, preimage_ref, &hunk.old_file))
-        {
+            .map(|hunk| read_preimage(root, preimage_ref, &hunk.old_file));
+        match &preimage {
             None => {}
             Some(Preimage::Unparsed) => unmeasured.push(file.clone()),
             Some(Preimage::Unavailable) => {
@@ -917,19 +918,12 @@ async fn analyze_hunks(
                 }
             }
             Some(Preimage::Parsed(before)) => {
-                let declared_in_removed = |hunk: &DiffHunk| {
-                    let (lo, hi) = (
-                        hunk.old_start,
-                        hunk.old_start.saturating_add(hunk.old_count),
-                    );
-                    before
-                        .iter()
-                        .filter(move |s| s.location.line >= lo && s.location.line < hi)
-                };
+                let before = before.as_slice();
 
                 // A pure deletion removed every declaration in its range from
                 // where it stood.
                 let mut deleted: Vec<Identity> = Vec::new();
+                let mut modified_by_removal: Vec<&Symbol> = Vec::new();
                 for hunk in removing
                     .iter()
                     .filter(|h| matches!(h.change_type, ChangeType::Deleted))
@@ -938,51 +932,8 @@ async fn analyze_hunks(
                         stopped_at_cap = true;
                         break;
                     }
-                    let declared: Vec<&Symbol> = declared_in_removed(hunk).collect();
-                    if declared.is_empty() {
-                        // No declaration the grammar reads was removed. Lines
-                        // removed strictly inside a surviving callable's body
-                        // modified it, whatever they held; the shared
-                        // `line_attributes_to_symbol` rule (callable body /
-                        // leaf / own declaration line, never a container's
-                        // inter-member gap) and the strict-interior check (a
-                        // blank line AFTER the symbol, new_start == f_end, is
-                        // not attributed) keep a container's references off a
-                        // row that is not about it.
-                        let enclosing = current_symbols.as_ref().and_then(|s| {
-                            let f = find_symbol_at_position(s, hunk.start_line, None)?;
-                            let f_end = f.location.end_line.unwrap_or(f.location.line);
-                            (line_attributes_to_symbol(f, hunk.start_line)
-                                && hunk.start_line < f_end)
-                                .then_some(f)
-                        });
-                        match enclosing {
-                            Some(sym) => {
-                                if seen.insert((sym.location.line, sym.location.column)) {
-                                    let impact = analyze_symbol_impact(
-                                        app.lsp.as_ref(),
-                                        file,
-                                        sym.clone(),
-                                        ChangeType::Modified,
-                                        root,
-                                        test_scope,
-                                        include_callers,
-                                        calls_limit,
-                                    )
-                                    .await;
-                                    changes.push(impact);
-                                    symbol_count += 1;
-                                }
-                            }
-                            None => {
-                                changes
-                                    .push(unresolved_deletion(DeletionResolution::NoSymbolInRange));
-                                symbol_count += 1;
-                            }
-                        }
-                        continue;
-                    }
-                    for symbol in declared {
+                    let declared: Vec<&Symbol> = declared_in_removed(before, hunk).collect();
+                    for symbol in &declared {
                         if at_cap(symbol_count) {
                             stopped_at_cap = true;
                             break;
@@ -991,6 +942,16 @@ async fn analyze_hunks(
                         changes.push(deleted_row(symbol, &hunk.old_file, root));
                         symbol_count += 1;
                     }
+                    let enclosing: Vec<&Symbol> = current_symbols
+                        .map(|current| {
+                            removed_lines_owners(before, current, headers_now, hunk, &declared)
+                        })
+                        .unwrap_or_default();
+                    if enclosing.is_empty() && declared.is_empty() {
+                        changes.push(unresolved_deletion(DeletionResolution::NoSymbolInRange));
+                        symbol_count += 1;
+                    }
+                    modified_by_removal.extend(enclosing);
                 }
 
                 // Lines replaced in place may hold a declaration the change
@@ -1010,9 +971,10 @@ async fn analyze_hunks(
                     .copied()
                     .collect();
                 if !replacing.is_empty() && !at_cap(symbol_count) {
-                    match current_declarations(file) {
+                    match &on_disk {
                         None => unmeasured.push(file.clone()),
-                        Some(after) => {
+                        Some(now) => {
+                            let after = &now.members;
                             let mut removed = counts(before.iter().map(identity));
                             for id in after.iter().map(identity).chain(deleted) {
                                 if let Some(n) = removed.get_mut(&id) {
@@ -1022,7 +984,8 @@ async fn analyze_hunks(
                             let replaced: Vec<(&DiffHunk, &Symbol)> = replacing
                                 .iter()
                                 .flat_map(|&hunk| {
-                                    declared_in_removed(hunk).map(move |symbol| (hunk, symbol))
+                                    declared_in_removed(before, hunk)
+                                        .map(move |symbol| (hunk, symbol))
                                 })
                                 .collect();
                             let declared_again = |hunk: &DiffHunk, symbol: &Symbol| {
@@ -1060,6 +1023,40 @@ async fn analyze_hunks(
                         }
                     }
                 }
+                if let Some(current) = current_symbols {
+                    for hunk in &replacing {
+                        let declared: Vec<&Symbol> = declared_in_removed(before, hunk).collect();
+                        modified_by_removal.extend(removed_lines_owners(
+                            before,
+                            current,
+                            headers_now,
+                            hunk,
+                            &declared,
+                        ));
+                    }
+                }
+                for sym in modified_by_removal {
+                    if !seen.insert((sym.location.line, sym.location.column)) {
+                        continue;
+                    }
+                    if at_cap(symbol_count) {
+                        stopped_at_cap = true;
+                        break;
+                    }
+                    let impact = analyze_symbol_impact(
+                        app.lsp.as_ref(),
+                        file,
+                        sym.clone(),
+                        ChangeType::Modified,
+                        root,
+                        test_scope,
+                        include_callers,
+                        calls_limit,
+                    )
+                    .await;
+                    changes.push(impact);
+                    symbol_count += 1;
+                }
             }
         }
 
@@ -1072,7 +1069,7 @@ async fn analyze_hunks(
         if live_hunks.is_empty() {
             continue;
         }
-        let Some(symbols) = current_symbols.as_ref() else {
+        let Some(symbols) = current_symbols else {
             // Added/Modified hunks exist but no current symbols. If the file is
             // present, find_symbols errored — disclose it as an unmeasured file
             // (a lower bound) instead of silently dropping its changes.
@@ -1088,20 +1085,13 @@ async fn analyze_hunks(
                 break;
             }
 
-            // Find symbols affected by this hunk. Same attribution rule as the
-            // deletion path (one shared helper): a changed line that resolves
-            // innermost to a non-callable container gap (a comment/blank line
-            // between members) carries none of the container's meaning, so it is
-            // NOT attributed to the container with the container's references.
-            let affected_symbols: Vec<_> = (hunk.start_line
-                ..hunk.start_line + hunk.line_count.max(1))
-                .filter_map(|line| {
-                    find_symbol_at_position(symbols, line, None)
-                        .filter(|sym| line_attributes_to_symbol(sym, line))
-                })
-                .collect();
-
-            for sym in affected_symbols {
+            let removed_a_declaration = match &preimage {
+                Some(Preimage::Parsed(before)) => {
+                    declared_in_removed(before, hunk).next().is_some()
+                }
+                _ => false,
+            };
+            for sym in added_lines_owners(symbols, headers_now, hunk, removed_a_declaration) {
                 if !seen.insert((sym.location.line, sym.location.column)) {
                     continue;
                 }
@@ -1235,10 +1225,118 @@ fn read_preimage(root: &Path, preimage_ref: &str, file: &Path) -> Preimage {
     let relpath = file.strip_prefix(root).unwrap_or(file);
     match git_show(root, preimage_ref, relpath) {
         Some(content) => {
-            Preimage::Parsed(SymbolExtractor::shared().extract(file, &content, language))
+            Preimage::Parsed(SymbolExtractor::shared().extract_members(file, &content, language))
         }
         None => Preimage::Unavailable,
     }
+}
+
+/// The current members a hunk's removed lines belong to, read from what held
+/// each line in the base. A line inside a surviving member or type modified
+/// it: that one now ends before the hunk's new lines, or begins right after
+/// them when the removed lines were its head (an annotation its range opens
+/// on); the current file alone cannot tell such lines from those around them
+/// (a Python function has no closing line). A line between members modified
+/// their container when the hunk left nothing in its place and removed no
+/// declaration, whose removal it would go with; lines the hunk put in its
+/// place answer for it, read where they now stand. A line of a declaration
+/// the hunk removed is that declaration's. `headers` are the current file's
+/// type headers; the base is read by the grammar, which names no type
+/// parameter, so it needs none.
+fn removed_lines_owners<'a>(
+    before: &[Symbol],
+    current: &'a [Symbol],
+    headers: &TypeHeaders,
+    hunk: &DiffHunk,
+    declared: &[&Symbol],
+) -> Vec<&'a Symbol> {
+    let (mut ends_before, mut begins_after, mut between) = (false, false, false);
+    for line in hunk.old_start..hunk.old_start + hunk.old_count {
+        let owners = members_at_line(before, &TypeHeaders::default(), line);
+        if owners
+            .iter()
+            .any(|owner| declared.iter().any(|gone| std::ptr::eq(*gone, *owner)))
+        {
+            continue;
+        }
+        match owners.last() {
+            Some(owner) if owner.location.effective_start().0 >= hunk.old_start => {
+                begins_after = true
+            }
+            Some(owner) if !owner.kind.holds_members() => ends_before = true,
+            _ => between = true,
+        }
+    }
+    between &= declared.is_empty() && hunk.line_count == 0;
+    // The last current line before the hunk's new lines: a pure deletion's
+    // new start names it, a replacement's new start is its first new line.
+    let point = if hunk.line_count == 0 {
+        hunk.start_line
+    } else {
+        hunk.start_line.saturating_sub(1)
+    };
+    let mut owners = Vec::new();
+    if ends_before {
+        owners.extend(members_at_line(current, headers, point));
+    }
+    if begins_after {
+        owners.extend(members_at_line(
+            current,
+            headers,
+            point + hunk.line_count + 1,
+        ));
+    }
+    if between {
+        owners.extend(members_at_deletion(current, headers, point));
+    }
+    owners
+}
+
+/// The members a hunk's new lines belong to, by the rule removed lines are
+/// read by (`members_at_line`). A line of a type's header (`headers`, as the
+/// built-in grammar reads the current file) modified the type; so did a line
+/// between its members, unless the hunk declares something in its new lines
+/// or removed a declaration, whose change it goes with.
+fn added_lines_owners<'a>(
+    current: &'a [Symbol],
+    headers: &TypeHeaders,
+    hunk: &DiffHunk,
+    removed_a_declaration: bool,
+) -> Vec<&'a Symbol> {
+    let lines = hunk.start_line..hunk.start_line + hunk.line_count.max(1);
+    let owners: Vec<(u32, Vec<&Symbol>)> = lines
+        .clone()
+        .map(|line| (line, members_at_line(current, headers, line)))
+        .collect();
+    let declares = removed_a_declaration
+        || owners
+            .iter()
+            .flat_map(|(_, held)| held)
+            .any(|symbol| lines.contains(&symbol.location.line));
+    let between = |line: u32, held: &[&Symbol]| {
+        held.last().is_some_and(|owner| {
+            owner.kind.holds_members()
+                && owner.location.effective_start().0 < hunk.start_line
+                && owner.location.line != line
+                && !headers.lines.contains(&line)
+        })
+    };
+    owners
+        .into_iter()
+        .filter(|(line, held)| !(declares && between(*line, held)))
+        .flat_map(|(_, held)| held)
+        .collect()
+}
+
+/// The base's declarations on the lines a hunk removed.
+fn declared_in_removed<'a>(
+    before: &'a [Symbol],
+    hunk: &DiffHunk,
+) -> impl Iterator<Item = &'a Symbol> {
+    let lines = hunk.old_start..hunk.old_start.saturating_add(hunk.old_count);
+    before
+        .iter()
+        .filter(move |symbol| lines.contains(&symbol.location.line))
 }
 
 /// What tells a declaration apart from the others in its file, as far as
@@ -1257,15 +1355,26 @@ fn counts(identities: impl Iterator<Item = Identity>) -> HashMap<Identity, usize
     counts
 }
 
-/// The declarations the built-in grammar reads in the file on disk, or `None`
-/// when it cannot: no grammar reads the file's language, or it is not text.
-fn current_declarations(file: &Path) -> Option<Vec<Symbol>> {
+/// The file on disk as the built-in grammar reads it: the members that stand
+/// for themselves, and the lines each type's header is written on.
+struct OnDisk {
+    members: Vec<Symbol>,
+    headers: TypeHeaders,
+}
+
+/// `None` when the built-in grammar cannot read the file: no grammar reads
+/// its language, or it is not text.
+fn read_on_disk(file: &Path) -> Option<OnDisk> {
     let language = Language::from_path(file);
     if !SymbolExtractor::is_supported(language) {
         return None;
     }
     let content = std::fs::read_to_string(file).ok()?;
-    Some(SymbolExtractor::shared().extract(file, &content, language))
+    let extractor = SymbolExtractor::shared();
+    Some(OnDisk {
+        members: extractor.extract_members(file, &content, language),
+        headers: extractor.type_headers(file, &content, language),
+    })
 }
 
 /// A declaration the change removed, read from the pre-image. Its position is
@@ -1336,6 +1445,52 @@ fn git_show(root: &Path, reference: &str, relpath: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// A line a hunk adds between a type's members goes with the member the
+    /// hunk adds there, whether or not the built-in grammar reads the type's
+    /// members: it reads no TypeScript enum member, which a server lists.
+    #[test]
+    fn an_added_member_takes_the_lines_added_with_it_whatever_the_grammar_reads() {
+        use crate::models::symbol::Location;
+
+        let content = "export enum Mode {\n  Fast,\n\n  Idle,\n  Slow,\n}\n";
+        let path = PathBuf::from("m.ts");
+        let headers = SymbolExtractor::new().type_headers(&path, content, Language::TypeScript);
+        let member = |name: &str, line| {
+            let end = 3 + name.len() as u32;
+            Symbol::new(
+                name.to_string(),
+                SymbolKind::EnumMember,
+                Location::full(path.clone(), line, 3, line, 3, line, end),
+            )
+        };
+        let symbols = vec![
+            Symbol::new(
+                "Mode".to_string(),
+                SymbolKind::Enum,
+                Location::full(path.clone(), 1, 13, 1, 1, 6, 2),
+            )
+            .with_children(vec![
+                member("Fast", 2),
+                member("Idle", 4),
+                member("Slow", 5),
+            ]),
+        ];
+        let hunk = DiffHunk {
+            file: path.clone(),
+            old_file: path.clone(),
+            start_line: 3,
+            line_count: 2,
+            old_start: 2,
+            old_count: 0,
+            change_type: ChangeType::Added,
+        };
+        let owners: Vec<&str> = added_lines_owners(&symbols, &headers, &hunk, false)
+            .iter()
+            .map(|symbol| symbol.name.as_str())
+            .collect();
+        assert_eq!(owners, ["Idle"]);
+    }
 
     #[test]
     fn every_changed_file_is_read_from_numstat() {
@@ -1677,33 +1832,6 @@ mod tests {
         assert_eq!(v["refs"], 3);
         assert_eq!(v["test_refs"], 1);
         assert!(v.get("deletion").is_none());
-    }
-
-    // ---------------------------------------------------------------
-    // line_attributes_to_symbol — the shared attribution rule guarding
-    // both the deletion-reclassification and live (Added/Modified) paths
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn line_attributes_to_symbol_excludes_container_gaps() {
-        use crate::models::symbol::{Location, Symbol, SymbolKind};
-
-        let pt = |line: u32| Location::point(PathBuf::from("x.rs"), line, 1);
-        let method = Symbol::new("bar".to_string(), SymbolKind::Method, pt(3));
-        let container = Symbol::new("Foo".to_string(), SymbolKind::Class, pt(1))
-            .with_children(vec![method.clone()]);
-        let leaf_field = Symbol::new("FIELD".to_string(), SymbolKind::Field, pt(12));
-
-        // A callable owns its whole body — a body line attributes to it.
-        assert!(line_attributes_to_symbol(&method, 4));
-        // A non-callable container's inter-member gap line does NOT attribute to
-        // the container — otherwise a blank line between members would surface a
-        // spurious `Modified <container>` row.
-        assert!(!line_attributes_to_symbol(&container, 7));
-        // ...but editing the container's own declaration line does attribute.
-        assert!(line_attributes_to_symbol(&container, 1));
-        // A leaf symbol (no children) owns all of its lines.
-        assert!(line_attributes_to_symbol(&leaf_field, 13));
     }
 
     #[test]

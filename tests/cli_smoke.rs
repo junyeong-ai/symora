@@ -1881,6 +1881,454 @@ fn of_same_named_declarations_the_one_not_declared_again_is_deleted() {
     );
 }
 
+/// The grammar reads a Go `var` in a function body among a file's
+/// declarations. A local renamed or removed is the function's own business,
+/// on the function's own line too: the function is modified, and no local is
+/// reported deleted.
+#[cfg(unix)]
+#[test]
+fn a_local_the_grammar_reads_is_never_reported_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("m.go"),
+        "package main\n\nfunc h() int {\n\tvar unused = 3\n\treturn 4\n}\n\n\
+         func f() int {\n\tvar total = 1\n\tvar spare = 2\n\treturn total + spare\n}\n\n\
+         func k() int { var y = 1; return y }\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.go"),
+        "package main\n\nfunc h() int {\n\treturn 4\n}\n\n\
+         func f() int {\n\tvar sum = 1\n\treturn sum\n}\n\n\
+         func k() int { return 1 }\n",
+    )
+    .unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let rows: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| format!("{} {}", c["name"], c["change_type"]))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            r#""h" "modified""#,
+            r#""f" "modified""#,
+            r#""k" "modified""#
+        ],
+        "{page}"
+    );
+}
+
+/// A body a declaration stands for (a Kotlin class's `init` block, a const's
+/// arrow function) holds declarations of its own. Renaming one there changes
+/// the body's member: no local is reported, deleted or modified.
+#[cfg(unix)]
+#[test]
+fn a_local_in_a_body_a_member_stands_for_is_never_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let kotlin = |local: &str| {
+        format!(
+            "class Svc(val id: Int) {{\n    init {{\n        val {local} = id * 2\n        \
+             println({local})\n    }}\n\n    fun run(): Int = id\n}}\n"
+        )
+    };
+    let handler = |inner: &str| {
+        format!(
+            "export const handler = () => {{\n  function {inner}() {{\n    return 1;\n  }}\n  \
+             return {inner}();\n}};\n"
+        )
+    };
+    std::fs::write(repo.join("Svc.kt"), kotlin("doubled")).unwrap();
+    std::fs::write(repo.join("handler.ts"), handler("inner")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("Svc.kt"), kotlin("twice")).unwrap();
+    std::fs::write(repo.join("handler.ts"), handler("helper")).unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let rows = named_rows(&page);
+    assert!(rows.iter().all(|(_, change)| change != "deleted"), "{page}");
+    for local in ["doubled", "twice", "inner", "helper"] {
+        assert!(
+            rows.iter().all(|(name, _)| name != local),
+            "{local}: {page}"
+        );
+    }
+    for member in ["Svc", "handler"] {
+        assert!(
+            rows.iter().any(|(name, _)| name == member),
+            "{member}: {page}"
+        );
+    }
+}
+
+/// A body no declaration stands for (a callback passed at the top of a test
+/// file, a function called where it is written) absorbs nothing: a function
+/// declared in it stands for itself, so renaming it deletes the old name and
+/// an edit inside it modifies it.
+#[cfg(unix)]
+#[test]
+fn a_function_in_a_body_no_member_stands_for_stands_for_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let test_file = |helper: &str| {
+        format!(
+            "describe(\"svc\", () => {{\n  function {helper}() {{\n    return 1;\n  }}\n\n  \
+             it(\"runs\", () => {{\n    {helper}();\n  }});\n}});\n"
+        )
+    };
+    let iife = |value: u32| {
+        format!(
+            "(function () {{\n  function once() {{\n    return {value};\n  }}\n  once();\n}})();\n"
+        )
+    };
+    std::fs::write(repo.join("svc.test.ts"), test_file("makeInput")).unwrap();
+    std::fs::write(repo.join("boot.ts"), iife(1)).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(repo.join("svc.test.ts"), test_file("buildInput")).unwrap();
+    std::fs::write(repo.join("boot.ts"), iife(2)).unwrap();
+
+    let page = json_ok(repo, &["diff-impact"]);
+    let rows = named_rows(&page);
+    assert!(
+        rows.contains(&("makeInput".to_string(), "deleted".to_string())),
+        "{page}"
+    );
+    assert!(
+        rows.contains(&("once".to_string(), "modified".to_string())),
+        "{page}"
+    );
+}
+
+/// An answer need not list every member: the grammar reads no Java
+/// constructor. A line of a type that no listed member covers is the type's,
+/// so a change there is reported rather than dropped — lines removed right
+/// after a member's last line as well as lines edited.
+#[test]
+fn a_change_no_listed_member_covers_is_its_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+    let java = |stored: &str, returned: &str, trailing: &str| {
+        format!(
+            "public class Svc {{\n    private final int id;\n\n    Svc(int id) {{\n        \
+             this.id = {stored};\n    }}\n\n    int run() {{\n        return {returned};\n    \
+             }}\n{trailing}}}\n"
+        )
+    };
+    let trailing = "    // run last\n";
+    std::fs::write(repo.join("Svc.java"), java("id", "id", trailing)).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (content, owner) in [
+        (java("id + 1", "id", trailing), "Svc"),
+        (java("id", "id", ""), "Svc"),
+        (java("id", "id * 2", trailing), "run"),
+    ] {
+        std::fs::write(repo.join("Svc.java"), content).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        assert_eq!(
+            named_rows(&page),
+            [(owner.to_string(), "modified".to_string())],
+            "{page}"
+        );
+    }
+}
+
+/// Lines between members go with a declaration the same hunk adds, removes
+/// or rewrites, while a hunk that changes none modifies the type. Lines a
+/// hunk put in place of removed ones answer for them where they now stand.
+#[test]
+fn lines_between_members_go_with_a_declaration_the_hunk_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+    let java = |between: &str, above_stop: &str| {
+        format!(
+            "public class Svc {{\n    int run() {{\n        return 1;\n    }}\n{between}\n    \
+             {above_stop}\n    void stop() {{\n    }}\n}}\n"
+        )
+    };
+    std::fs::write(repo.join("Svc.java"), java("", "// keep going")).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (content, rows) in [
+        (
+            java(
+                "\n    int size() {\n        return 0;\n    }\n",
+                "// keep going",
+            ),
+            vec![("size", "added")],
+        ),
+        (
+            java("\n    Svc() {\n    }\n", "// keep going"),
+            vec![("Svc", "modified")],
+        ),
+        (
+            java("\n    // no member here\n", "// keep going"),
+            vec![("Svc", "modified")],
+        ),
+        (java("", "@Deprecated"), vec![("stop", "modified")]),
+        (
+            java("", "// keep going").replace(
+                "    int run() {\n        return 1;\n    }\n",
+                "    // run moved to Util\n",
+            ),
+            vec![("run", "deleted")],
+        ),
+    ] {
+        std::fs::write(repo.join("Svc.java"), content).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        let expected: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|(name, change)| (name.to_string(), change.to_string()))
+            .collect();
+        assert_eq!(named_rows(&page), expected, "{page}");
+    }
+}
+
+/// A type's header — its name, bases and clauses, on however many lines —
+/// is the type's own, so a change there reports the type even when the same
+/// hunk changes a member. A comment inside the body is not header, and goes
+/// with a member declared beside it.
+#[test]
+fn a_types_header_is_its_own_whatever_else_the_hunk_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+    let base = "public class Service\n        implements Runnable {\n    public void run() {\n    }\n\n    \
+                void other() {\n    }\n}\n";
+    std::fs::write(repo.join("Service.java"), base).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (content, rows) in [
+        (
+            base.replace(
+                "        implements Runnable {\n    public void run() {\n",
+                "        implements Callable<Integer> {\n    public Integer call() {\n",
+            ),
+            vec![
+                ("run", "deleted"),
+                ("Service", "modified"),
+                ("call", "modified"),
+            ],
+        ),
+        (
+            base.replace(
+                "implements Runnable {\n",
+                "implements Runnable {\n    /** Starts. */\n    public void start() {\n    }\n\n",
+            ),
+            vec![("start", "added")],
+        ),
+    ] {
+        std::fs::write(repo.join("Service.java"), content).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        let expected: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|(name, change)| (name.to_string(), change.to_string()))
+            .collect();
+        assert_eq!(named_rows(&page), expected, "{page}");
+    }
+}
+
+/// A Python function has no closing line, so once its last lines are
+/// removed its range ends where they were, as it does when lines after it
+/// are removed. The base tells the two apart: removed lines that lay inside
+/// a member modified it, those between members modified the type, and a
+/// declaration removed with them is deleted, taking the lines around it.
+#[test]
+fn removed_lines_belong_to_what_held_them_in_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+    let base = "class Service:\n    def start(self, a, b):\n        total = a + b\n        \
+                return total\n\n    # helpers below\n    def compute(self):\n        \
+                return 0\n\n    def finish(self):\n        return 1\n\n\ndef helper():\n    \
+                value = 1\n    return value\n";
+    std::fs::write(repo.join("svc.py"), base).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (removed, rows) in [
+        ("        return total\n", vec![("start", "modified")]),
+        ("    # helpers below\n", vec![("Service", "modified")]),
+        ("    return value\n", vec![("helper", "modified")]),
+        (
+            "        return total\n\n    # helpers below\n",
+            vec![("start", "modified"), ("Service", "modified")],
+        ),
+        (
+            "        return 1\n\n\ndef helper():\n    value = 1\n    return value\n",
+            vec![("helper", "deleted"), ("finish", "modified")],
+        ),
+        (
+            "    # helpers below\n    def compute(self):\n        return 0\n\n",
+            vec![("compute", "deleted")],
+        ),
+    ] {
+        std::fs::write(repo.join("svc.py"), base.replacen(removed, "", 1)).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        let expected: Vec<(String, String)> = rows
+            .iter()
+            .map(|(name, change)| (name.to_string(), change.to_string()))
+            .collect();
+        assert_eq!(named_rows(&page), expected, "{removed:?}: {page}");
+    }
+}
+
+/// The grammar's range for a Java member opens on its annotations, so a
+/// removed annotation lay at the head of the member it annotated: that
+/// member now begins right after the deletion point, and the member ending
+/// at the point is left alone.
+#[test]
+fn an_annotation_removed_from_a_member_modifies_that_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+    let base = "class OrderService {\n    private Orders orders;\n    @Autowired\n    \
+                private Payments payments;\n\n    void run() {\n        orders.go();\n    }\n    \
+                @Override\n    public String toString() {\n        return \"s\";\n    }\n}\n";
+    std::fs::write(repo.join("OrderService.java"), base).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (removed, added, owners) in [
+        ("    @Autowired\n", "", vec!["payments"]),
+        ("    @Override\n", "", vec!["toString"]),
+        (
+            "    private Orders orders;\n    @Autowired\n",
+            "    private Orders pending;\n",
+            vec!["payments", "pending"],
+        ),
+    ] {
+        std::fs::write(
+            repo.join("OrderService.java"),
+            base.replacen(removed, added, 1),
+        )
+        .unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        let mut modified: Vec<String> = named_rows(&page)
+            .into_iter()
+            .filter(|(_, change)| change == "modified")
+            .map(|(name, _)| name)
+            .collect();
+        modified.sort();
+        assert_eq!(modified, owners, "{removed:?}: {page}");
+    }
+}
+
+/// A type's range opens on its annotations too: an annotation removed from
+/// a type, nested or at the top, modified that type.
+#[test]
+fn an_annotation_removed_from_a_type_modifies_that_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+    let base = "@Deprecated\nclass Top {\n    int size;\n    @Deprecated\n    static class Inner {\n        \
+                int depth;\n    }\n}\n";
+    std::fs::write(repo.join("Top.java"), base).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (removed, owner) in [("    @Deprecated\n", "Inner"), ("@Deprecated\n", "Top")] {
+        std::fs::write(repo.join("Top.java"), base.replacen(removed, "", 1)).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        assert_eq!(
+            named_rows(&page),
+            [(owner.to_string(), "modified".to_string())],
+            "{removed:?}: {page}"
+        );
+    }
+}
+
+fn named_rows(page: &serde_json::Value) -> Vec<(String, String)> {
+    page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap_or_default().to_string(),
+                c["change_type"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
 /// A symbolic link's lines are where it points, not source, so a link that
 /// appears or is retargeted is counted but no symbol is taken from the
 /// file it points to.
