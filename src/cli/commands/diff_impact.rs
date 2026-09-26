@@ -176,7 +176,11 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let test_scope = app.test_scope();
 
     let base = resolve_base(root, &args.revision)?;
-    let ParsedDiff { mut hunks, binary } = parse_git_diff(root, base.tree_ish(), args.staged)?;
+    let ParsedDiff {
+        mut hunks,
+        binary,
+        links,
+    } = parse_git_diff(root, base.tree_ish(), args.staged)?;
     let changed_files = changed_files(root, base.tree_ish(), args.staged)?;
     let mut hints = Vec::new();
     let mut unmeasured_files = Vec::new();
@@ -201,6 +205,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         ));
         unmeasured_files.extend(binary);
     }
+    unmeasured_files.extend(links.iter().map(|link| relative_display(link, root)));
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
@@ -524,19 +529,23 @@ fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// What the patch says: the hunks it names, and the files whose content
-/// changed but which git diffs as binary, naming no lines.
+/// What the patch says: the hunks it names, the files whose content changed
+/// but which git diffs as binary, naming no lines, and the symbolic links
+/// whose lines are where they point rather than source.
 struct ParsedDiff {
     hunks: Vec<DiffHunk>,
     binary: Vec<PathBuf>,
+    links: Vec<PathBuf>,
 }
 
 fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
     let mut hunks = Vec::new();
     let mut binary = Vec::new();
+    let mut links = Vec::new();
     let mut old_file: Option<PathBuf> = None;
     let mut current_file: Option<PathBuf> = None;
     let mut block_file: Option<PathBuf> = None;
+    let mut in_link = false;
     let mut in_header = false;
 
     for line in diff.lines() {
@@ -546,9 +555,13 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
             // deleted/added content (e.g. a Lua `--` comment becomes `--- …`)
             // and must not be mistaken for a header.
             in_header = true;
+            in_link = false;
             old_file = None;
             current_file = None;
             block_file = same_path_header(rest).map(|p| root.join(p));
+        } else if in_header && !in_link && names_a_link(line) {
+            in_link = true;
+            links.extend(block_file.clone());
         } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
             block_file = git_path(rest).map(|(path, _)| root.join(path));
         } else if in_header && line.starts_with("Binary files ") {
@@ -564,7 +577,8 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
                 .or_else(|| old_file.clone());
         } else if line.starts_with("@@ ") {
             in_header = false;
-            if let Some(ref file) = current_file
+            if !in_link
+                && let Some(ref file) = current_file
                 && let Some(mut hunk) = parse_hunk_header(line, file.clone())
             {
                 if let Some(old) = &old_file {
@@ -575,7 +589,23 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
         }
     }
 
-    ParsedDiff { hunks, binary }
+    ParsedDiff {
+        hunks,
+        binary,
+        links,
+    }
+}
+
+/// Whether a block header line gives the file git's symbolic-link mode, on
+/// either side of the change.
+fn names_a_link(line: &str) -> bool {
+    const LINK: &str = "120000";
+    line.strip_prefix("new file mode ") == Some(LINK)
+        || line.strip_prefix("deleted file mode ") == Some(LINK)
+        || line
+            .strip_prefix("index ")
+            .and_then(|rest| rest.split_once(' '))
+            .is_some_and(|(_, mode)| mode == LINK)
 }
 
 /// The path of a `diff --git a/X b/X` header whose two sides are the same
@@ -1152,6 +1182,37 @@ mod tests {
             parse_diff_output(diff, root).binary,
             ["logo.png", "new.bin", "my file.png", "add.png"].map(|p| root.join(p))
         );
+    }
+
+    #[test]
+    fn a_symbolic_link_names_no_hunks_of_source() {
+        let root = Path::new("/r");
+        let diff = "diff --git a/alias.py b/alias.py\n\
+                    new file mode 120000\n\
+                    index 0000000..1111111\n\
+                    --- /dev/null\n\
+                    +++ b/alias.py\n\
+                    @@ -0,0 +1 @@\n\
+                    +impl.py\n\
+                    diff --git a/current.py b/current.py\n\
+                    index 2222222..3333333 120000\n\
+                    --- a/current.py\n\
+                    +++ b/current.py\n\
+                    @@ -1 +1 @@\n\
+                    -v1.py\n\
+                    +v2.py\n\
+                    diff --git a/m.py b/m.py\n\
+                    index 4444444..5555555 100644\n\
+                    --- a/m.py\n\
+                    +++ b/m.py\n\
+                    @@ -1 +1 @@\n";
+        let parsed = parse_diff_output(diff, root);
+        assert_eq!(
+            parsed.links,
+            [root.join("alias.py"), root.join("current.py")]
+        );
+        assert_eq!(parsed.hunks.len(), 1);
+        assert_eq!(parsed.hunks[0].file, root.join("m.py"));
     }
 
     #[test]
