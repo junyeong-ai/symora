@@ -88,6 +88,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 dirs = "6.0"
 async-trait = "0.1.92"
 ignore = "0.4.33"
+globset = "0.4.20"
+
+# Workspace file watching: the client half of `workspace/didChangeWatchedFiles`.
+notify = "8.2.0"
 
 # HTTP transport for the MCP server (`symora mcp serve --transport http`).
 axum = { version = "0.8.9", default-features = false, features = ["json", "tokio", "http1"] }

@@ -668,6 +668,111 @@ pub struct CallHierarchyOutgoingCall {
     pub from_ranges: Vec<Range>,
 }
 
+// Dynamic registration and watched files
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Registration {
+    pub id: String,
+    pub method: String,
+    #[serde(default)]
+    pub register_options: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegistrationParams {
+    pub registrations: Vec<Registration>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Unregistration {
+    pub id: String,
+}
+
+/// `unregisterations` is the protocol's own spelling; the corrected one is
+/// accepted as well.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnregistrationParams {
+    #[serde(alias = "unregistrations")]
+    pub unregisterations: Vec<Unregistration>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DidChangeWatchedFilesRegistrationOptions {
+    pub watchers: Vec<FileSystemWatcher>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSystemWatcher {
+    pub glob_pattern: GlobPattern,
+    /// Bitmask of `WatchKind`; absent means all three.
+    #[serde(default)]
+    pub kind: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum GlobPattern {
+    /// Matched against the absolute path.
+    Absolute(String),
+    Relative(RelativePattern),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelativePattern {
+    pub base_uri: BaseUri,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum BaseUri {
+    Uri(String),
+    WorkspaceFolder(WorkspaceFolder),
+}
+
+impl BaseUri {
+    pub fn uri(&self) -> &str {
+        match self {
+            Self::Uri(uri) => uri,
+            Self::WorkspaceFolder(folder) => &folder.uri,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize_repr, Deserialize_repr, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum FileChangeType {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
+
+impl FileChangeType {
+    /// The `WatchKind` bit a watcher sets to receive this change.
+    pub fn watch_kind(self) -> u8 {
+        match self {
+            Self::Created => 1,
+            Self::Changed => 2,
+            Self::Deleted => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FileEvent {
+    pub uri: String,
+    #[serde(rename = "type")]
+    pub change: FileChangeType,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DidChangeWatchedFilesParams {
+    pub changes: Vec<FileEvent>,
+}
+
 // Tests
 
 #[cfg(test)]
