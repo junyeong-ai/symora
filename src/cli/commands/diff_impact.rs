@@ -262,10 +262,6 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     Ok(())
 }
 
-/// The commit the diff is measured from, resolved once so the diff and every
-/// pre-image read name the same tree. Only a single commit is accepted: the
-/// other side is always read from the working tree (or the index), so a
-/// range's second revision would name a tree nothing reads.
 /// What the working tree is measured against.
 enum Base {
     Commit(String),
@@ -282,6 +278,10 @@ impl Base {
     }
 }
 
+/// The base the diff is measured from, resolved once so the diff and every
+/// pre-image read name the same tree. Only a single commit is accepted: the
+/// other side is always read from the working tree (or the index), so a
+/// range's second revision would name a tree nothing reads.
 fn resolve_base(root: &Path, revision: &str) -> Result<Base> {
     let output = Command::new("git")
         .current_dir(root)
