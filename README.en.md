@@ -80,7 +80,7 @@ flowchart TD
     G --> H[("Structured JSON")]
 ```
 
-- **Two backends, different needs.** Index and `search ast`/`map` work with no language server. The LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language — and degrade *honestly* (a structured `unsupported` response) when a server lacks a capability, never a silently-wrong answer.
+- **Two backends, different needs.** Index and `search ast`/`map` work with no language server. `symbols` and `map file` answer from the server's tree when one serves and from the compiled-in grammar when not, and say which in `backend` (`document` | `ast`). The other LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language, and when a server lacks a capability they degrade *honestly* — a structured `unsupported` response, or a fallback that says it is one (`callers` without call hierarchy marks `callers_status: "references_derived"`) — never a silently-wrong answer.
 - **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process.
 
 ---
@@ -113,20 +113,18 @@ symora map summary
 {
   "root": "/home/dev/shopflow",
   "total_files": 84,
-  "code_files": 71,
-  "support_files": 13,
+  "code_files": 67,
+  "support_files": 17,
   "test_files": 18,
   "directories": 12,
   "languages": [
-    { "language": "typescript", "file_count": 67, "test_files": 18 },
-    { "language": "json", "file_count": 4, "test_files": 0 }
+    { "language": "typescript", "file_count": 67, "test_files": 18 }
   ],
   "top_directories": {
-    "count": 3,
-    "showing": 3,
+    "count": 2,
+    "showing": 2,
     "items": [
-      { "path": "src/services", "file_count": 14, "test_files": 0 },
-      { "path": "src/routes", "file_count": 9, "test_files": 0 },
+      { "path": "src", "file_count": 49, "test_files": 0 },
       { "path": "tests", "file_count": 18, "test_files": 18 }
     ]
   },
@@ -134,17 +132,18 @@ symora map summary
     "count": 2,
     "showing": 2,
     "items": [
-      { "file": "src/server.ts", "reason": "main entry file" },
+      { "file": "src/main.ts", "reason": "main entry file" },
       { "file": "src/app.ts", "reason": "application bootstrap candidate" }
     ]
   },
   "next_commands": [
-    "symora map file src/server.ts --related-limit 5",
-    "symora symbols src/server.ts --depth 1"
+    "symora map file src/main.ts --related-limit 5",
+    "symora map dir src --limit 10",
+    "symora symbols src/main.ts --depth 1"
   ]
 }
 ```
-> 67 TypeScript files, most logic under `src/services`, and `entrypoints` already points at where execution starts. `symora pack --tokens 4000` gives a deeper, PageRank-ranked brief when you want one.
+> 49 of the 67 TypeScript code files live under `src`, and `entrypoints` already points at where execution starts. `languages` counts code languages only; data files such as JSON are `support_files`. `symora pack --tokens 4000` gives a deeper, PageRank-ranked brief when you want one.
 
 ### ② Discover — where is checkout handled?
 
@@ -187,16 +186,16 @@ symora context src/services/checkout.ts:48 --all
     "file": "src/services/checkout.ts",
     "line": 48,
     "signature": "async processOrder(cart: Cart, user: User): Promise<Order>",
-    "body": "async processOrder(cart: Cart, user: User): Promise<Order> {\n    const reserved = await this.inventory.reserve(cart.items);\n    const order = await this.payment.charge(user, cart.total);\n    return this.orders.create(order, reserved);\n  }"
+    "body": "  async processOrder(cart: Cart, user: User): Promise<Order> {\n    const reserved = await this.inventory.reserve(cart.items);\n    const order = await this.payment.charge(user, cart.total);\n    return this.orders.create(order, reserved);\n  }"
   },
-  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": true },
-  "callers": { "count": 2, "showing": 2, "items": [ /* handleCheckout, runOrderQueue */ ] },
+  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
+  "callers": { "count": 4, "showing": 4, "items": [ /* handleCheckout, runOrderQueue, two test functions */ ] },
   "callees": { "count": 3, "showing": 3, "items": [ /* reserve, charge, create */ ] },
-  "types":   { "count": 3, "showing": 3, "items": [ /* Cart, User, Order */ ] },
-  "tests":   { "count": 1, "showing": 1, "items": [ /* checkout.test.ts */ ] }
+  "types":   { "count": 1, "showing": 1, "items": [ /* Order */ ] },
+  "tests":   { "count": 2, "showing": 2, "items": [ /* processesAnOrder, processesTwice */ ] }
 }
 ```
-> You now see the implementation, that it's exported, hit from 3 files, and covered by 1 test — without opening a single file.
+> You now see the implementation, its 5 references across 3 files (3 of them in tests), and the 2 tests that call it — without opening a single file. `is_exported` reads a TypeScript declaration's own `export`, so a class method is `false`.
 
 ### ④ Who calls it?
 
@@ -205,23 +204,33 @@ symora callers src/services/checkout.ts:48
 ```
 ```json
 {
-  "count": 2,
-  "showing": 2,
+  "count": 4,
+  "showing": 4,
   "items": [
     {
       "name": "handleCheckout",
-      "location":  { "file": "src/routes/checkout.ts", "line": 23, "column": 14 },
-      "call_site": { "file": "src/routes/checkout.ts", "line": 31, "column": 28 }
+      "location":  { "file": "src/routes/checkout.ts", "line": 23, "column": 23 },
+      "call_site": { "file": "src/routes/checkout.ts", "line": 31, "column": 31 }
     },
     {
       "name": "runOrderQueue",
-      "location":  { "file": "src/jobs/orderWorker.ts", "line": 67, "column": 16 },
-      "call_site": { "file": "src/jobs/orderWorker.ts", "line": 72, "column": 30 }
+      "location":  { "file": "src/jobs/orderWorker.ts", "line": 67, "column": 23 },
+      "call_site": { "file": "src/jobs/orderWorker.ts", "line": 72, "column": 19 }
+    },
+    {
+      "name": "processesAnOrder",
+      "location":  { "file": "tests/checkout.test.ts", "line": 8, "column": 23 },
+      "call_site": { "file": "tests/checkout.test.ts", "line": 9, "column": 17 }
+    },
+    {
+      "name": "processesTwice",
+      "location":  { "file": "tests/checkout.test.ts", "line": 13, "column": 23 },
+      "call_site": { "file": "tests/checkout.test.ts", "line": 14, "column": 17 }
     }
   ]
 }
 ```
-> Two entry points: the HTTP route and a background job. `location` is where the caller is declared; `call_site` is the exact line that calls your symbol.
+> Two production entry points — the HTTP route and a background job — and two test functions. `location` is where the caller is declared; `call_site` is the exact line that calls your symbol.
 
 ### ⑤ What breaks if I change it?
 
@@ -231,30 +240,30 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```json
 {
   "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48 },
-  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": true },
-  "coverage": { "count": 1, "files": ["tests/checkout.test.ts"] },
+  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
+  "coverage": { "count": 3, "files": ["tests/checkout.test.ts"] },
   "files": [
-    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 },
+    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 },
     { "file": "src/jobs/orderWorker.ts", "is_test": false, "refs": 1 },
-    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 }
+    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 }
   ],
   "blast_radius": {
-    "direct_callers": 2,
-    "transitive_callers": 4,
+    "direct_callers": 4,
+    "transitive_callers": 7,
     "depth": 2,
     "max_depth_reached": true,
     "callers_by_depth": [
-      { "depth": 1, "count": 2, "test": 0, "prod": 2 },
-      { "depth": 2, "count": 2, "test": 2, "prod": 0 }
+      { "depth": 1, "count": 4, "test": 2, "prod": 2 },
+      { "depth": 2, "count": 3, "test": 1, "prod": 2 }
     ],
-    "test_caller_ratio": 0.5,
-    "risk": "high",
+    "test_caller_ratio": 0.43,
+    "risk": "medium",
     "confidence": 0.8
   },
-  "next_commands": ["symora impact src/services/checkout.ts:48 --depth 3"]
+  "next_commands": ["symora impact src/services/checkout.ts:48:9 --depth 3"]
 }
 ```
-> `risk: "high"` with only half the call sites under test — change carefully. `max_depth_reached` is true, so the graph is a lower bound and `confidence` says so — the `--depth 3` in `next_commands` is what lifts it.
+> Seven transitive callers, past the five that `medium` starts at, make `risk` `medium`; were the symbol exported (`is_exported: true`), the same graph would read `high`. `test_caller_ratio` is the share of callers in the graph that are test code. `max_depth_reached` is true, so the transitive caller graph is a lower bound and `confidence` stays at 0.8. The reference counts and `direct_callers` do not depend on depth, and with none of their own markers present (`incomplete`, `indexing`, `callers_truncated`, `dynamic_dispatch`) they are complete. The `--depth 3` in `next_commands` widens the graph by one level.
 
 ### ⑥ Make the change — preview before you write
 
@@ -268,13 +277,13 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
   "file": "src/services/checkout.ts",
   "target_symbol": "CheckoutService/processOrder",
   "target_kind": "method",
-  "lines": { "start": 48, "end": 71 },
-  "bytes_changed": 84,
+  "lines": { "start": 48, "end": 52 },
+  "bytes_changed": 61,
   "dry_run": true,
-  "preview": "@@ -48,6 +48,8 @@\n   async processOrder(cart: Cart, user: User): Promise<Order> {\n+    if (cart.items.length === 0) throw new EmptyCartError();\n     const reserved = await this.inventory.reserve(cart.items);\n     ..."
+  "preview": "@@ -48,5 +48,6 @@\n-  async processOrder(cart: Cart, user: User): Promise<Order> {\n-    const reserved = …\n …\n+  async processOrder(cart: Cart, user: User): Promise<Order> {\n+    if (cart.items.length === 0) throw new EmptyCartError();\n+    const reserved = …\n …"
 }
 ```
-> `--dry-run` shows the exact hunk and writes nothing. Drop it to apply, or add `--verify-callers` to pull diagnostics on the two call sites afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
+> `--dry-run` shows the whole span it would replace (every old line `-`, every new line `+`) and the net byte change, and writes nothing. When the server's declaration range opens with doc-comment or attribute lines, those lines are in the span — check `lines` and include them in `--body`. Drop `--dry-run` to apply, or add `--verify-callers` to pull diagnostics on the files that reference the symbol afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
 
 > **Addressing is forgiving but safe.** `--symbol` matches a bare name, a `Class/method` suffix, a `*/method` wildcard, or the exact `name_path`. When a name is ambiguous, `edit` refuses rather than guess:
 > ```json
@@ -324,7 +333,8 @@ symora context src/services/checkout.ts:48 --all    # body + refs + callers + ca
 symora context src/services/checkout.ts:48 --with-bodies   # also attach callee/type bodies
 symora usage processOrder --lang typescript         # usage sites by name or location
 symora impact src/services/checkout.ts:48           # change blast radius
-symora diff-impact                                  # impact of the current git diff
+symora diff-impact                                  # impact of the working tree's changes against HEAD, staged or not
+symora diff-impact $(git merge-base main HEAD)      # impact of what this branch changed (a range A..B is refused)
 
 # Edit & refactor (mutations preview with --dry-run)
 symora edit replace-body <file> --symbol 'Class/method' --body "$(cat new.ts)" --dry-run
@@ -335,15 +345,15 @@ symora edit replace       <file>:10 --end <file>:12 --text "new lines"
 symora edit pattern       <file> --pattern '(function_item) @f' --lang rust --text "…"
 symora rename src/services/checkout.ts:48:9 settleOrder --dry-run
 symora actions list src/services/checkout.ts:48:9   # available code actions
-symora format src/services/checkout.ts              # LSP format
+symora format src/services/checkout.ts              # LSP format preview (`--apply` writes it)
 
 # Health & diagnostics
 symora doctor                # language servers: verified serving / missing + install commands
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
-symora status                # project + language-server state (daemon: `symora daemon status`)
+symora status                # project + whether language servers are installed (serving: doctor's `serves`; daemon: `symora daemon status`)
 ```
 
-Global flags work before or after the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose). `--workspace <name>`, `--token-estimate`, and `--check-version <REQ>` are global too — the last refuses to run unless this binary satisfies the requirement (`0.21`, `>=0.21,<0.22`), so a caller that parses the output never has to compare `--version` strings itself.
+Global flags work before or after the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose). `--workspace <name>`, `--token-estimate`, `--deterministic`, and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.21`, `>=0.21,<0.22`), so a caller that parses the output never has to compare `--version` strings itself.
 
 ---
 
@@ -357,7 +367,7 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output, and one address means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `context`, `impact`, `usage`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `edit` addresses declarations only: a column must sit on one. Emitted locations always carry line and column.
+- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `signature`, and `typedef` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Emitted locations always carry line and column.
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. That is a different axis from a source being behind: `stale` and `indexing: "timed_out"` say a source is behind, `incomplete` says the answer is short. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
 - **`--format compact`** emits single-line JSON. At most one budget governs a response: one that states a caller's own (`budget_tokens`, as `pack --tokens` does) is bounded by that alone, and every other is capped at `output.max_response_chars` (default 20,000) — whole items are dropped to fit, disclosed via `truncated` and a hint naming the config key. The ceiling is measured on the compact serialization in every format, so `--format` never changes which items you receive.
 
@@ -396,9 +406,9 @@ args = ["--stdio"]   # optional; absent = inherit built-in args
 tier = "slow"        # optional; one of fast | standard | slow
 ```
 
-The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads config at startup, so run `symora daemon restart` after editing it.
+The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads a project's config when it first serves that project and keeps it until restarted or until the project goes idle, so run `symora daemon restart` after editing it.
 
-File discovery follows the project's `.gitignore` (root and nested, with full per-directory semantics), plus an optional `.symora/ignore` — gitignore syntax — for symora-only exclusions. When a project ships no root `.gitignore`, common dependency and build directories (`node_modules`, `target`, `dist`, …) are skipped by default. Hidden entries (dotfiles and dot-directories) are always skipped and, like ripgrep and fd, cannot be re-included by a `.gitignore` negation — this is what keeps `.git` and `.symora` out unconditionally.
+File discovery follows the project's `.gitignore` (root and nested, with full per-directory semantics), plus an optional `.symora/ignore` — gitignore syntax — for symora-only exclusions. When a project ships no root `.gitignore`, common dependency and build directories (`node_modules`, `target`, `dist`, …) are skipped by default. Machine-local git state — `.git/info/exclude` and the global `core.excludesFile` — is not read, so the same tree indexes the same way on every machine. Hidden entries (dotfiles and dot-directories) are always skipped and, like ripgrep and fd, cannot be re-included by a `.gitignore` negation — this is what keeps `.git` and `.symora` out unconditionally.
 
 ---
 
@@ -416,7 +426,7 @@ Useful variants:
 # Binary only, skip the Claude Code skill
 curl -fsSL .../install.sh | bash -s -- --no-skill
 
-# Pin a release / verify GitHub build provenance (needs the gh CLI)
+# Pin a release / verify GitHub build provenance (needs a logged-in gh CLI — it asks the attestations API)
 curl -fsSL .../install.sh | bash -s -- --version <version> --verify-attestations
 
 # Source build (builds the release tag from git; no checkout needed)
@@ -440,7 +450,7 @@ symora setup deps --group core        # dependencies only (core / core-jvm / cor
 symora self update                    # in-place upgrade to the latest release
 symora self update --version <version>
 symora self update --verify-attestations   # refuse to install without gh
-symora self uninstall                 # remove binary + skill + config + daemon data
+symora self uninstall                 # remove binary + skill + config + daemon data (MCP entries stay — run `symora setup mcp --uninstall` first)
 ```
 
 An update always verifies the SHA-256, and when `gh` is installed it also
@@ -458,7 +468,7 @@ Bundles are published from the version that introduced them onward; use
 Symora also runs as a Model Context Protocol server. A curated subset of commands — navigation, analysis, and edit tools — is exposed as MCP tools that share the same in-process command layer, so the MCP and CLI results match.
 
 ```bash
-symora setup mcp                     # auto-detect and wire installed hosts (Claude Code, Codex)
+symora setup mcp                     # auto-detect and wire installed hosts (Claude Code: this project's .mcp.json, Codex: ~/.codex/config.toml)
 symora setup mcp --dry-run           # show the plan without writing
 symora setup mcp --host claude_code  # a specific host only
 symora setup mcp --uninstall         # disconnect (removes only the entry it wrote)
@@ -470,7 +480,7 @@ symora mcp tools                                 # tool catalog as JSON (schemas
 symora mcp tools --profile read-only             # what a read-only server would expose
 ```
 
-`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the list-shaped ones, and a tool's output schema also describes the JSON the matching CLI command emits. Mutating tools are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and all support `dry_run`. The server's `initialize` response carries the full usage playbook (tool sequencing, edit addressing, error recovery), so a connected agent needs no extra setup.
+`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the tools that declare one (every list-shaped tool and some fixed-shape ones), and a tool's output schema also describes the JSON the matching CLI command emits. Tools that write are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and every one that edits source supports `dry_run` (`build_index`, which only rebuilds the index, does not). The server's `initialize` response carries the full usage playbook (tool sequencing, edit addressing, error recovery), so a connected agent needs no extra setup.
 
 ---
 
@@ -511,9 +521,9 @@ symora daemon start | stop | restart | status
 | **Diagnose** | `diagnostics`, `inlay-hints`, `folding`, `selection`, `code-lens` |
 | **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp`, `bench` |
 
-Run `symora <command> --help` for flags and the full output shape of any command.
+Run `symora <command> --help` for any command's flags. Output fields are described in [the output contract](#the-output-contract) and in the output schemas `symora mcp tools` prints.
 
-> `search semantic` (natural-language search) exists only in builds compiled with the optional `embeddings` feature; a default build reports `unsupported`.
+> `search semantic` (natural-language search) exists only in builds compiled with the optional `embeddings` feature. A default build — the prebuilt binaries included — reports `unsupported`; build with `cargo install --path . --features embeddings` to use it.
 
 ---
 
@@ -523,11 +533,12 @@ Run `symora <command> --help` for flags and the full output shape of any command
 | --- | --- |
 | `count: 0` from `search …` | `symora search index status`; an empty `languages` means no build has completed — run `symora search index build`. A language absent from it was answered by a language server, not the index. |
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. |
+| `coverage_gaps` on a search | That language is missing from the answer. With `reason: "unavailable"`, `message` carries the failure's first line (for a server that rejected `initialize`, its reason), and the hints and `next_commands` lead with the languages whose lookup failed. |
 | `indexing: "timed_out"` | The language server is still reading the workspace. On a list the count is a lower bound; on a single answer (`def`, `hover`) an empty result means not settled yet, not nothing there. Retry once it's warm. `rename` refuses to apply under it and previews instead — a partial edit set renames some call sites and leaves the rest. |
 | `incomplete: true` | The count is a lower bound — the answer does not hold everything its own sources held. The leading `hints` name the cause; `next_commands` carries the fix where one exists. If `unread_paths` came with it, check those paths' permissions — no rebuild reaches a path nothing can read. |
 | `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
 | `conflict` from `search index` | Another process is rebuilding the index — retry as-is; nothing is left half-applied. |
-| Stale results after edits | `symora search index build` (incremental), or `symora daemon restart`. |
+| Stale results after edits | Rows from the index (`backend: "index"`, `stale: true`) are a snapshot of the last build — `symora search index build` (incremental). LSP-backed answers follow edits: the daemon and `mcp serve` watch the project and pass on-disk changes to the language servers. |
 | Debugging | `symora -v <command>` for verbose logs. |
 
 ---
