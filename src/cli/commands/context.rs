@@ -12,7 +12,9 @@ use crate::cli::response::{
     CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput, TestOutput,
     TypeInfoOutput,
 };
-use crate::cli::utils::{enclosing_callable, extract_signature, find_symbol_at_position};
+use crate::cli::utils::{
+    enclosing_callable, extract_signature, find_named_at_position, find_symbol_at_position,
+};
 use crate::cli::{LocationArg, OutputError};
 
 use super::common::lsp_error_at;
@@ -493,7 +495,16 @@ async fn fetch_types(
                     .await
                     .unwrap_or_default();
 
-                let type_sym = find_symbol_at_position(&type_symbols, type_loc.line, None);
+                // Named by the declaration whose name the answer is on: a
+                // one-line `interface Order { id: string }` also covers `id`.
+                let type_sym = find_named_at_position(
+                    &type_symbols,
+                    type_loc.line,
+                    type_loc.column,
+                )
+                .or_else(|| {
+                    find_symbol_at_position(&type_symbols, type_loc.line, Some(type_loc.column))
+                });
                 let items = vec![TypeInfoOutput {
                     name: type_sym
                         .map(|s| s.name.clone())
@@ -718,6 +729,7 @@ mod tests {
     /// `apply_section_bodies` and panics loudly if that ever changes.
     struct BodyLookupStub {
         symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
+        type_definition: Option<Location>,
     }
 
     fn body_symbol(name: &str, file: &Path, line: u32, end_line: u32, body: &str) -> Symbol {
@@ -771,7 +783,7 @@ mod tests {
             _line: u32,
             _column: u32,
         ) -> Result<Indexed<Option<Location>>, LspError> {
-            unreachable!()
+            Ok(Indexed::complete(self.type_definition.clone()))
         }
         async fn find_implementations(
             &self,
@@ -936,7 +948,38 @@ mod tests {
                 .into_iter()
                 .map(|(file, syms)| (PathBuf::from(file), syms))
                 .collect(),
+            type_definition: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_type_is_named_by_the_declaration_its_name_is_on() {
+        let models = Path::new("/repo/src/models.ts");
+        // `export interface Order { id: string }`: one line, two declarations.
+        let order = Symbol::new(
+            "Order".to_string(),
+            SymbolKind::Interface,
+            Location::full(models.to_path_buf(), 4, 18, 4, 1, 4, 38).with_name_end(4, 23),
+        )
+        .with_children(vec![Symbol::new(
+            "id".to_string(),
+            SymbolKind::Property,
+            Location::full(models.to_path_buf(), 4, 26, 4, 26, 4, 36).with_name_end(4, 28),
+        )]);
+        let mut stub = stub_with(vec![("/repo/src/models.ts", vec![order])]);
+        stub.type_definition = Some(Location::point(models.to_path_buf(), 4, 18));
+
+        let section = fetch_types(
+            &stub,
+            Path::new("/repo/src/checkout.ts"),
+            48,
+            9,
+            Path::new("/repo"),
+        )
+        .await;
+
+        assert_eq!(section.items[0].name, "Order");
+        assert_eq!(section.items[0].kind, "interface");
     }
 
     #[tokio::test]
