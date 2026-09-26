@@ -78,19 +78,65 @@ impl CoverageReason {
 /// surface of the disclosure — the structured gap an agent branches on, the
 /// prose hint, the follow-up command — is derived from this one value, and
 /// none of them can name a language or a cause the others do not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Uncovered {
     pub language: Language,
     pub reason: CoverageReason,
+    /// The failure in its own words, kept for `unavailable` — the one reason
+    /// that does not say what went wrong.
+    pub message: Option<String>,
 }
 
-impl From<Uncovered> for CoverageGap {
-    fn from(uncovered: Uncovered) -> Self {
+impl Uncovered {
+    fn failed(language: Language, err: &LspError) -> Self {
+        let reason = CoverageReason::of(err);
+        Self {
+            language,
+            reason,
+            message: (reason == CoverageReason::Unavailable).then(|| {
+                err.to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            }),
+        }
+    }
+
+    fn not_reached(language: Language, reason: CoverageReason) -> Self {
+        Self {
+            language,
+            reason,
+            message: None,
+        }
+    }
+
+    /// A server was there and its lookup did not come back.
+    fn lookup_failed(&self) -> bool {
+        matches!(
+            self.reason,
+            CoverageReason::Unavailable | CoverageReason::TimedOut
+        )
+    }
+}
+
+impl From<&Uncovered> for CoverageGap {
+    fn from(uncovered: &Uncovered) -> Self {
         Self {
             language: uncovered.language.lsp_id().to_string(),
             reason: uncovered.reason.as_str().to_string(),
+            message: uncovered.message.clone(),
         }
     }
+}
+
+/// The gaps in the order they are worth reading: a server whose lookup
+/// failed is a problem to fix, while a language no server is installed for
+/// is usually just one the project does not work in.
+fn by_consequence(shortfall: &[Uncovered]) -> Vec<&Uncovered> {
+    let mut ordered: Vec<&Uncovered> = shortfall.iter().collect();
+    ordered.sort_by_key(|gap| !gap.lookup_failed());
+    ordered
 }
 
 /// Whether the route asked language servers for what the index could not
@@ -124,27 +170,18 @@ pub fn coverage_shortfall(answered_for: &[Language], live: LiveLookup<'_>) -> Ve
         LiveLookup::Ran { failures, skipped } => failures
             .iter()
             .filter(|(language, _)| !answered_for.contains(language))
-            .map(|(language, err)| Uncovered {
-                language: *language,
-                reason: CoverageReason::of(err),
-            })
+            .map(|(language, err)| Uncovered::failed(*language, err))
             .chain(
                 skipped
                     .iter()
                     .filter(|language| !answered_for.contains(language))
-                    .map(|language| Uncovered {
-                        language: *language,
-                        reason: CoverageReason::NotSearched,
-                    }),
+                    .map(|language| Uncovered::not_reached(*language, CoverageReason::NotSearched)),
             )
             .collect(),
         LiveLookup::NotRun { requested } => requested
             .iter()
             .filter(|language| !answered_for.contains(language))
-            .map(|language| Uncovered {
-                language: *language,
-                reason: CoverageReason::NotIndexed,
-            })
+            .map(|language| Uncovered::not_reached(*language, CoverageReason::NotIndexed))
             .collect(),
     };
     gaps.sort_by_key(|gap| gap.language.lsp_id());
@@ -331,8 +368,8 @@ pub enum DisclosureRoute {
 /// language or a cause the others do not. What differs is the wording,
 /// which turns on how the answer was built.
 pub fn symbol_coverage_hints(shortfall: &[Uncovered], route: DisclosureRoute) -> Vec<String> {
-    let mut hints: Vec<String> = shortfall
-        .iter()
+    let mut hints: Vec<String> = by_consequence(shortfall)
+        .into_iter()
         .map(|gap| {
             let lang = gap.language.lsp_id();
             match gap.reason {
@@ -345,16 +382,20 @@ pub fn symbol_coverage_hints(shortfall: &[Uncovered], route: DisclosureRoute) ->
                 CoverageReason::NotConsulted => format!(
                     "This result is not authoritative for {lang}: the index does not extract it, and --deterministic asked no language server"
                 ),
-                reason => match route {
-                    DisclosureRoute::IndexConsulted => format!(
-                        "This result is not authoritative for {lang}: the index did not answer for it and its language server is unavailable ({reason})",
-                        reason = reason.as_str()
-                    ),
-                    DisclosureRoute::WorkspaceOnly(_) => format!(
-                        "This result is not authoritative for {lang}: its workspace symbol lookup failed ({reason})",
-                        reason = reason.as_str()
-                    ),
-                },
+                reason => {
+                    let why = match &gap.message {
+                        Some(message) => format!(": {message}"),
+                        None => format!(" ({})", reason.as_str()),
+                    };
+                    match route {
+                        DisclosureRoute::IndexConsulted => format!(
+                            "This result is not authoritative for {lang}: the index did not answer for it and its language server is unavailable{why}"
+                        ),
+                        DisclosureRoute::WorkspaceOnly(_) => format!(
+                            "This result is not authoritative for {lang}: its workspace symbol lookup failed{why}"
+                        ),
+                    }
+                }
             }
         })
         .collect();
@@ -387,7 +428,7 @@ pub fn symbol_coverage_next_commands(
     shortfall: &[Uncovered],
     route: DisclosureRoute,
 ) -> Vec<String> {
-    let Some(gap) = shortfall.first() else {
+    let Some(gap) = by_consequence(shortfall).first().copied() else {
         return Vec::new();
     };
     let lang = gap.language.lsp_id();
@@ -830,16 +871,78 @@ pub fn relative_paths(ctx: &OutputContext, paths: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A server that is installed and fails is the gap to read first, in its
+    /// own words: languages with no server at all sort ahead of it by name,
+    /// and would otherwise fill the hints and pick the remedy.
+    #[test]
+    fn a_failed_server_leads_the_disclosure_and_says_why() {
+        let failures = [
+            (
+                Language::Css,
+                LspError::ServerNotInstalled {
+                    name: "css".to_string(),
+                    install_hint: "npm".to_string(),
+                },
+            ),
+            (
+                Language::Html,
+                LspError::ServerNotInstalled {
+                    name: "html".to_string(),
+                    install_hint: "npm".to_string(),
+                },
+            ),
+            (
+                Language::JavaScript,
+                LspError::ServerStart(
+                    "javascript language server: Could not find a valid TypeScript installation\n  at stack"
+                        .to_string(),
+                ),
+            ),
+        ];
+        let shortfall = coverage_shortfall(
+            &[],
+            LiveLookup::Ran {
+                failures: &failures,
+                skipped: &[],
+            },
+        );
+        let gaps: Vec<CoverageGap> = shortfall.iter().map(CoverageGap::from).collect();
+        assert_eq!(
+            gaps.iter().map(|g| g.language.as_str()).collect::<Vec<_>>(),
+            ["css", "html", "javascript"],
+            "the structured list keeps its order"
+        );
+        assert_eq!(gaps[0].message, None);
+        assert_eq!(
+            gaps[2].message.as_deref(),
+            Some(
+                "Failed to start server: javascript language server: Could not find a valid \
+                 TypeScript installation"
+            )
+        );
+
+        let route = DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced);
+        let hints = symbol_coverage_hints(&shortfall, route);
+        assert!(
+            hints[0].contains("javascript") && hints[0].contains("valid TypeScript installation"),
+            "{hints:?}"
+        );
+        assert!(
+            symbol_coverage_next_commands("q", &shortfall, route)
+                .contains(&"symora doctor javascript".to_string())
+        );
+    }
+
     /// An index that did not answer took no part in the answer, and each
     /// reason it did not has its own remedy. Read from the store outcome
     /// here — a surface that asserted the route instead prescribed narrowing
     /// a result the index had never produced.
     #[test]
     fn an_index_that_did_not_answer_never_reads_as_one_that_did() {
-        let shortfall = [Uncovered {
-            language: Language::Rust,
-            reason: CoverageReason::ServerNotInstalled,
-        }];
+        let shortfall = [Uncovered::not_reached(
+            Language::Rust,
+            CoverageReason::ServerNotInstalled,
+        )];
         let commands = |error: &StoreError| {
             symbol_coverage_next_commands(
                 "alpha",

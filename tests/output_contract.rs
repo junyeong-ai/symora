@@ -261,6 +261,7 @@ fn section_discloses_coverage_gaps() {
         Section::new(vec![]).with_coverage_gaps(vec![CoverageGap {
             language: "lua".to_string(),
             reason: "not_indexed".to_string(),
+            message: None,
         }]);
     assert_json_snapshot!(section, @r###"
     {

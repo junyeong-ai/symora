@@ -201,7 +201,7 @@ fn representative_failure(failures: Vec<(Language, LspError)>) -> Option<LspErro
 /// answer.
 fn coverage_gaps(failures: &[(Language, LspError)], skipped: &[Language]) -> Vec<CoverageGap> {
     coverage_shortfall(&[], LiveLookup::Ran { failures, skipped })
-        .into_iter()
+        .iter()
         .map(CoverageGap::from)
         .collect()
 }
@@ -1065,6 +1065,7 @@ mod tests {
             coverage_gaps: vec![CoverageGap {
                 language: "rust".to_string(),
                 reason: "server_not_installed".to_string(),
+                message: None,
             }],
             section: Section::new(Vec::<UsageResult>::new()),
         };
