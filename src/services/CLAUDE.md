@@ -15,7 +15,7 @@ Row mutation takes a turn rather than merging: `.symora/index.lock` (via `infra:
 
 Whether the index may be answered from is the durable completion marker, read in the same transaction as the rows it qualifies — never a flag a handle caches, or the daemon and a direct run would disagree about a build the other made. Every operation that destroys rows opens a build window first (marker off, epoch advanced) and may publish completion only while it still owns that epoch, so an interrupted, cleared, or overtaken build leaves a store that reads as never built — slower, never wrong. A search answers for the requested languages the marker covers and says which those are, so whatever the caller reads live is disjoint from what the index served. That marker is also what lets a build without one behind it drop the text-index triggers and build the whole FTS index in one pass at the end (an order of magnitude cheaper than a row at a time): nothing consults an index that has not published, opening the store restores the triggers, and the next build takes the same path and rebuilds. A build that *does* inherit a published index keeps them, because one pass over the whole table would cost more than the rows it changes.
 
-The build scope recorded at index time is load-bearing, not bookkeeping: `content_languages` (the languages whose files the build indexed) and `indexed_languages` (those of them with a symbol extractor) derive from it, and search routes on those sets — a covered language is answered from the index alone, an uncovered one is the only reason to pay for a live workspace query or a scan of the tree. The unrestricted scope is `INDEXED_LANGUAGES`, and a language's coverage is every extension it declares, never a hand-kept extension list that can drift from `Language::extensions`. Widening what a build claims to cover silently widens what search treats as authoritative.
+The build scope recorded at index time is load-bearing, not bookkeeping: `content_languages` (the languages whose files the build indexed) and `indexed_languages` (those of them with a symbol extractor) derive from it, and search routes on those sets — a covered language is answered from the index alone, an uncovered one is the only reason to pay for a live workspace query or a scan of the tree. The unrestricted scope is every code language (`Language::is_code`), and a language's coverage is every extension it declares, never a hand-kept extension list that can drift from `Language::extensions`. Widening what a build claims to cover silently widens what search treats as authoritative.
 
 ## Test-versus-production classification
 
@@ -38,7 +38,7 @@ Both implementations of a trait must produce identical results for the same inpu
 
 ## Symbol cache invalidation
 
-`SymbolCache` keys on `(path, content_hash)`. Editing a file changes the hash and invalidates the entry — don't add path-only invalidation paths that break this. Eviction is oldest-first by insertion time (`created_at`, not touched on read) with a configurable `max_entries` cap; size limits are enforced, not advisory.
+`SymbolCache` holds one entry per path, valid only while the file's content hash matches the one it was computed from, so editing a file invalidates its entry — don't add path-only invalidation paths that break this. Entries also expire after a TTL, and eviction is oldest-first by insertion time (`created_at`, not touched on read) at the `max_entries` cap; size limits are enforced, not advisory.
 
 ## Fallback strategy
 

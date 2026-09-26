@@ -17,7 +17,7 @@ CLI inputs and JSON outputs use **1-indexed lines** and **1-indexed Unicode-scal
 ## Two axes, converted differently
 
 - **Line** — a flat shift. CLI → LSP `line - 1`; LSP → CLI `line + 1` (`saturating_sub(1)` guards the `u32` floor).
-- **Column** — a scalar ↔ encoded-offset transcode against that line's text, keyed by the negotiated encoding. `column - 1` yields the *scalar* index only; turning a scalar index into a wire offset (or back) goes through `PositionConverter`, never raw arithmetic.
+- **Column** — a scalar ↔ encoded-offset transcode against that line's text, keyed by the negotiated encoding. `column - 1` yields the *scalar* index only; turning a scalar index into a wire offset (or back) goes through the transcoders in `services/lsp/position.rs`, never raw arithmetic.
 
 For pure ASCII the two collapse (scalar == byte == UTF-16 unit), which is why a missed transcode passes every ASCII test and corrupts the first line holding a multi-byte or non-BMP character.
 
@@ -28,7 +28,7 @@ For pure ASCII the two collapse (scalar == byte == UTF-16 unit), which is why a 
 ## Where conversions live
 
 - `src/cli/location.rs` — parses `file:line[:column]` inputs (1-indexed scalar; an omitted column is tracked by `column_explicit`).
-- `src/services/lsp/position.rs` — the boundary converter `PositionConverter`: `scalar_to_wire` (outbound scalar column → wire offset), `scalar_column_disclosed` (inbound wire offset → 1-indexed scalar column **plus a `degraded` flag**), `scalar_offset` (inbound wire offset → 0-indexed scalar, for raw model `Position`s that carry no degradation flag), `encoded_offset_to_scalar` / `encoded_offset_to_byte`, `floor_char_boundary` (clamp a stray offset to a char edge), seeded per file with `with_content`.
+- `src/services/lsp/position.rs` — the boundary transcoders. Free functions: `scalar_to_wire` (outbound scalar column → wire offset), `encoded_offset_to_scalar` / `encoded_offset_to_byte`, `floor_char_boundary` (clamp a stray offset to a char edge). `PositionConverter`, seeded per file with `with_content`: `scalar_column_disclosed` (inbound wire offset → 1-indexed scalar column **plus a `degraded` flag**), `scalar_offset` (inbound wire offset → 0-indexed scalar, for raw model `Position`s that carry no degradation flag).
 - `src/services/lsp/helpers.rs` — `to_lsp_position(line, column, content, encoding)` builds an outbound `Position`: `line - 1` plus `scalar_to_wire`.
 - `src/services/lsp/converters.rs` — inbound LSP range → model `Location`: every returned column is decoded through `PositionConverter::scalar_column_disclosed`, which yields the 1-indexed scalar column and whether it was degraded; the flag is threaded onto `Location::degraded_column`. Every new inbound reader that builds a `Location` follows this; an undecoded range, or a decoded one that drops the flag, is the bug below.
 - `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the wire adds no conversion: each position crosses in whatever indexing its model type already carries (`Location` is 1-indexed scalar; raw LSP `Position`/`Range` payloads stay 0-indexed/encoded).

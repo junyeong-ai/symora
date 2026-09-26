@@ -259,11 +259,12 @@ impl WorkspaceSymbolCache {
     /// workspace-content `generation` it was computed under (see
     /// `infra::lsp::content_generation`). What bumps the generation: our
     /// own writes (`note_files_edited` after every edit), open-overlay
-    /// drift picked up by the pre-request sweep, and client start (a
-    /// fresh server is a fresh world). An EXTERNAL edit to a file no
-    /// server has open is the one change the generation cannot see — that
-    /// staleness is bounded by the TTL, which is why the TTL is short
-    /// rather than memory-only.
+    /// drift picked up by the pre-request sweep, a change on disk the
+    /// workspace watcher reports, and client start (a fresh server is a
+    /// fresh world). Where the workspace cannot be watched, an EXTERNAL edit
+    /// to a file no server has open is the one change the generation cannot
+    /// see — that staleness is bounded by the TTL, which is why the TTL is
+    /// short rather than memory-only.
     ///
     /// Answers computed under degraded indexing are returned with their
     /// marker but never cached: the server is still warming, and serving
