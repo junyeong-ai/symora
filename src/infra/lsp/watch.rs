@@ -187,6 +187,39 @@ impl WorkspaceWatcher {
         Ok((this, events, watch_root))
     }
 
+    /// Watch the tree afresh once events were lost. On Linux the watch
+    /// follows the tree through its own events, so a loss leaves it without
+    /// the directories created meanwhile, and a directory renamed meanwhile
+    /// still watched under its old path; elsewhere one recursive watch
+    /// covers both.
+    pub fn rewatch(&mut self, watch_root: &Path) -> notify::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            // Paths that are gone are unwatched before the walk: a renamed
+            // directory's one watch is named by its old path and, once the
+            // walk adds it, its new one, and unwatching the old path after
+            // that would take the new path's watch with it.
+            let gone: Vec<PathBuf> = self
+                .watched
+                .iter()
+                .filter(|path| !path.symlink_metadata().is_ok_and(|meta| meta.is_dir()))
+                .cloned()
+                .collect();
+            for path in gone {
+                let _ = self.watcher.unwatch(&path);
+            }
+            // Every directory is added again, not only those missing: one
+            // replaced meanwhile is a new directory at a watched path. Adding
+            // a directory already watched takes no second watch.
+            self.watched.clear();
+            self.warned = false;
+            self.watch_root(watch_root)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = watch_root;
+        Ok(())
+    }
+
     /// Keep the watch over the tree `changes` describe, and add to them the
     /// files inside each directory that appeared. A directory moved in, or
     /// created before a watch covered it, is reported as the directory
@@ -784,6 +817,38 @@ mod tests {
 
         let mut changes = vec![change(root.join("pkg").to_str().unwrap(), Created)];
         watcher.follow(&mut changes, &watch_root, &root);
+        std::fs::write(root.join("pkg/a.go"), "").unwrap();
+
+        assert!(arrives(&mut events, &root.join("pkg/a.go")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_created_while_events_were_lost_is_watched_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (mut watcher, mut events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        // Its creation is never followed, as when that event is lost.
+        std::fs::create_dir_all(root.join("pkg/sub")).unwrap();
+
+        watcher.rewatch(&watch_root).unwrap();
+        std::fs::write(root.join("pkg/sub/a.go"), "").unwrap();
+
+        assert!(arrives(&mut events, &root.join("pkg/sub/a.go")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_replaced_while_events_were_lost_is_watched_afresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+        let (mut watcher, mut events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        // Neither change is followed, as when those events are lost.
+        std::fs::remove_dir(root.join("pkg")).unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+
+        watcher.rewatch(&watch_root).unwrap();
         std::fs::write(root.join("pkg/a.go"), "").unwrap();
 
         assert!(arrives(&mut events, &root.join("pkg/a.go")));
