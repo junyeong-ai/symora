@@ -215,15 +215,14 @@ impl LspError {
         let lower = message.to_lowercase();
 
         if lower.contains("rename") {
-            "Rename not supported. Try: symora search text \"<symbol>\" to find occurrences".into()
+            "Rename not supported. Find its occurrences with: symora search content \"<symbol>\""
+                .into()
         } else if lower.contains("callhierarchy") || lower.contains("call_hierarchy") {
-            "Call hierarchy not supported. Try: symora find refs <location>".into()
+            "Call hierarchy not supported. Try: symora refs <location>".into()
         } else if lower.contains("implementation") {
-            "Find implementations not supported. Try: symora find refs <location>".into()
+            "Find implementations not supported. Try: symora refs <location>".into()
         } else if lower.contains("typedefinition") || lower.contains("type_definition") {
-            "Type definition not supported. Try: symora find def <location>".into()
-        } else if lower.contains("preparecallhierarchy") {
-            "Call hierarchy not supported. Try: symora find refs <location>".into()
+            "Type definition not supported. Try: symora def <location>".into()
         } else {
             format!("Feature not supported: {}", message)
         }
@@ -433,6 +432,25 @@ mod tests {
         // mechanical retry onto every caller.
         let err = LspError::server_error_friendly(-32801, "content modified".to_string());
         assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn a_missing_method_suggests_commands_that_exist() {
+        for method in [
+            "textDocument/rename",
+            "textDocument/prepareCallHierarchy",
+            "callHierarchy/incomingCalls",
+            "textDocument/implementation",
+            "textDocument/typeDefinition",
+        ] {
+            let LspError::ServerError { message, .. } =
+                LspError::server_error_friendly(-32601, format!("Unhandled method {method}"))
+            else {
+                panic!("-32601 stays a server error");
+            };
+            assert!(message.contains("symora "), "{method}: {message}");
+            crate::cli::assert_named_commands_parse(&message);
+        }
     }
 
     #[test]
