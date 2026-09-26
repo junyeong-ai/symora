@@ -248,6 +248,8 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         .await
     };
     unmeasured_files.extend(unreadable);
+    let mut listed = HashSet::new();
+    unmeasured_files.retain(|file| listed.insert(file.clone()));
     if stopped_at_cap {
         // The cause of `incomplete` leads the hints.
         hints.insert(0, LowerBound::AnalysisCapped(args.max_symbols).hint());
@@ -561,8 +563,9 @@ fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<PathBuf> {
 }
 
 /// What the patch says: the hunks it names, the files whose content changed
-/// but which git diffs as binary, naming no lines, and the symbolic links
-/// whose lines are where they point rather than source.
+/// but which git diffs as binary, naming no lines, and the files whose
+/// current version is a symbolic link, whose lines are where it points
+/// rather than source.
 struct ParsedDiff {
     hunks: Vec<DiffHunk>,
     binary: Vec<PathBuf>,
@@ -590,9 +593,14 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
             old_file = None;
             current_file = None;
             block_file = same_path_header(rest).map(|p| root.join(path_from_git(&p)));
-        } else if in_header && !in_link && names_a_link(line) {
+        } else if in_header
+            && !in_link
+            && let Some(side) = link_side(line)
+        {
             in_link = true;
-            links.extend(block_file.clone());
+            if side == LinkSide::Current {
+                links.extend(block_file.clone());
+            }
         } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
             block_file = git_path(rest).map(|(path, _)| root.join(path_from_git(&path)));
         } else if in_header && line.starts_with("Binary files ") {
@@ -627,16 +635,28 @@ fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
     }
 }
 
-/// Whether a block header line gives the file git's symbolic-link mode, on
-/// either side of the change.
-fn names_a_link(line: &str) -> bool {
+/// Which side of a block's change is a symbolic link. A path that changes
+/// between a link and a regular file comes as two blocks, one per side.
+#[derive(PartialEq)]
+enum LinkSide {
+    /// The file's current version is the link.
+    Current,
+    /// Only the removed version was.
+    Removed,
+}
+
+/// The side a block header line gives git's symbolic-link mode, if any.
+fn link_side(line: &str) -> Option<LinkSide> {
     const LINK: &str = "120000";
-    line.strip_prefix("new file mode ") == Some(LINK)
-        || line.strip_prefix("deleted file mode ") == Some(LINK)
+    if line.strip_prefix("deleted file mode ") == Some(LINK) {
+        return Some(LinkSide::Removed);
+    }
+    let current = line.strip_prefix("new file mode ") == Some(LINK)
         || line
             .strip_prefix("index ")
             .and_then(|rest| rest.split_once(' '))
-            .is_some_and(|(_, mode)| mode == LINK)
+            .is_some_and(|(_, mode)| mode == LINK);
+    current.then_some(LinkSide::Current)
 }
 
 /// The path of a `diff --git a/X b/X` header whose two sides are the same
@@ -1230,14 +1250,27 @@ mod tests {
                     index 4444444..5555555 100644\n\
                     --- a/m.py\n\
                     +++ b/m.py\n\
-                    @@ -1 +1 @@\n";
+                    @@ -1 +1 @@\n\
+                    diff --git a/was.py b/was.py\n\
+                    deleted file mode 120000\n\
+                    index 6666666..0000000\n\
+                    --- a/was.py\n\
+                    +++ /dev/null\n\
+                    @@ -1 +0,0 @@\n\
+                    -v1.py\n\
+                    diff --git a/was.py b/was.py\n\
+                    new file mode 100644\n\
+                    index 0000000..7777777\n\
+                    --- /dev/null\n\
+                    +++ b/was.py\n\
+                    @@ -0,0 +1,2 @@\n";
         let parsed = parse_diff_output(diff, root);
         assert_eq!(
             parsed.links,
             [root.join("alias.py"), root.join("current.py")]
         );
-        assert_eq!(parsed.hunks.len(), 1);
-        assert_eq!(parsed.hunks[0].file, root.join("m.py"));
+        let files: Vec<&PathBuf> = parsed.hunks.iter().map(|h| &h.file).collect();
+        assert_eq!(files, [&root.join("m.py"), &root.join("was.py")]);
     }
 
     #[test]

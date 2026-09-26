@@ -1682,20 +1682,27 @@ fn a_symbolic_link_is_counted_but_not_read_through() {
     std::fs::write(repo.join("v1.py"), "def one():\n    return 1\n").unwrap();
     std::fs::write(repo.join("v2.py"), "def two():\n    return 2\n").unwrap();
     std::os::unix::fs::symlink("v1.py", repo.join("current.py")).unwrap();
+    std::os::unix::fs::symlink("v1.py", repo.join("was_link.py")).unwrap();
+    std::fs::write(repo.join("blob.py"), b"\0binary").unwrap();
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "one"]);
     std::fs::remove_file(repo.join("current.py")).unwrap();
     std::os::unix::fs::symlink("v2.py", repo.join("current.py")).unwrap();
     std::os::unix::fs::symlink("v1.py", repo.join("alias.py")).unwrap();
+    std::fs::remove_file(repo.join("was_link.py")).unwrap();
+    std::fs::write(repo.join("was_link.py"), "def three():\n    return 3\n").unwrap();
+    std::fs::remove_file(repo.join("blob.py")).unwrap();
+    std::os::unix::fs::symlink("v1.py", repo.join("blob.py")).unwrap();
     git(repo, &["add", "-A"]);
 
     let page = json_ok(repo, &["diff-impact"]);
-    assert_eq!(page["changed_files_count"], 2, "{page}");
-    assert_eq!(page["changes"], serde_json::json!([]), "{page}");
+    assert_eq!(page["changed_files_count"], 4, "{page}");
+    assert_eq!(page["changes"][0]["name"], "three", "{page}");
+    assert_eq!(page["changes"].as_array().map(Vec::len), Some(1), "{page}");
     assert_eq!(
         page["unmeasured_files"],
-        serde_json::json!(["alias.py", "current.py"]),
-        "{page}"
+        serde_json::json!(["blob.py", "alias.py", "current.py"]),
+        "a link or binary is listed once, a regular file measured is not: {page}"
     );
 }
 
