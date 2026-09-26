@@ -49,9 +49,10 @@ pub struct DiffImpactOutput {
     /// Files whose changes could not be measured: nothing could read their
     /// symbols, git reports them as binary and names no lines, or — with
     /// `--staged` — unstaged edits sit over the staged ones, so the lines the
-    /// diff names are not the lines on disk. Their
-    /// changes are absent from `changes`, so the result is a lower bound for
-    /// these files; `hints` says which cause applies. Omitted when empty.
+    /// diff names are not the lines on disk. Their changes are absent from
+    /// `changes`, so the result is a lower bound for these files. `hints`
+    /// names the binary and staged causes; a file listed without one is one
+    /// whose symbols could not be read. Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unmeasured_files: Vec<String>,
     /// The analysis stopped before running out of changed symbols, so every
@@ -155,6 +156,9 @@ pub enum DeletionResolution {
 
 struct DiffHunk {
     file: PathBuf,
+    /// The path the pre-image names the file by: `file`, unless the diff
+    /// renamed it.
+    old_file: PathBuf,
     /// New-file coordinates — used to locate Added/Modified symbols in the
     /// current tree.
     start_line: u32,
@@ -172,7 +176,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     let test_scope = app.test_scope();
 
     let base = resolve_base(root, &args.revision)?;
-    let mut hunks = parse_git_diff(root, base.tree_ish(), args.staged)?;
+    let ParsedDiff { mut hunks, binary } = parse_git_diff(root, base.tree_ish(), args.staged)?;
     let changed_files = changed_files(root, base.tree_ish(), args.staged)?;
     let mut hints = Vec::new();
     let mut unmeasured_files = Vec::new();
@@ -188,11 +192,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         ));
     }
 
-    let binary: BTreeSet<String> = changed_files
-        .iter()
-        .filter(|file| file.binary)
-        .map(|file| relative_display(&file.path, root))
-        .collect();
+    let binary: BTreeSet<String> = binary.iter().map(|f| relative_display(f, root)).collect();
     if !binary.is_empty() {
         hints.push(format!(
             "git reports {} as binary, so which of their lines changed is not known; a `-diff` \
@@ -422,14 +422,17 @@ fn relative_display(file: &Path, root: &Path) -> String {
 
 /// Paths are relative to `root` and limited to it (`--relative`), which need
 /// not be the repository's top level.
-fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Vec<DiffHunk>> {
+fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<ParsedDiff> {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
     // Every option that shapes the patch text is set here, so the user's
     // diff configuration cannot reshape what the parser reads: an external
     // diff prints no patch, textconv moves lines off the file's own, other
-    // prefixes rename the files, and inter-hunk context — or context from
-    // GIT_DIFF_OPTS, which outranks `--unified` — takes in unchanged lines.
+    // prefixes rename the files, inter-hunk context — or context from
+    // GIT_DIFF_OPTS, which outranks `--unified` — takes in unchanged lines,
+    // copy or no rename detection changes which files are new, and a
+    // submodule setting hides a changed submodule or prints it as a log.
+    // The rename and submodule choices are git's defaults.
     cmd.env_remove("GIT_DIFF_OPTS");
     cmd.args([
         "-c",
@@ -443,6 +446,9 @@ fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Vec<DiffHunk>
         "--no-textconv",
         "--src-prefix=a/",
         "--dst-prefix=b/",
+        "--find-renames",
+        "--submodule=short",
+        "--ignore-submodules=none",
     ]);
     if staged {
         cmd.arg("--cached");
@@ -460,17 +466,10 @@ fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<Vec<DiffHunk>
     Ok(parse_diff_output(&diff_output, root))
 }
 
-/// A file the diff changes. `binary` when git diffs it as binary, so its
-/// patch names no lines.
-struct ChangedFile {
-    path: PathBuf,
-    binary: bool,
-}
-
 /// Every file the diff changes, from the same diff's `--numstat`. The patch
 /// alone would miss those it names no lines for: an empty file, a mode
 /// change, a pure rename, and a file git diffs as binary.
-fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<ChangedFile>> {
+fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<PathBuf>> {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
     cmd.args([
@@ -480,6 +479,8 @@ fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<ChangedFil
         "-z",
         "--no-ext-diff",
         "--no-textconv",
+        "--find-renames",
+        "--ignore-submodules=none",
     ]);
     if staged {
         cmd.arg("--cached");
@@ -497,9 +498,8 @@ fn changed_files(root: &Path, base: &str, staged: bool) -> Result<Vec<ChangedFil
 }
 
 /// `--numstat -z` writes `added<TAB>deleted<TAB>path<NUL>`, or for a rename
-/// `added<TAB>deleted<TAB><NUL>old<NUL>new<NUL>`; a binary file counts `-`
-/// for both.
-fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<ChangedFile> {
+/// `added<TAB>deleted<TAB><NUL>old<NUL>new<NUL>`.
+fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<PathBuf> {
     let mut fields = numstat.split(|&b| b == 0);
     let mut files = Vec::new();
     while let Some(record) = fields.next() {
@@ -507,10 +507,7 @@ fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<ChangedFile> {
             continue;
         }
         let record = String::from_utf8_lossy(record);
-        let mut columns = record.splitn(3, '\t');
-        let (added, deleted) = (columns.next(), columns.next());
-        let binary = added == Some("-") && deleted == Some("-");
-        let path = match columns.next() {
+        let path = match record.splitn(3, '\t').nth(2) {
             Some("") | None => {
                 fields.next();
                 fields
@@ -520,23 +517,29 @@ fn parse_numstat(numstat: &[u8], root: &Path) -> Vec<ChangedFile> {
             Some(path) => Some(path.to_string()),
         };
         if let Some(path) = path {
-            files.push(ChangedFile {
-                path: root.join(path),
-                binary,
-            });
+            files.push(root.join(path));
         }
     }
     files
 }
 
-fn parse_diff_output(diff: &str, root: &Path) -> Vec<DiffHunk> {
+/// What the patch says: the hunks it names, and the files whose content
+/// changed but which git diffs as binary, naming no lines.
+struct ParsedDiff {
+    hunks: Vec<DiffHunk>,
+    binary: Vec<PathBuf>,
+}
+
+fn parse_diff_output(diff: &str, root: &Path) -> ParsedDiff {
     let mut hunks = Vec::new();
+    let mut binary = Vec::new();
     let mut old_file: Option<PathBuf> = None;
     let mut current_file: Option<PathBuf> = None;
+    let mut block_file: Option<PathBuf> = None;
     let mut in_header = false;
 
     for line in diff.lines() {
-        if line.starts_with("diff --git ") {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
             // Each file block starts here; only its `---`/`+++` lines before
             // the first `@@` name the file. A `---`/`+++` line after a hunk is
             // deleted/added content (e.g. a Lua `--` comment becomes `--- …`)
@@ -544,6 +547,11 @@ fn parse_diff_output(diff: &str, root: &Path) -> Vec<DiffHunk> {
             in_header = true;
             old_file = None;
             current_file = None;
+            block_file = same_path_header(rest).map(|p| root.join(p));
+        } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
+            block_file = Some(root.join(rest));
+        } else if in_header && line.starts_with("Binary files ") {
+            binary.extend(block_file.clone());
         } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
             old_file = diff_header_path(rest).map(|p| root.join(p));
         } else if in_header && let Some(rest) = line.strip_prefix("+++ ") {
@@ -556,14 +564,27 @@ fn parse_diff_output(diff: &str, root: &Path) -> Vec<DiffHunk> {
         } else if line.starts_with("@@ ") {
             in_header = false;
             if let Some(ref file) = current_file
-                && let Some(hunk) = parse_hunk_header(line, file.clone())
+                && let Some(mut hunk) = parse_hunk_header(line, file.clone())
             {
+                if let Some(old) = &old_file {
+                    hunk.old_file = old.clone();
+                }
                 hunks.push(hunk);
             }
         }
     }
 
-    hunks
+    ParsedDiff { hunks, binary }
+}
+
+/// The path of a `diff --git a/X b/X` header whose two sides are the same
+/// path, as every block's are but a rename's (whose `rename to` line names
+/// it). Split at its middle, a path holding spaces is still unambiguous.
+fn same_path_header(rest: &str) -> Option<&str> {
+    let rest = rest.strip_prefix("a/")?;
+    let half = rest.len().checked_sub(3)? / 2;
+    let (old, new) = (rest.get(..half)?, rest.get(half..)?);
+    (new.strip_prefix(" b/")? == old).then_some(old)
 }
 
 /// The path inside a `--- `/`+++ ` diff header: strips the `a/`/`b/` prefix and
@@ -609,6 +630,7 @@ fn parse_hunk_header(header: &str, file: PathBuf) -> Option<DiffHunk> {
     // onto a current-tree line, which would map a deletion onto a live
     // neighbour and attribute its references to the deleted symbol.
     Some(DiffHunk {
+        old_file: file.clone(),
         file,
         start_line: new_start,
         line_count: new_count,
@@ -732,7 +754,7 @@ async fn analyze_hunks(
                 stopped_at_cap = true;
                 break;
             }
-            let deleted_rows = resolve_deleted_hunk(root, preimage_ref, file, hunk);
+            let deleted_rows = resolve_deleted_hunk(root, preimage_ref, hunk);
             // Reclassify ONLY a verified body-line deletion: the pre-image was
             // read and declared no symbol in the deleted range, so a surviving
             // symbol was Modified. A `PreimageUnavailable` row is NOT eligible —
@@ -949,9 +971,9 @@ async fn analyze_symbol_impact(
 fn resolve_deleted_hunk(
     root: &Path,
     preimage_ref: &str,
-    file: &Path,
     hunk: &DiffHunk,
 ) -> Vec<ChangedSymbolImpact> {
+    let file = &hunk.old_file;
     let deletion_row = |resolution| ChangedSymbolImpact {
         name: None,
         kind: None,
@@ -1033,23 +1055,56 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn every_changed_file_is_read_from_numstat_and_binary_ones_marked() {
+    fn every_changed_file_is_read_from_numstat() {
         let root = Path::new("/r");
         let numstat = b"1\t1\tm.py\x000\t0\tempty.py\x00-\t-\tlogo.png\x00-\t-\t\x00old.bin\x00new.bin\x002\t0\t\x00a.py\x00b.py\x00";
-        let files: Vec<(PathBuf, bool)> = parse_numstat(numstat, root)
-            .into_iter()
-            .map(|file| (file.path, file.binary))
-            .collect();
         assert_eq!(
-            files,
-            [
-                (root.join("m.py"), false),
-                (root.join("empty.py"), false),
-                (root.join("logo.png"), true),
-                (root.join("new.bin"), true),
-                (root.join("b.py"), false),
-            ]
+            parse_numstat(numstat, root),
+            ["m.py", "empty.py", "logo.png", "new.bin", "b.py"].map(|p| root.join(p))
         );
+    }
+
+    #[test]
+    fn a_binary_file_is_one_whose_content_changed() {
+        let root = Path::new("/r");
+        let diff = "diff --git a/logo.png b/logo.png\n\
+                    index 1111111..2222222 100644\n\
+                    Binary files a/logo.png and b/logo.png differ\n\
+                    diff --git a/icon.png b/icon.png\n\
+                    old mode 100644\n\
+                    new mode 100755\n\
+                    diff --git a/old.bin b/new.bin\n\
+                    similarity index 60%\n\
+                    rename from old.bin\n\
+                    rename to new.bin\n\
+                    index 3333333..4444444\n\
+                    Binary files a/old.bin and b/new.bin differ\n\
+                    diff --git a/my file.png b/my file.png\n\
+                    index 5555555..6666666 100644\n\
+                    Binary files a/my file.png and b/my file.png differ\n\
+                    diff --git a/add.png b/add.png\n\
+                    new file mode 100644\n\
+                    index 0000000..7777777\n\
+                    Binary files /dev/null and b/add.png differ\n";
+        assert_eq!(
+            parse_diff_output(diff, root).binary,
+            ["logo.png", "new.bin", "my file.png", "add.png"].map(|p| root.join(p))
+        );
+    }
+
+    #[test]
+    fn a_hunk_in_a_renamed_file_reads_its_preimage_from_the_old_path() {
+        let root = Path::new("/r");
+        let diff = "diff --git a/old.py b/new.py\n\
+                    similarity index 80%\n\
+                    rename from old.py\n\
+                    rename to new.py\n\
+                    --- a/old.py\n\
+                    +++ b/new.py\n\
+                    @@ -5,2 +4,0 @@\n";
+        let hunks = parse_diff_output(diff, root).hunks;
+        assert_eq!(hunks[0].file, root.join("new.py"));
+        assert_eq!(hunks[0].old_file, root.join("old.py"));
     }
 
     // ---------------------------------------------------------------
@@ -1315,7 +1370,7 @@ mod tests {
     #[test]
     fn parse_diff_output_empty_input() {
         let root = Path::new("/project");
-        let hunks = parse_diff_output("", root);
+        let hunks = parse_diff_output("", root).hunks;
         assert!(hunks.is_empty());
     }
 
@@ -1328,7 +1383,7 @@ diff --git a/src/main.rs b/src/main.rs
 +++ b/src/main.rs
 @@ -10,3 +10,5 @@ fn main() {";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].file, root.join("src/main.rs"));
         assert_eq!(hunks[0].start_line, 10);
@@ -1350,7 +1405,7 @@ diff --git a/src/lib.rs b/src/lib.rs
 -    removed_line_1();
 -    removed_line_2();";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 2);
 
         assert_eq!(hunks[0].file, root.join("src/lib.rs"));
@@ -1376,7 +1431,7 @@ diff --git a/src/bar.rs b/src/bar.rs
 @@ -10,2 +10,3 @@ fn bar() {
 @@ -30,5 +31,0 @@ fn baz() {";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 3);
 
         // First file: pure addition
@@ -1412,7 +1467,7 @@ diff --git a/src/main.rs b/src/main.rs
 +++ b/src/main.rs
 @@ -5,1 +5,2 @@ fn main() {";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].file, root.join("src/main.rs"));
         assert_eq!(hunks[0].start_line, 5);
@@ -1430,7 +1485,7 @@ diff --git a/src/old.rs b/src/old.rs
 +++ /dev/null
 @@ -1,10 +0,0 @@";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].file, root.join("src/old.rs"));
         assert_eq!(hunks[0].old_start, 1);
@@ -1454,7 +1509,7 @@ diff --git a/src/with space.rs b/src/with space.rs
 +++ b/src/with space.rs\t
 @@ -1,1 +1,2 @@";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 2);
         assert_eq!(hunks[0].file, root.join("src/모듈.rs"));
         assert_eq!(hunks[1].file, root.join("src/with space.rs"));
@@ -1473,7 +1528,7 @@ diff --git a/x.lua b/x.lua
 --- old comment
 +++ new comment";
 
-        let hunks = parse_diff_output(diff, root);
+        let hunks = parse_diff_output(diff, root).hunks;
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].file, root.join("x.lua"));
     }

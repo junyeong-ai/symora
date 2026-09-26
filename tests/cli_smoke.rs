@@ -1475,6 +1475,109 @@ fn a_change_that_names_no_lines_is_still_counted() {
     assert!(page["hints"].is_null(), "{page}");
 }
 
+/// Rename detection is git's default whatever the user set, so a rename, a
+/// copy and the deletions inside a renamed file are measured the same under
+/// any `diff.renames`, and a deletion is read from the path the base held it
+/// at.
+#[cfg(unix)]
+#[test]
+fn a_rename_is_measured_the_same_whatever_the_rename_setting() {
+    let functions = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("def {name}():\n    return 1\n\n\n"))
+            .collect::<String>()
+    };
+    let rows = |page: &serde_json::Value| {
+        let mut rows: Vec<String> = page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} {} {} {}",
+                    c["name"], c["change_type"], c["deletion"], c["location"]["file"]
+                )
+            })
+            .collect();
+        rows.sort_unstable();
+        rows
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("orig.py"), functions(&["a", "b", "c", "d"])).unwrap();
+    std::fs::write(
+        repo.join("old.py"),
+        functions(&["keep", "gone", "e1", "e2", "e3", "edit"]),
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("orig.py"),
+        functions(&["a", "b", "c", "d"]).replacen("return 1", "return 10", 1),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("copy.py"),
+        functions(&["a", "b", "c", "d", "extra"]),
+    )
+    .unwrap();
+    git(repo, &["mv", "old.py", "new.py"]);
+    std::fs::write(
+        repo.join("new.py"),
+        functions(&["keep", "e1", "e2", "e3", "edit"])
+            .replace("def edit():\n    return 1", "def edit():\n    return 30"),
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+
+    let baseline = rows(&json_ok(repo, &["diff-impact"]));
+    for row in [
+        r#""gone" "deleted" "resolved" "old.py""#,
+        r#""edit" "modified" null "new.py""#,
+        r#""a" "added" null "copy.py""#,
+        r#""extra" "added" null "copy.py""#,
+    ] {
+        assert!(baseline.iter().any(|r| r == row), "{row} in {baseline:#?}");
+    }
+    for (key, value) in [("diff.renames", "false"), ("diff.renames", "copies")] {
+        git(repo, &["config", key, value]);
+        let page = json_ok(repo, &["diff-impact"]);
+        git(repo, &["config", "--unset", key]);
+        assert_eq!(rows(&page), baseline, "{key}={value}");
+    }
+}
+
+/// A file git diffs as binary is unmeasured only when its content changed: a
+/// mode change or a pure rename changes none of its lines.
+#[cfg(unix)]
+#[test]
+fn a_binary_file_whose_content_is_unchanged_is_not_unmeasured() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("gen.py"), "def g():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("blob.py"), "def b():\n    return 1\n").unwrap();
+    std::fs::write(repo.join(".git/info/attributes"), "*.py -diff\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::set_permissions(repo.join("gen.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(repo, &["mv", "blob.py", "moved.py"]);
+    git(repo, &["add", "-A"]);
+
+    let page = json_ok(repo, &["diff-impact"]);
+    assert_eq!(page["changed_files_count"], 2, "{page}");
+    assert!(page["unmeasured_files"].is_null(), "{page}");
+    assert!(page["hints"].is_null(), "{page}");
+}
+
 /// A file git reports as binary names no changed lines, so it is counted
 /// and disclosed rather than dropped.
 #[cfg(unix)]
