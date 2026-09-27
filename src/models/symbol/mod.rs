@@ -360,11 +360,12 @@ impl Symbol {
     }
 
     /// Normalize a raw LSP documentSymbol name into the segment used for
-    /// symbol paths. Functions/methods drop their parameter list and
-    /// generics; an `impl` block collapses to its bare implementing type, so
-    /// a method reads `Type/method` on every surface — `impl Foo`,
-    /// `impl Trait for Foo`, and `impl<T> Foo<T>` all yield `Foo`, matching
-    /// the index extractor (which keys on the impl's self type, not the trait).
+    /// symbol paths, the name the index extractor reads for the same
+    /// declaration (`declared_name`); an `impl` block
+    /// collapses to its bare implementing type, so a method reads
+    /// `Type/method` on every surface — `impl Foo`, `impl Trait for Foo`, and
+    /// `impl<T> Foo<T>` all yield `Foo`, matching the index extractor (which
+    /// keys on the impl's self type, not the trait).
     pub fn normalize_symbol_name(name: &str) -> String {
         let name = name.trim();
         if let Some(rest) = name.strip_prefix("impl")
@@ -372,7 +373,7 @@ impl Symbol {
         {
             return Self::self_type_segment(rest);
         }
-        Self::strip_type_parameters(name)
+        Self::declared_name(name)
     }
 
     /// Reduce a self-type expression to its path segment — the one rule every
@@ -504,22 +505,84 @@ impl Symbol {
         s
     }
 
-    fn strip_type_parameters(name: &str) -> String {
-        let name = name.trim();
-
-        let name = if let Some(paren_pos) = name.find('(') {
-            &name[..paren_pos]
-        } else {
-            name
+    /// The name a server's label gives a declaration. A parameter list or
+    /// type parameters after it are dropped (`foo(int)`, `Foo<T>`), a
+    /// qualifier's type arguments kept (`Box<T>::get`), and so is
+    /// a Go method's receiver before it (gopls: `(*Server).Start`). An
+    /// operator keeps its symbols: a label that begins with them names the
+    /// operator (sourcekit-lsp: `<(lhs:rhs:)` is `<`), and so does the
+    /// `operator` keyword followed by one, qualified or not (clangd:
+    /// `operator<`, `Money::operator()`) — as would a method of another
+    /// language named `operator` whose server writes an empty parameter list
+    /// after it. A label that is an
+    /// anonymous marker as a whole (tsserver: `<function>`) names nothing.
+    fn declared_name(label: &str) -> String {
+        let label = label.trim();
+        let is_marker = label
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+            .is_some_and(|word| !word.is_empty() && word.chars().all(|c| c.is_ascii_alphabetic()));
+        if is_marker {
+            return String::new();
+        }
+        let label = label
+            .strip_prefix('(')
+            .and_then(|rest| rest.split_once(")."))
+            .map_or(label, |(_, name)| name);
+        let is_identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+        let (qualifier, unqualified) = match label.rfind("::operator") {
+            Some(at) => label.split_at(at + "::".len()),
+            None => ("", label),
         };
+        if let Some(symbol) = unqualified.strip_prefix("operator")
+            && (symbol.starts_with("()")
+                || symbol.starts_with(|c: char| !is_identifier(c) && c != '('))
+        {
+            let end = match symbol.strip_prefix("()") {
+                Some(_) => 2,
+                None => symbol.find('(').unwrap_or(symbol.len()),
+            };
+            return format!("{qualifier}operator{}", symbol[..end].trim_end());
+        }
+        let (operator, rest) = label.split_at(
+            label
+                .find(|c: char| c == '(' || is_identifier(c))
+                .unwrap_or(label.len()),
+        );
+        let rest = &rest[..Self::name_end(rest)];
+        format!("{operator}{rest}").trim().to_string()
+    }
 
-        let name = if let Some(angle_pos) = name.find('<') {
-            &name[..angle_pos]
-        } else {
-            name
-        };
-
-        name.trim().to_string()
+    /// Where the name a label begins with ends: at a parameter list, or at
+    /// type parameters after it. Type arguments a qualifier carries are part
+    /// of the name (clangd: `Box<T>::get`).
+    fn name_end(label: &str) -> usize {
+        let mut from = 0;
+        while let Some(found) = label[from..].find(['(', '<']) {
+            let open = from + found;
+            if label[open..].starts_with('(') {
+                return open;
+            }
+            let mut depth = 0usize;
+            let close = label[open..].char_indices().find_map(|(at, c)| {
+                match c {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(open + at);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            });
+            match close {
+                Some(close) if label[close + 1..].starts_with("::") => from = close + 1,
+                _ => return open,
+            }
+        }
+        label.len()
     }
 }
 
@@ -652,6 +715,42 @@ mod tests {
         // leading-`/` exact mode still enforces full-path segment count
         assert!(sym.matches_path("/Service/get*Name"));
         assert!(!sym.matches_path("/get*Name"));
+    }
+
+    /// A server's label names the declaration the index reads under the same
+    /// name: never an empty one for a Go method or an operator.
+    #[test]
+    fn normalize_symbol_name_reads_the_name_a_label_gives() {
+        for (label, name) in [
+            ("process(int, String)", "process"),
+            ("Foo<T>", "Foo"),
+            ("(*Server).Start", "Start"),
+            ("(Server).Name", "Name"),
+            ("(*List[T]).Push", "Push"),
+            ("<(lhs:rhs:)", "<"),
+            ("<<(lhs:rhs:)", "<<"),
+            ("==(lhs:rhs:)", "=="),
+            ("init(cents:)", "init"),
+            ("operator<", "operator<"),
+            ("operator()", "operator()"),
+            ("operator new", "operator new"),
+            ("operator +(Money, Money)", "operator +"),
+            ("operator()(int)", "operator()"),
+            ("Money::operator<", "Money::operator<"),
+            ("ns::Money::operator()", "ns::Money::operator()"),
+            ("Money::value", "Money::value"),
+            ("Box<T>::get", "Box<T>::get"),
+            ("Stack<T>::push", "Stack<T>::push"),
+            (
+                "ns::Map<K, std::pair<K, V>>::insert(K)",
+                "ns::Map<K, std::pair<K, V>>::insert",
+            ),
+            ("operator(int)", "operator"),
+            ("<function>", ""),
+            ("<unknown>", ""),
+        ] {
+            assert_eq!(Symbol::normalize_symbol_name(label), name, "{label}");
+        }
     }
 
     /// An LSP `impl` block collapses to its bare implementing type so a
