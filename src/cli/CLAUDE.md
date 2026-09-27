@@ -22,7 +22,7 @@ The shaping is combinators, not per-command assembly: `with_lower_bounds` sets `
 
 ## Symbol-path resolution
 
-`Symbol::compute_paths_for_all` (in `src/models/symbol/`) is the single source of truth for path strings like `Class/method`. Path matching (exact, `/`-anchored suffix, bare last-component, and `*` wildcard) is what makes `--symbol` flows reliable — keep its semantics stable.
+A path string like `Class/method` has two producers that agree by construction: `Symbol::compute_paths_for_all` (in `src/models/symbol/`) over a language server's nested tree, and the grammar extractor over its flat answer, where only `container` carries containment. `declared_in` hands every file answer over with its paths set, so a caller never recomputes them — over a flat answer that erases every container. Path matching (exact, `/`-anchored suffix, bare last-component, and `*` wildcard) is what makes `--symbol` flows reliable — keep its semantics stable.
 
 ## One anchor for every symbol-level surface
 

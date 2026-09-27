@@ -1182,6 +1182,46 @@ fn a_body_line_the_grammar_reads_addresses_its_method() {
     assert_eq!(preview["lines"]["end"], 4, "{preview}");
 }
 
+/// The grammar's answer carries a member's container in its `name_path`, and
+/// `edit --symbol` resolves the path `symbols` printed, as it does against a
+/// server's tree.
+#[test]
+fn a_path_the_grammar_answer_prints_addresses_its_member() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("svc.py"),
+        "class Service:\n    def start(self):\n        return 1\n\n\
+         def start():\n    return 2\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+
+    let listed = json_ok(dir.path(), &["symbols", "svc.py"]);
+    let method = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "start" && item["location"]["line"] == 2)
+        .unwrap_or_else(|| panic!("no method row: {listed}"));
+    let path = method["name_path"].as_str().unwrap();
+    assert_eq!(path, "Service/start", "{listed}");
+
+    for pattern in [path, "*/start"] {
+        let preview = json_ok(
+            dir.path(),
+            &["edit", "delete", "svc.py", "--symbol", pattern, "--dry-run"],
+        );
+        assert_eq!(preview["lines"]["start"], 2, "{pattern}: {preview}");
+        assert_eq!(preview["lines"]["end"], 3, "{pattern}: {preview}");
+    }
+}
+
 /// A decorator, an attribute, a Rust doc comment or a C++ template header is
 /// part of the declaration it heads, so deleting the declaration without a
 /// server takes those lines with it rather than leaving them on whatever
