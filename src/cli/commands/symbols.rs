@@ -473,10 +473,13 @@ fn producer(symbol: &Symbol, from_index: &HashMap<String, String>) -> &'static s
 
 /// Attach bodies to resolved workspace symbols. The index and `workspace/symbol`
 /// surfaces carry only a name-span location, so the body is read from each
-/// file's documentSymbol tree (which has the full range) — one request per
-/// distinct file, matched back by the canonical `name_path` every producer
-/// agrees on. A symbol the document tree does not surface keeps its bodiless
-/// row rather than a wrong slice.
+/// file's declarations as the file form reads them ([`declared_in`]: the
+/// server's tree, or the grammar's when the server does not answer) — one read
+/// per distinct file, matched back by the canonical `name_path` every producer
+/// agrees on. A symbol that read does not surface keeps its bodiless row
+/// rather than a wrong slice.
+///
+/// [`declared_in`]: crate::cli::declared_in
 async fn workspace_symbol_bodies(
     app: &App,
     resolved: &[Symbol],
@@ -495,9 +498,8 @@ async fn workspace_symbol_bodies(
         if !fetched.insert(file.clone()) {
             continue;
         }
-        if let Ok(mut tree) = app.lsp.find_symbols(&file, options.clone()).await {
-            Symbol::compute_paths_for_all(&mut tree);
-            collect_bodied(&tree, &file, &mut bodied);
+        if let Ok(declared) = crate::cli::declared_in(app, &file, options.clone()).await {
+            collect_bodied(&declared.symbols, &file, &mut bodied);
         }
     }
 
@@ -517,7 +519,7 @@ async fn workspace_symbol_bodies(
         .collect()
 }
 
-/// Index a file's documentSymbol tree by `(file, name_path)` so a resolved
+/// Index a file's declarations by `(file, name_path)` so a resolved
 /// workspace symbol can claim its full body.
 fn collect_bodied(symbols: &[Symbol], file: &Path, out: &mut HashMap<(PathBuf, String), Symbol>) {
     for symbol in symbols {
