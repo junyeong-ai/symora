@@ -1182,6 +1182,171 @@ fn a_body_line_the_grammar_reads_addresses_its_method() {
     assert_eq!(preview["lines"]["end"], 4, "{preview}");
 }
 
+/// A decorator, an attribute, a Rust doc comment or a C++ template header is
+/// part of the declaration it heads, so deleting the declaration without a
+/// server takes those lines with it rather than leaving them on whatever
+/// follows. So is the statement or token that holds a declaration alone — an
+/// `export`, a `const` or Go `type` declaring one name, `extern "C"`, a C++
+/// type's closing `;`, a member's `;` or a field's `,` — so a whole-line edit
+/// takes it rather than refusing to split its line.
+#[test]
+fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("m.py"),
+        "import functools\n\n\n@functools.cache\ndef compute(x):\n    return x * 2\n\n\n\
+         def other():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib.rs"),
+        "pub fn keep() {}\n\n/// Doubles.\n#[inline]\npub fn gone(x: u32) -> u32 {\n    x * 2\n\
+         }\n\npub fn next() {}\n\npub struct Store {\n    pub items: Vec<u32>,\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("svc.ts"),
+        "export function start() {\n  return 1;\n}\n\nexport const handler = () => {\n  \
+         return 2;\n};\n\ninterface Runnable {\n  run(): void;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("m.cpp"),
+        "template <typename T>\nT twice(T x) {\n    return x;\n}\n\ntemplate <typename T>\n\
+         class Box {\n    T v;\n};\n\nextern \"C\" int cfun() {\n    return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("types.go"),
+        "package p\n\ntype Foo struct {\n\tA int\n}\n",
+    )
+    .unwrap();
+    let config_dir = root.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n\
+         [lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer\"\n\
+         [lsp.servers.typescript]\ncommand = \"/nonexistent/tsserver\"\n\
+         [lsp.servers.cpp]\ncommand = \"/nonexistent/clangd\"\n\
+         [lsp.servers.go]\ncommand = \"/nonexistent/gopls\"\n",
+    )
+    .unwrap();
+
+    for (file, symbol, start, end) in [
+        ("m.py", "compute", 4, 6),
+        ("lib.rs", "gone", 3, 7),
+        ("lib.rs", "items", 12, 12),
+        ("svc.ts", "start", 1, 3),
+        ("svc.ts", "handler", 5, 7),
+        ("svc.ts", "run", 10, 10),
+        ("m.cpp", "twice", 1, 4),
+        ("m.cpp", "Box", 6, 9),
+        ("m.cpp", "cfun", 11, 13),
+        ("types.go", "Foo", 3, 5),
+    ] {
+        let preview = json_ok(
+            root,
+            &["edit", "delete", file, "--symbol", symbol, "--dry-run"],
+        );
+        assert_eq!(preview["lines"]["start"], start, "{preview}");
+        assert_eq!(preview["lines"]["end"], end, "{preview}");
+    }
+}
+
+/// A statement that declares several names is the whole declaration of
+/// each: both names are listed, a line of the statement changed both, a
+/// declaration inserted after one goes after the statement, a whole-line
+/// edit of one is refused rather than taking the other with it, and a column
+/// addresses the name it is on, or on the shared keyword neither.
+#[test]
+fn a_statement_declaring_several_names_is_each_ones_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let source = "package p\n\nfunc pick(a, b int) (int, int) { return a, b }\n\n\
+                  var lo, hi = pick(\n\t1,\n\t2,\n)\n";
+    std::fs::write(repo.join("p.go"), source).unwrap();
+    std::fs::create_dir_all(repo.join(".symora")).unwrap();
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        "[lsp.servers.go]\ncommand = \"/nonexistent/gopls\"\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "init"]);
+
+    let listed = json_ok(repo, &["symbols", "p.go"]);
+    let names: Vec<&str> = listed["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    assert_eq!(names, ["pick", "lo", "hi"], "{listed}");
+
+    let inserted = json_ok(
+        repo,
+        &[
+            "edit",
+            "insert-after",
+            "p.go",
+            "--symbol",
+            "hi",
+            "--code",
+            "func added() {}",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(inserted["lines"]["start"], 5, "{inserted}");
+    assert_eq!(inserted["lines"]["end"], 8, "{inserted}");
+
+    for (operation, symbol, other) in [("delete", "lo", "'hi'"), ("replace-body", "hi", "'lo'")] {
+        let mut args = vec!["edit", operation, "p.go", "--symbol", symbol, "--dry-run"];
+        if operation == "replace-body" {
+            args.extend(["--body", "var hi = 3"]);
+        }
+        let out = run_in(repo, &args);
+        let refused: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains(other), "{operation} {symbol}: {refused}");
+    }
+
+    let on_name = json_ok(
+        repo,
+        &[
+            "edit",
+            "insert-after",
+            "p.go:5:5",
+            "--code",
+            "func added() {}",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(on_name["target_symbol"], "lo", "{on_name}");
+    let out = run_in(repo, &["edit", "delete", "p.go:5:1", "--dry-run"]);
+    let on_keyword: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        on_keyword["error"]["code"], "invalid_argument",
+        "{on_keyword}"
+    );
+
+    std::fs::write(repo.join("p.go"), source.replace("\t2,", "\t3,")).unwrap();
+    let page = json_ok(repo, &["diff-impact"]);
+    let mut rows: Vec<String> = page["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .map(|change| format!("{} {}", change["name"], change["change_type"]))
+        .collect();
+    rows.sort();
+    assert_eq!(rows, [r#""hi" "modified""#, r#""lo" "modified""#], "{page}");
+}
+
 /// A symbol-path answer merges the index with a live lookup, so each row says
 /// which one produced it — the word `search symbols` already uses. Without it
 /// a caller cannot tell a row the index vouches for from one a language server
@@ -2212,6 +2377,120 @@ fn a_types_header_is_its_own_whatever_else_the_hunk_changes() {
             .collect();
         assert_eq!(named_rows(&page), expected, "{page}");
     }
+}
+
+/// The lines that head a declaration — a decorator, an attribute, a Rust doc
+/// comment, a C++ template header — are its own, so removing or rewriting
+/// one modifies that declaration rather than the type or namespace around
+/// it, or nothing.
+#[test]
+fn a_heading_line_changed_modifies_the_declaration_it_headed() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n\
+         [lsp.servers.rust]\ncommand = \"/nonexistent/rust-analyzer\"\n\
+         [lsp.servers.cpp]\ncommand = \"/nonexistent/clangd\"\n",
+    )
+    .unwrap();
+    let python = "import functools\n\n\n@functools.cache\ndef compute(x):\n    return x * 2\n";
+    let rust = "pub struct Store;\n\nimpl Store {\n    pub fn new() -> Self {\n        Store\n    \
+                }\n\n    /// How many.\n    #[inline]\n    pub fn len(&self) -> usize {\n        0\n    \
+                }\n}\n";
+    let cpp = "template <typename T>\nT twice(T x) {\n    return x * 2;\n}\n\nnamespace app {\n\
+               template <typename T>\nT half(T x) {\n    return x / 2;\n}\n}\n";
+    std::fs::write(repo.join("m.py"), python).unwrap();
+    std::fs::write(repo.join("lib.rs"), rust).unwrap();
+    std::fs::write(repo.join("m.cpp"), cpp).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (file, base, from, to, owner) in [
+        ("m.py", python, "@functools.cache\n", "", "compute"),
+        ("lib.rs", rust, "    /// How many.\n", "", "len"),
+        ("lib.rs", rust, "    #[inline]\n", "", "len"),
+        (
+            "m.cpp",
+            cpp,
+            "template <typename T>\nT twice",
+            "template <typename T, typename U = T>\nT twice",
+            "twice",
+        ),
+        (
+            "m.cpp",
+            cpp,
+            "template <typename T>\nT half",
+            "template <typename T, typename U = T>\nT half",
+            "half",
+        ),
+    ] {
+        std::fs::write(repo.join(file), base.replacen(from, to, 1)).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        assert_eq!(
+            named_rows(&page),
+            [(owner.to_string(), "modified".to_string())],
+            "{page}"
+        );
+        std::fs::write(repo.join(file), base).unwrap();
+    }
+}
+
+/// Dart's grammar reads a function by its signature, and the declaration
+/// around the signature holds the annotations and the body, so a change to
+/// either is the function's and deleting it takes both.
+#[test]
+fn a_dart_function_spans_its_annotations_and_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.dart]\ncommand = \"/nonexistent/dart\"\n",
+    )
+    .unwrap();
+    let base = "class Shape {\n  @override\n  String toString() {\n    return \"s\";\n  }\n}\n\n\
+                int top() {\n  return 2;\n}\n";
+    std::fs::write(repo.join("shape.dart"), base).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+
+    for (content, owner) in [
+        (base.replace("return 2;", "return 4;"), "top"),
+        (base.replace("  @override\n", ""), "toString"),
+    ] {
+        std::fs::write(repo.join("shape.dart"), content).unwrap();
+        let page = json_ok(repo, &["diff-impact"]);
+        assert_eq!(
+            named_rows(&page),
+            [(owner.to_string(), "modified".to_string())],
+            "{page}"
+        );
+    }
+
+    std::fs::write(repo.join("shape.dart"), base).unwrap();
+    let preview = json_ok(
+        repo,
+        &[
+            "edit",
+            "delete",
+            "shape.dart",
+            "--symbol",
+            "toString",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(preview["lines"]["start"], 2, "{preview}");
+    assert_eq!(preview["lines"]["end"], 5, "{preview}");
 }
 
 /// A Python function has no closing line, so once its last lines are

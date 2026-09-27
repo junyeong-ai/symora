@@ -21,6 +21,7 @@ use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::declared_in;
 use crate::cli::response::{EditOutput, LineRange, Section};
+use crate::cli::utils::declared_with;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
 use crate::utils::char_to_byte_index;
@@ -37,8 +38,8 @@ pub struct EditArgs {
 #[derive(Subcommand, Debug)]
 pub enum EditCommand {
     /// Replace a symbol's ENTIRE definition span (whole lines, signature
-    /// through closing brace, and any doc-comment or attribute lines the
-    /// server's range opens with — `--dry-run` shows them) — pass the
+    /// through closing brace, and the decorator, attribute or doc-comment
+    /// lines its range opens with — `--dry-run` shows them) — pass the
     /// complete definition, not just the inner code. For a raw character
     /// range use `replace`.
     ReplaceBody {
@@ -240,12 +241,11 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             verify_callers,
         } => {
             let body = read_payload(&body)?;
-            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            let addressed = resolve_symbol(app, &target, symbol).await?;
             symbol_edit(
                 app,
                 "replace_body",
-                &file,
-                &sym,
+                &addressed,
                 dry_run,
                 with_diagnostics,
                 verify_callers,
@@ -266,12 +266,11 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             verify_callers,
         } => {
             let code = read_payload(&code)?;
-            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            let addressed = resolve_symbol(app, &target, symbol).await?;
             symbol_edit(
                 app,
                 "insert_before",
-                &file,
-                &sym,
+                &addressed,
                 dry_run,
                 with_diagnostics,
                 verify_callers,
@@ -292,12 +291,11 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             verify_callers,
         } => {
             let code = read_payload(&code)?;
-            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            let addressed = resolve_symbol(app, &target, symbol).await?;
             symbol_edit(
                 app,
                 "insert_after",
-                &file,
-                &sym,
+                &addressed,
                 dry_run,
                 with_diagnostics,
                 verify_callers,
@@ -316,11 +314,10 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             dry_run,
             with_diagnostics,
         } => {
-            let (file, sym) = resolve_symbol(app, &target, symbol).await?;
+            let addressed = resolve_symbol(app, &target, symbol).await?;
             delete_symbol(
                 app,
-                &file,
-                &sym,
+                &addressed,
                 dry_run,
                 with_diagnostics,
                 expect_no_references,
@@ -394,19 +391,19 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
 async fn symbol_edit(
     app: &App,
     operation: &'static str,
-    file: &Path,
-    symbol: &Symbol,
+    addressed: &Addressed,
     dry_run: bool,
     with_diagnostics: bool,
     verify_callers: bool,
     make_splice: impl FnOnce(&LineRange) -> LineSplice,
 ) -> Result<()> {
+    let (file, symbol) = (addressed.file.as_path(), &addressed.symbol);
     let doc = FileDocument::load(file, dry_run)?;
     let span = symbol_line_span(symbol, doc.lines.len())?;
     let splice = make_splice(&span);
     if splice.removed > 0 {
         ensure_anchor_not_stale(symbol, &doc.lines)?;
-        ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
+        ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
     }
     // Resolve the caller files BEFORE the edit lands: editing a symbol does not
     // move which files reference it, and resolving against the pre-edit state
@@ -447,25 +444,42 @@ async fn symbol_edit(
 
 /// Whole-line operations (replace-body, delete) must not take neighbour
 /// code with them. This is an exact check, not a heuristic: if the
-/// symbol's first line has non-whitespace before its declaration start,
-/// or its last line has non-whitespace after its declared end column,
-/// the operation is refused with a character-precise alternative —
+/// symbol's declaration declares other names too (`declared_with`: `var a,
+/// b = f(…)`), its first line has non-whitespace before its declaration
+/// start, or its last line has non-whitespace after its declared end
+/// column, the operation is refused with a character-precise alternative —
 /// never a silent over-splice.
 fn ensure_exclusive_line_ownership(
     lines: &[String],
     symbol: &Symbol,
     span: &LineRange,
+    declared_with: &[String],
 ) -> Result<()> {
-    let shared = |what: &str| {
+    let refused = |message: String| {
         anyhow::Error::new(
-            crate::cli::OutputError::unsupported(format!(
-                "Symbol '{}' shares its {what} line with other code; \
-                 whole-line edits would remove it",
-                symbol.name,
-            ))
-            .with_hint("Use `edit replace` for character-precise control"),
+            crate::cli::OutputError::unsupported(message)
+                .with_hint("Use `edit replace` for character-precise control"),
         )
     };
+    let shared = |what: &str| {
+        refused(format!(
+            "Symbol '{}' shares its {what} line with other code; \
+             whole-line edits would remove it",
+            symbol.name,
+        ))
+    };
+    if !declared_with.is_empty() {
+        let names: Vec<String> = declared_with
+            .iter()
+            .map(|name| format!("'{name}'"))
+            .collect();
+        return Err(refused(format!(
+            "Symbol '{}' is declared together with {}; whole-line edits would remove {} too",
+            symbol.name,
+            names.join(", "),
+            if names.len() == 1 { "it" } else { "them" },
+        )));
+    }
 
     let (_, start_col) = symbol.location.effective_start();
     let first = &lines[span.start as usize - 1];
@@ -548,16 +562,16 @@ fn line_has_whole_identifier(line: &str, name: &str) -> bool {
 /// precondition for the write.
 async fn delete_symbol(
     app: &App,
-    file: &Path,
-    symbol: &Symbol,
+    addressed: &Addressed,
     dry_run: bool,
     with_diagnostics: bool,
     expect_no_references: bool,
 ) -> Result<()> {
+    let (file, symbol) = (addressed.file.as_path(), &addressed.symbol);
     let doc = FileDocument::load(file, dry_run)?;
     let span = symbol_line_span(symbol, doc.lines.len())?;
     ensure_anchor_not_stale(symbol, &doc.lines)?;
-    ensure_exclusive_line_ownership(&doc.lines, symbol, &span)?;
+    ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
 
     let check = check_dangling_references(app, file, symbol, &span).await;
     if expect_no_references {
@@ -1383,12 +1397,13 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
 /// or a leading-`/` exact path). The async wrapper fetches the file's
 /// symbols; `unique_symbol_by_path` owns the dispatch, so the destructive
 /// resolution stays unit-tested without an LSP round-trip.
-async fn find_symbol_by_path(app: &App, file: &Path, pattern: &str) -> Result<Symbol> {
-    let mut symbols = declared_in(app, file, FindSymbolsOptions::default().with_depth(10))
+async fn find_symbol_by_path(app: &App, file: PathBuf, pattern: &str) -> Result<Addressed> {
+    let mut symbols = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
         .await?
         .symbols;
     Symbol::compute_paths_for_all(&mut symbols);
-    unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(file))
+    let symbol = unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(&file))?;
+    Ok(Addressed::among(file, symbol, &symbols))
 }
 
 /// Pick the one symbol a flexible `--symbol` pattern names: exactly one
@@ -1414,13 +1429,13 @@ fn unique_symbol_by_path(symbols: &[Symbol], pattern: &str, file_display: &str) 
 /// enclosing block the caller didn't address.
 async fn find_symbol_at_location(
     app: &App,
-    file: &Path,
+    file: PathBuf,
     line: u32,
     column: Option<u32>,
-) -> Result<Symbol> {
+) -> Result<Addressed> {
     use crate::cli::utils::{SymbolResolution, column_addressed_symbol, line_addressed_symbol};
 
-    let symbols = declared_in(app, file, FindSymbolsOptions::default())
+    let symbols = declared_in(app, &file, FindSymbolsOptions::default())
         .await?
         .symbols;
 
@@ -1429,9 +1444,9 @@ async fn find_symbol_at_location(
         None => line_addressed_symbol(&symbols, line),
     };
 
-    let file_display = app.output.relative_path(file);
+    let file_display = app.output.relative_path(&file);
     match resolution {
-        SymbolResolution::Match(symbol) => Ok(symbol.clone()),
+        SymbolResolution::Match(symbol) => Ok(Addressed::among(file, symbol.clone(), &symbols)),
         SymbolResolution::NotFound => Err(anyhow::Error::new(match column {
             Some(col) => crate::cli::OutputError::not_found(format!(
                 "Column {col} of line {line} in {file_display} is not on a symbol's declaration"
@@ -1461,14 +1476,32 @@ async fn find_symbol_at_location(
     }
 }
 
+/// The symbol an edit addresses, and the names its declaration declares
+/// with it ([`declared_with`]), which a whole-line edit of it would remove.
+struct Addressed {
+    file: PathBuf,
+    symbol: Symbol,
+    declared_with: Vec<String>,
+}
+
+impl Addressed {
+    fn among(file: PathBuf, symbol: Symbol, symbols: &[Symbol]) -> Self {
+        let declared_with = declared_with(symbols, &symbol)
+            .into_iter()
+            .map(|other| other.name.clone())
+            .collect();
+        Self {
+            file,
+            symbol,
+            declared_with,
+        }
+    }
+}
+
 /// Resolve full symbol from target. Auto-detects location format
 /// (`file:line[:col]`) vs file path (requires --symbol); passing both
 /// addressing modes at once is refused rather than silently picking one.
-async fn resolve_symbol(
-    app: &App,
-    target: &str,
-    symbol_path: Option<String>,
-) -> Result<(PathBuf, Symbol)> {
+async fn resolve_symbol(app: &App, target: &str, symbol_path: Option<String>) -> Result<Addressed> {
     // Location mode: find symbol at position. An omitted column is its
     // own addressing mode (line-declared symbol first), not column 1.
     if ParsedLocation::is_location_format(target) {
@@ -1477,8 +1510,7 @@ async fn resolve_symbol(
         }
         let loc = ParsedLocation::parse(target)?.to_absolute_with_root(Some(app.root()))?;
         let column = loc.column_explicit.then_some(loc.column);
-        let symbol = find_symbol_at_location(app, &loc.file, loc.line, column).await?;
-        return Ok((loc.file, symbol));
+        return find_symbol_at_location(app, loc.file, loc.line, column).await;
     }
 
     // Symbol mode: --symbol is required
@@ -1492,8 +1524,7 @@ async fn resolve_symbol(
     })?;
 
     let file = resolve_file_path(app, target)?;
-    let symbol = find_symbol_by_path(app, &file, &pattern).await?;
-    Ok((file, symbol))
+    find_symbol_by_path(app, file, &pattern).await
 }
 
 /// The symbol's full declaration span (1-indexed, inclusive), with the
@@ -2438,7 +2469,7 @@ mod tests {
             Location::full(PathBuf::from("/tmp/a.rs"), 1, 28, 1, 25, 1, 46),
         );
         let span = LineRange { start: 1, end: 1 };
-        let err = ensure_exclusive_line_ownership(&content, &shared, &span).unwrap_err();
+        let err = ensure_exclusive_line_ownership(&content, &shared, &span, &[]).unwrap_err();
         assert!(err.to_string().contains("shares its first line"));
 
         // Sole occupant of its lines passes (ends at exclusive column 24,
@@ -2449,7 +2480,7 @@ mod tests {
             SymbolKind::Function,
             Location::full(PathBuf::from("/tmp/a.rs"), 1, 4, 1, 1, 1, 24),
         );
-        assert!(ensure_exclusive_line_ownership(&solo, &alone, &span).is_ok());
+        assert!(ensure_exclusive_line_ownership(&solo, &alone, &span, &[]).is_ok());
     }
 
     #[test]
@@ -2462,7 +2493,7 @@ mod tests {
             Location::full(PathBuf::from("/tmp/a.rs"), 1, 4, 1, 1, 2, 2),
         );
         let span = LineRange { start: 1, end: 2 };
-        let err = ensure_exclusive_line_ownership(&content, &sym, &span).unwrap_err();
+        let err = ensure_exclusive_line_ownership(&content, &sym, &span, &[]).unwrap_err();
         assert!(err.to_string().contains("shares its last line"));
     }
 

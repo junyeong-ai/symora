@@ -283,7 +283,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
   "preview": "@@ -48,5 +48,6 @@\n-  async processOrder(cart: Cart, user: User): Promise<Order> {\n-    const reserved = …\n …\n+  async processOrder(cart: Cart, user: User): Promise<Order> {\n+    if (cart.items.length === 0) throw new EmptyCartError();\n+    const reserved = …\n …"
 }
 ```
-> `--dry-run` shows the whole span it would replace (every old line `-`, every new line `+`) and the net byte change, and writes nothing. When the server's declaration range opens with doc-comment or attribute lines, those lines are in the span — check `lines` and include them in `--body`. Drop `--dry-run` to apply, or add `--verify-callers` to pull diagnostics on the files that reference the symbol afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
+> `--dry-run` shows the whole span it would replace (every old line `-`, every new line `+`) and the net byte change, and writes nothing. When the declaration's range opens with decorator, attribute or doc-comment lines, those lines are in the span — check `lines` and include them in `--body`. Drop `--dry-run` to apply, or add `--verify-callers` to pull diagnostics on the files that reference the symbol afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
 
 > **Addressing is forgiving but safe.** `--symbol` matches a bare name, a `Class/method` suffix, a `*/method` wildcard, or the exact `name_path`. When a name is ambiguous, `edit` refuses rather than guess:
 > ```json

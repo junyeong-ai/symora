@@ -192,7 +192,8 @@ pub fn holder_of(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> 
 
 /// The members a line belongs to: the innermost symbol over it that code
 /// outside can name — a top-level item, or a member of a type or namespace
-/// ([`SymbolKind::holds_members`]). Any other symbol owns every line inside
+/// ([`SymbolKind::holds_members`]) — with the others its declaration
+/// declares ([`declared_with`]). Any other symbol owns every line inside
 /// it, so a parameter or local listed inside a body (pyright and tsserver
 /// list them, and the grammar reads a Go `var` or a Kotlin `val` there) hands
 /// the line to the declaration it sits in. A container owns each of its lines
@@ -231,29 +232,32 @@ fn members_where<'a>(
     line: u32,
     within: impl Fn(&Symbol) -> bool,
 ) -> Vec<&'a Symbol> {
-    let mut owners = Vec::new();
-    let mut container = None;
-    for symbol in symbols_over(symbols, line, None) {
-        // A symbol the server names nothing — a function called where it is
-        // written, an anonymous namespace — or gives no kind — clangd's group
-        // of what a macro expands to, named after the macro — declares
-        // nothing itself: what is declared in it stands for itself, and the
-        // rest of it belongs to what encloses it. A type parameter written in
-        // another type's header is a parameter of that type (sourcekit-lsp
-        // lists a generic type's `T` there), and no more an owner than a
-        // function's; one declared anywhere else declares a type of its own
-        // (rust-analyzer and sourcekit-lsp give a type alias and an
-        // associated type that kind).
-        if symbol.name.is_empty()
-            || symbol.kind == SymbolKind::Null
+    // A symbol that declares nothing (`declares_nothing`) owns no line: what
+    // is declared in it stands for itself, and the rest of it belongs to
+    // what encloses it. A type parameter written in another type's header is
+    // a parameter of that type (sourcekit-lsp lists a generic type's `T`
+    // there), and no more an owner than a function's; one declared anywhere
+    // else declares a type of its own (rust-analyzer and sourcekit-lsp give a
+    // type alias and an associated type that kind).
+    let skipped = |symbol: &Symbol| {
+        declares_nothing(symbol)
             || (symbol.kind == SymbolKind::TypeParameter
                 && headers.holds_parameter((symbol.location.line, symbol.location.column)))
             || !within(symbol)
-        {
+    };
+    let mut owners = Vec::new();
+    let mut container = None;
+    for symbol in symbols_over(symbols, line, None) {
+        if skipped(symbol) {
             continue;
         }
         if !symbol.kind.holds_members() {
             owners.push(symbol);
+            owners.extend(
+                declared_with(symbols, symbol)
+                    .into_iter()
+                    .filter(|other| !skipped(other)),
+            );
             return owners;
         }
         if line == symbol.location.line {
@@ -267,6 +271,37 @@ fn members_where<'a>(
         owners.push(container);
     }
     owners
+}
+
+/// Whether a symbol declares nothing itself: the server names it nothing
+/// (a function called where it is written, an anonymous namespace) or gives
+/// it no kind (clangd's group of what a macro expands to, named after the
+/// macro).
+fn declares_nothing(symbol: &Symbol) -> bool {
+    symbol.name.is_empty() || symbol.kind == SymbolKind::Null
+}
+
+/// The other symbols `symbol`'s declaration declares. A statement that
+/// declares several names (`var a, b = f(…)`, `int a, b;`, `a = b = None`) is
+/// the whole declaration of each, so each is listed over the statement's one
+/// range: a line of it is all of theirs, and a whole-line edit of it removes
+/// them all.
+pub fn declared_with<'a>(symbols: &'a [Symbol], symbol: &Symbol) -> Vec<&'a Symbol> {
+    fn collect<'a>(symbols: &'a [Symbol], symbol: &Symbol, with: &mut Vec<&'a Symbol>) {
+        for other in symbols {
+            if span(other) == span(symbol)
+                && (other.location.line, other.location.column)
+                    != (symbol.location.line, symbol.location.column)
+                && !declares_nothing(other)
+            {
+                with.push(other);
+            }
+            collect(&other.children, symbol, with);
+        }
+    }
+    let mut with = Vec::new();
+    collect(symbols, symbol, &mut with);
+    with
 }
 
 /// A symbol's declared range as (line, column) ends; a range without an end
@@ -364,24 +399,39 @@ pub fn ambiguity_hint(line: u32, declared: &[&Symbol]) -> String {
         .map(|s| s.name.as_str())
         .unwrap_or_default();
     format!(
-        "Line {line} declares multiple symbols ({}); resolved to '{first}' — pass an explicit \
-         column (file:line:column) to target another",
+        "Line {line} declares multiple symbols ({}); resolved to '{first}' — address another \
+         by a column on its name (file:line:column)",
         names.join(", "),
     )
 }
 
 /// Resolution for a column-addressed target (`file:line:col`) against the
-/// symbol tree alone: the symbol whose declaration header the exact position
-/// is on. A column is a precise address, so a position inside a body
-/// resolves to no declaration rather than to the symbol that happens to
-/// enclose it. A surface that can ask the language server what a token
-/// denotes does so before falling back to this (see `cli::analysis`); one
-/// that addresses declarations in the tree — an edit — uses this directly.
+/// symbol tree alone: the symbol whose name the exact position is on, or
+/// else whose declaration header it is on. A column is a precise address, so
+/// a position inside a body resolves to no declaration rather than to the
+/// symbol that happens to enclose it. A statement that declares several
+/// names is each one's header ([`declared_with`]), so a position on what they
+/// share — the keyword of `var a, b` — is ambiguous among them. A surface
+/// that can ask the language server what a token denotes does so before
+/// falling back to this (see `cli::analysis`); one that addresses
+/// declarations in the tree — an edit — uses this directly.
 pub fn column_addressed_symbol(symbols: &[Symbol], line: u32, column: u32) -> SymbolResolution<'_> {
-    match find_declaration_at_position(symbols, line, column) {
-        Some(symbol) => SymbolResolution::Match(symbol),
-        None => SymbolResolution::NotFound,
+    if let Some(symbol) = find_named_at_position(symbols, line, column) {
+        return SymbolResolution::Match(symbol);
     }
+    let Some(symbol) = find_declaration_at_position(symbols, line, column) else {
+        return SymbolResolution::NotFound;
+    };
+    let mut declared: Vec<&Symbol> = declared_with(symbols, symbol)
+        .into_iter()
+        .filter(|other| declares_position(other, line, column))
+        .collect();
+    if declared.is_empty() {
+        return SymbolResolution::Match(symbol);
+    }
+    declared.push(symbol);
+    declared.sort_by_key(|s| (s.location.line, s.location.column));
+    SymbolResolution::Ambiguous(declared)
 }
 
 /// Resolution for a line-addressed target (`file:line`, no column): a
@@ -667,6 +717,38 @@ mod tests {
             )
             .with_name_end(line, col + name.len() as u32),
         )
+    }
+
+    /// A statement that declares several names is each one's header: a
+    /// column on a name addresses that name, and one on what they share (the
+    /// keyword) is ambiguous among them, first name first.
+    #[test]
+    fn a_column_on_a_statement_declaring_several_names_addresses_the_name_it_is_on() {
+        let declared = |name: &str, column: u32| {
+            Symbol::new(
+                name.to_string(),
+                SymbolKind::Variable,
+                Location::full(std::path::PathBuf::from("p.go"), 5, column, 5, 1, 8, 2)
+                    .with_name_end(5, column + name.len() as u32),
+            )
+        };
+        let symbols = vec![declared("lo", 5), declared("hi", 9)];
+        let addressed = |column| -> Vec<&str> {
+            match column_addressed_symbol(&symbols, 5, column) {
+                SymbolResolution::Match(symbol) => vec![symbol.name.as_str()],
+                SymbolResolution::Ambiguous(all) => {
+                    all.iter().map(|symbol| symbol.name.as_str()).collect()
+                }
+                SymbolResolution::NotFound => Vec::new(),
+            }
+        };
+        assert_eq!(addressed(5), ["lo"]);
+        assert_eq!(addressed(9), ["hi"]);
+        assert!(matches!(
+            column_addressed_symbol(&symbols, 5, 1),
+            SymbolResolution::Ambiguous(_)
+        ));
+        assert_eq!(addressed(1), ["lo", "hi"]);
     }
 
     fn nest(mut parent: Symbol, children: Vec<Symbol>) -> Symbol {

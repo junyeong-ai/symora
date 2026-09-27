@@ -199,6 +199,10 @@ impl SymbolExtractor {
                     continue;
                 }
                 let body = type_body(*node, language);
+                let opens = declaration_start(declaration_node(*node, language), language);
+                headers.lines.extend(
+                    opens.start_position().row as u32 + 1..=node.start_position().row as u32 + 1,
+                );
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
                     if !child.is_extra() && body.is_none_or(|body| body.id() != child.id()) {
@@ -213,7 +217,7 @@ impl SymbolExtractor {
                     });
                 headers.spans.push(HeaderSpan {
                     name: (symbol.location.line, symbol.location.column),
-                    from: scalar_position(content, node.start_byte(), node.start_position()),
+                    from: scalar_position(content, opens.start_byte(), opens.start_position()),
                     to: scalar_position(content, to_byte, to_point),
                 });
             }
@@ -257,10 +261,10 @@ impl SymbolExtractor {
         let mut declarations = Vec::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
-            if let Some(capture) = m.captures().first()
-                && let Some(symbol) = extract_from_match(m, path, content, language)
-            {
-                declarations.push((capture.node, symbol));
+            if let Some(capture) = m.captures().first() {
+                for symbol in extract_from_match(m, path, content, language) {
+                    declarations.push((capture.node, symbol));
+                }
             }
         }
         Some(read(declarations))
@@ -418,20 +422,44 @@ fn register(
     );
 }
 
+/// The symbols a query match declares: its one name, or each name a
+/// statement declaring several states ([`declared_names`]), all over the
+/// statement's one range — or each over its name alone where the statement
+/// also assigns to something else ([`assigns_beyond_its_names`]).
 fn extract_from_match(
     m: &tree_sitter::QueryMatch,
     path: &Path,
     content: &str,
     language: Language,
-) -> Option<Symbol> {
-    let node = m.captures().first()?.node;
-
-    let (name, kind) = extract_name_and_kind(node, content, language)?;
+) -> Vec<Symbol> {
+    let Some(node) = m.captures().first().map(|capture| capture.node) else {
+        return Vec::new();
+    };
+    let names = declared_names(node, language);
+    let named: Vec<(String, SymbolKind, Node)> = if names.len() > 1 {
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let text = content.get(name.start_byte()..name.end_byte())?;
+                (!names_nothing(text)).then(|| (text.to_string(), node_kind(node), name))
+            })
+            .collect()
+    } else {
+        extract_name_and_kind(node, content, language)
+            .map(|(name, kind)| {
+                (
+                    name,
+                    kind,
+                    name_position_node(node, language).unwrap_or(node),
+                )
+            })
+            .into_iter()
+            .collect()
+    };
+    if named.is_empty() {
+        return Vec::new();
+    }
     let container = extract_container_path(node, content, language);
-    let name_path = Some(match &container {
-        Some(container) => format!("{container}/{name}"),
-        None => name.clone(),
-    });
 
     // Anchor the symbol at its NAME, not the item start: `refs`/`def` on a
     // leading keyword (`pub`, `fn`, an attribute line) resolve to the wrong
@@ -439,29 +467,243 @@ fn extract_from_match(
     // LSP workspace pass dedup to a single row (both then point at the same
     // identifier). The declaration node supplies the surrounding range, so a
     // body is sliced from the same two fields a document-symbol answer fills.
-    let anchor = name_position_node(node, language).unwrap_or(node);
-    let (line, column) = scalar_position(content, anchor.start_byte(), anchor.start_position());
-    let (name_end_line, name_end_column) =
-        scalar_position(content, anchor.end_byte(), anchor.end_position());
-    let (range_start_line, range_start_column) =
-        scalar_position(content, node.start_byte(), node.start_position());
-    let (end_line, end_column) = scalar_position(content, node.end_byte(), node.end_position());
+    let declaration = declaration_node(node, language);
+    let statement = (
+        declaration_start(declaration, language),
+        declaration_end(declaration, language),
+    );
+    let own_name = assigns_beyond_its_names(node, language);
 
-    let location = Location::full(
-        path.to_path_buf(),
-        line,
-        column,
-        range_start_line,
-        range_start_column,
-        end_line,
-        end_column,
-    )
-    .with_name_end(name_end_line, name_end_column);
+    named
+        .into_iter()
+        .map(|(name, kind, anchor)| {
+            let (line, column) =
+                scalar_position(content, anchor.start_byte(), anchor.start_position());
+            let (name_end_line, name_end_column) =
+                scalar_position(content, anchor.end_byte(), anchor.end_position());
+            let (start, end) = if own_name {
+                (anchor, anchor)
+            } else {
+                statement
+            };
+            let (range_start_line, range_start_column) =
+                scalar_position(content, start.start_byte(), start.start_position());
+            let (end_line, end_column) =
+                scalar_position(content, end.end_byte(), end.end_position());
+            let location = Location::full(
+                path.to_path_buf(),
+                line,
+                column,
+                range_start_line,
+                range_start_column,
+                end_line,
+                end_column,
+            )
+            .with_name_end(name_end_line, name_end_column);
+            let name_path = Some(match &container {
+                Some(container) => format!("{container}/{name}"),
+                None => name.clone(),
+            });
+            let mut symbol = Symbol::new(name, kind, location);
+            symbol.name_path = name_path;
+            symbol.container = container.clone();
+            symbol
+        })
+        .collect()
+}
 
-    let mut symbol = Symbol::new(name, kind, location);
-    symbol.name_path = name_path;
-    symbol.container = container;
-    Some(symbol)
+/// The node that spans the whole of a declaration: the one the grammar
+/// gives it, or a wrapper that holds it with more of its syntax — a TS/JS
+/// `export` statement (decorators on it included), a TypeScript `declare`, a
+/// `const`, `let` or `var` statement declaring it alone, a Python
+/// `decorated_definition`, a C++ `template` header or `extern "C"`, a Go
+/// `type`, `const` or `var` declaring it alone, and a Dart function, method
+/// or class member, which holds its annotations and body beside the
+/// signature the query reads.
+fn declaration_node(mut node: Node, language: Language) -> Node {
+    while let Some(parent) = node.parent() {
+        let holds = |field| {
+            parent
+                .child_by_field_name(field)
+                .is_some_and(|held| held.id() == node.id())
+        };
+        let alone = || {
+            let mut cursor = parent.walk();
+            parent
+                .named_children(&mut cursor)
+                .filter(|child| !child.is_extra())
+                .count()
+                == 1
+        };
+        let wraps = match (language, parent.kind()) {
+            (Language::TypeScript | Language::JavaScript, "export_statement") => {
+                holds("declaration")
+            }
+            (
+                Language::TypeScript | Language::JavaScript,
+                "lexical_declaration" | "variable_declaration",
+            ) => alone(),
+            (Language::TypeScript, "ambient_declaration") => true,
+            (Language::Python, "decorated_definition") => holds("definition"),
+            (Language::Cpp, "template_declaration") => true,
+            (Language::Cpp, "linkage_specification") => holds("body"),
+            (Language::Go, "type_declaration" | "const_declaration" | "var_declaration") => alone(),
+            (Language::Dart, "function_declaration" | "method_declaration") => holds("signature"),
+            (Language::Dart, "method_signature" | "class_member") => true,
+            _ => false,
+        };
+        if !wraps {
+            break;
+        }
+        node = parent;
+    }
+    node
+}
+
+/// The names `node` declares, in the order they are written, where its
+/// grammar can state several in one node: `var a, b = 1, 2`, `int a, b;`,
+/// `a = b = None`, `public $a, $b;`, Swift's `let a = 1, b = 2`. The first
+/// is the name [`find_name_node`] reads. A statement that declares several
+/// names, and assigns to nothing else, is the whole declaration of each, so
+/// [`extract_from_match`] reads each as a symbol of its own over that one
+/// range. Listed per language, as each grammar holds the names differently.
+fn declared_names(node: Node, language: Language) -> Vec<Node> {
+    let fields = |field| {
+        let mut cursor = node.walk();
+        node.children_by_field_name(field, &mut cursor)
+            .collect::<Vec<_>>()
+    };
+    match language {
+        Language::Go | Language::Swift => fields("name"),
+        Language::Java => fields("declarator")
+            .into_iter()
+            .filter_map(|declarator| declarator.child_by_field_name("name"))
+            .collect(),
+        Language::Cpp => fields("declarator")
+            .into_iter()
+            .map(|declarator| {
+                declarator
+                    .child_by_field_name("declarator")
+                    .unwrap_or(declarator)
+            })
+            .collect(),
+        Language::CSharp => child_of_kind(node, "variable_declaration")
+            .map(|list| children_of_kind(list, "variable_declarator"))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|declarator| {
+                declarator
+                    .child_by_field_name("name")
+                    .or_else(|| child_of_kind(declarator, "identifier"))
+            })
+            .collect(),
+        Language::Python | Language::Ruby => assignment_targets(node)
+            .filter(|target| binds_a_name(*target, language))
+            .collect(),
+        Language::PHP => children_of_kind(node, "property_element")
+            .into_iter()
+            .filter_map(|element| {
+                child_of_kind(element, "variable_name").and_then(|v| child_of_kind(v, "name"))
+            })
+            .chain(
+                children_of_kind(node, "const_element")
+                    .into_iter()
+                    .filter_map(|element| child_of_kind(element, "name")),
+            )
+            .collect(),
+        Language::Dart => [
+            ("initialized_identifier_list", "initialized_identifier"),
+            ("static_final_declaration_list", "static_final_declaration"),
+        ]
+        .into_iter()
+        .filter_map(|(list, item)| Some(children_of_kind(child_of_kind(node, list)?, item)))
+        .flatten()
+        .filter_map(|bound| child_of_kind(bound, "identifier"))
+        .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// What a Python or Ruby assignment assigns to, through a chain (`a = b =
+/// None`), in the order it is written.
+fn assignment_targets(node: Node) -> impl Iterator<Item = Node> {
+    std::iter::successors(Some(node), |assignment| {
+        assignment
+            .child_by_field_name("right")
+            .filter(|right| right.kind() == "assignment")
+    })
+    .filter_map(|assignment| assignment.child_by_field_name("left"))
+}
+
+/// Whether an assignment's target is a name it declares, rather than an
+/// attribute, a subscript or a Ruby instance variable it assigns to.
+fn binds_a_name(target: Node, language: Language) -> bool {
+    match language {
+        Language::Python => target.kind() == "identifier",
+        Language::Ruby => matches!(target.kind(), "constant" | "identifier"),
+        _ => false,
+    }
+}
+
+/// Whether `node` assigns to something besides the names it declares: a
+/// chained assignment through an attribute, a subscript or an instance
+/// variable (`LIMIT = obj.attr = 5`, `@cache = TABLE = {}`). Such a statement
+/// is no declaration of its names alone, and nothing in the answer stands for
+/// the rest of it, so each name's range is the name itself: a whole-line edit
+/// of it is refused rather than taking the other assignment with it.
+fn assigns_beyond_its_names(node: Node, language: Language) -> bool {
+    matches!(language, Language::Python | Language::Ruby)
+        && assignment_targets(node).any(|target| !binds_a_name(target, language))
+}
+
+/// Where a declaration's text begins: its node ([`declaration_node`]), or
+/// the lines before it among its siblings that belong to it — a TypeScript
+/// class member's decorators, a Rust item's outer attributes and doc comments
+/// (`///` is `#[doc]`). A comment between those lines is inside the
+/// declaration; one above them is not.
+fn declaration_start(node: Node, language: Language) -> Node {
+    let mut start = node;
+    let mut before = node.prev_sibling();
+    while let Some(sibling) = before {
+        let leads = match (language, sibling.kind()) {
+            (Language::TypeScript | Language::JavaScript, "decorator") => true,
+            (Language::Rust, "attribute_item") => true,
+            (Language::Rust, "line_comment" | "block_comment") => {
+                sibling.child_by_field_name("outer").is_some()
+            }
+            _ => false,
+        };
+        if leads {
+            start = sibling;
+        } else if !sibling.is_extra() {
+            break;
+        }
+        before = sibling.prev_sibling();
+    }
+    start
+}
+
+/// Where a declaration's text ends: its node ([`declaration_node`]), or the
+/// token right after it that ends it — a C++ type's `;`, a TypeScript or
+/// JavaScript member's `;` or `,`, a Rust field's or variant's `,`.
+fn declaration_end(node: Node, language: Language) -> Node {
+    let Some(next) = node.next_sibling() else {
+        return node;
+    };
+    let ends = match (language, next.kind()) {
+        (Language::Cpp, ";") => matches!(
+            node.kind(),
+            "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
+        ),
+        (Language::TypeScript | Language::JavaScript, ";" | ",") => {
+            node.parent().is_some_and(|body| {
+                matches!(body.kind(), "class_body" | "interface_body" | "object_type")
+            })
+        }
+        (Language::Rust, ",") => true,
+        _ => false,
+    };
+    if ends { next } else { node }
 }
 
 /// A tree-sitter position as CLI/JSON positions are spelled: 1-indexed line,
@@ -553,19 +795,16 @@ fn extract_name_and_kind(
     let name = content
         .get(name_node.start_byte()..name_node.end_byte())?
         .to_string();
-    if name.is_empty() || (name.starts_with('_') && name.len() == 1) {
+    if names_nothing(&name) {
         return None;
     }
     Some((name, node_kind(node)))
 }
 
-/// The single name a binding introduces, where the grammar states bindings and
-/// destructuring with one node: a `left` that is one identifier names one
-/// symbol, and anything else names several or none, which this shape cannot
-/// carry.
-fn bound_name<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
-    node.child_by_field_name("left")
-        .filter(|left| kinds.contains(&left.kind()))
+/// Whether a declared name is no name at all: empty, or the blank `_` that
+/// discards what is bound to it.
+fn names_nothing(name: &str) -> bool {
+    name.is_empty() || name == "_"
 }
 
 /// The first child of `node` with the given grammar kind. Grammars that wrap a
@@ -574,6 +813,13 @@ fn bound_name<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
 /// written before it.
 fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     (0..node.child_count()).find_map(|i| node.child(i).filter(|c| c.kind() == kind))
+}
+
+/// Every child of `node` with the given grammar kind, in order.
+fn children_of_kind<'a>(node: Node<'a>, kind: &str) -> Vec<Node<'a>> {
+    (0..node.child_count())
+        .filter_map(|i| node.child(i).filter(|c| c.kind() == kind))
+        .collect()
 }
 
 /// The last child of `node` with the given grammar kind, for grammars that
@@ -678,52 +924,13 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
                 child_of_kind(node, "variable_declaration")
                     .and_then(|d| child_of_kind(d, "simple_identifier"))
             }),
-        Language::Cpp => node
-            .child_by_field_name("declarator")
-            .map(|declarator| {
-                declarator
-                    .child_by_field_name("declarator")
-                    .unwrap_or(declarator)
-            })
+        Language::Cpp => declared_names(node, language)
+            .into_iter()
+            .next()
             .or_else(|| node.child_by_field_name("name")),
-        Language::Python => node
+        _ => node
             .child_by_field_name("name")
-            .or_else(|| bound_name(node, &["identifier"])),
-        Language::Ruby => node
-            .child_by_field_name("name")
-            .or_else(|| bound_name(node, &["constant", "identifier"])),
-        Language::Dart => node.child_by_field_name("name").or_else(|| {
-            child_of_kind(node, "initialized_identifier_list")
-                .and_then(|list| child_of_kind(list, "initialized_identifier"))
-                .or_else(|| {
-                    child_of_kind(node, "static_final_declaration_list")
-                        .and_then(|list| child_of_kind(list, "static_final_declaration"))
-                })
-                .and_then(|bound| child_of_kind(bound, "identifier"))
-        }),
-        Language::Java => node.child_by_field_name("name").or_else(|| {
-            node.child_by_field_name("declarator")
-                .and_then(|d| d.child_by_field_name("name"))
-        }),
-        Language::PHP => node
-            .child_by_field_name("name")
-            .or_else(|| {
-                child_of_kind(node, "property_element")
-                    .and_then(|e| child_of_kind(e, "variable_name"))
-                    .and_then(|v| child_of_kind(v, "name"))
-            })
-            .or_else(|| {
-                child_of_kind(node, "const_element").and_then(|e| child_of_kind(e, "name"))
-            }),
-        Language::CSharp => node.child_by_field_name("name").or_else(|| {
-            child_of_kind(node, "variable_declaration")
-                .and_then(|d| child_of_kind(d, "variable_declarator"))
-                .and_then(|d| {
-                    d.child_by_field_name("name")
-                        .or_else(|| child_of_kind(d, "identifier"))
-                })
-        }),
-        _ => node.child_by_field_name("name"),
+            .or_else(|| declared_names(node, language).into_iter().next()),
     };
 
     name_field.or_else(|| {
@@ -909,10 +1116,10 @@ const GO_QUERY: &str = r#"
 "#;
 
 // A binding's node is the same at module scope, in a class body, and inside a
-// function, so members are matched where they are declared. The name is read
-// from the assignment's `left` only where that is a single identifier: a
-// destructuring bind states several names in one node, and this shape carries
-// one.
+// function, so members are matched where they are declared. The names are
+// the identifiers the assignment's `left` binds, through a chain as well
+// (`a = b = None`, see `declared_names`); a destructuring bind states its names
+// in one pattern (`a, b = …`), which is not read.
 const PYTHON_QUERY: &str = r#"
 (function_definition) @symbol
 (class_definition) @symbol
@@ -976,6 +1183,8 @@ const KOTLIN_QUERY: &str = r#"
 (property_declaration) @symbol
 "#;
 
+// A member declared in a class body is a `field_declaration`, and one a
+// `template` header heads is a plain `declaration` inside the template.
 const CPP_QUERY: &str = r#"
 (function_definition) @symbol
 (class_specifier) @symbol
@@ -983,6 +1192,7 @@ const CPP_QUERY: &str = r#"
 (enum_specifier) @symbol
 (namespace_definition) @symbol
 (field_declaration) @symbol
+(field_declaration_list (template_declaration (declaration) @symbol))
 "#;
 
 const CSHARP_QUERY: &str = r#"
@@ -1392,6 +1602,8 @@ struct S { int f; };
 class C {
 public:
     void m();
+    template <typename U>
+    U make();
 };
 
 enum E { X };
@@ -1406,6 +1618,7 @@ void f() {}
                 "field:S/f",
                 "class:C",
                 "method:C/m",
+                "method:C/make",
                 "enum:E",
                 "function:f",
             ],
@@ -1754,6 +1967,334 @@ region     = "us-central1"
             with_body[0].body.as_deref(),
             Some("    def 처리(self):\n        return 1")
         );
+    }
+
+    #[test]
+    fn a_declaration_opens_on_the_syntax_that_belongs_to_it() {
+        let extractor = SymbolExtractor::new();
+        let start = |path: &str, content: &str, language: Language, name: &str| {
+            extractor
+                .extract(Path::new(path), content, language)
+                .into_iter()
+                .find(|symbol| symbol.name == name)
+                .map(|symbol| symbol.location.effective_start())
+                .unwrap()
+        };
+
+        let rust = "//! The crate.\n\n// Above.\n/// Doubles.\n// Between.\n#[inline]\n\
+                    pub fn double(x: u32) -> u32 {\n    x * 2\n}\n\nimpl S {\n    /// Size.\n    \
+                    fn len(&self) -> usize {\n        0\n    }\n}\n";
+        assert_eq!(start("a.rs", rust, Language::Rust, "double"), (4, 1));
+        assert_eq!(start("a.rs", rust, Language::Rust, "len"), (12, 5));
+
+        let python = "# Above.\n@first\n@second(1)\ndef run():\n    pass\n\n\n@dataclass\n\
+                      class Row:\n    pass\n";
+        assert_eq!(start("a.py", python, Language::Python, "run"), (2, 1));
+        assert_eq!(start("a.py", python, Language::Python, "Row"), (8, 1));
+
+        let typescript = "class Svc {\n  // Above.\n  @log(\"a\")\n  stop() { return 1; }\n}\n\n\
+                          @Component()\nexport class Top {}\n\nexport function go() {}\n";
+        assert_eq!(
+            start("a.ts", typescript, Language::TypeScript, "stop"),
+            (3, 3)
+        );
+        assert_eq!(
+            start("a.ts", typescript, Language::TypeScript, "Top"),
+            (7, 1)
+        );
+        assert_eq!(
+            start("a.ts", typescript, Language::TypeScript, "go"),
+            (10, 1)
+        );
+
+        let dart = "class Shape {\n  @override\n  String toString() {\n    return \"s\";\n  }\n}\n\n\
+                    int top() {\n  return 2;\n}\n";
+        let spans = |name: &str| {
+            extractor
+                .extract(Path::new("a.dart"), dart, Language::Dart)
+                .into_iter()
+                .find(|symbol| symbol.name == name)
+                .map(|symbol| (symbol.location.effective_start(), symbol.location.end_line))
+                .unwrap()
+        };
+        assert_eq!(spans("toString"), ((2, 3), Some(5)));
+        assert_eq!(spans("top"), ((8, 1), Some(10)));
+    }
+
+    #[test]
+    fn a_declaration_spans_the_statement_and_token_that_hold_it() {
+        let extractor = SymbolExtractor::new();
+        let spans = |path: &str, content: &str, language: Language| {
+            extractor
+                .extract(Path::new(path), content, language)
+                .into_iter()
+                .map(|symbol| {
+                    let location = &symbol.location;
+                    (
+                        symbol.name.clone(),
+                        location.effective_start(),
+                        (location.end_line.unwrap(), location.end_column.unwrap()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let span = |all: &[(String, (u32, u32), (u32, u32))], name: &str| {
+            all.iter()
+                .find(|(named, _, _)| named == name)
+                .map(|(_, start, end)| (*start, *end))
+                .unwrap_or_else(|| panic!("no {name} in {all:?}"))
+        };
+
+        let cpp = spans(
+            "a.cpp",
+            "template <typename T>\nT twice(T x) {\n    return x;\n}\n\n\
+             extern \"C\" int cfun() {\n    return 2;\n}\n\n\
+             extern \"C\" {\nint g() { return 1; }\n}\n\n\
+             template <typename T>\nclass Box {\n    class Inner {};\n    \
+             template <typename U>\n    U pick(U u) { return u; }\n};\n\n\
+             struct S {\n    int a;\n};\n\nstruct T {\n    int b;\n} t;\n",
+            Language::Cpp,
+        );
+        assert_eq!(span(&cpp, "twice"), ((1, 1), (4, 2)));
+        assert_eq!(span(&cpp, "cfun"), ((6, 1), (8, 2)));
+        assert_eq!(span(&cpp, "g"), ((11, 1), (11, 22)));
+        assert_eq!(span(&cpp, "Box"), ((14, 1), (19, 3)));
+        assert_eq!(span(&cpp, "Inner"), ((16, 5), (16, 20)));
+        assert_eq!(span(&cpp, "pick"), ((17, 5), (18, 30)));
+        assert_eq!(span(&cpp, "S"), ((21, 1), (23, 3)));
+        assert_eq!(span(&cpp, "T"), ((25, 1), (27, 2)));
+        let member = spans(
+            "b.cpp",
+            "class W {\n    template <typename U>\n    static U make();\n};\n",
+            Language::Cpp,
+        );
+        assert_eq!(span(&member, "make"), ((2, 5), (3, 21)));
+
+        let typescript = spans(
+            "a.ts",
+            "export const handler = async () => {\n  return 1;\n};\n\
+             const a = () => 1, b = () => 2;\ndeclare class X {}\n\
+             interface Runnable {\n  run(): void;\n  name: string,\n}\n\
+             class Svc {\n  count = 0;\n}\n",
+            Language::TypeScript,
+        );
+        assert_eq!(span(&typescript, "handler"), ((1, 1), (3, 3)));
+        assert_eq!(span(&typescript, "a"), ((4, 7), (4, 18)));
+        assert_eq!(span(&typescript, "b"), ((4, 20), (4, 31)));
+        assert_eq!(span(&typescript, "X"), ((5, 1), (5, 19)));
+        assert_eq!(span(&typescript, "run"), ((7, 3), (7, 15)));
+        assert_eq!(span(&typescript, "name"), ((8, 3), (8, 16)));
+        assert_eq!(span(&typescript, "count"), ((11, 3), (11, 13)));
+
+        let rust = spans(
+            "a.rs",
+            "pub struct Store {\n    pub items: Vec<u32>,\n}\n\npub enum Mode {\n    Fast,\n    Slow\n}\n",
+            Language::Rust,
+        );
+        assert_eq!(span(&rust, "items"), ((2, 5), (2, 25)));
+        assert_eq!(span(&rust, "Fast"), ((6, 5), (6, 10)));
+        assert_eq!(span(&rust, "Slow"), ((7, 5), (7, 9)));
+
+        let go = spans(
+            "a.go",
+            "package p\n\ntype Foo struct {\n\tA int\n}\n\ntype (\n\tB int\n\tC int\n)\n\
+             const X = 1\nvar y = 2\n",
+            Language::Go,
+        );
+        assert_eq!(span(&go, "Foo"), ((3, 1), (5, 2)));
+        assert_eq!(span(&go, "B"), ((8, 2), (8, 7)));
+        assert_eq!(span(&go, "X"), ((11, 1), (11, 12)));
+        assert_eq!(span(&go, "y"), ((12, 1), (12, 10)));
+    }
+
+    #[test]
+    fn a_statement_declaring_several_names_is_the_whole_declaration_of_each() {
+        let extractor = SymbolExtractor::new();
+        for (path, language, content, several, one) in [
+            (
+                "a.go",
+                Language::Go,
+                "package p\n\nvar unused, shared = 1, 2\nvar one = 1\n",
+                &["unused", "shared"][..],
+                "one",
+            ),
+            (
+                "a.go",
+                Language::Go,
+                "package p\n\nvar lo, hi = pick(\n\t1,\n\t2,\n)\nvar one = 1\n",
+                &["lo", "hi"],
+                "one",
+            ),
+            (
+                "a.go",
+                Language::Go,
+                "package p\n\nconst lo, hi = 0, 9\nconst one = 1\n",
+                &["lo", "hi"],
+                "one",
+            ),
+            (
+                "a.go",
+                Language::Go,
+                "package p\n\ntype S struct {\n\tA, B int\n\tC int\n}\n",
+                &["A", "B"],
+                "C",
+            ),
+            (
+                "A.java",
+                Language::Java,
+                "class A {\n    int unused, shared;\n    int one;\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "class A {\n    int unused, *shared;\n    int one;\n};\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class A {\n    public int unused, shared;\n    public int one;\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "unused = shared = None\none = 1\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "UNUSED = SHARED = 1\nONE = 1\n",
+                &["UNUSED", "SHARED"],
+                "ONE",
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nclass A {\n    public $unused, $shared;\n    public $one;\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nclass A {\n    const X = 1, Y = 2;\n    const Z = 3;\n}\n",
+                &["X", "Y"],
+                "Z",
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "class A {\n  let unused = 1, shared = 2\n  let one = 1\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class A {\n  int unused = 1, shared = 2;\n  int one = 1;\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class A {\n  static const unused = 1, shared = 2;\n  static const one = 1;\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+        ] {
+            let symbols = extractor.extract(Path::new(path), content, language);
+            let located = |name: &str| {
+                let location = &symbols
+                    .iter()
+                    .find(|symbol| symbol.name == name)
+                    .unwrap_or_else(|| panic!("{path}: no {name}"))
+                    .location;
+                (
+                    (location.line, location.column),
+                    (location.name_end_line, location.name_end_column),
+                    location.effective_start(),
+                    (location.end_line, location.end_column),
+                )
+            };
+            let spans_statement = |(name, name_end, start, end): ((u32, u32), _, (u32, u32), _)| {
+                start < name || end != name_end
+            };
+            let first = located(several[0]);
+            assert!(
+                spans_statement(first),
+                "{path}: {} spans the statement",
+                several[0]
+            );
+            for name in &several[1..] {
+                let other = located(name);
+                assert_ne!(other.0, first.0, "{path}: {name} is read at its own name");
+                assert_eq!((other.2, other.3), (first.2, first.3), "{path}: {name}");
+            }
+            assert!(
+                spans_statement(located(one)),
+                "{path}: {one} declared alone spans its statement"
+            );
+        }
+
+        let blank = extractor.extract(
+            Path::new("a.go"),
+            "package p\n\nvar _, only = pick()\n",
+            Language::Go,
+        );
+        let names: Vec<(&str, (u32, u32))> = blank
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.location.effective_start()))
+            .collect();
+        assert_eq!(names, [("only", (3, 1))]);
+    }
+
+    #[test]
+    fn a_chained_assignment_to_more_than_names_is_none_of_its_names_alone() {
+        let extractor = SymbolExtractor::new();
+        for (path, language, content, names) in [
+            (
+                "a.py",
+                Language::Python,
+                "LIMIT = obj.attr = 5\nobj.flag = COUNT = 7\nTABLE = cache['k'] = {}\n",
+                &["LIMIT", "COUNT", "TABLE"][..],
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "LEVEL = CONF.level = 3\n@cache = TABLE = {}\n",
+                &["LEVEL", "TABLE"],
+            ),
+        ] {
+            let symbols = extractor.extract(Path::new(path), content, language);
+            for name in names {
+                let location = &symbols
+                    .iter()
+                    .find(|symbol| symbol.name == *name)
+                    .unwrap_or_else(|| panic!("{path}: no {name}"))
+                    .location;
+                assert_eq!(
+                    (
+                        location.effective_start(),
+                        location.end_line,
+                        location.end_column
+                    ),
+                    (
+                        (location.line, location.column),
+                        location.name_end_line,
+                        location.name_end_column,
+                    ),
+                    "{path}: {name} spans its name alone"
+                );
+            }
+        }
     }
 
     #[test]
