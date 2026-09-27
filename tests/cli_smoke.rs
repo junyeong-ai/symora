@@ -1222,6 +1222,44 @@ fn a_path_the_grammar_answer_prints_addresses_its_member() {
     }
 }
 
+/// A symbol found across the workspace takes its body from the same read the
+/// file form answers from, so it has one whether or not the file's server
+/// answers.
+#[test]
+fn a_workspace_symbol_takes_its_body_from_whatever_reads_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("svc.py"),
+        "class Service:\n    def start(self):\n        return 1\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+    let build = run_in(dir.path(), &["search", "index", "build"]);
+    assert!(
+        build.status.success(),
+        "index build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let query = ["symbols", "--symbol", "Service/start", "--lang", "python"];
+    let bodied = json_ok(dir.path(), &[&query[..], &["--body"]].concat());
+    assert_eq!(
+        bodied["items"][0]["body"], "    def start(self):\n        return 1",
+        "{bodied}"
+    );
+    let signed = json_ok(dir.path(), &[&query[..], &["--signature"]].concat());
+    assert_eq!(
+        signed["items"][0]["signature"], "def start(self)",
+        "{signed}"
+    );
+}
+
 /// A decorator, an attribute, a Rust doc comment or a C++ template header is
 /// part of the declaration it heads, so deleting the declaration without a
 /// server takes those lines with it rather than leaving them on whatever
