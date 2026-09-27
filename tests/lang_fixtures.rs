@@ -445,3 +445,77 @@ fn diff_impact_gives_a_class_the_lines_no_member_covers() {
         );
     }
 }
+
+/// pyright gives a variable the range of its name alone, which a whole-line
+/// edit could only split; the declaration the grammar reads at that name
+/// gives the answer the whole assignment, as it does wherever a server's
+/// range leaves out part of a declaration. An assignment that binds several
+/// names is the whole declaration of each, so a declaration inserted after
+/// one goes after all of it, and deleting one is refused rather than taking
+/// the others, as is deleting a name an assignment binds along with an
+/// attribute.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
+    if !pyright_on_path() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo)
+        .status()
+        .expect("git");
+    assert!(status.success());
+    std::fs::write(
+        repo.join("svc.py"),
+        "class Service:\n    timeout = 30\n\n    def start(self):\n        return self.timeout\n\n\n\
+         LIMIT = 5\nunused = shared = dict(\n    a=1,\n)\nTOTAL = Service.timeout = 60\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| -> Value {
+        let output = Command::new(SYMORA)
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(repo)
+            .env("SYMORA_NO_DAEMON", "1")
+            .stderr(Stdio::null())
+            .output()
+            .expect("run symora");
+        serde_json::from_slice(&output.stdout).expect("JSON on stdout")
+    };
+
+    let listed = run(&["symbols", "svc.py"]);
+    assert_eq!(listed["backend"], "document", "pyright answered: {listed}");
+    for (symbol, line) in [("Service/timeout", 2), ("LIMIT", 8)] {
+        let preview = run(&["edit", "delete", "svc.py", "--symbol", symbol, "--dry-run"]);
+        assert_eq!(preview["lines"]["start"], line, "{symbol}: {preview}");
+        assert_eq!(preview["lines"]["end"], line, "{symbol}: {preview}");
+    }
+    let inserted = run(&[
+        "edit",
+        "insert-after",
+        "svc.py",
+        "--symbol",
+        "shared",
+        "--code",
+        "OTHER = 1",
+        "--dry-run",
+    ]);
+    assert_eq!(inserted["lines"]["start"], 9, "{inserted}");
+    assert_eq!(inserted["lines"]["end"], 11, "{inserted}");
+    let refused = run(&[
+        "edit",
+        "delete",
+        "svc.py",
+        "--symbol",
+        "unused",
+        "--dry-run",
+    ]);
+    assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("'shared'"), "{refused}");
+    let refused = run(&["edit", "delete", "svc.py", "--symbol", "TOTAL", "--dry-run"]);
+    assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
+}

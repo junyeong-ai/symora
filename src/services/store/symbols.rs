@@ -226,6 +226,97 @@ impl SymbolExtractor {
         .unwrap_or_default()
     }
 
+    /// Give each of `symbols` — a language server's answer for `content` —
+    /// the extent of the declaration this grammar reads at its name, where
+    /// that extent is wider. A server's range can leave out syntax that is
+    /// part of the declaration: clangd a `template` header, an attribute on
+    /// its own line and a class's closing `;`, tsserver the `const` and `;`
+    /// of a `const f = () => {}`, rust-analyzer a field's `,`. Every surface
+    /// that splices, slices or attributes lines by a symbol's range reads it
+    /// from the answer, so the answer carries the whole declaration whichever
+    /// server gave it. The two readings are joined by where the name starts
+    /// or, failing that, where it ends: a qualified C++ name (`Widget::set`)
+    /// starts at its qualifier in the grammar and at its last part in clangd,
+    /// and ends at the same place in both. Each is a position one token
+    /// occupies, so no server's names or kinds are compared with the
+    /// grammar's; a symbol with no grammar reading there keeps the server's
+    /// range, and so does each end of one the grammar read there only by
+    /// recovering from a syntax error ([`read_as_written`]).
+    pub fn widen_to_declarations(
+        &self,
+        symbols: &mut [Symbol],
+        path: &Path,
+        content: &str,
+        language: Language,
+    ) {
+        type Extent = (Option<(u32, u32)>, Option<(u32, u32)>);
+        struct Extents {
+            by_start: HashMap<(u32, u32), Extent>,
+            by_end: HashMap<(u32, u32), Extent>,
+        }
+        fn widen(symbols: &mut [Symbol], extents: &Extents) {
+            for symbol in symbols {
+                let location = &mut symbol.location;
+                let named = extents
+                    .by_start
+                    .get(&(location.line, location.column))
+                    .or_else(|| {
+                        let end = (location.name_end_line?, location.name_end_column?);
+                        extents.by_end.get(&end)
+                    });
+                if let Some(&(start, end)) = named {
+                    if let Some(start) = start
+                        && start < location.effective_start()
+                    {
+                        location.range_start_line = Some(start.0);
+                        location.range_start_column = Some(start.1);
+                    }
+                    let ends = (
+                        location.end_line.unwrap_or(location.line),
+                        location.end_column.unwrap_or(location.column),
+                    );
+                    if let Some(end) = end
+                        && end > ends
+                    {
+                        location.end_line = Some(end.0);
+                        location.end_column = Some(end.1);
+                    }
+                }
+                widen(&mut symbol.children, extents);
+            }
+        }
+
+        let mut extents = Extents {
+            by_start: HashMap::new(),
+            by_end: HashMap::new(),
+        };
+        let declarations = self
+            .with_declarations(path, content, language, |read| {
+                read.into_iter()
+                    .map(|(node, symbol)| (read_as_written(node, language), symbol))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (written, declared) in declarations {
+            let location = declared.location;
+            let (Some(end_line), Some(end_column)) = (location.end_line, location.end_column)
+            else {
+                continue;
+            };
+            let extent = (
+                written.start.then(|| location.effective_start()),
+                written.end.then_some((end_line, end_column)),
+            );
+            extents
+                .by_start
+                .insert((location.line, location.column), extent);
+            if let (Some(line), Some(column)) = (location.name_end_line, location.name_end_column) {
+                extents.by_end.insert((line, column), extent);
+            }
+        }
+        widen(symbols, &extents);
+    }
+
     /// The declarations `keep` accepts, given each one's node and the nodes
     /// every declaration was read from.
     fn extract_where(
@@ -681,6 +772,55 @@ fn declaration_start(node: Node, language: Language) -> Node {
         before = sibling.prev_sibling();
     }
     start
+}
+
+/// Which ends of `node`'s declaration, from [`declaration_start`] to
+/// [`declaration_end`], the grammar read without recovering from a syntax
+/// error. A recovered reading is not one of the text as written: a macro the
+/// grammar cannot expand (`QT_BEGIN_NAMESPACE` on the line before a function)
+/// reads as the function's return type, and a class missing its `;` as the
+/// return type of the function after it. The start rests on the syntax
+/// before the declaration's body and the end on all of it, so an error inside
+/// a body (a macro statement with no `;`) leaves the start as written and the
+/// end not. A macro that happens to read as valid syntax of another shape
+/// leaves no error to tell by.
+fn read_as_written(node: Node, language: Language) -> AsWritten {
+    let declaration = declaration_node(node, language);
+    let end = declaration_end(declaration, language);
+    let parts: Vec<Node> =
+        std::iter::successors(Some(declaration_start(declaration, language)), |part| {
+            (part.id() != end.id())
+                .then(|| part.next_sibling())
+                .flatten()
+        })
+        .collect();
+    let body = node
+        .child_by_field_name("body")
+        .map_or(usize::MAX, |body| body.start_byte());
+    AsWritten {
+        start: !parts.iter().any(|part| errs_before(*part, body)),
+        end: !parts.iter().any(|part| part.has_error()),
+    }
+}
+
+/// Which ends of a declaration's extent [`read_as_written`] finds read as
+/// written.
+struct AsWritten {
+    start: bool,
+    end: bool,
+}
+
+/// Whether `node` holds a syntax error that begins before byte `limit`.
+fn errs_before(node: Node, limit: usize) -> bool {
+    if node.start_byte() >= limit || !node.has_error() {
+        return false;
+    }
+    if node.is_error() || node.is_missing() {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| errs_before(child, limit))
 }
 
 /// Where a declaration's text ends: its node ([`declaration_node`]), or the
@@ -2294,6 +2434,120 @@ region     = "us-central1"
                     "{path}: {name} spans its name alone"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_servers_range_takes_the_declaration_the_grammar_reads_at_its_name() {
+        let content = "template <typename T>\nT twice(T x) {\n    return x;\n}\n\n// Above.\n\
+                       int top() {\n    return 1;\n}\n\nclass Box {\n    int v;\n};\n\n\
+                       template <typename U>\nvoid Widget::set(U u) {\n}\n";
+        let path = Path::new("m.cpp");
+        let served =
+            |name: &str, (line, column): (u32, u32), start: (u32, u32), end: (u32, u32)| {
+                Symbol::new(
+                    name.to_string(),
+                    SymbolKind::Function,
+                    Location::full(
+                        path.to_path_buf(),
+                        line,
+                        column,
+                        start.0,
+                        start.1,
+                        end.0,
+                        end.1,
+                    ),
+                )
+            };
+        let mut symbols = vec![
+            served("twice", (2, 3), (2, 1), (4, 2)),
+            served("top", (7, 5), (6, 1), (9, 2)),
+            served("Box", (11, 7), (11, 1), (13, 2)).with_children(vec![served(
+                "v",
+                (12, 9),
+                (12, 5),
+                (12, 10),
+            )]),
+            served("return", (8, 5), (8, 5), (8, 13)),
+            Symbol::new(
+                "Widget::set".to_string(),
+                SymbolKind::Function,
+                Location::full(path.to_path_buf(), 16, 14, 16, 1, 17, 2).with_name_end(16, 17),
+            ),
+        ];
+        SymbolExtractor::new().widen_to_declarations(&mut symbols, path, content, Language::Cpp);
+
+        let extent = |symbol: &Symbol| {
+            let location = &symbol.location;
+            (
+                location.effective_start(),
+                (location.end_line.unwrap(), location.end_column.unwrap()),
+            )
+        };
+        assert_eq!(extent(&symbols[0]), ((1, 1), (4, 2)));
+        assert_eq!(extent(&symbols[1]), ((6, 1), (9, 2)));
+        assert_eq!(extent(&symbols[2]), ((11, 1), (13, 3)));
+        assert_eq!(extent(&symbols[2].children[0]), ((12, 5), (12, 11)));
+        assert_eq!(extent(&symbols[3]), ((8, 5), (8, 13)));
+        assert_eq!(extent(&symbols[4]), ((15, 1), (17, 2)));
+    }
+
+    #[test]
+    fn a_declaration_read_by_recovering_from_an_error_widens_only_what_it_read() {
+        let path = Path::new("m.cpp");
+        for (content, name, at, served, widened) in [
+            (
+                "#define BEGIN_NS namespace app {\n#define END_NS }\n\nBEGIN_NS\n\nint f() {\n    \
+                 return 1;\n}\n\nEND_NS\n",
+                "f",
+                (6, 5),
+                ((6, 1), (8, 2)),
+                ((6, 1), (8, 2)),
+            ),
+            (
+                "class Box {\n    int v;\n}\n\nint top() {\n    return 1;\n}\n",
+                "top",
+                (5, 5),
+                ((5, 1), (7, 2)),
+                ((5, 1), (7, 2)),
+            ),
+            (
+                "#define GUARDED(m) std::lock_guard<std::mutex> guard_(m);\n\
+                 template <typename T>\nint locked(T v) {\n    GUARDED(mu)\n    return 0;\n}\n",
+                "locked",
+                (3, 5),
+                ((3, 1), (6, 2)),
+                ((2, 1), (6, 2)),
+            ),
+        ] {
+            let mut symbols = vec![Symbol::new(
+                name.to_string(),
+                SymbolKind::Function,
+                Location::full(
+                    path.to_path_buf(),
+                    at.0,
+                    at.1,
+                    served.0.0,
+                    served.0.1,
+                    served.1.0,
+                    served.1.1,
+                ),
+            )];
+            SymbolExtractor::new().widen_to_declarations(
+                &mut symbols,
+                path,
+                content,
+                Language::Cpp,
+            );
+            let location = &symbols[0].location;
+            assert_eq!(
+                (
+                    location.effective_start(),
+                    (location.end_line.unwrap(), location.end_column.unwrap()),
+                ),
+                widened,
+                "{name}"
+            );
         }
     }
 
