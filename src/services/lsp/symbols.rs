@@ -6,6 +6,7 @@ use crate::infra::lsp::IndexingState;
 use crate::infra::lsp::protocol::{DocumentSymbol, SymbolInformation};
 use crate::models::lsp::{FindSymbolsOptions, Indexed, path_to_uri};
 use crate::models::symbol::{Language, Symbol};
+use crate::services::store::SymbolExtractor;
 
 use super::converters::*;
 use super::helpers::*;
@@ -58,14 +59,21 @@ pub(super) async fn find_symbols(
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file_clone, &content_clone);
-                parse_document_symbols(
+                let mut symbols = parse_document_symbols(
                     result,
                     &file_clone,
                     &base_options,
                     client.indexing_state(),
                     client.language(),
                     &mut conv,
-                )
+                )?;
+                SymbolExtractor::shared().widen_to_declarations(
+                    &mut symbols,
+                    &file_clone,
+                    &content_clone,
+                    Language::from_path(&file_clone),
+                );
+                Ok(symbols)
             }
         })
         .await?;
