@@ -1,4 +1,5 @@
-//! Position-driven navigation over a `documentSymbol` tree.
+//! Position-driven navigation over a file's symbols, as a server's tree or
+//! as a flat answer (see [`symbols_over`]).
 
 use crate::models::symbol::{Symbol, SymbolKind};
 use crate::services::store::TypeHeaders;
@@ -76,25 +77,44 @@ fn declares_position(symbol: &Symbol, line: u32, column: u32) -> bool {
     )
 }
 
-/// Find the innermost symbol at a position (recursive search).
+/// Every symbol whose declared range covers a position, outermost first.
+///
+/// A server's tree lists what a symbol holds among its children; a flat
+/// answer — the grammar's, or a server's `SymbolInformation` list — lists it
+/// beside the symbol, inside its range. Read by range the two are one
+/// sequence: by where each symbol begins, and the longer first among those
+/// that begin alike, so a symbol comes before what it holds whichever way
+/// the answer nests. Every navigator below reads a position through it.
+fn symbols_over(symbols: &[Symbol], line: u32, column: Option<u32>) -> Vec<&Symbol> {
+    fn collect<'a>(
+        symbols: &'a [Symbol],
+        line: u32,
+        column: Option<u32>,
+        over: &mut Vec<&'a Symbol>,
+    ) {
+        for symbol in symbols {
+            if contains_position(symbol, line, column) {
+                over.push(symbol);
+                collect(&symbol.children, line, column, over);
+            }
+        }
+    }
+    let mut over = Vec::new();
+    collect(symbols, line, column, &mut over);
+    over.sort_by_key(|symbol| {
+        let (start, end) = span(symbol);
+        (start, std::cmp::Reverse(end))
+    });
+    over
+}
+
+/// The innermost symbol at a position.
 pub fn find_symbol_at_position(
     symbols: &[Symbol],
     line: u32,
     column: Option<u32>,
 ) -> Option<&Symbol> {
-    fn search(symbols: &[Symbol], line: u32, column: Option<u32>) -> Option<&Symbol> {
-        for symbol in symbols {
-            if !contains_position(symbol, line, column) {
-                continue;
-            }
-            if let Some(child) = search(&symbol.children, line, column) {
-                return Some(child);
-            }
-            return Some(symbol);
-        }
-        None
-    }
-    search(symbols, line, column)
+    symbols_over(symbols, line, column).pop()
 }
 
 /// The innermost symbol whose name a position is on — see
@@ -116,18 +136,10 @@ fn innermost(
     column: u32,
     spans: fn(&Symbol, u32, u32) -> bool,
 ) -> Option<&Symbol> {
-    for symbol in symbols {
-        if !contains_position(symbol, line, Some(column)) {
-            continue;
-        }
-        if let Some(child) = innermost(&symbol.children, line, column, spans) {
-            return Some(child);
-        }
-        if spans(symbol, line, column) {
-            return Some(symbol);
-        }
-    }
-    None
+    symbols_over(symbols, line, Some(column))
+        .into_iter()
+        .rev()
+        .find(|symbol| spans(symbol, line, column))
 }
 
 /// The callable that owns a position: the innermost function, method, or
@@ -143,26 +155,39 @@ fn innermost(
 /// and an anonymous frame cannot serve as one — the search continues outward
 /// past it rather than reporting a blank.
 pub fn enclosing_callable(symbols: &[Symbol], line: u32, column: Option<u32>) -> Option<&Symbol> {
-    fn search<'a>(
+    symbols_over(symbols, line, column)
+        .into_iter()
+        .rev()
+        .find(|symbol| symbol.kind.is_callable() && !symbol.name.trim().is_empty())
+}
+
+/// The symbol that holds the one whose name begins at a position: its parent
+/// where the answer nests it — a server may list a member under its type
+/// with a range inside a sibling's, as pyright does an attribute assigned in
+/// `__init__` — and, for one listed at the top as a flat answer lists every
+/// symbol, the innermost other symbol whose range covers it.
+pub fn holder_of(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> {
+    fn parent_of<'a>(
         symbols: &'a [Symbol],
-        line: u32,
-        column: Option<u32>,
-        found: Option<&'a Symbol>,
-    ) -> Option<&'a Symbol> {
-        for symbol in symbols {
-            if !contains_position(symbol, line, column) {
-                continue;
-            }
-            let found = if symbol.kind.is_callable() && !symbol.name.trim().is_empty() {
-                Some(symbol)
+        parent: Option<&'a Symbol>,
+        at: (u32, u32),
+    ) -> Option<Option<&'a Symbol>> {
+        symbols.iter().find_map(|symbol| {
+            if (symbol.location.line, symbol.location.column) == at {
+                Some(parent)
             } else {
-                found
-            };
-            return search(&symbol.children, line, column, found);
-        }
-        found
+                parent_of(&symbol.children, Some(symbol), at)
+            }
+        })
     }
-    search(symbols, line, column, None)
+    if let Some(parent) = parent_of(symbols, None, (line, column))? {
+        return Some(parent);
+    }
+    let over = symbols_over(symbols, line, Some(column));
+    let at = over
+        .iter()
+        .rposition(|symbol| (symbol.location.line, symbol.location.column) == (line, column))?;
+    over[..at].last().copied()
 }
 
 /// The members a line belongs to: the innermost symbol over it that code
@@ -176,17 +201,14 @@ pub fn enclosing_callable(symbols: &[Symbol], line: u32, column: Option<u32>) ->
 /// need not list every member: the grammar reads no Java constructor, and a
 /// Dart method's range ends with its signature. A line holding a container's
 /// declaration and a member (a container written on one line) belongs to
-/// both. Siblings that overlap — the grammar's flat answer, whose nesting
-/// is in `name_path` alone — are read outermost first: by where they begin,
-/// and the longer first among those that begin alike. `headers` are where the
-/// file's types are declared outside their bodies, which tells a type's
-/// parameter from a type declared of its own.
+/// both. `headers` are where the file's types are declared outside their
+/// bodies, which tells a type's parameter from a type declared of its own.
 pub fn members_at_line<'a>(
     symbols: &'a [Symbol],
     headers: &TypeHeaders,
     line: u32,
 ) -> Vec<&'a Symbol> {
-    members_where(symbols, headers, line, &|_| true)
+    members_where(symbols, headers, line, |_| true)
 }
 
 /// The members a deletion made just after `line` lies inside, read as
@@ -198,7 +220,7 @@ pub fn members_at_deletion<'a>(
     headers: &TypeHeaders,
     line: u32,
 ) -> Vec<&'a Symbol> {
-    members_where(symbols, headers, line, &|symbol| {
+    members_where(symbols, headers, line, |symbol| {
         line < symbol.location.end_line.unwrap_or(symbol.location.line)
     })
 }
@@ -207,19 +229,11 @@ fn members_where<'a>(
     symbols: &'a [Symbol],
     headers: &TypeHeaders,
     line: u32,
-    within: &dyn Fn(&Symbol) -> bool,
+    within: impl Fn(&Symbol) -> bool,
 ) -> Vec<&'a Symbol> {
-    let mut over: Vec<&Symbol> = symbols
-        .iter()
-        .filter(|symbol| contains_position(symbol, line, None) && within(symbol))
-        .collect();
-    over.sort_by_key(|symbol| {
-        let (start, end) = span(symbol);
-        (start, std::cmp::Reverse(end))
-    });
     let mut owners = Vec::new();
     let mut container = None;
-    for symbol in over {
+    for symbol in symbols_over(symbols, line, None) {
         // A symbol the server names nothing — a function called where it is
         // written, an anonymous namespace — or gives no kind — clangd's group
         // of what a macro expands to, named after the macro — declares
@@ -230,25 +244,22 @@ fn members_where<'a>(
         // function's; one declared anywhere else declares a type of its own
         // (rust-analyzer and sourcekit-lsp give a type alias and an
         // associated type that kind).
-        let declares = !symbol.name.is_empty()
-            && symbol.kind != SymbolKind::Null
-            && !(symbol.kind == SymbolKind::TypeParameter
-                && headers.holds_parameter((symbol.location.line, symbol.location.column)));
-        if declares && symbol.kind.holds_members() && line == symbol.location.line {
-            owners.push(symbol);
+        if symbol.name.is_empty()
+            || symbol.kind == SymbolKind::Null
+            || (symbol.kind == SymbolKind::TypeParameter
+                && headers.holds_parameter((symbol.location.line, symbol.location.column)))
+            || !within(symbol)
+        {
+            continue;
         }
-        if declares && !symbol.kind.holds_members() {
+        if !symbol.kind.holds_members() {
             owners.push(symbol);
             return owners;
         }
-        let members = members_where(&symbol.children, headers, line, within);
-        if !members.is_empty() {
-            owners.extend(members);
-            return owners;
+        if line == symbol.location.line {
+            owners.push(symbol);
         }
-        if declares && symbol.kind.holds_members() {
-            container = Some(symbol);
-        }
+        container = Some(symbol);
     }
     if let Some(container) = container
         && !owners.iter().any(|owner| std::ptr::eq(*owner, container))
@@ -828,17 +839,87 @@ mod tests {
     }
 
     /// The grammar's answer is flat: a class, its methods and a method's
-    /// local are siblings, read outermost first by the lines they span.
+    /// local are siblings, and every position reads as it does in the same
+    /// symbols nested — a body line is its method's, not the class's.
     #[test]
-    fn in_a_flat_answer_the_outermost_non_container_owns_a_line() {
-        let symbols = vec![
+    fn a_flat_answer_reads_as_its_tree_does() {
+        let (class, method, local, field) = (
             declared("Foo", SymbolKind::Class, 1, 14),
             declared("bar", SymbolKind::Method, 3, 5),
-            declared("total", SymbolKind::Variable, 4, 4),
-        ];
+            Symbol::new(
+                "total".to_string(),
+                SymbolKind::Variable,
+                Location::full(std::path::PathBuf::from("x.py"), 4, 5, 4, 1, 4, 20),
+            ),
+            declared("FIELD", SymbolKind::Field, 12, 13),
+        );
+        let tree = vec![nest(
+            class.clone(),
+            vec![nest(method.clone(), vec![local.clone()]), field.clone()],
+        )];
+        let flat = vec![class, method, local, field];
+        let name = |symbol: Option<&Symbol>| symbol.map(|s| s.name.clone());
 
-        assert_eq!(owners(&symbols, 4), ["bar"]);
-        assert_eq!(owners(&symbols, 7), ["Foo"]);
+        for line in 1..=16 {
+            assert_eq!(owners(&flat, line), owners(&tree, line), "line {line}");
+            for column in [None, Some(1), Some(5), Some(9)] {
+                assert_eq!(
+                    name(find_symbol_at_position(&flat, line, column)),
+                    name(find_symbol_at_position(&tree, line, column)),
+                    "{line}:{column:?}"
+                );
+                assert_eq!(
+                    name(enclosing_callable(&flat, line, column)),
+                    name(enclosing_callable(&tree, line, column)),
+                    "{line}:{column:?}"
+                );
+            }
+            for column in [1, 5, 9] {
+                assert_eq!(
+                    name(find_named_at_position(&flat, line, column)),
+                    name(find_named_at_position(&tree, line, column)),
+                    "{line}:{column}"
+                );
+                assert_eq!(
+                    name(holder_of(&flat, line, column)),
+                    name(holder_of(&tree, line, column)),
+                    "{line}:{column}"
+                );
+            }
+        }
+        assert_eq!(owners(&flat, 4), ["bar"]);
+        assert_eq!(owners(&flat, 7), ["Foo"]);
+        assert_eq!(
+            name(find_symbol_at_position(&flat, 5, None)).as_deref(),
+            Some("bar")
+        );
+        assert_eq!(name(holder_of(&flat, 3, 5)).as_deref(), Some("Foo"));
+        assert_eq!(name(holder_of(&flat, 12, 5)).as_deref(), Some("Foo"));
+        assert_eq!(name(holder_of(&flat, 4, 5)).as_deref(), Some("bar"));
+        assert!(holder_of(&flat, 1, 5).is_none());
+    }
+
+    /// pyright lists an attribute assigned in `__init__` under its class,
+    /// with a range inside `__init__`'s: the tree says what holds it.
+    #[test]
+    fn a_member_listed_under_its_type_is_held_by_it_wherever_its_range_lies() {
+        let attribute = Symbol::new(
+            "unused_attr".to_string(),
+            SymbolKind::Variable,
+            Location::full(std::path::PathBuf::from("m.py"), 4, 14, 4, 9, 4, 30),
+        );
+        let init = Symbol::new(
+            "__init__".to_string(),
+            SymbolKind::Method,
+            Location::full(std::path::PathBuf::from("m.py"), 2, 9, 2, 5, 4, 30),
+        );
+        let symbols = vec![nest(
+            declared("Service", SymbolKind::Class, 1, 6),
+            vec![init, attribute],
+        )];
+
+        let holder = holder_of(&symbols, 4, 14).expect("a holder");
+        assert_eq!(holder.name, "Service");
     }
 
     /// clangd groups what a macro expands to under a symbol of no kind named

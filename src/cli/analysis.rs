@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::ParsedLocation;
 use crate::cli::utils::{
     AnchorResolution, RefsClassification, SymbolResolution, ambiguity_hint,
-    column_addressed_symbol, find_named_at_position, line_addressed_symbol,
+    column_addressed_symbol, find_named_at_position, holder_of, line_addressed_symbol,
 };
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
@@ -331,33 +331,18 @@ impl LocationAnalysis {
     }
 }
 
-/// The type a member is declared in, found by tree parentage rather than by
+/// The type a member is declared in, found by what holds it rather than by
 /// its name — an outer function declares a nested one, and a call there has to
 /// name it, so only a type weakens the member's zero.
 fn declaring_type_of(symbols: &[Symbol], anchor: &Anchor) -> Option<Symbol> {
-    fn walk(nodes: &[Symbol], parent: Option<&Symbol>, at: (u32, u32)) -> Option<Symbol> {
-        for node in nodes {
-            if (node.location.line, node.location.column) == at {
-                return parent
-                    .filter(|p| {
-                        matches!(
-                            p.kind,
-                            SymbolKind::Class
-                                | SymbolKind::Struct
-                                | SymbolKind::Interface
-                                | SymbolKind::Enum
-                        )
-                    })
-                    .cloned();
-            }
-            if let Some(found) = walk(&node.children, Some(node), at) {
-                return Some(found);
-            }
-        }
-        None
-    }
-
-    walk(symbols, None, (anchor.line, anchor.column))
+    holder_of(symbols, anchor.line, anchor.column)
+        .filter(|holder| {
+            matches!(
+                holder.kind,
+                SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Enum
+            )
+        })
+        .cloned()
 }
 
 /// How often the type declaring the anchor is referenced, asked only when the
