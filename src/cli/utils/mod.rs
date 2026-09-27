@@ -15,7 +15,7 @@ pub use io::{read_line_at, read_lines_around};
 pub use refs::{RefsClassification, extract_module};
 pub use signature::extract_signature;
 pub use symbol_nav::{
-    AnchorResolution, SymbolResolution, ambiguity_hint, column_addressed_symbol,
+    AnchorResolution, SymbolResolution, ambiguity_hint, column_addressed_symbol, declared_with,
     enclosing_callable, find_named_at_position, find_symbol_at_position, holder_of,
     line_addressed_symbol, members_at_deletion, members_at_line, symbols_declared_on_line,
 };

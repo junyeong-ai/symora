@@ -51,7 +51,8 @@ pub struct Anchor {
     /// definition — as opposed to being on the declaration itself.
     pub via_definition: bool,
     /// The multi-declaration disclosure for a line-only input that hit
-    /// several declarations: the first was chosen, and this names the rest.
+    /// several declarations, or a column on the header several names share:
+    /// the first was chosen, and this names the rest.
     pub hint: Option<String>,
     pub resolution: AnchorResolution,
 }
@@ -188,7 +189,11 @@ pub async fn resolve_anchor(
                 SymbolResolution::Match(symbol) => {
                     Anchor::declared(input, &input.file, symbol.clone(), None)
                 }
-                _ => match self_declaration {
+                SymbolResolution::Ambiguous(declared) => {
+                    let hint = ambiguity_hint(input.line, &declared);
+                    Anchor::declared(input, &input.file, declared[0].clone(), Some(hint))
+                }
+                SymbolResolution::NotFound => match self_declaration {
                     Some(location) => Anchor::binding(input, &location),
                     None => Anchor::raw(input, AnchorResolution::NotASymbol),
                 },
@@ -972,6 +977,22 @@ mod tests {
             PathBuf::from("svc.rs"),
             vec![func("svc.rs", "process_order", 5, 8, 12)],
         );
+        // `var lo, hi = pick(…)` over lines 5 to 8: one statement, the whole
+        // declaration of both names.
+        symbols_by_file.insert(
+            PathBuf::from("vars.go"),
+            [("lo", 5), ("hi", 9)]
+                .into_iter()
+                .map(|(name, column)| {
+                    Symbol::new(
+                        name.to_string(),
+                        SymbolKind::Variable,
+                        Location::full(PathBuf::from("vars.go"), 5, column, 5, 1, 8, 2)
+                            .with_name_end(5, column + 2),
+                    )
+                })
+                .collect(),
+        );
         symbols_by_file.insert(
             PathBuf::from("types.rs"),
             vec![func("types.rs", "Foo", 3, 12, 9)],
@@ -1087,6 +1108,25 @@ mod tests {
             assert!(anchor.is_resolved());
             assert!(!anchor.via_definition);
         }
+    }
+
+    /// A column on the keyword several names share anchors at the first of
+    /// them and names the rest; a column on a name anchors at that name.
+    #[tokio::test]
+    async fn a_column_on_a_shared_header_anchors_at_the_first_name_and_says_so() {
+        let keyword = resolve(at("vars.go", 5, 1)).await.unwrap();
+        assert_eq!(keyword.symbol.as_ref().map(|s| s.name.as_str()), Some("lo"));
+        assert!(
+            keyword
+                .hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("hi")),
+            "{:?}",
+            keyword.hint
+        );
+        let named = resolve(at("vars.go", 5, 9)).await.unwrap();
+        assert_eq!(named.symbol.as_ref().map(|s| s.name.as_str()), Some("hi"));
+        assert!(named.hint.is_none());
     }
 
     /// A token on the declaration's own line before the name — a return type,

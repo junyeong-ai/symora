@@ -283,7 +283,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
   "preview": "@@ -48,5 +48,6 @@\n-  async processOrder(cart: Cart, user: User): Promise<Order> {\n-    const reserved = …\n …\n+  async processOrder(cart: Cart, user: User): Promise<Order> {\n+    if (cart.items.length === 0) throw new EmptyCartError();\n+    const reserved = …\n …"
 }
 ```
-> `--dry-run`은 바뀔 범위 전체(옛 줄은 `-`, 새 줄은 `+`)와 바이트 증감을 보여주고 아무것도 쓰지 않습니다. 서버가 알려 준 선언 범위가 문서 주석이나 속성 줄로 시작하면 그 줄들도 범위에 들어가므로, `lines`를 확인하고 `--body`에 함께 넣으세요. 적용하려면 `--dry-run`을 빼면 되고, `--verify-callers`를 붙이면 변경 후 이 심볼을 참조하는 파일들의 진단까지 가져옵니다. 라인 번호보다 `--symbol`을 권장합니다 — 라이브 파일에 다시 해석되므로 연속 편집에도 좌표가 어긋나지 않습니다.
+> `--dry-run`은 바뀔 범위 전체(옛 줄은 `-`, 새 줄은 `+`)와 바이트 증감을 보여주고 아무것도 쓰지 않습니다. 선언 범위가 데코레이터, 속성, 문서 주석 줄로 시작하면 그 줄들도 범위에 들어가므로, `lines`를 확인하고 `--body`에 함께 넣으세요. 적용하려면 `--dry-run`을 빼면 되고, `--verify-callers`를 붙이면 변경 후 이 심볼을 참조하는 파일들의 진단까지 가져옵니다. 라인 번호보다 `--symbol`을 권장합니다 — 라이브 파일에 다시 해석되므로 연속 편집에도 좌표가 어긋나지 않습니다.
 
 > **주소 지정은 유연하지만 안전합니다.** `--symbol`은 단순 이름, `Class/method` suffix, `*/method` 와일드카드, 또는 정확한 `name_path`로 매칭됩니다. 이름이 모호하면 `edit`은 추측하지 않고 거부합니다.
 > ```json
