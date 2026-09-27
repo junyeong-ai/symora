@@ -126,7 +126,6 @@ impl From<&symbol::Symbol> for Symbol {
 impl From<Symbol> for symbol::Symbol {
     fn from(val: Symbol) -> Self {
         let kind = SymbolKind::parse_or_default(&val.kind);
-        let name = symbol::Symbol::normalize_name(&val.name, &PathBuf::from(&val.file), kind);
 
         let location = symbol::Location {
             file: PathBuf::from(val.file),
@@ -141,7 +140,7 @@ impl From<Symbol> for symbol::Symbol {
             degraded_column: val.degraded_column,
         };
 
-        let mut sym = symbol::Symbol::new(name, kind, location);
+        let mut sym = symbol::Symbol::new(val.name, kind, location);
 
         if let Some(container) = val.container
             && !container.is_empty()
@@ -1106,6 +1105,21 @@ mod tests {
         let back: SymSymbol = wire.into();
 
         assert_eq!(back.body, original.body);
+    }
+
+    /// A name crosses the wire as the direct path produced it, so a daemon
+    /// answer names a symbol exactly as an in-process one does (invariant 3):
+    /// an operator, a raw marker a server gave, and an empty name alike.
+    #[test]
+    fn symbol_roundtrip_keeps_the_name_as_given() {
+        for name in ["<", "<unknown>", "", " spaced "] {
+            let loc = SymLocation::point(PathBuf::from("test.swift"), 1, 1);
+            let original = SymSymbol::new(name.to_string(), SymbolKind::Function, loc);
+
+            let back: SymSymbol = Symbol::from(&original).into();
+
+            assert_eq!(back.name, name);
+        }
     }
 
     #[test]
