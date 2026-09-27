@@ -151,7 +151,7 @@ async fn fetch_context(
             analysis.anchor_resolution().as_status(),
         );
         if let Some(sym) = analysis.target() {
-            t = t.with_signature(extract_signature(sym.body.as_deref()));
+            t = t.with_signature(extract_signature(sym));
             if args.body || args.all || args.with_bodies {
                 t = t.with_body(sym.body.clone());
             }

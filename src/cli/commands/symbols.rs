@@ -156,7 +156,7 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 .map(|s| {
                     let mut output = SymbolOutput::from_symbol(s, ctx.root());
                     if args.signature {
-                        let sig = extract_signature(s.body.as_deref());
+                        let sig = extract_signature(s);
                         output = output.with_signature(sig).without_body();
                     }
                     output
@@ -511,7 +511,7 @@ async fn workspace_symbol_bodies(
             let mut output = SymbolOutput::from_symbol(source, ctx.root())
                 .produced_by(producer(symbol, from_index));
             if signature {
-                let sig = extract_signature(source.body.as_deref());
+                let sig = extract_signature(source);
                 output = output.with_signature(sig).without_body();
             }
             output

@@ -462,7 +462,7 @@ impl LocationAnalysis {
     }
 
     pub fn is_exported(&self) -> Option<bool> {
-        let body = self.target().and_then(|s| s.body.as_deref())?;
+        let body = self.target().and_then(Symbol::body_from_name)?;
         detect_exported(body, self.language)
     }
 }
@@ -1309,6 +1309,22 @@ mod tests {
             references,
             indexing: None,
         }
+    }
+
+    /// Visibility is read from the line that names the declaration, past
+    /// the attribute and doc-comment lines its body opens with.
+    #[test]
+    fn visibility_is_read_from_the_line_that_names_the_declaration() {
+        let mut anchor = Anchor::raw(&at("lib.rs", 3, 12), AnchorResolution::Resolved);
+        anchor.symbol = Some(
+            Symbol::new(
+                "len".to_string(),
+                SymbolKind::Function,
+                Location::full(PathBuf::from("lib.rs"), 3, 12, 1, 1, 5, 2),
+            )
+            .with_body("/// Size.\n#[inline]\npub fn len() -> usize {\n    0\n}"),
+        );
+        assert_eq!(analysis_of(anchor, vec![]).is_exported(), Some(true));
     }
 
     /// An input that resolved to a declaration through its definition is a

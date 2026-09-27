@@ -1425,6 +1425,52 @@ fn a_statement_declaring_several_names_is_each_ones_declaration() {
     assert_eq!(rows, [r#""hi" "modified""#, r#""lo" "modified""#], "{page}");
 }
 
+/// The body `symbols --body` returns is the span `edit replace-body`
+/// replaces, so a body read, changed and passed back keeps the decorator its
+/// declaration opens with; the signature is still read from the line that
+/// names it.
+#[test]
+fn a_body_read_changed_and_passed_back_keeps_its_decorator() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("m.py"),
+        "import functools\n\n\n@functools.cache\ndef top():\n    return 2\n",
+    )
+    .unwrap();
+    let config_dir = root.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+
+    let read = json_ok(root, &["symbols", "m.py", "--symbol", "top", "--body"]);
+    let body = read["items"][0]["body"].as_str().unwrap_or_default();
+    assert_eq!(body, "@functools.cache\ndef top():\n    return 2", "{read}");
+    let signed = json_ok(root, &["symbols", "m.py", "--symbol", "top", "--signature"]);
+    assert_eq!(signed["items"][0]["signature"], "def top()", "{signed}");
+
+    let changed = body.replace("return 2", "return 3");
+    json_ok(
+        root,
+        &[
+            "edit",
+            "replace-body",
+            "m.py",
+            "--symbol",
+            "top",
+            "--body",
+            &changed,
+        ],
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("m.py")).unwrap(),
+        "import functools\n\n\n@functools.cache\ndef top():\n    return 3\n"
+    );
+}
+
 /// A symbol-path answer merges the index with a live lookup, so each row says
 /// which one produced it — the word `search symbols` already uses. Without it
 /// a caller cannot tell a row the index vouches for from one a language server
