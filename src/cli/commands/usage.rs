@@ -724,7 +724,7 @@ fn build_result_without_refs(
     root: &std::path::Path,
     with_snippet: bool,
 ) -> UsageResult {
-    let signature = crate::cli::utils::extract_signature(symbol.body.as_deref());
+    let signature = crate::cli::utils::extract_signature(symbol);
     let snippet = if with_snippet {
         // workspace_symbols doesn't include body, so read from file
         symbol
@@ -900,7 +900,7 @@ async fn fetch_single_symbol_refs(
         None
     };
 
-    let signature = crate::cli::utils::extract_signature(symbol.body.as_deref());
+    let signature = crate::cli::utils::extract_signature(symbol);
 
     (
         Analysed::Kept(Box::new(UsageResult {

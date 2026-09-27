@@ -352,7 +352,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
                 .take(12)
                 .map(|symbol| {
                     let mut out = SymbolOutput::from_symbol(symbol, ctx.root()).without_body();
-                    out.signature = extract_signature(symbol.body.as_deref());
+                    out.signature = extract_signature(symbol);
                     out.without_children()
                 })
                 .collect();
@@ -1047,7 +1047,7 @@ fn build_focus_symbols(symbols: &[Symbol], root: &Path) -> Vec<FocusSymbolOutput
                 .unwrap_or_else(|_| symbol.location.file.display().to_string()),
             line: symbol.location.line,
             name_path: symbol.name_path.clone(),
-            signature: extract_signature(symbol.body.as_deref()),
+            signature: extract_signature(symbol),
             child_count: symbol.children.len(),
         })
         .collect()

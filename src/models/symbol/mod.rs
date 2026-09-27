@@ -34,14 +34,16 @@ pub struct Symbol {
 
 impl Symbol {
     /// Fill each symbol's `body` from the file it was read out of, spanning
-    /// its declaration.
+    /// its declaration: the lines an edit of the whole declaration replaces
+    /// or deletes, decorators, attributes and doc comments included, so a
+    /// body read, changed and passed back keeps them.
     ///
     /// A body is text, not a language-server answer: every producer of a
     /// `Symbol` fills it the same way, from the same two ends of the same
     /// location.
     pub fn attach_bodies(symbols: &mut [Symbol], content: &str) {
         for symbol in symbols {
-            let start = symbol.location.line.saturating_sub(1) as usize;
+            let start = symbol.location.effective_start().0.saturating_sub(1) as usize;
             let end = symbol
                 .location
                 .end_line
@@ -52,6 +54,23 @@ impl Symbol {
                 symbol.body = Some(lines.join("\n"));
             }
             Self::attach_bodies(&mut symbol.children, content);
+        }
+    }
+
+    /// The body from the line that names the symbol, where its signature and
+    /// visibility are written, past the lines its declaration opens with.
+    pub fn body_from_name(&self) -> Option<&str> {
+        let body = self.body.as_deref()?;
+        match self
+            .location
+            .line
+            .checked_sub(self.location.effective_start().0)?
+        {
+            0 => Some(body),
+            above => body
+                .match_indices('\n')
+                .nth(above as usize - 1)
+                .map(|(newline, _)| &body[newline + 1..]),
         }
     }
 
@@ -597,6 +616,34 @@ mod tests {
             kind,
             Location::point(PathBuf::from("test.rs"), 1, 1),
         )
+    }
+
+    #[test]
+    fn a_body_spans_the_declaration_and_reads_from_its_name() {
+        let content = "import functools\n\n\n@functools.cache\n@other\ndef top():\n    return 2\n\n\n\
+                       def plain():\n    return 1\n";
+        let at = |name: &str, line, start, end| {
+            Symbol::new(
+                name.to_string(),
+                SymbolKind::Function,
+                Location::full(PathBuf::from("m.py"), line, 5, start, 1, end, 13),
+            )
+        };
+        let mut symbols = vec![at("top", 6, 4, 7), at("plain", 10, 10, 11)];
+        Symbol::attach_bodies(&mut symbols, content);
+
+        assert_eq!(
+            symbols[0].body.as_deref(),
+            Some("@functools.cache\n@other\ndef top():\n    return 2")
+        );
+        assert_eq!(
+            symbols[0].body_from_name(),
+            Some("def top():\n    return 2")
+        );
+        assert_eq!(
+            symbols[1].body_from_name(),
+            Some("def plain():\n    return 1")
+        );
     }
 
     #[test]

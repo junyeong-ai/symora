@@ -73,11 +73,7 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 root,
                 analysis.anchor_resolution().as_status(),
             )
-            .with_signature(
-                analysis
-                    .target()
-                    .and_then(|symbol| extract_signature(symbol.body.as_deref())),
-            );
+            .with_signature(analysis.target().and_then(extract_signature));
 
             let anchor = format!(
                 "{}:{}:{}",
