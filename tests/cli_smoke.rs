@@ -1146,6 +1146,42 @@ fn a_declaration_the_grammar_reads_is_editable_without_a_server() {
     );
 }
 
+/// The grammar's answer is flat — a class and its methods are siblings — and
+/// a body line addresses the method it is in, as it does in a server's tree,
+/// never the class around it.
+#[test]
+fn a_body_line_the_grammar_reads_addresses_its_method() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Shop.java"),
+        "public class Shop {\n    int total(int a) {\n        return a + 1;\n    }\n\n    \
+         int price(int b) {\n        return b * 2;\n    }\n}\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.java]\ncommand = \"/nonexistent/jdtls\"\n",
+    )
+    .unwrap();
+
+    let preview = json_ok(
+        dir.path(),
+        &[
+            "edit",
+            "replace-body",
+            "Shop.java:3",
+            "--body",
+            "    int total(int a) {\n        return a;\n    }",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(preview["target_symbol"], "Shop/total", "{preview}");
+    assert_eq!(preview["lines"]["start"], 2, "{preview}");
+    assert_eq!(preview["lines"]["end"], 4, "{preview}");
+}
+
 /// A symbol-path answer merges the index with a live lookup, so each row says
 /// which one produced it — the word `search symbols` already uses. Without it
 /// a caller cannot tell a row the index vouches for from one a language server
