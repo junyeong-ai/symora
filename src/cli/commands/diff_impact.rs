@@ -492,10 +492,15 @@ fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<ParsedDiff> {
     // diff prints no patch, textconv moves lines off the file's own, other
     // prefixes rename the files, inter-hunk context — or context from
     // GIT_DIFF_OPTS, which outranks `--unified` — takes in unchanged lines,
-    // copy or no rename detection changes which files are new, and a
-    // submodule setting hides a changed submodule or prints it as a log.
-    // The rename and submodule choices are git's defaults. Quoting every
-    // byte past ASCII keeps a file name exact whatever its encoding.
+    // another algorithm or slider heuristic pairs different lines as
+    // changed, copy or no rename detection changes which files are new, and
+    // a submodule setting hides a changed submodule or prints it as a log.
+    // The rename, submodule and slider choices are git's defaults. The
+    // algorithm is patience, which pairs the lines each side holds once — a
+    // declaration's own header — before the lines around them, so a function
+    // added beside a similar one is not read as a change to it, as git's
+    // default myers can pair it. Quoting every byte past ASCII keeps a file
+    // name exact whatever its encoding.
     cmd.env_remove("GIT_DIFF_OPTS");
     cmd.args([
         "-c",
@@ -504,6 +509,8 @@ fn parse_git_diff(root: &Path, base: &str, staged: bool) -> Result<ParsedDiff> {
         "--relative",
         "--unified=0",
         "--inter-hunk-context=0",
+        "--diff-algorithm=patience",
+        "--indent-heuristic",
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",

@@ -1778,6 +1778,81 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
     assert_eq!(changed, ["a", "c"], "GIT_DIFF_OPTS=-u5: {page}");
 }
 
+/// Which lines git pairs as changed decides which declarations a change is
+/// read as touching, and a user's `diff.algorithm` would otherwise decide
+/// it. Git's default myers pairs the function added
+/// here with the lines of the untouched `f2` and of the class removed after
+/// it; whatever the configuration, the addition and the removal are read
+/// apart.
+#[test]
+fn which_lines_changed_does_not_depend_on_the_users_diff_algorithm() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    let config_dir = repo.join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("m.py"),
+        "def f1(x=None):\n    pass\n\n\ndef f2(x=None):\n    return None\n\n\nclass C3:\n\n    \
+         def m30(self, x=None):\n        y = 1\n        return y\n\n    \
+         def m32(self, x=None):\n        if x:\n            return None\n        return x\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "one"]);
+    std::fs::write(
+        repo.join("m.py"),
+        "def f1(x=None):\n    pass\n\n\ndef g(x=None):\n    if x:\n        return None\n    \
+         return x\n\n\ndef f2(x=None):\n    return None\n",
+    )
+    .unwrap();
+
+    let expected = [
+        ("C3", "deleted"),
+        ("g", "added"),
+        ("m30", "deleted"),
+        ("m32", "deleted"),
+    ]
+    .map(|(name, change)| (name.to_string(), change.to_string()));
+    for setting in [
+        None,
+        Some(("diff.algorithm", "myers")),
+        Some(("diff.algorithm", "minimal")),
+        Some(("diff.algorithm", "histogram")),
+    ] {
+        if let Some((key, value)) = setting {
+            git(repo, &["config", key, value]);
+        }
+        let page = json_ok(repo, &["diff-impact"]);
+        if let Some((key, _)) = setting {
+            git(repo, &["config", "--unset", key]);
+        }
+        let mut rows: Vec<(String, String)> = page["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .map(|change| {
+                (
+                    change["name"].as_str().unwrap_or_default().to_string(),
+                    change["change_type"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(rows, expected, "{setting:?}: {page}");
+    }
+}
+
 /// A change the patch names no lines for, an empty file or a mode change,
 /// is still a changed file, with nothing in it left unmeasured.
 #[cfg(unix)]
