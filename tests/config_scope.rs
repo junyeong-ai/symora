@@ -81,6 +81,18 @@ fn config_init_respects_scope() {
 }
 
 #[test]
+fn project_init_respects_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    json_ok(root.path(), home.path(), &["init"]);
+    let text = std::fs::read_to_string(root.path().join(".symora/config.toml")).unwrap();
+    let project: toml::Table = toml::from_str(&text).unwrap();
+    assert!(!project.contains_key("daemon"));
+    let value = json_ok(root.path(), home.path(), &["config", "show"]);
+    assert!(value.get("config_errors").is_none(), "{value}");
+}
+
+#[test]
 fn daemon_runtime_reads_global_config() {
     if std::env::var_os("SYMORA_TEST_DAEMON_SCOPE").is_some() {
         let config = symora::daemon::server::DaemonRuntimeConfig::load();

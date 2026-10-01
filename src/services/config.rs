@@ -20,6 +20,15 @@ pub trait ConfigService: Send + Sync {
 
 const GLOBAL_ONLY_SECTION: &str = "daemon";
 
+pub(crate) fn serialize_project_config(config: &SymoraConfig) -> Result<String, ConfigError> {
+    let content = toml::to_string_pretty(config).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let mut document = content
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    document.remove(GLOBAL_ONLY_SECTION);
+    Ok(document.to_string())
+}
+
 #[derive(Clone, Copy)]
 enum ConfigScope {
     Global,
@@ -65,15 +74,12 @@ impl DefaultConfigService {
             tokio::fs::create_dir_all(parent).await?;
         }
         let config = SymoraConfig::default();
-        let mut content =
-            toml::to_string_pretty(&config).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        if matches!(scope, ConfigScope::Project) {
-            let mut document = content
-                .parse::<toml_edit::DocumentMut>()
-                .map_err(|e| ConfigError::Parse(e.to_string()))?;
-            document.remove(GLOBAL_ONLY_SECTION);
-            content = document.to_string();
-        }
+        let content = match scope {
+            ConfigScope::Global => {
+                toml::to_string_pretty(&config).map_err(|e| ConfigError::Parse(e.to_string()))?
+            }
+            ConfigScope::Project => serialize_project_config(&config)?,
+        };
         tokio::fs::write(path, content).await?;
         Ok(())
     }
