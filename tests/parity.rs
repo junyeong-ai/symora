@@ -217,27 +217,46 @@ fn daemon_and_direct_emit_identical_payloads() {
         "src/utils.rs:{}",
         declaration_line("src/utils.rs", "pub fn estimate_tokens")
     );
-    let cases: &[&[&str]] = &[
-        &["symbols", "src/main.rs", "--depth", "1"],
-        &["refs", &anchor, "--limit", "5"],
+    // Each case pairs its argv with the `backend` a language-server answer
+    // reports, for a command that answers from a fallback instead of failing
+    // when no server is reachable: `symbols` then reports `ast`.
+    let cases: &[(&[&str], Option<&str>)] = &[
+        (
+            &["symbols", "src/main.rs", "--depth", "1"],
+            Some("document"),
+        ),
+        (&["refs", &anchor, "--limit", "5"], None),
         // Tri-state diagnostics: the `status` presence rule must not
         // depend on which side of the socket the wait ran on.
-        &["diagnostics", "src/main.rs"],
+        (&["diagnostics", "src/main.rs"], None),
     ];
 
-    for args in cases {
+    for (args, server_backend) in cases {
         let deadline = Instant::now() + QUIESCENCE_TIMEOUT;
         let direct = quiesced("direct", args, run_cli, deadline);
         let daemon = quiesced("daemon", args, run_via_daemon, deadline);
 
         // A payload is always non-empty — an error object is a payload — so
-        // emptiness is not what makes a case vacuous. A reference case that
-        // resolved to no symbol compares two identical nothings and proves
-        // nothing about parity.
+        // emptiness is not what makes a case vacuous. Two sides that failed
+        // alike are equal: without rust-analyzer, `refs` and `diagnostics`
+        // return `server_not_installed` on each. So are two fallback answers,
+        // and a reference case that resolved to no symbol compares two
+        // identical nothings. None of these proves anything about parity.
         assert!(
             !direct.is_empty(),
             "parity case {args:?} produced no output — the comparison is vacuous",
         );
+        assert!(
+            !direct.iter().any(|payload| payload.get("error").is_some()),
+            "parity case {args:?} failed — the comparison is vacuous: {direct:?}",
+        );
+        if let Some(backend) = server_backend {
+            assert!(
+                direct.iter().all(|payload| payload["backend"] == *backend),
+                "parity case {args:?} was not answered by the language server — the \
+                 comparison is vacuous: {direct:?}",
+            );
+        }
         assert!(
             !direct
                 .iter()
