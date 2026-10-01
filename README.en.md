@@ -392,6 +392,9 @@ Search degrades gracefully without an index (it falls back to a filesystem scan 
 
 Precedence: `.symora/config.toml` → `~/.config/symora/config.toml` (honors `XDG_CONFIG_HOME`) → built-in defaults. Two environment overrides sit above the files: `SYMORA_SEARCH_LIMIT` and `SYMORA_LSP_TIMEOUT`.
 
+`[daemon]` settings apply to the entire daemon and are read only from the user config. Keys under `[daemon]` in a project config are ignored and reported in `config_errors`. The daemon reads these settings once at startup, so run `symora daemon restart` to apply changes.
+`idle_timeout_mins` sets how long a project and each language server remain alive after their last request finishes.
+
 ```bash
 symora config init            # write a local config
 symora config init --global   # write the user config
@@ -404,7 +407,10 @@ Common settings: LSP timeouts and limits, daemon behavior, test-file patterns, a
 command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
 args = ["--stdio"]   # optional; absent = inherit built-in args
 tier = "slow"        # optional; one of fast | standard | slow
+env = { NODE_OPTIONS = "--max-old-space-size=2048" } # optional; server environment variables
 ```
+
+Entries in `env` are added to the server's inherited environment. For example, you can lower the heap limit of a Node-based server such as pyright with `NODE_OPTIONS = "--max-old-space-size=2048"`.
 
 The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads a project's config when it first serves that project and keeps it until restarted or until the project goes idle, so run `symora daemon restart` after editing it.
 
