@@ -228,6 +228,7 @@ mod tests {
                 command: Some("/custom/rust-analyzer".to_string()),
                 args: None,
                 tier: None,
+                env: None,
             },
         );
         let runtime = LspRuntimeConfig::from(&config);

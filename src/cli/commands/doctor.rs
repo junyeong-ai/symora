@@ -140,16 +140,17 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     let serving = join_all(all_servers.iter().map(|server| {
         let runtime = Arc::clone(&runtime);
         async move {
-            server.installed
-                && serves_workspace(
-                    server.language,
-                    &server.command,
-                    &server.args,
-                    app.root(),
-                    runtime,
-                    server.init_timeout,
-                )
-                .await
+            let Some(launch) = &server.launch else {
+                return false;
+            };
+            serves_workspace(
+                server.language,
+                launch,
+                app.root(),
+                runtime,
+                server.init_timeout,
+            )
+            .await
         }
     }))
     .await;

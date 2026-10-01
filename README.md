@@ -407,7 +407,10 @@ symora config init --global   # 사용자 설정 작성
 command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
 args = ["--stdio"]   # 생략 가능; 없으면 기본 args 상속
 tier = "slow"        # 생략 가능; fast | standard | slow 중 하나
+env = { NODE_OPTIONS = "--max-old-space-size=2048" } # 생략 가능; 서버 환경 변수
 ```
+
+`env`의 항목은 서버가 상속한 환경 변수에 더해집니다. 예를 들어 pyright 같은 Node 기반 서버는 `NODE_OPTIONS = "--max-old-space-size=2048"`로 힙 상한을 낮출 수 있습니다.
 
 키는 `symora doctor`가 출력하는 `language` id입니다. 잘못된 키는 doctor의 `config_errors`로 보고되며 조용히 적용되지 않습니다. daemon은 프로젝트를 처음 처리할 때 그 설정을 읽어 재시작하거나 프로젝트가 유휴 상태가 될 때까지 유지하므로, 변경 후 `symora daemon restart`를 실행하세요.
 

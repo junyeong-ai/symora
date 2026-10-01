@@ -328,7 +328,7 @@ impl LspManager {
 
         // Resolution is the only install gate: an executable we can
         // resolve is "installed", and spawning it is the truth test.
-        let command = config.resolve()?;
+        let launch = config.launch()?;
 
         let offers_file_watching = match self.file_watch {
             FileWatch::Off => true,
@@ -340,9 +340,7 @@ impl LspManager {
             Arc::clone(&self.runtime_config),
             offers_file_watching,
         );
-        client
-            .start(&command.to_string_lossy(), &config.args, || admit(&client))
-            .await?;
+        client.start(&launch, || admit(&client)).await?;
 
         tracing::info!("{:?} language server started", language);
         Ok(client)
@@ -883,12 +881,16 @@ pub(crate) mod tests {
 
         const FAKE_SERVER: &str = r#"#!/bin/sh
 case "$1" in
-  version|--version) echo 'fake-ls 1.0'; exit 0 ;;
+  version|--version) echo "${NODE_OPTIONS:-fake-ls 1.0}"; exit 0 ;;
 esac
 echo $$ >> "$1"
+if [ "$2" = env ]; then
+  printf '%s\n%s\n%s\n' "$NODE_OPTIONS" "$PATH" "$HOME" > "$4"
+  [ "$NODE_OPTIONS" = --max-old-space-size=2048 ] || exit 1
+fi
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
-  serve|watch|exits|deaf) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
+  serve|watch|exits|deaf|env) body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}' ;;
   hang) exec sleep 600 ;;
 esac
 IFS= read -r _
@@ -978,6 +980,7 @@ exec sleep 600
                         self.received().display().to_string(),
                     ]),
                     tier: None,
+                    env: None,
                 }
             }
 
@@ -1051,6 +1054,66 @@ exec sleep 600
             tokio::time::timeout(Duration::from_secs(15), future)
                 .await
                 .expect("the pool stopped making progress")
+        }
+
+        #[tokio::test]
+        async fn server_env_reaches_manager_and_workspace_probe() {
+            let fake = FakeServer::new();
+            let mut config = crate::models::config::SymoraConfig::default();
+            let mut server = fake.server("env", 0);
+            server.env = Some(std::collections::BTreeMap::from([
+                (
+                    "NODE_OPTIONS".to_string(),
+                    "--max-old-space-size=2048".to_string(),
+                ),
+                ("HOME".to_string(), "/server-home".to_string()),
+            ]));
+            config.lsp.servers.insert("go".to_string(), server);
+            let runtime = Arc::new(crate::config::LspRuntimeConfig::from(&config));
+            let manager = Arc::new(LspManager::new(
+                fake.dir.path().to_path_buf(),
+                Arc::clone(&runtime),
+                FileWatch::Off,
+            ));
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            let expected = format!(
+                "--max-old-space-size=2048\n{}\n/server-home\n",
+                std::env::var("PATH").unwrap()
+            );
+            assert_eq!(std::fs::read_to_string(fake.received()).unwrap(), expected);
+            client.shutdown().await.unwrap();
+            std::fs::remove_file(fake.received()).unwrap();
+            let launch = manager.config(Language::Go).unwrap().launch().unwrap();
+            assert!(
+                crate::infra::lsp::health::serves_workspace(
+                    Language::Go,
+                    &launch,
+                    fake.dir.path(),
+                    runtime,
+                    Duration::from_secs(2),
+                )
+                .await
+            );
+            assert_eq!(std::fs::read_to_string(fake.received()).unwrap(), expected);
+            assert_eq!(fake.pids().len(), 2);
+        }
+
+        #[test]
+        fn server_env_reaches_version_probe() {
+            let fake = FakeServer::new();
+            let mut server = fake.server("env", 0);
+            server.env = Some(std::collections::BTreeMap::from([(
+                "NODE_OPTIONS".to_string(),
+                "--max-old-space-size=2048".to_string(),
+            )]));
+            let servers = servers::merged(&std::collections::BTreeMap::from([(
+                "go".to_string(),
+                server,
+            )]));
+            assert_eq!(
+                servers[&Language::Go].probe_version().as_deref(),
+                Some("--max-old-space-size=2048")
+            );
         }
 
         #[tokio::test]

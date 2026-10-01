@@ -3423,3 +3423,80 @@ fn a_map_list_says_how_much_the_limit_cut_from_it() {
     assert_eq!(file["siblings"]["count"], 19, "{file}");
     assert_eq!(file["siblings"]["showing"], 8, "{file}");
 }
+
+#[cfg(unix)]
+#[test]
+fn doctor_server_env_preserves_json_shape() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("fake-ls");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+[ "$NODE_OPTIONS" = --max-old-space-size=2048 ] || exit 1
+case "$1" in
+  version|--version) echo 'fake-ls 1.0'; exit 0 ;;
+esac
+IFS= read -r _
+body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
+exec cat > /dev/null
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir(dir.path().join(".symora")).unwrap();
+    std::fs::write(
+        dir.path().join(".symora/config.toml"),
+        format!(
+            "[lsp.servers.go]\ncommand = {:?}\nargs = []\nenv = {{ NODE_OPTIONS = \"--max-old-space-size=2048\" }}\n",
+            bin.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(SYMORA)
+        .args(["--format", "compact", "doctor", "go"])
+        .env("SYMORA_NO_DAEMON", "1")
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("HOME", dir.path())
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(json.get("error").is_none(), "{json}");
+    assert!(json.get("config_errors").is_none(), "{json}");
+    assert_eq!(json["summary"]["serving"], 1);
+    let row = &json["languages"][0];
+    assert_eq!(row["installed"], true);
+    assert_eq!(row["serves"], true);
+    assert_eq!(row["version"], "fake-ls 1.0");
+    assert_eq!(row["source"], "config");
+    let mut keys: Vec<_> = row
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "ast_search",
+            "command",
+            "installed",
+            "language",
+            "server",
+            "serves",
+            "source",
+            "symbol_extraction",
+            "tier",
+            "version"
+        ]
+    );
+}

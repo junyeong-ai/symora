@@ -8,8 +8,8 @@ use super::client::LspClient;
 use crate::config::LspRuntimeConfig;
 use crate::models::symbol::Language;
 
-/// Whether the server at `command` can serve `root`, decided by the
-/// protocol's own handshake.
+/// Whether the resolved launch can serve `root`, decided by the protocol's
+/// own handshake.
 ///
 /// This is the only measurement that answers the question an agent asks of
 /// `doctor` — a file existing on PATH does not make a server, and a version
@@ -19,14 +19,13 @@ use crate::models::symbol::Language;
 /// has to be inferred.
 pub async fn serves_workspace(
     language: Language,
-    command: &str,
-    args: &[String],
+    launch: &super::servers::ServerLaunch,
     root: &std::path::Path,
     config: Arc<LspRuntimeConfig>,
     timeout: Duration,
 ) -> bool {
     let client = LspClient::new(language, root.to_path_buf(), config, false);
-    let started = tokio::time::timeout(timeout, client.start(command, args, || {})).await;
+    let started = tokio::time::timeout(timeout, client.start(launch, || {})).await;
     let _ = client.shutdown().await;
     matches!(started, Ok(Ok(())))
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -61,6 +61,7 @@ pub struct ServerConfig {
     pub display_name: &'static str,
     pub command: String,
     pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
     pub install: InstallInstructions,
     pub version_arg: &'static str,
     /// Binary to run for the `doctor` version report when the stdio
@@ -72,7 +73,23 @@ pub struct ServerConfig {
     pub source: ServerSource,
 }
 
+/// Resolved executable and the arguments and environment for one process.
+#[derive(Debug, Clone)]
+pub struct ServerLaunch {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
 impl ServerConfig {
+    pub fn launch(&self) -> Result<ServerLaunch, LspError> {
+        Ok(ServerLaunch {
+            command: self.resolve()?,
+            args: self.args.clone(),
+            env: self.env.clone(),
+        })
+    }
+
     pub fn init_timeout(&self) -> Duration {
         self.tier.init_timeout()
     }
@@ -126,7 +143,12 @@ impl ServerConfig {
     pub fn probe_version(&self) -> Option<String> {
         let probe = self.version_command.unwrap_or(self.command.as_str());
         let path = resolve_command(probe).ok()?;
-        let output = run_with_timeout(&path, self.version_arg, Duration::from_secs(2))?;
+        let launch = ServerLaunch {
+            command: path,
+            args: vec![self.version_arg.to_string()],
+            env: self.env.clone(),
+        };
+        let output = run_with_timeout(&launch, Duration::from_secs(2))?;
         if !output.status.success() {
             // A failed probe blanks the version column; it must never
             // surface an error line as if it were a version string.
@@ -153,6 +175,9 @@ impl ServerConfig {
         }
         if let Some(args) = &o.args {
             self.args = args.clone();
+        }
+        if let Some(env) = &o.env {
+            self.env = env.clone();
         }
         if let Some(tier) = o.tier {
             self.tier = tier;
@@ -288,9 +313,10 @@ fn override_not_found_hint(command: &str, searched: &[PathBuf]) -> String {
 }
 
 /// `Command::output()` with a hard deadline; kills the child on timeout.
-fn run_with_timeout(path: &Path, arg: &str, timeout: Duration) -> Option<std::process::Output> {
-    let mut child = Command::new(path)
-        .arg(arg)
+fn run_with_timeout(launch: &ServerLaunch, timeout: Duration) -> Option<std::process::Output> {
+    let mut child = Command::new(&launch.command)
+        .args(&launch.args)
+        .envs(&launch.env)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -325,6 +351,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "rust-analyzer",
             command: "rust-analyzer".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -350,6 +377,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 "--function-arg-placeholders".to_string(),
                 "--pch-storage=memory".to_string(),
             ],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -368,6 +396,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "zls",
             command: "zls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -386,6 +415,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "jdtls",
             command: "jdtls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -404,6 +434,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "kotlin-lsp",
             command: "kotlin-lsp".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--help",
             version_command: None,
             install: InstallInstructions {
@@ -422,6 +453,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "metals",
             command: "metals".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -440,6 +472,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "clojure-lsp",
             command: "clojure-lsp".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -458,6 +491,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "csharp-ls",
             command: "csharp-ls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -479,6 +513,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 "--adaptive-lsp-server-enabled".to_string(),
                 "--project-graph-enabled".to_string(),
             ],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -497,6 +532,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "typescript-language-server",
             command: "typescript-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -515,6 +551,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "typescript-language-server",
             command: "typescript-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -533,6 +570,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "vue-language-server",
             command: "vue-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -551,6 +589,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "pyright",
             command: "pyright-langserver".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: Some("pyright"),
             install: InstallInstructions {
@@ -569,6 +608,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "ruby-lsp",
             command: "ruby-lsp".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -587,6 +627,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "intelephense",
             command: "intelephense".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -605,6 +646,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "PerlNavigator",
             command: "perlnavigator".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -623,6 +665,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "lua-language-server",
             command: "lua-language-server".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -641,6 +684,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "bash-language-server",
             command: "bash-language-server".to_string(),
             args: vec!["start".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -659,6 +703,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "PowerShell EditorServices",
             command: "pwsh".to_string(),
             args: vec!["-NoLogo".to_string(), "-NoProfile".to_string(), "-Command".to_string(), "Import-Module PowerShellEditorServices; Start-EditorServices -HostName symora -HostProfileId symora -HostVersion 1.0.0 -BundledModulesPath $env:PSES_BUNDLE_PATH -Stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -677,6 +722,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "haskell-language-server",
             command: "haskell-language-server-wrapper".to_string(),
             args: vec!["--lsp".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -695,6 +741,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "elixir-ls",
             command: "elixir-ls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -713,6 +760,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "erlang_ls",
             command: "erlang_ls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -731,6 +779,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "elm-language-server",
             command: "elm-language-server".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -749,6 +798,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "ocamllsp",
             command: "ocamllsp".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -767,6 +817,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "gopls",
             command: "gopls".to_string(),
             args: vec!["serve".to_string()],
+            env: BTreeMap::new(),
             version_arg: "version",
             version_command: None,
             install: InstallInstructions {
@@ -785,6 +836,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "sourcekit-lsp",
             command: "sourcekit-lsp".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -803,6 +855,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "dart-language-server",
             command: "dart".to_string(),
             args: vec!["language-server".to_string(), "--protocol=lsp".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -821,6 +874,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "terraform-ls",
             command: "terraform-ls".to_string(),
             args: vec!["serve".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -839,6 +893,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "yaml-language-server",
             command: "yaml-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -857,6 +912,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "taplo",
             command: "taplo".to_string(),
             args: vec!["lsp".to_string(), "stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -875,6 +931,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "nil",
             command: "nil".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -893,6 +950,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "regal",
             command: "regal".to_string(),
             args: vec!["language-server".to_string()],
+            env: BTreeMap::new(),
             version_arg: "version",
             version_command: None,
             install: InstallInstructions {
@@ -915,6 +973,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 "-e".to_string(),
                 "languageserver::run()".to_string(),
             ],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -938,6 +997,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 "-e".to_string(),
                 "using LanguageServer; runserver()".to_string(),
             ],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -956,6 +1016,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "fortls",
             command: "fortls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -974,6 +1035,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "vscode-html-language-server",
             command: "vscode-html-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -992,6 +1054,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "vscode-css-language-server",
             command: "vscode-css-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1010,6 +1073,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "vscode-css-language-server",
             command: "vscode-css-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1028,6 +1092,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "vscode-json-language-server",
             command: "vscode-json-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1050,6 +1115,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
                 "--method".to_string(),
                 "stdio".to_string(),
             ],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1068,6 +1134,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "mdx-language-server",
             command: "mdx-language-server".to_string(),
             args: vec!["--stdio".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1086,6 +1153,7 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
             display_name: "marksman",
             command: "marksman".to_string(),
             args: vec!["server".to_string()],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1141,8 +1209,8 @@ pub struct ServerHealth {
     pub init_timeout: std::time::Duration,
     /// Effective spawn command from the merged table.
     pub command: String,
-    /// Effective spawn arguments from the merged table.
-    pub args: Vec<String>,
+    /// Resolved launch when the executable is installed.
+    pub launch: Option<ServerLaunch>,
 }
 
 /// Check health of every server in the given table
@@ -1150,7 +1218,8 @@ pub fn check_all_servers(configs: HashMap<Language, ServerConfig>) -> Vec<Server
     let mut results = Vec::new();
 
     for (language, config) in configs {
-        let installed = config.is_installed();
+        let launch = config.launch().ok();
+        let installed = launch.is_some();
         let version = if installed {
             config.probe_version()
         } else {
@@ -1166,7 +1235,7 @@ pub fn check_all_servers(configs: HashMap<Language, ServerConfig>) -> Vec<Server
             source: config.source,
             init_timeout: config.init_timeout(),
             command: config.command,
-            args: config.args,
+            launch,
         });
     }
 
@@ -1234,6 +1303,7 @@ mod tests {
             display_name: "grumpy-ls",
             command: bin.to_string_lossy().into_owned(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1268,6 +1338,7 @@ mod tests {
             display_name: "fake-ls",
             command: "/nonexistent/fake-ls".to_string(),
             args: vec![],
+            env: BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
@@ -1310,6 +1381,7 @@ mod tests {
                 command: Some("/custom/typescript-language-server".to_string()),
                 args: None,
                 tier: None,
+                env: None,
             },
         );
         let merged = merged(&overrides);
@@ -1329,6 +1401,7 @@ mod tests {
                 command: None,
                 args: Some(vec![]),
                 tier: Some(ServerTier::Fast),
+                env: None,
             },
         );
         let merged = merged(&overrides);

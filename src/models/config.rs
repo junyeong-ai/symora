@@ -83,8 +83,9 @@ pub struct LspConfig {
     pub servers: std::collections::BTreeMap<String, ServerOverride>,
 
     /// Rejected [lsp.servers] stanzas from the last resolve (non-canonical
-    /// keys, unknown fields, mistyped values) — never applied, never
-    /// serialized. Disclosed by `symora doctor` as `config_errors`.
+    /// keys, unknown fields, mistyped values, invalid environment entries) —
+    /// never applied, never serialized. Disclosed by `symora doctor` as
+    /// `config_errors`.
     #[serde(skip)]
     pub server_override_errors: Vec<ServerOverrideError>,
 }
@@ -117,6 +118,8 @@ pub struct ServerOverride {
     pub args: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ServerTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// A rejected [lsp.servers] stanza or field, recorded at config
