@@ -105,7 +105,7 @@ impl ProjectService for DefaultProjectService {
             ..Default::default()
         };
 
-        let content = toml::to_string_pretty(&config)
+        let content = crate::services::config::serialize_project_config(&config)
             .map_err(|e| ProjectError::Io(std::io::Error::other(e)))?;
         tokio::fs::write(self.config_path(), content).await?;
 
