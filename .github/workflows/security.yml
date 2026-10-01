@@ -18,20 +18,18 @@ concurrency:
 
 jobs:
   cargo-deny:
-    name: cargo-deny (${{ matrix.check }})
+    name: cargo-deny
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        check: [advisories, bans, licenses, sources]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # `check` runs advisories, bans, licenses and sources, and reports every
+      # one that fails rather than stopping at the first.
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          command: check ${{ matrix.check }}
+          command: check
 
   zizmor:
     name: Workflow lint (zizmor)
