@@ -104,7 +104,7 @@ impl DaemonServer {
         };
         match tokio::net::UnixStream::connect(&self.config.socket_path).await {
             Ok(_) => return Err(already_serving()),
-            // Only a refused or absent socket is a leftover to replace;
+            // Only a failure that proves no listener licenses replacement;
             // unlinking one this process merely could not reach would
             // strand the daemon still bound to it.
             Err(e) if !proves_no_listener(&e) => return Err(e),
