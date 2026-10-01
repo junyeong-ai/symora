@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::process::{Child, ChildStdin, Command};
@@ -301,6 +301,27 @@ impl IndexingState {
     }
 }
 
+struct ClientUseState {
+    in_flight: usize,
+    last_used: Instant,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ClientUse {
+    pub(super) in_flight: bool,
+    pub(super) last_used: Instant,
+}
+
+struct RequestUse<'a>(&'a LspClient);
+
+impl Drop for RequestUse<'_> {
+    fn drop(&mut self) {
+        let mut usage = self.0.usage.lock().expect("client usage lock poisoned");
+        usage.last_used = Instant::now();
+        usage.in_flight -= 1;
+    }
+}
+
 pub struct LspClient {
     language: Language,
     /// Spawned `kill_on_drop`, so the server process lives exactly as long as
@@ -308,6 +329,7 @@ pub struct LspClient {
     /// or handler that did would keep an abandoned server running forever.
     process: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
+    usage: std::sync::Mutex<ClientUseState>,
     next_id: AtomicU64,
     pending: RwLock<HashMap<RequestId, PendingRequest>>,
     diagnostics: RwLock<HashMap<String, PublishedDiagnostics>>,
@@ -376,6 +398,10 @@ impl LspClient {
             language,
             process: Mutex::new(None),
             stdin: Mutex::new(None),
+            usage: std::sync::Mutex::new(ClientUseState {
+                in_flight: 0,
+                last_used: Instant::now(),
+            }),
             next_id: AtomicU64::new(1),
             pending: RwLock::new(HashMap::new()),
             diagnostics: RwLock::new(HashMap::new()),
@@ -884,12 +910,33 @@ impl LspClient {
         })
     }
 
+    pub(super) fn mark_used(&self) {
+        self.usage
+            .lock()
+            .expect("client usage lock poisoned")
+            .last_used = Instant::now();
+    }
+
+    pub(super) fn usage(&self) -> ClientUse {
+        let usage = self.usage.lock().expect("client usage lock poisoned");
+        ClientUse {
+            in_flight: usage.in_flight != 0,
+            last_used: usage.last_used,
+        }
+    }
+
     /// Send a request and wait for response
     pub async fn request<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
         params: Option<Value>,
     ) -> Result<T, LspError> {
+        self.usage
+            .lock()
+            .expect("client usage lock poisoned")
+            .in_flight += 1;
+        let _usage = RequestUse(self);
+
         // Check if server is terminated before sending
         if self.terminated.load(Ordering::Acquire) {
             return Err(LspError::ServerTerminated {
@@ -1909,6 +1956,45 @@ mod tests {
             Arc::new(crate::config::LspRuntimeConfig::default()),
             false,
         )
+    }
+
+    #[tokio::test]
+    async fn server_messages_and_failed_notifications_do_not_mark_use() {
+        let client = test_client();
+        let stamp = client.usage().last_used;
+        notify_client(
+            &client,
+            "window/logMessage",
+            serde_json::json!({"type": 3, "message": "ready"}),
+        )
+        .await;
+        client
+            .handle_message(Message::Request(Request::new(
+                42,
+                "workspace/configuration",
+                Some(serde_json::json!({"items": []})),
+            )))
+            .await;
+        assert!(
+            client
+                .notify("workspace/didChangeWatchedFiles", None)
+                .await
+                .is_err()
+        );
+        assert!(!client.usage().in_flight);
+        assert_eq!(client.usage().last_used, stamp);
+    }
+
+    #[tokio::test]
+    async fn a_request_error_releases_and_refreshes_use() {
+        let client = test_client();
+        let stamp = client.usage().last_used;
+        assert!(matches!(
+            client.request::<Value>("textDocument/hover", None).await,
+            Err(LspError::NotConnected)
+        ));
+        assert!(!client.usage().in_flight);
+        assert!(client.usage().last_used > stamp);
     }
 
     #[test]

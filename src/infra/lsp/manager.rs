@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{OnceCell, RwLock, mpsc, watch};
 
@@ -18,34 +18,17 @@ enum ClientState {
     Initializing(watch::Receiver<()>),
     Live {
         client: Arc<LspClient>,
-        last_used: Instant,
     },
 }
 
 impl ClientState {
     fn live(client: Arc<LspClient>) -> Self {
-        Self::Live {
-            client,
-            last_used: Instant::now(),
-        }
-    }
-
-    fn touch(&mut self) {
-        if let Self::Live { last_used, .. } = self {
-            *last_used = Instant::now();
-        }
-    }
-
-    fn idle_duration(&self) -> Duration {
-        match self {
-            Self::Live { last_used, .. } => last_used.elapsed(),
-            Self::Initializing(_) => Duration::ZERO,
-        }
+        Self::Live { client }
     }
 
     fn client(&self) -> Option<Arc<LspClient>> {
         match self {
-            Self::Live { client, .. } => Some(Arc::clone(client)),
+            Self::Live { client } => Some(Arc::clone(client)),
             Self::Initializing(_) => None,
         }
     }
@@ -54,7 +37,7 @@ impl ClientState {
     /// watchers: one it registers only once told `initialized`, which a
     /// start tells it after the client has joined the pool.
     fn follows_the_disk(&self) -> bool {
-        matches!(self, Self::Live { client, .. } if client.initialized())
+        matches!(self, Self::Live { client } if client.initialized())
     }
 }
 
@@ -119,6 +102,7 @@ impl StartSlot {
     fn fill(&self, client: &Arc<LspClient>) {
         let mut clients = self.manager.pool();
         if self.holds(&clients) {
+            client.mark_used();
             clients.insert(self.language, ClientState::live(Arc::clone(client)));
         }
     }
@@ -211,16 +195,16 @@ impl LspManager {
     ) -> Result<Arc<LspClient>, LspError> {
         loop {
             let pooled = self.pool().get(&language).map(|state| match state {
-                ClientState::Live { client, .. } => Ok(Arc::clone(client)),
+                ClientState::Live { client } => {
+                    client.mark_used();
+                    Ok(Arc::clone(client))
+                }
                 ClientState::Initializing(done) => Err(done.clone()),
             });
 
             match pooled {
                 Some(Ok(client)) => {
                     if client.is_running().await {
-                        if let Some(state) = self.pool().get_mut(&language) {
-                            state.touch();
-                        }
                         return Ok(client);
                     }
                     self.retire(language, &client);
@@ -295,7 +279,7 @@ impl LspManager {
         let mut clients = self.pool();
         let pooled = matches!(
             clients.get(&language),
-            Some(ClientState::Live { client: pooled, .. }) if Arc::ptr_eq(pooled, client)
+            Some(ClientState::Live { client: pooled }) if Arc::ptr_eq(pooled, client)
         );
         if pooled {
             clients.remove(&language);
@@ -303,7 +287,7 @@ impl LspManager {
         pooled
     }
 
-    /// Pick the least-recently-used Ready client when the pool is full.
+    /// Pick an inactive client before one with requests in flight, oldest first.
     /// Returns `None` when there's still headroom under
     /// `max_concurrent_servers`.
     ///
@@ -323,10 +307,10 @@ impl LspManager {
         clients
             .iter()
             .filter_map(|(lang, state)| match state {
-                ClientState::Live { last_used, .. } => Some((*lang, *last_used)),
+                ClientState::Live { client } => Some((*lang, client.usage())),
                 _ => None,
             })
-            .min_by_key(|(_, last_used)| *last_used)
+            .min_by_key(|(_, usage)| (usage.in_flight, usage.last_used))
             .map(|(lang, _)| lang)
     }
 
@@ -482,13 +466,14 @@ impl LspManager {
     }
 
     /// Take every entry `which` selects out of the pool and stop its server.
-    async fn stop(&self, mut which: impl FnMut(&ClientState) -> bool) {
+    async fn stop(&self, mut which: impl FnMut(&ClientState) -> bool) -> usize {
         let stopping: Vec<(Language, Arc<LspClient>)> = self
             .pool()
             .extract_if(|_, state| which(state))
             .filter_map(|(lang, state)| state.client().map(|c| (lang, c)))
             .collect();
 
+        let count = stopping.len();
         for (lang, client) in stopping {
             if let Err(e) = client.shutdown().await {
                 tracing::warn!("Error shutting down {:?} server: {}", lang, e);
@@ -496,25 +481,18 @@ impl LspManager {
                 tracing::info!("{:?} language server stopped", lang);
             }
         }
+        count
     }
 
     pub async fn cleanup_idle(&self, timeout: Duration) -> usize {
-        let idle_languages: Vec<Language> = self
-            .pool()
-            .iter()
-            .filter(|(_, state)| state.idle_duration() > timeout)
-            .filter_map(|(lang, state)| state.client().map(|_| *lang))
-            .collect();
-
-        let mut stopped = 0;
-        for lang in idle_languages {
-            if self.shutdown_client(lang).await.is_ok() {
-                tracing::info!("{:?} language server stopped (idle)", lang);
-                stopped += 1;
+        self.stop(|state| match state {
+            ClientState::Live { client } => {
+                let usage = client.usage();
+                !usage.in_flight && usage.last_used.elapsed() > timeout
             }
-        }
-
-        stopped
+            ClientState::Initializing(_) => false,
+        })
+        .await
     }
 
     pub fn is_available(&self, language: Language) -> bool {
@@ -742,7 +720,7 @@ impl std::fmt::Display for ServerStatusDetail {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn manager_with_cap(cap: usize) -> LspManager {
@@ -817,6 +795,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_refreshes_use_before_the_start_returns() {
+        let manager = Arc::new(manager_with_cap(1));
+        let client = LspClient::new(
+            Language::Go,
+            manager.root().clone(),
+            Arc::clone(&manager.runtime_config),
+            false,
+        );
+        let created_at = client.usage().last_used;
+        let Reservation::Granted { done, evict } = manager.reserve(Language::Go) else {
+            panic!("the empty pool must admit a start");
+        };
+        assert!(evict.is_none());
+        let slot = StartSlot {
+            manager: Arc::clone(&manager),
+            language: Language::Go,
+            done,
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let admitted_at = std::time::Instant::now();
+        slot.fill(&client);
+        assert!(client.usage().last_used >= admitted_at);
+        assert_eq!(manager.cleanup_idle(created_at.elapsed()).await, 0);
+        assert!(Arc::ptr_eq(
+            &manager.peek_client(Language::Go).unwrap(),
+            &client
+        ));
+    }
+
+    #[tokio::test]
+    async fn idle_cleanup_never_removes_initializing_clients() {
+        let manager = manager_with_cap(1);
+        let (starting, done) = watch::channel(());
+        manager
+            .pool()
+            .insert(Language::Go, ClientState::Initializing(done));
+        assert_eq!(manager.cleanup_idle(Duration::ZERO).await, 0);
+        assert!(matches!(
+            manager.pool().get(&Language::Go),
+            Some(ClientState::Initializing(_))
+        ));
+        drop(starting);
+    }
+
+    #[tokio::test]
     async fn critical_failure_registry_marks_and_clears() {
         let manager = manager_with_cap(4);
         assert!(
@@ -854,11 +877,14 @@ mod tests {
     /// `deaf` stops reading before it answers `initialize`, so the client's
     /// `initialized` meets a closed pipe.
     #[cfg(unix)]
-    mod server_lifetime {
+    pub(crate) mod server_lifetime {
         use super::*;
         use std::time::Duration;
 
         const FAKE_SERVER: &str = r#"#!/bin/sh
+case "$1" in
+  version|--version) echo 'fake-ls 1.0'; exit 0 ;;
+esac
 echo $$ >> "$1"
 case "$2" in
   reject) body='{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"no workspace"}}' ;;
@@ -878,12 +904,12 @@ fi
 exec sleep 600
 "#;
 
-        struct FakeServer {
-            dir: tempfile::TempDir,
+        pub(crate) struct FakeServer {
+            pub(crate) dir: tempfile::TempDir,
         }
 
         impl FakeServer {
-            fn new() -> Self {
+            pub(crate) fn new() -> Self {
                 use std::os::unix::fs::PermissionsExt;
                 let dir = tempfile::tempdir().unwrap();
                 let script = dir.path().join("fake-ls");
@@ -920,14 +946,14 @@ exec sleep 600
 
             /// A pool holding at most `cap` servers, each of `languages`
             /// served by the fake.
-            fn capped(&self, languages: &[&str], cap: usize) -> Arc<LspManager> {
+            fn capped(&self, languages: &[&str], cap: usize, behavior: &str) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
                 config.lsp.timeout_secs = 1;
                 for language in languages {
                     config
                         .lsp
                         .servers
-                        .insert(language.to_string(), self.server("exits", 0));
+                        .insert(language.to_string(), self.server(behavior, 0));
                 }
                 let mut runtime = crate::config::LspRuntimeConfig::from(&config);
                 runtime.max_concurrent_servers = cap;
@@ -938,7 +964,7 @@ exec sleep 600
                 ))
             }
 
-            fn server(
+            pub(crate) fn server(
                 &self,
                 behavior: &str,
                 delay_secs: u32,
@@ -1004,7 +1030,7 @@ exec sleep 600
 
             /// Every server this fake ever started has exited AND been
             /// reaped — a zombie still counts as a leak.
-            async fn assert_all_gone(&self) {
+            pub(crate) async fn assert_all_gone(&self) {
                 let pids = self.pids();
                 assert!(!pids.is_empty(), "the fake server never started");
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1025,6 +1051,129 @@ exec sleep 600
             tokio::time::timeout(Duration::from_secs(15), future)
                 .await
                 .expect("the pool stopped making progress")
+        }
+
+        #[tokio::test]
+        async fn idle_cleanup_keeps_requests_in_flight_until_the_last_drop() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            let mut first =
+                Box::pin(client.request::<serde_json::Value>("textDocument/hover", None));
+            let mut second =
+                Box::pin(client.request::<serde_json::Value>("textDocument/hover", None));
+            tokio::select! {
+                _ = &mut first => panic!("request answered"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+            tokio::select! {
+                _ = &mut second => panic!("request answered"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+            assert_eq!(manager.cleanup_idle(Duration::ZERO).await, 0);
+            assert!(client.is_running().await);
+            drop(first);
+            assert_eq!(manager.cleanup_idle(Duration::ZERO).await, 0);
+            drop(second);
+            assert!(!client.usage().in_flight);
+            assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
+            drop((client, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn idle_cleanup_stops_and_replaces_an_unused_server() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
+            assert!(!client.is_running().await);
+            let replacement = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert!(!Arc::ptr_eq(&client, &replacement));
+            assert!(replacement.is_running().await);
+            assert_eq!(fake.pids().len(), 2);
+            drop((client, replacement, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn handout_refreshes_use_but_peeks_and_notifications_do_not() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            let stamp = client.usage().last_used;
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let again = bounded(manager.get_client(Language::Go)).await.unwrap();
+            assert!(Arc::ptr_eq(&client, &again));
+            assert!(client.usage().last_used > stamp);
+            assert_eq!(manager.cleanup_idle(Duration::from_millis(30)).await, 0);
+            let stamp = client.usage().last_used;
+            manager.peek_client(Language::Go).unwrap();
+            manager.server_status(Language::Go).await;
+            client
+                .notify("workspace/didChangeWatchedFiles", None)
+                .await
+                .unwrap();
+            assert_eq!(client.usage().last_used, stamp);
+            drop((client, again, manager));
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn request_timeout_and_cancellation_release_and_refresh_use() {
+            let fake = FakeServer::new();
+            let manager = fake.manager("serve", 0);
+            let client = bounded(manager.get_client(Language::Go)).await.unwrap();
+            let stamp = client.usage().last_used;
+            let request = client.request::<serde_json::Value>("textDocument/hover", None);
+            let mut request = Box::pin(request);
+            tokio::select! {
+                _ = &mut request => panic!("request answered"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+            assert!(client.usage().in_flight);
+            drop(request);
+            assert!(!client.usage().in_flight);
+            assert!(client.usage().last_used > stamp);
+            assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
+            let stamp = client.usage().last_used;
+            assert!(matches!(
+                bounded(client.request::<serde_json::Value>("textDocument/hover", None)).await,
+                Err(LspError::Timeout(_))
+            ));
+            assert!(!client.usage().in_flight);
+            assert!(client.usage().last_used > stamp);
+            assert_eq!(manager.cleanup_idle(Duration::from_millis(10)).await, 0);
+            assert_eq!(bounded(manager.cleanup_idle(Duration::ZERO)).await, 1);
+            fake.assert_all_gone().await;
+        }
+
+        #[tokio::test]
+        async fn eviction_prefers_idle_clients_then_the_least_recently_used() {
+            let fake = FakeServer::new();
+            let manager = fake.capped(&["go", "python", "rust"], 2, "serve");
+            let active = bounded(manager.get_client(Language::Go)).await.unwrap();
+            let mut request =
+                Box::pin(active.request::<serde_json::Value>("textDocument/hover", None));
+            tokio::select! {
+                _ = &mut request => panic!("request answered"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+            let idle = bounded(manager.get_client(Language::Python)).await.unwrap();
+            assert_eq!(
+                manager.pick_eviction_target(&manager.pool()),
+                Some(Language::Python)
+            );
+            let newest = bounded(manager.get_client(Language::Rust)).await.unwrap();
+            assert!(active.is_running().await);
+            assert!(!idle.is_running().await);
+            drop(request);
+            assert_eq!(
+                manager.pick_eviction_target(&manager.pool()),
+                Some(Language::Rust)
+            );
+            drop((active, idle, newest, manager));
+            fake.assert_all_gone().await;
         }
 
         #[tokio::test]
@@ -1208,7 +1357,7 @@ exec sleep 600
         #[tokio::test]
         async fn concurrent_starts_stay_within_the_server_limit() {
             let fake = FakeServer::new();
-            let manager = fake.capped(&["go", "python", "rust"], 1);
+            let manager = fake.capped(&["go", "python", "rust"], 1, "exits");
             bounded(manager.get_client(Language::Go)).await.unwrap();
 
             let (python, rust) = bounded(async {
