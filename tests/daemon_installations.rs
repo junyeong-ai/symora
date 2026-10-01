@@ -4,6 +4,23 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn copy_binary(destination: &Path) {
+    // Copy in a child so this process never holds the executable open for
+    // writing. A concurrent fork can inherit that descriptor until exec,
+    // making Linux reject execution with ETXTBSY.
+    let out = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_symora"))
+        .arg(destination)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn command(exe: &Path, home: &Path, action: &str) -> Command {
     let mut command = Command::new(exe);
     command
@@ -92,7 +109,7 @@ fn installations_run_independent_daemons_and_leave_legacy_files_untouched() {
     let first = home.path().join("first");
     let second = home.path().join("second");
     for exe in [&first, &second] {
-        std::fs::copy(env!("CARGO_BIN_EXE_symora"), exe).unwrap();
+        copy_binary(exe);
     }
     let _cleanup = Daemons {
         home: home.path().to_path_buf(),
@@ -146,13 +163,12 @@ fn installations_run_independent_daemons_and_leave_legacy_files_untouched() {
 
 #[test]
 fn installation_replaces_a_stale_build_at_its_own_key() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
     use std::os::unix::net::UnixListener;
-    use std::time::{Duration, Instant};
 
     let home = tempfile::tempdir().unwrap();
     let exe = home.path().join("symora");
-    std::fs::copy(env!("CARGO_BIN_EXE_symora"), &exe).unwrap();
+    copy_binary(&exe);
     let _cleanup = Daemons {
         home: home.path().to_path_buf(),
         binaries: vec![exe.clone()],
@@ -168,22 +184,8 @@ fn installation_replaces_a_stale_build_at_its_own_key() {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let stale = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            let (mut stream, _) = match listener.accept() {
-                Ok(connection) => connection,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                Err(e) => panic!("{e}"),
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
-            let request: symora::daemon::protocol::Request = serde_json::from_str(&line).unwrap();
+        loop {
+            let (mut stream, request) = accept_request(&listener);
             let shutdown = request.method == symora::daemon::protocol::methods::SHUTDOWN;
             let result = if shutdown {
                 serde_json::json!({"shutdown": true})
@@ -197,7 +199,6 @@ fn installation_replaces_a_stale_build_at_its_own_key() {
                 return;
             }
         }
-        panic!("stale daemon was not shut down");
     });
     let started = json_ok(&exe, home.path(), "start");
     assert_eq!(started["started"], true);
@@ -218,7 +219,7 @@ fn uninstall_stops_its_installation_and_removes_daemon_root() {
     let first = home.path().join("first");
     let second = home.path().join("second");
     for exe in [&first, &second] {
-        std::fs::copy(env!("CARGO_BIN_EXE_symora"), exe).unwrap();
+        copy_binary(exe);
     }
     let _cleanup = Daemons {
         home: home.path().to_path_buf(),
@@ -317,7 +318,6 @@ fn accept_request(
     std::os::unix::net::UnixStream,
     symora::daemon::protocol::Request,
 ) {
-    use std::io::{BufRead, BufReader};
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -331,13 +331,24 @@ fn accept_request(
             Err(e) => panic!("{e}"),
         }
     };
+    let request = read_request(&stream);
+    (stream, request)
+}
+
+fn read_request(stream: &std::os::unix::net::UnixStream) -> symora::daemon::protocol::Request {
+    use std::io::{BufRead, BufReader};
+    use std::time::Duration;
+
+    // The listener is polled nonblocking, and macOS accepted sockets inherit
+    // that mode: a read before the client's write fails at once despite its
+    // timeout.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).unwrap();
-    let request = serde_json::from_str(&line).unwrap();
-    (stream, request)
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
 }
 
 fn search_command(exe: &Path, home: &Path) -> Command {
@@ -408,12 +419,12 @@ fn accepted_project_connection_closed_without_read_is_not_retried() {
 }
 
 fn assert_accepted_project_request_is_not_retried(close: RequestClose) {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
-    use symora::daemon::protocol::{Request, Response, methods};
+    use symora::daemon::protocol::{Response, methods};
 
     let home = tempfile::tempdir().unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
@@ -446,12 +457,7 @@ fn assert_accepted_project_request_is_not_retried(close: RequestClose) {
             };
             connections += 1;
             if matches!(close, RequestClose::AfterRead) {
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                let request: Request = serde_json::from_str(&line).unwrap();
+                let request = read_request(&stream);
                 assert_eq!(request.method, methods::SEARCH_CONTENT);
             }
             drop(stream);
