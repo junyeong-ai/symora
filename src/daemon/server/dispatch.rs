@@ -395,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn project_request_is_counted_once_in_status() {
         let root = project(60);
-        let config = DaemonRuntimeConfig::load();
+        let config = DaemonRuntimeConfig::load().unwrap();
         let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
         let params = serde_json::json!({"project": root.path(), "files": []});
         let start = Instant::now();
@@ -436,7 +436,7 @@ mod tests {
         runtime.block_on(async {
             for cancel in [false, true] {
                 let root = project(60);
-                let config = DaemonRuntimeConfig::load();
+                let config = DaemonRuntimeConfig::load().unwrap();
                 let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
                 let (release, wait) = std::sync::mpsc::channel();
                 let (started, ready) = std::sync::mpsc::channel();
@@ -480,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn system_requests_create_no_project_context() {
         let root = project(60);
-        let config = DaemonRuntimeConfig::load();
+        let config = DaemonRuntimeConfig::load().unwrap();
         let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
         for method in [methods::PING, methods::STATUS, methods::SHUTDOWN] {
             for params in [None, Some(serde_json::json!({"project": root.path()}))] {

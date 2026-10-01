@@ -106,7 +106,7 @@ impl App {
 
         #[cfg(unix)]
         let lsp: Arc<dyn LspService + Send + Sync> = if use_daemon {
-            Arc::new(DaemonLspService::new(&root))
+            Arc::new(DaemonLspService::new(&root)?)
         } else {
             Arc::new(DefaultLspService::new(
                 &root,
@@ -133,7 +133,7 @@ impl App {
 
         #[cfg(unix)]
         let store: Arc<dyn StoreService> = if use_daemon {
-            Arc::new(DaemonStoreService::new(&root))
+            Arc::new(DaemonStoreService::new(&root)?)
         } else {
             Arc::new(DefaultStoreService::new(
                 &root,

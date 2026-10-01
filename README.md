@@ -500,7 +500,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 - **Linux**, **macOS**: 지원.
 - **Windows**: daemon 워크플로와 SQLite 인덱스 미지원. 데몬은 Unix domain socket을, 인덱스는 프로세스 간 배타를 위해 Unix 파일 락(`flock`)을 쓰기 때문입니다 — `search index build`는 그 사실을 오류로 알리고, 검색은 언어 서버와 트리 스캔으로 그대로 동작합니다.
 
-Unix에서는 daemon이 기본 켜짐(`SYMORA_NO_DAEMON=1`이면 in-process 강제). 모드는 시작 시 한 번 결정되며 런타임 폴백은 없습니다. `daemon start`/`daemon restart`는 데몬이 실제로 응답할 때까지 기다렸다가 반환하므로, 성공 응답은 곧 서비스 가능 상태를 뜻합니다. 동시에 여러 명령이 콜드 스타트를 만나도 데몬은 하나만 뜹니다.
+Unix에서는 daemon이 기본 켜짐(`SYMORA_NO_DAEMON=1`이면 in-process 강제). 모드는 시작 시 한 번 결정되며 런타임 폴백은 없습니다. `daemon start`/`daemon restart`는 데몬이 실제로 응답할 때까지 기다렸다가 반환하므로, 성공 응답은 곧 서비스 가능 상태를 뜻합니다. 동시에 여러 명령이 콜드 스타트를 만나도 데몬은 하나만 뜹니다. 각 설치(실행 파일 경로)는 자체 daemon을 실행하므로 저장소별로 고정한 버전이 서로의 daemon을 교체하지 않습니다.
 
 ```bash
 symora daemon start | stop | restart | status

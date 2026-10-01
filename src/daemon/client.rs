@@ -107,13 +107,13 @@ macro_rules! rpc_file {
 
 impl DaemonClient {
     /// Create a new daemon client
-    pub fn new(project_root: &Path) -> Self {
-        Self {
-            config: DaemonRuntimeConfig::load(),
+    pub fn new(project_root: &Path) -> Result<Self, LspError> {
+        Ok(Self {
+            config: DaemonRuntimeConfig::load()?,
             lsp_config: DaemonRuntimeConfig::load_lsp_config(project_root),
             project_root: project_root.to_path_buf(),
             next_request_id: AtomicU64::new(1),
-        }
+        })
     }
 
     // Connection Management
@@ -121,8 +121,8 @@ impl DaemonClient {
     /// Ensure a daemon of *this* binary is running, starting or replacing
     /// one as necessary — the single owner of daemon lifecycle, so no
     /// other path may spawn one. A daemon left over from a different
-    /// binary is replaced: the wire format is guaranteed only within one
-    /// build.
+    /// build at this installation's executable path is replaced: the wire
+    /// format is guaranteed only within one build.
     pub async fn ensure_running(&self) -> Result<DaemonStart, LspError> {
         if matches!(self.ping().await, Ok(true)) {
             return Ok(DaemonStart::AlreadyRunning);

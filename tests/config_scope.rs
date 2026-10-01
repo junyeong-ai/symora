@@ -1,3 +1,4 @@
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -95,7 +96,7 @@ fn project_init_respects_scope() {
 #[test]
 fn daemon_runtime_reads_global_config() {
     if std::env::var_os("SYMORA_TEST_DAEMON_SCOPE").is_some() {
-        let config = symora::daemon::server::DaemonRuntimeConfig::load();
+        let config = symora::daemon::server::DaemonRuntimeConfig::load().unwrap();
         assert_eq!(config.idle_timeout.as_secs(), 600);
         assert_eq!(config.max_concurrent, 7);
         std::fs::write(
@@ -185,4 +186,53 @@ fn ignored_daemon_keys_reach_app_and_doctor() {
             );
         }
     }
+}
+
+#[test]
+fn daemon_runtime_paths_are_installation_scoped() {
+    if std::env::var_os("SYMORA_TEST_DAEMON_PATHS").is_some() {
+        let config = symora::daemon::DaemonRuntimeConfig::load().unwrap();
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in exe.as_os_str().as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let base = symora::services::dist::paths::daemon_dir();
+        assert_eq!(
+            base,
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".symora")
+        );
+        for (path, suffix) in [
+            (&config.socket_path, "sock"),
+            (&config.pid_path, "pid"),
+            (&config.lock_path, "lock"),
+            (&config.bind_lock_path, "bind.lock"),
+        ] {
+            assert_eq!(*path, base.join(format!("daemon-{hash:016x}.{suffix}")));
+        }
+        assert!(
+            config.socket_path.as_os_str().as_bytes().len() < 104,
+            "{:?}",
+            config.socket_path
+        );
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "daemon_runtime_paths_are_installation_scoped",
+            "--nocapture",
+        ])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("SYMORA_TEST_DAEMON_PATHS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
