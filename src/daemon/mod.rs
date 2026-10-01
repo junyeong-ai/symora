@@ -11,16 +11,21 @@ pub use server::{DaemonRuntimeConfig, DaemonServer};
 /// Whether a failed connection to the daemon socket proves nothing is
 /// listening. Refusal and a missing path are that proof: the socket file
 /// outlives the daemon that bound it, so a leftover path answers
-/// `ConnectionRefused` and a cleaned-up one answers `NotFound`. Every
-/// other failure — permissions, exhausted descriptors, a full accept
-/// backlog — means the question was not answered, and reading it as an
-/// absence is what turns an unreachable daemon into a second daemon: the
-/// replacement unlinks the live socket, binds its own, and leaves the
-/// original running with nothing able to reach it.
+/// `ConnectionRefused` and a cleaned-up one answers `NotFound`.
+/// `ConnectionReset` during connect means the listener closed before it
+/// accepted the queued connection: no request was sent, and nothing accepts
+/// there at that moment. Every other failure — permissions, exhausted
+/// descriptors, a full accept backlog — means the question was not
+/// answered, and reading it as an absence is what turns an unreachable
+/// daemon into a second daemon: the replacement unlinks the live socket,
+/// binds its own, and leaves the original running with nothing able to
+/// reach it.
 pub(crate) fn proves_no_listener(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionReset
     )
 }
 
@@ -55,11 +60,12 @@ mod tests {
     /// unbound one. Reading a permission or resource failure as an absence
     /// is what licenses unlinking a live daemon's socket.
     #[test]
-    fn only_refusal_or_absence_proves_nothing_is_listening() {
+    fn only_refusal_absence_or_reset_proves_nothing_is_listening() {
         assert!(proves_no_listener(&Error::from(
             ErrorKind::ConnectionRefused
         )));
         assert!(proves_no_listener(&Error::from(ErrorKind::NotFound)));
+        assert!(proves_no_listener(&Error::from(ErrorKind::ConnectionReset)));
 
         for kind in [
             ErrorKind::PermissionDenied,

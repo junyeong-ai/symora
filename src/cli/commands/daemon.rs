@@ -109,9 +109,9 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
                 Ok(status) => {
                     ctx.print_success(status);
                 }
-                // Only a refused or absent socket proves there is no daemon.
-                // Any other failure left the question unanswered, and a
-                // definitive "not running" would be invented from it.
+                // Only a connect failure accepted by `proves_no_listener`
+                // proves absence. Other failures leave the question open;
+                // a definitive "not running" would be invented from them.
                 Err(LspError::NotConnected) => {
                     ctx.print_success(serde_json::json!({
                         "running": false,

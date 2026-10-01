@@ -392,14 +392,28 @@ fn project_request_starts_daemon_when_listener_disappears_after_ping() {
     assert_eq!(json_ok(exe, home.path(), "status")["running"], true);
 }
 
+enum RequestClose {
+    AfterRead,
+    BeforeRead,
+}
+
 #[test]
 fn accepted_project_request_without_answer_is_not_retried() {
-    use std::io::Write;
+    assert_accepted_project_request_is_not_retried(RequestClose::AfterRead);
+}
+
+#[test]
+fn accepted_project_connection_closed_without_read_is_not_retried() {
+    assert_accepted_project_request_is_not_retried(RequestClose::BeforeRead);
+}
+
+fn assert_accepted_project_request_is_not_retried(close: RequestClose) {
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
-    use symora::daemon::protocol::{Response, methods};
+    use symora::daemon::protocol::{Request, Response, methods};
 
     let home = tempfile::tempdir().unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
@@ -413,50 +427,44 @@ fn accepted_project_request_without_answer_is_not_retried() {
     let finished = Arc::new(AtomicBool::new(false));
     let client_finished = Arc::clone(&finished);
     let stand_in = std::thread::spawn(move || {
-        let mut requests = 0;
+        let (mut stream, request) = accept_request(&listener);
+        assert_eq!(request.method, methods::PING);
+        let response = Response::success(request.id, identity);
+        writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+        drop(stream);
+        let mut connections = 0;
         let deadline = Instant::now() + Duration::from_secs(15);
         while !client_finished.load(Ordering::Acquire) {
             assert!(Instant::now() < deadline, "client did not finish");
-            let (mut stream, request) = match listener.accept() {
-                Ok((stream, _)) => {
-                    use std::io::{BufRead, BufReader};
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
-                    let mut line = String::new();
-                    BufReader::new(&stream).read_line(&mut line).unwrap();
-                    let request: symora::daemon::protocol::Request =
-                        serde_json::from_str(&line).unwrap();
-                    (stream, request)
-                }
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
                 Err(e) => panic!("{e}"),
             };
-            if request.method == methods::PING {
-                let response = Response::success(request.id, identity.clone());
-                writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
-            } else {
+            connections += 1;
+            if matches!(close, RequestClose::AfterRead) {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Request = serde_json::from_str(&line).unwrap();
                 assert_eq!(request.method, methods::SEARCH_CONTENT);
-                requests += 1;
-                // Read the entire request before closing so the client
-                // observes EOF while waiting for an answer.
-                drop(stream);
             }
+            drop(stream);
         }
-        requests
+        connections
     });
     let out = search_command(exe, home.path()).output().unwrap();
     finished.store(true, Ordering::Release);
     assert_eq!(stand_in.join().unwrap(), 1);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Connection closed before 'search_content' was answered"),
+    assert_eq!(value["error"]["code"], "lsp_unavailable", "{value}");
+    assert_eq!(
+        value["error"]["message"], "Connection closed before 'search_content' was answered",
         "{value}"
     );
 }

@@ -43,6 +43,18 @@ pub(super) fn calculate_timeout(
         .expect("LSP request method must have a mapping")
 }
 
+/// A peer closing with the request unread appears as EOF on macOS and as a
+/// reset or broken pipe on Linux. Both are the lost answer described by
+/// `ConnectionLost`, and neither permits replaying the request.
+fn request_io_error(method: &str, error: std::io::Error) -> LspError {
+    match error.kind() {
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
+            LspError::ConnectionLost(method.to_string())
+        }
+        _ => LspError::Io(error),
+    }
+}
+
 /// What [`DaemonClient::ensure_running`] found, and did about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonStart {
@@ -259,9 +271,18 @@ impl DaemonClient {
         let request = Request::new(id, method, params);
         let request_json = serde_json::to_string(&request)?;
 
-        writer.write_all(request_json.as_bytes()).await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
+        writer
+            .write_all(request_json.as_bytes())
+            .await
+            .map_err(|e| request_io_error(method, e))?;
+        writer
+            .write_all(b"\n")
+            .await
+            .map_err(|e| request_io_error(method, e))?;
+        writer
+            .flush()
+            .await
+            .map_err(|e| request_io_error(method, e))?;
 
         let mut line = String::new();
         let read = timeout(timeout_duration, reader.read_line(&mut line))
@@ -272,15 +293,16 @@ impl DaemonClient {
                     method,
                     timeout_duration.as_secs()
                 ))
-            })??;
+            })?
+            .map_err(|e| request_io_error(method, e))?;
 
         // End of stream: the daemon closed without answering — it exited or
         // was replaced while this request was in flight. Parsing the empty
         // read would blame the payload for the connection, and send the
         // caller after a malformed response that was never sent. It is not
-        // `NotConnected` either: this connection was accepted, so all it
-        // proves is that this peer stopped answering, and a replacement may
-        // already be serving the socket.
+        // `NotConnected` either: the request may have reached this peer, so
+        // all it proves is that this peer stopped answering, and a replacement
+        // may already be serving the socket.
         if read == 0 {
             return Err(LspError::ConnectionLost(method.to_string()));
         }
@@ -630,9 +652,9 @@ impl DaemonClient {
         Ok(reached)
     }
 
-    /// Wait until nothing answers on the socket. Only a refused or absent
-    /// socket confirms the daemon is gone; a connection that fails for any
-    /// other reason leaves the question open and is reported as itself,
+    /// Wait until nothing answers on the socket. Only a connect failure
+    /// accepted by [`proves_no_listener`] confirms the daemon is gone.
+    /// Other failures leave the question open and are reported as themselves,
     /// because the caller's next move is to start a replacement.
     async fn wait_for_shutdown(&self) -> Result<(), LspError> {
         let start = std::time::Instant::now();
@@ -655,5 +677,38 @@ impl DaemonClient {
         Err(LspError::Timeout(
             "Daemon did not stop within timeout".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn request_io_errors_distinguish_peer_closure_from_other_failures() {
+        for kind in [ErrorKind::ConnectionReset, ErrorKind::BrokenPipe] {
+            assert!(matches!(
+                request_io_error(methods::SEARCH_CONTENT, Error::from(kind)),
+                LspError::ConnectionLost(method) if method == methods::SEARCH_CONTENT
+            ));
+        }
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::WouldBlock,
+            ErrorKind::TimedOut,
+            ErrorKind::InvalidInput,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::Other,
+        ] {
+            let error = Error::new(kind, "request I/O failure");
+            let LspError::Io(error) = request_io_error(methods::SEARCH_CONTENT, error) else {
+                panic!("{kind:?} must remain an I/O error");
+            };
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.to_string(), "request I/O failure");
+        }
     }
 }
