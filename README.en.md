@@ -393,7 +393,7 @@ Search degrades gracefully without an index (it falls back to a filesystem scan 
 Precedence: `.symora/config.toml` → `~/.config/symora/config.toml` (honors `XDG_CONFIG_HOME`) → built-in defaults. Two environment overrides sit above the files: `SYMORA_SEARCH_LIMIT` and `SYMORA_LSP_TIMEOUT`.
 
 `[daemon]` settings apply to the entire daemon and are read only from the user config. Keys under `[daemon]` in a project config are ignored and reported in `config_errors`. The daemon reads these settings once at startup, so run `symora daemon restart` to apply changes.
-`idle_timeout_mins` sets how long a project and each language server remain alive after their last request finishes.
+`idle_timeout_mins` sets how long a project and each language server remain alive after their last request finishes. The daemon itself exits once it has gone that long with no project and no request, and the next command starts it again.
 
 ```bash
 symora config init            # write a local config

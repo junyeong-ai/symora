@@ -9,7 +9,7 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::net::{UnixListener, UnixStream};
@@ -22,11 +22,39 @@ pub use config::DaemonRuntimeConfig;
 use connection::handle_connection;
 use context::{ProjectContext, ProjectsMap};
 
+struct ConnectionUseState {
+    connections: usize,
+    last_used: Instant,
+}
+
+struct ConnectionUse(Arc<Mutex<ConnectionUseState>>);
+
+impl ConnectionUse {
+    fn acquire(usage: &Arc<Mutex<ConnectionUseState>>) -> Self {
+        let mut state = usage.lock().expect("daemon connection usage lock poisoned");
+        state.last_used = Instant::now();
+        state.connections += 1;
+        Self(Arc::clone(usage))
+    }
+}
+
+impl Drop for ConnectionUse {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .lock()
+            .expect("daemon connection usage lock poisoned");
+        state.last_used = Instant::now();
+        state.connections -= 1;
+    }
+}
+
 pub struct DaemonServer {
     config: Arc<DaemonRuntimeConfig>,
     projects: ProjectsMap,
     semaphore: Arc<Semaphore>,
     start_time: Instant,
+    connection_usage: Arc<Mutex<ConnectionUseState>>,
     /// Level-triggered, so the signal is a state rather than an event: an
     /// observer that subscribes after the flag is already set still sees it
     /// (`wait_for` checks the current value before waiting). Serving must
@@ -46,6 +74,10 @@ impl DaemonServer {
             semaphore,
             projects: Arc::new(RwLock::new(HashMap::new())),
             start_time: Instant::now(),
+            connection_usage: Arc::new(Mutex::new(ConnectionUseState {
+                connections: 0,
+                last_used: Instant::now(),
+            })),
             shutdown,
         }
     }
@@ -97,7 +129,12 @@ impl DaemonServer {
         self.write_pid_file().await?;
 
         let mut shutdown_rx = self.shutdown.subscribe();
-        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+        let cleanup_period = Duration::from_secs(60);
+        // The first tick waits one period: startup has nothing to clean up,
+        // and a zero idle timeout would retire the daemon before its first
+        // connection.
+        let mut cleanup_interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + cleanup_period, cleanup_period);
         cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -157,8 +194,12 @@ impl DaemonServer {
         let config = Arc::clone(&self.config);
         let start_time = self.start_time;
         let shutdown = self.shutdown.clone();
+        // Count before spawning: cleanup runs on this same task, so the exit
+        // check cannot miss an accepted connection.
+        let usage = ConnectionUse::acquire(&self.connection_usage);
 
         tokio::spawn(async move {
+            let _usage = usage;
             if let Err(e) =
                 handle_connection(stream, projects, semaphore, config, start_time, shutdown).await
             {
@@ -200,11 +241,9 @@ impl DaemonServer {
             }
         }
 
-        if idle_paths.is_empty() {
-            return;
-        }
-
-        let idle: Vec<_> = {
+        let idle: Vec<_> = if idle_paths.is_empty() {
+            Vec::new()
+        } else {
             let mut projects = self.projects.write().await;
             let still_idle: Vec<_> = idle_paths
                 .into_iter()
@@ -226,6 +265,18 @@ impl DaemonServer {
             }
             ctx.lsp.shutdown().await;
             tracing::info!("Removed idle project: {:?}", path);
+        }
+
+        let projects = self.projects.read().await;
+        let usage = self
+            .connection_usage
+            .lock()
+            .expect("daemon connection usage lock poisoned");
+        if projects.is_empty()
+            && usage.connections == 0
+            && usage.last_used.elapsed() >= self.config.idle_timeout
+        {
+            self.shutdown();
         }
     }
 
@@ -259,6 +310,107 @@ impl DaemonServer {
 mod tests {
     use super::*;
     use context::get_context;
+
+    fn idle_test_server(root: &std::path::Path) -> DaemonServer {
+        DaemonServer::new(DaemonRuntimeConfig {
+            socket_path: root.join("daemon.sock"),
+            pid_path: root.join("daemon.pid"),
+            lock_path: root.join("daemon.lock"),
+            bind_lock_path: root.join("daemon.bind.lock"),
+            idle_timeout: Duration::from_secs(1),
+            max_concurrent: 1,
+        })
+    }
+
+    fn expire_connections(server: &DaemonServer) {
+        server
+            .connection_usage
+            .lock()
+            .expect("daemon connection usage lock poisoned")
+            .last_used = Instant::now() - Duration::from_secs(2);
+    }
+
+    #[tokio::test]
+    async fn cleanup_shuts_down_empty_expired_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        let server = idle_test_server(root.path());
+        server.cleanup_idle_servers().await;
+        assert!(!*server.shutdown.borrow());
+        expire_connections(&server);
+        server.cleanup_idle_servers().await;
+        assert!(*server.shutdown.borrow());
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_daemon_with_unleased_or_leased_project() {
+        let root = tempfile::tempdir().unwrap();
+        for leased in [false, true] {
+            let server = idle_test_server(root.path());
+            let lease = get_context(&server.projects, root.path().to_str().unwrap())
+                .await
+                .unwrap();
+            let lease = leased.then_some(lease);
+            expire_connections(&server);
+            server.cleanup_idle_servers().await;
+            assert_eq!(server.projects.read().await.len(), 1);
+            assert!(!*server.shutdown.borrow());
+            drop(lease);
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_connection_defers_expiry_until_after_close() {
+        let root = tempfile::tempdir().unwrap();
+        let server = idle_test_server(root.path());
+        let (client, server_end) = UnixStream::pair().unwrap();
+        expire_connections(&server);
+        let acquired_after = Instant::now();
+        server.spawn_connection_handler(server_end);
+        server.cleanup_idle_servers().await;
+        assert!(!*server.shutdown.borrow());
+        {
+            let usage = server
+                .connection_usage
+                .lock()
+                .expect("daemon connection usage lock poisoned");
+            assert_eq!(usage.connections, 1);
+            assert!(usage.last_used >= acquired_after);
+        }
+        expire_connections(&server);
+        server.cleanup_idle_servers().await;
+        assert!(!*server.shutdown.borrow());
+        let released_after = Instant::now();
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if server
+                    .connection_usage
+                    .lock()
+                    .expect("daemon connection usage lock poisoned")
+                    .connections
+                    == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            server
+                .connection_usage
+                .lock()
+                .expect("daemon connection usage lock poisoned")
+                .last_used
+                >= released_after
+        );
+        server.cleanup_idle_servers().await;
+        assert!(!*server.shutdown.borrow());
+        expire_connections(&server);
+        server.cleanup_idle_servers().await;
+        assert!(*server.shutdown.borrow());
+    }
 
     #[tokio::test]
     async fn cleanup_stops_unused_servers_in_a_leased_project() {
@@ -353,9 +505,11 @@ mod tests {
             assert!(Arc::ptr_eq(projects.get(&busy).unwrap(), &lease));
             assert!(!projects.contains_key(&idle));
         }
+        assert!(!*server.shutdown.borrow());
         drop(lease);
         tokio::time::sleep(Duration::from_millis(2)).await;
         server.cleanup_idle_servers().await;
         assert!(server.projects.read().await.is_empty());
+        assert!(*server.shutdown.borrow());
     }
 }
