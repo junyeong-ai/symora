@@ -16,4 +16,4 @@ A daemon leaves its socket and pid files behind: the next daemon settles them wh
 
 ## Request timeouts
 
-Each request is bounded by a per-request `tokio::time::timeout` sized per language/method from the served project’s retained runtime config (`estimate_request_timeout` in `server/dispatch.rs`); methods without an LSP mapping use 600 seconds. A timed-out request returns a structured error; there is no separate cancellation channel.
+Each request is bounded by a per-request `tokio::time::timeout` sized per language/method from the served project's retained runtime config (`estimate_request_timeout` in `server/dispatch.rs`); methods without an LSP mapping use 600 seconds. A timed-out request returns a structured error; there is no separate cancellation channel. The client waits with the same derivation (`daemon::lsp_request_timeout`); edits to either side must preserve this shared derivation so the two bounds cannot drift.

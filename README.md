@@ -392,7 +392,7 @@ symora search index clear
 
 우선순위: `.symora/config.toml` → `~/.config/symora/config.toml`(`XDG_CONFIG_HOME` 존중) → 기본값. 두 환경 변수 `SYMORA_SEARCH_LIMIT`, `SYMORA_LSP_TIMEOUT`은 파일보다 우선합니다.
 
-`[daemon]` 설정은 daemon 전체에 적용되며 사용자 설정 파일에서만 읽습니다. 프로젝트 설정 파일의 `[daemon]` 키는 적용하지 않으며 `config_errors`로 보고합니다.
+`[daemon]` 설정은 daemon 전체에 적용되며 사용자 설정 파일에서만 읽습니다. 프로젝트 설정 파일의 `[daemon]` 키는 적용하지 않으며 `config_errors`로 보고합니다. daemon이 시작할 때 한 번 읽으므로 변경 사항을 적용하려면 `symora daemon restart`를 실행해야 합니다.
 `idle_timeout_mins`는 프로젝트와 각 언어 서버가 마지막 요청이 끝난 후 유지되는 시간을 지정합니다.
 
 ```bash
