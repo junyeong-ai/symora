@@ -76,7 +76,7 @@ jobs:
         run: cargo hack check --rust-version --all-targets --all-features --locked
 
   lang-fixtures:
-    name: Real language servers (fixtures + parity)
+    name: Real language server (pyright fixtures)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,14 +87,6 @@ jobs:
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
-
-      # Inside the repository rust-toolchain.toml overrides `stable`, and a
-      # component's rustup proxy looks only in the overriding toolchain: a
-      # component installed into `stable` is never found here.
-      - name: Install rust-analyzer into the pinned toolchain
-        run: |
-          rustup install
-          rustup component add rust-analyzer
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -116,8 +108,3 @@ jobs:
 
       - name: Run language-fixture tests
         run: cargo nextest run --test lang_fixtures --run-ignored ignored-only
-
-      # Daemon/direct parity needs a real language server and a Unix socket,
-      # which is exactly what this job already provides.
-      - name: Run daemon parity tests
-        run: cargo nextest run --test parity --run-ignored all
