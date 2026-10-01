@@ -146,7 +146,7 @@ mod tests {
     #[tokio::test]
     async fn resolution_excludes_concurrent_idle_eviction() {
         let root = tempfile::tempdir().unwrap();
-        let mut config = DaemonRuntimeConfig::load();
+        let mut config = DaemonRuntimeConfig::load().unwrap();
         config.idle_timeout = Duration::ZERO;
         let server = super::super::DaemonServer::new(config);
         let ctx = Arc::new(ProjectContext::new(root.path()));

@@ -506,7 +506,7 @@ The short version: discovery flows from rough (`pack`, `map summary`, `search sy
 - **Linux** and **macOS**: supported.
 - **Windows**: the daemon workflow and the SQLite index are unsupported — the daemon speaks over a Unix domain socket, and the index relies on Unix file locks (`flock`) to keep two processes from rewriting it at once. `search index build` says so rather than building without that guarantee; search keeps working through the language server and a tree scan.
 
-On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` return once the daemon actually answers, so a success response means it is serving. Concurrent commands meeting a cold start bring up exactly one daemon.
+On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` return once the daemon actually answers, so a success response means it is serving. Concurrent commands meeting a cold start bring up exactly one daemon. Each installation (executable path) runs its own daemon, so versions pinned per repository do not replace each other's daemon.
 
 ```bash
 symora daemon start | stop | restart | status

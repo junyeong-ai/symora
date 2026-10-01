@@ -31,10 +31,10 @@ pub struct DaemonLspService {
 }
 
 impl DaemonLspService {
-    pub fn new(project_root: &Path) -> Self {
-        Self {
-            client: DaemonClient::new(project_root),
-        }
+    pub fn new(project_root: &Path) -> Result<Self, LspError> {
+        Ok(Self {
+            client: DaemonClient::new(project_root)?,
+        })
     }
 }
 

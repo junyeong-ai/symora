@@ -12,7 +12,7 @@ Types in `wire.rs` (Symbol, Location, Diagnostic, …) are an external protocol.
 
 ## Server cleanup
 
-A daemon leaves its socket and pid files behind: the next daemon settles them when it claims the path (`claim_socket`), under `daemon.bind.lock` and only after confirming nobody answers. Removing them at shutdown would give a slow teardown the power to unlink a successor's live socket, so liveness is always a connection attempt — never a path lookup — on both sides of the wire.
+A daemon leaves its socket and pid files behind: the next daemon settles them when it claims the installation's path (`claim_socket`), under `daemon-<id>.bind.lock` and only after confirming nobody answers. Removing them at shutdown would give a slow teardown the power to unlink a successor's live socket, so liveness is always a connection attempt — never a path lookup — on both sides of the wire.
 
 ## Request timeouts
 

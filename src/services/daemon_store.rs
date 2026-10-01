@@ -23,10 +23,10 @@ pub struct DaemonStoreService {
 }
 
 impl DaemonStoreService {
-    pub fn new(root: &Path) -> Self {
-        Self {
-            client: DaemonClient::new(root),
-        }
+    pub fn new(root: &Path) -> Result<Self, LspError> {
+        Ok(Self {
+            client: DaemonClient::new(root)?,
+        })
     }
 }
 

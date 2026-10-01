@@ -39,7 +39,7 @@ pub enum DaemonCommand {
 }
 
 async fn start_server() -> Result<()> {
-    let config = DaemonRuntimeConfig::load();
+    let config = DaemonRuntimeConfig::load()?;
     let server = DaemonServer::new(config);
 
     if let Err(e) = server.run().await {
@@ -55,7 +55,7 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
 
     match args.command {
         DaemonCommand::Start => {
-            let client = DaemonClient::new(app.root());
+            let client = DaemonClient::new(app.root())?;
             match client.ensure_running().await {
                 Ok(outcome) => ctx.print_success(serde_json::json!({
                     "started": outcome != DaemonStart::AlreadyRunning,
@@ -67,7 +67,7 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         }
 
         DaemonCommand::Stop => {
-            let client = DaemonClient::new(app.root());
+            let client = DaemonClient::new(app.root())?;
 
             match client.shutdown().await {
                 Ok(true) => ctx.print_success(serde_json::json!({
@@ -84,7 +84,7 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         }
 
         DaemonCommand::Restart => {
-            let client = DaemonClient::new(app.root());
+            let client = DaemonClient::new(app.root())?;
             let restarted = match client.shutdown().await {
                 Ok(_) => client.ensure_running().await.map(|_| ()),
                 Err(e) => Err(e),
@@ -103,7 +103,7 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         DaemonCommand::Serve => start_server().await,
 
         DaemonCommand::Status => {
-            let client = DaemonClient::new(app.root());
+            let client = DaemonClient::new(app.root())?;
 
             match client.status().await {
                 Ok(status) => {
