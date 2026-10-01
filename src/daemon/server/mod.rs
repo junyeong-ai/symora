@@ -253,3 +253,43 @@ impl DaemonServer {
         self.shutdown.send_replace(true);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use context::get_context;
+
+    #[tokio::test]
+    async fn cleanup_keeps_leased_projects_and_removes_idle_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let busy = root.path().join("busy");
+        let idle = root.path().join("idle");
+        std::fs::create_dir(&busy).unwrap();
+        std::fs::create_dir(&idle).unwrap();
+        let server = DaemonServer::new(DaemonRuntimeConfig {
+            socket_path: root.path().join("daemon.sock"),
+            pid_path: root.path().join("daemon.pid"),
+            lock_path: root.path().join("daemon.lock"),
+            bind_lock_path: root.path().join("daemon.bind.lock"),
+            idle_timeout: Duration::ZERO,
+            max_concurrent: 1,
+        });
+        let lease = get_context(&server.projects, busy.to_str().unwrap())
+            .await
+            .unwrap();
+        let unused = Arc::new(ProjectContext::new(&idle));
+        server.projects.write().await.insert(idle.clone(), unused);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        server.cleanup_idle_servers().await;
+        {
+            let projects = server.projects.read().await;
+            assert_eq!(projects.len(), 1);
+            assert!(Arc::ptr_eq(projects.get(&busy).unwrap(), &lease));
+            assert!(!projects.contains_key(&idle));
+        }
+        drop(lease);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        server.cleanup_idle_servers().await;
+        assert!(server.projects.read().await.is_empty());
+    }
+}
