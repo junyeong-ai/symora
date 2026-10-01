@@ -52,7 +52,7 @@ pub enum ConfigCommand {
 /// running.
 fn config_problems(config: &crate::models::config::SymoraConfig) -> Vec<String> {
     config
-        .unknown_keys
+        .ignored_keys
         .iter()
         .cloned()
         .chain(

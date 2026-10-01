@@ -39,7 +39,7 @@ pub enum DaemonCommand {
 }
 
 async fn start_server(root: &std::path::Path) -> Result<()> {
-    let config = DaemonRuntimeConfig::load(root);
+    let config = DaemonRuntimeConfig::load();
     let request_timeouts = DaemonRuntimeConfig::load_lsp_config(root);
     let server = DaemonServer::new(config, request_timeouts);
 

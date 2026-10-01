@@ -392,6 +392,8 @@ symora search index clear
 
 우선순위: `.symora/config.toml` → `~/.config/symora/config.toml`(`XDG_CONFIG_HOME` 존중) → 기본값. 두 환경 변수 `SYMORA_SEARCH_LIMIT`, `SYMORA_LSP_TIMEOUT`은 파일보다 우선합니다.
 
+`[daemon]` 설정은 daemon 전체에 적용되며 사용자 설정 파일에서만 읽습니다. 프로젝트 설정 파일의 `[daemon]` 키는 적용하지 않으며 `config_errors`로 보고합니다.
+
 ```bash
 symora config init            # 로컬 설정 작성
 symora config init --global   # 사용자 설정 작성

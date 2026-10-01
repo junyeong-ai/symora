@@ -117,7 +117,7 @@ impl DaemonClient {
     /// Create a new daemon client
     pub fn new(project_root: &Path) -> Self {
         Self {
-            config: DaemonRuntimeConfig::load(project_root),
+            config: DaemonRuntimeConfig::load(),
             lsp_config: DaemonRuntimeConfig::load_lsp_config(project_root),
             project_root: project_root.to_path_buf(),
             next_request_id: AtomicU64::new(1),

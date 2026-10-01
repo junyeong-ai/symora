@@ -4,7 +4,7 @@ use std::process::Command;
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 use crate::models::config::{ServerOverride, ServerOverrideError, SymoraConfig};
@@ -16,6 +16,14 @@ pub trait ConfigService: Send + Sync {
     fn config_path(&self, global: bool) -> PathBuf;
     async fn init(&self, global: bool, force: bool) -> Result<PathBuf, ConfigError>;
     async fn edit(&self, global: bool) -> Result<PathBuf, ConfigError>;
+}
+
+const GLOBAL_ONLY_SECTION: &str = "daemon";
+
+#[derive(Clone, Copy)]
+enum ConfigScope {
+    Global,
+    Project,
 }
 
 pub struct DefaultConfigService {
@@ -44,21 +52,28 @@ impl DefaultConfigService {
         self.root.join(".symora").join("config.toml")
     }
 
-    async fn load_raw_from_path(path: &Path) -> Result<RawParse, ConfigError> {
+    async fn load_raw_from_path(path: &Path, scope: ConfigScope) -> Result<RawParse, ConfigError> {
         if !path.exists() {
             return Ok(RawParse::default());
         }
         let content = tokio::fs::read_to_string(path).await?;
-        parse_raw(&content, path)
+        parse_scoped_raw(&content, path, scope)
     }
 
-    async fn write_default_config(path: &Path) -> Result<(), ConfigError> {
+    async fn write_default_config(path: &Path, scope: ConfigScope) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let config = SymoraConfig::default();
-        let content =
+        let mut content =
             toml::to_string_pretty(&config).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        if matches!(scope, ConfigScope::Project) {
+            let mut document = content
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| ConfigError::Parse(e.to_string()))?;
+            document.remove(GLOBAL_ONLY_SECTION);
+            content = document.to_string();
+        }
         tokio::fs::write(path, content).await?;
         Ok(())
     }
@@ -76,46 +91,50 @@ impl DefaultConfigService {
     }
 }
 
-pub fn load_merged_config_sync(
-    root: &Path,
-    global_only: bool,
-) -> Result<SymoraConfig, ConfigError> {
-    fn load_raw_sync(path: &Path) -> Result<RawParse, ConfigError> {
-        if !path.exists() {
-            return Ok(RawParse::default());
-        }
-        let content = std::fs::read_to_string(path)?;
-        parse_raw(&content, path)
+fn load_raw_sync(path: &Path, scope: ConfigScope) -> Result<RawParse, ConfigError> {
+    if !path.exists() {
+        return Ok(RawParse::default());
     }
+    let content = std::fs::read_to_string(path)?;
+    parse_scoped_raw(&content, path, scope)
+}
 
-    if global_only {
-        let raw = load_raw_sync(&DefaultConfigService::global_config_path())?;
-        return Ok(resolve_config(raw.config, raw.unknown_keys));
-    }
+pub fn load_global_config_sync() -> Result<SymoraConfig, ConfigError> {
+    let raw = load_raw_sync(
+        &DefaultConfigService::global_config_path(),
+        ConfigScope::Global,
+    )?;
+    Ok(resolve_config(raw.config, raw.ignored_keys))
+}
 
+pub fn load_merged_config_sync(root: &Path) -> Result<SymoraConfig, ConfigError> {
     let service = DefaultConfigService::new(root);
-    let global = load_raw_sync(&DefaultConfigService::global_config_path())?;
-    let project = load_raw_sync(&service.project_config_path())?;
-    let unknown_keys = [global.unknown_keys, project.unknown_keys].concat();
+    let global = load_raw_sync(
+        &DefaultConfigService::global_config_path(),
+        ConfigScope::Global,
+    )?;
+    let project = load_raw_sync(&service.project_config_path(), ConfigScope::Project)?;
+    let ignored_keys = [global.ignored_keys, project.ignored_keys].concat();
     let merged = merge_raw_config(global.config, project.config);
-    let mut config = resolve_config(merged, unknown_keys);
-    config = apply_env_overrides(config);
-    Ok(config)
+    Ok(apply_env_overrides(resolve_config(merged, ignored_keys)))
 }
 
 #[async_trait]
 impl ConfigService for DefaultConfigService {
     async fn load(&self, global_only: bool) -> Result<SymoraConfig, ConfigError> {
         if global_only {
-            let raw = Self::load_raw_from_path(&Self::global_config_path()).await?;
-            return Ok(resolve_config(raw.config, raw.unknown_keys));
+            let raw =
+                Self::load_raw_from_path(&Self::global_config_path(), ConfigScope::Global).await?;
+            return Ok(resolve_config(raw.config, raw.ignored_keys));
         }
 
-        let global = Self::load_raw_from_path(&Self::global_config_path()).await?;
-        let project = Self::load_raw_from_path(&self.project_config_path()).await?;
-        let unknown_keys = [global.unknown_keys, project.unknown_keys].concat();
+        let global =
+            Self::load_raw_from_path(&Self::global_config_path(), ConfigScope::Global).await?;
+        let project =
+            Self::load_raw_from_path(&self.project_config_path(), ConfigScope::Project).await?;
+        let ignored_keys = [global.ignored_keys, project.ignored_keys].concat();
         let merged = merge_raw_config(global.config, project.config);
-        let mut config = resolve_config(merged, unknown_keys);
+        let mut config = resolve_config(merged, ignored_keys);
         config = apply_env_overrides(config);
         Ok(config)
     }
@@ -141,7 +160,12 @@ impl ConfigService for DefaultConfigService {
             });
         }
 
-        Self::write_default_config(&path).await?;
+        let scope = if global {
+            ConfigScope::Global
+        } else {
+            ConfigScope::Project
+        };
+        Self::write_default_config(&path, scope).await?;
         Ok(path)
     }
 
@@ -185,7 +209,7 @@ impl ConfigService for DefaultConfigService {
 #[derive(Debug, Clone, Default)]
 struct RawParse {
     config: RawSymoraConfig,
-    unknown_keys: Vec<String>,
+    ignored_keys: Vec<String>,
 }
 
 /// Deserialize a config file, recording every key the typed shape ignored.
@@ -197,17 +221,38 @@ struct RawParse {
 /// settings that are correct, so the keys are collected and disclosed while
 /// the rest applies.
 fn parse_raw(content: &str, path: &Path) -> Result<RawParse, ConfigError> {
-    let mut unknown_keys = Vec::new();
+    let mut ignored_keys = Vec::new();
     let deserializer = toml::Deserializer::parse(content)
         .map_err(|e| ConfigError::Parse(format!("{}: {e}", path.display())))?;
     let config: RawSymoraConfig = serde_ignored::deserialize(deserializer, |key| {
-        unknown_keys.push(format!("{}: unknown key `{key}`", path.display()));
+        ignored_keys.push(format!("{}: unknown key `{key}`", path.display()));
     })
     .map_err(|e| ConfigError::Parse(format!("{}: {e}", path.display())))?;
     Ok(RawParse {
         config,
-        unknown_keys,
+        ignored_keys,
     })
+}
+
+fn parse_scoped_raw(
+    content: &str,
+    path: &Path,
+    scope: ConfigScope,
+) -> Result<RawParse, ConfigError> {
+    let mut raw = parse_raw(content, path)?;
+    if matches!(scope, ConfigScope::Project) {
+        let daemon = std::mem::take(&mut raw.config.daemon);
+        let daemon =
+            toml::Table::try_from(&daemon).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        for key in daemon.keys() {
+            raw.ignored_keys.push(format!(
+                "{}: `{GLOBAL_ONLY_SECTION}.{key}` is read only from the global config ({})",
+                path.display(),
+                DefaultConfigService::global_config_path().display()
+            ));
+        }
+    }
+    Ok(raw)
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -253,9 +298,11 @@ struct RawSearchConfig {
     max_file_size_mb: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct RawDaemonConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_concurrent: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     idle_timeout_mins: Option<u64>,
 }
 
@@ -351,14 +398,14 @@ fn merge_test(
 // Resolve: apply defaults to any fields that were never explicitly set
 // ---------------------------------------------------------------------------
 
-fn resolve_config(raw: RawSymoraConfig, unknown_keys: Vec<String>) -> SymoraConfig {
+fn resolve_config(raw: RawSymoraConfig, ignored_keys: Vec<String>) -> SymoraConfig {
     use crate::models::config::defaults;
     use crate::models::config::*;
 
     let (servers, server_override_errors) = resolve_server_overrides(raw.lsp.servers);
 
     SymoraConfig {
-        unknown_keys,
+        ignored_keys,
         project: raw.project,
         lsp: LspConfig {
             timeout_secs: raw.lsp.timeout_secs.unwrap_or_else(defaults::timeout_secs),
@@ -521,6 +568,95 @@ mod tests {
     fn resolve_str(content: &str) -> SymoraConfig {
         let raw: RawSymoraConfig = toml::from_str(content).unwrap();
         resolve_config(raw, Vec::new())
+    }
+
+    fn merge_project_str(global: &str, project: &str) -> SymoraConfig {
+        let global =
+            parse_scoped_raw(global, Path::new("global.toml"), ConfigScope::Global).unwrap();
+        let project =
+            parse_scoped_raw(project, Path::new("project.toml"), ConfigScope::Project).unwrap();
+        resolve_config(
+            merge_raw_config(global.config, project.config),
+            project.ignored_keys,
+        )
+    }
+
+    fn daemon_ignored_message(key: &str) -> String {
+        format!(
+            "project.toml: `daemon.{key}` is read only from the global config ({})",
+            DefaultConfigService::global_config_path().display()
+        )
+    }
+
+    #[test]
+    fn project_daemon_uses_global_values_and_discloses_keys() {
+        let config = merge_project_str(
+            "[daemon]\nidle_timeout_mins = 10\nmax_concurrent = 7\n",
+            "[daemon]\nidle_timeout_mins = 30\nmax_concurrent = 99\nbogus = 1\n",
+        );
+        assert_eq!(config.daemon.idle_timeout_mins, 10);
+        assert_eq!(config.daemon.max_concurrent, 7);
+        assert_eq!(
+            config.ignored_keys,
+            vec![
+                "project.toml: unknown key `daemon.bogus`".to_string(),
+                daemon_ignored_message("idle_timeout_mins"),
+                daemon_ignored_message("max_concurrent"),
+            ]
+        );
+    }
+
+    #[test]
+    fn project_daemon_without_global_uses_defaults() {
+        let config = merge_project_str("", "[daemon]\nidle_timeout_mins = 1\nmax_concurrent = 2\n");
+        assert_eq!(
+            config.daemon,
+            crate::models::config::DaemonConfig::default()
+        );
+        assert_eq!(
+            config.ignored_keys,
+            vec![
+                daemon_ignored_message("idle_timeout_mins"),
+                daemon_ignored_message("max_concurrent"),
+            ]
+        );
+    }
+
+    #[test]
+    fn project_default_dump_discloses_every_daemon_field_only() {
+        let defaults = SymoraConfig::default();
+        let dump = toml::to_string_pretty(&defaults).unwrap();
+        let config = merge_project_str("[daemon]\nidle_timeout_mins = 10\n", &dump);
+        let daemon = toml::Table::try_from(&defaults.daemon).unwrap();
+        assert_eq!(
+            config.ignored_keys,
+            daemon
+                .keys()
+                .map(|key| daemon_ignored_message(key))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(config.daemon.idle_timeout_mins, 10);
+        let mut expected = toml::Table::try_from(&defaults).unwrap();
+        expected.remove(GLOBAL_ONLY_SECTION);
+        let mut actual = toml::Table::try_from(&config).unwrap();
+        actual.remove(GLOBAL_ONLY_SECTION);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn scoped_parse_preserves_error_spans() {
+        for scope in [ConfigScope::Global, ConfigScope::Project] {
+            let error = parse_scoped_raw(
+                "[daemon]\nidle_timeout_mins = \"bad\"\n",
+                Path::new("broken.toml"),
+                scope,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("broken.toml"), "{error}");
+            assert!(error.contains("line 2, column"), "{error}");
+            assert!(error.contains("idle_timeout_mins ="), "{error}");
+        }
     }
 
     #[test]
