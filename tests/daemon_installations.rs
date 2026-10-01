@@ -251,3 +251,272 @@ fn uninstall_stops_its_installation_and_removes_daemon_root() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+fn stopped_daemon_socket(exe: &Path, home: &Path) -> (PathBuf, serde_json::Value) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    json_ok(exe, home, "start");
+    let status = json_ok(exe, home, "status");
+    let socket = PathBuf::from(status["socket_path"].as_str().unwrap());
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let request =
+        symora::daemon::protocol::Request::new(1, symora::daemon::protocol::methods::PING, None);
+    writeln!(stream, "{}", serde_json::to_string(&request).unwrap()).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let response: symora::daemon::protocol::Response = serde_json::from_str(&line).unwrap();
+    let identity = response.result.unwrap();
+    assert!(identity["build"].as_str().is_some());
+    assert_eq!(json_ok(exe, home, "stop")["stopped"], true);
+    std::fs::remove_file(&socket).unwrap();
+    (socket, identity)
+}
+
+fn accept_request(
+    listener: &std::os::unix::net::UnixListener,
+) -> (
+    std::os::unix::net::UnixStream,
+    symora::daemon::protocol::Request,
+) {
+    use std::io::{BufRead, BufReader};
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (stream, _) = loop {
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "client did not connect");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line).unwrap();
+    let request = serde_json::from_str(&line).unwrap();
+    (stream, request)
+}
+
+fn search_command(exe: &Path, home: &Path) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .args(["--format", "compact", "search", "content", "needle"])
+        .current_dir(home)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env_remove("SYMORA_NO_DAEMON");
+    command
+}
+
+#[test]
+fn project_request_starts_daemon_when_listener_disappears_after_ping() {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use symora::daemon::protocol::{Response, methods};
+
+    let home = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.to_path_buf()],
+    };
+    std::fs::write(home.path().join("main.rs"), "fn needle() {}\n").unwrap();
+    let (socket, identity) = stopped_daemon_socket(exe, home.path());
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stand_in = std::thread::spawn(move || {
+        let (mut stream, request) = accept_request(&listener);
+        assert_eq!(request.method, methods::PING);
+        // Removing the listener before answering makes the request's own
+        // connect observe absence regardless of client scheduling.
+        drop(listener);
+        std::fs::remove_file(socket).unwrap();
+        let response = Response::success(request.id, identity);
+        writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+    });
+    let out = search_command(exe, home.path()).output().unwrap();
+    stand_in.join().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value.get("error").is_none(), "{value}");
+    assert_eq!(value["count"], 1, "{value}");
+    assert_eq!(value["items"][0]["file"], "main.rs");
+    assert_eq!(json_ok(exe, home.path(), "status")["running"], true);
+}
+
+#[test]
+fn accepted_project_request_without_answer_is_not_retried() {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use symora::daemon::protocol::{Response, methods};
+
+    let home = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.to_path_buf()],
+    };
+    let (socket, identity) = stopped_daemon_socket(exe, home.path());
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let finished = Arc::new(AtomicBool::new(false));
+    let client_finished = Arc::clone(&finished);
+    let stand_in = std::thread::spawn(move || {
+        let mut requests = 0;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !client_finished.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "client did not finish");
+            let (mut stream, request) = match listener.accept() {
+                Ok((stream, _)) => {
+                    use std::io::{BufRead, BufReader};
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut line = String::new();
+                    BufReader::new(&stream).read_line(&mut line).unwrap();
+                    let request: symora::daemon::protocol::Request =
+                        serde_json::from_str(&line).unwrap();
+                    (stream, request)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            if request.method == methods::PING {
+                let response = Response::success(request.id, identity.clone());
+                writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+            } else {
+                assert_eq!(request.method, methods::SEARCH_CONTENT);
+                requests += 1;
+                // Read the entire request before closing so the client
+                // observes EOF while waiting for an answer.
+                drop(stream);
+            }
+        }
+        requests
+    });
+    let out = search_command(exe, home.path()).output().unwrap();
+    finished.store(true, Ordering::Release);
+    assert_eq!(stand_in.join().unwrap(), 1);
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Connection closed before 'search_content' was answered"),
+        "{value}"
+    );
+}
+
+#[test]
+fn status_without_daemon_does_not_start_one() {
+    let home = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.to_path_buf()],
+    };
+    assert_eq!(json_ok(exe, home.path(), "status")["running"], false);
+    let base = home.path().join(".symora");
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => panic!("{e}"),
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        assert_ne!(path.extension().and_then(|s| s.to_str()), Some("pid"));
+        assert_ne!(path.extension().and_then(|s| s.to_str()), Some("sock"));
+    }
+}
+
+#[test]
+fn edit_notifications_do_not_start_daemon_when_listener_disappears_after_ping() {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+    use symora::daemon::protocol::{Response, methods};
+
+    for notification in [methods::REFRESH_FILES, methods::NOTE_FILES_EDITED] {
+        let home = tempfile::tempdir().unwrap();
+        let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
+        let _cleanup = Daemons {
+            home: home.path().to_path_buf(),
+            binaries: vec![exe.to_path_buf()],
+        };
+        let file = home.path().join("main.rs");
+        std::fs::write(&file, "fn alpha() {}\n").unwrap();
+        let (socket, identity) = stopped_daemon_socket(exe, home.path());
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stand_in = std::thread::spawn(move || {
+            if notification == methods::NOTE_FILES_EDITED {
+                let (mut stream, request) = accept_request(&listener);
+                assert_eq!(request.method, methods::PING);
+                let response = Response::success(request.id, identity.clone());
+                writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+                let (mut stream, request) = accept_request(&listener);
+                assert_eq!(request.method, methods::REFRESH_FILES);
+                let response = Response::success(request.id, serde_json::json!({}));
+                writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+            }
+            let (mut stream, request) = accept_request(&listener);
+            assert_eq!(request.method, methods::PING);
+            // The gated notification must encounter absence on its own
+            // connect, after its liveness check succeeded.
+            drop(listener);
+            std::fs::remove_file(socket).unwrap();
+            let response = Response::success(request.id, identity);
+            writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+        });
+        let out = Command::new(exe)
+            .args([
+                "--format",
+                "compact",
+                "edit",
+                "replace",
+                "main.rs:1:1",
+                "--text",
+                "fn beta() {}",
+            ])
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env_remove("SYMORA_NO_DAEMON")
+            .output()
+            .unwrap();
+        stand_in.join().unwrap();
+        assert!(
+            out.status.success(),
+            "{notification}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(value.get("error").is_none(), "{notification}: {value}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn beta() {}\n");
+        assert_eq!(
+            json_ok(exe, home.path(), "status")["running"],
+            false,
+            "{notification} started a daemon"
+        );
+    }
+}

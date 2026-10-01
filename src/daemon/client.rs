@@ -74,7 +74,6 @@ macro_rules! rpc_position {
                 line: u32,
                 column: u32,
             ) -> Result<serde_json::Value, LspError> {
-                self.ensure_running().await?;
                 let params = serde_json::json!({
                     "file": file.display().to_string(),
                     "line": line,
@@ -93,7 +92,6 @@ macro_rules! rpc_file {
     ($($name:ident => $method:expr),* $(,)?) => {
         $(
             pub async fn $name(&self, file: &Path) -> Result<serde_json::Value, LspError> {
-                self.ensure_running().await?;
                 let params = serde_json::json!({
                     "file": file.display().to_string()
                 });
@@ -299,7 +297,7 @@ impl DaemonClient {
         }
     }
 
-    async fn request_with_project(
+    async fn send_request_with_project(
         &self,
         method: &str,
         mut params: serde_json::Value,
@@ -307,6 +305,23 @@ impl DaemonClient {
         self.inject_project(&mut params);
         let timeout = calculate_timeout(&self.lsp_config, &params, method);
         self.send_request(method, Some(params), timeout).await
+    }
+
+    async fn request_with_project(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Response, LspError> {
+        self.ensure_running().await?;
+        match self.send_request_with_project(method, params.clone()).await {
+            Err(LspError::NotConnected) => {
+                // Connect proved the request was never sent; an accepted
+                // request may have mutated files and must not be replayed.
+                self.ensure_running().await?;
+                self.send_request_with_project(method, params).await
+            }
+            result => result,
+        }
     }
 
     /// An error the daemon typed as an [`LspError`] carries its variant in
@@ -366,7 +381,6 @@ impl DaemonClient {
         include_body: bool,
         depth: u32,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "file": file.display().to_string(),
             "body": include_body,
@@ -384,7 +398,6 @@ impl DaemonClient {
         column: u32,
         new_name: &str,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "file": file.display().to_string(),
             "line": line,
@@ -402,7 +415,6 @@ impl DaemonClient {
         start_line: u32,
         end_line: u32,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "file": file.display().to_string(),
             "start_line": start_line,
@@ -418,7 +430,6 @@ impl DaemonClient {
         file: &Path,
         positions: &[(u32, u32)],
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "file": file.display().to_string(),
             "positions": positions.iter()
@@ -435,7 +446,6 @@ impl DaemonClient {
         query: &str,
         language: &str,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "query": query,
             "language": language
@@ -450,7 +460,6 @@ impl DaemonClient {
         file: &Path,
         action: &serde_json::Value,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "file": file.display().to_string(),
             "action": action
@@ -461,7 +470,6 @@ impl DaemonClient {
     }
 
     pub async fn language_status(&self, language: &str) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "language": language
         });
@@ -479,7 +487,7 @@ impl DaemonClient {
         let Some(params) = self.edited_files_params(files).await else {
             return Ok(());
         };
-        self.request_with_project(methods::NOTE_FILES_EDITED, params)
+        self.send_request_with_project(methods::NOTE_FILES_EDITED, params)
             .await
             .and_then(Self::extract_result)
             .map(|_| ())
@@ -494,7 +502,6 @@ impl DaemonClient {
         kind: Option<&str>,
         language: Option<&str>,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "query": query,
             "limit": limit,
@@ -512,7 +519,6 @@ impl DaemonClient {
         limit: Option<usize>,
         languages: &[String],
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "query": query,
             "limit": limit,
@@ -528,7 +534,6 @@ impl DaemonClient {
         force: bool,
         languages: Option<Vec<String>>,
     ) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         let params = serde_json::json!({
             "force": force,
             "languages": languages,
@@ -539,28 +544,24 @@ impl DaemonClient {
     }
 
     pub async fn index_status(&self) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         self.request_with_project(methods::INDEX_STATUS, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn index_is_current(&self) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         self.request_with_project(methods::INDEX_IS_CURRENT, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn indexed_languages(&self) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         self.request_with_project(methods::INDEXED_LANGUAGES, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn index_clear(&self) -> Result<serde_json::Value, LspError> {
-        self.ensure_running().await?;
         self.request_with_project(methods::INDEX_CLEAR, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
@@ -599,7 +600,7 @@ impl DaemonClient {
         let Some(params) = self.edited_files_params(files).await else {
             return Ok(());
         };
-        self.request_with_project(methods::REFRESH_FILES, params)
+        self.send_request_with_project(methods::REFRESH_FILES, params)
             .await
             .and_then(Self::extract_result)
             .map(|_| ())
