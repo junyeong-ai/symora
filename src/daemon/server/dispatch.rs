@@ -44,11 +44,13 @@ pub(super) async fn dispatch(
             let params = request.params.unwrap_or(serde_json::json!({}));
             let p: ProjectParams = parse_params(&params)?;
             let ctx = get_context(projects, &p.project).await?;
-            ctx.touch();
             let timeout = estimate_request_timeout(&request.method, &params, &ctx);
-            tokio::time::timeout(timeout, dispatch_project(&request.method, &params, ctx))
-                .await
-                .map_err(timeout_error)?
+            tokio::time::timeout(
+                timeout,
+                dispatch_project(&request.method, &params, Arc::clone(&ctx)),
+            )
+            .await
+            .map_err(timeout_error)?
         }
     }
 }
@@ -422,6 +424,57 @@ mod tests {
             );
             assert_eq!(status["projects"][0]["requests"], count);
         }
+    }
+
+    #[test]
+    fn project_lease_lives_until_response_or_cancellation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for cancel in [false, true] {
+                let root = project(60);
+                let config = DaemonRuntimeConfig::load();
+                let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
+                let (release, wait) = std::sync::mpsc::channel();
+                let (started, ready) = std::sync::mpsc::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    wait.recv().unwrap();
+                });
+                ready.recv().unwrap();
+                let mut request = Box::pin(dispatch(
+                    Request::new(
+                        1,
+                        methods::INDEX_CLEAR,
+                        Some(serde_json::json!({"project": root.path()})),
+                    ),
+                    &projects,
+                    &config,
+                    Instant::now(),
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(std::future::Future::poll(request.as_mut(), cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                let ctx = Arc::clone(projects.read().await.get(root.path()).unwrap());
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                assert!(!ctx.is_idle(Duration::ZERO));
+                if cancel {
+                    drop(request);
+                    release.send(()).unwrap();
+                } else {
+                    release.send(()).unwrap();
+                    assert_eq!(request.await.unwrap()["cleared"], true);
+                }
+                blocker.await.unwrap();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                assert!(ctx.is_idle(Duration::ZERO));
+            }
+        });
     }
 
     #[tokio::test]
