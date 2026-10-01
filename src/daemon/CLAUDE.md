@@ -14,6 +14,8 @@ Types in `wire.rs` (Symbol, Location, Diagnostic, …) are an external protocol.
 
 A daemon leaves its socket and pid files behind: the next daemon settles them when it claims the installation's path (`claim_socket`), under `daemon-<id>.bind.lock` and only after confirming nobody answers. Removing them at shutdown would give a slow teardown the power to unlink a successor's live socket, so liveness is always a connection attempt — never a path lookup — on both sides of the wire.
 
+A daemon that has held no project and had no connection open for `idle_timeout` shuts down through `DaemonServer::shutdown`, and the client starts one on demand; work the daemon does outside a project or a connection does not keep it alive.
+
 ## Request timeouts
 
 Each request is bounded by a per-request `tokio::time::timeout` sized per language/method from the served project's retained runtime config (`estimate_request_timeout` in `server/dispatch.rs`); methods without an LSP mapping use 600 seconds. A timed-out request returns a structured error; there is no separate cancellation channel. The client waits with the same derivation (`daemon::lsp_request_timeout`); edits to either side must preserve this shared derivation so the two bounds cannot drift.

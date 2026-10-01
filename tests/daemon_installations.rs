@@ -42,6 +42,40 @@ impl Drop for Daemons {
 }
 
 #[test]
+fn zero_idle_timeout_allows_start_and_project_request() {
+    let home = tempfile::tempdir().unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_symora"));
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.to_path_buf()],
+    };
+    let config_dir = home.path().join("symora");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[daemon]\nidle_timeout_mins = 0\n",
+    )
+    .unwrap();
+    std::fs::write(home.path().join("main.rs"), "fn needle() {}\n").unwrap();
+    assert_eq!(json_ok(exe, home.path(), "start")["started"], true);
+    let out = search_command(exe, home.path()).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value.get("error").is_none(), "{value}");
+    assert_eq!(value["count"], 1, "{value}");
+    assert_eq!(value["items"][0]["file"], "main.rs");
+    let status = json_ok(exe, home.path(), "status");
+    assert_eq!(status["active_projects"], 1, "{status}");
+    assert!(status["projects"][0]["requests"].as_u64().unwrap() > 0);
+    assert_eq!(json_ok(exe, home.path(), "stop")["stopped"], true);
+}
+
+#[test]
 fn installations_run_independent_daemons_and_leave_legacy_files_untouched() {
     let home = tempfile::tempdir().unwrap();
     let base = home.path().join(".symora");
