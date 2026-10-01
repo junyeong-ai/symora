@@ -433,8 +433,7 @@ impl LspClient {
     /// registers them with the client already handed on.
     pub async fn start(
         self: &Arc<Self>,
-        command: &str,
-        args: &[String],
+        launch: &super::servers::ServerLaunch,
         admit: impl FnOnce(),
     ) -> Result<(), LspError> {
         // Check if already running
@@ -445,20 +444,21 @@ impl LspClient {
         tracing::info!(
             "Starting {} language server: {} {:?}",
             self.language,
-            command,
-            args
+            launch.command.display(),
+            launch.args
         );
 
         // Spawn server process
-        let mut child = Command::new(command)
-            .args(args)
+        let mut child = Command::new(&launch.command)
+            .args(&launch.args)
+            .envs(&launch.env)
             .current_dir(&self.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| LspError::ServerStart(format!("{}: {}", command, e)))?;
+            .map_err(|e| LspError::ServerStart(format!("{}: {}", launch.command.display(), e)))?;
 
         let stdin = child
             .stdin

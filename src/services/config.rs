@@ -455,7 +455,7 @@ fn resolve_config(raw: RawSymoraConfig, ignored_keys: Vec<String>) -> SymoraConf
 
 /// The field set a [lsp.servers.<lang>] stanza accepts — the
 /// `ServerOverride` fields, kept in lockstep by the unit test below.
-const SERVER_OVERRIDE_FIELDS: [&str; 3] = ["command", "args", "tier"];
+const SERVER_OVERRIDE_FIELDS: [&str; 4] = ["command", "args", "tier", "env"];
 
 /// Partition [lsp.servers] stanzas: strictly canonical `Language::lsp_id`
 /// keys with only known, well-typed fields are applied; alias keys,
@@ -492,6 +492,25 @@ fn resolve_server_overrides(
                 // values alongside any unknown fields in the same load.
                 match toml::Value::Table(known).try_into::<ServerOverride>() {
                     Ok(value) => {
+                        if let Some(env) = &value.env {
+                            for (name, value) in env {
+                                let message = if name.is_empty() || name.contains(['=', '\0']) {
+                                    Some(
+                                        "environment name must be non-empty and contain neither `=` nor NUL",
+                                    )
+                                } else if value.contains('\0') {
+                                    Some("environment value must not contain NUL")
+                                } else {
+                                    None
+                                };
+                                if let Some(message) = message {
+                                    stanza_errors.push(ServerOverrideError {
+                                        key: format!("lsp.servers.{key}.env.{name}"),
+                                        message: message.to_string(),
+                                    });
+                                }
+                            }
+                        }
                         if stanza_errors.is_empty() {
                             applied.insert(key, value);
                         }
@@ -680,6 +699,97 @@ tier = "slow"
     }
 
     #[test]
+    fn server_env_resolves_and_merges() {
+        let config = resolve_str(
+            r#"[lsp.servers.python]
+env = { NODE_OPTIONS = "--max-old-space-size=2048" }
+"#,
+        );
+        assert!(config.lsp.server_override_errors.is_empty());
+        let env = BTreeMap::from([(
+            "NODE_OPTIONS".to_string(),
+            "--max-old-space-size=2048".to_string(),
+        )]);
+        assert_eq!(config.lsp.servers["python"].env, Some(env.clone()));
+        let servers = crate::infra::lsp::servers::merged(&config.lsp.servers);
+        let python = &servers[&Language::Python];
+        assert_eq!(python.env, env);
+        assert_eq!(
+            python.source,
+            crate::infra::lsp::servers::ServerSource::Config
+        );
+        let builtin = crate::infra::lsp::servers::defaults();
+        assert!(builtin.values().all(|server| server.env.is_empty()));
+        assert_eq!(python.command, builtin[&Language::Python].command);
+        assert_eq!(python.args, builtin[&Language::Python].args);
+        assert!(servers[&Language::Go].env.is_empty());
+    }
+
+    #[test]
+    fn server_env_invalid_entries_reject_whole_stanza() {
+        for (entry, name, message) in [
+            (r#""" = "x""#, "", "environment name"),
+            (r#""A=B" = "x""#, "A=B", "environment name"),
+            (r#""A\u0000B" = "x""#, "A\0B", "environment name"),
+            (r#"A = "x\u0000y""#, "A", "environment value"),
+        ] {
+            let config = resolve_str(&format!(
+                "[lsp.servers.python]\ncommand = \"/custom/pyright\"\nenv = {{ {entry} }}\n[lsp]\ntimeout_secs = 99\n"
+            ));
+            assert!(config.lsp.servers.is_empty(), "{entry}");
+            assert_eq!(config.lsp.timeout_secs, 99);
+            let errors = &config.lsp.server_override_errors;
+            assert_eq!(errors.len(), 1, "{entry}");
+            assert_eq!(errors[0].key, format!("lsp.servers.python.env.{name}"));
+            assert!(errors[0].message.contains(message), "{:?}", errors[0]);
+            let servers = crate::infra::lsp::servers::merged(&config.lsp.servers);
+            assert_eq!(
+                servers[&Language::Python].source,
+                crate::infra::lsp::servers::ServerSource::Builtin
+            );
+        }
+    }
+
+    #[test]
+    fn server_env_mistyped_value_rejects_stanza() {
+        let config = resolve_str("[lsp.servers.python]\nenv = { NODE_OPTIONS = 2048 }\n");
+        assert!(config.lsp.servers.is_empty());
+        let errors = &config.lsp.server_override_errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "lsp.servers.python");
+        assert!(errors[0].message.contains("invalid type"));
+        assert!(!errors[0].message.contains('\n'));
+    }
+
+    #[test]
+    fn project_server_env_replaces_global_stanza() {
+        for project_env in ["", "env = {}", r#"env = { LOCAL = "project" }"#] {
+            let global = toml::from_str(
+                "[lsp.servers.python]\ncommand = \"/global/pyright\"\nenv = { GLOBAL = \"global\" }\n"
+            ).unwrap();
+            let project =
+                toml::from_str(&format!("[lsp.servers.python]\n{project_env}\n")).unwrap();
+            let config = resolve_config(merge_raw_config(global, project), Vec::new());
+            assert!(config.lsp.server_override_errors.is_empty());
+            let server = &config.lsp.servers["python"];
+            assert_eq!(server.command, None);
+            let expected = if project_env.contains("LOCAL") {
+                BTreeMap::from([("LOCAL".to_string(), "project".to_string())])
+            } else {
+                BTreeMap::new()
+            };
+            assert_eq!(
+                server.env,
+                (!project_env.is_empty()).then_some(expected.clone())
+            );
+            assert_eq!(
+                crate::infra::lsp::servers::merged(&config.lsp.servers)[&Language::Python].env,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn server_override_unknown_key_recorded_not_applied() {
         let config = resolve_str("[lsp.servers.klingon]\ncommand = \"/nope\"\n");
         assert!(config.lsp.servers.is_empty());
@@ -774,6 +884,7 @@ comand = "/custom/rust-analyzer"
             command: Some("/x".to_string()),
             args: Some(vec![]),
             tier: Some(ServerTier::Fast),
+            env: Some(BTreeMap::new()),
         };
         let table = toml::Value::try_from(&full).unwrap();
         let mut keys: Vec<&str> = table

@@ -504,6 +504,7 @@ mod tests {
             display_name: "fake-ls",
             command,
             args: vec![],
+            env: std::collections::BTreeMap::new(),
             version_arg: "--version",
             version_command: None,
             install: InstallInstructions {
