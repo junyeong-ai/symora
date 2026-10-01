@@ -22,6 +22,7 @@ pub(super) fn epoch_millis() -> u64 {
 }
 
 pub(super) struct ProjectContext {
+    pub(super) config: Arc<crate::config::LspRuntimeConfig>,
     pub(super) lsp: Arc<DefaultLspService>,
     pub(super) store: DefaultStoreService,
     pub(super) last_used: AtomicU64,
@@ -42,6 +43,7 @@ impl ProjectContext {
         let lsp_config = DaemonRuntimeConfig::load_lsp_config(path);
         let store = DefaultStoreService::new(path, crate::app::store_config(&lsp_config));
         Self {
+            config: Arc::clone(&lsp_config),
             lsp: Arc::new(DefaultLspService::new(path, lsp_config, FileWatch::On)),
             store,
             last_used: AtomicU64::new(epoch_millis()),

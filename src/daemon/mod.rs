@@ -24,6 +24,28 @@ pub(crate) fn proves_no_listener(error: &std::io::Error) -> bool {
     )
 }
 
+pub(crate) fn lsp_request_timeout(
+    config: &crate::config::LspRuntimeConfig,
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<std::time::Duration> {
+    use crate::models::symbol::Language;
+
+    let lsp_method = protocol::methods::to_lsp_method(method)?;
+    let language = params
+        .get("file")
+        .and_then(serde_json::Value::as_str)
+        .map(|file| Language::from_path(std::path::Path::new(file)))
+        .or_else(|| {
+            params
+                .get("language")
+                .and_then(serde_json::Value::as_str)
+                .map(Language::parse_or_default)
+        })
+        .unwrap_or(Language::Unknown);
+    Some(config.timeout_for(language, lsp_method))
+}
+
 #[cfg(test)]
 mod tests {
     use super::proves_no_listener;
