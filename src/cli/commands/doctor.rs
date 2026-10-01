@@ -86,7 +86,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     let (overrides, config_errors) = match app.config_service.load(false).await {
         Ok(config) => {
             let errors = config
-                .unknown_keys
+                .ignored_keys
                 .iter()
                 .cloned()
                 .chain(

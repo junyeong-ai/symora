@@ -84,7 +84,7 @@ impl App {
         // not duplicated here.
         let (config, config_errors) = match config_service.load(false).await {
             Ok(config) => {
-                let errors = config.unknown_keys.clone();
+                let errors = config.ignored_keys.clone();
                 (config, errors)
             }
             Err(e) => {
