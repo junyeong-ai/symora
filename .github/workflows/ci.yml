@@ -87,7 +87,14 @@ jobs:
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
-          components: rust-analyzer
+
+      # Inside the repository rust-toolchain.toml overrides `stable`, and a
+      # component's rustup proxy looks only in the overriding toolchain: a
+      # component installed into `stable` is never found here.
+      - name: Install rust-analyzer into the pinned toolchain
+        run: |
+          rustup install
+          rustup component add rust-analyzer
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -127,7 +134,12 @@ jobs:
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
-          components: llvm-tools-preview
+
+      # See the lang-fixtures job: components go to the pinned toolchain.
+      - name: Install llvm-tools into the pinned toolchain
+        run: |
+          rustup install
+          rustup component add llvm-tools-preview
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
