@@ -17,7 +17,7 @@ use crate::services::lsp::LspService;
 use crate::services::store::StoreService;
 
 use super::config::DaemonRuntimeConfig;
-use super::context::{ProjectContext, ProjectsMap, get_context};
+use super::context::{ProjectContext, ProjectsMap};
 use super::dispatch::{parse_params, to_json};
 
 pub(super) async fn handle_status(
@@ -82,11 +82,9 @@ pub(super) async fn handle_status(
 
 pub(super) async fn handle_find_symbols(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: FileParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let options = FindSymbolsOptions {
         include_body: p.body,
@@ -111,11 +109,9 @@ pub(super) async fn handle_find_symbols(
 
 pub(super) async fn handle_workspace_symbols(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: WorkspaceSymbolParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let language = p
         .language
@@ -146,11 +142,9 @@ pub(super) async fn handle_workspace_symbols(
 
 pub(super) async fn handle_rename(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: RenameParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let result = ctx
         .lsp
@@ -169,11 +163,9 @@ pub(super) async fn handle_rename(
 
 pub(super) async fn handle_inlay_hints(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: InlayHintsParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let hints = ctx
         .lsp
@@ -200,11 +192,9 @@ pub(super) async fn handle_inlay_hints(
 
 pub(super) async fn handle_selection_ranges(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: SelectionRangeParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let positions: Vec<(u32, u32)> = p
         .positions
@@ -237,11 +227,9 @@ pub(super) async fn handle_selection_ranges(
 
 pub(super) async fn handle_apply_action(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: ApplyActionParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let action: crate::models::lsp::CodeAction = serde_json::from_value(p.action)
         .map_err(|e| RpcError::invalid_params(&format!("Invalid action: {}", e)))?;
@@ -260,11 +248,9 @@ pub(super) async fn handle_apply_action(
 
 pub(super) async fn handle_language_status(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: LanguageStatusParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let language = Language::parse_or_default(&p.language);
     let available = ctx.lsp.is_available(language).await;
@@ -315,11 +301,9 @@ pub(super) async fn handle_language_status(
 /// of the edit flow's `note_files_edited`.
 pub(super) async fn handle_note_files_edited(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: crate::daemon::params::EditedFilesParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let paths: Vec<PathBuf> = p.files.iter().map(PathBuf::from).collect();
     ctx.lsp.note_files_edited(&paths).await;

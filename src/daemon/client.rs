@@ -16,7 +16,11 @@ use crate::error::LspError;
 use crate::infra::file_lock::FileLock;
 use crate::models::symbol::Language;
 
-fn calculate_timeout(config: &LspRuntimeConfig, file: Option<&Path>, method: &str) -> Duration {
+pub(super) fn calculate_timeout(
+    config: &LspRuntimeConfig,
+    params: &serde_json::Value,
+    method: &str,
+) -> Duration {
     // Daemon-only operations with fixed timeouts
     match method {
         methods::PING
@@ -29,26 +33,14 @@ fn calculate_timeout(config: &LspRuntimeConfig, file: Option<&Path>, method: &st
         methods::INDEX_BUILD => return Duration::from_secs(600),
         methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
         methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
+        methods::LANGUAGE_STATUS | methods::INDEX_IS_CURRENT | methods::INDEXED_LANGUAGES => {
+            return config.timeout_for(Language::Unknown, "textDocument/hover");
+        }
         _ => {}
     }
 
-    // Determine language from file path
-    let language = file.map(Language::from_path).unwrap_or(Language::Unknown);
-
-    // Map daemon method to LSP method for config lookup
-    let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
-
-    config.timeout_for(language, lsp_method)
-}
-
-/// Calculate timeout for operations where language is known but file path is not.
-fn calculate_timeout_for_language(
-    config: &LspRuntimeConfig,
-    language: Language,
-    method: &str,
-) -> Duration {
-    let lsp_method = methods::to_lsp_method(method).unwrap_or("textDocument/hover");
-    config.timeout_for(language, lsp_method)
+    crate::daemon::lsp_request_timeout(config, method, params)
+        .expect("LSP request method must have a mapping")
 }
 
 /// What [`DaemonClient::ensure_running`] found, and did about it.
@@ -88,7 +80,7 @@ macro_rules! rpc_position {
                     "line": line,
                     "column": column
                 });
-                self.request_with_project($method, params, Some(file))
+                self.request_with_project($method, params)
                     .await
                     .and_then(Self::extract_result)
             }
@@ -105,7 +97,7 @@ macro_rules! rpc_file {
                 let params = serde_json::json!({
                     "file": file.display().to_string()
                 });
-                self.request_with_project($method, params, Some(file))
+                self.request_with_project($method, params)
                     .await
                     .and_then(Self::extract_result)
             }
@@ -311,20 +303,9 @@ impl DaemonClient {
         &self,
         method: &str,
         mut params: serde_json::Value,
-        file: Option<&Path>,
     ) -> Result<Response, LspError> {
         self.inject_project(&mut params);
-        let timeout = calculate_timeout(&self.lsp_config, file, method);
-        self.send_request(method, Some(params), timeout).await
-    }
-
-    async fn request_with_project_timeout(
-        &self,
-        method: &str,
-        mut params: serde_json::Value,
-        timeout: Duration,
-    ) -> Result<Response, LspError> {
-        self.inject_project(&mut params);
+        let timeout = calculate_timeout(&self.lsp_config, &params, method);
         self.send_request(method, Some(params), timeout).await
     }
 
@@ -391,7 +372,7 @@ impl DaemonClient {
             "body": include_body,
             "depth": depth
         });
-        self.request_with_project(methods::FIND_SYMBOLS, params, Some(file))
+        self.request_with_project(methods::FIND_SYMBOLS, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -410,7 +391,7 @@ impl DaemonClient {
             "column": column,
             "new_name": new_name
         });
-        self.request_with_project(methods::RENAME, params, Some(file))
+        self.request_with_project(methods::RENAME, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -427,7 +408,7 @@ impl DaemonClient {
             "start_line": start_line,
             "end_line": end_line
         });
-        self.request_with_project(methods::INLAY_HINTS, params, Some(file))
+        self.request_with_project(methods::INLAY_HINTS, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -444,7 +425,7 @@ impl DaemonClient {
                 .map(|(l, c)| serde_json::json!({"line": l, "column": c}))
                 .collect::<Vec<_>>()
         });
-        self.request_with_project(methods::SELECTION_RANGES, params, Some(file))
+        self.request_with_project(methods::SELECTION_RANGES, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -455,17 +436,11 @@ impl DaemonClient {
         language: &str,
     ) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        let language_enum = Language::parse_or_default(language);
         let params = serde_json::json!({
             "query": query,
             "language": language
         });
-        let timeout = calculate_timeout_for_language(
-            &self.lsp_config,
-            language_enum,
-            methods::WORKSPACE_SYMBOLS,
-        );
-        self.request_with_project_timeout(methods::WORKSPACE_SYMBOLS, params, timeout)
+        self.request_with_project(methods::WORKSPACE_SYMBOLS, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -480,7 +455,7 @@ impl DaemonClient {
             "file": file.display().to_string(),
             "action": action
         });
-        self.request_with_project(methods::APPLY_CODE_ACTION, params, Some(file))
+        self.request_with_project(methods::APPLY_CODE_ACTION, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -490,7 +465,7 @@ impl DaemonClient {
         let params = serde_json::json!({
             "language": language
         });
-        self.request_with_project(methods::LANGUAGE_STATUS, params, None)
+        self.request_with_project(methods::LANGUAGE_STATUS, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -504,14 +479,10 @@ impl DaemonClient {
         let Some(params) = self.edited_files_params(files).await else {
             return Ok(());
         };
-        self.request_with_project(
-            methods::NOTE_FILES_EDITED,
-            params,
-            files.first().map(PathBuf::as_path),
-        )
-        .await
-        .and_then(Self::extract_result)
-        .map(|_| ())
+        self.request_with_project(methods::NOTE_FILES_EDITED, params)
+            .await
+            .and_then(Self::extract_result)
+            .map(|_| ())
     }
 
     // Search Operations
@@ -530,7 +501,7 @@ impl DaemonClient {
             "kind": kind,
             "language": language,
         });
-        self.request_with_project(methods::SEARCH_SYMBOLS, params, None)
+        self.request_with_project(methods::SEARCH_SYMBOLS, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -547,7 +518,7 @@ impl DaemonClient {
             "limit": limit,
             "languages": languages,
         });
-        self.request_with_project(methods::SEARCH_CONTENT, params, None)
+        self.request_with_project(methods::SEARCH_CONTENT, params)
             .await
             .and_then(Self::extract_result)
     }
@@ -562,35 +533,35 @@ impl DaemonClient {
             "force": force,
             "languages": languages,
         });
-        self.request_with_project(methods::INDEX_BUILD, params, None)
+        self.request_with_project(methods::INDEX_BUILD, params)
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn index_status(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        self.request_with_project(methods::INDEX_STATUS, serde_json::json!({}), None)
+        self.request_with_project(methods::INDEX_STATUS, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn index_is_current(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        self.request_with_project(methods::INDEX_IS_CURRENT, serde_json::json!({}), None)
+        self.request_with_project(methods::INDEX_IS_CURRENT, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn indexed_languages(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        self.request_with_project(methods::INDEXED_LANGUAGES, serde_json::json!({}), None)
+        self.request_with_project(methods::INDEXED_LANGUAGES, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
 
     pub async fn index_clear(&self) -> Result<serde_json::Value, LspError> {
         self.ensure_running().await?;
-        self.request_with_project(methods::INDEX_CLEAR, serde_json::json!({}), None)
+        self.request_with_project(methods::INDEX_CLEAR, serde_json::json!({}))
             .await
             .and_then(Self::extract_result)
     }
@@ -628,14 +599,10 @@ impl DaemonClient {
         let Some(params) = self.edited_files_params(files).await else {
             return Ok(());
         };
-        self.request_with_project(
-            methods::REFRESH_FILES,
-            params,
-            files.first().map(PathBuf::as_path),
-        )
-        .await
-        .and_then(Self::extract_result)
-        .map(|_| ())
+        self.request_with_project(methods::REFRESH_FILES, params)
+            .await
+            .and_then(Self::extract_result)
+            .map(|_| ())
     }
 
     // Daemon Control Operations

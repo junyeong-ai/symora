@@ -25,10 +25,6 @@ use context::{ProjectContext, ProjectsMap};
 pub struct DaemonServer {
     config: Arc<DaemonRuntimeConfig>,
     projects: ProjectsMap,
-    /// The outer bound on how long one request may occupy a connection.
-    /// Every project-scoped setting is read from the project it serves; this
-    /// is the daemon's own transport guard and the only config it keeps.
-    request_timeouts: Arc<crate::config::LspRuntimeConfig>,
     semaphore: Arc<Semaphore>,
     start_time: Instant,
     /// Level-triggered, so the signal is a state rather than an event: an
@@ -42,15 +38,11 @@ pub struct DaemonServer {
 }
 
 impl DaemonServer {
-    pub fn new(
-        config: DaemonRuntimeConfig,
-        request_timeouts: Arc<crate::config::LspRuntimeConfig>,
-    ) -> Self {
+    pub fn new(config: DaemonRuntimeConfig) -> Self {
         let (shutdown, _) = watch::channel(false);
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
         Self {
             config: Arc::new(config),
-            request_timeouts,
             semaphore,
             projects: Arc::new(RwLock::new(HashMap::new())),
             start_time: Instant::now(),
@@ -163,21 +155,12 @@ impl DaemonServer {
         let projects = Arc::clone(&self.projects);
         let semaphore = Arc::clone(&self.semaphore);
         let config = Arc::clone(&self.config);
-        let request_timeouts = Arc::clone(&self.request_timeouts);
         let start_time = self.start_time;
         let shutdown = self.shutdown.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(
-                stream,
-                projects,
-                semaphore,
-                config,
-                request_timeouts,
-                start_time,
-                shutdown,
-            )
-            .await
+            if let Err(e) =
+                handle_connection(stream, projects, semaphore, config, start_time, shutdown).await
             {
                 tracing::warn!("Connection error: {}", e);
             }

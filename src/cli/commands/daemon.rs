@@ -38,10 +38,9 @@ pub enum DaemonCommand {
     Serve,
 }
 
-async fn start_server(root: &std::path::Path) -> Result<()> {
+async fn start_server() -> Result<()> {
     let config = DaemonRuntimeConfig::load();
-    let request_timeouts = DaemonRuntimeConfig::load_lsp_config(root);
-    let server = DaemonServer::new(config, request_timeouts);
+    let server = DaemonServer::new(config);
 
     if let Err(e) = server.run().await {
         tracing::error!("Daemon server error: {}", e);
@@ -101,7 +100,7 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
             Ok(())
         }
 
-        DaemonCommand::Serve => start_server(app.root()).await,
+        DaemonCommand::Serve => start_server().await,
 
         DaemonCommand::Status => {
             let client = DaemonClient::new(app.root());

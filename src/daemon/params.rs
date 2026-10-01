@@ -9,7 +9,6 @@ pub(crate) struct PositionParams {
     pub file: String,
     pub line: u32,
     pub column: u32,
-    pub project: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,7 +19,6 @@ pub(crate) struct ProjectParams {
 #[derive(Debug, Deserialize)]
 pub(crate) struct FileParams {
     pub file: String,
-    pub project: String,
     #[serde(default)]
     pub body: bool,
     #[serde(default = "default_depth")]
@@ -33,20 +31,17 @@ pub(crate) struct RenameParams {
     pub line: u32,
     pub column: u32,
     pub new_name: String,
-    pub project: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorkspaceSymbolParams {
     pub query: String,
-    pub project: String,
     pub language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApplyActionParams {
     pub file: String,
-    pub project: String,
     pub action: serde_json::Value,
 }
 
@@ -55,14 +50,12 @@ pub(crate) struct InlayHintsParams {
     pub file: String,
     pub start_line: u32,
     pub end_line: u32,
-    pub project: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SelectionRangeParams {
     pub file: String,
     pub positions: Vec<PositionInput>,
-    pub project: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +66,6 @@ pub(crate) struct PositionInput {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchSymbolsParams {
-    pub project: String,
     pub query: String,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -85,7 +77,6 @@ pub(crate) struct SearchSymbolsParams {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchContentParams {
-    pub project: String,
     pub query: String,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -101,18 +92,15 @@ pub(crate) struct SearchContentParams {
 #[derive(Debug, Deserialize)]
 pub(crate) struct EditedFilesParams {
     pub files: Vec<String>,
-    pub project: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct LanguageStatusParams {
-    pub project: String,
     pub language: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct IndexBuildParams {
-    pub project: String,
     #[serde(default)]
     pub force: bool,
     #[serde(default)]

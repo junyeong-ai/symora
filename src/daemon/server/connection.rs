@@ -1,6 +1,5 @@
-use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -8,7 +7,6 @@ use tokio::sync::{Semaphore, watch};
 
 use serde::Serialize;
 
-use crate::config::LspRuntimeConfig;
 use crate::daemon::protocol::{Request, RequestId, Response, RpcError, methods};
 
 use super::config::DaemonRuntimeConfig;
@@ -28,7 +26,6 @@ pub(super) async fn handle_connection(
     projects: ProjectsMap,
     semaphore: Arc<Semaphore>,
     config: Arc<DaemonRuntimeConfig>,
-    request_timeouts: Arc<LspRuntimeConfig>,
     start_time: Instant,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), std::io::Error> {
@@ -113,21 +110,8 @@ pub(super) async fn handle_connection(
             }
         };
 
-        let request_id = request.id.clone();
-        let timeout = estimate_request_timeout(&request, &request_timeouts);
-        let result = tokio::time::timeout(
-            timeout,
-            process_request(request, &projects, &config, start_time),
-        )
-        .await;
-
-        let (response, should_shutdown) = match result {
-            Ok(r) => r,
-            Err(_) => (
-                Response::error(request_id, RpcError::internal_error("Request timed out")),
-                false,
-            ),
-        };
+        let (response, should_shutdown) =
+            process_request(request, &projects, &config, start_time).await;
 
         let json = serialize_response(&response);
 
@@ -141,24 +125,6 @@ pub(super) async fn handle_connection(
     }
 
     Ok(())
-}
-
-fn estimate_request_timeout(request: &Request, lsp_config: &LspRuntimeConfig) -> Duration {
-    use crate::models::symbol::Language;
-
-    match methods::to_lsp_method(&request.method) {
-        Some(lsp_method) => {
-            let language = request
-                .params
-                .as_ref()
-                .and_then(|p| p.get("file"))
-                .and_then(|f| f.as_str())
-                .map(|f| Language::from_path(Path::new(f)))
-                .unwrap_or(Language::Unknown);
-            lsp_config.timeout_for(language, lsp_method)
-        }
-        None => Duration::from_secs(600),
-    }
 }
 
 async fn process_request(

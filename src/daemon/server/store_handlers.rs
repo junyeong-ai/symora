@@ -1,12 +1,12 @@
 use crate::daemon::params::{
-    EditedFilesParams, IndexBuildParams, ProjectParams, SearchContentParams, SearchSymbolsParams,
+    EditedFilesParams, IndexBuildParams, SearchContentParams, SearchSymbolsParams,
 };
 use crate::daemon::protocol::RpcError;
 use crate::daemon::wire;
 use crate::models::symbol::{Language, SymbolKind};
 use crate::services::store::{IndexOptions, SearchPage, StoreService};
 
-use super::context::{ProjectsMap, get_context};
+use super::context::ProjectContext;
 use super::dispatch::parse_params;
 
 /// Re-index just-edited files in the store. A failure travels back to the
@@ -15,11 +15,9 @@ use super::dispatch::parse_params;
 /// and the daemon never swallows the failure silently.
 pub(super) async fn handle_refresh_files(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: EditedFilesParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
     let paths: Vec<std::path::PathBuf> = p.files.iter().map(std::path::PathBuf::from).collect();
     ctx.store
         .refresh_files(&paths)
@@ -30,11 +28,9 @@ pub(super) async fn handle_refresh_files(
 
 pub(super) async fn handle_search_symbols(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: SearchSymbolsParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let kind_filter = p.kind.as_ref().map(|k| SymbolKind::parse_or_default(k));
     let lang_filter = p
@@ -70,11 +66,9 @@ pub(super) async fn handle_search_symbols(
 
 pub(super) async fn handle_search_content(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: SearchContentParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let languages: Vec<Language> = p
         .languages
@@ -130,11 +124,9 @@ fn search_response<T>(
 
 pub(super) async fn handle_index_build(
     params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: IndexBuildParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
 
     let languages: Option<Vec<Language>> = p.languages.as_ref().map(|langs| {
         langs
@@ -153,37 +145,22 @@ pub(super) async fn handle_index_build(
 }
 
 pub(super) async fn handle_index_status(
-    params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
-
     let stats = ctx.store.index_status().await.map_err(RpcError::from)?;
     serde_json::to_value(stats).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_index_is_current(
-    params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
-
     let current = ctx.store.index_is_current().await.map_err(RpcError::from)?;
     serde_json::to_value(current).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_indexed_languages(
-    params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
-
     let languages = ctx
         .store
         .indexed_languages()
@@ -193,13 +170,8 @@ pub(super) async fn handle_indexed_languages(
 }
 
 pub(super) async fn handle_index_clear(
-    params: &serde_json::Value,
-    projects: &ProjectsMap,
+    ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
-    let p: ProjectParams = parse_params(params)?;
-    let ctx = get_context(projects, &p.project).await?;
-    ctx.touch();
-
     ctx.store.index_clear().await.map_err(RpcError::from)?;
 
     Ok(serde_json::json!({
