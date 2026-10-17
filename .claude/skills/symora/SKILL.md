@@ -1,7 +1,7 @@
 ---
 name: symora
 metadata:
-  version: 0.30.3
+  version: 0.30.4
 description: Use the symora CLI for symbol discovery, exact code navigation, references, caller graphs, context, and symbol-aware edits.
 allowed-tools: Bash(symora *)
 ---
@@ -63,7 +63,7 @@ Lists use `count`, `showing`, and `items`. Optional markers change how to interp
 - `truncated`: some found items were not emitted. Narrow the query, raise `--limit`, or follow the size-limit hint.
 - `incomplete`: the count is a lower bound within its sources; read the cause in hints or `unread_paths`.
 - `coverage_gaps`: named languages were not fully searched.
-- `stale`: emitted index rows came from changed files. A separate index-currency hint can also report newly added files that have no rows yet. Rebuild before treating index results as a current enumeration.
+- `stale`: consulted index rows came from changed files; the flag may remain conservatively after response-size fitting removes some rows. A separate index-currency hint can also report newly added files that have no rows yet. Rebuild before treating index results as a current enumeration.
 - `indexing`: `timed_out` means work exceeded the wait; `unconfirmed` means the server did not confirm workspace readiness. Retry may help, but servers without a completion channel can remain unconfirmed. Neither state proves absence. Rename preserves unconfirmed on server-provided edits; timed_out blocks application.
 - `degraded_column`: the reported column could not be decoded from readable source; re-read before using it as an edit address.
 

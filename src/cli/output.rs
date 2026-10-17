@@ -69,7 +69,7 @@ pub struct OutputContext {
     root: PathBuf,
     options: OutputOptions,
     sink: Arc<dyn OutputSink>,
-    /// Per-response char ceiling enforced in `print_success`; 0 = off.
+    /// Best-effort response size target used in `print_success`; 0 = off.
     /// Constructors leave it off — `App` is the single application point,
     /// above the daemon/direct mode boundary, so every surface agrees.
     max_response_chars: usize,
@@ -174,17 +174,13 @@ impl OutputContext {
                 serde_json::json!({})
             }
         };
-        // Inject BEFORE fitting so the size ceiling accounts for the disclosure
-        // (the contract: the char ceiling applies last and wins on the emitted
-        // total). The fitter only ever drops whole `Section` items — never this
+        // Add disclosure before fitting so it counts toward the emitted size.
+        // The fitter only ever drops whole `Section` items — never this
         // top-level `config_errors` array — so a load failure rides along and is
-        // never dropped to fit; the fitter trims result items to stay under
-        // budget instead.
+        // never dropped to fit; the fitter trims result items where possible.
         self.inject_config_errors(&mut response);
         if self.max_response_chars > 0 && !crate::cli::response::declares_budget(&response) {
-            // Measured on the compact form in every format: the ceiling bounds
-            // the answer, not its typography, so `--format` cannot decide which
-            // items a caller receives.
+            // Measure compact JSON so display format does not change the items.
             let measure = |value: &serde_json::Value| -> usize {
                 serde_json::to_string(value)
                     .map(|s| s.chars().count())

@@ -289,16 +289,72 @@ impl Drop for RequestUse<'_> {
     }
 }
 
+struct PendingRequestGuard {
+    runtime: tokio::runtime::Handle,
+    id: u64,
+    pending: Arc<std::sync::Mutex<HashMap<RequestId, PendingRequest>>>,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    timeout: Duration,
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        let abandoned = self
+            .pending
+            .lock()
+            .expect("pending requests lock poisoned")
+            .remove(&RequestId::Number(self.id))
+            .is_some();
+        if abandoned {
+            send_cancellation(
+                &self.runtime,
+                Arc::clone(&self.stdin),
+                self.id,
+                self.timeout,
+            );
+        }
+    }
+}
+
+fn send_cancellation(
+    runtime: &tokio::runtime::Handle,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    id: u64,
+    timeout: Duration,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        let notification =
+            Notification::new("$/cancelRequest", Some(serde_json::json!({ "id": id })));
+        let writer = stdin.lock_owned().await;
+        if writer.is_some() {
+            let _ = write_notification(writer, &notification, timeout).await;
+        }
+    })
+}
+
+struct DocumentSyncGuard<'a> {
+    client: &'a LspClient,
+    complete: bool,
+}
+
+impl Drop for DocumentSyncGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.client.cancel_pending_requests_terminated();
+        }
+    }
+}
+
 pub struct LspClient {
     language: Language,
     /// Spawned `kill_on_drop`, so the server process lives exactly as long as
     /// this client. Nothing the client starts may hold it strongly — a task
     /// or handler that did would keep an abandoned server running forever.
     process: Mutex<Option<Child>>,
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
     usage: std::sync::Mutex<ClientUseState>,
     next_id: AtomicU64,
-    pending: RwLock<HashMap<RequestId, PendingRequest>>,
+    pending: Arc<std::sync::Mutex<HashMap<RequestId, PendingRequest>>>,
     diagnostics: RwLock<HashMap<String, PublishedDiagnostics>>,
     publish_seq: AtomicU64,
     document_cache: RwLock<DocumentCache>,
@@ -356,13 +412,13 @@ impl LspClient {
         Arc::new(Self {
             language,
             process: Mutex::new(None),
-            stdin: Mutex::new(None),
+            stdin: Arc::new(Mutex::new(None)),
             usage: std::sync::Mutex::new(ClientUseState {
                 in_flight: 0,
                 last_used: Instant::now(),
             }),
             next_id: AtomicU64::new(1),
-            pending: RwLock::new(HashMap::new()),
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
             diagnostics: RwLock::new(HashMap::new()),
             publish_seq: AtomicU64::new(0),
             document_cache: RwLock::new(DocumentCache::new()),
@@ -465,6 +521,9 @@ impl LspClient {
 
     /// Check if server is running
     pub async fn is_running(&self) -> bool {
+        if self.terminated.load(Ordering::Acquire) || self.stdin.lock().await.is_none() {
+            return false;
+        }
         let mut process = self.process.lock().await;
         if let Some(ref mut child) = *process {
             match child.try_wait() {
@@ -546,15 +605,19 @@ impl LspClient {
         *self.capabilities.write().await = Some(result);
 
         let initialized = Notification::new("initialized", Some(serde_json::json!({})));
-        let mut stdin_guard = self.stdin.lock().await;
-        let stdin = stdin_guard
-            .as_mut()
-            .ok_or_else(|| self.handshake_failure(LspError::NotConnected))?;
+        let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
+        if stdin_guard.is_none() {
+            return Err(self.handshake_failure(LspError::NotConnected));
+        }
         admit();
         self.initialized.store(true, Ordering::Release);
-        write_notification(stdin, &initialized)
-            .await
-            .map_err(|e| self.handshake_failure(e.into()))?;
+        write_notification(
+            stdin_guard,
+            &initialized,
+            self.config.timeout_for(self.language, "initialized"),
+        )
+        .await
+        .map_err(|e| self.handshake_failure(e.into()))?;
 
         Ok(())
     }
@@ -921,9 +984,23 @@ impl LspClient {
 
         // Register pending request
         {
-            let mut pending = self.pending.write().await;
+            let mut pending = self.pending.lock().expect("pending requests lock poisoned");
+            if self.terminated.load(Ordering::Acquire) {
+                return Err(LspError::ServerTerminated {
+                    language: self.language,
+                    established: self.initialized.load(Ordering::Acquire),
+                });
+            }
             pending.insert(RequestId::Number(id), tx);
         }
+
+        let _pending = PendingRequestGuard {
+            runtime: tokio::runtime::Handle::current(),
+            id,
+            pending: Arc::clone(&self.pending),
+            stdin: Arc::clone(&self.stdin),
+            timeout: self.config.timeout_for(self.language, "$/cancelRequest"),
+        };
 
         // Build and send request
         let request = Request::new(id, method, params);
@@ -931,9 +1008,16 @@ impl LspClient {
         tracing::trace!("{} LSP request {}: {}", self.language, id, method);
 
         {
-            let mut stdin_guard = self.stdin.lock().await;
-            let stdin = stdin_guard.as_mut().ok_or(LspError::NotConnected)?;
-            write_request(stdin, &request).await?;
+            let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
+            if stdin_guard.is_none() {
+                return Err(LspError::NotConnected);
+            }
+            write_request(
+                stdin_guard,
+                &request,
+                self.config.timeout_for(self.language, method),
+            )
+            .await?;
         }
 
         let result = timeout(self.config.timeout_for(self.language, method), rx).await;
@@ -964,21 +1048,32 @@ impl LspClient {
 
     pub async fn cancel_request(&self, id: u64) {
         {
-            let mut pending = self.pending.write().await;
+            let mut pending = self.pending.lock().expect("pending requests lock poisoned");
             pending.remove(&RequestId::Number(id));
         }
-        let _ = self
-            .notify("$/cancelRequest", Some(serde_json::json!({ "id": id })))
-            .await;
+        let sent = send_cancellation(
+            &tokio::runtime::Handle::current(),
+            Arc::clone(&self.stdin),
+            id,
+            self.config.timeout_for(self.language, "$/cancelRequest"),
+        );
+        let _ = sent.await;
     }
 
     /// Send a notification (no response expected)
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), LspError> {
         let notification = Notification::new(method, params);
 
-        let mut stdin_guard = self.stdin.lock().await;
-        let stdin = stdin_guard.as_mut().ok_or(LspError::NotConnected)?;
-        write_notification(stdin, &notification).await?;
+        let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
+        if stdin_guard.is_none() {
+            return Err(LspError::NotConnected);
+        }
+        write_notification(
+            stdin_guard,
+            &notification,
+            self.config.timeout_for(self.language, method),
+        )
+        .await?;
 
         Ok(())
     }
@@ -1000,7 +1095,7 @@ impl LspClient {
                 Err(e) => {
                     if !*client.shutdown.read().await {
                         tracing::error!("{} LSP read error: {}", client.language, e);
-                        client.cancel_pending_requests_terminated().await;
+                        client.cancel_pending_requests_terminated();
                     }
                     break;
                 }
@@ -1009,9 +1104,9 @@ impl LspClient {
     }
 
     /// Cancel all pending requests due to server termination
-    async fn cancel_pending_requests_terminated(&self) {
+    fn cancel_pending_requests_terminated(&self) {
         self.terminated.store(true, Ordering::Release);
-        let mut pending = self.pending.write().await;
+        let mut pending = self.pending.lock().expect("pending requests lock poisoned");
         let count = pending.len();
         if count > 0 {
             tracing::debug!(
@@ -1040,7 +1135,7 @@ impl LspClient {
 
     /// Cancel all pending requests (generic cancellation)
     async fn cancel_pending_requests(&self, reason: &str) {
-        let mut pending = self.pending.write().await;
+        let mut pending = self.pending.lock().expect("pending requests lock poisoned");
         let count = pending.len();
         if count > 0 {
             tracing::debug!("Cancelling {} pending requests: {}", count, reason);
@@ -1065,7 +1160,7 @@ impl LspClient {
         match message {
             Message::Response(response) => {
                 if let Some(id) = response.id.clone() {
-                    let mut pending = self.pending.write().await;
+                    let mut pending = self.pending.lock().expect("pending requests lock poisoned");
                     // Try direct match first, then string->number coercion for compatibility
                     let sender = pending.remove(&id).or_else(|| {
                         if let RequestId::String(s) = &id {
@@ -1178,7 +1273,11 @@ impl LspClient {
         }
 
         // Close stdin to signal EOF
-        self.stdin.lock().await.take();
+        if let Ok(mut stdin) = self.stdin.try_lock() {
+            stdin.take();
+        } else if let Some(child) = self.process.lock().await.as_mut() {
+            let _ = child.start_kill();
+        }
 
         // Stage 2 & 3: Wait for process exit, then force kill
         if let Some(mut child) = self.process.lock().await.take() {
@@ -1350,8 +1449,12 @@ impl LspClient {
         content: &str,
         disk: Option<DiskState>,
     ) -> Result<(u32, SyncOutcome), LspError> {
+        let mut cache = self.document_cache.write().await;
+        let mut synchronization = DocumentSyncGuard {
+            client: self,
+            complete: false,
+        };
         let (version, outcome, evicted) = {
-            let mut cache = self.document_cache.write().await;
             let language_id = self
                 .language
                 .document_id(&crate::models::lsp::uri_to_path(uri));
@@ -1401,6 +1504,7 @@ impl LspClient {
             }
         };
 
+        drop(cache);
         if let Some(evicted_uri) = evicted {
             let _ = self
                 .notify(
@@ -1409,6 +1513,7 @@ impl LspClient {
                 )
                 .await;
         }
+        synchronization.complete = true;
         Ok((version, outcome))
     }
 
@@ -1483,6 +1588,10 @@ impl LspClient {
         let _gate = self.dispatch_gate.write().await;
         let removed = self.document_cache.write().await.remove(uri);
         if removed {
+            let mut synchronization = DocumentSyncGuard {
+                client: self,
+                complete: false,
+            };
             let _ = self
                 .notify(
                     "textDocument/didClose",
@@ -1490,6 +1599,7 @@ impl LspClient {
                 )
                 .await;
             self.note_document_changed();
+            synchronization.complete = true;
         }
     }
 
@@ -1751,9 +1861,14 @@ impl LspClient {
 
         // A dropped response wedges the server's pending-request map;
         // wait for the writer instead of silently giving up on contention.
-        let mut stdin_guard = self.stdin.lock().await;
-        if let Some(stdin) = stdin_guard.as_mut()
-            && let Err(e) = write_response(stdin, &response).await
+        let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
+        if stdin_guard.is_some()
+            && let Err(e) = write_response(
+                stdin_guard,
+                &response,
+                self.config.timeout_for(self.language, &request.method),
+            )
+            .await
         {
             tracing::warn!("Failed to answer {} from server: {e}", request.method);
         }
@@ -1958,6 +2073,169 @@ mod tests {
         ));
         assert!(!client.usage().in_flight);
         assert!(client.usage().last_used > stamp);
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abandoning_a_sent_request_removes_pending_state_and_cancels_the_server_work() {
+        let client = test_client();
+        let mut echo = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *client.stdin.lock().await = echo.stdin.take();
+        let mut server = Transport::new(echo.stdout.take().unwrap());
+        let request = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.request::<Value>("textDocument/hover", None).await })
+        };
+        let Message::Request(sent) = server.read_message().await.unwrap() else {
+            panic!("expected a request");
+        };
+        assert_eq!(client.pending.lock().unwrap().len(), 1);
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(client.pending.lock().unwrap().is_empty());
+        assert!(!client.usage().in_flight);
+        let Message::Notification(cancelled) =
+            tokio::time::timeout(Duration::from_secs(5), server.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected cancellation");
+        };
+        assert_eq!(cancelled.method, "$/cancelRequest");
+        assert_eq!(
+            cancelled.params.unwrap()["id"],
+            serde_json::to_value(sent.id).unwrap()
+        );
+        drop(client);
+        echo.wait().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_survives_its_caller_while_waiting_for_the_writer() {
+        let client = test_client();
+        let mut echo = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *client.stdin.lock().await = echo.stdin.take();
+        let mut server = Transport::new(echo.stdout.take().unwrap());
+        let (sender, _receiver) = oneshot::channel();
+        client
+            .pending
+            .lock()
+            .unwrap()
+            .insert(RequestId::Number(42), sender);
+        let held = client.stdin.lock().await;
+        let cancellation = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.cancel_request(42).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.pending.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancellation.abort();
+        assert!(cancellation.await.unwrap_err().is_cancelled());
+        drop(held);
+        let Message::Notification(cancelled) =
+            tokio::time::timeout(Duration::from_secs(5), server.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected cancellation");
+        };
+        assert_eq!(cancelled.method, "$/cancelRequest");
+        assert_eq!(cancelled.params.unwrap()["id"], 42);
+        drop(client);
+        echo.wait().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interrupted_document_sync_retires_the_uncertain_session() {
+        use tokio::io::AsyncReadExt;
+
+        let client = test_client();
+        let mut echo = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *client.stdin.lock().await = echo.stdin.take();
+        let mut reader = echo.stdout.take().unwrap();
+        let synchronization = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .sync_document("file:///tmp/uncertain.rs", &"x".repeat(1024 * 1024))
+                    .await
+            })
+        };
+        reader.read_u8().await.unwrap();
+        synchronization.abort();
+        assert!(synchronization.await.unwrap_err().is_cancelled());
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert!(!client.is_running().await);
+        echo.kill().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_process_with_closed_input_is_not_a_reusable_session() {
+        let client = test_client();
+        let mut child = Command::new("sleep")
+            .arg("20")
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *client.stdin.lock().await = child.stdin.take();
+        *client.process.lock().await = Some(child);
+        assert!(client.is_running().await);
+        client.stdin.lock().await.take();
+        assert!(!client.is_running().await);
+        let mut child = client.process.lock().await.take().unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_request_waiting_for_dispatch_cannot_enter_a_retired_session() {
+        let client = test_client();
+        let gate = client.dispatch_gate.write().await;
+        let request = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.request::<Value>("textDocument/hover", None).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !client.usage().in_flight {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        client.cancel_pending_requests_terminated();
+        drop(gate);
+        assert!(matches!(
+            request.await.unwrap(),
+            Err(LspError::ServerTerminated { .. })
+        ));
+        assert!(client.pending.lock().unwrap().is_empty());
     }
 
     #[test]

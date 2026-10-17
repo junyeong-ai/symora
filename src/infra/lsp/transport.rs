@@ -1,7 +1,9 @@
 use std::io;
+use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
+use tokio::sync::OwnedMutexGuard;
 
 use super::protocol::{Message, Notification, Request};
 
@@ -83,46 +85,147 @@ impl Transport {
 }
 
 /// Write an LSP request to stdin
-pub async fn write_request(stdin: &mut ChildStdin, request: &Request) -> io::Result<()> {
+pub async fn write_request(
+    stdin: OwnedMutexGuard<Option<ChildStdin>>,
+    request: &Request,
+    timeout: Duration,
+) -> io::Result<()> {
     let json = serde_json::to_string(request)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, &json).await
+    write_message(stdin, json, timeout).await
 }
 
 /// Write an LSP notification to stdin
 pub async fn write_notification(
-    stdin: &mut ChildStdin,
+    stdin: OwnedMutexGuard<Option<ChildStdin>>,
     notification: &Notification,
+    timeout: Duration,
 ) -> io::Result<()> {
     let json = serde_json::to_string(notification)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, &json).await
+    write_message(stdin, json, timeout).await
 }
 
 /// Write an LSP response to stdin (for server-initiated requests)
 pub async fn write_response(
-    stdin: &mut ChildStdin,
+    stdin: OwnedMutexGuard<Option<ChildStdin>>,
     response: &super::protocol::Response,
+    timeout: Duration,
 ) -> io::Result<()> {
     let json = serde_json::to_string(response)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    write_message(stdin, &json).await
+    write_message(stdin, json, timeout).await
 }
 
 /// Write a raw JSON message with LSP framing
-async fn write_message(stdin: &mut ChildStdin, json: &str) -> io::Result<()> {
+async fn write_message<W>(
+    mut stdin: OwnedMutexGuard<Option<W>>,
+    json: String,
+    timeout: Duration,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     tracing::trace!("LSP -> {}", json);
 
     let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
-    stdin.write_all(message.as_bytes()).await?;
-    stdin.flush().await
+    // Keep transmission ownership after caller cancellation; close incomplete streams.
+    tokio::spawn(async move {
+        let write = async {
+            let stream = stdin.as_mut().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "Language server stdin is closed",
+                )
+            })?;
+            stream.write_all(message.as_bytes()).await?;
+            stream.flush().await
+        };
+        let result = tokio::time::timeout(timeout, write)
+            .await
+            .unwrap_or_else(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "LSP frame write timed out",
+                ))
+            });
+        if result.is_err() {
+            stdin.take();
+        }
+        result
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn cancelling_a_writer_keeps_frames_whole_and_ordered() {
+        let (stream, mut reader) = tokio::io::duplex(8);
+        let writer = Arc::new(Mutex::new(Some(stream)));
+        let body = "x".repeat(1024);
+        let first = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        let send = {
+            let writer = Arc::clone(&writer);
+            tokio::spawn(async move {
+                write_message(writer.lock_owned().await, body, Duration::from_secs(30)).await
+            })
+        };
+        let mut received = vec![0; first.len()];
+        reader.read_exact(&mut received[..1]).await.unwrap();
+        send.abort();
+        assert!(send.await.unwrap_err().is_cancelled());
+        let next = tokio::spawn(async move {
+            write_message(
+                writer.lock_owned().await,
+                "{}".to_string(),
+                Duration::from_secs(30),
+            )
+            .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            reader.read_exact(&mut received[1..]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(received, first.as_bytes());
+        let mut second = vec![0; "Content-Length: 2\r\n\r\n{}".len()];
+        tokio::time::timeout(Duration::from_secs(5), reader.read_exact(&mut second))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second, b"Content-Length: 2\r\n\r\n{}");
+        next.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_frame_closes_the_writer_instead_of_reusing_a_partial_stream() {
+        let (stream, mut reader) = tokio::io::duplex(1);
+        let writer = Arc::new(Mutex::new(Some(stream)));
+        let error = write_message(
+            Arc::clone(&writer).lock_owned().await,
+            "{}".to_string(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(writer.lock().await.is_none());
+        let mut partial = Vec::new();
+        reader.read_to_end(&mut partial).await.unwrap();
+        assert!(partial.len() < b"Content-Length: 2\r\n\r\n{}".len());
+    }
+
     #[test]
     fn test_message_framing() {
         let json = r#"{"jsonrpc":"2.0","id":1,"method":"test"}"#;
