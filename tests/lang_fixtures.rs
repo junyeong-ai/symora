@@ -8,8 +8,9 @@
 //!
 //! Gated like the daemon parity test: `#[ignore]` by default, opt in with
 //! `cargo test --test lang_fixtures -- --ignored`. Setup:
-//!   npm install -g pyright
-//!   (cd tests/fixtures/python/monorepo && uv sync --frozen)
+//!   (cd tests/fixtures/python/monorepo && npm ci --ignore-scripts && uv sync --frozen)
+//!   PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
+//!     cargo test --test lang_fixtures -- --include-ignored
 //! Missing prerequisites skip loudly instead of failing.
 
 use std::path::{Path, PathBuf};
@@ -101,7 +102,9 @@ fn pyright_on_path() -> bool {
         .status()
         .is_ok_and(|status| status.success());
     if !found {
-        eprintln!("SKIP: pyright does not run here (npm install -g pyright)");
+        eprintln!(
+            "SKIP: pyright does not run here — follow tests/fixtures/python/monorepo/README.md"
+        );
     }
     found
 }
