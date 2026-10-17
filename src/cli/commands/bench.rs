@@ -150,7 +150,7 @@ where
 }
 
 fn bench_classify_refs(root: &std::path::Path) -> impl FnMut() {
-    let scope = TestScope::new();
+    let scope = TestScope::new().with_root(root);
     let refs: Vec<Location> = (0..1000)
         .map(|i| {
             let path = if i % 5 == 0 {

@@ -28,7 +28,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
-A change to the language-server layer or the daemon also runs the suites against real servers — rust-analyzer, and pyright with `uv sync --frozen` in `tests/fixtures/python/monorepo`: `cargo test --test lang_fixtures --test parity -- --include-ignored`. CI runs only `lang_fixtures`: daemon parity starts a cold rust-analyzer for every direct command, and on a CI runner the direct `refs` case still disclosed `indexing` when the test's 600-second limit ran out. That suite is local.
+A change to the language-server layer or daemon also runs real-server suites: install rust-analyzer, prepare pyright with `uv sync --frozen` in `tests/fixtures/python/monorepo`, then run `cargo test --test lang_fixtures --test parity -- --include-ignored`. Daemon parity uses an isolated dependency-free Rust project so it measures the transport boundary without repeatedly indexing this entire workspace.
 
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 

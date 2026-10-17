@@ -53,3 +53,7 @@ Some servers don't implement call hierarchy or `textDocument/typeDefinition`. Th
 - Adding a command an agent should drive: also extend the MCP catalog/handler in `src/mcp/tools/`. MCP is a curated subset — navigation, analysis, and edit tools — so not every command becomes a tool; config/doctor/format and machine-setup commands (`commands::setup`, `commands::selfcmd`) stay CLI-only (see `src/mcp/CLAUDE.md`).
 - Adding a flag: prefer extending an existing command over forking a new one.
 - Removing a command: delete it cleanly. No deprecation shims.
+
+## Write ownership
+
+Source mutations hold the project edit lock through resolution and application. Preserve the content hash attached to a resolved symbol or WorkspaceEdit, and compare the original content again before atomic replacement. Dry runs acquire no write lock. Multi-file writes preflight every file and report earlier applied files if a later write fails; they do not promise a cross-file transaction.

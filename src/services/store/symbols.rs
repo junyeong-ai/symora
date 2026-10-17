@@ -136,7 +136,19 @@ impl SymbolExtractor {
     pub fn extraction_digest() -> u64 {
         let described = EXTRACTORS
             .iter()
-            .map(|(language, _, query)| format!("{}\u{1}{query}", language.lsp_id()))
+            .map(|(language, grammar, query)| {
+                let grammar = grammar();
+                format!(
+                    "{}\u{1}{}\u{1}{:?}\u{1}{query}",
+                    language.lsp_id(),
+                    grammar.abi_version(),
+                    grammar.metadata().map(|metadata| (
+                        metadata.major_version,
+                        metadata.minor_version,
+                        metadata.patch_version
+                    ))
+                )
+            })
             .collect::<Vec<_>>()
             .join("\u{2}");
         crate::infra::hash_content(&described)
@@ -184,6 +196,56 @@ impl SymbolExtractor {
         self.extract_where(path, content, language, |node, declared| {
             !is_local(node, declared)
         })
+    }
+
+    pub fn extract_signatures(
+        &self,
+        path: &Path,
+        content: &str,
+        language: Language,
+    ) -> Vec<(Symbol, String)> {
+        self.with_declarations(path, content, language, |read| {
+            let declared = read.iter().map(|(node, _)| node.id()).collect();
+            read.into_iter()
+                .filter(|(node, _)| !is_local(*node, &declared))
+                .filter_map(|(node, symbol)| {
+                    let declaration = declaration_node(node, language);
+                    let body = node
+                        .child_by_field_name("body")
+                        .or_else(|| {
+                            if language == Language::Kotlin {
+                                child_of_kind(node, "function_body")
+                                    .or_else(|| type_body(node, language))
+                            } else if language == Language::Go {
+                                let literal = node.child_by_field_name("type")?;
+                                if !matches!(literal.kind(), "struct_type" | "interface_type") {
+                                    return None;
+                                }
+                                let mut cursor = literal.walk();
+                                literal.children(&mut cursor).find(|child| {
+                                    matches!(child.kind(), "{" | "field_declaration_list")
+                                })
+                            } else {
+                                type_body(node, language)
+                            }
+                        })
+                        .or_else(|| {
+                            node.child_by_field_name("value")
+                                .and_then(|value| value.child_by_field_name("body"))
+                        })
+                        .or_else(|| declaration.child_by_field_name("body"));
+                    let end = body.map_or(node.end_byte(), |body| body.start_byte());
+                    let text = content.get(declaration.start_byte()..end)?.trim();
+                    let text = if language == Language::Python {
+                        text.trim_end_matches(':')
+                    } else {
+                        text
+                    };
+                    (!text.is_empty()).then(|| (symbol, text.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     /// Where each type's own declaration is written, outside the body that

@@ -6,7 +6,8 @@ use crate::app::App;
 use crate::cli::OutputError;
 
 use super::McpProfile;
-use super::protocol::{Content, ToolDefinition};
+use super::protocol::ToolDefinition;
+use rmcp::model::ContentBlock as Content;
 
 mod catalog;
 mod handlers;
@@ -101,6 +102,17 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_catalog_preserves_the_cli_contract() {
+        for tool in catalog() {
+            let converted = rmcp::model::Tool::from(tool);
+            assert_eq!(
+                serde_json::to_value(converted).unwrap(),
+                serde_json::to_value(tool).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn catalog_lists_all_dispatchable_tools() {

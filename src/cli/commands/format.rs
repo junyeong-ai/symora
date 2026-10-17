@@ -28,6 +28,10 @@ pub struct FormatEditOutput {
 }
 
 pub async fn execute(args: FormatArgs, app: &App) -> Result<()> {
+    let _lock = args
+        .apply
+        .then(|| super::edit::lock_edits(app.root()))
+        .transpose()?;
     let ctx = &app.output;
     let file = match resolve_project_file(&args.file, app.root()) {
         Ok(p) => p,
@@ -37,14 +41,14 @@ pub async fn execute(args: FormatArgs, app: &App) -> Result<()> {
         }
     };
 
+    let content = std::fs::read_to_string(&file)?;
     match app.lsp.format(&file).await {
         Ok(edits) => {
             if args.apply && !edits.is_empty() {
-                let content = std::fs::read_to_string(&file)?;
                 // Reuse the one text-edit applier (CRLF- and multibyte-correct,
                 // overlap-checked) rather than a second local implementation.
                 let formatted = super::edit::apply_text_edits(&content, &edits)?;
-                super::edit::atomic_write(&file, &formatted)?;
+                super::edit::write_file(&file, &formatted, Some(&content))?;
                 ctx.print_success(serde_json::json!({
                     "applied": true,
                     "edits": edits.len(),

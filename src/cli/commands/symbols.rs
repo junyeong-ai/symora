@@ -8,9 +8,8 @@ use crate::cli::OutputError;
 use crate::cli::resolve_project_file;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, WorkspaceSearchRoute, coverage_shortfall,
-    index_holes_bound, index_unavailable_disclosure, literal_query, ordered_bounds,
-    unconfirmed_by_live_lookup, unconfirmed_zero_fact, with_coverage_disclosure,
-    workspace_route_for,
+    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, literal_query,
+    ordered_bounds, unconfirmed_by_live_lookup, with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
@@ -34,7 +33,7 @@ pub struct SymbolsArgs {
     pub file: Option<String>,
 
     /// Search fairly specific symbol names across workspace
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "file")]
     pub name: Option<String>,
 
     /// Filter by symbol path (e.g., "Class/method", "*/update")
@@ -403,10 +402,13 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     });
     let mut route_facts = Vec::from_iter(unavailable);
     route_facts.extend(
-        unconfirmed_zero_fact(
+        index_currency_disclosure(
             app.store.as_ref(),
-            total,
-            &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
+            &if total > 0 {
+                covered.clone()
+            } else {
+                unconfirmed_by_live_lookup(&covered, &failures, &skipped)
+            },
         )
         .await,
     );

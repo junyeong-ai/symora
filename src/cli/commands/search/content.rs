@@ -9,8 +9,9 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
 use crate::cli::response::disclosure::{
-    LowerBound, as_paths, index_holes_bound, index_unavailable_disclosure, ordered_bounds,
-    relative_paths, relative_stale_files, with_lower_bounds,
+    LowerBound, as_paths, index_currency_disclosure, index_holes_bound,
+    index_unavailable_disclosure, ordered_bounds, relative_paths, relative_stale_files,
+    with_lower_bounds,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -118,8 +119,17 @@ pub async fn execute_content_search(
             // The same order every other surface says them in: what cannot be
             // read now leads what a past build could not.
             let lower_bounds = ordered_bounds(scan_bound, index_bounds);
-            let section =
-                finish_content_search(items, count, query, language, limit, &lower_bounds, &[]);
+            let currency =
+                index_currency_disclosure(app.store.as_ref(), &answered_from_index).await;
+            let section = finish_content_search(
+                items,
+                count,
+                query,
+                language,
+                limit,
+                &lower_bounds,
+                &currency,
+            );
             // Narrowed to the rows this answer actually emitted: the index page
             // it came from is a superset of them.
             let stale = section.items.iter().any(|item| {

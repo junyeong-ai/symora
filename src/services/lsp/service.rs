@@ -329,16 +329,15 @@ impl Drop for DefaultLspService {
     }
 }
 
-/// Map a computation-time indexing snapshot to the output marker. Readiness
-/// is strictly signal-driven (`Ready` only ever follows an explicit server
-/// signal — see `LspClient::handle_message`), so an unmarked answer was
-/// genuinely served from a complete index; `TimedOut` — the wait budget
-/// expired before any signal — is the one degraded state a result can be
-/// computed under.
+/// Preserve computation-time readiness, including an absent completion signal.
 pub(super) fn degradation_of(state: IndexingState) -> Option<IndexingDegradation> {
     match state {
         IndexingState::TimedOut => Some(IndexingDegradation::TimedOut),
-        _ => None,
+        IndexingState::Unconfirmed | IndexingState::NotStarted => {
+            Some(IndexingDegradation::Unconfirmed)
+        }
+        IndexingState::InProgress => Some(IndexingDegradation::TimedOut),
+        IndexingState::Ready => None,
     }
 }
 

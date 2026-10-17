@@ -21,7 +21,7 @@ The build scope recorded at index time is load-bearing, not bookkeeping: `conten
 
 `services/test_scope.rs` answers two different questions and they must not be conflated. `is_test_file` is a path question, for ranking and whole-file summaries. `TestClassifier::is_test_code` is a position question, for anything that counts a reference as coverage rather than as a production dependency.
 
-The position answer adds regions the LANGUAGE excludes from a production build (`infra/ast/test_regions.rs` — Rust's `#[cfg(test)]` and `#[test]`). That bound is deliberate: a compiler fact cannot produce a false positive, whereas a framework naming convention can, and code wrongly called test code deflates every coverage and risk signal downstream. Adding a language means finding its conditional-compilation rule, not its test-framework vocabulary.
+The position answer adds regions the LANGUAGE excludes from a production build (`infra/ast/test_regions.rs` — Rust's `#[cfg(test)]` and `#[test]`). That bound is deliberate: syntax-based classification has a narrower scope than framework naming conventions; it does not establish executed coverage. Paths are classified relative to the project root so a checkout under an ancestor named `tests` does not classify production files as tests. Adding a language means finding its conditional-compilation rule, not its test-framework vocabulary.
 
 ## Import edges come from the parse tree
 
@@ -42,4 +42,4 @@ Both implementations of a trait must produce identical results for the same inpu
 
 ## Fallback strategy
 
-When an LSP server lacks a capability, return a structured "unsupported" response from the service layer. Don't fabricate data and don't fall through to text heuristics silently. Heuristic fallbacks (e.g. anchoring a `line:col` to the nearest symbol) are fine when they raise success rate without misleading.
+When an LSP server lacks a capability, return a structured "unsupported" response from the service layer. Don't fabricate data and don't fall through to text heuristics silently. Position resolution follows the explicit anchor contract in the CLI guide; it must not select a nearby unrelated declaration. Pack signatures use the shared declaration parser, never line-pattern matching. Index answers disclose unconfirmed currency even when they contain matches.

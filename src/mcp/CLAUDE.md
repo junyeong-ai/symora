@@ -21,7 +21,7 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 ## The instructions playbook stays honest by test
 
-`initialize` returns a usage playbook (`instructions.rs`) that hosts inject into the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
+The SDK exposes a usage playbook through the protocol-appropriate metadata flow. Hosts inject this playbook (`instructions.rs`) into the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
 
 ## Location input convention
 
@@ -34,3 +34,7 @@ Handlers run the underlying command against a `BufferedSink` and return whatever
 ## Lifecycle commands are CLI-only
 
 `setup`, `setup skill`, `setup deps`, `setup mcp`, `self update`, `self uninstall` are deliberately not exposed as MCP tools. They mutate the user's machine outside the project boundary — installing skills under `~/.claude`, writing MCP entries into agent-host configs, running package managers, replacing the running binary, removing config — and an AI agent should never drive those flows. The 1:1 CLI↔MCP mapping rule above does not apply to commands under `cli::commands::setup` or `cli::commands::selfcmd`. Keep them out of the catalog.
+
+## Transport ownership
+
+Use the official rmcp SDK for protocol validation, negotiation, sessions, notifications, and cancellation. Keep project command dispatch and profile authorization in Symora. HTTP binds to loopback with Host and Origin validation; remote access requires an authenticated proxy. Do not add a parallel JSON-RPC implementation.

@@ -12,7 +12,6 @@ pub(super) fn python_init_options(root: &Path) -> Value {
                 "autoSearchPaths": true,
                 "useLibraryCodeForTypes": true,
                 "diagnosticMode": "openFilesOnly",
-                "typeCheckingMode": "off",
                 "autoImportCompletions": false,
                 "indexing": true,
                 // "Information" is load-bearing, not verbosity: pyright's
@@ -27,16 +26,8 @@ pub(super) fn python_init_options(root: &Path) -> Value {
                 // see init_options/exclude.rs. A hand-kept literal here drifts
                 // (it once missed the host's `.<tool>/worktrees/<slug>` trees,
                 // double-counting every ref into an in-flight worktree copy).
-                "exclude": lsp_exclude_globs(root),
-                "diagnosticSeverityOverrides": {
-                    "reportMissingImports": "none",
-                    "reportMissingTypeStubs": "none",
-                    "reportPrivateUsage": "none",
-                    "reportUntypedBaseClass": "none",
-                    "reportUnusedImport": "none",
-                    "reportUnusedVariable": "none",
-                    "reportGeneralTypeIssues": "none"
-                }
+                "exclude": lsp_exclude_globs(root)
+
             }
         }
     });

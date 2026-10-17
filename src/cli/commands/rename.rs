@@ -37,6 +37,9 @@ struct RenameOutput {
 }
 
 pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
+    let _lock = (!args.dry_run)
+        .then(|| super::edit::lock_edits(app.root()))
+        .transpose()?;
     let ctx = &app.output;
     let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
 
@@ -147,16 +150,17 @@ fn refuse_partial_rename(
     indexing: Option<IndexingDegradation>,
     dry_run: bool,
 ) -> Option<OutputError> {
-    let degradation = indexing.filter(|_| !dry_run)?;
+    let degradation =
+        indexing.filter(|state| !dry_run && *state == IndexingDegradation::TimedOut)?;
     Some(
         OutputError::precondition_failed(format!(
-            "Rename refused: the edit set is a lower bound under degraded indexing \
+            "Rename refused: workspace completeness is not confirmed for the edit set \
              (indexing: {})",
             degradation.as_str(),
         ))
         .with_hint(
-            "Wait for the language server to finish indexing (check `symora status`), \
-             then retry; `--dry-run` previews the edits computed so far.",
+            "Use `--dry-run` to inspect the edits. Retry after the language server finishes \
+             the reported workspace work.",
         ),
     )
 }
@@ -197,7 +201,7 @@ mod tests {
     use crate::cli::errors::ErrorCode;
 
     #[test]
-    fn a_rename_computed_under_degraded_indexing_applies_nothing() {
+    fn a_rename_computed_during_unfinished_workspace_work_applies_nothing() {
         let degraded = Some(IndexingDegradation::TimedOut);
         assert_eq!(
             refuse_partial_rename(degraded, false).map(|e| e.code),
@@ -205,5 +209,10 @@ mod tests {
         );
         assert!(refuse_partial_rename(degraded, true).is_none());
         assert!(refuse_partial_rename(None, false).is_none());
+    }
+
+    #[test]
+    fn a_server_without_a_completion_channel_can_apply_its_workspace_edit() {
+        assert!(refuse_partial_rename(Some(IndexingDegradation::Unconfirmed), false).is_none());
     }
 }

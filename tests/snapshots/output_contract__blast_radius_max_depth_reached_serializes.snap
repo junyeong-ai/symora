@@ -1,5 +1,6 @@
 ---
 source: tests/output_contract.rs
+assertion_line: 748
 expression: radius
 ---
 {
@@ -29,7 +30,5 @@ expression: radius
       "prod": 2
     }
   ],
-  "test_caller_ratio": 0.14,
-  "risk": "high",
-  "confidence": 1.0
+  "test_caller_ratio": 0.14
 }

@@ -29,26 +29,28 @@ impl LanguageProfile {
         }
     }
 
+    // Only rust-analyzer and JDT.LS expose the workspace completion channels
+    // consumed by this client. Waiting on other servers cannot confirm readiness.
     pub fn for_language(language: Language) -> Self {
         match language {
             // Kotlin-LS: Pre-alpha, needs extended time for Gradle/Maven project indexing
-            Language::Kotlin => Self::new(10.0, 15000, 2000, true),
+            Language::Kotlin => Self::new(10.0, 0, 2000, true),
             // Pyright: Large monorepo projects need significant indexing time
-            Language::Python => Self::new(8.0, 30000, 1500, true),
+            Language::Python => Self::new(8.0, 0, 1500, true),
             // JDT.LS: Large project indexing with Gradle/Maven dependency resolution
             Language::Java => Self::new(3.0, 10000, 1000, true),
             // TypeScript/JavaScript: Monorepo with thousands of files needs extended indexing
             // Cross-file wait helps with tsserver's lazy indexing behavior
-            Language::TypeScript | Language::JavaScript => Self::new(2.5, 15000, 1000, false),
+            Language::TypeScript | Language::JavaScript => Self::new(2.5, 0, 1000, false),
             // rust-analyzer: Cargo workspace indexing
             Language::Rust => Self::new(1.5, 8000, 0, false),
             // gopls: Fast but module graph can be large
-            Language::Go => Self::new(1.0, 5000, 0, false),
+            Language::Go => Self::new(1.0, 0, 0, false),
             // clangd: compile_commands.json parsing
-            Language::Cpp => Self::new(1.5, 5000, 500, false),
+            Language::Cpp => Self::new(1.5, 0, 500, false),
             // csharp-ls/OmniSharp: Solution parsing
-            Language::CSharp => Self::new(2.0, 8000, 500, false),
-            _ => Self::new(1.5, 3000, 0, false),
+            Language::CSharp => Self::new(2.0, 0, 500, false),
+            _ => Self::new(1.5, 0, 0, false),
         }
     }
 }

@@ -1,15 +1,4 @@
-//! Change-impact "blast radius" — the transitive caller graph for a
-//! symbol at a precise location, with risk + confidence signals.
-//!
-//! Walks the LSP `incoming_calls` graph BFS-style up to `max_depth`,
-//! parallelising the per-frontier round-trips. Stops early when a
-//! frontier becomes empty; surfaces `max_depth_reached` so callers know
-//! when to ask for a wider search.
-//!
-//! Risk + confidence use *objective* thresholds (transitive count,
-//! exported-API flag, test-vs-prod ratio). They are deliberately not
-//! ML-tuned — Symora's CLAUDE.md anti-goal is "heuristic tweaks without
-//! repeated evidence", so this stays simple and predictable.
+//! Bounded traversal of the language server's static caller graph.
 
 use std::path::Path;
 
@@ -20,17 +9,6 @@ use crate::error::LspError;
 use crate::models::symbol::SymbolKind;
 use crate::services::TestScope;
 use crate::services::lsp::LspService;
-
-/// A dynamically-dispatched anchor's call-hierarchy graph is a lower bound:
-/// implementations' transitive callers are not folded into the counts
-/// (Phase 1 discloses the gap rather than over-approximating by widening).
-/// Such a graph therefore never earns more than this confidence, no matter
-/// how deep the walk reached.
-const DYNAMIC_DISPATCH_CONFIDENCE_CAP: f64 = 0.7;
-
-/// A walk that swallowed a hop error (an LSP failure mid-traversal) is a known
-/// lower bound, so its caller graph can never be presented as high confidence.
-const INCOMPLETE_WALK_CONFIDENCE_CAP: f64 = 0.5;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BlastRadius {
@@ -69,8 +47,6 @@ pub struct BlastRadius {
     /// a type is referenced but never called.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_caller_ratio: Option<f64>,
-    pub risk: RiskLevel,
-    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,15 +55,6 @@ pub struct DepthBucket {
     pub count: usize,
     pub test: usize,
     pub prod: usize,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum RiskLevel {
-    Low,
-    Medium,
-    High,
-    Critical,
 }
 
 /// Why a dynamically-dispatched anchor's caller graph may be incomplete.
@@ -119,7 +86,6 @@ pub async fn compute(
     file: &Path,
     line: u32,
     column: u32,
-    is_exported: Option<bool>,
     anchor_kind: Option<SymbolKind>,
     test_scope: &TestScope,
     cfg: &WalkConfig,
@@ -127,7 +93,7 @@ pub async fn compute(
     // Blast radius is the upward (incoming) call graph. The traversal,
     // fan-out cap, depth/exhaustion markers, and degradation aggregation all
     // live in the shared `call_graph::walk` core; this function adds only the
-    // risk-specific projection (test/prod classification, risk, confidence,
+    // projection (test/prod classification and
     // dynamic-dispatch disclosure).
     let walk = call_graph::walk(
         lsp,
@@ -139,7 +105,7 @@ pub async fn compute(
 
     // A caller is classified where it is DECLARED, so a test living inside
     // the production file it exercises is counted as coverage rather than as
-    // one more production dependency inflating the risk.
+    // one more production dependency.
     let mut classifier = test_scope.classifier();
     let buckets: Vec<DepthBucket> = walk
         .levels
@@ -179,26 +145,6 @@ pub async fn compute(
         dynamic_dispatch,
         callers_by_depth: buckets,
         test_caller_ratio: test_ratio,
-        // Risk is computed from the *verified* call-hierarchy count only.
-        // Dynamic-dispatch incompleteness is disclosed via `dynamic_dispatch`
-        // + a capped `confidence`, never by inflating the risk label off a
-        // graph we know is a lower bound.
-        risk: compute_risk(transitive_callers, is_exported, test_ratio),
-        // A swallowed hop error makes the graph a lower bound, so — like
-        // dynamic dispatch — it caps confidence rather than being presented
-        // as an authoritative count.
-        confidence: {
-            let c = compute_confidence(
-                direct_callers,
-                !walk.max_depth_reached && !walk.truncated,
-                dynamic_dispatch.as_ref(),
-            );
-            if walk.incomplete {
-                c.min(INCOMPLETE_WALK_CONFIDENCE_CAP)
-            } else {
-                c
-            }
-        },
     })
 }
 
@@ -220,7 +166,10 @@ async fn detect_dynamic_dispatch(
     anchor_kind: Option<SymbolKind>,
 ) -> Option<DynamicDispatch> {
     let kind = anchor_kind?;
-    if !matches!(kind, SymbolKind::Method | SymbolKind::Interface) {
+    let structural_class = kind == SymbolKind::Class
+        && crate::models::symbol::Language::from_path(file)
+            == crate::models::symbol::Language::Python;
+    if !matches!(kind, SymbolKind::Method | SymbolKind::Interface) && !structural_class {
         return None;
     }
     match lsp.find_implementations(file, line, column).await {
@@ -233,88 +182,34 @@ async fn detect_dynamic_dispatch(
                 .iter()
                 .filter(|location| !location.covers(file, line, column))
                 .count();
-            (implementations > 0).then_some(DynamicDispatch {
-                status: DispatchStatus::Incomplete,
+            (implementations > 0 || impls.indexing.is_some()).then_some(DynamicDispatch {
+                status: if implementations > 0 {
+                    DispatchStatus::Incomplete
+                } else {
+                    DispatchStatus::Unavailable
+                },
                 implementations,
             })
         }
-        // `Unavailable` means a genuine capability gap — the server does not
-        // implement `textDocument/implementation`, whether declared statically
-        // or answered as MethodNotFound at runtime — on an interface anchor.
-        // A transient error (timeout, server restart) is not a capability
-        // statement: stay silent rather than mislabel it.
-        Err(e) if kind == SymbolKind::Interface && e.is_unsupported() => Some(DynamicDispatch {
+        // Unsupported and failed lookups cannot establish implementation completeness.
+        Err(e)
+            if (matches!(kind, SymbolKind::Interface | SymbolKind::Method) || structural_class)
+                && e.is_unsupported() =>
+        {
+            Some(DynamicDispatch {
+                status: DispatchStatus::Unavailable,
+                implementations: 0,
+            })
+        }
+        Err(_) => Some(DynamicDispatch {
             status: DispatchStatus::Unavailable,
             implementations: 0,
         }),
-        Err(_) => None,
     }
 }
 
-/// Round a published score to the precision it actually carries.
-///
-/// `risk` and `confidence` are assembled from fixed steps and compared
-/// against fixed thresholds, so binary floating point would otherwise leak
-/// values like `0.9000000357627869` into the output contract. Rounding at
-/// the point of computation — before the thresholds see the value — keeps
-/// the published number and the number the verdict was made on identical,
-/// so an agent can reproduce the verdict from the response alone.
 fn coarse(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
-}
-
-fn compute_risk(transitive: usize, exported: Option<bool>, test_ratio: Option<f64>) -> RiskLevel {
-    let exported = exported.unwrap_or(false);
-    if transitive == 0 {
-        return RiskLevel::Low;
-    }
-    // Exported APIs take precedence over test coverage: a public symbol
-    // with high test ratio is still a breaking-change risk because
-    // downstream consumers don't see those tests.
-    if exported && transitive > 50 {
-        return RiskLevel::Critical;
-    }
-    if exported || transitive > 50 {
-        return RiskLevel::High;
-    }
-    // For internal symbols, high test coverage genuinely lowers risk:
-    // well-exercised paths guard behavior, so a breaking change is more likely
-    // to surface as a failing test.
-    if test_ratio.is_some_and(|ratio| ratio > 0.8) {
-        return RiskLevel::Low;
-    }
-    if transitive > 5 {
-        return RiskLevel::Medium;
-    }
-    RiskLevel::Low
-}
-
-fn compute_confidence(
-    direct_callers: usize,
-    walk_finished: bool,
-    dynamic_dispatch: Option<&DynamicDispatch>,
-) -> f64 {
-    // Confidence rests on a graph that exists and was exhausted. Zero direct
-    // callers is the dominant false-negative case — an unsupported capability
-    // or a true leaf, with no way to tell them apart — and a walk over nothing
-    // finishes trivially, so it earns neither. How DEEP the graph turned out
-    // to be earns nothing either: a walk that stopped at the depth cap has
-    // callers past it, and a shallow one that ran out has none.
-    let mut score: f64 = 0.5;
-    if direct_callers > 0 {
-        score += 0.3;
-        if walk_finished {
-            score += 0.2;
-        }
-    }
-    let score = coarse(score.clamp(0.0, 1.0));
-    // A dynamically-dispatched anchor's graph is a known lower bound, so it
-    // can never be presented as high confidence regardless of depth.
-    if dynamic_dispatch.is_some() {
-        score.min(DYNAMIC_DISPATCH_CONFIDENCE_CAP)
-    } else {
-        score
-    }
 }
 
 #[cfg(test)]
@@ -353,7 +248,6 @@ mod tests {
             Path::new("src/lib.rs"),
             10,
             5,
-            Some(false),
             anchor_kind,
             &matcher,
             &cfg,
@@ -405,7 +299,6 @@ mod tests {
             },
         );
         assert!(!complete.max_depth_reached && !complete.callers_truncated);
-        assert_eq!(complete.confidence, 1.0);
 
         let depth_bound = compute_with(
             HashMap::from([
@@ -422,11 +315,6 @@ mod tests {
             depth_bound.max_depth_reached,
             "the fixture must trip the cap"
         );
-        assert!(
-            depth_bound.confidence < 1.0,
-            "a depth-bounded graph is a lower bound: {}",
-            depth_bound.confidence
-        );
 
         let neighbour_bound = compute_with(
             HashMap::from([((10, 5), vec![caller(20), caller(30), caller(40)])]),
@@ -438,11 +326,6 @@ mod tests {
         assert!(
             neighbour_bound.callers_truncated && !neighbour_bound.max_depth_reached,
             "the fixture must bound the walk by the neighbour cap alone"
-        );
-        assert!(
-            neighbour_bound.confidence < 1.0,
-            "a truncated caller list is a lower bound: {}",
-            neighbour_bound.confidence
         );
     }
 
@@ -475,79 +358,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn risk_zero_callers_is_low() {
-        assert_eq!(compute_risk(0, Some(true), Some(0.0)), RiskLevel::Low);
-        assert_eq!(compute_risk(0, Some(false), Some(0.0)), RiskLevel::Low);
-    }
-
-    #[test]
-    fn risk_high_test_coverage_lowers_internal_only() {
-        // Internal symbol with strong tests is genuinely Low.
-        assert_eq!(compute_risk(20, Some(false), Some(0.95)), RiskLevel::Low);
-        // Exported API is still a breaking-change risk regardless of tests:
-        // downstream consumers can't see those tests.
-        assert_eq!(compute_risk(20, Some(true), Some(0.95)), RiskLevel::High);
-        assert_eq!(
-            compute_risk(60, Some(true), Some(0.95)),
-            RiskLevel::Critical
-        );
-    }
-
-    #[test]
-    fn risk_exported_and_many_callers_is_critical() {
-        assert_eq!(compute_risk(60, Some(true), Some(0.0)), RiskLevel::Critical);
-    }
-
-    #[test]
-    fn risk_exported_or_many_is_high() {
-        assert_eq!(compute_risk(10, Some(true), Some(0.0)), RiskLevel::High);
-        assert_eq!(compute_risk(60, Some(false), Some(0.0)), RiskLevel::High);
-    }
-
-    #[test]
-    fn risk_moderate_internal_is_medium() {
-        assert_eq!(compute_risk(10, Some(false), Some(0.0)), RiskLevel::Medium);
-    }
-
-    #[test]
-    fn risk_few_internal_is_low() {
-        assert_eq!(compute_risk(3, Some(false), Some(0.0)), RiskLevel::Low);
-    }
-
-    #[test]
-    fn confidence_zero_callers_stays_at_baseline() {
-        let c = compute_confidence(0, true, None);
-        assert!(c < 0.7, "expected low confidence when no callers, got {c}");
-    }
-
-    /// A graph the walk did not finish holds callers it never reached, and its
-    /// own `max_depth_reached`/`callers_truncated` say so. It can therefore
-    /// never read as certain — least of all more certain than the same graph
-    /// walked to exhaustion.
-    #[test]
-    fn an_unfinished_walk_never_reads_as_complete() {
-        assert!(compute_confidence(5, true, None) > compute_confidence(0, true, None));
-        assert!(compute_confidence(5, true, None) > compute_confidence(5, false, None));
-        assert_eq!(compute_confidence(100, true, None), 1.0);
-        assert!(compute_confidence(100, false, None) < 1.0);
-    }
-
-    #[test]
-    fn dynamic_dispatch_caps_confidence() {
-        let dispatch = DynamicDispatch {
-            status: DispatchStatus::Incomplete,
-            implementations: 3,
-        };
-        // Without the marker this anchor would score 1.0; the cap pulls it
-        // down because the graph is a known lower bound.
-        assert_eq!(compute_confidence(100, true, None), 1.0);
-        assert_eq!(
-            compute_confidence(100, true, Some(&dispatch)),
-            DYNAMIC_DISPATCH_CONFIDENCE_CAP
-        );
-    }
-
     fn impl_at(line: u32) -> Location {
         Location::point(PathBuf::from("src/lib.rs"), line, 1)
     }
@@ -572,7 +382,6 @@ mod tests {
         assert_eq!(dispatch.implementations, 2);
         // The verified caller count is untouched — widening is not done.
         assert_eq!(radius.direct_callers, 1);
-        assert!(radius.confidence <= DYNAMIC_DISPATCH_CONFIDENCE_CAP);
     }
 
     #[test]
@@ -637,8 +446,8 @@ mod tests {
 
     /// A runtime JSON-RPC MethodNotFound is the same permanent capability
     /// statement as the static table: an interface anchor discloses
-    /// `unavailable`. Transient errors and non-interface anchors stay
-    /// silent — never a mislabeled capability claim.
+    /// `unavailable`. A failed implementation lookup cannot establish
+    /// that a method has no dynamic implementations.
     #[test]
     fn runtime_method_not_found_marks_interface_unavailable() {
         let radius = compute_for(
@@ -652,24 +461,27 @@ mod tests {
             .expect("interface + runtime -32601 must disclose unavailability");
         assert_eq!(dispatch.status, DispatchStatus::Unavailable);
         assert_eq!(dispatch.implementations, 0);
-        assert!(radius.confidence <= DYNAMIC_DISPATCH_CONFIDENCE_CAP);
 
-        // A transient server error is not a capability statement.
         let radius = compute_for(
             HashMap::new(),
             Err(-32603),
             Some(SymbolKind::Interface),
             WalkConfig::default(),
         );
-        assert!(radius.dynamic_dispatch.is_none());
+        assert_eq!(
+            radius.dynamic_dispatch.unwrap().status,
+            DispatchStatus::Unavailable
+        );
 
-        // A method can't be known virtual — silent even on -32601.
         let radius = compute_for(
             HashMap::new(),
             Err(-32601),
             Some(SymbolKind::Method),
             WalkConfig::default(),
         );
-        assert!(radius.dynamic_dispatch.is_none());
+        assert_eq!(
+            radius.dynamic_dispatch.unwrap().status,
+            DispatchStatus::Unavailable
+        );
     }
 }

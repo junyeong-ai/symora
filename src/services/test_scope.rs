@@ -31,6 +31,8 @@ use crate::models::symbol::Language;
 /// additions.
 #[derive(Debug, Clone, Default)]
 pub struct TestScope {
+    root: Option<PathBuf>,
+    canonical_root: Option<PathBuf>,
     custom_file_patterns: Vec<String>,
     custom_dir_patterns: Vec<String>,
 }
@@ -42,13 +44,40 @@ impl TestScope {
 
     pub fn from_config(config: &TestConfig) -> Self {
         Self {
+            root: None,
+            canonical_root: None,
             custom_file_patterns: config.file_patterns.clone(),
             custom_dir_patterns: config.dir_patterns.clone(),
         }
     }
 
+    pub fn with_root(mut self, root: &Path) -> Self {
+        self.root = Some(root.to_path_buf());
+        self.canonical_root = root.canonicalize().ok();
+        self
+    }
+
     /// Whether the file as a whole is test material.
     pub fn is_test_file(&self, path: &Path) -> bool {
+        let path = if path.is_absolute() {
+            self.root
+                .as_ref()
+                .and_then(|root| path.strip_prefix(root).ok())
+                .or_else(|| {
+                    self.canonical_root
+                        .as_ref()
+                        .and_then(|root| path.strip_prefix(root).ok())
+                })
+                .unwrap_or_else(|| {
+                    if self.root.is_some() {
+                        Path::new(path.file_name().unwrap_or_default())
+                    } else {
+                        path
+                    }
+                })
+        } else {
+            path
+        };
         self.matches_custom_patterns(path) || is_test_file_default(path)
     }
 
@@ -240,6 +269,14 @@ mod tests {
     use super::*;
 
     use std::io::Write;
+
+    #[test]
+    fn classification_is_relative_to_the_project() {
+        let scope = TestScope::new().with_root(Path::new("/workspace/tests/production"));
+        assert!(!scope.is_test_file(Path::new("/workspace/tests/production/main.py")));
+        assert!(scope.is_test_file(Path::new("/workspace/tests/production/tests/test_main.py")));
+        assert!(!scope.is_test_file(Path::new("/another/tests/main.py")));
+    }
 
     #[test]
     fn default_patterns_match_well_known_test_files() {

@@ -21,7 +21,7 @@
 grep은 *문자열*을 찾고, Symora는 *의미*를 찾습니다. 하나의 CLI 뒤에 네 가지 엔진을 결합합니다.
 
 - **LSP 의미 분석** — 에디터가 쓰는 바로 그 language server(rust-analyzer, pyright, typescript-language-server, gopls 등)에서 실제 정의·참조·호출 계층을 가져옵니다.
-- **SQLite 심볼/콘텐츠 인덱스** — 저장소 전체를 밀리초 단위로 fuzzy 검색하며, 디스크에 지속됩니다.
+- **SQLite 심볼/콘텐츠 인덱스** — 저장소의 심볼과 콘텐츠를 검색하며, 디스크에 지속됩니다.
 - **tree-sitter AST 검색** — language server 없이 구조적 패턴 매칭.
 - **재사용 daemon** — language server 세션을 따뜻하게 유지해 반복 호출을 빠르게.
 
@@ -50,7 +50,7 @@ grep은 *문자열*을 찾고, Symora는 *의미*를 찾습니다. 하나의 CLI
 # 1. 설치 (사전 빌드 바이너리, SHA-256 검증)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 
-# 2. 현재 프로젝트의 검색 인덱스 빌드 (한 번)
+# 2. 현재 프로젝트의 검색 인덱스 빌드 (소스 변경 후 증분 갱신)
 cd your-project && symora search index build
 
 # 3. 질문하기
@@ -80,7 +80,7 @@ flowchart TD
     G --> H[("구조화 JSON")]
 ```
 
-- **두 백엔드, 다른 요구.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 서빙하면 서버의 트리로, 아니면 컴파일된 문법으로 답하고 `backend`(`document`|`ast`)로 어느 쪽인지 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요하며, 서버가 어떤 기능을 지원하지 않으면 구조화된 `unsupported` 응답이나 근사임을 밝힌 대체 답(call hierarchy가 없을 때 `callers`의 `callers_status: "references_derived"`)으로 *정직하게* 격하되며, 절대 조용히 틀린 답을 주지 않습니다.
+- **두 백엔드, 다른 요구.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 서빙하면 서버의 트리로, 아니면 컴파일된 문법으로 답하고 `backend`(`document`|`ast`)로 어느 쪽인지 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요하며, 서버가 어떤 기능을 지원하지 않으면 구조화된 `unsupported` 응답이나 근사임을 밝힌 대체 답(call hierarchy가 없을 때 `callers`의 `callers_status: "references_derived"`)으로 *정직하게* 격하되며, 정적 분석과 서버별 기능의 한계를 명시합니다.
 - **daemon은 자동.** Unix에서는 호출 간에 language server 세션을 따뜻하게 유지해 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있습니다.
 
 ---
@@ -256,14 +256,14 @@ symora impact src/services/checkout.ts:48 --depth 2
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
       { "depth": 2, "count": 3, "test": 1, "prod": 2 }
     ],
-    "test_caller_ratio": 0.43,
-    "risk": "medium",
-    "confidence": 0.8
+    "test_caller_ratio": 0.43
   },
   "next_commands": ["symora impact src/services/checkout.ts:48:9 --depth 3"]
 }
 ```
-> 전이 호출자가 7개로 5개를 넘어 `risk`가 `medium`입니다. 공개 심볼이었다면(`is_exported: true`) 같은 그래프에서 `high`가 됩니다. `test_caller_ratio`는 그래프 속 호출자 가운데 테스트 코드의 비율입니다. `max_depth_reached`가 true라 전이 호출자 그래프는 하한이고 `confidence`가 0.8에 머뭅니다. 참조 수와 `direct_callers`는 깊이와 무관하며, 자기 표시(`incomplete`, `indexing`, `callers_truncated`, `dynamic_dispatch`)가 없으니 온전합니다. `next_commands`가 제안하는 `--depth 3`이 그래프를 한 단계 더 넓힙니다.
+> `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. 정적 참조·호출 그래프는 런타임 디스패치, 외부 소비자, 설정 기반 연결을 모두 증명하지 못합니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
+
+소스 편집은 프로젝트 내 쓰기를 직렬화하고, 읽은 내용이 달라졌으면 적용을 거부합니다. 파일 교체는 원자적이지만 여러 파일 전체가 하나의 트랜잭션은 아닙니다. 외부 편집기와의 동시 변경을 피하고 오류가 지목한 적용 파일을 검토하세요.
 
 ### ⑥ 변경 — 쓰기 전에 미리보기
 
@@ -373,6 +373,12 @@ symora status                # 프로젝트 + language server 설치 여부 (동
 
 ---
 
+`pack --tokens`와 `--token-estimate`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수나 전체 JSON 봉투 크기의 상한은 아닙니다.
+
+
+
+언어 서버가 워크스페이스 분석 완료를 명시하지 않으면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 서버가 제공한 편집을 적용하며, 명시적으로 분석 중임을 알린 서버가 시간 초과한 경우에는 적용을 거부합니다.
+
 ## 검색 인덱스
 
 Symora는 각 프로젝트의 `.symora/store.db`에 지속성 SQLite 인덱스를 둡니다.
@@ -383,6 +389,8 @@ symora search index build --force --lang rust
 symora search index status              # languages(커버 언어), 심볼/파일/라인 수, 크기, last_indexed
 symora search index clear
 ```
+
+인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 경로·크기·수정 시각을 비교하므로, 이를 보존한 변경은 재빌드해서 반영해야 합니다. 기존 행의 `stale` 표시만으로 새 파일의 누락을 판단할 수 없습니다. 검색 결과가 있어도 최신성이 확인되지 않으면 `hints`와 갱신 명령을 확인하세요.
 
 인덱스가 없어도 검색은 우아하게 격하됩니다(파일시스템 스캔 또는 라이브 LSP로 폴백). 다만 반복 사용에는 빌드된 인덱스가 가장 빠르고 안정적입니다. `--force`는 전체 재빌드에만 사용하세요.
 
@@ -480,7 +488,7 @@ symora mcp tools                                 # 도구 카탈로그를 JSON�
 symora mcp tools --profile read-only             # read-only 서버가 노출할 목록
 ```
 
-`mcp tools`는 `tools/list`가 서빙하는 것과 동일한 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 능력 목록을 얻을 수 있습니다 — 입력 스키마는 모든 도구에, 출력 스키마는 이를 선언한 도구에 실리며, 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 무언가를 쓰는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`), 그중 소스를 고치는 도구는 모두 `dry_run`을 지원합니다(인덱스만 다시 만드는 `build_index`는 제외). 서버의 `initialize` 응답에는 전체 사용 플레이북(도구 호출 순서, 편집 주소 지정, 오류 복구)이 포함되므로, 연결된 에이전트는 추가 설정이 필요 없습니다.
+`mcp tools`는 `tools/list`가 서빙하는 것과 동일한 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 능력 목록을 얻을 수 있습니다 — 입력 스키마는 모든 도구에, 출력 스키마는 이를 선언한 도구에 실리며, 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 무언가를 쓰는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`), 그중 소스를 고치는 도구는 모두 `dry_run`을 지원합니다(인덱스만 다시 만드는 `build_index`는 제외). 공식 Rust MCP SDK가 버전 협상, 전송, 취소를 처리합니다. 2026-07-28의 요청별 메타데이터와 이전 버전의 initialize 흐름을 지원합니다. HTTP는 loopback 주소에만 바인딩하며 원격 연결은 인증 프록시를 통해 구성하세요.
 
 ---
 
@@ -488,8 +496,8 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 
 에이전트용 플레이북은 이 README가 아니라 *도구와 함께* 배포되어 바이너리와 항상 일치합니다.
 
-- `symora setup skill`은 Claude Code 스킬(전체 CLI 플레이북)을 설치합니다.
-- `symora mcp serve`는 같은 내용을 MCP 도구 어휘로 옮긴 가이드를 `initialize` instructions로 반환합니다.
+- `symora setup skill`은 바이너리에 내장된 스킬을 네트워크 없이 설치합니다. 명시적인 `--git-ref`는 지정한 소스만 사용하며 실패하면 다른 버전으로 대체하지 않습니다.
+- `symora mcp serve`는 MCP 도구 순서와 한계를 설명하는 instructions를 제공합니다. 연결 클라이언트가 지원하는 프로토콜에 따라 이를 조회합니다.
 
 요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 명령 실패는 잘못된 CLI 인자까지 포함해 0이 아닌 코드로 종료하는 구조화된 `{code, message, hint}`입니다.
 

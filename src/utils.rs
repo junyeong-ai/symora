@@ -6,16 +6,8 @@ pub fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-/// Cheap token estimate using the well-known ~4 chars per token heuristic.
-/// Lives at the crate root so any layer (services, cli, mcp) can call it
-/// without crossing layer boundaries.
-///
-/// Uses `chars().count()`, not `len()`, because a byte-based count would
-/// overestimate by 3-4× on Korean/Japanese/Chinese source — and source
-/// files routinely contain multi-byte identifiers, comments, or strings.
-/// 4 chars/token still over-counts CJK relative to a real BPE tokenizer
-/// (BPE often groups 1-2 CJK chars per token), but it's a stable
-/// upper-bound budget signal across languages.
+/// Model-independent character estimate for relative context sizing.
+/// This is not a tokenizer count or an upper bound for every language.
 pub fn estimate_tokens(s: &str) -> usize {
     s.chars().count().div_ceil(4)
 }

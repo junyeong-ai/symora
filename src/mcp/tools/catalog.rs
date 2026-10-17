@@ -519,10 +519,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "get_impact",
             "Change-impact analysis at file:line[:column]: reference counts split by \
                           test vs prod, affected files, and a transitive caller graph with \
-                          risk + confidence (`blast_radius`). `is_exported` appears only for \
+                          explicit traversal limits (`blast_radius`). `is_exported` appears only for \
                           languages whose compiler decides visibility, and is absent \
                           elsewhere rather than read off a naming convention. Use depth=1 \
-                          for quick surveys, depth=2-3 when ranking blast radius matters.",
+                          for quick surveys, depth=2-3 when tracing wider caller reach.",
             with_extra(
                 location_schema(),
                 &[

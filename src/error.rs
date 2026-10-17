@@ -109,7 +109,7 @@ impl LspError {
     /// LSP `ContentModified`: the server's view of the document changed
     /// mid-request and the result would be stale. The spec's contract is
     /// "re-issue the request" — the canonical retryable error.
-    const CONTENT_MODIFIED_ERROR_CODE: i32 = -32801;
+    pub(crate) const CONTENT_MODIFIED_ERROR_CODE: i32 = -32801;
     /// JSON-RPC `MethodNotFound`: the server does not implement the
     /// requested method — a permanent capability statement, not a transient
     /// failure.

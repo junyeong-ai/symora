@@ -78,7 +78,6 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
                 &analysis.anchor.file,
                 analysis.anchor.line,
                 analysis.anchor.column,
-                exported,
                 anchor_kind,
                 test_scope,
                 &WalkConfig {
@@ -219,7 +218,7 @@ fn impact_next_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::blast_radius::{DynamicDispatch, RiskLevel};
+    use crate::cli::blast_radius::DynamicDispatch;
 
     fn radius(max_depth_reached: bool, dispatch: Option<DispatchStatus>) -> BlastRadius {
         BlastRadius {
@@ -240,8 +239,6 @@ mod tests {
             }),
             callers_by_depth: vec![],
             test_caller_ratio: None,
-            risk: RiskLevel::Low,
-            confidence: 0.8,
         }
     }
 

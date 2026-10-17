@@ -71,6 +71,7 @@ function classifyTool(m, name, input) {
 export function parse(lines) {
   const m = emptyMetrics();
   let sawResult = false;
+  let resultFailed = false;
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -96,6 +97,7 @@ export function parse(lines) {
       }
     } else if (ev.type === "result") {
       sawResult = true;
+      resultFailed = ev.is_error === true;
       // `result.usage` is the LAST turn only — deliberately NOT summed here.
       // Cumulative fields, however, are authoritative.
       if (typeof ev.duration_ms === "number") m.duration_ms = ev.duration_ms;
@@ -112,8 +114,8 @@ export function parse(lines) {
   // it so the aggregator drops it instead of biasing the medians toward zero.
   // `failed_reason` vocabulary is owned here: "no_result_or_zero_turns" (this
   // parser) and "mcp_not_exposed" (run-ab.sh's WITH-arm validity guard).
-  m.failed = !sawResult || m.turns === 0;
-  if (m.failed) m.failed_reason = "no_result_or_zero_turns";
+  m.failed = !sawResult || m.turns === 0 || resultFailed;
+  if (m.failed) m.failed_reason = resultFailed ? "result_error" : "no_result_or_zero_turns";
   return m;
 }
 
