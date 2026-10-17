@@ -97,12 +97,18 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
 }
 
 /// Strip `--workspace VALUE` and `--workspace=VALUE` from a raw argv,
-/// preserving everything else. Used by the workspace runner so spawned
+/// preserving everything else, including all arguments after `--`.
+/// Used by the workspace runner so spawned
 /// child processes don't recurse.
 pub fn strip_workspace_flag(args: Vec<String>) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
+        if arg == "--" {
+            out.push(arg);
+            out.extend(iter);
+            break;
+        }
         if arg == "--workspace" {
             iter.next();
             continue;
@@ -133,9 +139,8 @@ pub async fn run_workspace(
     let exe = exe.to_path_buf();
 
     // Capped concurrency: prevents a 100-root workspace from forking
-    // 100 daemons at once. 4 is a reasonable default for read-heavy
-    // commands; mutating commands run effectively serially because each
-    // root is its own filesystem.
+    // 100 daemons at once. Each root runs independently; source mutations
+    // retain their per-project edit locks.
     const WORKSPACE_FANOUT: usize = 4;
 
     let entries: Vec<(usize, serde_json::Value)> = stream::iter(ws.roots.iter().enumerate())
@@ -237,6 +242,35 @@ mod tests {
             "1000".into(),
         ];
         assert_eq!(strip_workspace_flag(args.clone()), args);
+    }
+
+    #[test]
+    fn strip_workspace_flag_preserves_literal_arguments_after_separator() {
+        for flag in [vec!["--workspace", "fleet"], vec!["--workspace=fleet"]] {
+            let mut args = vec!["symora"];
+            args.extend(flag);
+            args.extend([
+                "search",
+                "content",
+                "--",
+                "--workspace=literal",
+                "--workspace",
+                "fleet",
+            ]);
+            let expected = [
+                "symora",
+                "search",
+                "content",
+                "--",
+                "--workspace=literal",
+                "--workspace",
+                "fleet",
+            ];
+            assert_eq!(
+                strip_workspace_flag(args.into_iter().map(str::to_string).collect()),
+                expected.map(str::to_string),
+            );
+        }
     }
 
     #[test]
