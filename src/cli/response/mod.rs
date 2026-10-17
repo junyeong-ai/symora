@@ -232,7 +232,20 @@ impl<T> Section<T> {
     }
 }
 
-/// Fit a serialized response under `max_chars` by dropping whole trailing
+/// Whether the response states a content budget of its own (`budget_tokens`),
+/// which the command already fitted its answer to.
+///
+/// Responses without a command budget use list fitting. Applying that
+/// on top of a named budget contradicts the caller twice over: it returns less
+/// than was asked for, and it leaves the response's own accounting of what it
+/// spent describing items that were then dropped.
+pub fn declares_budget(value: &serde_json::Value) -> bool {
+    value
+        .get("budget_tokens")
+        .is_some_and(serde_json::Value::is_number)
+}
+
+/// Reduce a serialized response toward `max_chars` by dropping whole trailing
 /// items from its `Section`-shaped lists, largest list first. `showing`
 /// shrinks with the items, `truncated` is set, and one disclosure hint
 /// naming `output.max_response_chars` lands on the largest list before
@@ -241,7 +254,7 @@ impl<T> Section<T> {
 /// stays over the ceiling, the reduced-but-whole JSON is emitted as-is.
 ///
 /// `measure` must serialize exactly the string the caller will emit —
-/// the ceiling guards emitted characters, not an estimate. Returns true
+/// the measurement counts emitted characters, not an estimate. Returns true
 /// when any items were dropped.
 ///
 /// A section carrying `bodies_included` has the field recounted against
@@ -256,19 +269,6 @@ impl<T> Section<T> {
 /// flatten their Section to the top level (`refs`, `usage`) or nest it
 /// under a key (`map file`, `context`, `pack`) — by the time the response
 /// reaches the output layer, only the shape identifies it.
-/// Whether the response states a content budget of its own (`budget_tokens`),
-/// which the command already fitted its answer to.
-///
-/// The transport ceiling is the bound for a caller who named none. Applying it
-/// on top of a named one contradicts the caller twice over: it returns less
-/// than was asked for, and it leaves the response's own accounting of what it
-/// spent describing items that were then dropped.
-pub fn declares_budget(value: &serde_json::Value) -> bool {
-    value
-        .get("budget_tokens")
-        .is_some_and(serde_json::Value::is_number)
-}
-
 pub fn fit_to_char_budget(
     value: &mut serde_json::Value,
     max_chars: usize,

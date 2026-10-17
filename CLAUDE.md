@@ -20,13 +20,15 @@ A fallback that returns plausible but wrong data is worse than a clear "unsuppor
 
 ## Validation
 
-Before finishing any change:
+For changes to Rust behavior, dependencies, or build logic:
 
 ```bash
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
+
+For documentation or comment-only changes, validate local links, rule path references, and changed examples or output claims against the matching binary. Check Rust formatting when Rust files are touched and skill frontmatter when a skill changes. Changes to bundled agent instructions also exercise the affected workflow. Rebuilds and full suites are needed when executable behavior changes, rather than for prose alone.
 
 A change to the language-server layer or daemon also runs real-server suites: install rust-analyzer, then prepare the Python fixture and its pinned pyright:
 
