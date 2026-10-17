@@ -462,8 +462,26 @@ impl LocationAnalysis {
     }
 
     pub fn is_exported(&self) -> Option<bool> {
-        let body = self.target().and_then(Symbol::body_from_name)?;
-        detect_exported(body, self.language)
+        if !matches!(
+            self.language,
+            Language::Rust
+                | Language::Go
+                | Language::Java
+                | Language::Kotlin
+                | Language::CSharp
+                | Language::TypeScript
+                | Language::JavaScript
+        ) {
+            return None;
+        }
+        let target = self.target()?;
+        let content = std::fs::read_to_string(&self.anchor.file).ok()?;
+        crate::services::store::SymbolExtractor::shared().declaration_visibility(
+            &self.anchor.file,
+            &content,
+            self.language,
+            target,
+        )
     }
 }
 
@@ -503,230 +521,9 @@ fn usages_of(
     usages
 }
 
-/// Whether a body's first declaration line exports the symbol, for the
-/// languages whose visibility the compiler decides:
-/// - Rust: `pub ` without restricted visibility (`pub(crate)`, `pub(super)`, `pub(in ...)`)
-/// - Go: declared name starts with an uppercase letter
-/// - Java/Kotlin/C#: `public ` modifier (NOT `internal` for C#)
-/// - TypeScript/JavaScript: `export ` keyword
-///
-/// `None` everywhere else, because only a rule the language enforces settles
-/// it. Python's leading underscore states intent and imports `_helper` all
-/// the same; every other language here is one this reads no visibility for,
-/// and "not exported" would be a fact about the reader.
-pub fn detect_exported(body: &str, lang: Language) -> Option<bool> {
-    let first_line = body.lines().next().unwrap_or("");
-    match lang {
-        Language::Rust => Some(detect_rust(first_line)),
-        Language::Java | Language::Kotlin | Language::CSharp => {
-            Some(first_line.contains("public "))
-        }
-        Language::TypeScript | Language::JavaScript => Some(first_line.contains("export ")),
-        Language::Go => Some(detect_go(first_line)),
-        _ => None,
-    }
-}
-
-fn detect_rust(line: &str) -> bool {
-    if !line.contains("pub ") {
-        return false;
-    }
-    !line.contains("pub(crate)")
-        && !line.contains("pub(super)")
-        && !line.contains("pub(self)")
-        && !line.contains("pub(in ")
-}
-
-fn detect_go(line: &str) -> bool {
-    let candidate = if let Some(pos) = line.find("func ") {
-        let after = &line[pos + 5..];
-        if after.starts_with('(') {
-            after.find(") ").map(|i| &after[i + 2..]).unwrap_or(after)
-        } else {
-            after
-        }
-    } else if let Some(pos) = line.find("type ") {
-        &line[pos + 5..]
-    } else {
-        line
-    };
-    candidate
-        .chars()
-        .find(|c| c.is_alphabetic())
-        .map(|c| c.is_uppercase())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
-    const EXPORTED: Option<bool> = Some(true);
-    const NOT_EXPORTED: Option<bool> = Some(false);
-    const UNDECIDED: Option<bool> = None;
-
     use super::*;
-
-    #[test]
-    fn detect_rust_exported_and_restricted() {
-        assert_eq!(
-            EXPORTED,
-            detect_exported("pub fn process()", Language::Rust)
-        );
-        assert_eq!(
-            EXPORTED,
-            detect_exported("pub struct Foo {}", Language::Rust)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("pub(crate) fn process()", Language::Rust)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("pub(super) fn process()", Language::Rust)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("pub(self) fn process()", Language::Rust)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("pub(in crate::foo) fn process()", Language::Rust)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("fn process()", Language::Rust)
-        );
-    }
-
-    #[test]
-    fn detect_go_exported_uppercase_name() {
-        assert_eq!(EXPORTED, detect_exported("func Process()", Language::Go));
-        assert_eq!(
-            EXPORTED,
-            detect_exported("type Handler struct", Language::Go)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("func process()", Language::Go)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("type handler struct", Language::Go)
-        );
-    }
-
-    #[test]
-    fn detect_go_method_receiver() {
-        assert_eq!(
-            EXPORTED,
-            detect_exported("func (h *Handler) Process()", Language::Go)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("func (h *Handler) process()", Language::Go)
-        );
-        assert_eq!(
-            EXPORTED,
-            detect_exported("func (s Service) Export()", Language::Go)
-        );
-    }
-
-    #[test]
-    fn detect_typescript_export_keyword() {
-        assert_eq!(
-            EXPORTED,
-            detect_exported("export function process()", Language::TypeScript)
-        );
-        assert_eq!(
-            EXPORTED,
-            detect_exported("export const foo = 1", Language::TypeScript)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("function process()", Language::TypeScript)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("const foo = 1", Language::TypeScript)
-        );
-    }
-
-    /// Which languages settle visibility at all, stated as a set: only those
-    /// whose rule the language itself enforces. A convention does not settle
-    /// it — Python imports `_helper` all the same — and a language this reads
-    /// nothing for settles nothing. Either would feed a risk verdict a premise
-    /// it does not have.
-    #[test]
-    fn only_an_enforced_rule_settles_visibility() {
-        for language in [
-            Language::Rust,
-            Language::Go,
-            Language::Java,
-            Language::Kotlin,
-            Language::CSharp,
-            Language::TypeScript,
-            Language::JavaScript,
-        ] {
-            assert!(
-                detect_exported("pub export public func Process()", language).is_some(),
-                "{language:?} enforces visibility and must answer"
-            );
-        }
-
-        for language in [
-            Language::Python,
-            Language::Swift,
-            Language::Ruby,
-            Language::PHP,
-            Language::Scala,
-        ] {
-            assert_eq!(
-                UNDECIDED,
-                detect_exported("public func process()", language),
-                "{language:?} has no rule this reads, so it states nothing"
-            );
-        }
-    }
-
-    #[test]
-    fn detect_java_public_modifier() {
-        assert_eq!(
-            EXPORTED,
-            detect_exported("public void process()", Language::Java)
-        );
-        assert_eq!(
-            EXPORTED,
-            detect_exported("public class Handler", Language::Java)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("private void process()", Language::Java)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("void process()", Language::Java)
-        );
-    }
-
-    #[test]
-    fn detect_csharp_only_public_is_exported() {
-        assert_eq!(
-            EXPORTED,
-            detect_exported("public void Process()", Language::CSharp)
-        );
-        assert_eq!(
-            EXPORTED,
-            detect_exported("public class Handler", Language::CSharp)
-        );
-        // internal is NOT exported (assembly-private)
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("internal void Process()", Language::CSharp)
-        );
-        assert_eq!(
-            NOT_EXPORTED,
-            detect_exported("private void Process()", Language::CSharp)
-        );
-    }
 
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1311,16 +1108,21 @@ mod tests {
         }
     }
 
-    /// Visibility is read from the line that names the declaration, past
-    /// the attribute and doc-comment lines its body opens with.
     #[test]
-    fn visibility_is_read_from_the_line_that_names_the_declaration() {
-        let mut anchor = Anchor::raw(&at("lib.rs", 3, 12), AnchorResolution::Resolved);
+    fn visibility_matches_the_exact_declaration_in_the_source_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("lib.rs");
+        let source = "/// Size.\n#[inline]\npub fn len() -> usize {\n    0\n}";
+        std::fs::write(&file, source).unwrap();
+        let mut anchor = Anchor::raw(
+            &at(file.to_str().unwrap(), 3, 8),
+            AnchorResolution::Resolved,
+        );
         anchor.symbol = Some(
             Symbol::new(
                 "len".to_string(),
                 SymbolKind::Function,
-                Location::full(PathBuf::from("lib.rs"), 3, 12, 1, 1, 5, 2),
+                Location::full(file, 3, 8, 1, 1, 5, 2),
             )
             .with_body("/// Size.\n#[inline]\npub fn len() -> usize {\n    0\n}"),
         );

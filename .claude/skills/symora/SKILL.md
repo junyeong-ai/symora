@@ -1,7 +1,7 @@
 ---
 name: symora
 metadata:
-  version: 0.29.1
+  version: 0.30.0
 description: Use the symora CLI for symbol discovery, exact code navigation, references, caller graphs, context, and symbol-aware edits.
 allowed-tools: Bash(symora *)
 ---
@@ -67,7 +67,7 @@ Lists use `count`, `showing`, and `items`. Optional markers change how to interp
 - `indexing`: `timed_out` means work exceeded the wait; `unconfirmed` means the server did not confirm workspace readiness. Retry may help, but servers without a completion channel can remain unconfirmed. Neither state proves absence. Rename preserves unconfirmed on server-provided edits; timed_out blocks application.
 - `degraded_column`: the reported column could not be decoded from readable source; re-read before using it as an edit address.
 
-`impact` reports references and a bounded static caller graph. `max_depth_reached`, `callers_truncated`, `incomplete`, and `dynamic_dispatch` disclose limits. It does not estimate the probability a change is safe. Test references and test callers are not execution coverage. String-based registration, reflection, structural Protocol implementations, external consumers, and serialized contracts may require additional inspection.
+`impact` reports references and a bounded static caller graph. `max_depth_reached`, `callers_truncated`, `incomplete`, and `dynamic_dispatch` disclose limits. It does not estimate the probability a change is safe. Test references and test callers are not execution coverage. `is_exported` describes the declaration's own visibility, not accessibility through enclosing types, modules, or re-exports. String-based registration, reflection, structural Protocol implementations, external consumers, and serialized contracts may require additional inspection.
 
 When call hierarchy is unsupported, `callers` may return `callers_status: references_derived`: containing functions of references, not verified call edges. `--no-fallback` requires actual call hierarchy.
 
@@ -97,6 +97,7 @@ Failures emit `{ "error": { "code", "message", "hint" } }` on stdout with a nonz
 - `server_not_installed` / `lsp_unavailable`: run `symora doctor <lang>`. Branch on `serves`, not `installed`; version-manager shims can resolve without running. Configure an absolute `[lsp.servers.<lang>].command` when necessary, then restart a warm daemon.
 - `unsupported`: use the available index/AST alternative; retrying the same missing capability does not add support.
 - `conflict`: another edit/build owns the resource or a file changed. Wait as directed, re-read, and retry with current input.
+- `cancelled` with a content-change hint: re-read the source and resolve the target before requesting fresh edits; the same coordinates may now address another symbol.
 - `precondition_failed`: fix the named precondition; do not blind-retry.
 - `config_errors`: repair the configuration before depending on its intended behavior.
 

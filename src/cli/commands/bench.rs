@@ -5,12 +5,11 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::analysis::detect_exported;
 use crate::cli::errors::OutputError;
 use crate::cli::utils::RefsClassification;
 use crate::error::LspError;
 use crate::infra::file_filter::FileFilter;
-use crate::models::symbol::{Language, Location};
+use crate::models::symbol::Location;
 use crate::services::TestScope;
 use crate::services::pack::{PackConfig, build_pack};
 
@@ -91,13 +90,6 @@ pub async fn execute(args: BenchArgs, app: &App) -> Result<()> {
         "OutputError::from(LspError::ServerError) over a 4-variant fixture",
         iterations,
         bench_error_classify(),
-    ));
-
-    results.push(measure(
-        "detect_exported_rust",
-        "detect_exported across Rust + Go + Python + TS",
-        iterations,
-        bench_detect_exported(),
     ));
 
     ctx.print_success(BenchOutput {
@@ -181,17 +173,5 @@ fn bench_error_classify() -> impl FnMut() {
             };
             std::hint::black_box(OutputError::from(e));
         }
-    }
-}
-
-fn bench_detect_exported() -> impl FnMut() {
-    move || {
-        std::hint::black_box(detect_exported("pub fn process()", Language::Rust));
-        std::hint::black_box(detect_exported("func (h *Handler) Process()", Language::Go));
-        std::hint::black_box(detect_exported("def process():", Language::Python));
-        std::hint::black_box(detect_exported(
-            "export function process()",
-            Language::TypeScript,
-        ));
     }
 }

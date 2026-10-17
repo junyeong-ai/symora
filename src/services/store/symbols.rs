@@ -188,6 +188,32 @@ impl SymbolExtractor {
         self.extract_where(path, content, language, |_, _| true)
     }
 
+    /// Visibility on this declaration, without resolving its containing API or re-exports.
+    pub fn declaration_visibility(
+        &self,
+        path: &Path,
+        content: &str,
+        language: Language,
+        target: &Symbol,
+    ) -> Option<bool> {
+        self.with_declarations(path, content, language, |declarations| {
+            let (node, symbol) = declarations.iter().find(|(_, symbol)| {
+                symbol.name == target.name
+                    && symbol.location.line == target.location.line
+                    && symbol.location.column == target.location.column
+            })?;
+            let mut root = *node;
+            while let Some(parent) = root.parent() {
+                root = parent;
+            }
+            if root.has_error() {
+                return None;
+            }
+            let declared = declarations.iter().map(|(node, _)| node.id()).collect();
+            declaration_visibility(*node, symbol, content, language, &declared)
+        })?
+    }
+
     /// The declarations of [`extract`](Self::extract) that stand for
     /// themselves: none that belongs to a body a declaration stands for
     /// ([`is_local`]). What is declared inside such a body is its own, and a
@@ -663,6 +689,171 @@ fn extract_from_match(
             symbol
         })
         .collect()
+}
+
+fn declaration_visibility(
+    node: Node,
+    symbol: &Symbol,
+    content: &str,
+    language: Language,
+    declared: &HashSet<usize>,
+) -> Option<bool> {
+    let modifier = |keyword| {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .filter(|child| {
+                matches!(
+                    child.kind(),
+                    "modifiers" | "modifier" | "visibility_modifier"
+                )
+            })
+            .any(|modifiers| syntax_keyword(modifiers, keyword))
+    };
+    let in_interface = || {
+        node.parent()
+            .and_then(|body| body.parent())
+            .is_some_and(|parent| {
+                matches!(
+                    parent.kind(),
+                    "interface_declaration" | "annotation_type_declaration"
+                )
+            })
+    };
+    match language {
+        Language::Rust => {
+            if matches!(
+                node.kind(),
+                "impl_item" | "macro_definition" | "enum_variant" | "function_signature_item"
+            ) {
+                return None;
+            }
+            if let Some(parent) = node.parent().and_then(|body| body.parent())
+                && (parent.kind() == "trait_item"
+                    || (parent.kind() == "impl_item"
+                        && parent.child_by_field_name("trait").is_some()))
+            {
+                return None;
+            }
+            Some(
+                child_of_kind(node, "visibility_modifier").is_some_and(|visibility| {
+                    syntax_keyword(visibility, "pub") && !syntax_keyword(visibility, "(")
+                }),
+            )
+        }
+        Language::Go => {
+            if node.kind() != "field_declaration" && is_local(node, declared) {
+                return Some(false);
+            }
+            let name = declared_names(node, language)
+                .into_iter()
+                .find(|name| {
+                    content.get(name.start_byte()..name.end_byte()) == Some(symbol.name.as_str())
+                })
+                .or_else(|| find_name_node(node, language))?;
+            static UPPERCASE_NAME: std::sync::LazyLock<Query> = std::sync::LazyLock::new(|| {
+                Query::new(
+                    &tree_sitter_go::LANGUAGE.into(),
+                    r#"((_) @name (#match? @name "^\\p{Lu}"))"#,
+                )
+                .expect("Go uppercase-name query is valid")
+            });
+            Some(
+                QueryCursor::new()
+                    .matches(&UPPERCASE_NAME, name, content.as_bytes())
+                    .next()
+                    .is_some(),
+            )
+        }
+        Language::Java | Language::CSharp => {
+            if matches!(
+                node.kind(),
+                "package_declaration"
+                    | "namespace_declaration"
+                    | "file_scoped_namespace_declaration"
+            ) {
+                return None;
+            }
+            if modifier("public") {
+                return Some(true);
+            }
+            if ["private", "protected", "internal"]
+                .into_iter()
+                .any(modifier)
+            {
+                return Some(false);
+            }
+            if in_interface() {
+                return if language == Language::Java
+                    || (node.kind() == "method_declaration"
+                        && node.child_by_field_name("body").is_none())
+                {
+                    Some(true)
+                } else {
+                    None
+                };
+            }
+            Some(false)
+        }
+        Language::Kotlin => {
+            if is_local(node, declared) {
+                return Some(false);
+            }
+            if modifier("public") {
+                Some(true)
+            } else if ["private", "protected", "internal"]
+                .into_iter()
+                .any(modifier)
+            {
+                Some(false)
+            } else if modifier("override") {
+                None
+            } else {
+                Some(true)
+            }
+        }
+        Language::TypeScript | Language::JavaScript => {
+            let mut declaration = declaration_node(node, language);
+            while let Some(parent) = declaration.parent() {
+                if matches!(
+                    parent.kind(),
+                    "lexical_declaration" | "variable_declaration" | "ambient_declaration"
+                ) {
+                    declaration = parent;
+                } else {
+                    break;
+                }
+            }
+            if declaration.kind() == "export_statement"
+                || declaration
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == "export_statement")
+            {
+                Some(true)
+            } else if matches!(
+                node.kind(),
+                "method_definition"
+                    | "method_signature"
+                    | "property_signature"
+                    | "public_field_definition"
+                    | "field_definition"
+                    | "abstract_method_signature"
+            ) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn syntax_keyword(node: Node, keyword: &str) -> bool {
+    if node.kind() == keyword {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| syntax_keyword(child, keyword))
 }
 
 /// The node that spans the whole of a declaration: the one the grammar
@@ -1489,6 +1680,157 @@ const PHP_QUERY: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declaration_visibility_uses_syntax_and_name_identity() {
+        type VisibilityCase = (
+            Language,
+            &'static str,
+            &'static [(&'static str, Option<bool>)],
+        );
+        let cases: &[VisibilityCase] = &[
+            (
+                Language::Rust,
+                "fn hidden() { let _ = \"pub \"; }\npub\nfn visible() { let _ = \"pub(crate)\"; }\npub(crate) fn restricted() {}\nmod inner { pub fn member() {} }",
+                &[
+                    ("hidden", Some(false)),
+                    ("visible", Some(true)),
+                    ("restricted", Some(false)),
+                    ("member", Some(true)),
+                ],
+            ),
+            (
+                Language::Go,
+                "package p\nvar Exported, hidden = 1, 2\nconst Number = 1\ntype T struct { Field int; private int }\nfunc(receiver *T) Method(){}\nfunc scope(){ var Local int; type local struct { InnerField int }; _ = Local }\nvar ᴬmodifier = 0\nvar Kelvin = 0\nvar 𝔄math = 0\n",
+                &[
+                    ("Exported", Some(true)),
+                    ("hidden", Some(false)),
+                    ("Number", Some(true)),
+                    ("Field", Some(true)),
+                    ("private", Some(false)),
+                    ("Method", Some(true)),
+                    ("Local", Some(false)),
+                    ("local", Some(false)),
+                    ("InnerField", Some(true)),
+                    ("ᴬmodifier", Some(false)),
+                    ("Kelvin", Some(true)),
+                    ("𝔄math", Some(true)),
+                ],
+            ),
+            (
+                Language::TypeScript,
+                "export\nclass Api { method(){ return \"export \"; } } function hidden(){ return \"export \"; } export function\nvisible(){}",
+                &[
+                    ("Api", None),
+                    ("method", Some(false)),
+                    ("hidden", None),
+                    ("visible", Some(true)),
+                ],
+            ),
+            (
+                Language::JavaScript,
+                "function hidden(){ return \"export \"; } export function\nvisible(){}",
+                &[("hidden", None), ("visible", Some(true))],
+            ),
+            (
+                Language::Java,
+                "public interface Api { void run(); private void hidden(){ String s = \"public \"; } }\nclass C { public\nvoid visible(){} void local(){} }",
+                &[
+                    ("run", Some(true)),
+                    ("hidden", Some(false)),
+                    ("visible", Some(true)),
+                    ("local", Some(false)),
+                ],
+            ),
+            (
+                Language::CSharp,
+                "interface Api { void Run(); void Default(){} } class C { private void Hidden(){ var s = \"public \"; } public\nvoid Visible(){} }",
+                &[
+                    ("Run", Some(true)),
+                    ("Default", None),
+                    ("Hidden", Some(false)),
+                    ("Visible", Some(true)),
+                ],
+            ),
+            (
+                Language::Kotlin,
+                "private fun hidden() = \"public \"\nfun visible() {}\nopen class Base {\n    protected open fun work() {}\n}\nclass Derived: Base() {\n    override fun work() {}\n}\n",
+                &[
+                    ("hidden", Some(false)),
+                    ("visible", Some(true)),
+                    ("Base/work", Some(false)),
+                    ("Derived/work", None),
+                ],
+            ),
+            (
+                Language::Kotlin,
+                "class SingleLine { fun work() {} }",
+                &[("work", None)],
+            ),
+            (
+                Language::Python,
+                "def hidden():\n    return 'public export pub '\n",
+                &[("hidden", None)],
+            ),
+        ];
+        let extractor = SymbolExtractor::new();
+        for (language, source, expectations) in cases {
+            let path = Path::new("fixture");
+            let symbols = extractor.extract(path, source, *language);
+            for (name, expected) in *expectations {
+                let symbol = symbols
+                    .iter()
+                    .find(|symbol| {
+                        symbol.name == *name || symbol.name_path.as_deref() == Some(*name)
+                    })
+                    .unwrap_or_else(|| panic!("{language:?} did not declare {name}: {symbols:?}"));
+                assert_eq!(
+                    extractor.declaration_visibility(path, source, *language, symbol),
+                    *expected,
+                    "{language:?} {name}: {}",
+                    extractor
+                        .languages
+                        .get(language)
+                        .unwrap()
+                        .parser
+                        .lock()
+                        .unwrap()
+                        .parse(source, None)
+                        .unwrap()
+                        .root_node()
+                        .to_sexp()
+                );
+            }
+        }
+        let path = Path::new("fixture.rs");
+        let source = "pub fn visible() {}";
+        let target = extractor.extract(path, source, Language::Rust).remove(0);
+        assert_eq!(
+            extractor.declaration_visibility(path, "pub fn changed() {}", Language::Rust, &target),
+            None
+        );
+        assert_eq!(
+            extractor.declaration_visibility(path, "pub fn visible( {", Language::Rust, &target),
+            None
+        );
+        for (language, source, name) in [
+            (Language::Java, "enum E { Value }", "Value"),
+            (Language::CSharp, "enum E { Value }", "Value"),
+            (Language::Go, "package Upper\n", "Upper"),
+        ] {
+            let column = source[..source.find(name).unwrap()].chars().count() as u32 + 1;
+            let target = Symbol::new(
+                name.to_string(),
+                SymbolKind::EnumMember,
+                Location::point(path.to_path_buf(), 1, column),
+            );
+            assert_eq!(
+                extractor.declaration_visibility(path, source, language, &target),
+                None,
+                "{language:?} {name} has no visibility declaration in this registry"
+            );
+        }
+    }
 
     /// What a language declares, written from the LANGUAGE rather than from
     /// the query that reads it.
