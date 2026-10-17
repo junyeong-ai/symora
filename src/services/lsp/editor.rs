@@ -421,7 +421,7 @@ pub(super) async fn apply_code_action(
             let document_hashes = document_hashes.clone();
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
-                verify_action_snapshot(&file, &content, expected_hash)?;
+                verify_document_snapshot(&file, &content, expected_hash)?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
@@ -461,10 +461,11 @@ pub(super) async fn apply_code_action(
                 }
 
                 let snapshots = client.validate_workspace_edit(&edit).await?;
+                verify_workspace_edit_target(&file, expected_hash, &snapshots)?;
                 for (uri, hash) in &document_hashes {
                     let path = crate::models::lsp::uri_to_path(uri);
                     if let Some(content) = snapshots.get(&path) {
-                        verify_action_snapshot(&path, content, Some(*hash))?;
+                        verify_document_snapshot(&path, content, Some(*hash))?;
                     }
                 }
                 let changes = parse_workspace_edit_snapshot(
@@ -521,23 +522,6 @@ pub(super) async fn format(
         .await
 }
 
-fn verify_action_snapshot(
-    file: &Path,
-    content: &str,
-    expected_hash: Option<u64>,
-) -> Result<(), LspError> {
-    if expected_hash.is_none_or(|expected| crate::infra::hash_content(content) != expected) {
-        return Err(LspError::ServerError {
-            code: LspError::CONTENT_MODIFIED_ERROR_CODE,
-            message: format!(
-                "Code action document changed: {}. Request fresh code actions.",
-                file.display()
-            ),
-        });
-    }
-    Ok(())
-}
-
 fn workspace_edit_uris(edit: &serde_json::Value) -> Vec<&str> {
     if let Some(changes) = edit
         .get("documentChanges")
@@ -575,13 +559,13 @@ mod tests {
     fn code_actions_reject_changed_or_missing_request_snapshots() {
         let file = Path::new("main.go");
         let expected = Some(crate::infra::hash_content("abc()\n"));
-        assert!(verify_action_snapshot(file, "abc()\n", expected).is_ok());
+        assert!(verify_document_snapshot(file, "abc()\n", expected).is_ok());
         assert_eq!(
-            verify_action_snapshot(file, "prefixabc()\n", expected)
+            verify_document_snapshot(file, "prefixabc()\n", expected)
                 .unwrap_err()
                 .error_code(),
             LspError::CONTENT_MODIFIED_ERROR_CODE
         );
-        assert!(verify_action_snapshot(file, "abc()\n", None).is_err());
+        assert!(verify_document_snapshot(file, "abc()\n", None).is_err());
     }
 }

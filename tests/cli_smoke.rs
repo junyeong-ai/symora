@@ -3624,3 +3624,55 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
         }
     }
 }
+
+#[test]
+#[cfg(unix)]
+fn unrelated_hover_text_cannot_suppress_a_rename() {
+    let python = std::path::Path::new("/usr/bin/python3");
+    if !Command::new(python)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("rename protocol fixture requires /usr/bin/python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("main.go");
+    std::fs::write(
+        &source,
+        "package main\nfunc abc() {}\nfunc caller() { abc() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("go.mod"),
+        "module example.com/fixture\n\ngo 1.25\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"go": {
+        "command": python, "args": [server, source, "unrelated-hover"]
+    }}}});
+    let config: symora::models::config::SymoraConfig = serde_json::from_value(config).unwrap();
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let output = run_in(
+        root.path(),
+        &["rename", "main.go:3:17", "Renamed", "--format", "compact"],
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{payload}");
+    assert!(payload.get("error").is_none(), "{payload}");
+    assert_eq!(payload["affected_files"], 1, "{payload}");
+    assert_eq!(payload["dry_run"], false, "{payload}");
+    assert!(payload["old_name"].is_null(), "{payload}");
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        "package main\nfunc Renamed() {}\nfunc caller() { Renamed() }\n"
+    );
+}

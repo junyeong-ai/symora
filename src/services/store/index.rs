@@ -421,9 +421,12 @@ impl Store {
         }
 
         db.execute(INIT_SCHEMA).await?;
-        db.execute(TEXT_INDEX_TRIGGERS).await?;
         db.call(|conn| {
-            conn.query_row("SELECT 1", [], |_r| Ok(()))?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if read_completed_build(&tx)?.is_some() {
+                tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
+            }
+            tx.commit()?;
             Ok(())
         })
         .await?;
@@ -861,7 +864,11 @@ impl Store {
     /// that rows were written by only one: the lock owns that, and where
     /// the lock is gone an overtaken build's rows can survive under
     /// another's marker until the next build prunes them.
-    async fn begin_build(&self, reindex: Reindex) -> Result<i64, StoreError> {
+    async fn begin_build(
+        &self,
+        reindex: Reindex,
+        defer_text_index: bool,
+    ) -> Result<i64, StoreError> {
         self.db
             .call(move |conn| {
                 let tx =
@@ -876,21 +883,22 @@ impl Store {
                     rusqlite::params![META_BUILD_SCOPE, META_BUILD_COMPLETED_AT],
                 )?;
                 tx.execute("DELETE FROM unread_paths", [])?;
+                if defer_text_index || reindex == Reindex::FromScratch {
+                    tx.execute_batch(DROP_TEXT_INDEX_TRIGGERS)?;
+                }
                 if reindex == Reindex::FromScratch {
                     tx.execute("DELETE FROM content_lines", [])?;
-                    // The text index derives from those rows, and its delete
-                    // trigger records one removal per row — the right shape
-                    // for a file, and a whole index's worth of tombstones
-                    // when the table is emptied. Discarding it wholesale is
-                    // what leaves nothing behind: tombstones are rows like
-                    // any other, so an index cleared without this keeps most
-                    // of its size while holding nothing.
+                    // Reset the derived index without per-row deletes: an
+                    // interrupted deferred build can hold rows FTS never saw.
                     tx.execute(
                         "INSERT INTO content_lines_fts(content_lines_fts) VALUES ('delete-all')",
                         [],
                     )?;
                     tx.execute("DELETE FROM symbols", [])?;
                     tx.execute("DELETE FROM files", [])?;
+                }
+                if !defer_text_index {
+                    tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
                 }
                 write_meta(&tx, META_BUILD_EPOCH, &epoch.to_string())?;
                 tx.commit()?;
@@ -905,6 +913,7 @@ impl Store {
         scope: &BuildScope,
         fingerprint: String,
         unread_paths: Vec<UnreadPath>,
+        defer_text_index: bool,
     ) -> Result<(), StoreError> {
         let value = scope.meta_value();
         let owned = self
@@ -914,6 +923,10 @@ impl Store {
                     conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let owned = read_build_epoch(&tx)? == epoch;
                 if owned {
+                    if defer_text_index {
+                        tx.execute_batch(REBUILD_TEXT_INDEX)?;
+                        tx.execute_batch(TEXT_INDEX_TRIGGERS)?;
+                    }
                     write_meta(&tx, META_BUILD_SCOPE, &value)?;
                     write_meta(&tx, META_BUILD_COMPLETED_AT, &now_unix().to_string())?;
                     write_meta(&tx, META_TREE_FINGERPRINT, &fingerprint)?;
@@ -973,7 +986,7 @@ impl Store {
     /// and a build this clear interrupted cannot mark what it left behind.
     pub async fn clear(&self) -> Result<(), StoreError> {
         let _lock = self.own_index().await?;
-        self.begin_build(Reindex::FromScratch).await?;
+        self.begin_build(Reindex::FromScratch, false).await?;
         if let Err(e) = self.db.execute("VACUUM;").await {
             tracing::debug!("Failed to reclaim index space: {}", e);
         }
@@ -1134,15 +1147,11 @@ impl Store {
         // dropped the triggers and did not finish, since not having published
         // is exactly what says one did.
         let defer_text_index = from_scratch || self.build_scope().await?.is_none();
-        if defer_text_index {
-            self.db.execute(DROP_TEXT_INDEX_TRIGGERS).await?;
-        }
-
         let reindex = match from_scratch {
             true => Reindex::FromScratch,
             false => Reindex::InPlace,
         };
-        let epoch = self.begin_build(reindex).await?;
+        let epoch = self.begin_build(reindex, defer_text_index).await?;
         // Pruning reads "absent from the walk" as "gone from the tree", which
         // holds only where the walk went. It is scoped to that rather than
         // refused outright: a single directory the walk could not enter would
@@ -1206,12 +1215,7 @@ impl Store {
         unread_paths.sort_by(|a, b| a.path.cmp(&b.path));
         unread_paths.dedup_by(|a, b| a.path == b.path);
 
-        if defer_text_index {
-            self.db.execute(REBUILD_TEXT_INDEX).await?;
-            self.db.execute(TEXT_INDEX_TRIGGERS).await?;
-        }
-
-        self.publish_build(epoch, &scope, fingerprint, unread_paths)
+        self.publish_build(epoch, &scope, fingerprint, unread_paths, defer_text_index)
             .await?;
         let _ = self.reclaim_free_pages().await;
         let _ = self.checkpoint().await;
@@ -1585,7 +1589,7 @@ mod tests {
             "a completed build carries its date"
         );
 
-        store.begin_build(Reindex::InPlace).await.unwrap();
+        store.begin_build(Reindex::InPlace, false).await.unwrap();
 
         let interrupted = store.stats().await.unwrap();
         assert_eq!(
@@ -2180,7 +2184,7 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 1);
 
-        reader.begin_build(Reindex::InPlace).await.unwrap();
+        reader.begin_build(Reindex::InPlace, false).await.unwrap();
         assert!(matches!(
             builder
                 .search_content("handle_probe", 10, &[Language::Rust])
@@ -2397,6 +2401,75 @@ mod tests {
         assert_eq!(store.matching_lines("findable_token").await, 1);
     }
 
+    #[tokio::test]
+    async fn clear_recovers_an_interrupted_deferred_text_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn interrupted_token() {}\n")
+            .await
+            .unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        store.begin_build(Reindex::FromScratch, true).await.unwrap();
+        store.index_file(&file).await.unwrap();
+        assert!(store.text_index_integrity().await.is_err());
+        drop(store);
+
+        let reopened = Store::open(root, StoreConfig::default()).await.unwrap();
+        assert_eq!(reopened.text_index_trigger_count().await, 0);
+        reopened.clear().await.unwrap();
+        reopened.text_index_integrity().await.unwrap();
+        assert_eq!(reopened.text_index_trigger_count().await, 3);
+        let stats = reopened.stats().await.unwrap();
+        assert_eq!(stats.file_count, 0);
+        assert_eq!(stats.content_line_count, 0);
+        assert!(stats.languages.is_empty());
+        reopened.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(reopened.matching_lines("interrupted_token").await, 1);
+    }
+
+    #[tokio::test]
+    async fn opening_a_reader_preserves_a_deferred_builds_trigger_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("lib.rs");
+        tokio::fs::write(&file, "fn initial_token() {}\n")
+            .await
+            .unwrap();
+        let writer = Store::open(root, StoreConfig::default()).await.unwrap();
+        writer.index(IndexOptions::default()).await.unwrap();
+        let epoch = writer
+            .begin_build(Reindex::FromScratch, true)
+            .await
+            .unwrap();
+        writer.index_file(&file).await.unwrap();
+        let reader = Store::open(root, StoreConfig::default()).await.unwrap();
+        assert!(reader.build_scope().await.unwrap().is_none());
+        assert_eq!(reader.text_index_trigger_count().await, 0);
+
+        tokio::fs::write(&file, "fn finalized_token() {}\n")
+            .await
+            .unwrap();
+        writer.index_file(&file).await.unwrap();
+        writer
+            .publish_build(epoch, &BuildScope::All, String::new(), Vec::new(), true)
+            .await
+            .unwrap();
+        reader.text_index_integrity().await.unwrap();
+        assert_eq!(reader.text_index_trigger_count().await, 3);
+        assert_eq!(reader.matching_lines("initial_token").await, 0);
+        assert_eq!(reader.matching_lines("finalized_token").await, 1);
+
+        tokio::fs::write(&file, "fn refreshed_token() {}\n")
+            .await
+            .unwrap();
+        reader.refresh_files(&[file]).await.unwrap();
+        writer.text_index_integrity().await.unwrap();
+        assert_eq!(writer.matching_lines("refreshed_token").await, 1);
+        assert_eq!(writer.matching_lines("finalized_token").await, 0);
+    }
+
     /// The classification the replacement decision rests on: only SQLite's
     /// own verdict that the file is not a database sends it down the
     /// destructive path, and a locked store is a retryable condition
@@ -2474,19 +2547,25 @@ mod tests {
             .unwrap();
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
 
-        let overtaken = store.begin_build(Reindex::InPlace).await.unwrap();
+        let overtaken = store.begin_build(Reindex::InPlace, false).await.unwrap();
         store.clear().await.unwrap();
         assert!(matches!(
             store
-                .publish_build(overtaken, &BuildScope::All, String::new(), Vec::new())
+                .publish_build(
+                    overtaken,
+                    &BuildScope::All,
+                    String::new(),
+                    Vec::new(),
+                    false
+                )
                 .await,
             Err(StoreError::AlreadyIndexing)
         ));
         assert!(store.build_scope().await.unwrap().is_none());
 
-        let owned = store.begin_build(Reindex::InPlace).await.unwrap();
+        let owned = store.begin_build(Reindex::InPlace, false).await.unwrap();
         store
-            .publish_build(owned, &BuildScope::All, String::new(), Vec::new())
+            .publish_build(owned, &BuildScope::All, String::new(), Vec::new(), false)
             .await
             .unwrap();
         assert_eq!(store.build_scope().await.unwrap(), Some(BuildScope::All));

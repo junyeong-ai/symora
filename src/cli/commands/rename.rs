@@ -48,24 +48,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
         return Ok(());
     }
 
-    // Strategy: prepareRename > find_symbols > hover
     let old_name = get_symbol_name_at_position(app, &loc).await;
-
-    if let Some(ref current) = old_name
-        && current == &args.new_name
-    {
-        let response = RenameOutput {
-            old_name: old_name.clone(),
-            new_name: args.new_name,
-            dry_run: true,
-            affected_files: 0,
-            changes: vec![],
-            message: Some("Symbol is already named the same. No changes needed.".to_string()),
-            indexing: None,
-        };
-        ctx.print_success(response);
-        return Ok(());
-    }
 
     let answer = match app
         .lsp
@@ -185,14 +168,7 @@ async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<
         return Some(sym.name.clone());
     }
 
-    // 3. Fall back to hover (least reliable)
-    app.lsp
-        .hover(&loc.file, loc.line, loc.column)
-        .await
-        .ok()
-        .and_then(|hover| hover.data)
-        .and_then(|h| h.extract_symbol_name())
-        .filter(|s| !s.is_empty())
+    None
 }
 
 #[cfg(test)]

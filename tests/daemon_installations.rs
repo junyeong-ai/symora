@@ -22,9 +22,13 @@ fn copy_binary(destination: &Path) {
 }
 
 fn command(exe: &Path, home: &Path, action: &str) -> Command {
+    project_command(exe, home, &["daemon", action])
+}
+
+fn project_command(exe: &Path, home: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(exe);
     command
-        .args(["daemon", action])
+        .args(args)
         .current_dir(home)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home)
@@ -352,14 +356,138 @@ fn read_request(stream: &std::os::unix::net::UnixStream) -> symora::daemon::prot
 }
 
 fn search_command(exe: &Path, home: &Path) -> Command {
-    let mut command = Command::new(exe);
-    command
-        .args(["--format", "compact", "search", "content", "needle"])
-        .current_dir(home)
-        .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home)
-        .env_remove("SYMORA_NO_DAEMON");
-    command
+    project_command(
+        exe,
+        home,
+        &["--format", "compact", "search", "content", "needle"],
+    )
+}
+
+#[test]
+fn concurrent_readers_cannot_replace_a_mutation_request_snapshot() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let python = Path::new("/usr/bin/python3");
+    if !Command::new(python)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("concurrent edit protocol fixture requires /usr/bin/python3");
+        return;
+    }
+
+    for mode in ["concurrent-rename", "concurrent-resolve"] {
+        let home = tempfile::tempdir().unwrap();
+        let exe = home.path().join("symora");
+        copy_binary(&exe);
+        let _cleanup = Daemons {
+            home: home.path().to_path_buf(),
+            binaries: vec![exe.clone()],
+        };
+        let root = home.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let alias = home.path().join("project-alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let source = root.join("main.go");
+        std::fs::write(&source, "package main\nfunc abc() {}\n").unwrap();
+        std::fs::write(
+            root.join("go.mod"),
+            "module example.com/fixture\n\ngo 1.25\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join(".symora")).unwrap();
+        let server =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp/code_action_server.py");
+        let config = serde_json::json!({"lsp": {"servers": {"go": {
+            "command": python, "args": [server, alias.join("main.go"), mode]
+        }}}});
+        let config: symora::models::config::SymoraConfig = serde_json::from_value(config).unwrap();
+        std::fs::write(
+            root.join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let args: &[&str] = if mode == "concurrent-rename" {
+            &["rename", "main.go:2:6", "renamed", "--format", "compact"]
+        } else {
+            &[
+                "actions",
+                "apply",
+                "main.go:2:6",
+                "Rename first token",
+                "--format",
+                "compact",
+            ]
+        };
+        let mut mutation = project_command(&exe, home.path(), args)
+            .current_dir(&root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !root.join("ready").exists() {
+            if mutation.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                let _ = mutation.kill();
+                let output = mutation.wait_with_output().unwrap();
+                panic!(
+                    "{mode} did not reach its request barrier: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let reader = project_command(
+            &exe,
+            home.path(),
+            &["hover", "main.go:2:6", "--format", "compact"],
+        )
+        .current_dir(&root)
+        .output()
+        .unwrap();
+        assert!(
+            reader.status.success(),
+            "{mode}: {}{}",
+            String::from_utf8_lossy(&reader.stdout),
+            String::from_utf8_lossy(&reader.stderr)
+        );
+        let reader_payload: serde_json::Value = serde_json::from_slice(&reader.stdout).unwrap();
+        assert!(
+            reader_payload.get("error").is_none(),
+            "{mode}: {reader_payload}"
+        );
+        assert!(
+            root.join("changed").exists(),
+            "{mode} did not sync the external change"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while mutation.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = mutation.kill();
+                let output = mutation.wait_with_output().unwrap();
+                panic!(
+                    "{mode} did not reject its changed request: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = mutation.wait_with_output().unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{mode}: {payload}");
+        assert!(payload.get("error").is_some(), "{mode}: {payload}");
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "package main\nfunc prefixabc() {}\n",
+            "{mode}: {payload}"
+        );
+    }
 }
 
 #[test]

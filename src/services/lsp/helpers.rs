@@ -51,6 +51,42 @@ pub(super) async fn read_file_validated(
     String::from_utf8(bytes).map_err(|_| not_text())
 }
 
+pub(super) fn verify_document_snapshot(
+    file: &Path,
+    content: &str,
+    expected_hash: Option<u64>,
+) -> Result<(), LspError> {
+    if expected_hash.is_none_or(|expected| crate::infra::hash_content(content) != expected) {
+        return Err(LspError::ServerError {
+            code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+            message: format!(
+                "Edit request document changed: {}. Request fresh edits.",
+                file.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn verify_workspace_edit_target(
+    file: &Path,
+    expected_hash: Option<u64>,
+    snapshots: &std::collections::HashMap<PathBuf, String>,
+) -> Result<(), LspError> {
+    let canonical = file.canonicalize()?;
+    let mut found = false;
+    for (path, content) in snapshots {
+        if path == file || path.canonicalize()? == canonical {
+            verify_document_snapshot(file, content, expected_hash)?;
+            found = true;
+        }
+    }
+    if !found {
+        verify_document_snapshot(file, &std::fs::read_to_string(file)?, expected_hash)?;
+    }
+    Ok(())
+}
+
 pub(super) async fn read_line_streaming(file: &Path, target_line: u32) -> Option<String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -457,6 +493,63 @@ pub fn find_containing_callable(symbols: &[Symbol], target_line: u32) -> Option<
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn edit_response_keeps_the_request_baseline_after_an_overlay_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.go");
+        let request_content = "abc()\n";
+        std::fs::write(&file, request_content).unwrap();
+        let expected_hash = Some(crate::infra::hash_content(request_content));
+        let mut snapshots =
+            std::collections::HashMap::from([(file.to_path_buf(), request_content.to_string())]);
+        assert!(verify_workspace_edit_target(&file, expected_hash, &snapshots).is_ok());
+
+        snapshots.insert(file.to_path_buf(), "prefixabc()\n".to_string());
+        let error = verify_workspace_edit_target(&file, expected_hash, &snapshots).unwrap_err();
+        assert_eq!(error.error_code(), LspError::CONTENT_MODIFIED_ERROR_CODE);
+        assert!(error.to_string().contains("main.go"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edit_response_checks_every_alias_of_the_request_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.go");
+        let alias = dir.path().join("alias.go");
+        std::fs::write(&file, "abc()\n").unwrap();
+        std::os::unix::fs::symlink(&file, &alias).unwrap();
+        let expected = Some(crate::infra::hash_content("abc()\n"));
+        let snapshots = std::collections::HashMap::from([
+            (file.clone(), "abc()\n".to_string()),
+            (alias, "prefixabc()\n".to_string()),
+        ]);
+        assert_eq!(
+            verify_workspace_edit_target(&file, expected, &snapshots)
+                .unwrap_err()
+                .error_code(),
+            LspError::CONTENT_MODIFIED_ERROR_CODE
+        );
+    }
+
+    #[test]
+    fn edits_to_other_files_still_validate_the_request_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.go");
+        let other = dir.path().join("other.go");
+        std::fs::write(&file, "abc()\n").unwrap();
+        std::fs::write(&other, "other()\n").unwrap();
+        let expected = Some(crate::infra::hash_content("abc()\n"));
+        let snapshots = std::collections::HashMap::from([(other, "other()\n".to_string())]);
+        assert!(verify_workspace_edit_target(&file, expected, &snapshots).is_ok());
+        std::fs::write(&file, "prefixabc()\n").unwrap();
+        assert_eq!(
+            verify_workspace_edit_target(&file, expected, &snapshots)
+                .unwrap_err()
+                .error_code(),
+            LspError::CONTENT_MODIFIED_ERROR_CODE
+        );
+    }
 
     #[test]
     fn to_lsp_position_encodes_the_column_for_the_wire() {

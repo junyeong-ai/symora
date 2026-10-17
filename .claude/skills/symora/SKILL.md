@@ -1,7 +1,7 @@
 ---
 name: symora
 metadata:
-  version: 0.28.0
+  version: 0.29.0
 description: Use the symora CLI for symbol discovery, exact code navigation, references, caller graphs, context, and symbol-aware edits.
 allowed-tools: Bash(symora *)
 ---
@@ -88,7 +88,7 @@ symora diagnostics src/auth.py --with-context --with-suggestions
 - Symbol/range edit previews contain exact hunks. Rename and code-action previews report affected files and edit counts.
 - `delete --expect-no-references` refuses when reference freedom is not verified. A zero static reference count alone does not prove runtime unreachability.
 - Applied edits can attach `--with-diagnostics`; symbol replacement/insertion can also use `--verify-callers`. `unconfirmed`, `unsupported`, or `unavailable` diagnostics are not a clean result. Project type checking and tests remain necessary for behavior changes.
-- Edits in one project are serialized. Files are checked for observed changes before replacement. Multi-file application is not an atomic filesystem transaction; on failure inspect the named files already modified before retrying.
+- Edits in one project are serialized. Files are checked for observed changes before replacement. An unversioned edit to another project file not open in the language server has no verifiable server-time source baseline. Multi-file application is not an atomic filesystem transaction; on failure inspect the named files already modified before retrying.
 
 ## Recover from errors
 
