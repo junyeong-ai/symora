@@ -86,15 +86,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS content_lines_fts USING fts5(
 );
 "#;
 
-/// The triggers that keep the text index in lockstep with `content_lines`
-/// through every mutation site — including the bulk paths that bypass the
-/// per-file helpers — so it can never desync.
-///
-/// Applied on open, so a build that dropped them and did not finish has them
-/// back before anything else runs. Kept apart from `INIT_SCHEMA` because a
-/// build that writes most of the content table drops them for the duration:
-/// row by row the text index costs an order of magnitude more than built once
-/// from the rows themselves, and `REBUILD_TEXT_INDEX` is what it is left to.
+/// Maintain the text index during per-file writes. A deferred build disables
+/// these atomically with its completion marker and restores them in the same
+/// transaction that rebuilds FTS and publishes completion. Opening a reader
+/// must leave an incomplete build's trigger state untouched.
 pub const TEXT_INDEX_TRIGGERS: &str = r#"
 CREATE TRIGGER IF NOT EXISTS content_lines_ai AFTER INSERT ON content_lines BEGIN
     INSERT INTO content_lines_fts(rowid, content) VALUES (new.id, new.content);

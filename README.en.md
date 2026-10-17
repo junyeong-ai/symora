@@ -263,7 +263,7 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```
 > `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
 
-Source edits serialize project writers and reject changes to the content they read. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
+Source edits serialize project writers and reject changes to the content they read. An unversioned edit to another project file not open in the language server has no verifiable server-time source baseline. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
 
 ### ⑥ Make the change — preview before you write
 

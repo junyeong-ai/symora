@@ -145,6 +145,11 @@ pub(super) async fn rename(
                 });
                 let result: serde_json::Value = client.request("textDocument/rename", Some(params)).await?;
                 let snapshots = client.validate_workspace_edit(&result).await?;
+                verify_workspace_edit_target(
+                    &file,
+                    Some(crate::infra::hash_content(&content)),
+                    &snapshots,
+                )?;
                 Ok(Indexed::new(
                     (result, client.position_encoding().await, snapshots),
                     ran_under,
