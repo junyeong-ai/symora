@@ -19,7 +19,7 @@ Mutating tools include `replace_symbol_body`, `insert_before_symbol`, `insert_af
 
 Use `get_diagnostics` after editing, or request with_diagnostics on the edit. Unconfirmed, unsupported, or unavailable diagnostics are unknown, not clean. Project type checking and tests still verify behavior. get_context with_bodies attaches complete source: target unbudgeted, callees/types under body_tokens. Missing bodies can also be unresolvable or absent in source.
 
-Errors use {code, message, hint}. A conflict means changed content or a held resource: wait as directed, re-read, then retry. A precondition_failed needs its condition repaired. An unsupported capability needs an alternative, not repeated calls. A degraded_column must be verified before use as an edit address. Whole list items may be dropped to meet the response size ceiling; follow its hint or narrow the query.";
+Errors use {code, message, hint}. A conflict means changed content or a held resource: wait as directed, re-read, then retry. A cancelled response with a content-change hint requires re-reading the source and resolving the target before requesting fresh edits; unchanged coordinates may address another symbol. A precondition_failed needs its condition repaired. An unsupported capability needs an alternative, not repeated calls. A degraded_column must be verified before use as an edit address. Whole list items may be dropped to meet the response size ceiling; follow its hint or narrow the query.";
 
 #[cfg(test)]
 mod tests {

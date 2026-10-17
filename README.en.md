@@ -195,7 +195,7 @@ symora context src/services/checkout.ts:48 --all
   "tests":   { "count": 2, "showing": 2, "items": [ /* processesAnOrder, processesTwice */ ] }
 }
 ```
-> You now see the implementation, its 5 references across 3 files (3 of them in tests), and the 2 tests that call it — without opening a single file. `is_exported` reads a TypeScript declaration's own `export`, so a class method is `false`.
+> You now see the implementation, its 5 references across 3 files (3 of them in tests), and the 2 tests that call it — without opening a single file. `is_exported` reads a TypeScript declaration's own `export`, so a class method is `false`. It does not establish accessibility through enclosing types, modules, or re-exports; an undetermined value is omitted.
 
 ### ④ Who calls it?
 
@@ -545,7 +545,7 @@ Run `symora <command> --help` for any command's flags. Output fields are describ
 
 | Symptom | Fix |
 | --- | --- |
-| `count: 0` from `search …` | `symora search index status`; an empty `languages` means no build has completed — run `symora search index build`. A language absent from it was answered by a language server, not the index. |
+| `count: 0` from `search …` | Check `symora search index status` and the response's hints and `coverage_gaps`. An empty `languages` means no symbol build has completed — run `symora search index build`. Outside indexed coverage, symbol search may consult a language server; content search scans files. `--deterministic` never consults a language server. |
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. |
 | `coverage_gaps` on a search | That language is missing from the answer. With `reason: "unavailable"`, `message` carries the failure's first line (for a server that rejected `initialize`, its reason), and the hints and `next_commands` lead with the languages whose lookup failed. |
 | `indexing: "timed_out"` | The language server is still reading the workspace. On a list the count is a lower bound; on a single answer (`def`, `hover`) an empty result means not settled yet, not nothing there. Retry once it's warm. `rename` refuses to apply under it and previews instead — a partial edit set renames some call sites and leaves the rest. |
