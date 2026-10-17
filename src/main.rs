@@ -97,7 +97,7 @@ fn parse_cli() -> anyhow::Result<Cli> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    let cli = parse_cli()?;
+    let mut cli = parse_cli()?;
 
     let format =
         if std::env::var(symora::constants::env::FORMAT_OVERRIDE).as_deref() == Ok("compact") {
@@ -119,7 +119,11 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     if let Some(name) = cli.workspace.as_deref() {
-        return run_workspace_dispatch(name, output_options).await;
+        return run_workspace_dispatch(name, output_options, &mut cli.command).await;
+    }
+
+    if let Some(input) = read_edit_stdin(&mut cli.command)? {
+        *edit_payload(&mut cli.command).unwrap() = input;
     }
 
     #[cfg(unix)]
@@ -172,7 +176,39 @@ async fn async_main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_workspace_dispatch(name: &str, output_options: OutputOptions) -> anyhow::Result<()> {
+fn edit_payload(command: &mut Commands) -> Option<&mut String> {
+    use symora::cli::commands::edit::EditCommand;
+
+    let Commands::Edit(args) = command else {
+        return None;
+    };
+    match &mut args.command {
+        EditCommand::ReplaceBody { body: value, .. }
+        | EditCommand::InsertBefore { code: value, .. }
+        | EditCommand::InsertAfter { code: value, .. }
+        | EditCommand::Replace { text: value, .. }
+        | EditCommand::Pattern { text: value, .. } => Some(value),
+        EditCommand::Delete { .. } => None,
+    }
+}
+
+fn read_edit_stdin(command: &mut Commands) -> anyhow::Result<Option<String>> {
+    use std::io::Read;
+
+    if edit_payload(command).is_some_and(|value| value == "-") {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        Ok(Some(input))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn run_workspace_dispatch(
+    name: &str,
+    output_options: OutputOptions,
+    command: &mut Commands,
+) -> anyhow::Result<()> {
     use symora::cli::OutputContext;
     use symora::cli::workspace::{WorkspaceConfig, run_workspace, strip_workspace_flag};
 
@@ -182,7 +218,8 @@ async fn run_workspace_dispatch(name: &str, output_options: OutputOptions) -> an
     let argv: Vec<String> = std::env::args().collect();
     let forwarded = strip_workspace_flag(argv).into_iter().skip(1).collect();
 
-    let envelope = run_workspace(ws, &exe, forwarded).await;
+    let input = read_edit_stdin(command)?;
+    let envelope = run_workspace(ws, &exe, forwarded, input).await;
     let any_failed = envelope
         .get("items")
         .and_then(|r| r.as_array())

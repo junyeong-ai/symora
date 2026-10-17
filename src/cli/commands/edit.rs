@@ -11,7 +11,7 @@
 //! AST layer's byte columns are converted before they reach the core).
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -249,7 +249,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             with_diagnostics,
             verify_callers,
         } => {
-            let body = read_payload(&body)?;
             let addressed = resolve_symbol(app, &target, symbol).await?;
             symbol_edit(
                 app,
@@ -274,7 +273,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             with_diagnostics,
             verify_callers,
         } => {
-            let code = read_payload(&code)?;
             let addressed = resolve_symbol(app, &target, symbol).await?;
             symbol_edit(
                 app,
@@ -299,7 +297,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             with_diagnostics,
             verify_callers,
         } => {
-            let code = read_payload(&code)?;
             let addressed = resolve_symbol(app, &target, symbol).await?;
             symbol_edit(
                 app,
@@ -341,7 +338,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             dry_run,
             with_diagnostics,
         } => {
-            let text = read_payload(&text)?;
             let start_loc =
                 ParsedLocation::parse(&start)?.to_absolute_with_root(Some(app.root()))?;
             let (end_line, end_col) = match end {
@@ -387,10 +383,7 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
             text,
             index,
             dry_run,
-        } => {
-            let text = read_payload(&text)?;
-            pattern_edit(app, &file, &pattern, &lang, &text, &index, dry_run).await
-        }
+        } => pattern_edit(app, &file, &pattern, &lang, &text, &index, dry_run).await,
     }
 }
 
@@ -1334,16 +1327,6 @@ fn split_merged_lines(text: &str) -> Vec<String> {
 
 fn to_lines(text: &str) -> Vec<String> {
     text.lines().map(String::from).collect()
-}
-
-fn read_payload(value: &str) -> Result<String> {
-    if value == "-" {
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf)?;
-        Ok(buf)
-    } else {
-        Ok(value.to_string())
-    }
 }
 
 /// Validate a file for editing. Existence and the size cap always apply;

@@ -3676,3 +3676,92 @@ fn unrelated_hover_text_cannot_suppress_a_rename() {
         "package main\nfunc Renamed() {}\nfunc caller() { Renamed() }\n"
     );
 }
+
+#[test]
+fn stdin_edit_payload_is_interpreted_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("a.txt");
+    std::fs::write(&file, "original\n").unwrap();
+    let mut child = Command::new(SYMORA)
+        .args(["edit", "replace", "a.txt:1:1", "--text", "-"])
+        .current_dir(directory.path())
+        .env("SYMORA_NO_DAEMON", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"-").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "-\n");
+}
+
+#[test]
+fn workspace_edits_deliver_stdin_to_each_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let roots: Vec<_> = ["first root", "두번째"]
+        .map(|name| directory.path().join(name))
+        .to_vec();
+    for root in &roots {
+        std::fs::create_dir(root).unwrap();
+    }
+    let config = directory.path().join("config");
+    let workspaces = config.join("symora/workspaces");
+    std::fs::create_dir_all(&workspaces).unwrap();
+    for (input, partial) in [("-".to_string(), true), ("문자".repeat(32768), false)] {
+        for root in &roots {
+            std::fs::write(root.join("a.txt"), "original\n").unwrap();
+        }
+        let mut configured = roots.clone();
+        if partial {
+            configured.push(directory.path().join("missing"));
+        }
+        let paths: Vec<_> = configured
+            .iter()
+            .map(|p| serde_json::to_string(p).unwrap())
+            .collect();
+        std::fs::write(
+            workspaces.join("fixture.toml"),
+            format!("roots = [{}]\n", paths.join(",")),
+        )
+        .unwrap();
+        let mut child = Command::new(SYMORA)
+            .args([
+                "--workspace",
+                "fixture",
+                "edit",
+                "replace",
+                "a.txt:1:1",
+                "--text",
+                "-",
+            ])
+            .current_dir(directory.path())
+            .env("SYMORA_NO_DAEMON", "1")
+            .env("XDG_CONFIG_HOME", &config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.success(), !partial, "{:?}", output);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["items"].as_array().unwrap().len(), configured.len());
+        for root in &roots {
+            assert_eq!(
+                std::fs::read_to_string(root.join("a.txt")).unwrap(),
+                format!("{input}\n")
+            );
+        }
+        if partial {
+            assert!(json["items"][2].get("error").is_some());
+        }
+    }
+}
