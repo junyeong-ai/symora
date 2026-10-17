@@ -132,10 +132,12 @@ pub async fn run_workspace(
     ws: WorkspaceConfig,
     exe: &Path,
     forwarded_args: Vec<String>,
+    stdin: Option<String>,
 ) -> serde_json::Value {
     use futures::stream::{self, StreamExt};
 
     let args = std::sync::Arc::new(forwarded_args);
+    let stdin = stdin.map(std::sync::Arc::<str>::from);
     let exe = exe.to_path_buf();
 
     // Capped concurrency: prevents a 100-root workspace from forking
@@ -147,7 +149,8 @@ pub async fn run_workspace(
         .map(|(idx, root)| {
             let exe = exe.clone();
             let args = args.clone();
-            async move { (idx, run_one_root(&exe, root, &args).await) }
+            let stdin = stdin.clone();
+            async move { (idx, run_one_root(&exe, root, &args, stdin.as_deref()).await) }
         })
         .buffer_unordered(WORKSPACE_FANOUT)
         .collect()
@@ -164,20 +167,53 @@ pub async fn run_workspace(
     })
 }
 
-async fn run_one_root(exe: &Path, root: &Path, args: &[String]) -> serde_json::Value {
+async fn run_one_root(
+    exe: &Path,
+    root: &Path,
+    args: &[String],
+    input: Option<&str>,
+) -> serde_json::Value {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
     let mut cmd = tokio::process::Command::new(exe);
     cmd.args(args);
     cmd.current_dir(root);
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     // Force compact JSON inside the child so the envelope stays
     // single-line for the host process to embed.
     cmd.env(FORMAT_OVERRIDE, "compact");
 
-    let output = match cmd.output().await {
+    let output = async {
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take();
+        let write_input = async {
+            if let Some(mut stdin) = stdin {
+                stdin.write_all(input.unwrap().as_bytes()).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (output, written) = tokio::join!(child.wait_with_output(), write_input);
+        let output = output?;
+        if output.status.success() {
+            written?;
+        }
+        Ok::<_, std::io::Error>(output)
+    }
+    .await;
+    let output = match output {
         Ok(o) => o,
         Err(e) => {
             return serde_json::json!({
                 "root": root.display().to_string(),
-                "error": format!("Failed to spawn child: {e}"),
+                "error": format!("Failed to run child: {e}"),
             });
         }
     };

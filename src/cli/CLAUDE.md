@@ -42,6 +42,8 @@ Depth-bounded call-graph walks share one core, `src/cli/call_graph.rs` (`walk` o
 
 Every command that splices source text by symbol or range lives in `commands/edit.rs`, sharing one root-validated resolution path, one validation gate, one splice core (`LineSplice`), one preview format (an exact hunk derived from the splice — never a re-diff), and one typed output (`EditOutput`). Don't add a second file-writing command; add a subcommand that reduces to the splice core. Previews and safety checks (dangling references on `delete`, optional `--with-diagnostics`) run on the same path for every operation — the destructive path never gets to skip them.
 
+Resolve `-` as stdin only at the CLI boundary, before taking a write lock. Shared edit commands receive literal content, including `-` from MCP. Workspace dispatch reads input once and delivers it to every child.
+
 Commands that apply *LSP-computed* edits — `rename`, `actions apply`, `format` — keep their own command files and output types, but must route the actual write through `edit.rs`: `apply_text_edits` (overlap-checked, CRLF- and multibyte-correct) for a single file and `apply_workspace_edits` for a multi-file edit. Source replacement uses `write_file` with the observed original content so it checks for conflicts before atomic replacement. `atomic_write` omits that precondition and serves host-config writes such as `setup mcp`; do not use it to bypass source revision checks.
 
 ## Fallback messaging on weak LSP servers

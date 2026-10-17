@@ -103,6 +103,60 @@ pub async fn dispatch(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn edit_payloads_are_literal_even_when_they_are_a_dash() {
+        for (name, field, expected) in [
+            ("replace_symbol_body", "body", "-\n"),
+            (
+                "insert_before_symbol",
+                "code",
+                "-\nhello() {\n  echo hi\n}\n",
+            ),
+            (
+                "insert_after_symbol",
+                "code",
+                "hello() {\n  echo hi\n}\n-\n",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("a.sh");
+            let original = "hello() {\n  echo hi\n}\n";
+            std::fs::write(&file, original).unwrap();
+            let app = App::new_at(
+                directory.path().to_path_buf(),
+                crate::cli::OutputOptions::default(),
+                crate::app::Wiring {
+                    use_daemon: false,
+                    deterministic: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            for dry_run in [true, false] {
+                let mut arguments = serde_json::json!({
+                    "file": "a.sh", "symbol": "hello", "dry_run": dry_run,
+                });
+                arguments[field] = Value::String("-".to_string());
+                let result = dispatch(name, arguments, &app, McpProfile::Full)
+                    .await
+                    .unwrap();
+                assert!(!result.is_error, "{}", result.structured.unwrap());
+                if dry_run {
+                    assert!(
+                        result.structured.unwrap()["preview"]
+                            .as_str()
+                            .unwrap()
+                            .contains("+-")
+                    );
+                    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+                } else {
+                    assert_eq!(std::fs::read_to_string(&file).unwrap(), expected);
+                }
+            }
+        }
+    }
+
     #[test]
     fn sdk_catalog_preserves_the_cli_contract() {
         for tool in catalog() {
