@@ -1,7 +1,7 @@
 ---
 name: symora
 metadata:
-  version: 0.30.0
+  version: 0.30.1
 description: Use the symora CLI for symbol discovery, exact code navigation, references, caller graphs, context, and symbol-aware edits.
 allowed-tools: Bash(symora *)
 ---
