@@ -227,6 +227,10 @@ async fn run_workspace_dispatch(
         .unwrap_or(false);
 
     let cwd = std::env::current_dir()?;
+    let output_options = OutputOptions {
+        quiet: output_options.quiet && !any_failed,
+        ..output_options
+    };
     OutputContext::new(cwd, output_options).print_success(envelope);
 
     if any_failed {

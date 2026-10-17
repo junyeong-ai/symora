@@ -36,7 +36,7 @@ Keep these meanings distinct:
 | Field | Meaning |
 |---|---|
 | `backend` | Producer: `index`, `workspace`, `document`, `scan`, or `ast`, according to the surface |
-| `stale` | An emitted index row came from a file changed since indexing |
+| `stale` | Consulted index rows came from files changed since indexing; retained conservatively after partial response-size fitting |
 | `incomplete` | The answer did not enumerate everything its own sources held |
 | `coverage_gaps` | Named languages could not be covered, with a machine-readable reason |
 | `indexing` | An LSP-dependent query ran under degraded workspace analysis |

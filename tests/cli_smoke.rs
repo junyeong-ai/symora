@@ -3765,3 +3765,55 @@ fn workspace_edits_deliver_stdin_to_each_root() {
         }
     }
 }
+
+#[test]
+fn quiet_workspace_failures_preserve_per_root_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let good = directory.path().join("good");
+    let bad = directory.path().join("bad");
+    for root in [&good, &bad] {
+        std::fs::create_dir(root).unwrap();
+    }
+    std::fs::write(good.join("a.rs"), "fn present() {}\n").unwrap();
+    let config = directory.path().join("config");
+    let workspaces = config.join("symora/workspaces");
+    std::fs::create_dir_all(&workspaces).unwrap();
+    let run = |roots: &[&std::path::Path]| {
+        let paths: Vec<_> = roots
+            .iter()
+            .map(|p| serde_json::to_string(p).unwrap())
+            .collect();
+        std::fs::write(
+            workspaces.join("fixture.toml"),
+            format!("roots = [{}]\n", paths.join(",")),
+        )
+        .unwrap();
+        Command::new(SYMORA)
+            .args([
+                "--deterministic",
+                "--workspace",
+                "fixture",
+                "-q",
+                "symbols",
+                "a.rs",
+            ])
+            .current_dir(directory.path())
+            .env("SYMORA_NO_DAEMON", "1")
+            .env("XDG_CONFIG_HOME", &config)
+            .output()
+            .unwrap()
+    };
+    let success = run(&[&good]);
+    assert!(success.status.success(), "{:?}", success);
+    assert!(success.stdout.is_empty());
+    for roots in [vec![bad.as_path()], vec![good.as_path(), bad.as_path()]] {
+        let failure = run(&roots);
+        assert!(!failure.status.success());
+        let envelope: serde_json::Value = serde_json::from_slice(&failure.stdout).unwrap();
+        let items = envelope["items"].as_array().unwrap();
+        assert_eq!(items.len(), roots.len());
+        let failed = items.last().unwrap();
+        assert!(failed.get("error").is_some());
+        assert_eq!(failed["data"]["error"]["code"], "not_found");
+    }
+}
