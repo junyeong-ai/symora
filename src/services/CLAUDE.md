@@ -36,6 +36,8 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 
 Both implementations of a trait must produce identical results for the same inputs — anything that diverges is a parity bug (invariant #3). A read against a missing store reports `NotInitialized` so the caller falls back to a filesystem scan; a present-but-unopenable store surfaces the real error.
 
+Rename captures its request-document hash before the retry loop and retains it across all attempts and server restarts.
+
 ## Symbol cache invalidation
 
 `SymbolCache` holds one entry per path, valid only while the file's content hash matches the one it was computed from, so editing a file invalidates its entry — don't add path-only invalidation paths that break this. Entries also expire after a TTL, and eviction is oldest-first by insertion time (`created_at`, not touched on read) at the `max_entries` cap; size limits are enforced, not advisory.

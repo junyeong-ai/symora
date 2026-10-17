@@ -118,6 +118,8 @@ pub(super) async fn rename(
     let new_name = new_name.to_string();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
+    let expected_hash =
+        crate::infra::hash_content(&read_file_validated(&file, max_file_size).await?);
 
     let Indexed {
         data: (result, encoding, snapshots),
@@ -130,6 +132,7 @@ pub(super) async fn rename(
             let manager = Arc::clone(&manager);
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
+                verify_document_snapshot(&file, &content, Some(expected_hash))?;
                 // Rename rewrites references across the workspace, so wait for
                 // the index to settle before issuing it — the same gate the
                 // navigation queries use.
@@ -147,7 +150,7 @@ pub(super) async fn rename(
                 let snapshots = client.validate_workspace_edit(&result).await?;
                 verify_workspace_edit_target(
                     &file,
-                    Some(crate::infra::hash_content(&content)),
+                    Some(expected_hash),
                     &snapshots,
                 )?;
                 Ok(Indexed::new(

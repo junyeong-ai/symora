@@ -71,7 +71,11 @@ while True:
         result = [action]
     elif concurrent and method in ("textDocument/rename", "codeAction/resolve"):
         if requested:
-            send(message["id"], error={"code": -32801, "message": "Request source changed"})
+            edit = workspace_edit()
+            edit["changes"][source.as_uri()][0]["range"]["end"]["character"] = 14
+            send(message["id"], edit if method == "textDocument/rename" else {
+                "title": "Rename first token", "edit": edit
+            })
             continue
         requested = True
         pending = (message["id"], method)
