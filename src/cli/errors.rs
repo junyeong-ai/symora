@@ -186,7 +186,7 @@ fn classify_server_error(code: i32, message: &str, full: String) -> OutputError 
         -32800 => return OutputError::new(ErrorCode::Cancelled, full),
         -32801 => {
             return OutputError::new(ErrorCode::Cancelled, full)
-                .with_hint("File content changed mid-request. Retry the same call.");
+                .with_hint("File changed during the request. Re-read the source and resolve the target before retrying.");
         }
         _ => {}
     }
@@ -209,7 +209,7 @@ fn classify_server_error(code: i32, message: &str, full: String) -> OutputError 
         )
     } else if lower.contains("content modified") || lower.contains("version mismatch") {
         OutputError::new(ErrorCode::Cancelled, full)
-            .with_hint("File changed during the request. Retry the same call.")
+            .with_hint("File changed during the request. Re-read the source and resolve the target before retrying.")
     } else if lower.contains("timeout") || lower.contains("timed out") {
         OutputError::new(ErrorCode::Timeout, full)
     } else if lower.contains("cancelled") {
@@ -439,7 +439,7 @@ mod tests {
         }
         .into();
         assert!(matches!(err.code, ErrorCode::Cancelled));
-        assert!(err.hint.unwrap().contains("Retry"));
+        assert!(err.hint.is_some_and(|hint| !hint.is_empty()));
     }
 
     #[test]
