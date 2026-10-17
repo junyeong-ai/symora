@@ -94,3 +94,21 @@ impl Drop for FileLock {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn releasing_a_lock_does_not_wait_for_inherited_descriptors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("operation.lock");
+        let lock = FileLock::exclusive(&path).unwrap().unwrap();
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(FileLock::exclusive(&path).unwrap().is_none());
+        drop(lock);
+        let reacquired = FileLock::exclusive(&path).unwrap();
+        assert!(reacquired.is_some());
+        drop(inherited);
+    }
+}

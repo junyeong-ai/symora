@@ -22,6 +22,7 @@ use crate::cli::ParsedLocation;
 use crate::cli::declared_in;
 use crate::cli::response::{EditOutput, LineRange, Section};
 use crate::cli::utils::declared_with;
+use crate::infra::file_lock::FileLock;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
 use crate::utils::char_to_byte_index;
@@ -1755,20 +1756,12 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
     write_file(target, content, None)
 }
 
-pub(crate) fn lock_edits(root: &Path) -> Result<fs::File> {
-    let directory = root.join(".symora");
-    fs::create_dir_all(&directory)?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(directory.join("edit.lock"))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(fs::TryLockError::WouldBlock) => Err(stale_revision(
+pub(crate) fn lock_edits(root: &Path) -> Result<FileLock> {
+    match FileLock::exclusive(&root.join(".symora/edit.lock"))? {
+        Some(lock) => Ok(lock),
+        None => Err(stale_revision(
             "Another edit is running in this project; retry when it finishes".to_string(),
         )),
-        Err(fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
