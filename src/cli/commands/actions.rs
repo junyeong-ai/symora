@@ -41,7 +41,7 @@ pub struct ApplyArgs {
     /// File path with position (file:line:column)
     pub location: String,
 
-    /// Action title to apply (use 'list' to see available actions)
+    /// Exact, unique action title to apply (use 'list' to see available actions)
     pub title: String,
 
     /// Preview changes without applying
@@ -91,24 +91,18 @@ async fn execute_list(args: ListArgs, app: &App) -> Result<()> {
 }
 
 async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
+    let _lock = (!args.dry_run)
+        .then(|| super::edit::lock_edits(app.root()))
+        .transpose()?;
     let ctx = &app.output;
     let loc = ParsedLocation::parse(&args.location)?.to_absolute_with_root(Some(app.root()))?;
 
     match app.lsp.code_actions(&loc.file, loc.line, loc.column).await {
         Ok(actions) => {
-            // Find matching action by title (case-insensitive partial match)
-            let title_lower = args.title.to_lowercase();
-            let action = match actions
-                .iter()
-                .find(|a| a.title.to_lowercase().contains(&title_lower))
-            {
-                Some(a) => a,
-                None => {
-                    let available: Vec<_> = actions.iter().map(|a| a.title.as_str()).collect();
-                    ctx.print_error(OutputError::not_found(format!(
-                        "No action matching '{}' found. Available: {:?}",
-                        args.title, available
-                    )));
+            let action = match select_action(&actions, &args.title) {
+                Ok(action) => action,
+                Err(error) => {
+                    ctx.print_error(error);
                     return Ok(());
                 }
             };
@@ -153,4 +147,53 @@ async fn execute_apply(args: ApplyArgs, app: &App) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn select_action<'a>(
+    actions: &'a [crate::models::lsp::CodeAction],
+    title: &str,
+) -> Result<&'a crate::models::lsp::CodeAction, OutputError> {
+    let mut matches = actions.iter().filter(|action| action.title == title);
+    let action = matches.next().ok_or_else(|| {
+        OutputError::not_found(format!("No action with exact title '{title}' found"))
+            .with_hint("List the actions at this location and pass an exact title.")
+    })?;
+    if matches.next().is_some() {
+        return Err(OutputError::invalid(format!(
+            "Multiple actions have the title '{title}'; refusing to choose one"
+        )));
+    }
+    Ok(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::lsp::{CodeAction, CodeActionKind};
+
+    #[test]
+    fn action_selection_requires_a_unique_exact_title() {
+        let action = |title: &str| CodeAction {
+            expected_hash: None,
+            document_hashes: Default::default(),
+            title: title.to_string(),
+            kind: CodeActionKind::QuickFix,
+            is_preferred: false,
+            diagnostics: vec![],
+            edit: None,
+            data: None,
+        };
+        let actions = [
+            action("Remove unused import"),
+            action("Remove unused imports"),
+        ];
+        assert_eq!(
+            select_action(&actions, "Remove unused import")
+                .unwrap()
+                .title,
+            "Remove unused import"
+        );
+        assert!(select_action(&actions, "Remove unused").is_err());
+        assert!(select_action(&[action("Fix"), action("Fix")], "Fix").is_err());
+    }
 }

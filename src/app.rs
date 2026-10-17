@@ -152,7 +152,7 @@ impl App {
             if use_daemon { "enabled" } else { "disabled" }
         );
 
-        let test_scope = crate::services::TestScope::from_config(&config.test);
+        let test_scope = crate::services::TestScope::from_config(&config.test).with_root(&root);
 
         Ok(Self {
             root,

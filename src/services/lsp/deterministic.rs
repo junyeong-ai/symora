@@ -315,6 +315,8 @@ mod tests {
         declined_by("code_actions", s.code_actions(f, 1, 1).await.map(|_| ()));
         declined_by("format", s.format(f).await.map(|_| ()));
         let action = CodeAction {
+            expected_hash: None,
+            document_hashes: Default::default(),
             title: "t".to_string(),
             kind: CodeActionKind::default(),
             is_preferred: false,

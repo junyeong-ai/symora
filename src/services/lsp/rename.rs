@@ -8,7 +8,6 @@ use super::converters::*;
 use super::helpers::*;
 use super::position::encoded_offset_to_byte;
 use super::service::{DefaultLspService, degradation_of, ensure_indexed};
-use crate::infra::lsp::protocol::PositionEncoding;
 
 pub(super) async fn prepare_rename(
     service: &DefaultLspService,
@@ -115,23 +114,22 @@ pub(super) async fn rename(
     new_name: &str,
 ) -> Result<Indexed<Option<RenameResult>>, LspError> {
     let max_file_size = service.max_file_size_bytes();
-    let content = read_file_validated(file, max_file_size).await?;
     let uri = path_to_uri(file);
     let new_name = new_name.to_string();
     let file = file.to_path_buf();
     let manager = Arc::clone(&service.manager);
 
     let Indexed {
-        data: (result, encoding),
+        data: (result, encoding, snapshots),
         indexing,
-    }: Indexed<(serde_json::Value, PositionEncoding)> = service
+    } = service
         .execute_with_retry(&file, |client| {
             let uri = uri.clone();
-            let content = content.clone();
             let new_name = new_name.clone();
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
+                let content = read_file_validated(&file, max_file_size).await?;
                 // Rename rewrites references across the workspace, so wait for
                 // the index to settle before issuing it — the same gate the
                 // navigation queries use.
@@ -145,9 +143,10 @@ pub(super) async fn rename(
                     "position": to_lsp_position(line, column, &content, client.position_encoding().await),
                     "newName": new_name
                 });
-                let result = client.request("textDocument/rename", Some(params)).await?;
+                let result: serde_json::Value = client.request("textDocument/rename", Some(params)).await?;
+                let snapshots = client.validate_workspace_edit(&result).await?;
                 Ok(Indexed::new(
-                    (result, client.position_encoding().await),
+                    (result, client.position_encoding().await, snapshots),
                     ran_under,
                 ))
             }
@@ -166,6 +165,6 @@ pub(super) async fn rename(
         )));
     }
 
-    let changes = parse_workspace_edit(&result, encoding)?;
+    let changes = parse_workspace_edit_snapshot(&result, encoding, &snapshots)?;
     Ok(Indexed::new(Some(RenameResult { changes }), indexing))
 }

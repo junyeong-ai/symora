@@ -345,7 +345,7 @@ pub(super) async fn code_actions(
                     .request("textDocument/codeAction", Some(params))
                     .await?;
 
-                let actions = response
+                let mut actions: Vec<CodeAction> = response
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|v| {
@@ -367,6 +367,8 @@ pub(super) async fn code_actions(
                             .unwrap_or_default();
 
                         Some(CodeAction {
+                            expected_hash: Some(crate::infra::hash_content(&content)),
+                            document_hashes: Default::default(),
                             title,
                             kind: CodeActionKind::from(kind),
                             is_preferred,
@@ -377,6 +379,17 @@ pub(super) async fn code_actions(
                     })
                     .collect();
 
+                for action in &mut actions {
+                    if let Some(edit) = action.data.as_ref().and_then(|raw| raw.get("edit")) {
+                        for uri in workspace_edit_uris(edit) {
+                            let path = crate::models::lsp::uri_to_path(uri);
+                            let snapshot = read_file_validated(&path, max_file_size).await?;
+                            action
+                                .document_hashes
+                                .insert(uri.to_string(), crate::infra::hash_content(&snapshot));
+                        }
+                    }
+                }
                 Ok(actions)
             }
         })
@@ -398,13 +411,17 @@ pub(super) async fn apply_code_action(
     };
 
     let file = file.to_path_buf();
+    let expected_hash = action.expected_hash;
+    let document_hashes = action.document_hashes.clone();
 
     service
         .execute_with_retry(&file, |client| {
             let file = file.clone();
             let raw_action = raw_action.clone();
+            let document_hashes = document_hashes.clone();
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
+                verify_action_snapshot(&file, &content, expected_hash)?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
 
@@ -443,7 +460,18 @@ pub(super) async fn apply_code_action(
                     )));
                 }
 
-                let changes = parse_workspace_edit(&edit, client.position_encoding().await)?;
+                let snapshots = client.validate_workspace_edit(&edit).await?;
+                for (uri, hash) in &document_hashes {
+                    let path = crate::models::lsp::uri_to_path(uri);
+                    if let Some(content) = snapshots.get(&path) {
+                        verify_action_snapshot(&path, content, Some(*hash))?;
+                    }
+                }
+                let changes = parse_workspace_edit_snapshot(
+                    &edit,
+                    client.position_encoding().await,
+                    &snapshots,
+                )?;
                 Ok(ApplyActionResult { changes })
             }
         })
@@ -491,4 +519,69 @@ pub(super) async fn format(
             }
         })
         .await
+}
+
+fn verify_action_snapshot(
+    file: &Path,
+    content: &str,
+    expected_hash: Option<u64>,
+) -> Result<(), LspError> {
+    if expected_hash.is_none_or(|expected| crate::infra::hash_content(content) != expected) {
+        return Err(LspError::ServerError {
+            code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+            message: format!(
+                "Code action document changed: {}. Request fresh code actions.",
+                file.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn workspace_edit_uris(edit: &serde_json::Value) -> Vec<&str> {
+    if let Some(changes) = edit
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+    {
+        return changes
+            .iter()
+            .filter_map(|change| {
+                let edits = change.get("edits")?.as_array()?;
+                (!edits.is_empty())
+                    .then(|| change.get("textDocument")?.get("uri")?.as_str())
+                    .flatten()
+            })
+            .collect();
+    }
+    edit.get("changes")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|changes| {
+            changes.iter().filter_map(|(uri, edits)| {
+                edits
+                    .as_array()
+                    .is_some_and(|edits| !edits.is_empty())
+                    .then_some(uri.as_str())
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_actions_reject_changed_or_missing_request_snapshots() {
+        let file = Path::new("main.go");
+        let expected = Some(crate::infra::hash_content("abc()\n"));
+        assert!(verify_action_snapshot(file, "abc()\n", expected).is_ok());
+        assert_eq!(
+            verify_action_snapshot(file, "prefixabc()\n", expected)
+                .unwrap_err()
+                .error_code(),
+            LspError::CONTENT_MODIFIED_ERROR_CODE
+        );
+        assert!(verify_action_snapshot(file, "abc()\n", None).is_err());
+    }
 }

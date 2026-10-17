@@ -256,14 +256,14 @@ symora impact src/services/checkout.ts:48 --depth 2
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
       { "depth": 2, "count": 3, "test": 1, "prod": 2 }
     ],
-    "test_caller_ratio": 0.43,
-    "risk": "medium",
-    "confidence": 0.8
+    "test_caller_ratio": 0.43
   },
   "next_commands": ["symora impact src/services/checkout.ts:48:9 --depth 3"]
 }
 ```
-> Seven transitive callers, past the five that `medium` starts at, make `risk` `medium`; were the symbol exported (`is_exported: true`), the same graph would read `high`. `test_caller_ratio` is the share of callers in the graph that are test code. `max_depth_reached` is true, so the transitive caller graph is a lower bound and `confidence` stays at 0.8. The reference counts and `direct_callers` do not depend on depth, and with none of their own markers present (`incomplete`, `indexing`, `callers_truncated`, `dynamic_dispatch`) they are complete. The `--depth 3` in `next_commands` widens the graph by one level.
+> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
+
+Source edits serialize project writers and reject changes to the content they read. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
 
 ### ⑥ Make the change — preview before you write
 
@@ -373,9 +373,17 @@ Every command is built for machine parsing, and the rules are stable:
 
 ---
 
+`pack --tokens` and `--token-estimate` use a character-based approximation. They do not bound model-specific token counts or the entire JSON envelope.
+
+
+
+When the language server does not explicitly confirm workspace readiness, results carry `indexing: "unconfirmed"`. Log text, ended progress tasks, and elapsed time do not prove completion. A zero in this state does not prove absence. Rename can apply server-provided edits while preserving this marker; a timeout after explicit server activity blocks application.
+
 ## Search index
 
 Symora keeps a persistent SQLite index at `.symora/store.db` in each project.
+
+The index is a snapshot of the last build. Currency checks compare paths, sizes, and modification times; rebuild after changes preserving that metadata. Row-level `stale` markers cannot detect omitted new files. Positive results also carry currency hints when the working tree has changed.
 
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted
@@ -486,7 +494,7 @@ symora mcp tools                                 # tool catalog as JSON (schemas
 symora mcp tools --profile read-only             # what a read-only server would expose
 ```
 
-`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the tools that declare one, and a tool's output schema also describes the JSON the matching CLI command emits. Tools that write are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and every one that edits source supports `dry_run` (`build_index`, which only rebuilds the index, does not). The server's `initialize` response carries the full usage playbook (tool sequencing, edit addressing, error recovery), so a connected agent needs no extra setup.
+`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the tools that declare one, and a tool's output schema also describes the JSON the matching CLI command emits. Tools that write are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and every one that edits source supports `dry_run` (`build_index`, which only rebuilds the index, does not). The official Rust MCP SDK handles negotiation, transport, and cancellation. Both the 2026-07-28 per-request metadata flow and earlier initialize flows are supported. HTTP binds to loopback only; put remote access behind an authenticated proxy.
 
 ---
 
@@ -494,8 +502,8 @@ symora mcp tools --profile read-only             # what a read-only server would
 
 The agent-facing playbook ships *with the tool*, not in this README, so it stays in lockstep with the binary:
 
-- `symora setup skill` installs the Claude Code skill (the full CLI playbook).
-- `symora mcp serve` returns the equivalent guidance, written in MCP tool vocabulary, through the `initialize` instructions.
+- `symora setup skill` installs the skill bundled into the binary without network access. An explicit `--git-ref` uses only that source and never falls back to another version on failure.
+- `symora mcp serve` exposes instructions for tool sequencing and recovery through the metadata flow supported by the connected client.
 
 The short version: discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`); list responses share one shape; positions are 1-indexed; command failures — a bad CLI argument included — are structured `{code, message, hint}` at non-zero exit.
 

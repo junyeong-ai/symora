@@ -31,11 +31,15 @@ function pctDelta(withMed, withoutMed) {
 }
 
 export function aggregate(withRuns, withoutRuns) {
-  // Drop failed runs (no result event / crashed / budget-capped) before
-  // computing medians — a failed run is not a legitimate zero, and including
-  // it would silently bias both arms toward zero.
-  const okWith = withRuns.filter((r) => !r.failed);
-  const okWithout = withoutRuns.filter((r) => !r.failed);
+  const eligible = (runs) => runs.filter((run) => !run.failed && run.correct === true);
+  const counts = (runs) => ({
+    ok: eligible(runs).length,
+    failed: runs.filter((run) => run.failed).length,
+    incorrect: runs.filter((run) => !run.failed && run.correct === false).length,
+    unjudged: runs.filter((run) => !run.failed && typeof run.correct !== "boolean").length,
+  });
+  const okWith = eligible(withRuns);
+  const okWithout = eligible(withoutRuns);
   const withSummary = summarizeArm(okWith);
   const withoutSummary = summarizeArm(okWithout);
   const deltas = {};
@@ -44,9 +48,10 @@ export function aggregate(withRuns, withoutRuns) {
   }
   return {
     runs: {
-      with: { ok: okWith.length, failed: withRuns.length - okWith.length },
-      without: { ok: okWithout.length, failed: withoutRuns.length - okWithout.length },
+      with: counts(withRuns),
+      without: counts(withoutRuns),
     },
+    attempts: { with: summarizeArm(withRuns), without: summarizeArm(withoutRuns) },
     with: withSummary,
     without: withoutSummary,
     delta_pct: deltas,
@@ -60,7 +65,7 @@ function loadRuns(dir, arm, runs) {
     try {
       out.push(JSON.parse(readFileSync(path, "utf8")));
     } catch {
-      /* a missing/failed run is dropped from the median, not zero-filled */
+      out.push({ failed: true, failed_reason: "missing_or_invalid_metrics" });
     }
   }
   return out;
@@ -68,12 +73,14 @@ function loadRuns(dir, arm, runs) {
 
 function selftest() {
   const withRuns = [
-    { tokens: 100, read: 0 },
-    { tokens: 120, read: 0 },
-    { tokens: 110, read: 1 },
+    { tokens: 100, read: 0, correct: true },
+    { tokens: 120, read: 0, correct: true },
+    { tokens: 110, read: 1, correct: true },
+    { tokens: 1, read: 0, correct: false },
+    { tokens: 1, read: 0 },
     { tokens: 0, read: 0, failed: true }, // crashed run — must be excluded
   ];
-  const withoutRuns = [{ tokens: 200, read: 4 }, { tokens: 240, read: 6 }, { tokens: 220, read: 5 }];
+  const withoutRuns = [{ tokens: 200, read: 4, correct: true }, { tokens: 240, read: 6, correct: true }, { tokens: 220, read: 5, correct: true }];
   const agg = aggregate(withRuns, withoutRuns);
   const fail = (msg) => {
     console.error("selftest FAIL:", msg);
@@ -81,6 +88,9 @@ function selftest() {
   };
   if (agg.with.tokens.median !== 110) fail(`with tokens median ${agg.with.tokens.median} != 110 (failed run leaked in?)`);
   if (agg.runs.with.ok !== 3 || agg.runs.with.failed !== 1) fail(`with run accounting ${JSON.stringify(agg.runs.with)}`);
+  if (agg.runs.with.incorrect !== 1 || agg.runs.with.unjudged !== 1) fail("correctness accounting");
+  const unjudged = aggregate([{ tokens: 1 }], [{ tokens: 2 }]);
+  if (unjudged.delta_pct.tokens !== null) fail("unjudged runs produced a comparison");
   if (agg.without.tokens.median !== 220) fail(`without tokens median ${agg.without.tokens.median} != 220`);
   if (agg.delta_pct.tokens !== -50) fail(`tokens delta ${agg.delta_pct.tokens} != -50`);
   if (agg.without.read.median !== 5) fail(`without read median ${agg.without.read.median} != 5`);

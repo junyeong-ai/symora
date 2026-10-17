@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use insta::assert_json_snapshot;
 use serde_json::json;
-use symora::cli::blast_radius::{BlastRadius, DepthBucket, RiskLevel};
+use symora::cli::blast_radius::{BlastRadius, DepthBucket};
 use symora::cli::commands::diagnostics::{DiagnosticsOutput, EnhancedDiagnostic};
 use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
@@ -675,8 +675,6 @@ fn impact_output_full() {
                 },
             ],
             test_caller_ratio: Some(0.33),
-            risk: RiskLevel::Medium,
-            confidence: 0.9,
         }),
         next_commands: vec!["symora impact src/main.rs:12:4 --depth 2".to_string()],
     };
@@ -746,28 +744,8 @@ fn blast_radius_max_depth_reached_serializes() {
             },
         ],
         test_caller_ratio: Some(0.14),
-        risk: RiskLevel::High,
-        confidence: 1.0,
     };
     assert_json_snapshot!(radius);
-}
-
-#[test]
-fn risk_level_serializes_lowercase() {
-    let levels = [
-        RiskLevel::Low,
-        RiskLevel::Medium,
-        RiskLevel::High,
-        RiskLevel::Critical,
-    ];
-    assert_json_snapshot!(levels, @r###"
-    [
-      "low",
-      "medium",
-      "high",
-      "critical"
-    ]
-    "###);
 }
 
 #[test]

@@ -23,7 +23,7 @@ use crate::services::pack::PackedSymbol;
 /// Bumped whenever the on-disk layout changes shape (new column, changed
 /// JSON shape inside a TEXT column, etc.). Mismatched versions recreate the
 /// table rather than risking stale-decode bugs at read time.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 #[derive(Debug, Clone)]
 pub struct CachedEntry {
@@ -58,7 +58,15 @@ impl PackCache {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        if stored != SCHEMA_VERSION {
+        let extractor = crate::services::store::SymbolExtractor::extraction_digest().to_string();
+        let recorded: Option<String> = conn
+            .query_row(
+                "SELECT value FROM pack_meta WHERE key = 'extractor'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        if stored != SCHEMA_VERSION || recorded.as_deref() != Some(&extractor) {
             conn.execute_batch("DROP TABLE IF EXISTS pack_files")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
             conn.execute(
@@ -67,6 +75,11 @@ impl PackCache {
             )
             .map_err(|e| StoreError::Database(e.to_string()))?;
         }
+        conn.execute(
+            "INSERT OR REPLACE INTO pack_meta (key, value) VALUES ('extractor', ?1)",
+            params![extractor],
+        )
+        .map_err(|error| StoreError::Database(error.to_string()))?;
         conn.execute_batch(FILES_SCHEMA)
             .map_err(|e| StoreError::Database(e.to_string()))?;
 

@@ -220,10 +220,38 @@ pub(super) fn parse_range(value: &serde_json::Value) -> Option<crate::models::ls
     Some(crate::models::lsp::Range::new(start, end))
 }
 
-pub(super) fn parse_workspace_edit(
+#[cfg(test)]
+fn parse_workspace_edit(
     edit: &serde_json::Value,
     encoding: PositionEncoding,
 ) -> Result<Vec<FileChangeWithEdits>, LspError> {
+    parse_workspace_edit_inner(edit, encoding, None)
+}
+
+pub(super) fn parse_workspace_edit_snapshot(
+    edit: &serde_json::Value,
+    encoding: PositionEncoding,
+    snapshots: &std::collections::HashMap<std::path::PathBuf, String>,
+) -> Result<Vec<FileChangeWithEdits>, LspError> {
+    parse_workspace_edit_inner(edit, encoding, Some(snapshots))
+}
+
+fn parse_workspace_edit_inner(
+    edit: &serde_json::Value,
+    encoding: PositionEncoding,
+    snapshots: Option<&std::collections::HashMap<std::path::PathBuf, String>>,
+) -> Result<Vec<FileChangeWithEdits>, LspError> {
+    let read_content = |file: &Path| -> Result<String, LspError> {
+        match snapshots {
+            Some(snapshots) => snapshots.get(file).cloned().ok_or_else(|| {
+                LspError::Protocol(format!(
+                    "Missing workspace edit snapshot for {}",
+                    file.display()
+                ))
+            }),
+            None => Ok(std::fs::read_to_string(file)?),
+        }
+    };
     // Each edit's range arrives in the negotiated wire encoding; it is decoded
     // to a native scalar column HERE (against the edit's own target file) so the
     // edit applier in edit.rs receives native coordinates and never has to know
@@ -269,11 +297,20 @@ pub(super) fn parse_workspace_edit(
                         file.display(),
                     )));
                 };
+                let content = if edits.as_array().is_some_and(|edits| edits.is_empty()) {
+                    None
+                } else {
+                    Some(read_content(&file)?)
+                };
+                if let Some(content) = &content {
+                    conv = conv.with_content(&file, content);
+                }
                 let text_edits = parse_text_edits(edits, &file, &mut conv)?;
                 if !text_edits.is_empty() {
                     changes.push(FileChangeWithEdits {
                         file,
                         edits: text_edits,
+                        expected_hash: content.as_deref().map(crate::infra::hash_content),
                     });
                 }
             }
@@ -297,11 +334,20 @@ pub(super) fn parse_workspace_edit(
                     ));
                 }
                 let file = uri_to_path(uri);
+                let content = if edits.as_array().is_some_and(|edits| edits.is_empty()) {
+                    None
+                } else {
+                    Some(read_content(&file)?)
+                };
+                if let Some(content) = &content {
+                    conv = conv.with_content(&file, content);
+                }
                 let text_edits = parse_text_edits(edits, &file, &mut conv)?;
                 if !text_edits.is_empty() {
                     changes.push(FileChangeWithEdits {
                         file,
                         edits: text_edits,
+                        expected_hash: content.as_deref().map(crate::infra::hash_content),
                     });
                 }
             }
@@ -486,12 +532,32 @@ pub(super) fn parse_signature_help(
 mod tests {
     use super::{
         PositionEncoding, diagnostic_code_string, find_resource_operation, parse_workspace_edit,
+        parse_workspace_edit_snapshot,
     };
 
     /// An edit range's wire column is decoded to a native scalar offset against
     /// the target file BEFORE it reaches the edit applier, so a non-BMP line
     /// cannot be sliced at the wrong byte. `let x = "😀";` — the closing quote is
     /// utf-16 unit 11 but scalar 10; a missing conversion would slice wrong.
+    #[test]
+    fn workspace_edit_conversion_keeps_the_validated_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.rs");
+        let content = "😀abc()\n";
+        std::fs::write(&file, content).unwrap();
+        let snapshots = std::collections::HashMap::from([(file.clone(), content.to_string())]);
+        std::fs::write(&file, "prefix😀abc()\n").unwrap();
+        let edit = serde_json::json!({"changes": {crate::models::lsp::path_to_uri(&file): [{"range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 5}}, "newText": "renamed"}]}});
+        let changes =
+            parse_workspace_edit_snapshot(&edit, PositionEncoding::Utf16, &snapshots).unwrap();
+        assert_eq!(
+            changes[0].expected_hash,
+            Some(crate::infra::hash_content(content))
+        );
+        assert_eq!(changes[0].edits[0].range.start.character, 1);
+        assert_eq!(changes[0].edits[0].range.end.character, 4);
+    }
+
     #[test]
     fn parse_text_edits_decodes_wire_columns_to_native_scalars() {
         use crate::services::lsp::position::PositionConverter;
@@ -682,16 +748,20 @@ mod tests {
     /// `changes` is ignored — reading both would apply every edit twice.
     #[test]
     fn document_changes_take_precedence_over_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("a.rs");
+        std::fs::write(&file, "a").unwrap();
+        let uri = crate::models::lsp::path_to_uri(&file);
         let both = serde_json::json!({
             "changes": {
-                "file:///a.rs": [
+                (uri.clone()): [
                     { "range": { "start": { "line": 0, "character": 0 },
                                  "end": { "line": 0, "character": 1 } },
                       "newText": "X" }
                 ]
             },
             "documentChanges": [
-                { "textDocument": { "uri": "file:///a.rs" },
+                { "textDocument": { "uri": uri },
                   "edits": [
                     { "range": { "start": { "line": 0, "character": 0 },
                                  "end": { "line": 0, "character": 0 } },
@@ -707,9 +777,13 @@ mod tests {
     /// With no `documentChanges`, the legacy `changes` map is read.
     #[test]
     fn changes_map_is_read_when_document_changes_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("a.rs");
+        std::fs::write(&file, "a").unwrap();
+        let uri = crate::models::lsp::path_to_uri(&file);
         let changes_only = serde_json::json!({
             "changes": {
-                "file:///a.rs": [
+                (uri.clone()): [
                     { "range": { "start": { "line": 0, "character": 0 },
                                  "end": { "line": 0, "character": 0 } },
                       "newText": "X" }

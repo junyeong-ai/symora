@@ -76,6 +76,7 @@ pub struct PackResult {
     pub files: Vec<PackedFile>,
     pub estimated_tokens: usize,
     pub graph_size: usize,
+    pub unsupported_languages: Vec<Language>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
     /// publishes how many the selection chose FROM, and the budget's own
@@ -132,7 +133,15 @@ pub fn build_pack(
     let personalization = personalization_vector(&nodes, focus);
     let ranks = page_rank(&graph, &personalization, cfg);
     let fitted = fit_to_budget(&nodes, &ranks, budget_tokens, cfg.max_symbols_per_file);
+    let mut unsupported_languages: Vec<Language> = nodes
+        .iter()
+        .map(|node| node.language)
+        .filter(|language| !crate::services::store::SymbolExtractor::is_supported(*language))
+        .collect();
+    unsupported_languages.sort_by_key(|language| language.lsp_id());
+    unsupported_languages.dedup();
     Ok(PackResult {
+        unsupported_languages,
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
         graph_size: nodes.len(),
@@ -691,8 +700,8 @@ fn fit_to_budget(
         let declared = node.signatures.len();
         let shown: Vec<PackedSymbol> = node.signatures.iter().take(per_file).cloned().collect();
         let tokens = estimate_tokens_for_file(&node.rel_path, &shown);
-        if spent + tokens > budget && !packed.is_empty() {
-            break;
+        if spent + tokens > budget {
+            continue;
         }
         spent += tokens;
         packed.push(PackedFile {
@@ -718,320 +727,24 @@ fn fit_to_budget(
 /// holding a capped list would answer a later request with an earlier one's
 /// shape.
 fn signatures_from(source: &str, language: Language) -> Vec<PackedSymbol> {
-    source
-        .lines()
-        .enumerate()
-        .filter_map(|(idx, line)| {
-            extract_signature(line, language).map(|symbol| PackedSymbol {
-                line: (idx + 1) as u32,
-                ..symbol
-            })
+    crate::services::store::SymbolExtractor::shared()
+        .extract_signatures(Path::new(""), source, language)
+        .into_iter()
+        .filter(|(symbol, _)| {
+            use crate::models::symbol::SymbolKind;
+            !matches!(
+                symbol.kind,
+                SymbolKind::Field | SymbolKind::EnumMember | SymbolKind::TypeParameter
+            ) && (language == Language::Terraform
+                || !matches!(symbol.kind, SymbolKind::Variable | SymbolKind::Property))
+        })
+        .map(|(symbol, signature)| PackedSymbol {
+            name: symbol.name,
+            kind: symbol.kind.to_string(),
+            line: symbol.location.line,
+            signature,
         })
         .collect()
-}
-
-/// Extract a top-level signature from a single line. Returns `None` when
-/// the line is not a recognized declaration. Conservative on purpose:
-/// false negatives only cost packing breadth, not correctness.
-fn extract_signature(line: &str, language: Language) -> Option<PackedSymbol> {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with('#') {
-        return None;
-    }
-    let signature = trimmed.trim_end_matches('{').trim_end().to_string();
-
-    match language {
-        Language::Rust => match_rust(trimmed, signature),
-        Language::Python => match_python(trimmed, signature),
-        Language::JavaScript | Language::TypeScript => match_js_ts(trimmed, signature),
-        Language::Go => match_go(trimmed, signature),
-        Language::Java | Language::Kotlin | Language::CSharp => match_jvm(trimmed, signature),
-        Language::Swift => match_swift(trimmed, signature),
-        Language::Scala => match_scala(trimmed, signature),
-        Language::Elixir => match_elixir(trimmed, signature),
-        Language::Dart => match_dart(trimmed, signature),
-        _ => None,
-    }
-}
-
-fn match_swift(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("public class ", "class"),
-        ("public struct ", "struct"),
-        ("public protocol ", "interface"),
-        ("public enum ", "enum"),
-        ("public func ", "function"),
-        ("class ", "class"),
-        ("struct ", "struct"),
-        ("protocol ", "interface"),
-        ("enum ", "enum"),
-        ("func ", "function"),
-        ("extension ", "extension"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature,
-            });
-        }
-    }
-    None
-}
-
-fn match_scala(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("class ", "class"),
-        ("trait ", "interface"),
-        ("object ", "object"),
-        ("def ", "function"),
-        ("type ", "type"),
-        ("val ", "constant"),
-        ("var ", "variable"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature: signature.trim_end_matches('=').trim_end().to_string(),
-            });
-        }
-    }
-    None
-}
-
-fn match_elixir(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("defmodule ", "module"),
-        ("defprotocol ", "interface"),
-        ("defimpl ", "implementation"),
-        ("defstruct ", "struct"),
-        ("defmacro ", "macro"),
-        ("defmacrop ", "macro"),
-        ("defp ", "function"),
-        ("def ", "function"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            // Elixir module names: `Foo.Bar` — accept dots in identifier.
-            let name = first_dotted_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature: signature.trim_end_matches(',').trim_end().to_string(),
-            });
-        }
-    }
-    None
-}
-
-fn match_dart(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("abstract class ", "class"),
-        ("class ", "class"),
-        ("mixin ", "mixin"),
-        ("extension ", "extension"),
-        ("enum ", "enum"),
-        ("typedef ", "type"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature,
-            });
-        }
-    }
-    // Dart top-level functions look like `T name(...) {` — match
-    // identifier-followed-by-parens with no leading keyword.
-    if trimmed.contains('(') && !trimmed.starts_with('@') {
-        let head = trimmed.split('(').next().unwrap_or("");
-        if let Some(name) = head.split_whitespace().last()
-            && name.chars().next().is_some_and(|c| c.is_alphabetic())
-        {
-            return Some(PackedSymbol {
-                name: name
-                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-                    .to_string(),
-                kind: "function".to_string(),
-                line: 0,
-                signature,
-            });
-        }
-    }
-    None
-}
-
-fn first_dotted_ident(s: &str) -> Option<String> {
-    let mut name = String::new();
-    for c in s.chars() {
-        if c.is_alphanumeric() || c == '_' || c == '.' {
-            name.push(c);
-        } else if !name.is_empty() {
-            break;
-        } else if c.is_whitespace() {
-            continue;
-        } else {
-            return None;
-        }
-    }
-    if name.is_empty() { None } else { Some(name) }
-}
-
-fn match_rust(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("pub fn ", "function"),
-        ("pub async fn ", "function"),
-        ("pub(crate) fn ", "function"),
-        ("pub struct ", "struct"),
-        ("pub enum ", "enum"),
-        ("pub trait ", "interface"),
-        ("pub mod ", "module"),
-        ("pub type ", "type"),
-        ("fn ", "function"),
-        ("async fn ", "function"),
-        ("struct ", "struct"),
-        ("enum ", "enum"),
-        ("trait ", "interface"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature,
-            });
-        }
-    }
-    None
-}
-
-fn match_python(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("def ", "function"),
-        ("async def ", "function"),
-        ("class ", "class"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature: signature.trim_end_matches(':').trim_end().to_string(),
-            });
-        }
-    }
-    None
-}
-
-fn match_js_ts(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("export function ", "function"),
-        ("export async function ", "function"),
-        ("export class ", "class"),
-        ("export interface ", "interface"),
-        ("export type ", "type"),
-        ("export const ", "constant"),
-        ("function ", "function"),
-        ("async function ", "function"),
-        ("class ", "class"),
-        ("interface ", "interface"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature,
-            });
-        }
-    }
-    None
-}
-
-fn match_go(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    if let Some(rest) = trimmed.strip_prefix("func ") {
-        // Method: `func (r *Recv) Name(...)` or function `func Name(...)`
-        let name_start = if rest.starts_with('(') {
-            rest.find(')')? + 1
-        } else {
-            0
-        };
-        let name = first_ident(rest[name_start..].trim_start())?;
-        return Some(PackedSymbol {
-            name,
-            kind: "function".to_string(),
-            line: 0,
-            signature,
-        });
-    }
-    if let Some(rest) = trimmed.strip_prefix("type ") {
-        let name = first_ident(rest)?;
-        return Some(PackedSymbol {
-            name,
-            kind: "type".to_string(),
-            line: 0,
-            signature,
-        });
-    }
-    None
-}
-
-fn match_jvm(trimmed: &str, signature: String) -> Option<PackedSymbol> {
-    let candidates: &[(&str, &str)] = &[
-        ("public class ", "class"),
-        ("public interface ", "interface"),
-        ("public final class ", "class"),
-        ("public abstract class ", "class"),
-        ("class ", "class"),
-        ("interface ", "interface"),
-        ("public fun ", "function"),
-        ("fun ", "function"),
-    ];
-    for (prefix, kind) in candidates {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let name = first_ident(rest)?;
-            return Some(PackedSymbol {
-                name,
-                kind: (*kind).to_string(),
-                line: 0,
-                signature,
-            });
-        }
-    }
-    None
-}
-
-fn first_ident(s: &str) -> Option<String> {
-    let mut name = String::new();
-    for c in s.chars() {
-        if c.is_alphanumeric() || c == '_' {
-            name.push(c);
-        } else if !name.is_empty() {
-            break;
-        } else if c.is_whitespace() {
-            continue;
-        } else {
-            return None;
-        }
-    }
-    if name.is_empty() { None } else { Some(name) }
 }
 
 fn estimate_tokens_for_file(rel_path: &str, symbols: &[PackedSymbol]) -> usize {
@@ -1310,64 +1023,101 @@ mod tests {
     }
 
     #[test]
-    fn rust_signature_extraction() {
-        let sym = extract_signature("pub fn process(&self) -> Result<()> {", Language::Rust)
-            .expect("matched");
-        assert_eq!(sym.name, "process");
-        assert_eq!(sym.kind, "function");
-        assert!(sym.signature.contains("process"));
+    fn signatures_exclude_bodies_across_grammars() {
+        let cases = [
+            (
+                Language::Rust,
+                "pub fn work() { println!(\"BODY_MARKER\"); }",
+            ),
+            (
+                Language::Python,
+                "@decorate\ndef work():\n    print('BODY_MARKER')\n",
+            ),
+            (
+                Language::Go,
+                "package main\nfunc work() { println(\"BODY_MARKER\") }",
+            ),
+            (
+                Language::TypeScript,
+                "export const work = () => { console.log('BODY_MARKER'); };",
+            ),
+            (
+                Language::JavaScript,
+                "export function work() { console.log('BODY_MARKER'); }",
+            ),
+            (
+                Language::Java,
+                "class Worker { void work() { System.out.println(\"BODY_MARKER\"); } }",
+            ),
+            (Language::Kotlin, "fun work() { println(\"BODY_MARKER\") }"),
+            (Language::Cpp, "void work() { puts(\"BODY_MARKER\"); }"),
+            (
+                Language::CSharp,
+                "class Worker { void work() { Console.WriteLine(\"BODY_MARKER\"); } }",
+            ),
+            (
+                Language::PHP,
+                "<?php function work() { echo 'BODY_MARKER'; }",
+            ),
+            (Language::Ruby, "def work\n puts 'BODY_MARKER'\nend"),
+            (Language::Bash, "work() { echo BODY_MARKER; }"),
+            (Language::Lua, "function work() print('BODY_MARKER') end"),
+            (Language::Swift, "func work() { print(\"BODY_MARKER\") }"),
+            (
+                Language::Scala,
+                "def work(): Unit = { println(\"BODY_MARKER\") }",
+            ),
+            (Language::Dart, "void work() { print('BODY_MARKER'); }"),
+            (
+                Language::Terraform,
+                "resource \"null_resource\" \"work\" { triggers = { marker = \"BODY_MARKER\" } }",
+            ),
+        ];
+        for (language, source) in cases {
+            let signatures = signatures_from(source, language);
+            assert!(
+                !signatures.is_empty(),
+                "{language:?} produced no signatures"
+            );
+            assert!(
+                signatures
+                    .iter()
+                    .all(|symbol| !symbol.signature.contains("BODY_MARKER")),
+                "{language:?}: {signatures:?}"
+            );
+        }
+        let go = signatures_from(
+            "package p\ntype Point struct { X int }\ntype ID string",
+            Language::Go,
+        );
+        assert!(
+            go.iter()
+                .any(|symbol| symbol.signature == "type Point struct"),
+            "{go:?}"
+        );
+        assert!(
+            go.iter().any(|symbol| symbol.signature == "type ID string"),
+            "{go:?}"
+        );
+        let terraform = signatures_from(
+            "variable \"region\" { default = \"BODY_MARKER\" }",
+            Language::Terraform,
+        );
+        assert_eq!(terraform.len(), 1);
+        assert!(!terraform[0].signature.contains("BODY_MARKER"));
+        let python = signatures_from("@decorate\ndef work():\n    pass", Language::Python);
+        assert_eq!(python[0].signature, "@decorate\ndef work()");
     }
 
     #[test]
-    fn python_signature_extraction() {
-        let sym = extract_signature("def process(self, name):", Language::Python).expect("matched");
-        assert_eq!(sym.name, "process");
-        assert_eq!(sym.kind, "function");
-        assert!(!sym.signature.ends_with(':'));
-    }
-
-    #[test]
-    fn go_method_signature_extraction() {
-        let sym = extract_signature("func (r *Recv) Process(ctx Context) error {", Language::Go)
-            .expect("matched");
-        assert_eq!(sym.name, "Process");
-    }
-
-    #[test]
-    fn swift_signature_extraction() {
-        let sym =
-            extract_signature("public func process() async throws {", Language::Swift).unwrap();
-        assert_eq!(sym.name, "process");
-        assert_eq!(sym.kind, "function");
-    }
-
-    #[test]
-    fn scala_signature_extraction() {
-        let sym = extract_signature("def process(x: Int): String =", Language::Scala).unwrap();
-        assert_eq!(sym.name, "process");
-        assert!(!sym.signature.ends_with('='));
-    }
-
-    #[test]
-    fn elixir_module_signature_extraction() {
-        let sym = extract_signature("defmodule My.Module do", Language::Elixir).unwrap();
-        assert_eq!(sym.name, "My.Module");
-        assert_eq!(sym.kind, "module");
-    }
-
-    #[test]
-    fn dart_class_signature_extraction() {
-        let sym =
-            extract_signature("class MyWidget extends StatelessWidget {", Language::Dart).unwrap();
-        assert_eq!(sym.name, "MyWidget");
-        assert_eq!(sym.kind, "class");
-    }
-
-    #[test]
-    fn dart_function_signature_extraction() {
-        let sym = extract_signature("Future<void> main() async {", Language::Dart).unwrap();
-        assert_eq!(sym.name, "main");
-        assert_eq!(sym.kind, "function");
+    fn signatures_follow_declarations_and_preserve_multiline_headers() {
+        let source = "\"\"\"\ndef fabricated():\n    pass\n\"\"\"\n\ndef real(\n    value: str,\n) -> str:\n    return value\n";
+        let signatures = signatures_from(source, Language::Python);
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].name, "real");
+        assert!(signatures[0].signature.contains("value: str"));
+        assert!(signatures[0].signature.ends_with(") -> str"));
+        assert!(!signatures[0].signature.contains("return value"));
     }
 
     #[test]
@@ -1430,10 +1180,10 @@ mod tests {
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.6), (1, 0.4)].into();
         let result = fit_to_budget(&nodes, &ranks, 50, PACK_SYMBOLS_PER_FILE);
-        // We always emit at least one file, but the second should be dropped
-        // because the first already overflows the tiny 50-token budget.
-        assert_eq!(result.files.len(), 1);
-        assert!(result.estimated_tokens > 0);
+        assert!(result.estimated_tokens <= 50);
+        let tiny = fit_to_budget(&nodes, &ranks, 1, PACK_SYMBOLS_PER_FILE);
+        assert!(tiny.files.is_empty());
+        assert_eq!(tiny.estimated_tokens, 0);
     }
 
     /// The cap belongs to the request. A cache holding a list already cut to

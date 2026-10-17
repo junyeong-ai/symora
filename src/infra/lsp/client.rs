@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -203,20 +203,8 @@ impl DocumentCache {
     }
 }
 
-/// Workspace-indexing readiness, derived from server signals.
-///
-/// `Ready` is reached either through an explicit quiescence signal (a status
-/// notification, a drained set of indexing-progress tokens, a known readiness
-/// log line) OR by a wait elapsing without the server ever signalling activity
-/// — a server with no indexing phase (or none it exposes) is ready, not
-/// degraded. `TimedOut` is reached ONLY when a wait elapses AFTER the server
-/// signalled it was indexing (`InProgress`): a genuine lower bound, disclosed
-/// via the `indexing` marker. That distinction — real activity then timeout vs.
-/// silence then timeout — is what keeps an unsignalled server from falsely
-/// reporting every complete result as degraded, with no per-language allow-list.
-/// The state moves only through the transition table in
-/// [`IndexingState::on_event`], applied atomically (compare-and-swap) so a
-/// racing signal can never be stomped by a blind store.
+/// Workspace readiness confirmed by structured server status. Silence and
+/// work-progress completion do not establish that a workspace is fully analyzed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IndexingState {
@@ -224,6 +212,7 @@ pub enum IndexingState {
     InProgress = 1,
     Ready = 2,
     TimedOut = 3,
+    Unconfirmed = 4,
 }
 
 /// The events that may move [`IndexingState`]. Every state change goes
@@ -235,16 +224,11 @@ pub enum IndexingEvent {
     /// `await_indexing_signal`). A pure no-op on the state — waiting is not
     /// evidence the server is indexing.
     WaitStarted,
-    /// The bounded wait's budget expired. Concludes `InProgress` as a degraded
-    /// lower bound (`TimedOut`); from `NotStarted` (no activity ever seen) it
-    /// resolves to `Ready` — there was no indexing phase to wait for.
+    /// The wait budget expired without establishing readiness.
     WaitTimedOut,
-    /// The server signalled a fully analyzed workspace (quiescent=true,
-    /// a drained progress-token set, a known readiness log line).
+    /// An explicit workspace status confirms quiescence.
     ServerQuiescent,
-    /// The server signalled it is (re)working: `experimental/serverStatus`
-    /// busy, or an indexing-progress `begin`. The only signal that opens
-    /// `InProgress` — the evidence a timeout needs to mean a real lower bound.
+    /// The server reports work in progress.
     ServerBusy,
 }
 
@@ -254,6 +238,7 @@ impl IndexingState {
             1 => Self::InProgress,
             2 => Self::Ready,
             3 => Self::TimedOut,
+            4 => Self::Unconfirmed,
             _ => Self::NotStarted,
         }
     }
@@ -263,29 +248,11 @@ impl IndexingState {
     }
 
     pub fn is_usable(self) -> bool {
-        matches!(self, Self::Ready | Self::TimedOut)
+        matches!(self, Self::Ready | Self::TimedOut | Self::Unconfirmed)
     }
 
-    /// The legal transition table. Anything not listed is a no-op, which
-    /// is what makes the racy interleavings safe:
-    ///
-    /// - Only a quiescence signal ever produces `Ready`.
-    /// - A busy signal re-opens `InProgress` from `Ready` (the server is
-    ///   genuinely re-working) but NOT from `TimedOut`: a timed-out index
-    ///   that is still incomplete must keep its disclosed marker until
-    ///   quiescence proves completion.
-    /// - `WaitStarted` is a pure no-op: claiming a wait is NOT evidence the
-    ///   server is indexing. `InProgress` is reached only by a REAL activity
-    ///   signal (`ServerBusy`, fired by `experimental/serverStatus` busy or an
-    ///   indexing-progress `begin`). This is the difference between "the server
-    ///   told us it is working" and "a query happened to wait".
-    /// - A timeout that concludes an in-flight `InProgress` is a genuine lower
-    ///   bound -> `TimedOut` (disclosed via the `indexing` marker). A timeout
-    ///   from `NotStarted` — the wait elapsed without the server EVER signalling
-    ///   activity — means there is no indexing phase to wait for (or none this
-    ///   server exposes), so it resolves to `Ready`, NOT `TimedOut`. This is
-    ///   what stops a server with no readiness signal from falsely marking every
-    ///   complete result as degraded, with no per-language allow-list.
+    /// Only structured workspace status produces `Ready`. Usable unconfirmed
+    /// states avoid charging the full wait budget on every subsequent query.
     pub fn on_event(self, event: IndexingEvent) -> IndexingState {
         use IndexingEvent::*;
         use IndexingState::*;
@@ -295,7 +262,7 @@ impl IndexingState {
             (_, ServerBusy) => InProgress,
             (state, WaitStarted) => state,
             (InProgress, WaitTimedOut) => TimedOut,
-            (NotStarted, WaitTimedOut) => Ready,
+            (NotStarted, WaitTimedOut) => Unconfirmed,
             (state, WaitTimedOut) => state,
         }
     }
@@ -356,14 +323,6 @@ pub struct LspClient {
     /// stands by the time the server can register a file watcher.
     initialized: AtomicBool,
     cross_file_waited: AtomicBool,
-    /// Set once the server demonstrates an explicit status protocol
-    /// (`experimental/serverStatus`). From then on the fuzzy progress and
-    /// log-line readiness heuristics stand down — a heuristic must never
-    /// overrule a server that can state readiness precisely.
-    status_channel_seen: AtomicBool,
-    /// Progress tokens whose `begin` looked like indexing and that have not
-    /// yet ended; see `observe_progress`.
-    indexing_tokens: std::sync::Mutex<HashSet<String>>,
     /// Whether the server is offered `workspace.didChangeWatchedFiles`; the
     /// manager decides, by [`FileWatch`](super::watch::FileWatch).
     file_watching: bool,
@@ -418,8 +377,6 @@ impl LspClient {
             terminated: AtomicBool::new(false),
             initialized: AtomicBool::new(false),
             cross_file_waited: AtomicBool::new(false),
-            status_channel_seen: AtomicBool::new(false),
-            indexing_tokens: std::sync::Mutex::new(HashSet::new()),
             file_watching,
             watched_files: std::sync::Mutex::new(WatchRegistry::default()),
             settings: RwLock::new(None),
@@ -1180,12 +1137,8 @@ impl LspClient {
                     }
                     "experimental/serverStatus" => self.observe_server_status(&params),
                     "language/status" => self.observe_language_status(&params),
-                    "$/progress" => self.observe_progress(&params),
                     "window/logMessage" | "window/showMessage" => {
                         if let Some(msg) = params.get("message").and_then(|m| m.as_str()) {
-                            if method == "window/logMessage" {
-                                self.observe_log_message(msg);
-                            }
                             let msg_type = params.get("type").and_then(|t| t.as_u64());
                             match Self::classify_log_level(self.language, msg, msg_type) {
                                 LogLevel::Error => {
@@ -1251,6 +1204,85 @@ impl LspClient {
         self.cancel_pending_requests("Server shutdown").await;
         tracing::info!("{} language server stopped", self.language);
         Ok(())
+    }
+
+    /// Reject edits whose server versions or open-document contents have changed.
+    pub async fn validate_workspace_edit(
+        &self,
+        edit: &Value,
+    ) -> Result<HashMap<PathBuf, String>, LspError> {
+        let cache = self.document_cache.read().await;
+        let documents = edit
+            .get("documentChanges")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for document in documents {
+            let Some(text_document) = document.get("textDocument") else {
+                continue;
+            };
+            let Some(uri) = text_document.get("uri").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(version) = text_document
+                .get("version")
+                .filter(|version| !version.is_null())
+            {
+                let expected = version.as_u64();
+                let current = cache
+                    .docs
+                    .get(uri)
+                    .map(|document| u64::from(document.version));
+                if expected.is_none() || expected != current {
+                    return Err(LspError::ServerError {
+                        code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+                        message: format!("Document version changed for {uri}"),
+                    });
+                }
+            }
+        }
+        let uris: Vec<&str> = if let Some(changes) = edit.get("documentChanges") {
+            changes
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|change| {
+                    let edits = change.get("edits")?.as_array()?;
+                    if edits.is_empty() {
+                        return None;
+                    }
+                    change.get("textDocument")?.get("uri")?.as_str()
+                })
+                .collect()
+        } else {
+            edit.get("changes")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|changes| {
+                    changes.iter().filter_map(|(uri, edits)| {
+                        edits
+                            .as_array()
+                            .is_some_and(|edits| !edits.is_empty())
+                            .then_some(uri.as_str())
+                    })
+                })
+                .collect()
+        };
+        let mut snapshots = HashMap::new();
+        for uri in uris {
+            let path = crate::models::lsp::uri_to_path(uri);
+            let content = std::fs::read_to_string(&path)?;
+            if let Some(document) = cache.docs.get(uri)
+                && crate::infra::hash_content(&content) != document.content_hash
+            {
+                return Err(LspError::ServerError {
+                    code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+                    message: format!("Document content changed for {uri}"),
+                });
+            }
+            snapshots.insert(path, content);
+        }
+        Ok(snapshots)
     }
 
     /// Sync the document and return the version the server now knows it
@@ -1506,7 +1538,7 @@ impl LspClient {
                 )
                 .is_ok()
             {
-                if next == IndexingState::Ready {
+                if next.is_usable() {
                     self.indexing_notify.notify_waiters();
                 }
                 return next;
@@ -1551,8 +1583,7 @@ impl LspClient {
         if max_wait.is_zero() {
             // No budget means we do not wait. A server that already signalled it
             // is indexing (`InProgress`) is disclosed as `TimedOut`; one that has
-            // signalled nothing resolves to `Ready` — no evidence of an indexing
-            // phase to disclose as a lower bound.
+            // signalled nothing remains unconfirmed.
             return self.apply_indexing_event(IndexingEvent::WaitTimedOut);
         }
 
@@ -1604,11 +1635,10 @@ impl LspClient {
     /// `experimental/serverStatus`, requested via the matching client
     /// capability): quiescent=true means the workspace is fully analyzed,
     /// false that the server is (re)working — including after edits, so
-    /// readiness re-evaluates instead of latching. Once a server demonstrates
-    /// this channel, the fuzzy progress and log heuristics stand down for good.
+    /// readiness re-evaluates after edits. This channel takes precedence over
+    /// generic progress notifications.
     fn observe_server_status(&self, params: &Value) {
         if let Some(quiescent) = params.get("quiescent").and_then(|v| v.as_bool()) {
-            self.status_channel_seen.store(true, Ordering::Release);
             self.apply_indexing_event(if quiescent {
                 IndexingEvent::ServerQuiescent
             } else {
@@ -1622,73 +1652,6 @@ impl LspClient {
             && params.get("message").and_then(|v| v.as_str()) == Some("OK")
         {
             self.apply_indexing_event(IndexingEvent::ServerQuiescent);
-        }
-    }
-
-    /// Heuristic for servers without a status protocol.
-    /// `WorkDoneProgressBegin` carries the `title`; `End` carries only the
-    /// token. Remember which tokens began an indexing-shaped task and flip
-    /// readiness only when the LAST of them ends — flipping on the first end
-    /// would present a half-built index as authoritative while a sibling phase
-    /// is still running. A server that leaks a begin-token never reaches a
-    /// heuristic Ready; that fails toward the disclosed `timed_out` marker,
-    /// never toward a false "complete".
-    fn observe_progress(&self, params: &Value) {
-        if self.status_channel_seen.load(Ordering::Acquire) {
-            return;
-        }
-        let Some(token) = params.get("token").map(|t| t.to_string()) else {
-            return;
-        };
-        let Some(value) = params.get("value") else {
-            return;
-        };
-        match value.get("kind").and_then(|k| k.as_str()) {
-            Some("begin") => {
-                if let Some(title) = value.get("title").and_then(|t| t.as_str()) {
-                    let t = title.to_lowercase();
-                    if t.contains("index") || t.contains("load") || t.contains("analyz") {
-                        self.indexing_tokens
-                            .lock()
-                            .expect("indexing token set poisoned")
-                            .insert(token);
-                        // Real activity: the server told us it is indexing,
-                        // so a later timeout is a genuine lower bound rather
-                        // than the silence of a server with no indexing phase.
-                        self.apply_indexing_event(IndexingEvent::ServerBusy);
-                    }
-                }
-            }
-            Some("end") => {
-                let mut tokens = self
-                    .indexing_tokens
-                    .lock()
-                    .expect("indexing token set poisoned");
-                if tokens.remove(&token) && tokens.is_empty() {
-                    drop(tokens);
-                    self.apply_indexing_event(IndexingEvent::ServerQuiescent);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn observe_log_message(&self, message: &str) {
-        if !self.status_channel_seen.load(Ordering::Acquire)
-            && Self::is_readiness_signal(self.language, message)
-        {
-            self.apply_indexing_event(IndexingEvent::ServerQuiescent);
-        }
-    }
-
-    fn is_readiness_signal(language: Language, message: &str) -> bool {
-        match language {
-            Language::Python => message.contains("Found") && message.contains("source file"),
-            Language::TypeScript | Language::JavaScript => {
-                message.contains("Loading completed") || message.contains("project load finished")
-            }
-            Language::Java => message.contains("initialized") || message.contains("Initialized"),
-            _ => false,
         }
     }
 
@@ -2100,6 +2063,20 @@ mod tests {
         assert_eq!(client.indexing_state(), IndexingState::Ready);
     }
 
+    #[tokio::test]
+    async fn human_readable_logs_do_not_establish_readiness() {
+        let client = test_client();
+        for message in ["Found 200 source files", "Loading completed", "Initialized"] {
+            notify_client(
+                &client,
+                "window/logMessage",
+                serde_json::json!({"type": 3, "message": message}),
+            )
+            .await;
+            assert_eq!(client.indexing_state(), IndexingState::NotStarted);
+        }
+    }
+
     /// The full transition table: every pair not explicitly legal is a
     /// no-op. This is the single place the legal moves are encoded, so
     /// the race fixes (no blind stores) reduce to this table being right.
@@ -2108,7 +2085,7 @@ mod tests {
         use IndexingEvent::*;
         use IndexingState::*;
 
-        let states = [NotStarted, InProgress, Ready, TimedOut];
+        let states = [NotStarted, InProgress, Ready, TimedOut, Unconfirmed];
 
         // A quiescence signal is the only path to Ready, from anywhere.
         for state in states {
@@ -2131,12 +2108,8 @@ mod tests {
         assert_eq!(Ready.on_event(WaitStarted), Ready);
         assert_eq!(TimedOut.on_event(WaitStarted), TimedOut);
 
-        // A timeout concludes an in-flight InProgress as a degraded lower bound;
-        // from NotStarted (the server never signalled activity) it resolves to
-        // Ready — no indexing phase to wait for — never a false TimedOut. It
-        // never overwrites a Ready/TimedOut that already landed.
         assert_eq!(InProgress.on_event(WaitTimedOut), TimedOut);
-        assert_eq!(NotStarted.on_event(WaitTimedOut), Ready);
+        assert_eq!(NotStarted.on_event(WaitTimedOut), Unconfirmed);
         assert_eq!(Ready.on_event(WaitTimedOut), Ready);
         assert_eq!(TimedOut.on_event(WaitTimedOut), TimedOut);
     }
@@ -2153,79 +2126,22 @@ mod tests {
         assert_eq!(client.await_indexing_signal().await, IndexingState::Ready);
     }
 
-    /// The progress heuristic flips Ready only when the LAST tracked
-    /// indexing token ends — one phase finishing while a sibling runs is
-    /// not readiness.
     #[tokio::test]
-    async fn progress_heuristic_waits_for_all_indexing_tokens_to_drain() {
+    async fn progress_does_not_claim_workspace_readiness() {
         let client = test_client();
-
-        notify_client(
-            &client,
-            "$/progress",
-            progress("t1", "begin", Some("Indexing")),
-        )
-        .await;
-        notify_client(
-            &client,
-            "$/progress",
-            progress("t2", "begin", Some("Loading workspace")),
-        )
-        .await;
-        notify_client(&client, "$/progress", progress("t1", "end", None)).await;
-        assert_eq!(
-            client.indexing_state(),
-            IndexingState::InProgress,
-            "the server is indexing (a sibling phase is still in flight), not yet ready"
-        );
-
-        notify_client(&client, "$/progress", progress("t2", "end", None)).await;
-        assert_eq!(client.indexing_state(), IndexingState::Ready);
-    }
-
-    /// An indexing-progress `begin` is real activity: it opens `InProgress`, so
-    /// a later timeout reads as a genuine lower bound rather than the silence of
-    /// a server with no indexing phase. (Before, only a synthetic wait-claim
-    /// opened InProgress, which is why a silent server timed out forever.)
-    #[tokio::test]
-    async fn indexing_progress_begin_opens_in_progress() {
-        let client = test_client();
-        assert_eq!(client.indexing_state(), IndexingState::NotStarted);
-
-        notify_client(
-            &client,
-            "$/progress",
-            progress("t1", "begin", Some("Indexing")),
-        )
-        .await;
+        for title in ["Indexing", "Loading workspace", "Analyze selection"] {
+            notify_client(
+                &client,
+                "$/progress",
+                progress("task", "begin", Some(title)),
+            )
+            .await;
+            notify_client(&client, "$/progress", progress("task", "end", None)).await;
+            assert_eq!(client.indexing_state(), IndexingState::NotStarted);
+        }
+        client.apply_indexing_event(IndexingEvent::ServerBusy);
+        notify_client(&client, "$/progress", progress("task", "end", None)).await;
         assert_eq!(client.indexing_state(), IndexingState::InProgress);
-    }
-
-    /// Once the server demonstrates an explicit status channel, progress
-    /// titles stop being readiness signals — a fuzzy heuristic must not
-    /// overrule a server that reported itself busy.
-    #[tokio::test]
-    async fn progress_heuristic_stands_down_once_the_status_channel_speaks() {
-        let client = test_client();
-
-        notify_client(
-            &client,
-            "experimental/serverStatus",
-            serde_json::json!({"quiescent": false}),
-        )
-        .await;
-        notify_client(
-            &client,
-            "$/progress",
-            progress("t1", "begin", Some("Indexing")),
-        )
-        .await;
-        notify_client(&client, "$/progress", progress("t1", "end", None)).await;
-        assert_eq!(
-            client.indexing_state(),
-            IndexingState::InProgress,
-            "the status channel owns readiness once it has spoken"
-        );
     }
 
     /// An edit does not unprove a server's demonstrated quiescence: the

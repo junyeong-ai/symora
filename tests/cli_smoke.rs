@@ -181,7 +181,7 @@ fn mcp_initialize_returns_protocol_version() {
         let stdin = child.stdin.as_mut().expect("stdin");
         writeln!(
             stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"symora-tests","version":"1"}}}}}}"#
         )
         .unwrap();
     }
@@ -193,7 +193,7 @@ fn mcp_initialize_returns_protocol_version() {
     let json: serde_json::Value = serde_json::from_str(line).expect("valid JSON-RPC response");
     assert_eq!(
         json["result"]["protocolVersion"],
-        symora::mcp::MCP_PROTOCOL_VERSION
+        rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE.as_str()
     );
     assert_eq!(json["result"]["serverInfo"]["name"], "symora");
 }
@@ -213,7 +213,12 @@ fn mcp_tools_list_advertises_pack_and_search() {
         let stdin = child.stdin.as_mut().expect("stdin");
         writeln!(
             stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"symora-tests","version":"1"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
         )
         .unwrap();
         writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
@@ -579,15 +584,10 @@ fn a_wildcard_zero_says_it_was_never_confirmed_against_disk() {
         .as_array()
         .expect("an unconfirmed zero says so: {json}");
     assert!(
-        hints[0]
-            .as_str()
-            .unwrap()
-            .contains("matched against the index alone"),
+        hints[0].as_str().unwrap().contains("indexed snapshot"),
         "a wildcard zero must not read as absence: {hints:?}"
     );
 
-    // A wildcard that DOES match says nothing extra: every row carries
-    // `backend: "index"`, which is the same statement about provenance.
     let out = run_in(
         root,
         &["--format", "compact", "search", "symbols", "*Alpha*"],
@@ -595,8 +595,10 @@ fn a_wildcard_zero_says_it_was_never_confirmed_against_disk() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["count"], 1);
     assert!(
-        json["hints"].is_null(),
-        "a non-empty wildcard answer carries its provenance in `backend`: {json}"
+        json["hints"].as_array().is_some_and(|hints| hints
+            .iter()
+            .any(|hint| hint.as_str().unwrap().contains("indexed snapshot"))),
+        "a positive wildcard also discloses currency: {json}"
     );
 }
 
@@ -1427,8 +1429,7 @@ fn a_statement_declaring_several_names_is_each_ones_declaration() {
 
 /// The body `symbols --body` returns is the span `edit replace-body`
 /// replaces, so a body read, changed and passed back keeps the decorator its
-/// declaration opens with; the signature is still read from the line that
-/// names it.
+/// declaration opens with; its signature keeps the decorator and omits the body.
 #[test]
 fn a_body_read_changed_and_passed_back_keeps_its_decorator() {
     let dir = tempfile::tempdir().unwrap();
@@ -1450,7 +1451,10 @@ fn a_body_read_changed_and_passed_back_keeps_its_decorator() {
     let body = read["items"][0]["body"].as_str().unwrap_or_default();
     assert_eq!(body, "@functools.cache\ndef top():\n    return 2", "{read}");
     let signed = json_ok(root, &["symbols", "m.py", "--symbol", "top", "--signature"]);
-    assert_eq!(signed["items"][0]["signature"], "def top()", "{signed}");
+    assert_eq!(
+        signed["items"][0]["signature"], "@functools.cache\ndef top()",
+        "{signed}"
+    );
 
     let changed = body.replace("return 2", "return 3");
     json_ok(
@@ -3499,4 +3503,124 @@ exec cat > /dev/null
             "version"
         ]
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn positive_index_results_disclose_new_files_until_rebuilt() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::write(root.join("first.py"), "def snapshot_marker():\n    pass\n").unwrap();
+    json_ok(root, &["search", "index", "build"]);
+    std::fs::write(root.join("second.py"), "def snapshot_marker():\n    pass\n").unwrap();
+    for mode in ["symbols", "content"] {
+        let result = json_ok(
+            root,
+            &[
+                "--deterministic",
+                "search",
+                mode,
+                "snapshot_marker",
+                "--lang",
+                "python",
+            ],
+        );
+        assert_eq!(result["count"], 1, "{result}");
+        assert!(
+            result["hints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hint| hint.as_str().unwrap().contains("indexed snapshot")),
+            "{result}"
+        );
+        assert!(
+            result["next_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "symora search index build"),
+            "{result}"
+        );
+    }
+    json_ok(root, &["search", "index", "build"]);
+    for mode in ["symbols", "content"] {
+        let result = json_ok(
+            root,
+            &[
+                "--deterministic",
+                "search",
+                mode,
+                "snapshot_marker",
+                "--lang",
+                "python",
+            ],
+        );
+        assert_eq!(result["count"], 2, "{result}");
+    }
+}
+
+#[test]
+fn file_and_workspace_name_search_cannot_be_mixed() {
+    let result = run(&[
+        "symbols",
+        "src/main.rs",
+        "--name",
+        "main",
+        "--format",
+        "compact",
+    ]);
+    assert!(!result.status.success());
+    let payload: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(payload.get("error").is_some());
+}
+
+#[test]
+#[cfg(unix)]
+fn code_action_ranges_remain_bound_to_the_request_content() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("code-action protocol fixture requires python3");
+        return;
+    }
+    for mutate in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("main.go");
+        std::fs::write(&source, "abc()\n").unwrap();
+        std::fs::write(
+            root.path().join("go.mod"),
+            "module example.com/fixture\n\ngo 1.25\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join(".symora")).unwrap();
+        let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/lsp/code_action_server.py");
+        let config = serde_json::json!({"lsp": {"servers": {"go": {"command": "python3", "args": [server.to_str().unwrap(), source.to_str().unwrap(), if mutate { "mutate" } else { "keep" }]}}}});
+        let config: symora::models::config::SymoraConfig = serde_json::from_value(config).unwrap();
+        std::fs::write(
+            root.path().join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let output = run_in(
+            root.path(),
+            &[
+                "actions",
+                "apply",
+                "main.go:1:1",
+                "Rename first token",
+                "--format",
+                "compact",
+            ],
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if mutate {
+            assert!(!output.status.success(), "{payload}");
+            assert!(payload.get("error").is_some(), "{payload}");
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), "prefixabc()\n");
+        } else {
+            assert!(output.status.success(), "{payload}");
+            assert_eq!(payload["applied"], true);
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), "renamed()\n");
+        }
+    }
 }

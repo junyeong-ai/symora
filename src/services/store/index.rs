@@ -221,11 +221,9 @@ fn extraction_digest() -> String {
 /// A fingerprint of the tree a build read: the path, size, and modification
 /// time of every file it discovered, in one stable order.
 ///
-/// Taken before any of those files is opened. A file written while the build
-/// runs then carries a modification time past the one recorded here, so the
-/// next comparison reports the index behind rather than current — the one
-/// direction this must never get wrong, since a false "current" publishes a
-/// confident zero over content nothing read.
+/// Taken before opening files so ordinary concurrent writes invalidate the
+/// recorded view. This is metadata currency, not byte-for-byte verification:
+/// changes preserving both size and modification time require a rebuild.
 ///
 /// A file the walk found and a stat cannot describe compares equal to itself
 /// and to nothing else. It is unreadable, so the build already recorded it in
@@ -1232,9 +1230,8 @@ impl Store {
     /// covered cannot make the index look behind — and the comparison is
     /// stat-only: no file is opened. `false` wherever the question cannot be
     /// settled: no build has completed, one is running now, or this binary
-    /// wrote no fingerprint. An index reported current is one whose zero can
-    /// be published without a language server to confirm it, so every
-    /// unsettled case has to fall on this side.
+    /// wrote no fingerprint. A match confirms recorded filesystem metadata,
+    /// not a content comparison or a transactional filesystem snapshot.
     ///
     /// A build is the only thing that records a fingerprint. A per-file
     /// refresh deliberately does not: it brings the files it was given in

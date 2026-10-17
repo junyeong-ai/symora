@@ -79,7 +79,12 @@ fn run_mcp_tool(tool: &str, arguments: &str) -> Vec<Value> {
         let stdin = child.stdin.as_mut().expect("stdin");
         writeln!(
             stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{}}}}"#
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"symora-tests","version":"1"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
         )
         .unwrap();
         writeln!(
@@ -123,18 +128,29 @@ fn cli_and_mcp_emit_identical_payloads() {
     }
 }
 
-fn run_via_daemon(args: &[&str]) -> Vec<Value> {
-    let output = Command::new(SYMORA)
+fn run_at(root: &std::path::Path, args: &[&str], direct: bool) -> Vec<Value> {
+    let mut command = Command::new(SYMORA);
+    command
+        .current_dir(root)
         .args(args)
-        .args(["--format", "compact"])
-        .stderr(Stdio::null())
-        .output()
-        .expect("run symora CLI (daemon)");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect("CLI emits valid JSON"))
-        .collect()
+        .args(["--format", "compact"]);
+    if direct {
+        command.env("SYMORA_NO_DAEMON", "1");
+    } else {
+        command.env_remove("SYMORA_NO_DAEMON");
+    }
+    let output = command.output().expect("run fixture command");
+    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "invalid output for {args:?}: {error}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert!(
+        output.status.success(),
+        "fixture command {args:?} failed: {payload}"
+    );
+    vec![payload]
 }
 
 /// Whether a payload carries a degradation marker, at any depth.
@@ -154,30 +170,12 @@ fn discloses_degradation(payload: &[Value]) -> bool {
     payload.iter().any(walk)
 }
 
-/// 1-indexed line of a symbol's declaration, located in the source at run
-/// time.
-///
-/// A hardcoded `line:col` into a file this repository keeps editing goes
-/// stale silently: it lands on a comment, the anchor resolves to no symbol,
-/// and the comparison passes because both backends returned the same
-/// nothing. Resolving the position from the source is how the
-/// language-fixture suite keeps its anchors honest.
-fn declaration_line(path: &str, declaration: &str) -> u32 {
-    let source = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("parity anchor file {path} unreadable: {e}"));
-    source
-        .lines()
-        .position(|line| line.trim_start().starts_with(declaration))
-        .map(|index| index as u32 + 1)
-        .unwrap_or_else(|| panic!("parity anchor `{declaration}` not found in {path}"))
-}
-
 /// Poll one backend until it stops disclosing degradation, and return the
 /// payload it settled on.
 fn quiesced(
     backend: &str,
     args: &[&str],
-    run: fn(&[&str]) -> Vec<Value>,
+    run: impl Fn(&[&str]) -> Vec<Value>,
     deadline: Instant,
 ) -> Vec<Value> {
     loop {
@@ -194,10 +192,7 @@ fn quiesced(
     }
 }
 
-/// Long enough for a cold language server to analyse this workspace on a
-/// loaded CI machine. A stall past it is reported rather than papered over
-/// with a comparison that was never meaningful.
-const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(600);
+const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Daemon ↔ direct parity for LSP-backed commands. Needs rust-analyzer
@@ -213,28 +208,39 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 #[test]
 #[ignore = "requires rust-analyzer and a daemon-capable environment"]
 fn daemon_and_direct_emit_identical_payloads() {
-    let anchor = format!(
-        "src/utils.rs:{}",
-        declaration_line("src/utils.rs", "pub fn estimate_tokens")
-    );
-    // Each case pairs its argv with the `backend` a language-server answer
-    // reports, for a command that answers from a fallback instead of failing
-    // when no server is reachable: `symbols` then reports `ast`.
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"parity_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn add(a: u32, b: u32) -> u32 { a + b }\npub fn answer() -> u32 { add(20, 22) }\n",
+    )
+    .unwrap();
+    struct StopDaemon<'a>(&'a std::path::Path);
+    impl Drop for StopDaemon<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new(SYMORA)
+                .current_dir(self.0)
+                .args(["daemon", "stop"])
+                .output();
+        }
+    }
+    let _stop = StopDaemon(root);
     let cases: &[(&[&str], Option<&str>)] = &[
-        (
-            &["symbols", "src/main.rs", "--depth", "1"],
-            Some("document"),
-        ),
-        (&["refs", &anchor, "--limit", "5"], None),
-        // Tri-state diagnostics: the `status` presence rule must not
-        // depend on which side of the socket the wait ran on.
-        (&["diagnostics", "src/main.rs"], None),
+        (&["symbols", "src/lib.rs", "--depth", "1"], Some("document")),
+        (&["refs", "src/lib.rs:1:8", "--limit", "5"], None),
+        (&["diagnostics", "src/lib.rs"], None),
     ];
 
     for (args, server_backend) in cases {
         let deadline = Instant::now() + QUIESCENCE_TIMEOUT;
-        let direct = quiesced("direct", args, run_cli, deadline);
-        let daemon = quiesced("daemon", args, run_via_daemon, deadline);
+        let direct = quiesced("direct", args, |args| run_at(root, args, true), deadline);
+        let daemon = quiesced("daemon", args, |args| run_at(root, args, false), deadline);
 
         // A payload is always non-empty — an error object is a payload — so
         // emptiness is not what makes a case vacuous. Two sides that failed

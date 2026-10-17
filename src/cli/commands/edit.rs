@@ -230,6 +230,15 @@ pub async fn execute(args: EditArgs, app: &App) -> Result<()> {
 }
 
 async fn run(command: EditCommand, app: &App) -> Result<()> {
+    let dry_run = match &command {
+        EditCommand::ReplaceBody { dry_run, .. }
+        | EditCommand::InsertBefore { dry_run, .. }
+        | EditCommand::InsertAfter { dry_run, .. }
+        | EditCommand::Delete { dry_run, .. }
+        | EditCommand::Replace { dry_run, .. }
+        | EditCommand::Pattern { dry_run, .. } => *dry_run,
+    };
+    let _lock = (!dry_run).then(|| lock_edits(app.root())).transpose()?;
     match command {
         EditCommand::ReplaceBody {
             target,
@@ -398,6 +407,12 @@ async fn symbol_edit(
 ) -> Result<()> {
     let (file, symbol) = (addressed.file.as_path(), &addressed.symbol);
     let doc = FileDocument::load(file, dry_run)?;
+    if crate::infra::hash_content(&doc.content) != addressed.expected_hash {
+        anyhow::bail!(stale_revision(format!(
+            "{} changed while resolving the symbol",
+            file.display()
+        )));
+    }
     let span = symbol_line_span(symbol, doc.lines.len())?;
     let splice = make_splice(&span);
     if splice.removed > 0 {
@@ -568,6 +583,12 @@ async fn delete_symbol(
 ) -> Result<()> {
     let (file, symbol) = (addressed.file.as_path(), &addressed.symbol);
     let doc = FileDocument::load(file, dry_run)?;
+    if crate::infra::hash_content(&doc.content) != addressed.expected_hash {
+        anyhow::bail!(stale_revision(format!(
+            "{} changed while resolving the symbol",
+            file.display()
+        )));
+    }
     let span = symbol_line_span(symbol, doc.lines.len())?;
     ensure_anchor_not_stale(symbol, &doc.lines)?;
     ensure_exclusive_line_ownership(&doc.lines, symbol, &span, &addressed.declared_with)?;
@@ -1006,7 +1027,7 @@ impl FileDocument {
         let preview = if dry_run {
             Some(splice.unified_hunk(&self.lines))
         } else {
-            atomic_write(&self.file, &new_content)?;
+            write_file(&self.file, &new_content, Some(&self.content))?;
             None
         };
 
@@ -1397,11 +1418,12 @@ fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
 /// symbols; `unique_symbol_by_path` owns the dispatch, so the destructive
 /// resolution stays unit-tested without an LSP round-trip.
 async fn find_symbol_by_path(app: &App, file: PathBuf, pattern: &str) -> Result<Addressed> {
+    let expected_hash = crate::infra::hash_content(&fs::read_to_string(&file)?);
     let symbols = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
         .await?
         .symbols;
     let symbol = unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(&file))?;
-    Ok(Addressed::among(file, symbol, &symbols))
+    Ok(Addressed::among(file, symbol, &symbols, expected_hash))
 }
 
 /// Pick the one symbol a flexible `--symbol` pattern names: exactly one
@@ -1432,6 +1454,7 @@ async fn find_symbol_at_location(
     column: Option<u32>,
 ) -> Result<Addressed> {
     use crate::cli::utils::{SymbolResolution, column_addressed_symbol, line_addressed_symbol};
+    let expected_hash = crate::infra::hash_content(&fs::read_to_string(&file)?);
 
     let symbols = declared_in(app, &file, FindSymbolsOptions::default())
         .await?
@@ -1444,7 +1467,12 @@ async fn find_symbol_at_location(
 
     let file_display = app.output.relative_path(&file);
     match resolution {
-        SymbolResolution::Match(symbol) => Ok(Addressed::among(file, symbol.clone(), &symbols)),
+        SymbolResolution::Match(symbol) => Ok(Addressed::among(
+            file,
+            symbol.clone(),
+            &symbols,
+            expected_hash,
+        )),
         SymbolResolution::NotFound => Err(anyhow::Error::new(match column {
             Some(col) => crate::cli::OutputError::not_found(format!(
                 "Column {col} of line {line} in {file_display} is not on a symbol's declaration"
@@ -1477,18 +1505,20 @@ async fn find_symbol_at_location(
 /// The symbol an edit addresses, and the names its declaration declares
 /// with it ([`declared_with`]), which a whole-line edit of it would remove.
 struct Addressed {
+    expected_hash: u64,
     file: PathBuf,
     symbol: Symbol,
     declared_with: Vec<String>,
 }
 
 impl Addressed {
-    fn among(file: PathBuf, symbol: Symbol, symbols: &[Symbol]) -> Self {
+    fn among(file: PathBuf, symbol: Symbol, symbols: &[Symbol], expected_hash: u64) -> Self {
         let declared_with = declared_with(symbols, &symbol)
             .into_iter()
             .map(|other| other.name.clone())
             .collect();
         Self {
+            expected_hash,
             file,
             symbol,
             declared_with,
@@ -1683,7 +1713,7 @@ async fn pattern_edit(
 
     if !dry_run {
         let new_content = doc.render(&working);
-        atomic_write(&abs_path, &new_content)?;
+        write_file(&abs_path, &new_content, Some(&doc.content))?;
     }
 
     let mut section = Section::with_total(outputs, matches.len());
@@ -1722,86 +1752,58 @@ fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
 /// on every in-process failure path. Staging next to the target (not in a
 /// temp dir) keeps the rename on one filesystem, where it is atomic.
 pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
-    // Renaming over a symlink would replace the link itself, not the file it
-    // points to — resolve first so the edit lands in the real file.
+    write_file(target, content, None)
+}
+
+pub(crate) fn lock_edits(root: &Path) -> Result<fs::File> {
+    let directory = root.join(".symora");
+    fs::create_dir_all(&directory)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join("edit.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(stale_revision(
+            "Another edit is running in this project; retry when it finishes".to_string(),
+        )),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+pub(crate) fn write_file(target: &Path, content: &str, expected: Option<&str>) -> Result<()> {
     let target = target
         .canonicalize()
         .unwrap_or_else(|_| target.to_path_buf());
     let parent = target
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Target has no parent: {}", target.display()))?;
-    let staging = parent.join(format!(
-        ".{}.symora-edit.{}",
-        target
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("edit"),
-        std::process::id()
-    ));
-
-    let mut guard = StagingFile::new(&staging);
-    {
-        // `create_new` (O_EXCL) won't follow or open an existing path at the
-        // staging name, so a symlink planted there can't redirect the write
-        // into another file. If a same-pid staging file is somehow already
-        // present, it fails loudly here instead of being silently reused.
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)
-            .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
-        file.write_all(content.as_bytes())
-            .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to stage write: {}", staging.display()))?;
-    }
-
-    // The staging file was created with default permissions; the target's
-    // mode (an executable script, say) must survive the rename.
+    let mut staging = tempfile::Builder::new()
+        .prefix(".symora-edit-")
+        .tempfile_in(parent)
+        .with_context(|| format!("Failed to stage write: {}", target.display()))?;
+    staging.write_all(content.as_bytes())?;
     if let Ok(meta) = fs::metadata(&target) {
-        let _ = fs::set_permissions(&staging, meta.permissions());
+        fs::set_permissions(staging.path(), meta.permissions())?;
     }
-
-    fs::rename(&staging, &target)
+    staging.as_file().sync_all()?;
+    if let Some(expected) = expected {
+        let current = fs::read_to_string(&target)?;
+        if current != expected {
+            anyhow::bail!(stale_revision(format!(
+                "{} changed while the edit was being prepared",
+                target.display()
+            )));
+        }
+    }
+    staging
+        .persist(&target)
         .with_context(|| format!("Failed to write file: {}", target.display()))?;
-    guard.disarm();
-
-    // Best-effort fsync of the directory so the rename — not just the staged
-    // bytes — has a chance to be durable across a power loss. The edit has
-    // already landed via the atomic rename, so a failure here doesn't fail
-    // the command.
     if let Ok(dir) = fs::File::open(parent) {
         let _ = dir.sync_all();
     }
     Ok(())
-}
-
-/// RAII cleanup for the staging file: removes it on drop unless the rename
-/// landed, so a failed write never leaves an orphan dotfile in the project.
-struct StagingFile {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl StagingFile {
-    fn new(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for StagingFile {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1848,7 +1850,7 @@ pub fn apply_workspace_edits(
     // that splits one document across entries) must apply together against
     // one read — staging them independently would let the later write clobber
     // the earlier one's changes.
-    let grouped = coalesce_changes_by_file(changes);
+    let grouped = coalesce_changes_by_file(changes)?;
 
     // Two phases: validate and stage every file in memory first, write
     // only after the whole edit checked out. A stale range in file N
@@ -1856,7 +1858,12 @@ pub fn apply_workspace_edits(
     // reports failure.
     let mut staged = Vec::with_capacity(grouped.len());
 
-    for (file, edits) in grouped {
+    for GroupedEdits {
+        file,
+        edits,
+        expected_hash,
+    } in grouped
+    {
         // The paths come from the language server, not the user — they
         // still don't get to write outside the project.
         let canonical = file
@@ -1871,17 +1878,40 @@ pub fn apply_workspace_edits(
         let content = fs::read_to_string(&file)
             .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
+        if expected_hash.is_some_and(|expected| crate::infra::hash_content(&content) != expected) {
+            anyhow::bail!(stale_revision(format!(
+                "{} changed since the language server edit was read",
+                file.display()
+            )));
+        }
         let new_content = apply_text_edits(&content, &edits)
             .with_context(|| format!("Invalid edit for {}", file.display()))?;
 
-        staged.push((file, new_content, edits.len()));
+        staged.push((file, content, new_content, edits.len()));
     }
 
-    let mut results = Vec::with_capacity(staged.len());
-    for (file, new_content, edit_count) in staged {
-        if !dry_run {
-            atomic_write(&file, &new_content)?;
+    let mut results: Vec<AppliedFileChange> = Vec::with_capacity(staged.len());
+    for (file, content, new_content, edit_count) in staged {
+        if !dry_run && let Err(error) = write_file(&file, &new_content, Some(&content)) {
+            if results.is_empty() {
+                return Err(error);
+            }
+            let applied = results
+                .iter()
+                .map(|change| {
+                    change
+                        .file
+                        .strip_prefix(&root)
+                        .unwrap_or(&change.file)
+                        .display()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let error = crate::cli::OutputError::from(error).with_hint(format!("Already modified: {applied}. Inspect these files before retrying the remaining edit."));
+            return Err(error.into());
         }
+
         results.push(AppliedFileChange {
             file,
             edit_count,
@@ -1898,29 +1928,53 @@ pub fn apply_workspace_edits(
 /// existing file coalesce; a path that can't be canonicalized (it doesn't
 /// exist yet) falls back to its literal spelling, which still groups an
 /// entry with itself.
-fn coalesce_changes_by_file(changes: &[FileChangeWithEdits]) -> Vec<(PathBuf, Vec<TextEdit>)> {
-    let mut order: Vec<PathBuf> = Vec::new();
-    let mut by_key: std::collections::HashMap<PathBuf, (PathBuf, Vec<TextEdit>)> =
-        std::collections::HashMap::new();
+struct GroupedEdits {
+    file: PathBuf,
+    edits: Vec<TextEdit>,
+    expected_hash: Option<u64>,
+}
 
+fn coalesce_changes_by_file(changes: &[FileChangeWithEdits]) -> Result<Vec<GroupedEdits>> {
+    let mut order = Vec::new();
+    let mut groups: std::collections::HashMap<PathBuf, GroupedEdits> =
+        std::collections::HashMap::new();
     for change in changes {
         let key = change
             .file
             .canonicalize()
             .unwrap_or_else(|_| change.file.clone());
-        match by_key.get_mut(&key) {
-            Some((_, edits)) => edits.extend(change.edits.iter().cloned()),
+        match groups.get_mut(&key) {
+            Some(group) => {
+                if group
+                    .expected_hash
+                    .zip(change.expected_hash)
+                    .is_some_and(|(left, right)| left != right)
+                {
+                    anyhow::bail!(stale_revision(format!(
+                        "Edits for {} refer to different file revisions",
+                        change.file.display()
+                    )));
+                }
+                group.expected_hash = group.expected_hash.or(change.expected_hash);
+                group.edits.extend(change.edits.iter().cloned());
+            }
             None => {
                 order.push(key.clone());
-                by_key.insert(key, (change.file.clone(), change.edits.clone()));
+                groups.insert(
+                    key,
+                    GroupedEdits {
+                        file: change.file.clone(),
+                        edits: change.edits.clone(),
+                        expected_hash: change.expected_hash,
+                    },
+                );
             }
         }
     }
-
-    order
+    Ok(order
         .into_iter()
-        .filter_map(|key| by_key.remove(&key))
-        .collect()
+        .filter_map(|key| groups.remove(&key))
+        .collect())
 }
 
 /// Result of applying edits to a single file
@@ -2895,24 +2949,27 @@ mod tests {
         // edits, so a later write can't clobber the earlier one's changes.
         let changes = vec![
             FileChangeWithEdits {
+                expected_hash: None,
                 file: PathBuf::from("a.rs"),
                 edits: vec![edit(0, "x")],
             },
             FileChangeWithEdits {
+                expected_hash: None,
                 file: PathBuf::from("b.rs"),
                 edits: vec![edit(0, "y")],
             },
             FileChangeWithEdits {
+                expected_hash: None,
                 file: PathBuf::from("a.rs"),
                 edits: vec![edit(1, "z")],
             },
         ];
-        let grouped = coalesce_changes_by_file(&changes);
+        let grouped = coalesce_changes_by_file(&changes).unwrap();
         assert_eq!(grouped.len(), 2, "a.rs must appear once");
-        assert_eq!(grouped[0].0, PathBuf::from("a.rs"));
-        assert_eq!(grouped[0].1.len(), 2, "both a.rs edits retained");
-        assert_eq!(grouped[1].0, PathBuf::from("b.rs"));
-        assert_eq!(grouped[1].1.len(), 1);
+        assert_eq!(grouped[0].file, PathBuf::from("a.rs"));
+        assert_eq!(grouped[0].edits.len(), 2, "both a.rs edits retained");
+        assert_eq!(grouped[1].file, PathBuf::from("b.rs"));
+        assert_eq!(grouped[1].edits.len(), 1);
     }
 
     #[test]
@@ -2920,6 +2977,55 @@ mod tests {
         let sym = sample_symbol(2, 4);
         let span = symbol_line_span(&sym, 10).unwrap();
         assert_eq!((span.start, span.end), (2, 4));
+    }
+
+    #[test]
+    fn a_write_preserves_foreign_staging_files_and_refuses_changed_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("a.py");
+        fs::write(&target, "original").unwrap();
+        let foreign = directory
+            .path()
+            .join(format!(".a.py.symora-edit.{}", std::process::id()));
+        fs::write(&foreign, "owned by another operation").unwrap();
+        atomic_write(&target, "current").unwrap();
+        assert_eq!(
+            fs::read_to_string(&foreign).unwrap(),
+            "owned by another operation"
+        );
+        let error = write_file(&target, "replacement", Some("original")).unwrap_err();
+        assert_eq!(
+            crate::cli::OutputError::from(error).code,
+            crate::cli::errors::ErrorCode::Conflict
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "current");
+    }
+
+    #[test]
+    fn edits_of_one_project_require_exclusive_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = lock_edits(directory.path()).unwrap();
+        assert!(lock_edits(directory.path()).is_err());
+        drop(first);
+        assert!(lock_edits(directory.path()).is_ok());
+    }
+
+    #[test]
+    fn a_workspace_edit_rejects_changed_source_before_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("a.py");
+        fs::write(&file, "changed").unwrap();
+        let changes = [FileChangeWithEdits {
+            file: file.clone(),
+            edits: vec![],
+            expected_hash: Some(crate::infra::hash_content("original")),
+        }];
+        let error = apply_workspace_edits(&changes, false, directory.path()).unwrap_err();
+        assert_eq!(
+            crate::cli::OutputError::from(error).code,
+            crate::cli::errors::ErrorCode::Conflict
+        );
+        assert_eq!(fs::read_to_string(file).unwrap(), "changed");
     }
 
     #[test]

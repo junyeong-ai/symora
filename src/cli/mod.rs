@@ -13,7 +13,7 @@ pub mod utils;
 pub mod workspace;
 
 pub use analysis::{LocationAnalysis, detect_exported};
-pub use blast_radius::{BlastRadius, RiskLevel};
+pub use blast_radius::BlastRadius;
 pub use call_graph::{CallGraphWalk, Direction, WalkConfig};
 pub use errors::{ErrorCode, OutputError};
 pub use file_symbols::{FileSymbols, SymbolBackend, declared_in};

@@ -20,8 +20,8 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
                        symora pack --tokens 2000 --shape markdown"
 )]
 pub struct PackArgs {
-    /// Approximate token budget. Files are added in rank order until adding
-    /// the next one would push the pack over this number.
+    /// Approximate token budget. Files are considered in rank order and
+    /// included when they fit in the remaining estimate.
     #[arg(long, default_value_t = crate::constants::defaults::PACK_TOKENS)]
     pub tokens: usize,
 
@@ -102,7 +102,13 @@ pub async fn execute(args: PackArgs, app: &App) -> Result<()> {
         ..PackConfig::default()
     };
 
-    match build_pack(&root, args.tokens, args.focus.as_deref(), &filter, &cfg) {
+    let tokens = args.tokens;
+    let focus = args.focus.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        build_pack(&root, tokens, focus.as_deref(), &filter, &cfg)
+    })
+    .await?;
+    match result {
         Ok(result) => match args.shape {
             PackShape::Json => {
                 let output = build_json_output(ctx, &args, result);
@@ -124,6 +130,7 @@ fn build_json_output(
     args: &PackArgs,
     result: PackResult,
 ) -> PackOutput {
+    let hints = declaration_coverage_hints(&result);
     let estimated = result.estimated_tokens;
     let graph = result.graph_size;
     let unread_paths = relative_paths(ctx, &as_paths(&result.unreadable_paths));
@@ -135,8 +142,23 @@ fn build_json_output(
         incomplete: !unread_paths.is_empty(),
         unread_paths,
         focus: args.focus.clone(),
-        files: Section::new(files),
+        files: Section::new(files).with_hints(hints),
     }
+}
+
+fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
+    if result.unsupported_languages.is_empty() {
+        return Vec::new();
+    }
+    let languages = result
+        .unsupported_languages
+        .iter()
+        .map(|language| language.lsp_id())
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![format!(
+        "No declaration extractor for {languages}; files in these languages participate in the import graph but have no signatures in this pack. Inspect their source or query their language server."
+    )]
 }
 
 fn into_file_output(file: PackedFile) -> PackFileOutput {
@@ -185,6 +207,9 @@ fn render_markdown(
             name_some(&named)
         ));
     }
+    for hint in declaration_coverage_hints(result) {
+        out.push_str(&format!("- **Coverage**: {hint}\n"));
+    }
     out.push_str(&format!("- **Files included**: {}\n", result.files.len()));
     if let Some(focus) = args.focus.as_deref() {
         out.push_str(&format!("- **Focus**: `{focus}`\n"));
@@ -199,7 +224,13 @@ fn render_markdown(
             file.language.lsp_id(),
         ));
         if file.symbols.is_empty() {
-            out.push_str("_(no extractable symbols)_\n\n");
+            if crate::services::store::SymbolExtractor::is_supported(file.language) {
+                out.push_str("_(no extractable symbols)_\n\n");
+            } else {
+                out.push_str(
+                    "_(no declaration extractor for this language; inspect the source)_\n\n",
+                );
+            }
             continue;
         }
         for sym in &file.symbols {
@@ -240,8 +271,49 @@ mod tests {
             }],
             estimated_tokens: 50,
             graph_size: 25,
+            unsupported_languages: Vec::new(),
             unreadable_paths: Vec::new(),
         }
+    }
+
+    #[test]
+    fn unsupported_declarations_are_disclosed_even_when_the_pack_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("demo.ex"),
+            "defmodule Demo do\n  def greet(), do: :ok\nend\n",
+        )
+        .unwrap();
+        let result = build_pack(
+            root.path(),
+            4000,
+            None,
+            &FileFilter::new(root.path()),
+            &PackConfig {
+                use_cache: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(result.files.is_empty());
+        assert_eq!(result.unsupported_languages, vec![Language::Elixir]);
+        let args = PackArgs {
+            tokens: 4000,
+            focus: None,
+            per_file: 12,
+            shape: PackShape::Json,
+        };
+        assert!(
+            render_markdown(&ctx(), &args, &result).contains("No declaration extractor for elixir")
+        );
+        let output = serde_json::to_value(build_json_output(&ctx(), &args, result)).unwrap();
+        assert_eq!(output["files"]["count"], 0);
+        assert!(
+            output["files"]["hints"][0]
+                .as_str()
+                .unwrap()
+                .contains("No declaration extractor for elixir")
+        );
     }
 
     #[test]

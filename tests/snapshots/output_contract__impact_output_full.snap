@@ -1,5 +1,6 @@
 ---
 source: tests/output_contract.rs
+assertion_line: 681
 expression: out
 ---
 {
@@ -48,9 +49,7 @@ expression: out
         "prod": 3
       }
     ],
-    "test_caller_ratio": 0.33,
-    "risk": "medium",
-    "confidence": 0.9
+    "test_caller_ratio": 0.33
   },
   "next_commands": [
     "symora impact src/main.rs:12:4 --depth 2"

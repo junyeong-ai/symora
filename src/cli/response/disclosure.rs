@@ -724,30 +724,34 @@ pub fn unconfirmed_by_live_lookup(
         .collect()
 }
 
-/// What a zero owes its reader, in the shape a route states its own facts in.
-///
-/// A zero can be published unqualified on either of two grounds, and the
-/// cheaper one is checked second because it is the one that costs a walk: a
-/// language server that answered the same nothing against the working tree, or
-/// an index whose scope covered the question and whose tree has not moved
-/// since the build read it. Neither holding is the only case with anything to
-/// admit — and then the fact is about the index being behind, which a rebuild
-/// repairs, rather than about the server, which the answer did not need.
-///
-/// Only a zero reaches here. A match is evidence on its own terms, and its
-/// rows carry `backend` to say what produced them.
-pub async fn unconfirmed_zero_fact(
+/// Qualify snapshot results when the index no longer matches the working tree.
+pub async fn index_currency_disclosure(
     store: &dyn crate::services::store::StoreService,
-    count: usize,
     unconfirmed: &[Language],
 ) -> Vec<(String, String)> {
-    if count > 0 || unconfirmed.is_empty() {
+    if unconfirmed.is_empty() {
         return Vec::new();
     }
-    // A store that cannot answer has not established currency, which is the
-    // same standing as an index that is behind: both leave the zero qualified.
-    if store.index_is_current().await.unwrap_or(false) {
-        return Vec::new();
+    match store.index_is_current().await {
+        Ok(true) => return Vec::new(),
+        Ok(false) => {}
+        Err(error) => {
+            return vec![(
+                format!("Could not verify index currency: {error}"),
+                "symora search index status".to_string(),
+            )];
+        }
+    }
+    if store
+        .index_status()
+        .await
+        .is_ok_and(|status| status.is_indexing)
+    {
+        return vec![(
+            "The index is being rebuilt; these results describe the previous indexed snapshot"
+                .to_string(),
+            "symora search index status".to_string(),
+        )];
     }
     let languages = unconfirmed
         .iter()
@@ -756,8 +760,8 @@ pub async fn unconfirmed_zero_fact(
         .join(", ");
     vec![(
         format!(
-            "The index is behind the working tree and no {languages} language server confirmed \
-             this against it, so a symbol written since the last build has no row to match"
+            "The index is behind the working tree for {languages}; results describe the indexed \
+             snapshot and may omit symbols or content added since the last build"
         ),
         "symora search index build".to_string(),
     )]

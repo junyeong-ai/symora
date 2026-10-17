@@ -8,8 +8,8 @@ use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
-    index_holes_bound, index_unavailable_disclosure, ordered_bounds, relative_stale_files,
-    unconfirmed_by_live_lookup, unconfirmed_zero_fact, with_coverage_disclosure,
+    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, ordered_bounds,
+    relative_stale_files, unconfirmed_by_live_lookup, with_coverage_disclosure,
     workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section};
@@ -187,10 +187,13 @@ pub async fn execute_symbol_search(
                     skipped: &skipped,
                 },
             );
-            let unconfirmed_zero = unconfirmed_zero_fact(
+            let currency_facts = index_currency_disclosure(
                 app.store.as_ref(),
-                count,
-                &unconfirmed_by_live_lookup(&covered, &failures, &skipped),
+                &if count > 0 {
+                    covered.clone()
+                } else {
+                    unconfirmed_by_live_lookup(&covered, &failures, &skipped)
+                },
             )
             .await;
             let section = with_coverage_disclosure(
@@ -212,7 +215,7 @@ pub async fn execute_symbol_search(
                 query,
                 DisclosureRoute::IndexConsulted,
                 &lower_bounds,
-                &unconfirmed_zero,
+                &currency_facts,
             );
             ctx.print_success(section);
         }
@@ -330,28 +333,8 @@ async fn execute_glob_symbol_search(
             requested: &detected.languages,
         },
     );
-    // A wildcard is matched against the index alone — no language server can
-    // honor `*` — so unlike every other route this zero was never confirmed
-    // against disk. With no rows there is no `backend` to read either, which
-    // leaves nothing at all to distinguish "no such symbol" from "written
-    // since the last build". Said only on the zero: a non-empty answer
-    // carries `backend: "index"` on every row, which is the same statement.
-    // Said only on the zero, and as a fact of this ROUTE: it is about the index
-    // being behind, which is a different axis from the bounds, and passing it
-    // through the shared shaping is what keeps the bounds in front of it and
-    // keeps its rebuild from surviving a cap that dropped the sentence
-    // explaining it.
-    let unconfirmed_zero: Vec<(String, String)> = (count == 0)
-        .then(|| {
-            (
-                "Wildcards are matched against the index alone, so a symbol written since the \
-                 last build has no row to match"
-                    .to_string(),
-                "symora search index build".to_string(),
-            )
-        })
-        .into_iter()
-        .collect();
+    // Wildcards consult only the index, including for positive results.
+    let currency_facts = index_currency_disclosure(app.store.as_ref(), &covered).await;
     ctx.print_success(with_coverage_disclosure(
         with_emitted_stale(
             finish_symbol_search(
@@ -370,7 +353,7 @@ async fn execute_glob_symbol_search(
         query,
         DisclosureRoute::IndexConsulted,
         &lower_bounds,
-        &unconfirmed_zero,
+        &currency_facts,
     ));
     Ok(())
 }
@@ -560,10 +543,13 @@ async fn execute_workspace_symbol_search(
     );
     let mut route_facts = Vec::from_iter(supplement_unavailable.or(index_unavailable));
     route_facts.extend(
-        unconfirmed_zero_fact(
+        index_currency_disclosure(
             app.store.as_ref(),
-            count,
-            &unconfirmed_by_live_lookup(&index_covered, &failures, &skipped),
+            &if count > 0 {
+                index_covered.clone()
+            } else {
+                unconfirmed_by_live_lookup(&index_covered, &failures, &skipped)
+            },
         )
         .await,
     );

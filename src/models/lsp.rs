@@ -22,6 +22,8 @@ pub enum IndexingDegradation {
     /// The workspace-indexing wait hit its budget; results are a lower
     /// bound. Retrying after the server warms up may return more.
     TimedOut,
+    /// The server provided no whole-workspace readiness confirmation.
+    Unconfirmed,
 }
 
 impl IndexingDegradation {
@@ -30,6 +32,7 @@ impl IndexingDegradation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TimedOut => "timed_out",
+            Self::Unconfirmed => "unconfirmed",
         }
     }
 }
@@ -398,6 +401,10 @@ pub struct CodeLensCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub document_hashes: HashMap<String, u64>,
     pub title: String,
     pub kind: CodeActionKind,
     #[serde(default)]
@@ -473,6 +480,8 @@ pub struct ApplyActionResult {
 pub struct FileChangeWithEdits {
     pub file: PathBuf,
     pub edits: Vec<TextEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -614,10 +614,8 @@ fn build_file_record(path: &Path, app: &App) -> Option<FileRecord> {
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let top_dir = rel
-        .split('/')
-        .next()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| rel.clone());
+        .split_once('/')
+        .map_or_else(|| ".".to_string(), |(directory, _)| directory.to_string());
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())

@@ -15,7 +15,7 @@ use crate::services::dist::{
 #[derive(Args, Debug, Default)]
 pub struct SkillArgs {
     /// Git ref (tag/branch/sha) to fetch the SKILL.md from when running
-    /// outside a checkout. Defaults to the running binary's version.
+    /// instead of the skill bundled with the running binary.
     #[arg(long, value_name = "REF")]
     pub git_ref: Option<String>,
 
@@ -52,7 +52,7 @@ pub enum SkillAction {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "ref")]
 pub enum SkillOriginRepr {
-    LocalCheckout,
+    Bundled,
     Remote(String),
 }
 
@@ -63,9 +63,8 @@ pub fn run_skill(args: SkillArgs, assume_yes: bool) -> Result<SkillOutcome> {
     let installed_md = dest.join("SKILL.md");
     let installed_version = read_skill_version(&installed_md);
 
-    let git_ref = resolve_ref(args.git_ref.as_deref());
     let tmp = TempDir::new("symora-setup-skill")?;
-    let source = prepare_skill_source(&git_ref, tmp.path())?;
+    let source = prepare_skill_source(args.git_ref.as_deref(), tmp.path())?;
     let incoming_md = source.root.join("SKILL.md");
     let incoming_version = read_skill_version(&incoming_md);
 
@@ -133,9 +132,7 @@ pub fn run_skill(args: SkillArgs, assume_yes: bool) -> Result<SkillOutcome> {
 
 fn origin_view(origin: &SkillOrigin) -> (String, SkillOriginRepr) {
     match origin {
-        SkillOrigin::LocalCheckout => {
-            ("local checkout".to_string(), SkillOriginRepr::LocalCheckout)
-        }
+        SkillOrigin::Bundled => ("bundled".to_string(), SkillOriginRepr::Bundled),
         SkillOrigin::Remote { git_ref } => (
             format!("ref {git_ref}"),
             SkillOriginRepr::Remote(git_ref.clone()),
@@ -212,12 +209,4 @@ fn copy_recursively(src: &Path, dst: &Path) -> Result<()> {
         copy_recursively(&entry.path(), &target)?;
     }
     Ok(())
-}
-
-/// Default the git ref to the running binary's release tag. `CARGO_PKG_VERSION`
-/// is guaranteed non-empty by Cargo, so no further fallback is needed.
-fn resolve_ref(explicit: Option<&str>) -> String {
-    explicit
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")))
 }

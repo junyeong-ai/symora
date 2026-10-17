@@ -39,13 +39,20 @@ done
 
 with_cfg="$OUT/mcp-with.json"
 without_cfg="$OUT/mcp-without.json"
-printf '{"mcpServers":{"symora":{"command":"%s","args":["mcp","serve"]}}}\n' "$SYMORA_BIN" >"$with_cfg"
+node -e 'process.stdout.write(JSON.stringify({mcpServers:{symora:{command:process.argv[1],args:["mcp","serve","--profile","read-only"]}}})+"\n")' "$SYMORA_BIN" >"$with_cfg"
 printf '{"mcpServers":{}}\n' >"$without_cfg"
 
 # Build the WITH arm's index against the binary under test, and confirm the
 # repo's language server is present. A missing server invalidates the cell.
-( cd "$REPO" && "$SYMORA_BIN" init >/dev/null 2>&1 || true )
-( cd "$REPO" && "$SYMORA_BIN" search index build >/dev/null 2>&1 || true )
+if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+  echo "Benchmark requires a clean, committed target repository" >&2
+  exit 1
+fi
+( cd "$REPO" && "$SYMORA_BIN" search index build ) >"$OUT/index-build.json"
+git -C "$REPO" rev-parse HEAD >"$OUT/revision.txt"
+"$SYMORA_BIN" --version >"$OUT/symora-version.txt"
+claude --version >"$OUT/claude-version.txt"
+cp "$TASK_FILE" "$OUT/task.txt"
 
 run_arm() {
   local arm="$1" cfg="$2" i raw metrics
@@ -57,10 +64,14 @@ run_arm() {
     # transcript with no `result` event as failed, and aggregate.mjs drops it.
     ( cd "$REPO" && claude -p "$TASK" \
         --output-format stream-json --verbose \
-        --permission-mode bypassPermissions \
+        --permission-mode plan \
         --model opus \
         --strict-mcp-config --mcp-config "$cfg" ) >"$raw" 2>>"$OUT/${arm}-run${i}.err" || true
     node "$SCRIPT_DIR/parse-run.mjs" <"$raw" >"$metrics"
+    if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+      echo "Target repository changed during evaluation; stop and inspect it before continuing" >&2
+      exit 1
+    fi
 
     # Validity guard from the methodology: a WITH run whose system/init event
     # never exposed the symora MCP tools (parse-run's structured

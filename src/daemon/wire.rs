@@ -297,6 +297,8 @@ impl From<&lsp::Range> for Range {
 pub struct FileChange {
     pub file: String,
     pub edits: Vec<TextEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +320,7 @@ impl From<&lsp::FileChangeWithEdits> for FileChange {
     fn from(c: &lsp::FileChangeWithEdits) -> Self {
         Self {
             file: c.file.display().to_string(),
+            expected_hash: c.expected_hash,
             edits: c
                 .edits
                 .iter()
@@ -335,6 +338,7 @@ impl From<FileChange> for lsp::FileChangeWithEdits {
         Self {
             file: PathBuf::from(val.file),
             edits: val.edits.into_iter().map(Into::into).collect(),
+            expected_hash: val.expected_hash,
         }
     }
 }
@@ -483,6 +487,10 @@ pub struct CodeActionsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_hash: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub document_hashes: std::collections::HashMap<String, u64>,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
@@ -735,6 +743,8 @@ impl From<CodeLens> for lsp::CodeLens {
 impl From<CodeAction> for lsp::CodeAction {
     fn from(val: CodeAction) -> Self {
         Self {
+            expected_hash: val.expected_hash,
+            document_hashes: val.document_hashes,
             title: val.title,
             kind: CodeActionKind::from(val.kind.as_deref()),
             is_preferred: val.is_preferred,
@@ -943,6 +953,8 @@ impl CodeActionsResponse {
             actions: actions
                 .iter()
                 .map(|a| CodeAction {
+                    expected_hash: a.expected_hash,
+                    document_hashes: a.document_hashes.clone(),
                     title: a.title.clone(),
                     kind: Some(a.kind.to_string()),
                     is_preferred: a.is_preferred,
@@ -963,6 +975,29 @@ mod tests {
     /// The computation-time indexing marker must survive the daemon wire
     /// (INV3: daemon and direct answers carry the same disclosure), and a
     /// complete answer must omit the field rather than ship filler.
+    #[test]
+    fn code_action_snapshots_survive_the_daemon_wire() {
+        let action = lsp::CodeAction {
+            expected_hash: Some(42),
+            document_hashes: std::collections::HashMap::from([(
+                "file:///other.rs".to_string(),
+                84,
+            )]),
+            title: "Fix".to_string(),
+            kind: CodeActionKind::QuickFix,
+            is_preferred: false,
+            diagnostics: Vec::new(),
+            edit: None,
+            data: None,
+        };
+        let response = CodeActionsResponse::from_actions(vec![action]);
+        let encoded = serde_json::to_value(response).unwrap();
+        let decoded: CodeActionsResponse = serde_json::from_value(encoded).unwrap();
+        let restored: lsp::CodeAction = decoded.actions.into_iter().next().unwrap().into();
+        assert_eq!(restored.expected_hash, Some(42));
+        assert_eq!(restored.document_hashes["file:///other.rs"], 84);
+    }
+
     #[test]
     fn indexing_marker_round_trips_and_omits_when_absent() {
         let degraded = ReferencesResponse::from(lsp::Indexed::new(

@@ -6,9 +6,7 @@ feature-depth = 1
 
 [advisories]
 yanked = "deny"
-# Transitively-unmaintained crates (e.g. `paste` deep inside fastembed's
-# image/tokenizers tree) are upstream's call, not ours — only flag direct
-# workspace dependencies.
+# Report unmaintained direct dependencies; inspect transitive notices upstream.
 unmaintained = "workspace"
 
 [licenses]
@@ -29,10 +27,7 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
-exceptions = [
-  # fastembed → image → ravif → rav1e (fuzz harness); "(MIT OR Apache-2.0) AND NCSA".
-  { allow = ["NCSA"], crate = "libfuzzer-sys" },
-]
+
 
 [bans]
 multiple-versions = "warn"
