@@ -1379,8 +1379,8 @@ fn detect_line_ending(content: &str) -> &'static str {
 
 /// Resolve file path from target string, handling relative paths.
 /// Canonicalizes the result and validates it is within the project root.
-fn resolve_file_path(app: &App, target: &str) -> Result<PathBuf> {
-    let path = Path::new(target);
+pub(crate) fn resolve_file_path(app: &App, target: impl AsRef<Path>) -> Result<PathBuf> {
+    let path = target.as_ref();
     let resolved = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1646,32 +1646,41 @@ async fn pattern_edit(
         return Ok(());
     }
 
-    // Each match reduces to a char splice against the file state it is
-    // applied to. Bottom-up order keeps earlier (higher) coordinates
-    // valid while later (lower) matches are spliced first.
+    let replacement = text.replace("\r\n", "\n").replace('\n', doc.eol);
+    let edits: Vec<_> = selected
+        .iter()
+        .map(|(_, m)| TextEdit {
+            range: LspRange::new(
+                Position::new(m.start_line - 1, m.start_column - 1),
+                Position::new(m.end_line - 1, m.end_column - 1),
+            ),
+            new_text: replacement.clone(),
+        })
+        .collect();
+    let new_content = apply_text_edits(&doc.content, &edits)?;
+
     let mut ordered = selected.clone();
     ordered.sort_by(|a, b| {
-        (b.1.start_line, b.1.start_column).cmp(&(a.1.start_line, a.1.start_column))
+        (a.1.start_line, a.1.start_column).cmp(&(b.1.start_line, b.1.start_column))
     });
 
     let mut outputs = Vec::with_capacity(ordered.len());
-    let mut working = doc.lines.clone();
     for (_, m) in &ordered {
         let start_idx = (m.start_line.saturating_sub(1)) as usize;
         let end_idx = (m.end_line.saturating_sub(1)) as usize;
-        if start_idx >= working.len() || end_idx >= working.len() {
+        if start_idx >= doc.lines.len() || end_idx >= doc.lines.len() {
             anyhow::bail!(stale_revision(format!(
                 "Match span {}..{} exceeds file length {}; the AST index is stale, retry",
                 m.start_line,
                 m.end_line,
-                working.len()
+                doc.lines.len()
             )));
         }
         // AstMatch columns are already 1-indexed character columns (the JSON
         // contract), exactly what the splice core speaks — pass them straight
         // through.
         let splice = char_splice(
-            &working,
+            &doc.lines,
             m.start_line,
             m.start_column,
             m.end_line,
@@ -1680,7 +1689,7 @@ async fn pattern_edit(
             None,
         )?;
 
-        let old_len: usize = region_len(&working, &splice, doc.eol);
+        let old_len: usize = region_len(&doc.lines, &splice, doc.eol);
         let new_len: usize = splice.new_lines.join(doc.eol).len();
         outputs.push(EditOutput {
             operation: "pattern",
@@ -1693,22 +1702,15 @@ async fn pattern_edit(
             },
             bytes_changed: new_len as i64 - old_len as i64,
             dry_run,
-            preview: dry_run.then(|| splice.unified_hunk(&working)),
+            preview: dry_run.then(|| splice.unified_hunk(&doc.lines)),
             dangling_references: None,
             references_status: None,
             diagnostics: None,
             caller_verification: None,
         });
-
-        if !dry_run {
-            working = splice.apply(&working);
-        }
     }
-    // Emit in original (top-down) match order.
-    outputs.reverse();
 
     if !dry_run {
-        let new_content = doc.render(&working);
         write_file(&abs_path, &new_content, Some(&doc.content))?;
     }
 
@@ -1819,7 +1821,7 @@ pub(crate) async fn refresh_store_files(app: &App, files: &[PathBuf]) {
 // Workspace edit applier (LSP-computed edits; used by rename and actions)
 // ---------------------------------------------------------------------------
 
-use crate::models::lsp::{FileChangeWithEdits, TextEdit};
+use crate::models::lsp::{FileChangeWithEdits, Position, Range as LspRange, TextEdit};
 
 /// Apply workspace edits from LSP to actual files.
 /// Used by rename and actions apply commands.
@@ -1983,9 +1985,8 @@ pub struct AppliedFileChange {
 /// bytes an earlier edit already moved, the original offsets stay valid for
 /// every edit — including a zero-width insert that shares a boundary with an
 /// adjacent replace. An edit that starts before the previous one ended is a
-/// genuine overlap (edits from one revision don't overlap) and is refused
-/// rather than silently misapplied. Several inserts at one position keep the
-/// order they were given.
+/// genuine overlap and is refused rather than silently misapplied. Several
+/// inserts at one position keep the order they were given.
 pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
     if edits.is_empty() {
         return Ok(content.to_string());
@@ -2035,8 +2036,7 @@ pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<Stri
     for e in &resolved {
         if e.start < pos {
             anyhow::bail!(stale_revision(format!(
-                "overlapping LSP edits near byte {}; the edit set was computed \
-                 against a different revision — retry",
+                "overlapping edit ranges near byte {}; select non-overlapping edits",
                 e.start,
             )));
         }

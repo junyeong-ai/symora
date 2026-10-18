@@ -687,6 +687,7 @@ pub struct RegistrationParams {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Unregistration {
     pub id: String,
+    pub method: String,
 }
 
 /// `unregisterations` is the protocol's own spelling; the corrected one is

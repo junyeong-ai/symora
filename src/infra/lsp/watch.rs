@@ -81,42 +81,44 @@ impl FileWatcher {
 }
 
 impl WatchRegistry {
-    /// Record a `workspace/didChangeWatchedFiles` registration. A watcher
-    /// whose glob does not compile can never match, so it is dropped.
-    pub fn register(&mut self, registration: &Registration) {
-        let Some(options) = registration.register_options.clone().and_then(|options| {
-            serde_json::from_value::<DidChangeWatchedFilesRegistrationOptions>(options).ok()
-        }) else {
-            tracing::debug!(
-                "Watched-files registration {} has no watchers",
-                registration.id
-            );
-            return;
-        };
-        let watchers = options
-            .watchers
-            .into_iter()
-            .filter_map(|watcher| {
-                let (base, pattern) = match watcher.glob_pattern {
-                    GlobPattern::Absolute(pattern) => (None, pattern),
-                    GlobPattern::Relative(relative) => {
-                        (Some(uri_to_path(relative.base_uri.uri())), relative.pattern)
-                    }
-                };
-                let glob = GlobBuilder::new(&pattern)
-                    .literal_separator(true)
-                    .build()
-                    .inspect_err(|e| tracing::debug!("Ignoring watcher glob {pattern:?}: {e}"))
-                    .ok()?
-                    .compile_matcher();
-                Some(FileWatcher {
-                    base,
-                    glob,
-                    kinds: watcher.kind.unwrap_or(7),
-                })
+    /// Compile the complete registration batch before changing any active watcher.
+    pub fn register(&mut self, registrations: &[Registration]) -> Result<(), String> {
+        let compiled = registrations
+            .iter()
+            .map(|registration| {
+                let options: DidChangeWatchedFilesRegistrationOptions = serde_json::from_value(
+                    registration.register_options.clone().unwrap_or_default(),
+                )
+                .map_err(|error| {
+                    format!("Invalid watcher registration {}: {error}", registration.id)
+                })?;
+                let watchers = options
+                    .watchers
+                    .into_iter()
+                    .map(|watcher| {
+                        let (base, pattern) = match watcher.glob_pattern {
+                            GlobPattern::Absolute(pattern) => (None, pattern),
+                            GlobPattern::Relative(relative) => {
+                                (Some(uri_to_path(relative.base_uri.uri())), relative.pattern)
+                            }
+                        };
+                        let glob = GlobBuilder::new(&pattern)
+                            .literal_separator(true)
+                            .build()
+                            .map_err(|error| format!("Invalid watcher glob {pattern:?}: {error}"))?
+                            .compile_matcher();
+                        Ok(FileWatcher {
+                            base,
+                            glob,
+                            kinds: watcher.kind.unwrap_or(7),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok((registration.id.clone(), watchers))
             })
-            .collect();
-        self.registrations.insert(registration.id.clone(), watchers);
+            .collect::<Result<HashMap<_, _>, String>>()?;
+        self.registrations.extend(compiled);
+        Ok(())
     }
 
     pub fn unregister(&mut self, id: &str) {
@@ -473,11 +475,13 @@ mod tests {
 
     fn registry(options: serde_json::Value) -> WatchRegistry {
         let mut registry = WatchRegistry::default();
-        registry.register(&Registration {
-            id: "r1".to_string(),
-            method: WATCHED_FILES_METHOD.to_string(),
-            register_options: Some(options),
-        });
+        registry
+            .register(&[Registration {
+                id: "r1".to_string(),
+                method: WATCHED_FILES_METHOD.to_string(),
+                register_options: Some(options),
+            }])
+            .unwrap();
         registry
     }
 
@@ -559,6 +563,38 @@ mod tests {
             registry
                 .select(&[change("/w/a.py", FileChangeType::Changed)])
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_registration_batches_preserve_existing_watchers() {
+        let mut registry = registry(serde_json::json!({
+            "watchers": [{ "globPattern": "**/*.go" }]
+        }));
+        let valid = Registration {
+            id: "python".to_string(),
+            method: WATCHED_FILES_METHOD.to_string(),
+            register_options: Some(serde_json::json!({
+                "watchers": [{ "globPattern": "**/*.py" }]
+            })),
+        };
+        let invalid = Registration {
+            id: "invalid".to_string(),
+            method: WATCHED_FILES_METHOD.to_string(),
+            register_options: Some(serde_json::json!({
+                "watchers": [{ "globPattern": "[" }]
+            })),
+        };
+        assert!(registry.register(&[valid, invalid]).is_err());
+        assert_eq!(
+            selected(
+                &registry,
+                &[
+                    change("/w/main.go", FileChangeType::Changed),
+                    change("/w/main.py", FileChangeType::Changed),
+                ]
+            ),
+            ["file:///w/main.go:Changed"]
         );
     }
 

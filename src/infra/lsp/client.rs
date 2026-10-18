@@ -634,7 +634,7 @@ impl LspClient {
         }
     }
 
-    /// Build client capabilities optimized for the target language server (LSP 3.17 complete)
+    /// Negotiate static providers and the client's implemented file-watching registrations.
     fn client_capabilities(language: Language, file_watching: bool) -> ClientCapabilities {
         let general = GeneralClientCapabilities {
             position_encodings: Some(vec!["utf-8".to_string(), "utf-16".to_string()]),
@@ -666,18 +666,18 @@ impl LspClient {
 
         let text_document = TextDocumentClientCapabilities {
             synchronization: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "willSave": true,
                 "willSaveWaitUntil": true,
                 "didSave": true
             })),
             completion: Some(Self::completion_capabilities(language)),
             hover: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "contentFormat": ["markdown", "plaintext"]
             })),
             signature_help: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "signatureInformation": {
                     "documentationFormat": ["markdown", "plaintext"],
                     "parameterInformation": { "labelOffsetSupport": true },
@@ -686,29 +686,29 @@ impl LspClient {
                 "contextSupport": true
             })),
             declaration: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "linkSupport": true
             })),
             definition: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "linkSupport": true
             })),
             type_definition: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "linkSupport": true
             })),
             implementation: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "linkSupport": true
             })),
             references: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             document_highlight: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             document_symbol: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "symbolKind": {
                     "valueSet": (1..=26).collect::<Vec<_>>()
                 },
@@ -717,7 +717,7 @@ impl LspClient {
                 "labelSupport": true
             })),
             code_action: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "isPreferredSupport": true,
                 "disabledSupport": true,
                 "dataSupport": true,
@@ -735,26 +735,26 @@ impl LspClient {
                 "honorsChangeAnnotations": true
             })),
             code_lens: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             document_link: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "tooltipSupport": true
             })),
             color_provider: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             formatting: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             range_formatting: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             on_type_formatting: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             rename: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "prepareSupport": true,
                 "prepareSupportDefaultBehavior": 1,
                 "honorsChangeAnnotations": true
@@ -767,7 +767,7 @@ impl LspClient {
                 "dataSupport": true
             })),
             folding_range: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "rangeLimit": 5000,
                 "lineFoldingOnly": false,
                 "foldingRangeKind": {
@@ -776,16 +776,16 @@ impl LspClient {
                 "foldingRange": { "collapsedText": true }
             })),
             selection_range: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             linked_editing_range: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             call_hierarchy: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             semantic_tokens: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "requests": {
                     "range": true,
                     "full": { "delta": true }
@@ -807,22 +807,22 @@ impl LspClient {
                 "augmentsSyntaxTokens": true
             })),
             moniker: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             type_hierarchy: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             inline_value: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             inlay_hint: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "resolveSupport": {
                     "properties": ["tooltip", "textEdits", "label.tooltip", "label.location", "label.command"]
                 }
             })),
             diagnostic: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "relatedDocumentSupport": true
             })),
         };
@@ -837,7 +837,7 @@ impl LspClient {
                 "changeAnnotationSupport": { "groupsOnLabel": true }
             })),
             did_change_configuration: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             did_change_watched_files: file_watching.then(|| {
                 serde_json::json!({
@@ -846,7 +846,7 @@ impl LspClient {
                 })
             }),
             symbol: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "symbolKind": {
                     "valueSet": (1..=26).collect::<Vec<_>>()
                 },
@@ -854,7 +854,7 @@ impl LspClient {
                 "resolveSupport": { "properties": ["location.range"] }
             })),
             execute_command: Some(serde_json::json!({
-                "dynamicRegistration": true
+                "dynamicRegistration": false
             })),
             workspace_folders: Some(true),
             configuration: Some(true),
@@ -865,7 +865,7 @@ impl LspClient {
                 "refreshSupport": true
             })),
             file_operations: Some(serde_json::json!({
-                "dynamicRegistration": true,
+                "dynamicRegistration": false,
                 "didCreate": true,
                 "willCreate": true,
                 "didRename": true,
@@ -904,7 +904,7 @@ impl LspClient {
         let snippet_support = !matches!(language, Language::Kotlin);
 
         serde_json::json!({
-            "dynamicRegistration": true,
+            "dynamicRegistration": false,
             "contextSupport": true,
             "completionItem": {
                 "snippetSupport": snippet_support,
@@ -1874,38 +1874,51 @@ impl LspClient {
         Ok(Value::Array(items))
     }
 
-    /// Accepted even when unreadable, like every other registration: an
-    /// error answer makes some servers exit.
-    fn register_capabilities(&self, params: &Option<Value>) -> Result<Value, ResponseError> {
-        match params
-            .clone()
-            .map(serde_json::from_value::<RegistrationParams>)
-        {
-            Some(Ok(params)) => {
-                let mut watched = self.watched_files.lock().expect("watch registry poisoned");
-                for registration in &params.registrations {
-                    if registration.method == WATCHED_FILES_METHOD {
-                        watched.register(registration);
-                    }
-                }
-            }
-            _ => tracing::debug!("{} sent an unreadable registration", self.language),
+    fn invalid_registration(message: impl ToString) -> ResponseError {
+        ResponseError {
+            code: error_codes::INVALID_PARAMS,
+            message: message.to_string(),
+            data: None,
         }
+    }
+
+    fn register_capabilities(&self, params: &Option<Value>) -> Result<Value, ResponseError> {
+        let params: RegistrationParams =
+            serde_json::from_value(params.clone().unwrap_or(Value::Null))
+                .map_err(Self::invalid_registration)?;
+        if let Some(registration) = params
+            .registrations
+            .iter()
+            .find(|registration| !self.file_watching || registration.method != WATCHED_FILES_METHOD)
+        {
+            return Err(Self::invalid_registration(format!(
+                "Dynamic registration is not supported for {}",
+                registration.method
+            )));
+        }
+        self.watched_files
+            .lock()
+            .expect("watch registry poisoned")
+            .register(&params.registrations)
+            .map_err(Self::invalid_registration)?;
         Ok(Value::Null)
     }
 
     fn unregister_capabilities(&self, params: &Option<Value>) -> Result<Value, ResponseError> {
-        match params
-            .clone()
-            .map(serde_json::from_value::<UnregistrationParams>)
-        {
-            Some(Ok(params)) => {
-                let mut watched = self.watched_files.lock().expect("watch registry poisoned");
-                for unregistration in &params.unregisterations {
-                    watched.unregister(&unregistration.id);
-                }
-            }
-            _ => tracing::debug!("{} sent an unreadable unregistration", self.language),
+        let params: UnregistrationParams =
+            serde_json::from_value(params.clone().unwrap_or(Value::Null))
+                .map_err(Self::invalid_registration)?;
+        if let Some(unregistration) = params.unregisterations.iter().find(|unregistration| {
+            !self.file_watching || unregistration.method != WATCHED_FILES_METHOD
+        }) {
+            return Err(Self::invalid_registration(format!(
+                "Dynamic registration is not supported for {}",
+                unregistration.method
+            )));
+        }
+        let mut watched = self.watched_files.lock().expect("watch registry poisoned");
+        for unregistration in params.unregisterations {
+            watched.unregister(&unregistration.id);
         }
         Ok(Value::Null)
     }
@@ -2285,6 +2298,159 @@ mod tests {
         };
         assert!(offered(true));
         assert!(!offered(false));
+    }
+
+    #[test]
+    fn only_file_watching_supports_dynamic_registration() {
+        fn offered(value: &Value, path: &str, dynamic: &mut Vec<String>) {
+            if let Some(object) = value.as_object() {
+                for (key, value) in object {
+                    let path = format!("{path}.{key}");
+                    if key == "dynamicRegistration" && value == &Value::Bool(true) {
+                        dynamic.push(path);
+                    } else {
+                        offered(value, &path, dynamic);
+                    }
+                }
+            }
+        }
+        for language in Language::all() {
+            for watching in [false, true] {
+                let capabilities =
+                    serde_json::to_value(LspClient::client_capabilities(language, watching))
+                        .unwrap();
+                let mut dynamic = Vec::new();
+                offered(&capabilities, "", &mut dynamic);
+                let expected: Vec<&str> = if watching {
+                    vec![".workspace.didChangeWatchedFiles.dynamicRegistration"]
+                } else {
+                    vec![]
+                };
+                assert_eq!(dynamic, expected, "{language:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn registration_batches_reject_unsupported_methods_before_mutating_watchers() {
+        use super::super::protocol::FileChangeType;
+
+        let client = LspClient::new(
+            Language::Python,
+            PathBuf::from("/w"),
+            Arc::new(crate::config::LspRuntimeConfig::default()),
+            true,
+        );
+        let watching = serde_json::json!({
+            "id": "python", "method": WATCHED_FILES_METHOD,
+            "registerOptions": { "watchers": [{ "globPattern": "**/*.py" }] }
+        });
+        let unsupported = serde_json::json!({
+            "id": "calls", "method": "textDocument/prepareCallHierarchy"
+        });
+        let selected = || {
+            client
+                .watched_files
+                .lock()
+                .unwrap()
+                .select(&[FileChange {
+                    path: PathBuf::from("/w/main.py"),
+                    change: FileChangeType::Changed,
+                }])
+                .len()
+        };
+        let error = client
+            .register_capabilities(&Some(serde_json::json!({
+                "registrations": [watching, unsupported]
+            })))
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_PARAMS);
+        assert_eq!(selected(), 0);
+
+        assert!(
+            client
+                .register_capabilities(&Some(serde_json::json!({
+                    "registrations": [watching]
+                })))
+                .is_ok()
+        );
+        assert_eq!(selected(), 1);
+        let error = client
+            .unregister_capabilities(&Some(serde_json::json!({
+                "unregisterations": [watching, unsupported]
+            })))
+            .unwrap_err();
+        assert_eq!(error.code, error_codes::INVALID_PARAMS);
+        assert_eq!(selected(), 1);
+        assert!(client.unregister_capabilities(&None).is_err());
+        assert!(client.register_capabilities(&None).is_err());
+        assert_eq!(selected(), 1);
+        assert!(
+            client
+                .unregister_capabilities(&Some(serde_json::json!({
+                    "unregisterations": [watching]
+                })))
+                .is_ok()
+        );
+        assert_eq!(selected(), 0);
+
+        assert!(
+            test_client()
+                .register_capabilities(&Some(serde_json::json!({
+                    "registrations": [watching]
+                })))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn static_call_hierarchy_is_negotiated_when_dynamic_registration_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::models::config::SymoraConfig::default();
+        config.lsp.timeout_secs = 3;
+        let client = LspClient::new(
+            Language::Python,
+            root.path().to_path_buf(),
+            Arc::new(crate::config::LspRuntimeConfig::from(&config)),
+            false,
+        );
+        let launch = super::super::servers::ServerLaunch {
+            command: PathBuf::from("python3"),
+            args: vec![
+                "-u".to_string(),
+                "-c".to_string(),
+                include_str!("../../../tests/fixtures/lsp/capability_server.py").to_string(),
+            ],
+            env: Default::default(),
+        };
+        client.start(&launch, || {}).await.unwrap();
+        assert!(
+            client
+                .feature_advertised(crate::infra::lsp::LspFeature::IncomingCalls)
+                .await
+        );
+        let items: Vec<Value> = client
+            .request(
+                "textDocument/prepareCallHierarchy",
+                Some(serde_json::json!({
+                    "textDocument": { "uri": path_to_uri(&root.path().join("main.py")) },
+                    "position": { "line": 0, "character": 4 }
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        let calls: Vec<Value> = client
+            .request(
+                "callHierarchy/incomingCalls",
+                Some(serde_json::json!({ "item": items[0] })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["from"]["name"], "caller");
+        client.shutdown().await.unwrap();
     }
 
     async fn notify_client(client: &Arc<LspClient>, method: &str, params: serde_json::Value) {

@@ -36,9 +36,8 @@ pub struct SetupArgs {
     #[arg(long, value_enum, default_value_t = DepsGroup::None)]
     pub deps: DepsGroup,
 
-    /// Git ref (tag/branch/sha) to fetch the skill from when running outside
-    /// a checkout (e.g. `v0.7.0` or `main`). Default: the running binary's
-    /// release tag.
+    /// Fetch the skill from this git ref (tag/branch/sha) instead of using
+    /// the skill bundled with the running binary.
     #[arg(long, value_name = "REF")]
     pub git_ref: Option<String>,
 }

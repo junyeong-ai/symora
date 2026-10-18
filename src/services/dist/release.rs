@@ -34,16 +34,10 @@ fn version_of_tag(tag: &str) -> Option<String> {
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// The version the API's answer names.
-///
-/// Read from the release object's own `tag_name`, which is the first key of
-/// that name in the body — the release GitHub calls latest is the whole
-/// response, and the fields that follow (author, assets) carry no such key.
+/// The version named by the release object's own `tag_name` field.
 pub(super) fn tag_from_api_body(body: &str) -> Option<String> {
-    let after = body.split_once("\"tag_name\"")?.1;
-    let after = after.split_once(':')?.1;
-    let after = after.split_once('"')?.1;
-    version_of_tag(after.split_once('"')?.0)
+    let release: serde_json::Value = serde_json::from_str(body).ok()?;
+    version_of_tag(release.get("tag_name")?.as_str()?)
 }
 
 /// The version the redirect's destination names.
@@ -174,7 +168,23 @@ mod tests {
             tag_from_api_body(r#"{"tag_name": "0.9.0"}"#).as_deref(),
             Some("0.9.0")
         );
-        for empty in [r#"{"tag_name": "v"}"#, r#"{"tag_name": ""}"#, "{}", ""] {
+        for body in [
+            r#"{"name":"tag_name","body":"not a version","tag_name":"v0.31.2"}"#,
+            r#"{"nested":{"tag_name":"v0.0.0"},"tag_name":"v0.31.2"}"#,
+            r#"{"tag_name":"v0.31.\u0032"}"#,
+        ] {
+            assert_eq!(tag_from_api_body(body).as_deref(), Some("0.31.2"));
+        }
+        for empty in [
+            r#"{"tag_name": "v"}"#,
+            r#"{"tag_name": ""}"#,
+            r#"{"tag_name": null}"#,
+            r#"{"tag_name": 12}"#,
+            r#"[{"tag_name":"v0.31.2"}]"#,
+            r#"{"tag_name":"v0.31.2"} invalid"#,
+            "{}",
+            "",
+        ] {
             assert_eq!(tag_from_api_body(empty), None, "body {empty:?}");
         }
     }
