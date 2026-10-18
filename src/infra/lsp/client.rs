@@ -2406,6 +2406,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn static_call_hierarchy_is_negotiated_when_dynamic_registration_is_unavailable() {
+        use super::super::protocol::LspCallHierarchyItem;
+
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::models::config::SymoraConfig::default();
         config.lsp.timeout_secs = 3;
@@ -2430,7 +2432,7 @@ mod tests {
                 .feature_advertised(crate::infra::lsp::LspFeature::IncomingCalls)
                 .await
         );
-        let items: Vec<Value> = client
+        let items: Vec<LspCallHierarchyItem> = client
             .request(
                 "textDocument/prepareCallHierarchy",
                 Some(serde_json::json!({

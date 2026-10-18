@@ -650,6 +650,8 @@ pub struct LspCallHierarchyItem {
     pub selection_range: Range,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 /// Call hierarchy incoming call
@@ -779,6 +781,33 @@ pub struct DidChangeWatchedFilesParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_hierarchy_items_preserve_opaque_data_between_requests() {
+        let base = serde_json::json!({
+            "name": "target", "kind": 12, "uri": "file:///w/main.py",
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 1, "character": 0 } },
+            "selectionRange": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 10 } }
+        });
+        for data in [
+            None,
+            Some(serde_json::json!({
+                "session": ["target", 7, null], "nested": { "ready": true }
+            })),
+            Some(serde_json::json!(["target", { "id": 7 }])),
+            Some(serde_json::json!("opaque")),
+            Some(serde_json::json!(0)),
+            Some(serde_json::json!(false)),
+        ] {
+            let mut expected = base.clone();
+            if let Some(data) = data {
+                expected["data"] = data;
+            }
+            let item: LspCallHierarchyItem = serde_json::from_value(expected.clone()).unwrap();
+            let follow = serde_json::json!({ "item": item });
+            assert_eq!(follow["item"], expected);
+        }
+    }
 
     #[test]
     fn advertises_is_present_and_not_false() {
