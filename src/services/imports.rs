@@ -325,8 +325,7 @@ fn rust_identifier_name<'a>(node: Node, source: &'a [u8]) -> &'a str {
     name.strip_prefix("r#").unwrap_or(name)
 }
 
-/// A `mod x;` with no body names a sibling file; one with a body is an
-/// inline module and names nothing on disk.
+/// Out-of-line declarations name modules; inline modules add lexical context.
 const RUST_QUERY: &str = r#"
 (use_declaration argument: (_) @path)
 (mod_item name: (identifier) @module !body)

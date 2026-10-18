@@ -153,12 +153,13 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
             let items: Vec<SymbolOutput> = limited
                 .iter()
                 .map(|s| {
-                    let mut output = SymbolOutput::from_symbol(s, ctx.root());
-                    if need_body {
+                    let mut output = if args.signature {
+                        SymbolOutput::from_symbol_signature(s, ctx.root())
+                    } else {
+                        SymbolOutput::from_symbol(s, ctx.root())
+                    };
+                    if args.body {
                         output = output.with_signature(extract_signature(s));
-                    }
-                    if args.signature {
-                        output = output.without_body();
                     }
                     output
                 })
@@ -517,13 +518,13 @@ async fn workspace_symbol_bodies(
         .map(|symbol| {
             let key = (symbol.location.file.clone(), symbol.path().to_string());
             let source = bodied.get(&key).unwrap_or(symbol);
-            let mut output = SymbolOutput::from_symbol(source, ctx.root())
-                .produced_by(producer(symbol, from_index));
-            output = output.with_signature(extract_signature(source));
-            if signature {
-                output = output.without_body();
-            }
-            output
+            let output = if signature {
+                SymbolOutput::from_symbol_signature(source, ctx.root())
+            } else {
+                SymbolOutput::from_symbol(source, ctx.root())
+                    .with_signature(extract_signature(source))
+            };
+            output.produced_by(producer(symbol, from_index))
         })
         .collect()
 }
