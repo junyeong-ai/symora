@@ -5,8 +5,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
-/// Run a command, inherit stdout/stderr to the user, and bubble up a
-/// non-zero exit as an error.
+/// Stream command output to stderr, preserving stdin and exit status.
 pub fn run_streaming(program: &str, args: &[&str]) -> Result<()> {
     run_streaming_in(program, args, None)
 }
@@ -14,7 +13,7 @@ pub fn run_streaming(program: &str, args: &[&str]) -> Result<()> {
 /// Same as [`run_streaming`] but pinned to a working directory.
 pub fn run_streaming_in(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<()> {
     let mut cmd = Command::new(program);
-    cmd.args(args);
+    cmd.args(args).stdout(Stdio::from(std::io::stderr()));
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
