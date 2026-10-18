@@ -1,7 +1,5 @@
-//! The single mutation surface. Every command that splices source text
-//! lives here, sharing one resolution path (root-validated), one
-//! validation gate, one splice core, one preview format, and one typed
-//! output (`EditOutput`).
+//! Source mutations share project-boundary validation, revision-checked
+//! writes, unified previews, and typed output (`EditOutput`).
 //!
 //! Symbol-targeted subcommands (`replace-body`, `insert-before`,
 //! `insert-after`) operate on whole lines of the symbol's full
@@ -926,8 +924,8 @@ async fn finish(app: &App, file: &Path, dry_run: bool) {
 
 /// One planned, contiguous content change in line units: `removed`
 /// original lines starting at `at` are replaced by `new_lines`. Inserts
-/// are the `removed == 0` case. Every subcommand reduces to this, which
-/// is what keeps validation, preview, and output uniform.
+/// are the `removed == 0` case. Symbol and explicit character-range edits
+/// reduce to this form.
 #[derive(Debug)]
 struct LineSplice {
     /// 0-indexed first affected line.
@@ -1657,40 +1655,12 @@ async fn pattern_edit(
             new_text: replacement.clone(),
         })
         .collect();
-    let new_content = apply_text_edits(&doc.content, &edits)?;
+    let resolved = resolve_text_edits(&doc.content, &edits)?;
+    let new_content = apply_resolved_edits(&doc.content, &resolved);
 
-    let mut ordered = selected.clone();
-    ordered.sort_by(|a, b| {
-        (a.1.start_line, a.1.start_column).cmp(&(b.1.start_line, b.1.start_column))
-    });
-
-    let mut outputs = Vec::with_capacity(ordered.len());
-    for (_, m) in &ordered {
-        let start_idx = (m.start_line.saturating_sub(1)) as usize;
-        let end_idx = (m.end_line.saturating_sub(1)) as usize;
-        if start_idx >= doc.lines.len() || end_idx >= doc.lines.len() {
-            anyhow::bail!(stale_revision(format!(
-                "Match span {}..{} exceeds file length {}; the AST index is stale, retry",
-                m.start_line,
-                m.end_line,
-                doc.lines.len()
-            )));
-        }
-        // AstMatch columns are already 1-indexed character columns (the JSON
-        // contract), exactly what the splice core speaks — pass them straight
-        // through.
-        let splice = char_splice(
-            &doc.lines,
-            m.start_line,
-            m.start_column,
-            m.end_line,
-            Some(m.end_column),
-            text,
-            None,
-        )?;
-
-        let old_len: usize = region_len(&doc.lines, &splice, doc.eol);
-        let new_len: usize = splice.new_lines.join(doc.eol).len();
+    let mut outputs = Vec::with_capacity(resolved.len());
+    for edit in &resolved {
+        let (_, m) = selected[edit.order];
         outputs.push(EditOutput {
             operation: "pattern",
             file: app.output.relative_path(&abs_path),
@@ -1700,9 +1670,9 @@ async fn pattern_edit(
                 start: m.start_line,
                 end: m.end_line,
             },
-            bytes_changed: new_len as i64 - old_len as i64,
+            bytes_changed: edit.text.len() as i64 - (edit.end - edit.start) as i64,
             dry_run,
-            preview: dry_run.then(|| splice.unified_hunk(&doc.lines)),
+            preview: dry_run.then(|| text_edit_hunk(&doc.content, edit, m.start_line)),
             dangling_references: None,
             references_status: None,
             diagnostics: None,
@@ -1730,12 +1700,6 @@ async fn pattern_edit(
     app.output.print_success(section);
     finish(app, &abs_path, dry_run).await;
     Ok(())
-}
-
-fn region_len(lines: &[String], splice: &LineSplice, eol: &str) -> usize {
-    let region = &lines[splice.at..splice.at + splice.removed];
-    let newline_bytes = eol.len() * region.len().saturating_sub(1);
-    region.iter().map(String::len).sum::<usize>() + newline_bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -1988,10 +1952,11 @@ pub struct AppliedFileChange {
 /// genuine overlap and is refused rather than silently misapplied. Several
 /// inserts at one position keep the order they were given.
 pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<String> {
-    if edits.is_empty() {
-        return Ok(content.to_string());
-    }
+    let resolved = resolve_text_edits(content, edits)?;
+    Ok(apply_resolved_edits(content, &resolved))
+}
 
+fn resolve_text_edits<'a>(content: &str, edits: &'a [TextEdit]) -> Result<Vec<ResolvedEdit<'a>>> {
     // Resolve to original-document byte offsets up front. `order` keeps
     // same-position inserts in the order they were given.
     let mut resolved: Vec<ResolvedEdit> = Vec::with_capacity(edits.len());
@@ -2031,7 +1996,6 @@ pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<Stri
             .then(a.order.cmp(&b.order))
     });
 
-    let mut result = String::with_capacity(content.len());
     let mut pos = 0usize;
     for e in &resolved {
         if e.start < pos {
@@ -2040,22 +2004,74 @@ pub(crate) fn apply_text_edits(content: &str, edits: &[TextEdit]) -> Result<Stri
                 e.start,
             )));
         }
-        result.push_str(&content[pos..e.start]);
-        result.push_str(e.text);
         pos = e.end;
     }
-    result.push_str(&content[pos..]);
-    Ok(result)
+    Ok(resolved)
 }
 
-/// One LSP edit resolved to original-document byte offsets. `order` is the
-/// index in the given edit list, used only to keep same-position inserts in
-/// the order they were given.
+fn apply_resolved_edits(content: &str, edits: &[ResolvedEdit<'_>]) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut pos = 0usize;
+    for edit in edits {
+        result.push_str(&content[pos..edit.start]);
+        result.push_str(edit.text);
+        pos = edit.end;
+    }
+    result.push_str(&content[pos..]);
+    result
+}
+
+/// One text edit resolved to original-document byte offsets. `order` retains
+/// the input identity and the order of same-position inserts.
 struct ResolvedEdit<'a> {
     start: usize,
     end: usize,
     order: usize,
     text: &'a str,
+}
+
+fn text_edit_hunk(content: &str, edit: &ResolvedEdit<'_>, start_line: u32) -> String {
+    let line_start = content[..edit.start].rfind('\n').map_or(0, |at| at + 1);
+    let ends_at_line_start = edit.end == 0 || content.as_bytes()[edit.end - 1] == b'\n';
+    let preserves_line_boundary =
+        edit.text.ends_with('\n') || (edit.start == line_start && edit.text.is_empty());
+    let line_end = if ends_at_line_start && preserves_line_boundary {
+        edit.end
+    } else {
+        content[edit.end..]
+            .find('\n')
+            .map_or(content.len(), |at| edit.end + at + 1)
+    };
+    let before = &content[line_start..line_end];
+    let after = format!(
+        "{}{}{}",
+        &content[line_start..edit.start],
+        edit.text,
+        &content[edit.end..line_end],
+    );
+    let removed = before.split_inclusive('\n').count();
+    let added = after.split_inclusive('\n').count();
+    let old_line = if removed == 0 {
+        start_line - 1
+    } else {
+        start_line
+    };
+    let new_line = if added == 0 {
+        start_line - 1
+    } else {
+        start_line
+    };
+    let mut hunk = format!("@@ -{old_line},{removed} +{new_line},{added} @@\n");
+    for (prefix, fragment) in [('-', before), ('+', after.as_str())] {
+        for line in fragment.split_inclusive('\n') {
+            hunk.push(prefix);
+            hunk.push_str(line);
+            if !line.ends_with('\n') {
+                hunk.push_str("\n\\ No newline at end of file\n");
+            }
+        }
+    }
+    hunk
 }
 
 /// Byte offset for an LSP (0-indexed) line/character position.
@@ -2833,6 +2849,44 @@ mod tests {
             apply_text_edits("z\n", &[insert("A"), insert("B")]).unwrap(),
             "ABz\n"
         );
+    }
+
+    #[test]
+    fn text_edit_hunks_preserve_line_joins_and_eof_inserts() {
+        for (content, range, text, start_line, expected, hunk) in [
+            (
+                "one\ntail\n",
+                LspRange::new(Position::new(0, 0), Position::new(1, 0)),
+                "joined",
+                1,
+                "joinedtail\n",
+                "@@ -1,2 +1,1 @@\n-one\n-tail\n+joinedtail\n",
+            ),
+            (
+                "one\ntail\n",
+                LspRange::new(Position::new(0, 0), Position::new(1, 0)),
+                "new\n",
+                1,
+                "new\ntail\n",
+                "@@ -1,1 +1,1 @@\n-one\n+new\n",
+            ),
+            (
+                "one\n",
+                LspRange::new(Position::new(1, 0), Position::new(1, 0)),
+                "tail",
+                2,
+                "one\ntail",
+                "@@ -1,0 +2,1 @@\n+tail\n\\ No newline at end of file\n",
+            ),
+        ] {
+            let edits = [TextEdit {
+                range,
+                new_text: text.to_string(),
+            }];
+            let resolved = resolve_text_edits(content, &edits).unwrap();
+            assert_eq!(apply_resolved_edits(content, &resolved), expected);
+            assert_eq!(text_edit_hunk(content, &resolved[0], start_line), hunk);
+        }
     }
 
     #[test]
