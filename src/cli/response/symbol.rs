@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::LocationOutput;
+use crate::cli::utils::extract_signature;
 use crate::models::symbol::Symbol;
 
 /// Symbol output for find symbol commands.
@@ -58,6 +59,14 @@ impl SymbolOutput {
     }
 
     pub fn from_symbol(symbol: &Symbol, root: &Path) -> Self {
+        Self::project(symbol, root, false)
+    }
+
+    pub fn from_symbol_signature(symbol: &Symbol, root: &Path) -> Self {
+        Self::project(symbol, root, true)
+    }
+
+    fn project(symbol: &Symbol, root: &Path, signature_only: bool) -> Self {
         Self {
             name: symbol.name.clone(),
             name_path: symbol.name_path.clone(),
@@ -76,9 +85,17 @@ impl SymbolOutput {
             }),
             container: symbol.container.clone(),
             backend: None,
-            signature: None,
+            signature: if signature_only {
+                extract_signature(symbol)
+            } else {
+                None
+            },
             documentation: None,
-            body: symbol.body.clone(),
+            body: if signature_only {
+                None
+            } else {
+                symbol.body.clone()
+            },
             body_omitted: None,
             children: if symbol.children.is_empty() {
                 None
@@ -87,7 +104,7 @@ impl SymbolOutput {
                     symbol
                         .children
                         .iter()
-                        .map(|s| SymbolOutput::from_symbol(s, root))
+                        .map(|s| Self::project(s, root, signature_only))
                         .collect(),
                 )
             },

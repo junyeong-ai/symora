@@ -586,7 +586,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Build a token-budgeted context pack: files ranked from syntax-level import paths \
                           with top-level signatures fitted to a token budget. This is an \
                           orientation aid, not a complete dependency graph. Module strings requiring \
-                          unsupported decoding are omitted. Set focus for a \
+                          unsupported decoding and Rust relative paths without module ownership \
+                          are omitted. Set focus for a \
                           known task area. Set shape=\"markdown\" for a \
                           plain-text view ready to paste into an LLM context window.",
             schema_object(

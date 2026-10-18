@@ -160,11 +160,22 @@ fn pyright_resolves_across_package_boundaries() {
     ]);
     assert_eq!(signed["backend"], "document", "{signed}");
     let items = signed["items"].as_array().expect("signature items");
-    assert!(items.iter().any(|item| {
-        item["children"]
-            .as_array()
-            .is_some_and(|children| !children.is_empty())
-    }));
+    let circle = items
+        .iter()
+        .find(|item| item["name"] == "Circle")
+        .expect("Circle signature");
+    let perimeter = circle["children"]
+        .as_array()
+        .expect("Circle members")
+        .iter()
+        .find(|item| item["name"] == "perimeter")
+        .expect("perimeter method");
+    assert!(
+        perimeter["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.contains("perimeter(self) -> float")),
+        "nested method signature is missing: {signed}"
+    );
     fn has_body(value: &Value) -> bool {
         match value {
             Value::Object(object) => object.contains_key("body") || object.values().any(has_body),

@@ -73,6 +73,7 @@ pub struct PackResult {
     pub graph_size: usize,
     pub unsupported_languages: Vec<Language>,
     pub unsupported_import_languages: Vec<Language>,
+    pub rust_relative_imports_omitted: bool,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
     /// publishes how many the selection chose FROM, and the budget's own
@@ -105,6 +106,7 @@ pub fn build_pack(
             graph_size: 0,
             unsupported_languages: Vec::new(),
             unsupported_import_languages: Vec::new(),
+            rust_relative_imports_omitted: false,
             unreadable_paths: Vec::new(),
         });
     }
@@ -145,7 +147,7 @@ pub fn build_pack(
 
     let graph = build_import_graph(&nodes, &declared_module_prefix(root));
     let personalization = personalization_vector(&nodes, focus);
-    let ranks = page_rank(&graph, &personalization, cfg);
+    let ranks = page_rank(&graph.edges, &personalization, cfg);
     let fitted = fit_to_budget(
         &nodes,
         &ranks,
@@ -172,6 +174,7 @@ pub fn build_pack(
     Ok(PackResult {
         unsupported_import_languages,
         unsupported_languages,
+        rust_relative_imports_omitted: graph.rust_relative_imports_omitted,
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
         graph_size: nodes.len(),
@@ -407,7 +410,12 @@ fn module_path(abs_path: &Path, root: &Path, language: Language) -> Vec<String> 
 // reproducibility contract. Ascending-id iteration is the canonical order.
 type Graph = BTreeMap<usize, Vec<usize>>;
 
-fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
+struct ImportGraph {
+    edges: Graph,
+    rust_relative_imports_omitted: bool,
+}
+
+fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> ImportGraph {
     let mut exact = PathIndex::default();
     let mut suffixes = PathIndex::default();
     for node in nodes {
@@ -444,40 +452,60 @@ fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
     };
 
     let mut graph: Graph = BTreeMap::new();
+    let mut rust_relative_imports_omitted = false;
     for node in nodes {
         graph.entry(node.id).or_default();
         let mut seen = HashSet::new();
         for target in &node.imports {
-            for dst in index.resolve(&Reference::parse(target, node.language), node) {
+            let reference = Reference::parse(target, node.language);
+            if node.language == Language::Rust && matches!(&reference, Reference::Relative { .. }) {
+                rust_relative_imports_omitted = true;
+                continue;
+            }
+            for dst in index.resolve(&reference, node) {
                 if dst != node.id && seen.insert(dst) {
                     graph.entry(node.id).or_default().push(dst);
                 }
             }
         }
     }
-    graph
+    ImportGraph {
+        edges: graph,
+        rust_relative_imports_omitted,
+    }
 }
 
-/// Where a reference is anchored.
-///
-/// A path is only meaningful against the thing it is written relative to,
-/// and the two anchors carry different information: `../util` says "one
-/// directory up from here", which the importing file's own location
-/// resolves exactly, while `crate::cli::output` says "from the project's
-/// root". Collapsing them — dropping the leading hops and matching whatever
-/// tail is left — loses the very part that made the relative form
-/// unambiguous, and in a tree with more than one `utils` it loses the edge
-/// entirely.
+/// Syntactic reference anchors. Filesystem-relative paths retain their hops;
+/// absolute names contribute module-path candidates, without proving crate or
+/// build ownership. Rust relative module paths require ownership not held here.
 #[derive(Debug, PartialEq, Eq)]
 enum Reference {
-    /// Anchored at the importing file's directory, `up` levels above it.
+    /// Relative to the language's source/module context, retaining parent hops.
     Relative { up: usize, components: Vec<String> },
-    /// Anchored at the project root.
+    /// An absolute module name, possibly qualified by its crate or package.
     Absolute(Vec<String>),
 }
 
 impl Reference {
     fn parse(raw: &str, language: Language) -> Self {
+        if language == Language::Rust {
+            match raw {
+                "self" => {
+                    return Self::Relative {
+                        up: 0,
+                        components: Vec::new(),
+                    };
+                }
+                "super" => {
+                    return Self::Relative {
+                        up: 1,
+                        components: Vec::new(),
+                    };
+                }
+                "crate" => return Self::Absolute(Vec::new()),
+                _ => {}
+            }
+        }
         if language == Language::Python {
             let dots = raw.bytes().take_while(|byte| *byte == b'.').count();
             let components = raw[dots..]
@@ -943,6 +971,7 @@ mod tests {
 
     fn edges_with(nodes: &[Node], id: usize, prefix: &[String]) -> Vec<String> {
         build_import_graph(nodes, prefix)
+            .edges
             .get(&id)
             .map(|dsts| {
                 dsts.iter()
@@ -1032,6 +1061,9 @@ mod tests {
             rel(1, &["pkg", "sibling"])
         );
         assert_eq!(Reference::parse(".", Language::Python), rel(0, &[]));
+        assert_eq!(Reference::parse("self", Language::Rust), rel(0, &[]));
+        assert_eq!(Reference::parse("super", Language::Rust), rel(1, &[]));
+        assert_eq!(Reference::parse("crate", Language::Rust), abs(&[]));
     }
 
     /// Two files can share a trailing name and be reached by relative
@@ -1075,13 +1107,6 @@ mod tests {
                 "from .helper import value\n",
                 "pkg/helper.py",
                 "nested/pkg/helper.py",
-            ),
-            (
-                Language::Rust,
-                "lib.rs",
-                "mod helper;\n",
-                "helper.rs",
-                "nested/helper.rs",
             ),
             (
                 Language::Terraform,
@@ -1216,17 +1241,61 @@ mod tests {
         assert_eq!(edges_of(&nodes, 0), vec!["src/services/lsp/mod.rs"]);
     }
 
-    /// `mod x;` names the declaring file's own neighbour. Resolved against
-    /// the whole project it would land on any lone file called `x`, however
-    /// unrelated.
     #[test]
-    fn a_mod_declaration_names_a_neighbour_not_a_namesake() {
-        let nodes = vec![
-            node(0, "src/handlers/mod.rs", "mod auth;\n"),
-            node(1, "src/handlers/auth.rs", ""),
-            node(2, "src/services/auth.rs", ""),
-        ];
-        assert_eq!(edges_of(&nodes, 0), vec!["src/handlers/auth.rs"]);
+    fn rust_relative_imports_require_module_ownership() {
+        for (file, source, child, decoy) in [
+            (
+                "src/foo.rs",
+                "mod child; use self::child as dependency;",
+                "src/foo/child.rs",
+                "src/child.rs",
+            ),
+            (
+                "src/custom_root.rs",
+                "mod child; use self::child as dependency;",
+                "src/child.rs",
+                "src/custom_root/child.rs",
+            ),
+            (
+                "src/handlers/mod.rs",
+                "mod child;",
+                "src/handlers/child.rs",
+                "src/child.rs",
+            ),
+            (
+                "src/lib.rs",
+                "mod child;",
+                "src/child.rs",
+                "src/lib/child.rs",
+            ),
+            (
+                "src/lib.rs",
+                "mod outer { mod child; use self::child as dependency; use super::other; }",
+                "src/outer/child.rs",
+                "src/child.rs",
+            ),
+            (
+                "src/lib.rs",
+                "mod outer { use self as current; use super as parent; }",
+                "src/self.rs",
+                "src/super.rs",
+            ),
+        ] {
+            let nodes = vec![
+                node(
+                    0,
+                    file,
+                    &format!("{source}\nuse crate as root;\nuse crate::known;\n"),
+                ),
+                node(1, child, ""),
+                node(2, decoy, ""),
+                node(3, "src/known.rs", ""),
+                node(4, "src/crate.rs", ""),
+            ];
+            let graph = build_import_graph(&nodes, &[]);
+            assert!(graph.rust_relative_imports_omitted, "{file}");
+            assert_eq!(graph.edges[&0], vec![3], "{file}");
+        }
     }
 
     #[test]
@@ -1493,8 +1562,9 @@ mod tests {
         let a = node(0, "src/a.rs", "use crate::b;\npub fn a() {}\n");
         let b = node(1, "src/b.rs", "pub fn b() {}\n");
         let graph = build_import_graph(&[a, b], &[]);
-        assert!(graph[&0].contains(&1));
-        assert!(graph[&1].is_empty());
+        assert!(graph.edges[&0].contains(&1));
+        assert!(graph.edges[&1].is_empty());
+        assert!(!graph.rust_relative_imports_omitted);
     }
     #[test]
     fn a_small_pack_defers_signatures_until_the_file_can_be_selected() {

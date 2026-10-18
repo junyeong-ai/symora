@@ -376,7 +376,7 @@ Every command is built for machine parsing, and the rules are stable:
 
 `pack --tokens` and `--token-estimate` use a character-based approximation. They do not bound model-specific token counts or the entire JSON envelope.
 
-Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; module strings requiring unsupported decoding are omitted; an unmatched `--focus` is refused.
+Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; module strings requiring unsupported decoding are omitted. Rust relative module paths are omitted without crate/module ownership, with a hint when encountered. An unmatched `--focus` is refused.
 
 `lsp.timeout_secs` is the shared LSP work budget for one command. Startup, requests, and retries consume it together, and daemon RPCs carry the remaining allowance. It does not interrupt source application midway.
 

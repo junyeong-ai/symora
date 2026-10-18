@@ -15,6 +15,7 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
                        signatures are emitted until the budget is reached. This is an\n\
                        orientation aid, not a complete dependency graph.\n\
                        Unsupported escape or string syntax is omitted from import edges.\n\
+                       Rust relative module paths are omitted without crate/module ownership.\n\
                        \n\
                        Examples:\n  \
                        symora pack --tokens 4000\n  \
@@ -151,6 +152,9 @@ fn build_json_output(
 
 fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
     let mut hints = Vec::new();
+    if result.rust_relative_imports_omitted {
+        hints.push("Rust relative module paths were omitted because crate/module ownership is unresolved; use semantic references or inspect source.".to_string());
+    }
     if !result.unsupported_import_languages.is_empty() {
         let languages = result
             .unsupported_import_languages
@@ -294,6 +298,7 @@ mod tests {
             graph_size: 25,
             unsupported_languages: Vec::new(),
             unsupported_import_languages: Vec::new(),
+            rust_relative_imports_omitted: false,
             unreadable_paths: Vec::new(),
         }
     }
@@ -359,6 +364,19 @@ mod tests {
         let partial = render_markdown(&ctx(), &args, &result);
         assert!(partial.contains("Showing 1 of 3 declarations"));
         assert!(partial.contains("pub fn main()"));
+        assert!(!partial.contains("Rust relative module paths"));
+        result.rust_relative_imports_omitted = true;
+        assert!(
+            render_markdown(&ctx(), &args, &result)
+                .contains("Rust relative module paths were omitted")
+        );
+        let json = serde_json::to_value(build_json_output(&ctx(), &args, result)).unwrap();
+        assert!(
+            json["files"]["hints"][0]
+                .as_str()
+                .unwrap()
+                .contains("Rust relative module paths were omitted")
+        );
     }
 
     #[test]
