@@ -154,18 +154,24 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 .iter()
                 .map(|s| {
                     let mut output = SymbolOutput::from_symbol(s, ctx.root());
+                    if need_body {
+                        output = output.with_signature(extract_signature(s));
+                    }
                     if args.signature {
-                        let sig = extract_signature(s);
-                        output = output.with_signature(sig).without_body();
+                        output = output.without_body();
                     }
                     output
                 })
                 .collect();
 
-            ctx.print_success(FileSymbolsOutput {
-                backend: answer.backend,
-                symbols: Section::with_total(items, total),
-            });
+            let body_paths = SymbolOutput::body_paths(&items);
+            ctx.print_source(
+                FileSymbolsOutput {
+                    backend: answer.backend,
+                    symbols: Section::with_total(items, total),
+                },
+                &body_paths,
+            );
         }
         Err(e) => ctx.print_error(e),
     }
@@ -432,7 +438,8 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         &bounds,
         &route_facts,
     );
-    ctx.print_success(section);
+    let body_paths = SymbolOutput::body_paths(&section.items);
+    ctx.print_source(section, &body_paths);
 
     Ok(())
 }
@@ -512,9 +519,9 @@ async fn workspace_symbol_bodies(
             let source = bodied.get(&key).unwrap_or(symbol);
             let mut output = SymbolOutput::from_symbol(source, ctx.root())
                 .produced_by(producer(symbol, from_index));
+            output = output.with_signature(extract_signature(source));
             if signature {
-                let sig = extract_signature(source);
-                output = output.with_signature(sig).without_body();
+                output = output.without_body();
             }
             output
         })
@@ -545,7 +552,6 @@ fn workspace_symbol_hints(
     limit: usize,
 ) -> Vec<String> {
     symbol_lookup_hints(
-        name_query.or(symbol_query).unwrap_or_default(),
         symbol_query.is_some(),
         lang.is_none(),
         no_kind_filter && name_query.is_some(),

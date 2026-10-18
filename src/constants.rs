@@ -21,10 +21,6 @@ pub mod defaults {
     /// depth 1.
     pub const CONTEXT_BODY_TOKENS: usize = 2000;
 
-    /// Hard cap on file size pack will read. Keeps generated artefacts and
-    /// vendored bundles from dominating the import graph.
-    pub const PACK_MAX_FILE_BYTES: u64 = 256 * 1024;
-
     /// Maximum affected files surfaced by `impact`. Beyond this the
     /// command truncates and reports a count.
     pub const IMPACT_FILES_LIMIT: usize = 50;

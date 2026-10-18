@@ -1104,6 +1104,127 @@ impl Widget {
     );
 }
 
+#[test]
+fn an_unlimited_file_size_still_allows_grammar_based_symbol_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".symora")).unwrap();
+    std::fs::write(
+        dir.path().join(".symora/config.toml"),
+        "[search]\nmax_file_size_mb = 0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("main.py"),
+        "def live_target():\n    return 1\n",
+    )
+    .unwrap();
+
+    let answer = json_ok(dir.path(), &["symbols", "main.py", "--deterministic"]);
+    assert_eq!(answer["backend"], "ast");
+    assert_eq!(answer["items"][0]["name"], "live_target");
+
+    let built = json_ok(dir.path(), &["search", "index", "build"]);
+    assert_eq!(built["file_count"], 1);
+    let indexed = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "symbols",
+            "live_target",
+            "--lang",
+            "python",
+            "--deterministic",
+        ],
+    );
+    assert_eq!(indexed["items"][0]["name"], "live_target");
+    let syntax = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "ast",
+            "(function_definition) @f",
+            "--lang",
+            "python",
+        ],
+    );
+    assert_eq!(syntax["count"], 1);
+}
+
+#[test]
+fn related_file_suggestions_do_not_start_a_language_server() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".symora")).unwrap();
+    let marker = dir.path().join("server-started");
+    let args = vec![
+        "-c",
+        "touch \"$1\"; exit 1",
+        "probe",
+        marker.to_str().unwrap(),
+    ];
+    let config = toml::toml! {
+        [lsp.servers.python]
+        command = "/bin/sh"
+        args = args
+    };
+    std::fs::write(
+        dir.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    for name in ["target", "neighbor"] {
+        std::fs::write(
+            dir.path().join(format!("{name}.py")),
+            format!("def {name}():\n    pass\n"),
+        )
+        .unwrap();
+    }
+    let answer = json_ok(dir.path(), &["map", "related", "target.py"]);
+    assert_eq!(answer["related_files"][0]["file"], "neighbor.py");
+    assert!(
+        !marker.exists(),
+        "a file suggestion started a language server"
+    );
+    let support = json_ok(dir.path(), &["doctor", "python"]);
+    assert!(
+        marker.exists(),
+        "the configured probe did not run: {support}"
+    );
+}
+
+#[test]
+fn context_packs_honor_the_configured_file_size_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".symora")).unwrap();
+    std::fs::write(dir.path().join("small.rs"), "pub fn small() {}\n").unwrap();
+    for (name, size) in [("large", 300_000), ("over_limit", 1_100_000)] {
+        std::fs::write(
+            dir.path().join(format!("{name}.rs")),
+            format!("// {}\npub fn {name}() {{}}\n", "x".repeat(size)),
+        )
+        .unwrap();
+    }
+    for (limit_mb, expected_files) in [(1, 2), (0, 3)] {
+        std::fs::write(
+            dir.path().join(".symora/config.toml"),
+            format!("[search]\nmax_file_size_mb = {limit_mb}\n"),
+        )
+        .unwrap();
+        let answer = json_ok(
+            dir.path(),
+            &["pack", "--tokens", "1000", "--focus", "large.rs"],
+        );
+        assert_eq!(answer["graph_size"], expected_files, "{answer}");
+        assert!(
+            answer["files"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "large.rs"),
+            "{answer}"
+        );
+    }
+}
+
 /// A mutation addresses a declaration through the same reader every other
 /// surface does, so a file the grammar can read is editable whether or not a
 /// language server is installed. Resolving it through the server alone made
@@ -3339,10 +3460,6 @@ fn a_symbol_answer_publishes_the_relevance_it_was_ordered_by() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("tests")).unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    // A named value spelled exactly as the query, against a type the term only
-    // opens: the ranking leads with the type, while the textual tiers alone
-    // rank the value higher. The two orders disagree, which is what a single
-    // published number has to survive.
     std::fs::write(
         dir.path().join("src/settings.py"),
         "config = {}\n\n\nclass ConfigLoader:\n    def load(self):\n        pass\n",
@@ -3363,8 +3480,8 @@ fn a_symbol_answer_publishes_the_relevance_it_was_ordered_by() {
     );
     let leading = page["items"][0]["name"].as_str().unwrap_or_default();
     assert_eq!(
-        leading, "ConfigLoader",
-        "the fixture must make the two orders disagree: {page}"
+        leading, "config",
+        "exact identifiers precede broader names: {page}"
     );
     let scores: Vec<f64> = page["items"]
         .as_array()
@@ -3816,4 +3933,106 @@ fn quiet_workspace_failures_preserve_per_root_errors() {
         assert!(failed.get("error").is_some());
         assert_eq!(failed["data"]["error"]["code"], "not_found");
     }
+}
+
+#[test]
+fn a_large_body_keeps_the_selected_declaration_and_discloses_omission() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".symora")).unwrap();
+    std::fs::write(
+        dir.path().join(".symora/config.toml"),
+        "[output]\nmax_response_chars = 2000\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("large.py"),
+        format!(
+            "def large():\n{}",
+            "    value = '한글과 emoji 😀'\n".repeat(1400)
+        ),
+    )
+    .unwrap();
+    let answer = json_ok(
+        dir.path(),
+        &[
+            "symbols",
+            "large.py",
+            "--symbol",
+            "large",
+            "--body",
+            "--deterministic",
+        ],
+    );
+    assert_eq!(answer["count"], 1);
+    assert_eq!(answer["showing"], 1);
+    assert_eq!(answer["items"][0]["name"], "large");
+    assert_eq!(answer["items"][0]["body_omitted"], "response_size");
+    assert!(answer["items"][0].get("body").is_none());
+    assert!(
+        answer["items"][0]["signature"]
+            .as_str()
+            .unwrap()
+            .contains("def large")
+    );
+    assert!(serde_json::to_string(&answer).unwrap().chars().count() <= 2000);
+}
+
+#[test]
+fn explicit_content_paths_search_hidden_text_without_expanding_the_default_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in [".claude", ".git", ".symora"] {
+        std::fs::create_dir(dir.path().join(path)).unwrap();
+    }
+    std::fs::write(dir.path().join(".claude/guide.md"), "unique_scope_marker\n").unwrap();
+    std::fs::write(dir.path().join(".claude/skip.md"), "unique_scope_marker\n").unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "skip.md\n").unwrap();
+    std::fs::write(dir.path().join(".git/metadata"), "unique_scope_marker\n").unwrap();
+    std::fs::write(dir.path().join(".symora/metadata"), "unique_scope_marker\n").unwrap();
+    assert_eq!(
+        json_ok(
+            dir.path(),
+            &[
+                "search",
+                "content",
+                "unique_scope_marker",
+                "--lang",
+                "markdown"
+            ]
+        )["count"],
+        0
+    );
+    let answer = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "content",
+            "unique_scope_marker",
+            "--path",
+            ".claude",
+            "--path",
+            ".claude/guide.md",
+        ],
+    );
+    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["items"][0]["file"], ".claude/guide.md");
+    assert_eq!(answer["items"][0]["backend"], "scan");
+    let missing = json_ok(
+        dir.path(),
+        &[
+            "search",
+            "content",
+            "missing_scope_marker",
+            "--path",
+            ".claude",
+        ],
+    );
+    assert_eq!(missing["count"], 0);
+    assert!(missing.get("hints").is_none(), "{missing}");
+    let denied = run_in(
+        dir.path(),
+        &["search", "content", "unique_scope_marker", "--path", ".git"],
+    );
+    assert!(!denied.status.success());
+    let denied: serde_json::Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert_eq!(denied["error"]["code"], "invalid_argument");
 }

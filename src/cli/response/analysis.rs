@@ -19,6 +19,8 @@ pub struct TargetOutput {
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_omitted: Option<super::BodyOmission>,
     /// The unresolved-anchor disclosure, omitted when the target resolved: a
     /// synthesized `symbol@line:col` placeholder carries `"binding"` (a
     /// declaration the symbol tree does not list — the placeholder sits at
@@ -40,6 +42,7 @@ impl TargetOutput {
             line,
             signature: None,
             body: None,
+            body_omitted: None,
             anchor_status: None,
         }
     }
@@ -59,6 +62,7 @@ impl TargetOutput {
             line: symbol.location.line,
             signature: None,
             body: None,
+            body_omitted: None,
             anchor_status: None,
         }
     }

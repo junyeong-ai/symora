@@ -23,18 +23,19 @@ use crate::services::pack::PackedSymbol;
 /// Bumped whenever the on-disk layout changes shape (new column, changed
 /// JSON shape inside a TEXT column, etc.). Mismatched versions recreate the
 /// table rather than risking stale-decode bugs at read time.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct CachedEntry {
     pub mtime: i64,
     pub language: Language,
     pub imports: Vec<String>,
-    pub signatures: Vec<PackedSymbol>,
+    pub signatures: Option<Vec<PackedSymbol>>,
 }
 
 pub struct PackCache {
     conn: Connection,
+    extractor: String,
 }
 
 impl PackCache {
@@ -58,7 +59,11 @@ impl PackCache {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        let extractor = crate::services::store::SymbolExtractor::extraction_digest().to_string();
+        let extractor = format!(
+            "{}:{}",
+            crate::services::store::SymbolExtractor::extraction_digest(),
+            crate::services::imports::ImportExtractor::extraction_digest(),
+        );
         let recorded: Option<String> = conn
             .query_row(
                 "SELECT value FROM pack_meta WHERE key = 'extractor'",
@@ -74,16 +79,16 @@ impl PackCache {
                 params![SCHEMA_VERSION.to_string()],
             )
             .map_err(|e| StoreError::Database(e.to_string()))?;
+            conn.execute(
+                "INSERT OR REPLACE INTO pack_meta (key, value) VALUES ('extractor', ?1)",
+                params![extractor],
+            )
+            .map_err(|error| StoreError::Database(error.to_string()))?;
         }
-        conn.execute(
-            "INSERT OR REPLACE INTO pack_meta (key, value) VALUES ('extractor', ?1)",
-            params![extractor],
-        )
-        .map_err(|error| StoreError::Database(error.to_string()))?;
         conn.execute_batch(FILES_SCHEMA)
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        Ok(Self { conn })
+        Ok(Self { conn, extractor })
     }
 
     pub fn get(&self, rel_path: &str) -> Option<CachedEntry> {
@@ -91,10 +96,10 @@ impl PackCache {
             .conn
             .prepare_cached(
                 "SELECT mtime, language, imports, signatures \
-                 FROM pack_files WHERE path = ?1",
+                 FROM pack_files WHERE path = ?1 AND extractor = ?2",
             )
             .ok()?;
-        stmt.query_row(params![rel_path], |row| {
+        stmt.query_row(params![rel_path, &self.extractor], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -122,14 +127,15 @@ impl PackCache {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO pack_files \
-                 (path, mtime, language, imports, signatures) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (path, mtime, language, imports, signatures, extractor) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     rel_path,
                     entry.mtime,
                     entry.language.lsp_id(),
                     imports,
                     signatures,
+                    &self.extractor,
                 ],
             )
             .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -141,10 +147,11 @@ impl PackCache {
     pub fn prune(&self, active: &std::collections::HashSet<String>) -> Result<usize, StoreError> {
         let known: Vec<String> = self
             .conn
-            .prepare("SELECT path FROM pack_files")
+            .prepare("SELECT path FROM pack_files WHERE extractor = ?1")
             .and_then(|mut stmt| {
-                let rows: Result<Vec<String>, _> =
-                    stmt.query_map([], |r| r.get::<_, String>(0))?.collect();
+                let rows: Result<Vec<String>, _> = stmt
+                    .query_map(params![&self.extractor], |r| r.get::<_, String>(0))?
+                    .collect();
                 rows
             })
             .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -159,8 +166,11 @@ impl PackCache {
             .unchecked_transaction()
             .map_err(|e| StoreError::Database(e.to_string()))?;
         for path in &stale {
-            tx.execute("DELETE FROM pack_files WHERE path = ?1", params![path])
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM pack_files WHERE path = ?1 AND extractor = ?2",
+                params![path, &self.extractor],
+            )
+            .map_err(|e| StoreError::Database(e.to_string()))?;
         }
         tx.commit()
             .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -186,7 +196,8 @@ CREATE TABLE IF NOT EXISTS pack_files (
     mtime INTEGER NOT NULL,
     language TEXT NOT NULL,
     imports TEXT NOT NULL,
-    signatures TEXT NOT NULL
+    signatures TEXT NOT NULL,
+    extractor TEXT NOT NULL
 );
 "#;
 
@@ -200,12 +211,12 @@ mod tests {
             mtime,
             language: Language::Rust,
             imports: vec!["crate::baz".into()],
-            signatures: vec![PackedSymbol {
+            signatures: Some(vec![PackedSymbol {
                 name: "foo".into(),
                 kind: "function".into(),
                 line: 12,
                 signature: "pub fn foo()".into(),
-            }],
+            }]),
         }
     }
 
@@ -216,8 +227,9 @@ mod tests {
         cache.put("src/foo.rs", &entry(100)).unwrap();
         let got = cache.get("src/foo.rs").unwrap();
         assert_eq!(got.mtime, 100);
-        assert_eq!(got.signatures.len(), 1);
-        assert_eq!(got.signatures[0].name, "foo");
+        let signatures = got.signatures.unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].name, "foo");
     }
 
     #[test]
@@ -244,9 +256,48 @@ mod tests {
     }
 
     #[test]
+    fn entries_require_the_current_import_extractor() {
+        let dir = TempDir::new().unwrap();
+        let cache = PackCache::open(dir.path()).unwrap();
+        cache.put("src/foo.rs", &entry(100)).unwrap();
+        cache
+            .conn
+            .execute(
+                "UPDATE pack_meta SET value = ?1 WHERE key = 'extractor'",
+                params![crate::services::store::SymbolExtractor::extraction_digest().to_string()],
+            )
+            .unwrap();
+        drop(cache);
+        let cache = PackCache::open(dir.path()).unwrap();
+        assert!(cache.get("src/foo.rs").is_none());
+        cache.put("src/foo.rs", &entry(100)).unwrap();
+        drop(cache);
+        assert!(
+            PackCache::open(dir.path())
+                .unwrap()
+                .get("src/foo.rs")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn missing_entry_returns_none() {
         let dir = TempDir::new().unwrap();
         let cache = PackCache::open(dir.path()).unwrap();
         assert!(cache.get("does/not/exist.rs").is_none());
+    }
+    #[test]
+    fn simultaneous_producers_cannot_replay_each_others_entries() {
+        let root = TempDir::new().unwrap();
+        let mut earlier = PackCache::open(root.path()).unwrap();
+        earlier.extractor = "earlier-producer".to_string();
+        let current = PackCache::open(root.path()).unwrap();
+        earlier.put("a.rs", &entry(1)).unwrap();
+        assert!(current.get("a.rs").is_none());
+        assert_eq!(current.prune(&std::collections::HashSet::new()).unwrap(), 0);
+        assert!(earlier.get("a.rs").is_some());
+        current.put("a.rs", &entry(2)).unwrap();
+        assert!(earlier.get("a.rs").is_none());
+        assert_eq!(current.get("a.rs").unwrap().mtime, 2);
     }
 }

@@ -112,11 +112,7 @@ fn daemon_runtime_reads_global_config() {
         let lsp = symora::daemon::server::DaemonRuntimeConfig::load_lsp_config(
             &std::env::current_dir().unwrap(),
         );
-        assert_eq!(
-            lsp.timeout_for(symora::models::symbol::Language::Go, "textDocument/hover")
-                .as_secs(),
-            9
-        );
+        assert_eq!(lsp.request_timeout().as_secs(), 9);
         return;
     }
     let root = tempfile::tempdir().unwrap();

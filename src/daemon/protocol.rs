@@ -8,6 +8,8 @@ pub struct Request {
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Request {
@@ -17,6 +19,7 @@ impl Request {
             id: RequestId::Number(id),
             method: method.into(),
             params,
+            timeout_ms: None,
         }
     }
 }

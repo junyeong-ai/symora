@@ -18,4 +18,6 @@ A daemon that has held no project and had no connection open for `idle_timeout` 
 
 ## Request timeouts
 
-Each request is bounded by a per-request `tokio::time::timeout` sized per language/method from the served project's retained runtime config (`estimate_request_timeout` in `server/dispatch.rs`); methods without an LSP mapping use 600 seconds. A timed-out request returns a structured error; there is no separate cancellation channel. The client waits with the same derivation (`daemon::lsp_request_timeout`); edits to either side must preserve this shared derivation so the two bounds cannot drift.
+LSP operations use the project's retained `lsp.timeout_secs` budget. CLI/MCP establish a shared deadline, and daemon requests carry remaining milliseconds. Admission waits and dispatch preparation consume that allowance; expired queued requests do not start project work. The server also clamps it to the project's retained configuration. Initialization and retries consume the same budget; language/operation multipliers do not extend it. Timeout errors retain their typed wire identity. Non-LSP store/lifecycle operations keep their separate bounds.
+
+A caller can stop waiting for a pooled server start without cancelling other waiters. The start has its own bounded lifetime and must release its pool claim on failure. Pending LSP requests send cancellation and remove pending state when dropped. Source application is not aborted midway to enforce an LSP deadline.

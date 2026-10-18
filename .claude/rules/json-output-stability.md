@@ -27,7 +27,7 @@ Use `Section<T>` for enumerated sets whose length grows with the repository or f
 
 Bounded summaries and rankings without an enumeration claim may remain arrays. Map's individually limited lists use their own sections; a neighbouring subtree total does not count an immediate directory listing.
 
-A command-level token budget applies inside the command; `pack` stays within its character-based estimate, which is not a model-specific token count or an envelope limit. Other responses use `output.max_response_chars` (default 20000; 0 disables) as a sizing target. The output layer measures compact JSON independently of display format, drops whole items from lists, preserves totals, and adds an actionable size-limit hint. Body strings and fixed fields remain whole, so the target can be exceeded even after all items are removed. Never slice strings or return invalid JSON to meet it. Recount `bodies_included` after fitting; omit it when its section becomes empty.
+A command-level token budget applies inside the command; `pack` stays within its character-based estimate, which is not a model-specific token count or an envelope limit. Other responses use `output.max_response_chars` (default 20000; 0 disables) as a sizing target. The output layer measures compact JSON independently of display format. Source-bearing commands identify body paths explicitly through `print_source`; whole bodies are omitted before list items, preserving declaration identities and disclosing `body_omitted: response_size`. Never discover source bodies by matching arbitrary JSON keys. List fitting preserves totals and adds a size-limit hint. Fixed metadata may still exceed the target. Never slice strings or return invalid JSON to meet it. Recount `bodies_included` after fitting; omit it when its section becomes empty.
 
 ## Provenance and limits
 
@@ -61,7 +61,7 @@ For JavaScript/TypeScript, an AST export wrapper establishes `true`; without one
 
 Navigation location objects carry file, line, and column. Location analysis echoes a summary `target` with file and line, without a column. A local or parameter may be a `binding` even when the document-symbol tree omits it. `not_a_symbol` and `unavailable` are not resolved declarations. A member's zero references may still permit construction, dispatch, or structural conformance through its declaring type; a free function can also be reached through registration or reflection. Never label either unused from a static zero alone.
 
-`declared_symbols` on a packed file counts its AST-derived signatures and is present only when the per-file cap omitted some. `bodies_included` counts complete attached bodies; an omitted body can mean exhausted budget, an unresolvable location, or a declaration without a body.
+`declared_symbols` on a packed file counts its AST-derived signatures and is present when the per-file cap or token budget omitted some. `context` shares `body_tokens` across target, callees, and types in that order. `body_omitted` names `token_budget` or `response_size` when that budget omitted a requested body. `bodies_included` counts complete attached bodies; an omitted body can mean exhausted budget, an unresolvable location, or a declaration without a body.
 
 `diff-impact` discloses unmeasured files and candidate caps. Deletions read declarations from the base revision; changed body lines belong to their enclosing declaration. A staged analysis cannot use working-tree symbols over unstaged line changes as though they described the index.
 

@@ -1,61 +1,34 @@
-# src/cli — Command Surface Rules
+# CLI command layer
 
-This layer turns parsed args into JSON output. The contract with downstream agents lives here.
+Commands emit typed values through `OutputContext`; CLI and MCP share those commands. The JSON contract is in `.claude/rules/json-output-stability.md`.
 
-## Output contract
+## Results and discovery
 
-All command output goes through `OutputContext` (`src/cli/output.rs`) and the `Section<T>` / `*Output` types in `src/cli/response/`. Build structured values, hand them to the output context — don't `println!` JSON yourself. Project-relative paths, compact mode, and quiet mode all branch inside the context.
+Use `Section<T>` for enumerations. Shape lower bounds, coverage, currency, hints, and remedies through `response::disclosure`. These are distinct facts: unread input bounds the consulted sources; missing languages qualify coverage; stale rows and tree currency describe index freshness. Derive each from the source outcome rather than asserting it at a call site. Keep causes with their remedies when capping advice.
 
-List responses wrap items in `Section<T>`; its fields and stability rules are the single source of truth in `.claude/rules/json-output-stability.md` and the `Section<T>` doc-comment. Reuse `Section<T>` for any new list response rather than hand-rolling one, and shape its `incomplete`/`hints`/`next_commands` through `response::disclosure` (below) rather than setting them by hand.
+Source-bearing responses use `OutputContext::print_source` with explicitly enumerated body paths. It omits whole bodies before dropping list items and never edits arbitrary nested data. Preserve declaration identity and signature; `body_omitted` names the budget. Context budgets target, callees, then types together. Recount `bodies_included` after response fitting.
 
-## Discovery and steering heuristics
+`symbol_discovery` owns ranking, language detection, and steering. Textual exactness precedes path suffix, prefix, and substring matches; test scope and kind only break ties within those tiers. Do not infer query intent from ASCII word length or identifier suffixes. `map related` is a path suggestion, not semantic dependency evidence.
 
-Shared discovery and steering heuristics are centralized in `src/cli/symbol_discovery.rs`: broad-query handling, test/noise suppression, ranking hints (`search`, `symbols --name`, and `usage` go through them), `is_single_file_concentration` for the `refs`/`impact` steering gates, and language detection (`resolve_search_languages` / `DetectedLanguages`). It decides what to look for and in what order. If you find yourself reimplementing similar logic in a command handler, move it there instead.
+## Locations and references
 
-## One vocabulary for what an answer could not do
+Use `analysis::resolve_anchor` for symbol-level analysis and the shared `utils::symbol_nav` rules for declaration edits.
 
-`src/cli/response/disclosure.rs` owns everything a response says about its own shortfalls, and every search surface routes through it — so a fact stated by one is stated by all, in the same words, with the same remedy.
+- Without a column, select the declaration on the line, otherwise the innermost enclosing declaration, including its decorators/attributes/docs.
+- With a column, select a name span or resolve that exact token through LSP definitions. A header keyword/whitespace may address its declaration when no definition resolves; an empty body position addresses nothing. Never select an enclosing declaration for an unrelated body token.
+- Match returned definitions to declaration name spans. Locals, parameters, module/file positions, and positions outside name spans are bindings rather than invented symbols. Preserve the existing self-definition handling and disclosed residuals for servers without precise name spans.
+- `declared_in` supplies computed symbol paths. Keep exact, anchored-suffix, leaf, and wildcard matching consistent for nested LSP trees and flat AST declarations.
 
-Two axes, kept apart because their remedies are opposites. `LowerBound` says the answer does not hold everything *its own sources* held (a walk turned away, an index built over unread paths, a page that filled); `CoverageReason`/`Uncovered`/`coverage_shortfall` say a *language* is missing from the answer's domain. Currency — whether a source is up to date — is neither, and lives in `stale`/`backend`/`search index status`.
+`LocationAnalysis` owns project-local references excluding the resolved declaration. Refs, context, and impact project from that same set. Per-position test classification belongs to `TestScope`; whole-file classification is for file summaries and ranking. Outside-project declarations still receive this project's inbound references and the matching disclosure.
 
-The shaping is combinators, not per-command assembly: `with_lower_bounds` sets `incomplete`, the prose, and the remedy in one call (a caller that took only the half it needed is how three surfaces came to drop a command the other two emitted), and `with_coverage_disclosure` layers the language gaps and the route's steering on top. Path naming (`relative_paths`, `relative_unread_paths`, `as_paths`, `name_some`) lives here too, so a shortfall reads the same wherever it surfaces. `workspace_route_for` derives *why* an index took no part in an answer from the store outcome — never asserted by a caller, since two surfaces reading the same state must not prescribe opposite remedies.
+Incoming/outgoing traversals share `call_graph::walk`, including deterministic frontier order, visited sets, depth/fan-out limits, and failed-hop markers. `diff-impact` assigns changed lines through `symbol_nav::members_at_line`, and reads deleted declarations from the base revision.
 
-## Symbol-path resolution
+## Mutations and execution
 
-A path string like `Class/method` has two producers that agree by construction: `Symbol::compute_paths_for_all` (in `src/models/symbol/`) over a language server's nested tree, and the grammar extractor over its flat answer, where only `container` carries containment. `declared_in` hands every file answer over with its paths set, so a caller never recomputes them — over a flat answer that erases every container. Path matching (exact, `/`-anchored suffix, bare last-component, and `*` wildcard) is what makes `--symbol` flows reliable — keep its semantics stable.
+All source splices use `commands/edit.rs`: one resolution/validation path, `LineSplice`, exact preview hunks, and typed output. Resolve CLI stdin before acquiring the write lock; MCP content is literal, including `-`.
 
-## One anchor for every symbol-level surface
+LSP edits from rename, actions, and format use `apply_text_edits` / `apply_workspace_edits`. Source writes use `write_file` with observed content and retain the edit lock through resolution/application. Preserve revision hashes and check them again before replacement. `atomic_write` without a source precondition is for host configuration. Dry runs hold no write lock; multi-file application preflights and reports earlier applied files on failure.
 
-`cli::analysis::resolve_anchor` decides what a `file:line[:column]` addresses, and every symbol-level command — `refs`, `callers`, `callees`, `implementations`, the type hierarchy, `impact`, `context`, `usage`'s location form — routes through it; `edit` shares the same tree rules from `cli::utils::symbol_nav`. A column-less line addresses the symbol declared on it; a line that declares nothing addresses the innermost symbol whose declared range covers it — a body line, or a decorator, attribute or doc-comment line the range opens with. An explicit column is precise, in this order: on a symbol's name (`find_named_at_position`) it is that symbol; otherwise it is the token there — a body token, a parameter, a type or receiver in a signature, an attribute or decorator — resolved through the language server's definition so the analysis anchors at that declaration, wherever it lives (outside the project too; the reference set stays project-local); only a position the server resolves to nothing falls back to the declaration whose header it is on (`column_addressed_symbol`: the keyword or whitespace before a name), and a position that is neither addresses nothing. A usage and its declaration are thus the same question with the same answer, and the position reads exactly as `def`, `hover`, and `rename` read it. `edit`, which addresses declarations in the tree, uses the header rule directly. A definition is mapped into the tree by the name span alone — a file or module definition names the file's first position, a Go receiver a position between a keyword and a method name: spots no name occupies, each a `Binding` there rather than whatever declaration the position falls on. The one exception is a self-definition — the server answering that the queried token IS its own definition, detected from `LocationLink.originSelectionRange` containing the target (rust-analyzer answers a declaration's own `fn`/`async` keyword that way; a plain-`Location` server can only say it by answering the exact queried position): it names no other position, so it reads exactly as no definition at all — the declaration whose header the position sits on, or nothing (a server without name spans keeps a residual: `SymbolInformation` trees, and any server whose `selectionRange` equals its full range, widen the name span to the declaration, so a body position there reads as the enclosing symbol). A definition the symbol tree does not list (a local, a parameter, a module) is a `Binding` anchor: exact, disclosed as such, never dressed up as a symbol. Never resolve a body position to whatever encloses it: that answers a different question than the one asked, and a mutation addressed the same way lands on the wrong symbol. Don't add a second resolver in a command — extend this one and let every surface inherit the change. `diff-impact` asks a different question of a changed line — which members it belongs to, never a parameter or local — and answers it with `symbol_nav::members_at_line`.
+LSP work shares the command deadline across initialization, requests, retries, and daemon RPCs. Do not reset the budget per step or abort source application midway to enforce it. Unsupported capabilities produce structured errors or explicitly qualified alternatives, never synthetic semantic results.
 
-## One definition of a symbol's references
-
-`LocationAnalysis` owns what "the references of a symbol" means: project-local, and never the declaration the anchor resolved to. `refs`, `impact`, and `context` project from that one set, so the count they publish under the same name is the same number — from a declaration or from any usage of it. Don't re-filter a raw `find_references` result in a command, and don't add a parameter that lets a call site choose a different meaning for a published field — that is how the three surfaces drifted apart in the first place. Because the set is project-local, a position in a file outside the project root is answered from THIS project, and a command that searches the project for it says so — `Anchor::inbound_hints`, or `Reach::Inbound` on `execute_list`; one read from the declaration itself (`Reach::Outbound`: callees, supertypes) has nothing to qualify.
-
-`RefsClassification` then decides what each usage counts as, per POSITION (`services::test_scope`), so a usage inside a `#[cfg(test)]` region of a production file is coverage. File-level classification stays correct for file-shaped facts — `impact`'s per-file rows, `map`'s counts, search ranking.
-
-## One call-graph traversal
-
-Depth-bounded call-graph walks share one core, `src/cli/call_graph.rs` (`walk` over a `Direction` with a `WalkConfig`): `impact`/`blast_radius` walk `Incoming`, `callees --depth`/`--to` walk `Outgoing`. The core owns frontier ordering (sorted → deterministic), the visited set, the depth/fan-out caps, and the lower-bound markers (`max_depth_reached`, truncation). Don't hand-roll a second BFS in a command — extend the core and surface its markers, so a swallowed hop never reads as a genuine empty result.
-
-## One mutation surface
-
-Every command that splices source text by symbol or range lives in `commands/edit.rs`, sharing one root-validated resolution path, one validation gate, one splice core (`LineSplice`), one preview format (an exact hunk derived from the splice — never a re-diff), and one typed output (`EditOutput`). Don't add a second file-writing command; add a subcommand that reduces to the splice core. Previews and safety checks (dangling references on `delete`, optional `--with-diagnostics`) run on the same path for every operation — the destructive path never gets to skip them.
-
-Resolve `-` as stdin only at the CLI boundary, before taking a write lock. Shared edit commands receive literal content, including `-` from MCP. Workspace dispatch reads input once and delivers it to every child.
-
-Commands that apply *LSP-computed* edits — `rename`, `actions apply`, `format` — keep their own command files and output types, but must route the actual write through `edit.rs`: `apply_text_edits` (overlap-checked, CRLF- and multibyte-correct) for a single file and `apply_workspace_edits` for a multi-file edit. Source replacement uses `write_file` with the observed original content so it checks for conflicts before atomic replacement. `atomic_write` omits that precondition and serves host-config writes such as `setup mcp`; do not use it to bypass source revision checks.
-
-## Fallback messaging on weak LSP servers
-
-Some servers don't implement call hierarchy or `textDocument/typeDefinition`. The right behavior is a structured response that names the missing capability and points to a working alternative — not a silent empty result and not a synthesized one. The `context` command is the canonical example.
-
-## When extending
-
-- Adding a command an agent should drive: also extend the MCP catalog/handler in `src/mcp/tools/`. MCP is a curated subset — navigation, analysis, and edit tools — so not every command becomes a tool; config/doctor/format and machine-setup commands (`commands::setup`, `commands::selfcmd`) stay CLI-only (see `src/mcp/CLAUDE.md`).
-- Adding a flag: prefer extending an existing command over forking a new one.
-- Removing a command: delete it cleanly. No deprecation shims.
-
-## Write ownership
-
-Source mutations hold the project edit lock through resolution and application. Preserve the content hash attached to a resolved symbol or WorkspaceEdit, and compare the original content again before atomic replacement. Dry runs acquire no write lock. Multi-file writes preflight every file and report earlier applied files if a later write fails; they do not promise a cross-file transaction.
+Extend existing commands rather than adding parallel surfaces. Agent-facing options must stay aligned with the curated MCP catalog and handlers; lifecycle/config/doctor/format remain CLI-only. Remove obsolete paths cleanly.

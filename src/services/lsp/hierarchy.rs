@@ -57,7 +57,6 @@ async fn call_hierarchy(
                 // this server advertises call hierarchy, attempt the request.
                 check_feature_support_live(&client, &file, feature).await?;
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.sleep_for_cross_file_settle().await;
                 // Computation-time snapshot — the output marker derives
                 // from the state the query was issued under.
                 let ran_under = degradation_of(client.indexing_state());

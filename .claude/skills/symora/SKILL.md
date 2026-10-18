@@ -1,104 +1,78 @@
 ---
 name: symora
 metadata:
-  version: 0.30.4
-description: Use the symora CLI for symbol discovery, exact code navigation, references, caller graphs, context, and symbol-aware edits.
+  version: 0.31.0
+description: Provides symbol discovery, semantic navigation, static impact analysis, and symbol-aware edits through the symora CLI. Use when locating code, tracing references or callers, reviewing changes, or editing a known declaration.
 allowed-tools: Bash(symora *)
 ---
 
 # Symora
 
-Symora emits structured JSON. Use its index and AST for discovery and the target language server for semantic follow-up. It answers within the selected project, language, ignore policy, and size limits; a zero outside that scope is not established.
+Choose the narrowest source that answers the task. A known file or declaration does not require a repository-wide map, pack, or index build. Run a command with `--help` for its detailed options.
 
-## Choose the next query
+## Find and inspect
 
 ```bash
-symora search index status
-symora map summary
-symora pack --tokens 4000
-symora search symbols AuthService --limit 10
-symora symbols src/auth.py --signature
-symora symbols src/auth.py --symbol 'AuthService/login' --body
+symora search symbols AuthService --lang python --limit 5
+symora symbols src/auth.py --symbol 'AuthService/login' --signature
 symora refs src/auth.py:42
-symora context src/auth.py:42 --all
-symora impact src/auth.py:42 --depth 1
-```
-
-Build the index with `symora search index build` when status lists no completed language coverage, when the answer names an out-of-date index, or after external edits requiring a current workspace-wide search. A build is incremental; `--force` is for rebuilding everything. If another build owns the index, wait for it rather than starting another.
-
-- `search symbols` discovers names and paths. `symbols <file> --symbol 'Type/method'` inspects a known declaration. Workspace resolution without a file reads the index and may consult a language server.
-- `search content` searches code by default. Name a documentation or data language explicitly: `symora search content 'config key' --lang markdown`. Hidden paths are excluded from discovery, including `.github` and `.claude`; use a direct file read or an appropriate text search for those.
-- `search ast` uses tree-sitter queries and needs no language server. `symora search nodes --list` lists supported grammars.
-- `symbols` and `map file` prefer document symbols and fall back to AST declarations; `backend` names the producer. AST output is flat, with containment in `name_path`.
-- `map related` ranks possible next files; it is not a dependency graph. `pack` ranks files using imports and emits AST-derived signatures within an approximate character-based token budget, not a model-specific tokenizer count.
-- `--deterministic` restricts answers to the index and built-in grammars. Semantic commands without such a source return `unsupported`.
-
-## Resolve locations precisely
-
-Inputs and outputs use 1-indexed lines and Unicode-scalar columns.
-
-For `refs`, `callers`, `callees`, `implementations`, type hierarchy, `context`, `impact`, and location-based `usage`:
-
-- `file:line` addresses the declaration on that line, or the enclosing symbol on a body line.
-- `file:line:column` addresses the token there. A usage resolves through its definition. Keywords or whitespace in a declaration header may address that declaration; an empty body position addresses nothing.
-- Read the echoed `target`, `anchor_status`, and hints before using an answer. A binding is a local or parameter that the document-symbol tree does not list.
-
-`def`, `hover`, `signature`, `typedef`, and `rename` are position-exact; an omitted column means column 1. Take a name position from an actual result rather than guessing.
-
-```bash
-symora callees src/auth.py:42 --depth 3
-symora callees src/auth.py:42 --to src/store.py:18
-symora usage src/auth.py:42 --max-symbols 10 --limit 5
+symora context src/auth.py:42 --with-bodies --body-tokens 2000
 symora diff-impact
-symora diff-impact main
-symora diff-impact --staged
 ```
 
-`diff-impact [REV]` compares tracked working-tree changes with one revision, not a revision range. Running from a subdirectory scopes the analysis there. Check `unmeasured_files` and truncation before interpreting its totals.
+- Use `search symbols` for names, `search ast` for syntax, and `search content` for strings. Content search defaults to code. Name a format with `--lang markdown`, or select files/directories with `--path .claude` to search their text live, including hidden paths. Project ignores and size limits still apply; `.git` and `.symora` remain excluded.
+- `symbols` and `map file` use the language server when available, otherwise AST declarations; `backend` identifies the producer. `--deterministic` permits only index/grammar sources and returns `unsupported` for semantic operations.
+- For repeated workspace queries, inspect `search index status` and build incrementally with `search index build` when coverage is absent or the response requests refresh. Wait for an existing build. `--force` rebuilds everything.
+- `map summary` and `pack --tokens 4000` are optional orientation tools. `map related` suggests names/directories. Pack uses syntax-derived import paths, not a complete dependency graph or task-relevance model. Use `--focus` for a known area; an unmatched focus is refused. Check coverage hints and `declared_symbols` before treating excerpts as complete.
+- `diff-impact [REV]` compares tracked working-tree changes with one revision, not a revision range; `--staged` uses the index. Read `unmeasured_files` and `incomplete`.
 
-## Read limits before making a decision
+## Address the intended symbol
 
-Lists use `count`, `showing`, and `items`. Optional markers change how to interpret them:
+Lines and Unicode-scalar columns are 1-indexed.
 
-- `truncated`: some found items were not emitted. Narrow the query, raise `--limit`, or follow the size-limit hint.
-- `incomplete`: the count is a lower bound within its sources; read the cause in hints or `unread_paths`.
-- `coverage_gaps`: named languages were not fully searched.
-- `stale`: consulted index rows came from changed files; the flag may remain conservatively after response-size fitting removes some rows. A separate index-currency hint can also report newly added files that have no rows yet. Rebuild before treating index results as a current enumeration.
-- `indexing`: `timed_out` means work exceeded the wait; `unconfirmed` means the server did not confirm workspace readiness. Retry may help, but servers without a completion channel can remain unconfirmed. Neither state proves absence. Rename preserves unconfirmed on server-provided edits; timed_out blocks application.
-- `degraded_column`: the reported column could not be decoded from readable source; re-read before using it as an edit address.
+- For `refs`, callers/callees, implementations, type hierarchy, context, impact, and location-based usage: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
+- `def`, hover, signature, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.
+- Read the echoed target and `anchor_status`. A binding is a local or parameter absent from the document-symbol tree. Source edits address declarations, not body tokens.
 
-`impact` reports references and a bounded static caller graph. `max_depth_reached`, `callers_truncated`, `incomplete`, and `dynamic_dispatch` disclose limits. It does not estimate the probability a change is safe. Test references and test callers are not execution coverage. `is_exported` describes the declaration's own visibility, not accessibility through enclosing types, modules, or re-exports. String-based registration, reflection, structural Protocol implementations, external consumers, and serialized contracts may require additional inspection.
+## Interpret limits
 
-When call hierarchy is unsupported, `callers` may return `callers_status: references_derived`: containing functions of references, not verified call edges. `--no-fallback` requires actual call hierarchy.
+Lists carry `count`, `showing`, and `items`. These markers qualify the answer:
 
-`context --with-bodies` attaches complete bodies. The target is unbudgeted; callee/type bodies share `--body-tokens` (default 2000). Missing bodies may also be unresolvable or absent in source, so raising the budget is not always a remedy.
+| Marker | Meaning and next action |
+|---|---|
+| `truncated` | Found items were omitted; narrow the query or follow the limit hint. |
+| `incomplete` / `unread_paths` | Counts are lower bounds within the consulted sources; inspect the cause. |
+| `coverage_gaps` | Named languages were not fully searched; use the indicated source or remedy. |
+| `stale` / currency hints | The index is a snapshot; refresh before current enumeration. New files can require refresh even without stale returned rows. |
+| `indexing` | `unconfirmed` lacks an explicit completion signal; `timed_out` exceeded the wait. Neither proves absence. Retry cannot add a missing completion channel. |
+| `degraded_column` | Verify the source position before editing. |
+| `body_omitted` | `token_budget` or `response_size`: read the complete source at the returned location, or adjust that budget. |
+
+Requested bodies are complete or omitted. Context shares `--body-tokens` across target, callees, then types; `bodies_included` counts emitted section bodies. Missing bodies may also be unresolvable or absent in source. Token estimates are character-based, not model-specific. `output.max_response_chars` can remove bodies before list items; 0 disables that size target.
+
+Static references and caller graphs do not prove runtime reachability, change safety, or executed test coverage. Inspect registration, reflection, structural Protocol implementations, serialization, and external contracts when relevant. Reference-derived callers are marked `callers_status: references_derived`; `--no-fallback` requires verified call hierarchy.
 
 ## Edit and verify
 
 ```bash
 symora edit replace-body src/auth.py --symbol 'AuthService/login' --body - --dry-run < replacement.py
-symora edit delete src/auth.py --symbol 'obsolete' --expect-no-references --dry-run
+symora edit delete src/auth.py --symbol obsolete --expect-no-references --dry-run
 symora rename src/auth.py:42:9 new_name --dry-run
-symora diagnostics src/auth.py --with-context --with-suggestions
+symora diagnostics src/auth.py --with-context
 ```
 
-- `replace-body --body` replaces the entire definition, including its signature, decorators/attributes, and body. Read it with `symbols --body`, modify that complete definition, and pass it back.
-- Prefer `--symbol 'Type/method'` over line addresses for sequential edits. An edit column must address a declaration, not a token inside its body. Ambiguous targets are refused.
-- `insert-before`/`insert-after` take `--code`; raw range `replace` and AST `pattern` take `--text`. `replace --expect` requires the live range to match.
-- Symbol/range edit previews contain exact hunks. Rename and code-action previews report affected files and edit counts.
-- `delete --expect-no-references` refuses when reference freedom is not verified. A zero static reference count alone does not prove runtime unreachability.
-- Applied edits can attach `--with-diagnostics`; symbol replacement/insertion can also use `--verify-callers`. `unconfirmed`, `unsupported`, or `unavailable` diagnostics are not a clean result. Project type checking and tests remain necessary for behavior changes.
-- Edits in one project are serialized. Files are checked for observed changes before replacement. An unversioned edit to another project file not open in the language server has no verifiable server-time source baseline. Multi-file application is not an atomic filesystem transaction; on failure inspect the named files already modified before retrying.
+- `replace-body` takes the entire definition, including signature and decorators. Obtain complete source before replacing it; an omitted body is not replacement text.
+- Prefer a returned symbol path over line numbers for sequential edits. `insert-before`/`insert-after` take `--code`; range replace and AST pattern take `--text`. Range `--expect` checks the live text.
+- Preview first. Applied edits can request `--with-diagnostics`; symbol replacement/insertion can also use `--verify-callers`. Unknown diagnostics are not clean; run relevant project checks.
+- Delete's `--expect-no-references` requires verified static reference freedom. A static zero alone does not establish that code is unused.
+- Project edits are serialized and checked against observed content. Multi-file application is not atomic; inspect already-applied files before retrying an error.
 
-## Recover from errors
+## Recover
 
-Failures emit `{ "error": { "code", "message", "hint" } }` on stdout with a nonzero exit. Stderr carries logs. Follow the specific hint:
+Failures emit `{ "error": { "code", "message", "hint" } }` on stdout and exit nonzero; logs use stderr.
 
-- `server_not_installed` / `lsp_unavailable`: run `symora doctor <lang>`. Branch on `serves`, not `installed`; version-manager shims can resolve without running. Configure an absolute `[lsp.servers.<lang>].command` when necessary, then restart a warm daemon.
-- `unsupported`: use the available index/AST alternative; retrying the same missing capability does not add support.
-- `conflict`: another edit/build owns the resource or a file changed. Wait as directed, re-read, and retry with current input.
-- `cancelled` with a content-change hint: re-read the source and resolve the target before requesting fresh edits; the same coordinates may now address another symbol.
-- `precondition_failed`: fix the named precondition; do not blind-retry.
-- `config_errors`: repair the configuration before depending on its intended behavior.
+- On `server_not_installed` / `lsp_unavailable`, run `doctor <lang>` and read `serves`, not only `installed`. A configured absolute server command avoids a broken version-manager shim; restart a warm daemon after config changes.
+- On `unsupported`, choose an index/AST/source alternative. On `conflict`, wait as directed and re-read. On `cancelled` with a content-change hint, resolve the target again. Repair `precondition_failed` and `config_errors` before depending on the result.
+- `lsp.timeout_secs` is the shared LSP work budget: startup, requests, and retries consume it together. Narrow expensive queries or explicitly configure a suitable budget; repeated calls do not resolve a missing capability.
 
-Use `--format compact` for one-line JSON; there is no `-c` flag. `--check-version '<requirement>'` enforces a binary version requirement. `symora setup skill` installs the playbook bundled with that binary; `--git-ref` explicitly selects a different source.
+Use `--format compact` for one-line JSON. `--check-version '<requirement>'` enforces a binary contract. `setup skill` installs the playbook bundled with that binary; `--git-ref` explicitly selects another source.

@@ -118,7 +118,11 @@ impl LspService for DefaultLspService {
         file: &Path,
         options: FindSymbolsOptions,
     ) -> Result<Vec<Symbol>, LspError> {
-        symbols::find_symbols(self, file, options).await
+        crate::infra::deadline::run(
+            self.manager.runtime_config().request_timeout(),
+            symbols::find_symbols(self, file, options),
+        )
+        .await
     }
 
     async fn workspace_symbols(
@@ -126,7 +130,11 @@ impl LspService for DefaultLspService {
         query: &str,
         language: Language,
     ) -> Result<Indexed<Vec<Symbol>>, LspError> {
-        symbols::workspace_symbols(self, query, language).await
+        crate::infra::deadline::run(
+            self.manager.runtime_config().request_timeout(),
+            symbols::workspace_symbols(self, query, language),
+        )
+        .await
     }
 
     async fn find_references(

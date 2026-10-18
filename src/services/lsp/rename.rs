@@ -29,7 +29,6 @@ pub(super) async fn prepare_rename(
                 // run first — otherwise a cold server answers "no references"
                 // for a symbol it simply has not indexed yet.
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.sleep_for_cross_file_settle().await;
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
@@ -137,7 +136,6 @@ pub(super) async fn rename(
                 // the index to settle before issuing it — the same gate the
                 // navigation queries use.
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.sleep_for_cross_file_settle().await;
                 let ran_under = degradation_of(client.indexing_state());
 
                 client.sync_document(&uri, &content).await?;

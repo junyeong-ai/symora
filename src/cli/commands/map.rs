@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use futures::future::join_all;
 use serde::Serialize;
 
 use crate::app::App;
@@ -55,7 +54,7 @@ pub enum MapCommand {
         #[arg(long, default_value = "12")]
         limit: usize,
     },
-    /// Suggest related files for a file
+    /// Suggest nearby files from names and directory layout
     Related {
         /// File path relative to project root
         path: String,
@@ -210,13 +209,6 @@ struct FocusSymbolOutput {
     child_count: usize,
 }
 
-#[derive(Default)]
-struct SymbolProfile {
-    names: HashSet<String>,
-    tokens: HashSet<String>,
-    import_tokens: HashSet<String>,
-}
-
 /// A list a limit cut, carrying the size of what it cut from. Truncating
 /// here and nowhere else keeps `count` describing the set the items were
 /// drawn from — a list that reports only what survived reads as the whole
@@ -365,7 +357,7 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         Err(e) => (None, None, Section::error(e)),
     };
 
-    let related_files = collect_related_files(app, &target, &records, related_limit).await;
+    let related_files = collect_related_files(&target, &records, related_limit);
     let siblings = records
         .iter()
         .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
@@ -509,7 +501,7 @@ async fn execute_related(app: &App, path: &str, limit: usize) -> Result<()> {
 
     ctx.print_success(MapRelatedOutput {
         target: target.rel_path.clone(),
-        related_files: collect_related_files(app, &target, &records, limit).await,
+        related_files: collect_related_files(&target, &records, limit),
     });
     Ok(())
 }
@@ -771,95 +763,20 @@ fn detect_counterparts<'a>(target: &FileRecord, records: &'a [FileRecord]) -> Ve
         .collect()
 }
 
-async fn collect_related_files(
-    app: &App,
+fn collect_related_files(
     target: &FileRecord,
     records: &[FileRecord],
     limit: usize,
 ) -> Vec<RelatedFileOutput> {
-    let mut results = collect_related_files_heuristic(target, records);
-    if results.is_empty() {
-        return results;
+    if limit == 0 {
+        return Vec::new();
     }
-
-    let target_profile = load_symbol_profile(app, &target.abs_path).await;
-    if target_profile.names.is_empty()
-        && target_profile.tokens.is_empty()
-        && target_profile.import_tokens.is_empty()
-    {
-        results.truncate(limit);
-        return results;
-    }
-
-    // The symbol evidence below only raises a score, so it can promote a
-    // candidate the filename heuristic ranked low — which is why the window
-    // is wider than what gets published. Narrowing to it BEFORE the reads
-    // is what keeps `score` one measure: a row the window left out would
-    // reach the same sorted list carrying filename evidence alone.
-    results.truncate(rerank_window(limit));
-
-    let candidates: Vec<PathBuf> = results
-        .iter()
-        .map(|item| app.root().join(&item.file))
-        .collect();
-    let profiles = join_all(candidates.iter().map(|path| load_symbol_profile(app, path))).await;
-
-    for (item, profile) in results.iter_mut().zip(profiles) {
-        let exact_shared = target_profile.names.intersection(&profile.names).count() as i32;
-        if exact_shared > 0 {
-            item.score += exact_shared.min(4) * 3;
-            item.reasons.push("shared symbols".to_string());
-        }
-
-        let token_shared = target_profile.tokens.intersection(&profile.tokens).count() as i32;
-        if token_shared > 0 {
-            item.score += token_shared.min(6);
-            item.reasons.push("shared symbol tokens".to_string());
-        }
-
-        let shared_imports = target_profile
-            .import_tokens
-            .intersection(&profile.import_tokens)
-            .count() as i32;
-        if shared_imports > 0 {
-            item.score += shared_imports.min(4) * 2;
-            item.reasons.push("shared imports".to_string());
-        }
-
-        let imports_target_symbols = profile
-            .import_tokens
-            .intersection(&target_profile.names)
-            .count() as i32;
-        if imports_target_symbols > 0 {
-            item.score += imports_target_symbols.min(3) * 4;
-            item.reasons.push("imports target symbols".to_string());
-        }
-
-        let target_imports_candidate = target_profile
-            .import_tokens
-            .intersection(&profile.names)
-            .count() as i32;
-        if target_imports_candidate > 0 {
-            item.score += target_imports_candidate.min(2) * 3;
-            item.reasons.push("target imports symbols".to_string());
-        }
-    }
-
-    for item in &mut results {
-        dedupe_reasons(&mut item.reasons);
-    }
-    results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.file.cmp(&b.file)));
+    let mut results = collect_related_file_candidates(target, records);
     results.truncate(limit);
     results
 }
 
-/// How many candidates the symbol-profile stage reads. Wide enough to
-/// promote past the published window, and never narrower than it.
-fn rerank_window(limit: usize) -> usize {
-    limit.saturating_mul(3).max(12)
-}
-
-fn collect_related_files_heuristic(
+fn collect_related_file_candidates(
     target: &FileRecord,
     records: &[FileRecord],
 ) -> Vec<RelatedFileOutput> {
@@ -889,7 +806,7 @@ fn collect_related_files_heuristic(
         }
         if candidate.is_test != target.is_test && candidate_norm_stem == target_norm_stem {
             score += 8;
-            reasons.push("test/source counterpart".to_string());
+            reasons.push("matching test/source names".to_string());
         }
 
         let shared_tokens = shared_stem_tokens(&target_norm_stem, &candidate_norm_stem);
@@ -913,11 +830,12 @@ fn collect_related_files_heuristic(
 }
 
 fn normalize_stem(stem: &str) -> String {
-    stem.replace("_test", "")
-        .replace(".test", "")
-        .replace(".spec", "")
-        .replace("-test", "")
-        .replace("-spec", "")
+    let stem = stem.strip_prefix("test_").unwrap_or(stem);
+    ["_test", ".test", ".spec", "-test", "-spec"]
+        .iter()
+        .find_map(|suffix| stem.strip_suffix(suffix))
+        .unwrap_or(stem)
+        .to_string()
 }
 
 fn shared_stem_tokens(a: &str, b: &str) -> i32 {
@@ -932,90 +850,6 @@ fn split_tokens(value: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(|part| part.to_ascii_lowercase())
         .collect()
-}
-
-async fn load_symbol_profile(app: &App, file: &Path) -> SymbolProfile {
-    let Ok(mut symbols) = app
-        .lsp
-        .find_symbols(file, FindSymbolsOptions::default().with_depth(1))
-        .await
-    else {
-        return SymbolProfile::default();
-    };
-
-    Symbol::compute_paths_for_all(&mut symbols);
-    let filtered = Symbol::filter_advanced(&symbols, None, false, None, None, true);
-    let mut profile = SymbolProfile::default();
-    for symbol in filtered {
-        profile.names.insert(symbol.name.to_ascii_lowercase());
-        for token in split_symbol_tokens(&symbol.name) {
-            profile.tokens.insert(token);
-        }
-        if let Some(container) = symbol.container {
-            for token in split_symbol_tokens(&container) {
-                profile.tokens.insert(token);
-            }
-        }
-    }
-
-    if let Ok(content) = tokio::fs::read_to_string(file).await {
-        for token in extract_import_tokens(&content) {
-            profile.import_tokens.insert(token);
-        }
-    }
-
-    profile
-}
-
-fn extract_import_tokens(content: &str) -> HashSet<String> {
-    let mut tokens = HashSet::new();
-    for line in content.lines().take(300) {
-        let trimmed = line.trim();
-        if !looks_like_import_line(trimmed) {
-            continue;
-        }
-
-        for token in split_symbol_tokens(trimmed) {
-            if token.len() >= 3 {
-                tokens.insert(token);
-            }
-        }
-    }
-    tokens
-}
-
-fn looks_like_import_line(line: &str) -> bool {
-    let prefixes = [
-        "use ",
-        "pub use ",
-        "import ",
-        "from ",
-        "#include ",
-        "include ",
-        "require(",
-        "require ",
-        "export * from ",
-        "export {",
-    ];
-    prefixes.iter().any(|prefix| line.starts_with(prefix))
-}
-
-fn split_symbol_tokens(value: &str) -> Vec<String> {
-    let mut normalized = String::with_capacity(value.len() * 2);
-    let mut prev_is_lower = false;
-    for ch in value.chars() {
-        if ch.is_ascii_uppercase() && prev_is_lower {
-            normalized.push('_');
-        }
-        prev_is_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
-        normalized.push(ch.to_ascii_lowercase());
-    }
-    split_tokens(&normalized)
-}
-
-fn dedupe_reasons(reasons: &mut Vec<String>) {
-    let mut seen = HashSet::new();
-    reasons.retain(|reason| seen.insert(reason.clone()));
 }
 
 fn build_focus_symbols(symbols: &[Symbol], root: &Path) -> Vec<FocusSymbolOutput> {
@@ -1183,21 +1017,6 @@ mod tests {
         );
     }
 
-    /// A candidate the profile stage never read carries filename evidence
-    /// alone, and it lands in the same list, ordered by the same `score`
-    /// column, as rows that were read. The window has to cover what gets
-    /// published — at every limit a caller can ask for, not just the
-    /// default.
-    #[test]
-    fn the_rerank_window_is_never_narrower_than_what_it_publishes() {
-        for limit in [1usize, 8, 10, 24, 25, 50, 200] {
-            assert!(
-                rerank_window(limit) >= limit,
-                "limit {limit} publishes rows the rerank never read"
-            );
-        }
-    }
-
     #[test]
     fn normalizes_dir_arg() {
         assert_eq!(normalize_dir_arg("."), "");
@@ -1220,6 +1039,8 @@ mod tests {
     #[test]
     fn normalizes_test_suffixes() {
         assert_eq!(normalize_stem("foo_test"), "foo");
+        assert_eq!(normalize_stem("test_foo"), "foo");
+        assert_eq!(normalize_stem("foo_test_runner"), "foo_test_runner");
         assert_eq!(normalize_stem("foo.spec"), "foo");
         assert_eq!(normalize_stem("foo-test"), "foo");
     }

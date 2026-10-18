@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod deadline;
 pub mod file_filter;
 pub mod file_lock;
 pub mod lsp;

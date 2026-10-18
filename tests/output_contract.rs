@@ -450,6 +450,7 @@ fn call_hierarchy_output_with_body() {
         location: sample_location(12, 4),
         call_site: None,
         body: Some("fn callee() {}".to_string()),
+        body_omitted: None,
     };
     assert_json_snapshot!(out, @r###"
     {
@@ -575,6 +576,7 @@ fn type_info_output_with_body() {
         location: sample_location(5, 12),
         detail: None,
         body: Some("struct Config { path: PathBuf }".to_string()),
+        body_omitted: None,
     };
     assert_json_snapshot!(out, @r###"
     {

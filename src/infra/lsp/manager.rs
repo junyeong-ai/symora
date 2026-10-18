@@ -193,6 +193,17 @@ impl LspManager {
         self: &Arc<Self>,
         language: Language,
     ) -> Result<Arc<LspClient>, LspError> {
+        crate::infra::deadline::run(
+            self.runtime_config.request_timeout(),
+            self.get_client_inner(language),
+        )
+        .await
+    }
+
+    async fn get_client_inner(
+        self: &Arc<Self>,
+        language: Language,
+    ) -> Result<Arc<LspClient>, LspError> {
         loop {
             let pooled = self.pool().get(&language).map(|state| match state {
                 ClientState::Live { client } => {
@@ -231,7 +242,8 @@ impl LspManager {
                 language,
                 done,
             };
-            return match tokio::spawn(slot.run(evict)).await {
+            let limit = self.runtime_config.request_timeout();
+            return match tokio::spawn(crate::infra::deadline::scope(limit, slot.run(evict))).await {
                 Ok(started) => started,
                 Err(e) => std::panic::resume_unwind(e.into_panic()),
             };
@@ -340,7 +352,11 @@ impl LspManager {
             Arc::clone(&self.runtime_config),
             offers_file_watching,
         );
-        client.start(&launch, || admit(&client)).await?;
+        crate::infra::deadline::run(
+            self.runtime_config.request_timeout(),
+            client.start(&launch, || admit(&client)),
+        )
+        .await?;
 
         tracing::info!("{:?} language server started", language);
         Ok(client)
@@ -625,17 +641,20 @@ impl LspManager {
     {
         use crate::infra::retry::{RetryConfig, with_retry};
 
-        with_retry(&RetryConfig::for_language(language), || async {
-            let client = self.get_client(language).await?;
-            match op(Arc::clone(&client)).await {
-                Ok(result) => Ok(result),
-                Err(e) if e.needs_restart() && self.runtime_config.auto_restart => {
-                    tracing::warn!("{:?} server error, restarting: {}", language, e);
-                    Err(e)
+        crate::infra::deadline::run(
+            self.runtime_config.request_timeout(),
+            with_retry(&RetryConfig::default(), || async {
+                let client = self.get_client(language).await?;
+                match op(Arc::clone(&client)).await {
+                    Ok(result) => Ok(result),
+                    Err(e) if e.needs_restart() && self.runtime_config.auto_restart => {
+                        tracing::warn!("{:?} server error, restarting: {}", language, e);
+                        Err(e)
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            }
-        })
+            }),
+        )
         .await
     }
 }
@@ -921,8 +940,7 @@ exec sleep 600
             }
 
             /// A pool whose Go server is the fake, answering `initialize`
-            /// per `behavior` after `delay_secs`. Go's profile makes the
-            /// handshake budget 2s at `timeout_secs = 1`.
+            /// per `behavior` after `delay_secs`.
             fn manager(&self, behavior: &str, delay_secs: u32) -> Arc<LspManager> {
                 self.manager_watching(behavior, delay_secs, FileWatch::On)
             }
@@ -934,7 +952,11 @@ exec sleep 600
                 file_watch: FileWatch,
             ) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
-                config.lsp.timeout_secs = 1;
+                config.lsp.timeout_secs = if behavior == "hang" {
+                    1
+                } else {
+                    3 + u64::from(delay_secs)
+                };
                 config
                     .lsp
                     .servers
@@ -950,7 +972,7 @@ exec sleep 600
             /// served by the fake.
             fn capped(&self, languages: &[&str], cap: usize, behavior: &str) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
-                config.lsp.timeout_secs = 1;
+                config.lsp.timeout_secs = 5;
                 for language in languages {
                     config
                         .lsp

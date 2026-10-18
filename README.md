@@ -91,9 +91,10 @@ Symora는 *대략적인* 감에서 *정확한* 답으로 이동하도록 설계�
 
 ```mermaid
 flowchart LR
-    O["① 방향 잡기<br/>pack · map summary"] --> D["② 탐색<br/>search symbols / content / ast"]
-    D --> I["③ 들여다보기<br/>symbols · map file"]
-    I --> X["④ 정밀 후속 분석<br/>refs · callers · callees<br/>context · impact · usage"]
+    O["구조를 모를 때: 선택적 방향 잡기<br/>pack · map summary"] --> D["이름·문구 탐색<br/>search symbols / content / ast"]
+    D --> I["파일·선언 확인<br/>symbols · map file"]
+    K["알고 있는 파일·심볼"] --> I
+    I --> X["의미 분석<br/>refs · callers · callees<br/>context · impact · usage"]
 ```
 
 아래 워크스루가 정확히 이 경로를 따릅니다.
@@ -143,7 +144,7 @@ symora map summary
   ]
 }
 ```
-> TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`가 실행 시작점을 바로 짚어 줍니다. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다. 더 깊은 브리핑이 필요하면 `symora pack --tokens 4000`이 PageRank 순위로 정리해 줍니다.
+> TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`는 파일명·경로에 따른 시작점 후보를 보여 줍니다. 실제 실행 경로는 소스와 설정에서 확인하세요. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다. 더 깊은 브리핑이 필요하면 `symora pack --tokens 4000`이 구문상 import 경로에 따른 PageRank 순위로 정리해 줍니다.
 
 ### ② 탐색 — 체크아웃은 어디서 처리되지?
 
@@ -308,7 +309,7 @@ symora pack --tokens 4000                   # 토큰 예산 기반, PageRank 순
 symora map summary                          # 저장소 형태
 symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련 파일
 symora map dir src/services                 # 디렉터리 목록
-symora map related src/services/checkout.ts # 휴리스틱 "다음에 읽을 것"
+symora map related src/services/checkout.ts # 이름·디렉터리 기반 다음 파일 후보
 
 # 심볼 & 들여다보기 (LSP)
 symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
@@ -369,11 +370,15 @@ symora status                # 프로젝트 + language server 설치 여부 (동
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 잘못된 CLI 인자도 같은 봉투로 나옵니다 — `invalid_argument` 코드에 clap의 산문이 아닌 JSON이라, 어떤 실패든 stdout 한 스트림만 파싱하면 됩니다. 예외는 하나뿐입니다: "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
 - **위치는 1-indexed** — 입력과 출력 모두이며, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `def`·`hover`·`signature`·`typedef`는 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 좌표로 file과 line을 담으며 column은 없습니다.
 - **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. 이는 소스가 뒤처졌다는 신호와는 다른 축입니다: `stale`과 `indexing: "timed_out"`은 소스가 뒤처졌다는 뜻이고, `incomplete`는 답이 짧다는 뜻입니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
-- **`--format compact`**는 단일 라인 JSON을 출력합니다. `pack --tokens`처럼 자체 예산을 밝힌 응답(`budget_tokens`)에는 그 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자)를 목표로 목록 항목을 통째로 줄이고 `truncated`와 설정 키를 지목하는 hint로 공개합니다. 본문 문자열·고정 필드는 자르지 않으므로, 목록을 모두 비워도 목표 크기를 초과할 수 있습니다. 크기는 어느 출력 형식에서든 compact 직렬화로 재므로 `--format`이 받는 항목을 바꾸지 않습니다.
+- **`--format compact`**는 단일 라인 JSON을 출력합니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 이후 필요한 경우 목록 항목을 줄이고 `truncated`와 설정 키를 지목하는 hint를 반환합니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
 ---
 
 `pack --tokens`와 `--token-estimate`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수나 전체 JSON 봉투 크기의 상한은 아닙니다.
+
+`context`의 요청 본문은 `--body-tokens`를 대상·피호출자·타입 순서로 공유하며 통째로 포함하거나 생략합니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
+
+`lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 소스 적용 도중의 강제 취소에 사용하지 않습니다.
 
 
 
@@ -422,7 +427,7 @@ env = { NODE_OPTIONS = "--max-old-space-size=2048" } # 생략 가능; 서버 환
 
 키는 `symora doctor`가 출력하는 `language` id입니다. 잘못된 키는 doctor의 `config_errors`로 보고되며 조용히 적용되지 않습니다. daemon은 프로젝트를 처음 처리할 때 그 설정을 읽어 재시작하거나 프로젝트가 유휴 상태가 될 때까지 유지하므로, 변경 후 `symora daemon restart`를 실행하세요.
 
-파일 탐색은 프로젝트의 `.gitignore`(루트·중첩, 디렉터리별 시맨틱 완전 지원)를 따르며, symora 전용 제외는 `.symora/ignore`(gitignore 문법)로 추가할 수 있습니다. 루트 `.gitignore`가 없으면 흔한 의존성·빌드 디렉터리(`node_modules`, `target`, `dist` …)를 기본 제외합니다. 기기별 git 설정인 `.git/info/exclude`와 전역 `core.excludesFile`은 읽지 않으므로, 같은 트리는 어느 기기에서든 같은 인덱스가 됩니다. 숨김 항목(도트파일·도트디렉터리)은 ripgrep·fd와 동일하게 항상 제외되며 `.gitignore` negation으로도 재포함되지 않습니다 — 이것이 `.git`·`.symora`를 무조건 배제하는 근거입니다.
+파일 탐색은 프로젝트의 `.gitignore`(루트·중첩, 디렉터리별 시맨틱 완전 지원)를 따르며, symora 전용 제외는 `.symora/ignore`(gitignore 문법)로 추가할 수 있습니다. 루트 `.gitignore`가 없으면 흔한 의존성·빌드 디렉터리(`node_modules`, `target`, `dist` …)를 기본 제외합니다. 기기별 git 설정인 `.git/info/exclude`와 전역 `core.excludesFile`은 읽지 않으므로, 같은 트리는 어느 기기에서든 같은 인덱스가 됩니다. 기본 탐색은 `.gitignore`와 별개로 숨김 항목을 제외합니다. `search content '문구' --path .claude`는 지정한 파일·디렉터리의 숨김 텍스트와 문서 형식을 직접 검색합니다. 프로젝트 ignore와 크기 제한은 적용하며 `.git`·`.symora`는 계속 제외합니다. 명시한 경로가 지속성 인덱스의 범위를 넓히지는 않습니다.
 
 ---
 
@@ -499,7 +504,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 - `symora setup skill`은 바이너리에 내장된 스킬을 네트워크 없이 설치합니다. 명시적인 `--git-ref`는 지정한 소스만 사용하며 실패하면 다른 버전으로 대체하지 않습니다.
 - `symora mcp serve`는 MCP 도구 순서와 한계를 설명하는 instructions를 제공합니다. 연결 클라이언트가 지원하는 프로토콜에 따라 이를 조회합니다.
 
-요약하면: 탐색은 대략적(`pack`, `map summary`, `search symbols`)에서 정밀(`symbols`, `context`, `refs`, `impact`)로 흐르고, 리스트 응답은 하나의 형태를 공유하며, 위치는 1-indexed이고, 명령 실패는 잘못된 CLI 인자까지 포함해 0이 아닌 코드로 종료하는 구조화된 `{code, message, hint}`입니다.
+파일·선언을 알고 있다면 `symbols`, `context`, `refs`, `impact`로 바로 조사하세요. 저장소 방향 파악에는 `map summary`와 `pack`을 선택적으로 사용합니다. 리스트 응답은 공통 형태를 쓰고, 위치는 1-indexed이며, 잘못된 CLI 인자를 포함한 명령 실패는 구조화된 `{code, message, hint}`와 0이 아닌 종료 코드로 전달됩니다.
 
 ---
 

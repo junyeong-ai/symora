@@ -50,12 +50,11 @@ QUICK START:
   symora refs src/main.rs:10:5   Find references
   symora callers src/main.rs:10  Find who calls this
 
-EXPLORATION FLOW:
-  1. `symora map summary` for project entrypoints and major areas
-  2. `symora search symbols <query>` when you know only a rough name/path
-  3. `symora map file <path>` to inspect one file before reading full code
-  4. `symora symbols <file>` or `symora symbols --symbol <path>` for precise semantic follow-up
-  5. `symora refs <loc>` once you have the exact symbol location
+CHOOSE A QUERY:
+  Known file or symbol: `symbols <file>` or `symbols <file> --symbol <path>`
+  Unknown name or text: `search symbols <query>` or `search content <query>`
+  Project orientation: optional `map summary` or `pack --tokens 4000`
+  Exact semantic follow-up: `refs <loc>`, `callers <loc>`, or `context <loc>`
 
 EXAMPLES:
   symora symbols src/lib.rs --body          Include source code

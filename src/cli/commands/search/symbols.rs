@@ -1104,7 +1104,6 @@ fn symbol_search_hints(
     limit: usize,
 ) -> Vec<String> {
     symbol_lookup_hints(
-        query,
         looks_like_symbol_path(query),
         language.is_none(),
         kind.is_none(),

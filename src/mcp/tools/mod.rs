@@ -103,6 +103,54 @@ pub async fn dispatch(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_content_paths_preserve_project_relative_paths_and_reject_empty_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        std::fs::create_dir_all(actual.join(".claude")).unwrap();
+        std::fs::write(actual.join(".claude/guide.md"), "scope marker\n").unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let app = App::new_at(
+            alias,
+            crate::cli::OutputOptions::default(),
+            crate::app::Wiring {
+                use_daemon: false,
+                deterministic: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let result = dispatch(
+            "search_content",
+            serde_json::json!({"query": "scope marker", "path": [".claude"]}),
+            &app,
+            McpProfile::ReadOnly,
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(
+            result.structured.unwrap()["items"][0]["file"],
+            ".claude/guide.md"
+        );
+        let empty = dispatch(
+            "search_content",
+            serde_json::json!({"query": "scope marker", "path": []}),
+            &app,
+            McpProfile::ReadOnly,
+        )
+        .await
+        .unwrap();
+        assert!(empty.is_error);
+        assert_eq!(
+            empty.structured.unwrap()["error"]["code"],
+            "invalid_argument"
+        );
+    }
+
     #[tokio::test]
     async fn edit_payloads_are_literal_even_when_they_are_a_dash() {
         for (name, field, expected) in [
@@ -190,6 +238,7 @@ mod tests {
             "get_hover",
             "get_context",
             "get_impact",
+            "get_diff_impact",
             "get_diagnostics",
             "build_context_pack",
             "rename_symbol",

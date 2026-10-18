@@ -1,20 +1,15 @@
-//! Token-budgeted context pack — PageRank-ranked file selection with
-//! import-graph edges, then signature-only excerpts truncated to fit a
-//! caller-supplied token budget.
+//! Context packs ranked from syntax-derived module paths.
 //!
-//! This is the engine behind `symora pack`. It is intentionally
-//! self-contained: it does not depend on the LSP, the daemon, or a built
-//! search index. One repo walk, each file's imports read from its parse
-//! tree, is enough to produce a useful, deterministic pack.
+//! Imports are cached per file. Signatures are loaded in rank order and
+//! admitted whole within the caller's approximate token budget.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use anyhow::Result;
-
-use crate::constants::defaults::{PACK_MAX_FILE_BYTES, PACK_SYMBOLS_PER_FILE};
+use crate::constants::defaults::PACK_SYMBOLS_PER_FILE;
 use crate::infra::file_filter::{Discovery, FileFilter};
+use crate::models::config::SearchConfig;
 use crate::models::symbol::Language;
 use crate::services::imports::ImportExtractor;
 use crate::services::pack_cache::{CachedEntry, PackCache};
@@ -44,7 +39,7 @@ impl Default for PackConfig {
             max_iterations: 30,
             convergence_tolerance: 1e-6,
             max_symbols_per_file: PACK_SYMBOLS_PER_FILE,
-            max_file_size_bytes: PACK_MAX_FILE_BYTES,
+            max_file_size_bytes: SearchConfig::default().max_file_size_bytes(),
             use_cache: true,
         }
     }
@@ -77,11 +72,18 @@ pub struct PackResult {
     pub estimated_tokens: usize,
     pub graph_size: usize,
     pub unsupported_languages: Vec<Language>,
+    pub unsupported_import_languages: Vec<Language>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
     /// publishes how many the selection chose FROM, and the budget's own
     /// exclusions are disclosed while these would not be.
     pub unreadable_paths: Vec<std::path::PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PackError {
+    #[error("No eligible file matches focus '{0}'; use a project-relative path or substring")]
+    UnmatchedFocus(String),
 }
 
 /// Build a context pack for `root` under the given token budget.
@@ -95,7 +97,17 @@ pub fn build_pack(
     focus: Option<&str>,
     file_filter: &FileFilter,
     cfg: &PackConfig,
-) -> Result<PackResult> {
+) -> Result<PackResult, PackError> {
+    if budget_tokens == 0 || cfg.max_symbols_per_file == 0 {
+        return Ok(PackResult {
+            files: Vec::new(),
+            estimated_tokens: 0,
+            graph_size: 0,
+            unsupported_languages: Vec::new(),
+            unsupported_import_languages: Vec::new(),
+            unreadable_paths: Vec::new(),
+        });
+    }
     let cache = if cfg.use_cache {
         match PackCache::open(root) {
             Ok(c) => Some(c),
@@ -108,14 +120,16 @@ pub fn build_pack(
         None
     };
 
-    let collected = collect_nodes(
-        root,
-        file_filter,
-        cfg,
-        cache.as_ref(),
-        &ImportExtractor::new(),
-    );
+    let mut collected = collect_nodes(root, file_filter, cfg, cache.as_ref());
     let nodes = collected.nodes;
+    if let Some(focus) = focus
+        && (focus.trim().is_empty()
+            || !nodes
+                .iter()
+                .any(|node| node.rel_path.to_lowercase().contains(&focus.to_lowercase())))
+    {
+        return Err(PackError::UnmatchedFocus(focus.to_string()));
+    }
 
     // Prune evicts what the walk did not find, which only means "gone" when
     // the walk saw everything. A path it could not read is not absent, and
@@ -132,7 +146,15 @@ pub fn build_pack(
     let graph = build_import_graph(&nodes, &declared_module_prefix(root));
     let personalization = personalization_vector(&nodes, focus);
     let ranks = page_rank(&graph, &personalization, cfg);
-    let fitted = fit_to_budget(&nodes, &ranks, budget_tokens, cfg.max_symbols_per_file);
+    let fitted = fit_to_budget(
+        &nodes,
+        &ranks,
+        budget_tokens,
+        cfg.max_symbols_per_file,
+        root,
+        cache.as_ref(),
+    );
+    collected.unreadable.extend(fitted.unreadable_paths);
     let mut unsupported_languages: Vec<Language> = nodes
         .iter()
         .map(|node| node.language)
@@ -140,7 +162,15 @@ pub fn build_pack(
         .collect();
     unsupported_languages.sort_by_key(|language| language.lsp_id());
     unsupported_languages.dedup();
+    let mut unsupported_import_languages: Vec<_> = nodes
+        .iter()
+        .map(|node| node.language)
+        .filter(|language| !ImportExtractor::is_supported(*language))
+        .collect();
+    unsupported_import_languages.sort_by_key(|language| language.lsp_id());
+    unsupported_import_languages.dedup();
     Ok(PackResult {
+        unsupported_import_languages,
         unsupported_languages,
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
@@ -161,7 +191,8 @@ struct Node {
     /// a package resolves to in languages where a package is a directory.
     directory: Vec<String>,
     imports: Vec<String>,
-    signatures: Vec<PackedSymbol>,
+    mtime: i64,
+    signatures: Option<Vec<PackedSymbol>>,
 }
 
 fn collect_nodes(
@@ -169,7 +200,6 @@ fn collect_nodes(
     file_filter: &FileFilter,
     cfg: &PackConfig,
     cache: Option<&PackCache>,
-    imports: &ImportExtractor,
 ) -> CollectedNodes {
     let mut nodes = Vec::new();
     let Discovery {
@@ -217,6 +247,7 @@ fn collect_nodes(
                 language,
                 module_path,
                 directory,
+                mtime,
                 imports: cached.imports,
                 signatures: cached.signatures,
             });
@@ -233,8 +264,8 @@ fn collect_nodes(
                 continue;
             }
         };
-        let imports = imports.extract(&contents, language);
-        let signatures = signatures_from(&contents, language);
+        let imports = ImportExtractor::shared().extract(&contents, language);
+        let signatures = None;
 
         if let Some(cache) = cache {
             let entry = CachedEntry {
@@ -255,6 +286,7 @@ fn collect_nodes(
             module_path,
             directory,
             imports,
+            mtime,
             signatures,
         });
     }
@@ -329,6 +361,7 @@ fn directory_path(abs_path: &Path, root: &Path) -> Vec<String> {
 fn directory_module_file(language: Language) -> Option<&'static str> {
     match language {
         Language::Rust => Some("mod"),
+        Language::Python => Some("__init__"),
         Language::JavaScript | Language::TypeScript | Language::Vue => Some("index"),
         _ => None,
     }
@@ -392,6 +425,7 @@ fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
         }
     }
     let index = ProjectIndex {
+        nodes,
         by_module,
         by_directory,
         module_prefix,
@@ -402,7 +436,7 @@ fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
         graph.entry(node.id).or_default();
         let mut seen = HashSet::new();
         for target in &node.imports {
-            for dst in index.resolve(&Reference::parse(target), node) {
+            for dst in index.resolve(&Reference::parse(target, node.language), node) {
                 if dst != node.id && seen.insert(dst) {
                     graph.entry(node.id).or_default().push(dst);
                 }
@@ -431,43 +465,77 @@ enum Reference {
 }
 
 impl Reference {
-    fn parse(raw: &str) -> Self {
-        let raw = raw
-            .trim()
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == '`');
-        let mut rest = raw;
-        let mut up = 0usize;
-        let mut relative = false;
-
-        // `./x` and `../x` in the quoted-path languages, `.x` and `..x` in
-        // Python, `self::x` and `super::x` in Rust: the same two ideas
-        // spelled three ways.
-        loop {
-            if let Some(tail) = rest.strip_prefix("../").or_else(|| rest.strip_prefix("..")) {
-                relative = true;
-                up += 1;
-                rest = tail;
-            } else if let Some(tail) = rest
-                .strip_prefix("./")
-                .or_else(|| rest.strip_prefix("super::"))
-            {
-                if rest.starts_with("super::") {
-                    up += 1;
+    fn parse(raw: &str, language: Language) -> Self {
+        let raw = raw.trim().trim_matches(['"', '\'', '`']);
+        if language == Language::Python {
+            let dots = raw.bytes().take_while(|byte| *byte == b'.').count();
+            let components = raw[dots..]
+                .split('.')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect();
+            return if dots > 0 {
+                Self::Relative {
+                    up: dots - 1,
+                    components,
                 }
+            } else {
+                Self::Absolute(components)
+            };
+        }
+        let mut rest = raw;
+        let mut up = 0;
+        let mut relative = false;
+        loop {
+            if let Some(tail) = rest.strip_prefix("../") {
+                up += 1;
                 relative = true;
                 rest = tail;
-            } else if let Some(tail) = rest.strip_prefix("self::") {
+            } else if let Some(tail) = rest.strip_prefix("./") {
                 relative = true;
                 rest = tail;
-            } else if rest.starts_with('.') && !rest.starts_with("..") {
+            } else if language == Language::Rust && rest.starts_with("super::") {
+                up += 1;
                 relative = true;
-                rest = &rest[1..];
+                rest = &rest[7..];
+            } else if language == Language::Rust && rest.starts_with("self::") {
+                relative = true;
+                rest = &rest[6..];
             } else {
                 break;
             }
         }
-
-        let components = split_components(rest);
+        let mut components: Vec<String> = match language {
+            Language::Rust => rest
+                .strip_prefix("crate::")
+                .unwrap_or(rest)
+                .split("::")
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect(),
+            Language::Java
+            | Language::Kotlin
+            | Language::Scala
+            | Language::Swift
+            | Language::Elixir => rest
+                .split('.')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => split_components(rest),
+        };
+        if matches!(
+            language,
+            Language::JavaScript | Language::TypeScript | Language::Vue | Language::Dart
+        ) && let Some(last) = components.last_mut()
+            && let Some((stem, extension)) = last.rsplit_once('.')
+            && matches!(
+                extension,
+                "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "vue" | "dart"
+            )
+        {
+            *last = stem.to_string();
+        }
         if relative {
             Self::Relative { up, components }
         } else {
@@ -477,8 +545,8 @@ impl Reference {
 }
 
 fn split_components(raw: &str) -> Vec<String> {
-    raw.split(['/', '.', ':'])
-        .filter(|part| !part.is_empty() && *part != "crate")
+    raw.split('/')
+        .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
 }
@@ -486,6 +554,7 @@ fn split_components(raw: &str) -> Vec<String> {
 /// The project's files, indexed by every suffix of their module path and of
 /// their directory, plus the module prefix its own imports carry.
 struct ProjectIndex<'a> {
+    nodes: &'a [Node],
     by_module: HashMap<&'a [String], Vec<usize>>,
     by_directory: HashMap<&'a [String], Vec<usize>>,
     module_prefix: &'a [String],
@@ -514,7 +583,12 @@ impl ProjectIndex<'_> {
                     .unwrap_or(components);
                 // `use a::b::Item` names a module and an item in one path;
                 // read it whole, then without the item.
-                for candidate in [components, components.split_last().map_or(&[][..], |s| s.1)] {
+                let parent = matches!(
+                    from.language,
+                    Language::Rust | Language::Java | Language::Kotlin | Language::Scala
+                )
+                .then(|| components.split_last().map_or(&[][..], |parts| parts.1));
+                for candidate in std::iter::once(components).chain(parent) {
                     if candidate.is_empty() {
                         continue;
                     }
@@ -531,17 +605,29 @@ impl ProjectIndex<'_> {
     /// The nodes at an exact project path: the file it names, or — where a
     /// package IS a directory — every file the directory holds.
     fn at(&self, path: &[String], language: Language) -> Vec<usize> {
+        let compatible = |id: &&usize| {
+            let target = self.nodes[**id].language;
+            target == language
+                || (matches!(
+                    target,
+                    Language::JavaScript | Language::TypeScript | Language::Vue
+                ) && matches!(
+                    language,
+                    Language::JavaScript | Language::TypeScript | Language::Vue
+                ))
+        };
         if let Some(files) = self.by_module.get(path) {
-            return match files.as_slice() {
-                // A path several files share names none of them.
-                [only] => vec![*only],
-                _ => Vec::new(),
-            };
+            let candidates: Vec<_> = files.iter().filter(compatible).copied().collect();
+            match candidates.as_slice() {
+                [only] => return vec![*only],
+                [] => {}
+                _ => return Vec::new(),
+            }
         }
         if package_is_directory(language)
             && let Some(files) = self.by_directory.get(path)
         {
-            return files.clone();
+            return files.iter().filter(compatible).copied().collect();
         }
         Vec::new()
     }
@@ -552,7 +638,7 @@ impl ProjectIndex<'_> {
 /// file. Go's specification says so outright; the rest address a directory
 /// through a `mod`/`index` file, which `module_path` already folds in.
 fn package_is_directory(language: Language) -> bool {
-    matches!(language, Language::Go)
+    matches!(language, Language::Go | Language::Terraform)
 }
 
 /// The module path a project's own imports are written against, when the
@@ -583,14 +669,11 @@ fn personalization_vector(nodes: &[Node], focus: Option<&str>) -> BTreeMap<usize
 
     if let Some(focus_str) = focus {
         let focus_lower = focus_str.to_lowercase();
-        let mut focused: Vec<usize> = nodes
+        let focused: Vec<usize> = nodes
             .iter()
             .filter(|n| n.rel_path.to_lowercase().contains(&focus_lower))
             .map(|n| n.id)
             .collect();
-        if focused.is_empty() {
-            focused = nodes.iter().map(|n| n.id).collect();
-        }
         let bonus = 0.9 / focused.len() as f64;
         let leftover = 0.1 / n;
         for node in nodes {
@@ -669,6 +752,7 @@ fn page_rank(
 struct Fitted {
     files: Vec<PackedFile>,
     estimated_tokens: usize,
+    unreadable_paths: Vec<PathBuf>,
 }
 
 fn fit_to_budget(
@@ -676,6 +760,8 @@ fn fit_to_budget(
     ranks: &BTreeMap<usize, f64>,
     budget: usize,
     per_file: usize,
+    root: &Path,
+    cache: Option<&PackCache>,
 ) -> Fitted {
     let mut ordered: Vec<&Node> = nodes.iter().collect();
     ordered.sort_by(|a, b| {
@@ -693,12 +779,35 @@ fn fit_to_budget(
 
     let mut packed = Vec::new();
     let mut spent = 0usize;
+    let mut unreadable_paths = Vec::new();
     for node in ordered {
-        if node.signatures.is_empty() {
+        if estimate_tokens_for_file(&node.rel_path, &[]) >= budget.saturating_sub(spent) {
             continue;
         }
-        let declared = node.signatures.len();
-        let shown: Vec<PackedSymbol> = node.signatures.iter().take(per_file).cloned().collect();
+        let signatures = match node_signatures(node, root, cache) {
+            Ok(signatures) => signatures,
+            Err(error) => {
+                if crate::infra::hides_text(&error) {
+                    unreadable_paths.push(root.join(&node.rel_path));
+                }
+                continue;
+            }
+        };
+        if signatures.is_empty() {
+            continue;
+        }
+        let declared = signatures.len();
+        let mut shown = Vec::new();
+        for signature in signatures.into_iter().take(per_file) {
+            shown.push(signature);
+            if estimate_tokens_for_file(&node.rel_path, &shown) > budget - spent {
+                shown.pop();
+                break;
+            }
+        }
+        if shown.is_empty() {
+            continue;
+        }
         let tokens = estimate_tokens_for_file(&node.rel_path, &shown);
         if spent + tokens > budget {
             continue;
@@ -719,7 +828,40 @@ fn fit_to_budget(
     Fitted {
         files: packed,
         estimated_tokens: spent,
+        unreadable_paths,
     }
+}
+
+fn node_signatures(
+    node: &Node,
+    root: &Path,
+    cache: Option<&PackCache>,
+) -> std::io::Result<Vec<PackedSymbol>> {
+    if let Some(signatures) = &node.signatures {
+        return Ok(signatures.clone());
+    }
+    let path = root.join(&node.rel_path);
+    let source = std::fs::read_to_string(&path)?;
+    let metadata = std::fs::metadata(&path)?;
+    if file_mtime(&metadata) != Some(node.mtime) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Source changed while building the context pack",
+        ));
+    }
+    let signatures = signatures_from(&source, node.language);
+    if let Some(cache) = cache {
+        let entry = CachedEntry {
+            mtime: node.mtime,
+            language: node.language,
+            imports: node.imports.clone(),
+            signatures: Some(signatures.clone()),
+        };
+        if let Err(error) = cache.put(&node.rel_path, &entry) {
+            tracing::debug!("pack signature cache write failed: {error}");
+        }
+    }
+    Ok(signatures)
 }
 
 /// Every signature the file states. The per-file cap belongs to the request,
@@ -773,8 +915,9 @@ mod tests {
             language,
             directory: directory_path(Path::new(rel), Path::new("")),
             module_path: module_path(Path::new(rel), Path::new(""), language),
-            imports: ImportExtractor::new().extract(contents, language),
-            signatures: signatures_from(contents, language),
+            imports: ImportExtractor::shared().extract(contents, language),
+            mtime: 0,
+            signatures: Some(signatures_from(contents, language)),
         }
     }
 
@@ -845,28 +988,34 @@ mod tests {
         };
 
         assert_eq!(
-            Reference::parse("crate::services::pack"),
+            Reference::parse("crate::services::pack", Language::Rust),
             abs(&["services", "pack"])
         );
         assert_eq!(
-            Reference::parse("github.com/acme/w/internal/store"),
-            abs(&["github", "com", "acme", "w", "internal", "store"])
+            Reference::parse("github.com/acme/w/internal/store", Language::Go),
+            abs(&["github.com", "acme", "w", "internal", "store"])
         );
         assert_eq!(
-            Reference::parse("\"./services/pack\""),
+            Reference::parse("\"./services/pack\"", Language::TypeScript),
             rel(0, &["services", "pack"])
         );
         assert_eq!(
-            Reference::parse("\"../../shared/util\""),
+            Reference::parse("\"../../shared/util\"", Language::TypeScript),
             rel(2, &["shared", "util"])
         );
-        assert_eq!(Reference::parse("super::super::util"), rel(2, &["util"]));
-        assert_eq!(Reference::parse("self::helper"), rel(0, &["helper"]));
         assert_eq!(
-            Reference::parse("..pkg.sibling"),
+            Reference::parse("super::super::util", Language::Rust),
+            rel(2, &["util"])
+        );
+        assert_eq!(
+            Reference::parse("self::helper", Language::Rust),
+            rel(0, &["helper"])
+        );
+        assert_eq!(
+            Reference::parse("..pkg.sibling", Language::Python),
             rel(1, &["pkg", "sibling"])
         );
-        assert_eq!(Reference::parse("."), rel(0, &[]));
+        assert_eq!(Reference::parse(".", Language::Python), rel(0, &[]));
     }
 
     /// Two files can share a trailing name and be reached by relative
@@ -900,7 +1049,7 @@ mod tests {
     /// the ranking it feeds degenerates to uniform.
     #[test]
     fn a_go_import_resolves_through_the_module_path_go_mod_declares() {
-        let prefix: Vec<String> = ["github", "com", "acme", "widget"]
+        let prefix: Vec<String> = ["github.com", "acme", "widget"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -933,7 +1082,7 @@ mod tests {
         .expect("write go.mod");
         assert_eq!(
             declared_module_prefix(dir.path()),
-            vec!["github", "com", "acme", "widget"]
+            vec!["github.com", "acme", "widget"]
         );
         assert!(declared_module_prefix(Path::new("/nonexistent")).is_empty());
     }
@@ -1161,10 +1310,17 @@ mod tests {
     }
 
     #[test]
-    fn personalization_falls_back_to_uniform_on_no_match() {
-        let nodes = vec![node(0, "src/auth.rs", ""), node(1, "src/render.rs", "")];
-        let pers = personalization_vector(&nodes, Some("nonexistent"));
-        assert!((pers[&0] - pers[&1]).abs() < 1e-3);
+    fn unmatched_focus_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("auth.rs"), "fn auth() {}\n").unwrap();
+        let result = build_pack(
+            dir.path(),
+            1000,
+            Some("nonexistent"),
+            &FileFilter::new(dir.path()),
+            &PackConfig::default(),
+        );
+        assert!(matches!(result, Err(PackError::UnmatchedFocus(_))));
     }
 
     #[test]
@@ -1179,9 +1335,23 @@ mod tests {
             node(1, "src/b.rs", "pub fn small() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.6), (1, 0.4)].into();
-        let result = fit_to_budget(&nodes, &ranks, 50, PACK_SYMBOLS_PER_FILE);
+        let result = fit_to_budget(
+            &nodes,
+            &ranks,
+            50,
+            PACK_SYMBOLS_PER_FILE,
+            Path::new(""),
+            None,
+        );
         assert!(result.estimated_tokens <= 50);
-        let tiny = fit_to_budget(&nodes, &ranks, 1, PACK_SYMBOLS_PER_FILE);
+        let tiny = fit_to_budget(
+            &nodes,
+            &ranks,
+            1,
+            PACK_SYMBOLS_PER_FILE,
+            Path::new(""),
+            None,
+        );
         assert!(tiny.files.is_empty());
         assert_eq!(tiny.estimated_tokens, 0);
     }
@@ -1206,11 +1376,12 @@ mod tests {
             module_path: vec!["a".to_string()],
             language: Language::Rust,
             imports: vec![],
-            signatures,
+            mtime: 0,
+            signatures: Some(signatures),
         }];
         let ranks = BTreeMap::from([(0usize, 1.0)]);
         for cap in [1usize, 2, 3, 9] {
-            let fitted = fit_to_budget(&nodes, &ranks, 10_000, cap);
+            let fitted = fit_to_budget(&nodes, &ranks, 10_000, cap, Path::new(""), None);
             let file = &fitted.files[0];
             assert_eq!(file.symbols.len(), cap.min(3), "cap {cap}");
             assert_eq!(file.declared_symbols, 3, "the file states three either way");
@@ -1224,7 +1395,14 @@ mod tests {
             node(1, "src/high.rs", "pub fn high() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.1), (1, 0.9)].into();
-        let result = fit_to_budget(&nodes, &ranks, 10_000, PACK_SYMBOLS_PER_FILE);
+        let result = fit_to_budget(
+            &nodes,
+            &ranks,
+            10_000,
+            PACK_SYMBOLS_PER_FILE,
+            Path::new(""),
+            None,
+        );
         assert_eq!(result.files[0].path, PathBuf::from("src/high.rs"));
         assert_eq!(result.files[1].path, PathBuf::from("src/low.rs"));
     }
@@ -1240,7 +1418,14 @@ mod tests {
             node(1, "src/alpha.rs", "pub fn a() {}\n"),
         ];
         let ranks: BTreeMap<usize, f64> = [(0, 0.5), (1, 0.5)].into();
-        let result = fit_to_budget(&nodes, &ranks, 10_000, PACK_SYMBOLS_PER_FILE);
+        let result = fit_to_budget(
+            &nodes,
+            &ranks,
+            10_000,
+            PACK_SYMBOLS_PER_FILE,
+            Path::new(""),
+            None,
+        );
         assert_eq!(result.files[0].path, PathBuf::from("src/alpha.rs"));
         assert_eq!(result.files[1].path, PathBuf::from("src/zebra.rs"));
     }
@@ -1252,5 +1437,69 @@ mod tests {
         let graph = build_import_graph(&[a, b], &[]);
         assert!(graph[&0].contains(&1));
         assert!(graph[&1].is_empty());
+    }
+    #[test]
+    fn a_small_pack_defers_signatures_until_the_file_can_be_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(
+                dir.path().join(format!("{name}.rs")),
+                format!("fn {name}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let one = signatures_from("fn a() {}\n", Language::Rust);
+        let budget = estimate_tokens_for_file("a.rs", &one);
+        let cfg = PackConfig::default();
+        let result =
+            build_pack(dir.path(), budget, None, &FileFilter::new(dir.path()), &cfg).unwrap();
+        assert_eq!(result.files.len(), 1);
+        let cache = PackCache::open(dir.path()).unwrap();
+        assert!(cache.get("a.rs").unwrap().signatures.is_some());
+        assert!(cache.get("b.rs").unwrap().signatures.is_none());
+        assert!(cache.get("c.rs").unwrap().signatures.is_none());
+        drop(cache);
+        let larger =
+            build_pack(dir.path(), 10000, None, &FileFilter::new(dir.path()), &cfg).unwrap();
+        assert_eq!(larger.files.len(), 3);
+    }
+    #[test]
+    fn relative_imports_preserve_python_depth_and_literal_file_stems() {
+        let python = vec![
+            node_in(
+                0,
+                "pkg/a/b/caller.py",
+                "from ...shared import value\n",
+                Language::Python,
+            ),
+            node_in(1, "pkg/shared.py", "", Language::Python),
+            node_in(2, "pkg/a/shared.py", "", Language::Python),
+        ];
+        assert_eq!(edges_of(&python, 0), vec!["pkg/shared.py"]);
+        let js = vec![
+            node_in(
+                0,
+                "web/caller.ts",
+                "import {value} from './util.test.js';\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "web/util.test.ts", "", Language::TypeScript),
+            node_in(2, "web/util.test.py", "", Language::Python),
+        ];
+        assert_eq!(edges_of(&js, 0), vec!["web/util.test.ts"]);
+        let tf = vec![
+            node_in(
+                0,
+                "main.tf",
+                "module \"network\" { source = \"./network\" }\n",
+                Language::Terraform,
+            ),
+            node_in(1, "network/main.tf", "", Language::Terraform),
+            node_in(2, "network/variables.tf", "", Language::Terraform),
+        ];
+        assert_eq!(
+            edges_of(&tf, 0),
+            vec!["network/main.tf", "network/variables.tf"]
+        );
     }
 }

@@ -15,8 +15,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_file_overview",
-            "Compact map for one file: focus symbols, sibling/counterpart files, \
-                          shallow symbol tree, and related-file ranking. `focus_symbols` and \
+            "Compact map for one file: focus symbols, siblings, name-matched counterparts, \
+                          shallow symbol tree, and nearby files suggested from names and \
+                          directory layout. Use find_references for semantic links. `focus_symbols` and \
                           `backend` are omitted together when nothing read the file's \
                           declarations — an empty list would say the file declares none.",
             schema_object(
@@ -179,30 +180,20 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "search_content",
-            "Keyword/phrase search over file contents. Without `language` it reads \
-                          code files only, so a zero there means no CODE match — \
-                          documentation and configuration formats are reached by naming \
-                          one. The index answers for what it covers and the working tree \
-                          for the rest, so a zero is confirmed against disk rather than \
-                          being a stale index's guess.",
-            schema_object(
-                &[
+            "Keyword/phrase search. Defaults to code files; language selects documentation/data formats too. Explicit path searches read the named files/directories live, including hidden paths and text formats. Project ignores and size limits apply; .git and .symora are excluded. Unscoped queries use the index and uncovered live sources; zero matches are confirmed against disk.",
+            {
+                let mut schema = schema_object(&[
                     ("query", "string", "Keyword or phrase"),
-                    (
-                        "language",
-                        "string",
-                        "One language to search. Narrows a code search, and is the only \
-                         way to reach documentation and configuration formats, which an \
-                         unscoped search does not read.",
-                    ),
+                    ("language", "string", "Optional language filter"),
                     ("limit", "integer", "Maximum results"),
-                ],
-                &["query"],
-            ),
-        )
-        .with_output_schema(section_output_schema(
-            "Content-line matches: file, line, content, score",
-        )),
+                ], &["query"]);
+                schema["properties"]["path"] = serde_json::json!({
+                    "type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Explicit project-relative files/directories to search live, including hidden paths"
+                });
+                schema
+            },
+        ).with_output_schema(section_output_schema("Content-line matches: file, line, content, score")),
         ToolDefinition::read_only(
             "list_file_symbols",
             "List symbols defined in one file (precise, not heuristic). Use after \
@@ -466,17 +457,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "get_context",
-            "Aggregated context for a symbol at file:line[:column] — by default \
-                          callers, callees, related types, and tests in one response. Set \
-                          with_bodies=true to also receive complete verbatim source bodies: \
-                          the target's whole body attaches unbudgeted; callee bodies (in \
-                          listed order) and type bodies draw on the body_tokens budget — \
-                          answers how-does-X-work without follow-up inspect_symbol \
-                          calls. Each body-bearing section reports bodies_included; an item \
-                          without a body was omitted because the budget ran out, the symbol \
-                          was unresolvable at its position, or it has no body (prototypes, \
-                          interface methods) — only the first is cured by raising \
-                          body_tokens.",
+            "Aggregated symbol context: callers, callees, related types, and tests. Set with_bodies=true for complete source bodies sharing body_tokens in target/callee/type order. Bodies that do not fit are omitted with body_omitted; source-size fitting can also omit bodies. bodies_included counts emitted section bodies. Missing bodies can be unresolvable or absent in source.",
             with_extra(
                 location_schema(),
                 &[
@@ -500,17 +481,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "with_bodies",
                         "boolean",
-                        "Attach complete verbatim bodies: the target's whole body \
-                         unbudgeted, callee and type bodies under the body_tokens \
-                         budget; per-section bodies_included discloses how many items \
-                         carry one (default false)",
+                        "Attach complete bodies under the shared body_tokens budget; target first, then callees and types (default false)",
                     ),
                     (
                         "body_tokens",
                         "integer",
-                        "Token budget for the callee and type bodies attached by \
-                         with_bodies=true — the target's own body is exempt \
-                         (default 2000)",
+                        "Shared approximate token budget for requested target, callee, and type bodies (default 2000)",
                     ),
                 ],
             ),
@@ -534,6 +510,16 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     ),
                 ],
             ),
+        ),
+        ToolDefinition::read_only(
+            "get_diff_impact",
+            "Analyze tracked working-tree changes against one revision (default HEAD), or staged changes. Reports changed symbols, static references, and unmeasured files. Check incomplete and unmeasured_files before interpreting totals; test references are not execution coverage.",
+            schema_object(&[
+                ("revision", "string", "One base revision, not a revision range; default HEAD"),
+                ("staged", "boolean", "Compare staged changes instead of the working tree"),
+                ("callers", "boolean", "Include caller analysis"),
+                ("max_symbols", "integer", "Maximum changed symbols to analyze; default 50, 0 means unlimited"),
+            ], &[]),
         ),
         ToolDefinition::read_only(
             "get_diagnostics",
@@ -597,9 +583,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )),
         ToolDefinition::read_only(
             "build_context_pack",
-            "Build a token-budgeted context pack: PageRank-ranked files with \
-                          top-level signatures fitted to a token budget. Strong first call \
-                          when starting a new task in this repo. Set shape=\"markdown\" for a \
+            "Build a token-budgeted context pack: files ranked from syntax-level import paths \
+                          with top-level signatures fitted to a token budget. This is an \
+                          orientation aid, not a complete dependency graph. Set focus for a \
+                          known task area. Set shape=\"markdown\" for a \
                           plain-text view ready to paste into an LLM context window.",
             schema_object(
                 &[

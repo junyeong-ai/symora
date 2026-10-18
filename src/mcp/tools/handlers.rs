@@ -12,6 +12,7 @@ use crate::cli::commands::{
     context::ContextArgs,
     def::DefArgs,
     diagnostics::DiagnosticsArgs,
+    diff_impact::DiffImpactArgs,
     edit::{EditArgs, EditCommand},
     hover::HoverArgs,
     impact::ImpactArgs,
@@ -67,6 +68,7 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "get_hover" => run_hover(arguments, app).await,
         "get_context" => run_get_context(arguments, app).await,
         "get_impact" => run_get_impact(arguments, app).await,
+        "get_diff_impact" => run_diff_impact(arguments, app).await,
         "get_diagnostics" => run_get_diagnostics(arguments, app).await,
         "build_context_pack" => run_context_pack(arguments, app).await,
         "rename_symbol" => run_rename_symbol(arguments, app).await,
@@ -99,11 +101,48 @@ where
     // Grab the failure-flag handle before the scoped App moves into the
     // command future; this is the same flag the CLI exit code reads.
     let errored = scoped.output.errored_flag();
-    run(scoped).await?;
+    let limit = std::time::Duration::from_secs(scoped.config().lsp.timeout_secs);
+    crate::infra::deadline::scope(limit, run(scoped)).await?;
     Ok(CapturedOutput {
         body: buf.take().join("\n"),
         errored: errored.load(std::sync::atomic::Ordering::Relaxed),
     })
+}
+
+#[derive(Deserialize)]
+struct DiffImpactInput {
+    #[serde(default = "default_revision")]
+    revision: String,
+    #[serde(default)]
+    staged: bool,
+    #[serde(default)]
+    callers: bool,
+    #[serde(default = "default_max_symbols")]
+    max_symbols: usize,
+}
+
+fn default_revision() -> String {
+    "HEAD".to_string()
+}
+fn default_max_symbols() -> usize {
+    50
+}
+
+async fn run_diff_impact(args: Value, app: &App) -> Result<CapturedOutput> {
+    let input: DiffImpactInput = parse_args(args)?;
+    capture(app, move |app| async move {
+        crate::cli::commands::diff_impact::execute(
+            DiffImpactArgs {
+                revision: input.revision,
+                staged: input.staged,
+                callers: input.callers,
+                max_symbols: input.max_symbols,
+            },
+            &app,
+        )
+        .await
+    })
+    .await
 }
 
 // --- discovery ------------------------------------------------------------
@@ -187,6 +226,7 @@ async fn run_search_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
 #[derive(Deserialize)]
 struct SearchContentInput {
     query: String,
+    path: Option<Vec<std::path::PathBuf>>,
     language: Option<String>,
     limit: Option<usize>,
 }
@@ -198,6 +238,7 @@ async fn run_search_content(args: Value, app: &App) -> Result<CapturedOutput> {
             SearchArgs {
                 command: SearchCommand::Content {
                     query: input.query,
+                    path: input.path,
                     language: input.language,
                     limit: input.limit,
                 },
@@ -579,9 +620,6 @@ async fn run_get_context(args: Value, app: &App) -> Result<CapturedOutput> {
                 callees: input.callees,
                 types: input.types,
                 tests: input.tests,
-                // Pinned off: the unbudgeted target-body flag bloats every
-                // call; with_bodies is the token-budgeted route to bodies
-                // (it includes the target's).
                 body: false,
                 with_bodies: input.with_bodies,
                 body_tokens: input.body_tokens,
@@ -895,7 +933,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "get_project_overview" => &[],
         "get_file_overview" => &["path", "depth", "related_limit"],
         "search_symbols" => &["query", "language", "kind", "limit"],
-        "search_content" => &["query", "language", "limit"],
+        "search_content" => &["query", "path", "language", "limit"],
         "check_language_support" => &["language"],
         "search_ast" => &["pattern", "language", "path", "limit"],
         "get_index_status" => &[],
@@ -921,6 +959,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "body_tokens",
         ],
         "get_impact" => &["file", "line", "column", "limit", "depth"],
+        "get_diff_impact" => &["revision", "staged", "callers", "max_symbols"],
         "get_diagnostics" => &[
             "file",
             "severity",
@@ -997,6 +1036,7 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "find_call_path" => check::<FindCallPathInput>(args),
         "get_context" => check::<GetContextInput>(args),
         "get_impact" => check::<GetImpactInput>(args),
+        "get_diff_impact" => check::<DiffImpactInput>(args),
         "get_diagnostics" => check::<GetDiagnosticsInput>(args),
         "build_context_pack" => check::<ContextPackInput>(args),
         "rename_symbol" => check::<RenameSymbolInput>(args),

@@ -1,18 +1,7 @@
-//! The module references a source file makes, read from its parse tree.
+//! Static module references read from language grammars.
 //!
-//! A reference is only a reference where the grammar says one is. Scanning
-//! lines for `import` and quotes cannot tell an import from a string that
-//! spells one, and a Go constant holding a package path was enough to
-//! fabricate a graph edge into that package — structure invented out of
-//! text, which whatever ranks the graph then amplifies. Asking the parser
-//! removes the whole class: a `const` is not an `import_spec`, however it
-//! is spelled.
-//!
-//! Reading the tree also settles what line scanning could only approximate.
-//! An import that spans lines is one node. An import inside a comment or a
-//! string is not a node at all. And a grouped Rust `use` names each of its
-//! targets rather than the module they share, so `use crate::commands::{a,
-//! b}` reaches `a` and `b` instead of pointing at the directory above them.
+//! Import paths are read from syntax nodes. Resolving them to modules still
+//! depends on the language, source roots, and build configuration.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -43,12 +32,11 @@ impl LanguageEntry {
 enum Dialect {
     /// A Rust use tree, whose braces name several targets at once.
     RustUse,
+    Terraform,
     /// A bare identifier already in its final form.
     Plain,
     /// A path wrapped in quotes.
     Quoted,
-    /// A statement whose path is the quoted or trailing portion.
-    Statement,
 }
 
 pub struct ImportExtractor {
@@ -64,91 +52,41 @@ impl Default for ImportExtractor {
 impl ImportExtractor {
     pub fn new() -> Self {
         let mut languages = HashMap::new();
-        register(
-            &mut languages,
-            Language::Rust,
-            tree_sitter_rust::LANGUAGE.into(),
-            RUST_QUERY,
-            Dialect::RustUse,
-        );
-        register(
-            &mut languages,
-            Language::Python,
-            tree_sitter_python::LANGUAGE.into(),
-            PYTHON_QUERY,
-            Dialect::Statement,
-        );
-        register(
-            &mut languages,
-            Language::Go,
-            tree_sitter_go::LANGUAGE.into(),
-            GO_QUERY,
-            Dialect::Quoted,
-        );
-        register(
-            &mut languages,
-            Language::JavaScript,
-            tree_sitter_javascript::LANGUAGE.into(),
-            JAVASCRIPT_QUERY,
-            Dialect::Quoted,
-        );
-        register(
-            &mut languages,
-            Language::TypeScript,
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            JAVASCRIPT_QUERY,
-            Dialect::Quoted,
-        );
-        register(
-            &mut languages,
-            Language::Java,
-            tree_sitter_java::LANGUAGE.into(),
-            JAVA_QUERY,
-            Dialect::Plain,
-        );
-        register(
-            &mut languages,
-            Language::Kotlin,
-            tree_sitter_kotlin_sg::LANGUAGE.into(),
-            KOTLIN_QUERY,
-            Dialect::Plain,
-        );
-        register(
-            &mut languages,
-            Language::Scala,
-            tree_sitter_scala::LANGUAGE.into(),
-            SCALA_QUERY,
-            Dialect::Plain,
-        );
-        register(
-            &mut languages,
-            Language::Swift,
-            tree_sitter_swift::LANGUAGE.into(),
-            SWIFT_QUERY,
-            Dialect::Statement,
-        );
-        register(
-            &mut languages,
-            Language::Elixir,
-            tree_sitter_elixir::LANGUAGE.into(),
-            ELIXIR_QUERY,
-            Dialect::Plain,
-        );
-        register(
-            &mut languages,
-            Language::Dart,
-            tree_sitter_dart::LANGUAGE.into(),
-            DART_QUERY,
-            Dialect::Statement,
-        );
-        register(
-            &mut languages,
-            Language::Terraform,
-            tree_sitter_hcl::LANGUAGE.into(),
-            TERRAFORM_QUERY,
-            Dialect::Quoted,
-        );
+        for &(language, grammar, query, dialect) in IMPORT_EXTRACTORS {
+            register(&mut languages, language, grammar(), query, dialect);
+        }
         Self { languages }
+    }
+
+    pub fn shared() -> &'static Self {
+        static SHARED: std::sync::LazyLock<ImportExtractor> =
+            std::sync::LazyLock::new(ImportExtractor::new);
+        &SHARED
+    }
+
+    pub fn is_supported(language: Language) -> bool {
+        IMPORT_EXTRACTORS
+            .iter()
+            .any(|definition| definition.0 == language)
+    }
+
+    pub fn extraction_digest() -> u64 {
+        let mut described = String::from("imports:4");
+        for &(language, grammar, query, dialect) in IMPORT_EXTRACTORS {
+            let grammar = grammar();
+            described.push_str(&format!(
+                "\u{1}{}:{:?}:{}:{:?}:{query}",
+                language.lsp_id(),
+                dialect,
+                grammar.abi_version(),
+                grammar.metadata().map(|metadata| (
+                    metadata.major_version,
+                    metadata.minor_version,
+                    metadata.patch_version
+                )),
+            ));
+        }
+        crate::infra::hash_content(&described)
     }
 
     /// The module references `content` makes, in source order.
@@ -213,107 +151,115 @@ fn references_of(
     source: &[u8],
     entry: &LanguageEntry,
 ) -> Vec<String> {
-    // A `require` match carries its callee alongside the path so the callee
-    // can be checked; every other match carries the path alone.
-    if captures.len() == 2 {
-        let callee = text_of(captures[0].node, source);
-        return match callee {
-            "require" => vec![unquote(text_of(captures[1].node, source)).to_string()],
-            _ => Vec::new(),
-        };
+    let captured = |name| {
+        captures
+            .iter()
+            .find(|capture| entry.capture_name(capture) == Some(name))
+            .map(|capture| capture.node)
+    };
+    if let Some(module) = captured("module") {
+        return vec![format!("self::{}", text_of(module, source))];
     }
-    let Some(capture) = captures.first() else {
+    let Some(path) = captured("path") else {
         return Vec::new();
     };
-    let text = text_of(capture.node, source);
-    // `mod x;` and `use self::x;` name the same file, and only the second
-    // spelling says so. Normalising to it keeps the anchor a property of
-    // the reference rather than of which syntax was used to write it.
-    if entry.capture_name(capture) == Some("module") {
-        return vec![format!("self::{}", text.trim())];
-    }
     match entry.dialect {
-        Dialect::RustUse => use_tree_targets(text),
-        Dialect::Plain => vec![text.trim().to_string()],
-        Dialect::Quoted => vec![unquote(text).to_string()],
-        Dialect::Statement => vec![statement_path(text)],
+        Dialect::RustUse => use_tree_targets(path, source),
+        Dialect::Plain => vec![text_of(path, source).trim().to_string()],
+        Dialect::Quoted => vec![unquote(text_of(path, source)).to_string()],
+        Dialect::Terraform => {
+            if captured("block_type").is_none_or(|block| text_of(block, source) != "module")
+                || captured("attribute").is_none_or(|attr| text_of(attr, source) != "source")
+            {
+                return Vec::new();
+            }
+            vec![unquote(text_of(path, source)).to_string()]
+        }
     }
 }
 
-/// Every target a Rust use tree names.
-///
-/// `use a::{b, c::d}` names `a::b` and `a::c::d`. Reading only the text
-/// before the brace would name `a` instead — the directory holding them —
-/// and a group of modules would collapse onto one edge into their parent.
-fn use_tree_targets(argument: &str) -> Vec<String> {
-    fn walk(prefix: &str, tree: &str, out: &mut Vec<String>) {
-        let tree = tree.trim();
-        let Some(brace) = tree.find('{') else {
-            let target = tree.split(" as ").next().unwrap_or(tree).trim();
-            let joined = join(prefix, target);
-            if !joined.is_empty() {
-                out.push(joined);
-            }
-            return;
-        };
-
-        let head = join(prefix, tree[..brace].trim().trim_end_matches(':'));
-        let mut depth = 0usize;
-        let mut group = String::new();
-        for ch in tree[brace + 1..].chars() {
-            match ch {
-                '{' => depth += 1,
-                '}' if depth == 0 => break,
-                '}' => depth -= 1,
-                ',' if depth == 0 => {
-                    walk(&head, &std::mem::take(&mut group), out);
-                    continue;
-                }
-                _ => {}
-            }
-            group.push(ch);
-        }
-        if !group.trim().is_empty() {
-            walk(&head, &group, out);
-        }
-    }
-
+fn use_tree_targets(node: Node<'_>, source: &[u8]) -> Vec<String> {
     fn join(prefix: &str, tail: &str) -> String {
-        match (prefix.is_empty(), tail.is_empty() || tail == "self") {
-            (true, _) => tail.to_string(),
-            (false, true) => prefix.to_string(),
-            (false, false) => format!("{prefix}::{tail}"),
+        if prefix.is_empty() {
+            tail.to_string()
+        } else if tail.is_empty() || tail == "self" {
+            prefix.to_string()
+        } else {
+            format!("{prefix}::{tail}")
         }
     }
 
-    let mut out = Vec::new();
-    walk("", argument, &mut out);
-    out.retain(|target| target != "*" && !target.is_empty());
-    out
-}
-
-/// The path an import statement carries: its quoted portion when it has
-/// one, otherwise everything after the leading keyword.
-fn statement_path(text: &str) -> String {
-    if let Some(quoted) = first_quoted(text) {
-        return quoted.to_string();
+    fn path(node: Node<'_>, source: &[u8]) -> Option<String> {
+        match node.kind() {
+            "identifier" | "crate" | "self" | "super" => Some(text_of(node, source).to_string()),
+            "scoped_identifier" => {
+                let prefix = match node.child_by_field_name("path") {
+                    Some(prefix) => path(prefix, source)?,
+                    None => String::new(),
+                };
+                let name = path(node.child_by_field_name("name")?, source)?;
+                Some(join(&prefix, &name))
+            }
+            _ => None,
+        }
     }
-    text.split_whitespace()
-        .last()
-        .unwrap_or_default()
-        .trim_end_matches(';')
-        .to_string()
-}
 
-fn first_quoted(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let open = bytes
-        .iter()
-        .position(|b| matches!(b, b'"' | b'\'' | b'`'))?;
-    let quote = bytes[open];
-    let rest = &text[open + 1..];
-    let close = rest.as_bytes().iter().position(|b| *b == quote)?;
-    Some(&rest[..close])
+    fn walk(node: Node<'_>, prefix: &str, source: &[u8], out: &mut Vec<String>) {
+        if node.has_error() || node.is_missing() {
+            return;
+        }
+        match node.kind() {
+            "use_list" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    walk(child, prefix, source, out);
+                }
+            }
+            "scoped_use_list" => {
+                let head = match node.child_by_field_name("path") {
+                    Some(head) => match path(head, source) {
+                        Some(head) => head,
+                        None => return,
+                    },
+                    None => String::new(),
+                };
+                if let Some(list) = node.child_by_field_name("list") {
+                    walk(list, &join(prefix, &head), source, out);
+                }
+            }
+            "use_as_clause" => {
+                if let Some(aliased) = node.child_by_field_name("path") {
+                    walk(aliased, prefix, source, out);
+                }
+            }
+            "use_wildcard" => {
+                let mut cursor = node.walk();
+                let module = match node
+                    .named_children(&mut cursor)
+                    .find(|node| !node.is_extra())
+                {
+                    Some(module) => match path(module, source) {
+                        Some(module) => module,
+                        None => return,
+                    },
+                    None => String::new(),
+                };
+                let target = join(prefix, &module);
+                if !target.is_empty() {
+                    out.push(target);
+                }
+            }
+            _ => {
+                if let Some(target) = path(node, source) {
+                    out.push(join(prefix, &target));
+                }
+            }
+        }
+    }
+
+    let mut targets = Vec::new();
+    walk(node, "", source, &mut targets);
+    targets
 }
 
 fn unquote(text: &str) -> &str {
@@ -332,23 +278,20 @@ const RUST_QUERY: &str = r#"
 (mod_item name: (identifier) @module !body)
 "#;
 
-/// `from . import x` carries its depth in the module name and its target in
-/// the imported name, so both are captured; the resolver joins them.
+/// Python from-imports name a module; imported attributes are not assumed to be modules.
 const PYTHON_QUERY: &str = r#"
 (import_statement name: (dotted_name) @path)
+(import_statement name: (aliased_import name: (dotted_name) @path))
 (import_from_statement module_name: (_) @path)
 "#;
 
 const GO_QUERY: &str = r#"
-(import_spec path: (interpreted_string_literal) @path)
+(import_spec path: [(interpreted_string_literal) (raw_string_literal)] @path)
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
 (import_statement source: (string) @path)
 (export_statement source: (string) @path)
-(call_expression
-  function: (identifier) @callee
-  arguments: (arguments (string) @path))
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -365,7 +308,7 @@ const SCALA_QUERY: &str = r#"
 "#;
 
 const SWIFT_QUERY: &str = r#"
-(import_declaration) @path
+(import_declaration (identifier) @path)
 "#;
 
 const ELIXIR_QUERY: &str = r#"
@@ -373,22 +316,108 @@ const ELIXIR_QUERY: &str = r#"
 "#;
 
 const DART_QUERY: &str = r#"
-(import_specification) @path
+(import_specification uri: (uri (string_literal) @path))
+(import_specification uri: (configurable_uri (uri (string_literal) @path)))
 "#;
 
 /// Terraform addresses another module through a block's `source`.
 const TERRAFORM_QUERY: &str = r#"
-(attribute
-  (identifier) @callee
-  (expression (literal_value (string_lit) @path)))
+(block
+  (identifier) @block_type
+  (body
+    (attribute
+      (identifier) @attribute
+      (expression (literal_value (string_lit) @path)))))
 "#;
+
+type ImportExtractorDefinition = (
+    Language,
+    fn() -> tree_sitter::Language,
+    &'static str,
+    Dialect,
+);
+
+const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
+    (
+        Language::Rust,
+        || tree_sitter_rust::LANGUAGE.into(),
+        RUST_QUERY,
+        Dialect::RustUse,
+    ),
+    (
+        Language::Python,
+        || tree_sitter_python::LANGUAGE.into(),
+        PYTHON_QUERY,
+        Dialect::Plain,
+    ),
+    (
+        Language::Go,
+        || tree_sitter_go::LANGUAGE.into(),
+        GO_QUERY,
+        Dialect::Quoted,
+    ),
+    (
+        Language::JavaScript,
+        || tree_sitter_javascript::LANGUAGE.into(),
+        JAVASCRIPT_QUERY,
+        Dialect::Quoted,
+    ),
+    (
+        Language::TypeScript,
+        || tree_sitter_typescript::LANGUAGE_TSX.into(),
+        JAVASCRIPT_QUERY,
+        Dialect::Quoted,
+    ),
+    (
+        Language::Java,
+        || tree_sitter_java::LANGUAGE.into(),
+        JAVA_QUERY,
+        Dialect::Plain,
+    ),
+    (
+        Language::Kotlin,
+        || tree_sitter_kotlin_sg::LANGUAGE.into(),
+        KOTLIN_QUERY,
+        Dialect::Plain,
+    ),
+    (
+        Language::Scala,
+        || tree_sitter_scala::LANGUAGE.into(),
+        SCALA_QUERY,
+        Dialect::Plain,
+    ),
+    (
+        Language::Swift,
+        || tree_sitter_swift::LANGUAGE.into(),
+        SWIFT_QUERY,
+        Dialect::Plain,
+    ),
+    (
+        Language::Elixir,
+        || tree_sitter_elixir::LANGUAGE.into(),
+        ELIXIR_QUERY,
+        Dialect::Plain,
+    ),
+    (
+        Language::Dart,
+        || tree_sitter_dart::LANGUAGE.into(),
+        DART_QUERY,
+        Dialect::Quoted,
+    ),
+    (
+        Language::Terraform,
+        || tree_sitter_hcl::LANGUAGE.into(),
+        TERRAFORM_QUERY,
+        Dialect::Terraform,
+    ),
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn extract(content: &str, language: Language) -> Vec<String> {
-        ImportExtractor::new().extract(content, language)
+        ImportExtractor::shared().extract(content, language)
     }
 
     /// The defect the parse tree removes: a string that spells a package
@@ -481,14 +510,14 @@ mod tests {
     }
 
     #[test]
-    fn javascript_covers_both_module_forms() {
+    fn javascript_reads_declarations_without_guessing_call_targets() {
         let source = "import { A } from \"./services/pack\";\n\
                       export { B } from \"../shared/util\";\n\
                       const legacy = require(\"./legacy\");\n\
                       const noise = format(\"./not-an-import\");\n";
         assert_eq!(
             extract(source, Language::JavaScript),
-            vec!["./services/pack", "../shared/util", "./legacy"]
+            vec!["./services/pack", "../shared/util"]
         );
     }
 
@@ -501,6 +530,76 @@ mod tests {
         assert_eq!(
             extract("import com.acme.core.Thing\n", Language::Kotlin),
             vec!["com.acme.core.Thing"]
+        );
+    }
+
+    #[test]
+    fn rust_use_paths_ignore_comments_and_preserve_nested_groups() {
+        assert_eq!(
+            extract(
+                "use crate::{ /* }, fake, { */ api::{self, Client as ApiClient}, store::Record };\n\
+                 use super::{helpers::*, prelude::{*}};\n",
+                Language::Rust,
+            ),
+            vec![
+                "crate::api",
+                "crate::api::Client",
+                "crate::store::Record",
+                "super::helpers",
+                "super::prelude",
+            ],
+        );
+    }
+
+    #[test]
+    fn terraform_sources_belong_to_module_blocks() {
+        let source = r#"
+module "network" {
+  source = "./modules/network"
+  description = "./not-a-module"
+}
+resource "example" "record" {
+  source = "./resource-data"
+}
+module "wrapper" {
+  source = "./wrapper"
+  nested { source = "./nested-data" }
+}
+"#;
+        assert_eq!(
+            extract(source, Language::Terraform),
+            vec!["./modules/network", "./wrapper"],
+        );
+    }
+
+    #[test]
+    fn go_imports_accept_both_string_literal_forms() {
+        assert_eq!(
+            extract("package p\nimport `example.com/core`\n", Language::Go),
+            vec!["example.com/core"],
+        );
+    }
+
+    #[test]
+    fn python_import_aliases_preserve_the_module_path() {
+        assert_eq!(
+            extract("import os.path as path, json as codec\n", Language::Python),
+            vec!["os.path", "json"],
+        );
+    }
+
+    #[test]
+    fn import_modifiers_and_comments_do_not_change_the_path() {
+        assert_eq!(
+            extract("import Foundation // 'not-an-import'\n", Language::Swift),
+            vec!["Foundation"],
+        );
+        assert_eq!(
+            extract(
+                "import 'core.dart' as core; // 'not-an-import'\n",
+                Language::Dart
+            ),
+            vec!["core.dart"],
         );
     }
 

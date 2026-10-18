@@ -245,6 +245,77 @@ pub fn declares_budget(value: &serde_json::Value) -> bool {
         .is_some_and(serde_json::Value::is_number)
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyOmission {
+    TokenBudget,
+    ResponseSize,
+}
+
+pub fn fit_source_bodies(
+    value: &mut serde_json::Value,
+    paths: &[String],
+    max_chars: usize,
+    measure: &dyn Fn(&serde_json::Value) -> usize,
+) {
+    if paths.is_empty() || measure(value) <= max_chars {
+        return;
+    }
+    let mut bodies: Vec<_> = paths
+        .iter()
+        .filter_map(|path| {
+            let body = value.pointer(path)?.as_str()?;
+            let cost = serde_json::to_string(body).ok()?.chars().count();
+            Some((path, cost))
+        })
+        .collect();
+    bodies.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
+    for (path, _) in bodies {
+        let Some(parent) = path.strip_suffix("/body") else {
+            continue;
+        };
+        if let Some(item) = value
+            .pointer_mut(parent)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            item.remove("body");
+            item.insert(
+                "body_omitted".to_string(),
+                serde_json::to_value(BodyOmission::ResponseSize).expect("body omission serializes"),
+            );
+        }
+        recount_bodies(value);
+        if measure(value) <= max_chars {
+            break;
+        }
+    }
+}
+
+fn recount_bodies(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.contains_key("bodies_included")
+                && let Some(items) = object.get("items").and_then(serde_json::Value::as_array)
+            {
+                let count = items
+                    .iter()
+                    .filter(|item| item.get("body").is_some())
+                    .count();
+                object.insert("bodies_included".to_string(), count.into());
+            }
+            for child in object.values_mut() {
+                recount_bodies(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                recount_bodies(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Reduce a serialized response toward `max_chars` by dropping whole trailing
 /// items from its `Section`-shaped lists, largest list first. `showing`
 /// shrinks with the items, `truncated` is set, and one disclosure hint
@@ -474,6 +545,44 @@ fn apply_keep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_fitting_preserves_identity_and_only_omits_declared_source_paths() {
+        let mut value = serde_json::json!({
+            "target": {"name": "work", "file": "a.rs", "line": 1, "signature": "fn work()", "body": "x".repeat(4000)},
+            "data": {"body": "literal payload"},
+            "callees": {"count": 1, "showing": 1, "items": [{"name": "other", "body": "y".repeat(2000)}], "bodies_included": 1}
+        });
+        let measure =
+            |value: &serde_json::Value| serde_json::to_string(value).unwrap().chars().count();
+        fit_source_bodies(
+            &mut value,
+            &["/target/body".into(), "/callees/items/0/body".into()],
+            600,
+            &measure,
+        );
+        assert!(measure(&value) <= 600);
+        assert_eq!(value["target"]["name"], "work");
+        assert_eq!(value["target"]["body_omitted"], "response_size");
+        assert_eq!(value["data"]["body"], "literal payload");
+        assert_eq!(value["callees"]["showing"], 1);
+        assert_eq!(value["callees"]["bodies_included"], 0);
+        let mut unicode = serde_json::json!({
+            "target": {"body": "한".repeat(1000)},
+            "callees": {"count": 1, "showing": 1, "items": [{"body": "a".repeat(2000)}]}
+        });
+        fit_source_bodies(
+            &mut unicode,
+            &["/target/body".into(), "/callees/items/0/body".into()],
+            1600,
+            &measure,
+        );
+        assert!(unicode["target"].get("body").is_some());
+        assert_eq!(
+            unicode["callees"]["items"][0]["body_omitted"],
+            "response_size"
+        );
+    }
 
     #[test]
     fn complete_section_emits_count_showing_and_no_truncation() {

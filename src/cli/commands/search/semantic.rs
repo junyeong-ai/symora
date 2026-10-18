@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
-use crate::constants::defaults::{PACK_MAX_FILE_BYTES, SEMANTIC_CHUNK_LINES as CHUNK_LINES};
+use crate::constants::defaults::SEMANTIC_CHUNK_LINES as CHUNK_LINES;
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
@@ -232,7 +232,7 @@ fn discover_files(app: &App) -> DiscoveredCorpus {
                 continue;
             }
         };
-        if metadata.len() > PACK_MAX_FILE_BYTES {
+        if metadata.len() > app.config().search.max_file_size_bytes() {
             continue;
         }
         // Nanosecond resolution so two edits in the same wall-clock second

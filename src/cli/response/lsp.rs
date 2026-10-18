@@ -79,6 +79,8 @@ pub struct CallHierarchyOutput {
     /// callee attachment — absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_omitted: Option<super::BodyOmission>,
 }
 
 impl CallHierarchyOutput {
@@ -91,6 +93,7 @@ impl CallHierarchyOutput {
                 .as_ref()
                 .map(|cs| LocationOutput::from_location(cs, root)),
             body: None,
+            body_omitted: None,
         }
     }
 }
@@ -106,6 +109,8 @@ pub struct TypeInfoOutput {
     /// type attachment — absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_omitted: Option<super::BodyOmission>,
 }
 
 impl TypeInfoOutput {
@@ -116,6 +121,7 @@ impl TypeInfoOutput {
             location: LocationOutput::from_location(&item.location, root),
             detail: item.detail.clone(),
             body: None,
+            body_omitted: None,
         }
     }
 }

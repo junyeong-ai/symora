@@ -91,9 +91,10 @@ Symora is designed to move from a *rough* idea to an *exact* answer:
 
 ```mermaid
 flowchart LR
-    O["① Orient<br/>pack · map summary"] --> D["② Discover<br/>search symbols / content / ast"]
-    D --> I["③ Inspect<br/>symbols · map file"]
-    I --> X["④ Exact follow-up<br/>refs · callers · callees<br/>context · impact · usage"]
+    O["Optional orientation<br/>pack · map summary"] --> D["Discover names or text<br/>search symbols / content / ast"]
+    D --> I["Inspect declarations<br/>symbols · map file"]
+    K["Known file or symbol"] --> I
+    I --> X["Semantic follow-up<br/>refs · callers · callees<br/>context · impact · usage"]
 ```
 
 The walkthrough below follows exactly this path.
@@ -143,7 +144,7 @@ symora map summary
   ]
 }
 ```
-> 49 of the 67 TypeScript code files live under `src`, and `entrypoints` already points at where execution starts. `languages` counts code languages only; data files such as JSON are `support_files`. `symora pack --tokens 4000` gives a deeper, PageRank-ranked brief when you want one.
+> 49 of the 67 TypeScript code files live under `src`. `entrypoints` suggests starting points from file names and paths; confirm execution paths in source and configuration. `languages` counts code languages only; data files such as JSON are `support_files`. `symora pack --tokens 4000` gives a deeper brief ranked by PageRank over syntax-derived import paths when you want one.
 
 ### ② Discover — where is checkout handled?
 
@@ -308,7 +309,7 @@ symora pack --tokens 4000                   # token-budgeted, PageRank-ranked re
 symora map summary                          # repo shape
 symora map file src/services/checkout.ts    # one file: symbols, siblings, related files
 symora map dir src/services                 # directory listing
-symora map related src/services/checkout.ts # heuristic "what to read next"
+symora map related src/services/checkout.ts # nearby files by name and directory
 
 # Symbols & inspection (LSP)
 symora symbols src/services/checkout.ts --depth 2   # full symbol tree
@@ -369,11 +370,15 @@ Every command is built for machine parsing, and the rules are stable:
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
 - **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `signature`, and `typedef` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. That is a different axis from a source being behind: `stale` and `indexing: "timed_out"` say a source is behind, `incomplete` says the answer is short. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
-- **`--format compact`** emits single-line JSON. A response declaring its own budget (`budget_tokens`, as `pack --tokens` does) uses that command's budget. Other responses use `output.max_response_chars` (default 20,000) as a sizing target: whole list items are dropped, disclosed via `truncated` and a hint naming the config key. Body strings and fixed fields are preserved, so the response can exceed the target even after all list items are removed. Size is measured on compact serialization in every format, so `--format` never changes which items you receive.
+- **`--format compact`** emits single-line JSON. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. List reductions retain totals and disclose `truncated` and a size-limit hint. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 
 ---
 
 `pack --tokens` and `--token-estimate` use a character-based approximation. They do not bound model-specific token counts or the entire JSON envelope.
+
+Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; an unmatched `--focus` is refused.
+
+`lsp.timeout_secs` is the shared LSP work budget for one command. Startup, requests, and retries consume it together, and daemon RPCs carry the remaining allowance. It does not interrupt source application midway.
 
 
 
@@ -422,7 +427,7 @@ Entries in `env` are added to the server's inherited environment. For example, y
 
 The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads a project's config when it first serves that project and keeps it until restarted or until the project goes idle, so run `symora daemon restart` after editing it.
 
-File discovery follows the project's `.gitignore` (root and nested, with full per-directory semantics), plus an optional `.symora/ignore` — gitignore syntax — for symora-only exclusions. When a project ships no root `.gitignore`, common dependency and build directories (`node_modules`, `target`, `dist`, …) are skipped by default. Machine-local git state — `.git/info/exclude` and the global `core.excludesFile` — is not read, so the same tree indexes the same way on every machine. Hidden entries (dotfiles and dot-directories) are always skipped and, like ripgrep and fd, cannot be re-included by a `.gitignore` negation — this is what keeps `.git` and `.symora` out unconditionally.
+File discovery follows the project's `.gitignore` (root and nested, with full per-directory semantics), plus an optional `.symora/ignore` — gitignore syntax — for symora-only exclusions. When a project ships no root `.gitignore`, common dependency and build directories (`node_modules`, `target`, `dist`, …) are skipped by default. Machine-local git state — `.git/info/exclude` and the global `core.excludesFile` — is not read, so the same tree indexes the same way on every machine. Default discovery excludes hidden entries, independently of `.gitignore`. `search content 'text' --path .claude` explicitly searches a named file/directory live, including hidden text and documentation formats. Project ignores and size limits still apply; `.git` and `.symora` remain excluded. Explicit paths do not widen the persistent index.
 
 ---
 
@@ -505,7 +510,7 @@ The agent-facing playbook ships *with the tool*, not in this README, so it stays
 - `symora setup skill` installs the skill bundled into the binary without network access. An explicit `--git-ref` uses only that source and never falls back to another version on failure.
 - `symora mcp serve` exposes instructions for tool sequencing and recovery through the metadata flow supported by the connected client.
 
-The short version: discovery flows from rough (`pack`, `map summary`, `search symbols`) to exact (`symbols`, `context`, `refs`, `impact`); list responses share one shape; positions are 1-indexed; command failures — a bad CLI argument included — are structured `{code, message, hint}` at non-zero exit.
+For a known file or declaration, go directly to `symbols`, `context`, `refs`, or `impact`. Use `map summary` and `pack` when repository orientation helps. List responses share one shape; positions are 1-indexed; command failures, including bad CLI arguments, are structured `{code, message, hint}` at non-zero exit.
 
 ---
 

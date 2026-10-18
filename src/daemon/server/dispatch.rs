@@ -24,6 +24,8 @@ pub(super) async fn dispatch(
     config: &DaemonRuntimeConfig,
     start_time: Instant,
 ) -> Result<serde_json::Value, RpcError> {
+    let received = Instant::now();
+    let caller_budget = request.timeout_ms.map(Duration::from_millis);
     match request.method.as_str() {
         // `version` lets the client detect a daemon left over from a
         // different binary and restart it before any wire exchange, so the
@@ -44,10 +46,21 @@ pub(super) async fn dispatch(
             let params = request.params.unwrap_or(serde_json::json!({}));
             let p: ProjectParams = parse_params(&params)?;
             let ctx = get_context(projects, &p.project).await?;
-            let timeout = estimate_request_timeout(&request.method, &params, &ctx);
-            tokio::time::timeout(
+            let configured = estimate_request_timeout(&request.method, &ctx);
+            let timeout = caller_budget
+                .map_or(configured, |budget| budget.min(configured))
+                .saturating_sub(received.elapsed());
+            if timeout.is_zero() {
+                return Err(RpcError::from(&LspError::Timeout(
+                    "Caller time budget expired".to_string(),
+                )));
+            }
+            crate::infra::deadline::scope(
                 timeout,
-                dispatch_project(&request.method, &params, Arc::clone(&ctx)),
+                tokio::time::timeout(
+                    timeout,
+                    dispatch_project(&request.method, &params, Arc::clone(&ctx)),
+                ),
             )
             .await
             .map_err(timeout_error)?
@@ -56,16 +69,11 @@ pub(super) async fn dispatch(
 }
 
 fn timeout_error(_: tokio::time::error::Elapsed) -> RpcError {
-    RpcError::internal_error("Request timed out")
+    RpcError::from(&LspError::Timeout("Request timed out".to_string()))
 }
 
-fn estimate_request_timeout(
-    method: &str,
-    params: &serde_json::Value,
-    ctx: &ProjectContext,
-) -> Duration {
-    crate::daemon::lsp_request_timeout(&ctx.config, method, params)
-        .unwrap_or(NON_LSP_REQUEST_TIMEOUT)
+fn estimate_request_timeout(method: &str, ctx: &ProjectContext) -> Duration {
+    crate::daemon::lsp_request_timeout(&ctx.config, method).unwrap_or(NON_LSP_REQUEST_TIMEOUT)
 }
 
 async fn dispatch_project(
@@ -307,13 +315,12 @@ mod tests {
         let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
         let first = project(10);
         let second = project(100);
-        let params = serde_json::json!({"file": "main.go"});
         for (root, seconds) in [(&first, 10), (&second, 100)] {
             let ctx = get_context(&projects, root.path().to_str().unwrap())
                 .await
                 .unwrap();
             assert_eq!(
-                estimate_request_timeout(methods::HOVER, &params, &ctx),
+                estimate_request_timeout(methods::HOVER, &ctx),
                 Duration::from_secs(seconds)
             );
             std::fs::write(
@@ -326,7 +333,7 @@ mod tests {
                 .unwrap();
             assert!(Arc::ptr_eq(&ctx, &retained));
             assert_eq!(
-                estimate_request_timeout(methods::HOVER, &params, &retained),
+                estimate_request_timeout(methods::HOVER, &retained),
                 Duration::from_secs(seconds)
             );
         }
@@ -334,40 +341,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_symbols_uses_python_on_client_and_server() {
+    async fn client_and_server_share_the_configured_lsp_budget() {
         let root = project(60);
         let ctx = ProjectContext::new(root.path());
-        let params = serde_json::json!({"language": "python", "query": "Name"});
         assert_eq!(
-            estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &params, &ctx),
-            Duration::from_secs(2880)
+            estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &ctx),
+            Duration::from_secs(60)
         );
         assert_eq!(
-            crate::daemon::client::calculate_timeout(
-                &ctx.config,
-                &params,
-                methods::WORKSPACE_SYMBOLS
-            ),
-            Duration::from_secs(2880)
+            crate::daemon::client::calculate_timeout(&ctx.config, methods::WORKSPACE_SYMBOLS),
+            Duration::from_secs(60)
         );
     }
 
     #[tokio::test]
-    async fn file_language_precedes_language_and_unmapped_bounds_stay_fixed() {
+    async fn lsp_budget_is_language_independent_and_store_bounds_stay_fixed() {
         let root = project(10);
         let ctx = ProjectContext::new(root.path());
-        let params = serde_json::json!({"file": "main.go", "language": "python"});
         assert_eq!(
-            estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &params, &ctx),
-            Duration::from_secs(60)
+            estimate_request_timeout(methods::WORKSPACE_SYMBOLS, &ctx),
+            Duration::from_secs(10)
         );
         assert_eq!(
-            crate::daemon::client::calculate_timeout(
-                &ctx.config,
-                &params,
-                methods::WORKSPACE_SYMBOLS
-            ),
-            Duration::from_secs(60)
+            crate::daemon::client::calculate_timeout(&ctx.config, methods::WORKSPACE_SYMBOLS),
+            Duration::from_secs(10)
         );
         for method in [
             methods::PING,
@@ -385,7 +382,7 @@ mod tests {
             methods::INDEX_CLEAR,
         ] {
             assert_eq!(
-                estimate_request_timeout(method, &params, &ctx),
+                estimate_request_timeout(method, &ctx),
                 Duration::from_secs(600),
                 "{method}"
             );
@@ -495,5 +492,35 @@ mod tests {
                 assert!(projects.read().await.is_empty(), "{method}");
             }
         }
+    }
+    #[tokio::test]
+    async fn an_expired_caller_budget_returns_a_typed_timeout() {
+        let root = project(60);
+        let projects: ProjectsMap =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let mut request = Request::new(
+            1,
+            methods::HOVER,
+            Some(serde_json::json!({
+                "project": root.path().to_str().unwrap(), "file": "main.go", "line": 1, "column": 1
+            })),
+        );
+        request.timeout_ms = Some(0);
+        let error = dispatch(
+            request,
+            &projects,
+            &DaemonRuntimeConfig {
+                socket_path: root.path().join("daemon.sock"),
+                pid_path: root.path().join("daemon.pid"),
+                lock_path: root.path().join("daemon.lock"),
+                bind_lock_path: root.path().join("bind.lock"),
+                idle_timeout: Duration::from_secs(60),
+                max_concurrent: 1,
+            },
+            Instant::now(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, LspError::Timeout(String::new()).error_code());
     }
 }
