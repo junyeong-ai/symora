@@ -2,6 +2,8 @@
 
 Commands emit typed values through `OutputContext`; CLI and MCP share those commands. The JSON contract is in `.claude/rules/json-output-stability.md`.
 
+Suggested commands encode dynamic arguments with `utils::shell_arg`. Place options before `--` and positional values after it; use `--flag=value` for dynamic option values.
+
 ## Results and discovery
 
 Use `Section<T>` for enumerations. Shape lower bounds, coverage, currency, hints, and remedies through `response::disclosure`. These are distinct facts: unread input bounds the consulted sources; missing languages qualify coverage; stale rows and tree currency describe index freshness. Derive each from the source outcome rather than asserting it at a call site. Keep causes with their remedies when capping advice.

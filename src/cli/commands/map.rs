@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{as_paths, relative_paths};
 use crate::cli::response::{Section, SymbolOutput};
-use crate::cli::utils::extract_signature;
+use crate::cli::utils::{extract_signature, shell_arg};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
@@ -967,15 +967,21 @@ fn map_summary_next_commands(
     let mut commands = Vec::new();
     if let Some(entrypoint) = entrypoints.first() {
         commands.push(format!(
-            "symora map file {} --related-limit 5",
-            entrypoint.file
+            "symora map file --related-limit 5 -- {}",
+            shell_arg(&entrypoint.file)
         ));
     }
     if let Some(dir) = top_directories.first() {
-        commands.push(format!("symora map dir {} --limit 10", dir.path));
+        commands.push(format!(
+            "symora map dir --limit 10 -- {}",
+            shell_arg(&dir.path)
+        ));
     }
     if let Some(entrypoint) = entrypoints.first() {
-        commands.push(format!("symora symbols {} --depth 1", entrypoint.file));
+        commands.push(format!(
+            "symora symbols --depth 1 -- {}",
+            shell_arg(&entrypoint.file)
+        ));
     }
     commands.truncate(3);
     commands

@@ -10,6 +10,7 @@ use crate::cli::response::{
     AffectedFileOutput, ImpactOutput, RefOutput, TargetOutput, TestCoverageOutput,
 };
 use crate::cli::symbol_discovery::is_single_file_concentration;
+use crate::cli::utils::shell_arg;
 use crate::constants::defaults::{IMPACT_DEFAULT_DEPTH, IMPACT_FILES_LIMIT, IMPACT_MAX_DEPTH};
 
 #[derive(Args, Debug)]
@@ -179,6 +180,7 @@ fn impact_next_commands(
     depth: u32,
     blast_radius: Option<&BlastRadius>,
 ) -> Vec<String> {
+    let anchor = shell_arg(anchor);
     let limit_flag = if limit == IMPACT_FILES_LIMIT {
         String::new()
     } else {
@@ -193,7 +195,7 @@ fn impact_next_commands(
     let mut commands = Vec::new();
     if blast_radius.is_some_and(|b| b.max_depth_reached) && depth < IMPACT_MAX_DEPTH {
         commands.push(format!(
-            "symora impact {anchor} --depth {}{limit_flag}",
+            "symora impact --depth {}{limit_flag} -- {anchor}",
             depth + 1
         ));
     }
@@ -201,15 +203,15 @@ fn impact_next_commands(
         .and_then(|b| b.dynamic_dispatch)
         .is_some_and(|d| d.status == DispatchStatus::Incomplete)
     {
-        commands.push(format!("symora implementations {anchor}"));
+        commands.push(format!("symora implementations -- {anchor}"));
     }
     if total_files > limit {
         commands.push(format!(
-            "symora impact {anchor} --limit {total_files}{depth_flag}"
+            "symora impact --limit {total_files}{depth_flag} -- {anchor}"
         ));
     }
     if is_single_file_concentration(total_files, total_refs) {
-        commands.push(format!("symora refs {anchor} --snippet"));
+        commands.push(format!("symora refs --snippet -- {anchor}"));
     }
     commands.truncate(3);
     commands
@@ -246,7 +248,10 @@ mod tests {
     fn depth_gate_reruns_one_deeper() {
         let radius = radius(true, None);
         let commands = impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&radius));
-        assert_eq!(commands, vec!["symora impact src/main.rs:10:5 --depth 2"]);
+        assert_eq!(
+            commands,
+            vec!["symora impact --depth 2 -- 'src/main.rs:10:5'"]
+        );
     }
 
     #[test]
@@ -268,7 +273,7 @@ mod tests {
         let incomplete = radius(false, Some(DispatchStatus::Incomplete));
         assert_eq!(
             impact_next_commands("src/main.rs:10:5", 3, 50, 8, 1, Some(&incomplete)),
-            vec!["symora implementations src/main.rs:10:5"]
+            vec!["symora implementations -- 'src/main.rs:10:5'"]
         );
 
         let unavailable = radius(false, Some(DispatchStatus::Unavailable));
@@ -280,7 +285,10 @@ mod tests {
     #[test]
     fn files_truncation_reruns_with_exact_limit() {
         let commands = impact_next_commands("src/main.rs:10:5", 80, 50, 200, 1, None);
-        assert_eq!(commands, vec!["symora impact src/main.rs:10:5 --limit 80"]);
+        assert_eq!(
+            commands,
+            vec!["symora impact --limit 80 -- 'src/main.rs:10:5'"]
+        );
     }
 
     /// Each `impact` re-run carries the other flag's non-default value, so
@@ -292,7 +300,7 @@ mod tests {
         let commands = impact_next_commands("src/main.rs:10:5", 3, 10, 8, 1, Some(&radius));
         assert_eq!(
             commands,
-            vec!["symora impact src/main.rs:10:5 --depth 2 --limit 10"]
+            vec!["symora impact --depth 2 --limit 10 -- 'src/main.rs:10:5'"]
         );
     }
 
@@ -301,14 +309,17 @@ mod tests {
         let commands = impact_next_commands("src/main.rs:10:5", 80, 50, 200, 2, None);
         assert_eq!(
             commands,
-            vec!["symora impact src/main.rs:10:5 --limit 80 --depth 2"]
+            vec!["symora impact --limit 80 --depth 2 -- 'src/main.rs:10:5'"]
         );
     }
 
     #[test]
     fn concentration_steers_to_refs_snippet() {
         let commands = impact_next_commands("src/main.rs:10:5", 1, 50, 5, 1, None);
-        assert_eq!(commands, vec!["symora refs src/main.rs:10:5 --snippet"]);
+        assert_eq!(
+            commands,
+            vec!["symora refs --snippet -- 'src/main.rs:10:5'"]
+        );
     }
 
     #[test]
@@ -318,9 +329,9 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                "symora impact src/main.rs:10:5 --depth 2 --limit 1",
-                "symora implementations src/main.rs:10:5",
-                "symora impact src/main.rs:10:5 --limit 2",
+                "symora impact --depth 2 --limit 1 -- 'src/main.rs:10:5'",
+                "symora implementations -- 'src/main.rs:10:5'",
+                "symora impact --limit 2 -- 'src/main.rs:10:5'",
             ]
         );
     }
@@ -336,8 +347,8 @@ mod tests {
         assert_eq!(
             commands,
             vec![
-                "symora impact src/main.rs:10:5 --depth 2 --limit 1",
-                "symora impact src/main.rs:10:5 --limit 3",
+                "symora impact --depth 2 --limit 1 -- 'src/main.rs:10:5'",
+                "symora impact --limit 3 -- 'src/main.rs:10:5'",
             ]
         );
         assert!(commands.iter().all(|c| !c.contains("--limit 0")));

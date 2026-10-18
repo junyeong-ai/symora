@@ -101,6 +101,9 @@ impl SymbolOutput {
 
     pub fn without_body(mut self) -> Self {
         self.body = None;
+        self.children = self
+            .children
+            .map(|children| children.into_iter().map(Self::without_body).collect());
         self
     }
 

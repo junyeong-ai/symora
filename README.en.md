@@ -138,9 +138,9 @@ symora map summary
     ]
   },
   "next_commands": [
-    "symora map file src/main.ts --related-limit 5",
-    "symora map dir src --limit 10",
-    "symora symbols src/main.ts --depth 1"
+    "symora map file --related-limit 5 -- 'src/main.ts'",
+    "symora map dir --limit 10 -- 'src'",
+    "symora symbols --depth 1 -- 'src/main.ts'"
   ]
 }
 ```
@@ -259,7 +259,7 @@ symora impact src/services/checkout.ts:48 --depth 2
     ],
     "test_caller_ratio": 0.43
   },
-  "next_commands": ["symora impact src/services/checkout.ts:48:9 --depth 3"]
+  "next_commands": ["symora impact --depth 3 -- 'src/services/checkout.ts:48:9'"]
 }
 ```
 > `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
@@ -376,7 +376,7 @@ Every command is built for machine parsing, and the rules are stable:
 
 `pack --tokens` and `--token-estimate` use a character-based approximation. They do not bound model-specific token counts or the entire JSON envelope.
 
-Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; an unmatched `--focus` is refused.
+Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; module strings requiring unsupported decoding are omitted; an unmatched `--focus` is refused.
 
 `lsp.timeout_secs` is the shared LSP work budget for one command. Startup, requests, and retries consume it together, and daemon RPCs carry the remaining allowance. It does not interrupt source application midway.
 

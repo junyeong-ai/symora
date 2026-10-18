@@ -19,7 +19,7 @@ use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
     RankedSymbol, no_languages_error, resolve_search_languages, symbol_rank,
 };
-use crate::cli::utils::{AnchorResolution, read_line_at};
+use crate::cli::utils::{AnchorResolution, read_line_at, shell_arg};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Language;
@@ -288,11 +288,13 @@ fn usage_hints(auto_lang: bool) -> Vec<String> {
 
 fn usage_hints_for_empty(auto_lang: bool, resolved_from: Option<&str>) -> Vec<String> {
     let mut hints = usage_hints(auto_lang);
-    if let Some(loc) = resolved_from {
+    if let Some(loc) = resolved_from
+        && let Ok(position) = ParsedLocation::parse(loc)
+    {
         hints.push(format!(
-            "Workspace symbol lookup was empty for the resolved symbol. Continue with `symora symbols {}` or `symora refs {}` for file-level follow-up.",
-            loc.split(':').next().unwrap_or(loc),
-            loc
+            "Workspace symbol lookup was empty for the resolved symbol. Continue with `symora symbols -- {}` or `symora refs -- {}` for file-level follow-up.",
+            shell_arg(&position.file.to_string_lossy()),
+            shell_arg(loc)
         ));
     }
     hints.truncate(3);
@@ -650,7 +652,10 @@ async fn resolve_usage_query(
                 "{position} denotes a binding the symbol tree does not list (a local, a \
                  parameter, a module, or a generated item), which usage does not analyze"
             ))
-            .with_hint(format!("Use `symora refs {position}` for its references")),
+            .with_hint(format!(
+                "Use `symora refs -- {}` for its references",
+                shell_arg(&position)
+            )),
             // The read failed, so nothing was learned about the position.
             // "No symbol" is a conclusion about the tree, and answering an
             // I/O failure with one sends a caller off to look elsewhere for
@@ -1087,8 +1092,13 @@ mod tests {
 
     #[test]
     fn usage_empty_hints_include_file_level_followup_for_resolved_locations() {
-        let hints = usage_hints_for_empty(true, Some("src/main.py:54:11"));
+        let hints = usage_hints_for_empty(true, Some("part:name/main.py:54:11"));
         assert!(hints.iter().any(|h| h.contains("file-level follow-up")));
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.contains("symora symbols -- 'part:name/main.py'"))
+        );
     }
 
     #[test]

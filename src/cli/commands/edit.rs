@@ -21,7 +21,7 @@ use crate::app::App;
 use crate::cli::ParsedLocation;
 use crate::cli::declared_in;
 use crate::cli::response::{EditOutput, LineRange, Section};
-use crate::cli::utils::declared_with;
+use crate::cli::utils::{declared_with, shell_arg};
 use crate::infra::file_lock::FileLock;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
@@ -590,10 +590,13 @@ async fn delete_symbol(
     let check = check_dangling_references(app, file, symbol, &span).await;
     if expect_no_references {
         let refs_command = format!(
-            "symora refs {}:{}:{}",
-            app.output.relative_path(file),
-            symbol.location.line,
-            symbol.location.column,
+            "symora refs -- {}",
+            shell_arg(&format!(
+                "{}:{}:{}",
+                app.output.relative_path(file),
+                symbol.location.line,
+                symbol.location.column
+            )),
         );
         ensure_no_dangling_references(&symbol.name, &refs_command, &check)?;
     }
@@ -687,10 +690,13 @@ async fn check_dangling_references(
     .with_indexing(indexing);
     if total > DELETE_REFS_DISPLAY_LIMIT {
         section = section.with_next_commands(vec![format!(
-            "symora refs {}:{}:{}",
-            app.output.relative_path(file),
-            symbol.location.line,
-            symbol.location.column,
+            "symora refs -- {}",
+            shell_arg(&format!(
+                "{}:{}:{}",
+                app.output.relative_path(file),
+                symbol.location.line,
+                symbol.location.column
+            )),
         )]);
     }
     ReferenceCheck::Checked(section)
@@ -720,8 +726,9 @@ fn ensure_no_dangling_references(
             let hint = if *status == "unsupported" {
                 format!(
                     "Reference lookup is unsupported for this language; verify call \
-                     sites manually (try: symora search content '{symbol_name}') and \
-                     rerun without --expect-no-references."
+                     sites manually (try: symora search content -- {}) and \
+                     rerun without --expect-no-references.",
+                    shell_arg(symbol_name)
                 )
             } else {
                 "The reference lookup failed; retry once, check 'symora doctor', or \
@@ -1257,7 +1264,10 @@ fn stale_revision(message: String) -> anyhow::Error {
 fn symbol_not_found(pattern: &str, file: &str) -> anyhow::Error {
     anyhow::Error::new(
         crate::cli::OutputError::not_found(format!("Symbol not found: {pattern} in {file}"))
-            .with_hint(format!("List symbol paths with 'symora symbols {file}'")),
+            .with_hint(format!(
+                "List symbol paths with `symora symbols -- {}`",
+                shell_arg(file)
+            )),
     )
 }
 
@@ -1462,15 +1472,17 @@ async fn find_symbol_at_location(
                 "Column {col} of line {line} in {file_display} is not on a symbol's declaration"
             ))
             .with_hint(format!(
-                "Pass the name column of the symbol to edit — 'symora symbols {file_display}' \
+                "Pass the name column of the symbol to edit — `symora symbols -- {}` \
                  lists them; a column-less {file_display}:{line} addresses the symbol declared \
-                 on that line, or the one enclosing it"
+                 on that line, or the one enclosing it",
+                shell_arg(&file_display)
             )),
             None => crate::cli::OutputError::not_found(format!(
                 "No symbol found at line {line} in {file_display}"
             ))
             .with_hint(format!(
-                "List symbol paths with 'symora symbols {file_display}'"
+                "List symbol paths with `symora symbols -- {}`",
+                shell_arg(&file_display)
             )),
         })),
         SymbolResolution::Ambiguous(declared) => {

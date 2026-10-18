@@ -11,7 +11,7 @@ use crate::cli::analysis::LocationAnalysis;
 use crate::cli::errors::{ErrorCode, OutputError};
 use crate::cli::response::disclosure::LowerBound;
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
-use crate::cli::utils::{members_at_deletion, members_at_line};
+use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{SymbolBackend, declared_in};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
@@ -199,9 +199,10 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     {
         hints.push(format!(
             "`{rev}` is not an ancestor of HEAD, so this diff also takes back what `{rev}` \
-             gained after this branch left it; `symora diff-impact $(git merge-base {rev} HEAD)` \
+             gained after this branch left it; `symora diff-impact -- \"$(git merge-base -- {rev_arg} HEAD)\"` \
              measures this branch alone.",
-            rev = args.revision
+            rev = args.revision,
+            rev_arg = shell_arg(&args.revision),
         ));
     }
 
@@ -396,9 +397,10 @@ fn unresolvable_revision(revision: &str) -> OutputError {
                 ),
             )
             .with_hint(format!(
-                "`symora diff-impact {from}` measures everything since {from}; \
-                 `symora diff-impact $(git merge-base {from} HEAD)` measures what this branch \
-                 changed after it left {from}."
+                "`symora diff-impact -- {}` measures everything since {from}; \
+                 `symora diff-impact -- \"$(git merge-base -- {} HEAD)\"` measures what this branch \
+                 changed after it left {from}.",
+                shell_arg(from), shell_arg(from)
             ))
         }
         None => OutputError::new(

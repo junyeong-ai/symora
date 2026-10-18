@@ -9,11 +9,12 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{
-    CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput, TestOutput,
-    TypeInfoOutput,
+    BodyOmission, CallHierarchyOutput, LocationOutput, RefOutput, Section, TargetOutput,
+    TestOutput, TypeInfoOutput,
 };
 use crate::cli::utils::{
     enclosing_callable, extract_signature, find_named_at_position, find_symbol_at_position,
+    shell_arg,
 };
 use crate::cli::{LocationArg, OutputError};
 
@@ -254,14 +255,11 @@ async fn fetch_context(
     );
 
     let mut remaining = args.body_tokens;
-    if let Some(body) = &target.body {
-        let cost = estimate_tokens(body);
-        if cost <= remaining {
-            remaining -= cost;
-        } else {
-            target.body = None;
-            target.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
-        }
+    if let Some(body) = &target.body
+        && !admit_body(body, &mut remaining)
+    {
+        target.body = None;
+        target.body_omitted = Some(BodyOmission::TokenBudget);
     }
     if args.with_bodies {
         apply_section_bodies(lsp, root, remaining, callees.as_mut(), types.as_mut()).await;
@@ -282,15 +280,9 @@ async fn fetch_context(
     }
 }
 
-/// Attach complete verbatim bodies to the callee items (in displayed
-/// order) and the type item, whole-body-or-nothing under `budget_tokens`
-/// — callees first, then types from whatever budget remains. Sequential
-/// by design: admission order is the visible item order, so an agent can
-/// correlate every omission to an item it sees. Each qualifying section
-/// gets `bodies_included` (the count of items that carry a body); an
-/// item left without one was omitted because the budget ran out, the
-/// symbol was unresolvable at its position, or it genuinely has no body
-/// — disclosed, never silent.
+/// Attach whole bodies in display order, callees before types. Oversized
+/// bodies leave the budget for later items; an exhausted budget skips all
+/// further body lookups. Each qualifying section reports `bodies_included`.
 async fn apply_section_bodies(
     lsp: &dyn LspService,
     root: &Path,
@@ -305,35 +297,34 @@ async fn apply_section_bodies(
         && section.error.is_none()
         && section.showing > 0
     {
-        let mut candidates = Vec::with_capacity(section.items.len());
+        let mut admitted = 0;
         for item in &mut section.items {
+            item.body = None;
+            item.body_omitted = None;
             if remaining == 0 {
-                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
-                candidates.push(None);
+                item.body_omitted = Some(BodyOmission::TokenBudget);
                 continue;
             }
             // Joining an already-absolute path replaces the base, so
             // out-of-root locations (emitted absolute) resolve too.
             let file = root.join(&item.location.file);
-            candidates.push(
-                resolve_body(
-                    lsp,
-                    &file,
-                    item.location.line,
-                    item.location.column,
-                    &item.name,
-                    &mut symbols_by_file,
-                )
-                .await,
-            );
-        }
-        let available: Vec<_> = candidates.iter().map(Option::is_some).collect();
-        let (bodies, admitted) = fit_bodies_to_budget(candidates, &mut remaining);
-        for ((item, body), available) in section.items.iter_mut().zip(bodies).zip(available) {
-            if available && body.is_none() {
-                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+            if let Some(body) = resolve_body(
+                lsp,
+                &file,
+                item.location.line,
+                item.location.column,
+                &item.name,
+                &mut symbols_by_file,
+            )
+            .await
+            {
+                if admit_body(body, &mut remaining) {
+                    item.body = Some(body.to_owned());
+                    admitted += 1;
+                } else {
+                    item.body_omitted = Some(BodyOmission::TokenBudget);
+                }
             }
-            item.body = body;
         }
         section.bodies_included = Some(admitted);
     }
@@ -342,33 +333,32 @@ async fn apply_section_bodies(
         && section.error.is_none()
         && section.showing > 0
     {
-        let mut candidates = Vec::with_capacity(section.items.len());
+        let mut admitted = 0;
         for item in &mut section.items {
+            item.body = None;
+            item.body_omitted = None;
             if remaining == 0 {
-                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
-                candidates.push(None);
+                item.body_omitted = Some(BodyOmission::TokenBudget);
                 continue;
             }
             let file = root.join(&item.location.file);
-            candidates.push(
-                resolve_body(
-                    lsp,
-                    &file,
-                    item.location.line,
-                    item.location.column,
-                    &item.name,
-                    &mut symbols_by_file,
-                )
-                .await,
-            );
-        }
-        let available: Vec<_> = candidates.iter().map(Option::is_some).collect();
-        let (bodies, admitted) = fit_bodies_to_budget(candidates, &mut remaining);
-        for ((item, body), available) in section.items.iter_mut().zip(bodies).zip(available) {
-            if available && body.is_none() {
-                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+            if let Some(body) = resolve_body(
+                lsp,
+                &file,
+                item.location.line,
+                item.location.column,
+                &item.name,
+                &mut symbols_by_file,
+            )
+            .await
+            {
+                if admit_body(body, &mut remaining) {
+                    item.body = Some(body.to_owned());
+                    admitted += 1;
+                } else {
+                    item.body_omitted = Some(BodyOmission::TokenBudget);
+                }
             }
-            item.body = body;
         }
         section.bodies_included = Some(admitted);
     }
@@ -381,14 +371,14 @@ async fn apply_section_bodies(
 /// match `expected_name` — a mismatch signals position drift, where the
 /// body would belong to a different symbol, so it fails closed to
 /// omission rather than attaching a plausible-but-wrong body.
-async fn resolve_body(
+async fn resolve_body<'a>(
     lsp: &dyn LspService,
     file: &Path,
     line: u32,
     column: u32,
     expected_name: &str,
-    symbols_by_file: &mut HashMap<PathBuf, Vec<Symbol>>,
-) -> Option<String> {
+    symbols_by_file: &'a mut HashMap<PathBuf, Vec<Symbol>>,
+) -> Option<&'a str> {
     if !symbols_by_file.contains_key(file) {
         let symbols = lsp
             .find_symbols(file, FindSymbolsOptions::default().with_body())
@@ -402,36 +392,16 @@ async fn resolve_body(
     if !is_same_symbol_name(expected_name, &symbol.name) {
         return None;
     }
-    symbol.body.clone().filter(|b| !b.is_empty())
+    symbol.body.as_deref().filter(|b| !b.is_empty())
 }
 
-/// Greedy whole-body-or-nothing admission in candidate order: an
-/// oversized body is skipped — to None — and smaller later bodies may
-/// still admit, so one outlier can't starve the rest. The stated budget
-/// is never exceeded (no admit-first override: a context response stays
-/// fully useful without bodies). Returns the positionally aligned
-/// admitted bodies and how many were admitted; `remaining` carries the
-/// leftover budget to the next section.
-fn fit_bodies_to_budget(
-    candidates: Vec<Option<String>>,
-    remaining: &mut usize,
-) -> (Vec<Option<String>>, usize) {
-    let mut admitted = 0;
-    let bodies = candidates
-        .into_iter()
-        .map(|candidate| {
-            let body = candidate?;
-            let cost = estimate_tokens(&body);
-            if cost <= *remaining {
-                *remaining -= cost;
-                admitted += 1;
-                Some(body)
-            } else {
-                None
-            }
-        })
-        .collect();
-    (bodies, admitted)
+fn admit_body(body: &str, remaining: &mut usize) -> bool {
+    let cost = estimate_tokens(body);
+    if cost > *remaining {
+        return false;
+    }
+    *remaining -= cost;
+    true
 }
 
 /// True when the two names denote the same symbol: exact, or one is the
@@ -508,8 +478,9 @@ fn call_hierarchy_next_commands(
 ) -> Vec<String> {
     if total > limit {
         vec![format!(
-            "symora {} {file_rel}:{line}:{column} --limit {total}",
-            if incoming { "callers" } else { "callees" }
+            "symora {} --limit {total} -- {}",
+            if incoming { "callers" } else { "callees" },
+            shell_arg(&format!("{file_rel}:{line}:{column}"))
         )]
     } else {
         Vec::new()
@@ -563,15 +534,10 @@ async fn fetch_types(
 
 fn format_call_hierarchy_error(error: &str, file: &Path, line: u32, column: u32) -> OutputError {
     if is_unsupported_lsp_feature(error) {
+        let anchor = shell_arg(&format!("{}:{line}:{column}", file.display()));
         OutputError::unsupported("Call hierarchy is not supported at this position").with_hint(
             format!(
-                "Use `symora refs {}:{}:{}` for usages or `symora usage {}:{}:{}` for broader symbol analysis.",
-                file.display(),
-                line,
-                column,
-                file.display(),
-                line,
-                column,
+                "Use `symora refs -- {anchor}` for usages or `symora usage -- {anchor}` for broader symbol analysis.",
             ),
         )
     } else {
@@ -583,10 +549,8 @@ fn format_type_error(error: &str, file: &Path, line: u32, column: u32) -> Output
     if is_unsupported_lsp_feature(error) {
         OutputError::unsupported("Type definition lookup is not supported at this position")
             .with_hint(format!(
-                "Use `symora hover {}:{}:{}` or inspect the target body in this context output instead.",
-                file.display(),
-                line,
-                column,
+                "Use `symora hover -- {}` or inspect the target body in this context output instead.",
+                shell_arg(&format!("{}:{line}:{column}", file.display())),
             ))
     } else {
         OutputError::internal(error.to_string())
@@ -670,7 +634,7 @@ mod tests {
     fn truncated_callers_steer_to_callers_with_limit() {
         assert_eq!(
             call_hierarchy_next_commands(true, "f.rs", 12, 4, 12, 8),
-            vec!["symora callers f.rs:12:4 --limit 12"]
+            vec!["symora callers --limit 12 -- 'f.rs:12:4'"]
         );
     }
 
@@ -684,7 +648,7 @@ mod tests {
     fn callees_use_callees_command() {
         assert_eq!(
             call_hierarchy_next_commands(false, "f.rs", 12, 4, 9, 8),
-            vec!["symora callees f.rs:12:4 --limit 9"]
+            vec!["symora callees --limit 9 -- 'f.rs:12:4'"]
         );
     }
 
@@ -711,54 +675,56 @@ mod tests {
     fn budget_fit_admits_an_exact_fit_boundary() {
         // 8 chars = exactly 2 tokens under the 4-chars-per-token estimate.
         let mut remaining = 2;
-        let (bodies, admitted) =
-            fit_bodies_to_budget(vec![Some("12345678".to_string())], &mut remaining);
-        assert_eq!(bodies, vec![Some("12345678".to_string())]);
-        assert_eq!(admitted, 1);
+        assert!(admit_body("12345678", &mut remaining));
         assert_eq!(remaining, 0);
     }
 
-    #[test]
-    fn budget_fit_skips_an_oversized_body_and_admits_a_smaller_later_one() {
+    #[tokio::test]
+    async fn budget_fit_skips_an_oversized_body_and_admits_a_smaller_later_one() {
+        let root = Path::new("/repo");
+        let file = root.join("src/a.rs");
         let big = "x".repeat(100); // 25 tokens
         let small = "y".repeat(20); // 5 tokens
-        let mut remaining = 10;
-        let (bodies, admitted) =
-            fit_bodies_to_budget(vec![Some(big), Some(small.clone())], &mut remaining);
-        assert_eq!(bodies, vec![None, Some(small)]);
-        assert_eq!(admitted, 1);
-        assert_eq!(remaining, 5);
+        let stub = stub_with(vec![(
+            "/repo/src/a.rs",
+            vec![
+                body_symbol("alpha", &file, 10, 12, &big),
+                body_symbol("beta", &file, 20, 22, &small),
+            ],
+        )]);
+        let mut callees = Section::new(vec![
+            callee_item("alpha", "src/a.rs", 10),
+            callee_item("beta", "src/a.rs", 20),
+        ]);
+
+        apply_section_bodies(&stub, root, 10, Some(&mut callees), None).await;
+
+        assert_eq!(callees.items[0].body, None);
+        assert!(matches!(
+            callees.items[0].body_omitted,
+            Some(BodyOmission::TokenBudget)
+        ));
+        assert_eq!(callees.items[1].body.as_deref(), Some(small.as_str()));
+        assert!(callees.items[1].body_omitted.is_none());
+        assert_eq!(callees.bodies_included, Some(1));
+        assert_eq!(*stub.symbol_requests.lock().unwrap(), vec![file]);
     }
 
     #[test]
     fn budget_fit_shares_remaining_across_sequential_calls() {
         let mut remaining = 12;
-        let (_, first) = fit_bodies_to_budget(vec![Some("a".repeat(40))], &mut remaining); // 10 tokens
-        assert_eq!(first, 1);
+        assert!(admit_body(&"a".repeat(40), &mut remaining)); // 10 tokens
         assert_eq!(remaining, 2);
         // The second (types) call only sees what the first left over.
-        let (bodies, second) = fit_bodies_to_budget(vec![Some("b".repeat(40))], &mut remaining);
-        assert_eq!(bodies, vec![None]);
-        assert_eq!(second, 0);
+        assert!(!admit_body(&"b".repeat(40), &mut remaining));
         assert_eq!(remaining, 2);
-    }
-
-    #[test]
-    fn budget_fit_passes_unresolved_candidates_through() {
-        let mut remaining = 100;
-        let (bodies, admitted) = fit_bodies_to_budget(vec![None, None], &mut remaining);
-        assert_eq!(bodies, vec![None, None]);
-        assert_eq!(admitted, 0);
-        assert_eq!(remaining, 100);
     }
 
     #[test]
     fn budget_fit_admits_nothing_under_a_zero_budget() {
         let mut remaining = 0;
-        let (bodies, admitted) =
-            fit_bodies_to_budget(vec![Some("fn f() {}".to_string())], &mut remaining);
-        assert_eq!(bodies, vec![None]);
-        assert_eq!(admitted, 0);
+        assert!(!admit_body("fn f() {}", &mut remaining));
+        assert_eq!(remaining, 0);
     }
 
     /// Body-lookup stub: serves canned per-file `documentSymbol` trees
@@ -767,6 +733,7 @@ mod tests {
     struct BodyLookupStub {
         symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
         type_definition: Option<Location>,
+        symbol_requests: std::sync::Mutex<Vec<PathBuf>>,
     }
 
     fn body_symbol(name: &str, file: &Path, line: u32, end_line: u32, body: &str) -> Symbol {
@@ -785,6 +752,10 @@ mod tests {
             file: &Path,
             _options: FindSymbolsOptions,
         ) -> Result<Vec<Symbol>, LspError> {
+            self.symbol_requests
+                .lock()
+                .unwrap()
+                .push(file.to_path_buf());
             self.symbols_by_file
                 .get(file)
                 .cloned()
@@ -988,6 +959,7 @@ mod tests {
                 .map(|(file, syms)| (PathBuf::from(file), syms))
                 .collect(),
             type_definition: None,
+            symbol_requests: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1043,6 +1015,76 @@ mod tests {
         assert_eq!(section.items[0].body.as_deref(), Some("fn alpha() { 1 }"));
         assert_eq!(section.items[1].body.as_deref(), Some("fn beta() { 2 }"));
         assert_eq!(section.bodies_included, Some(2));
+        assert_eq!(
+            *stub.symbol_requests.lock().unwrap(),
+            vec![file.to_path_buf()]
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausting_callee_budget_skips_remaining_callee_and_type_lookups() {
+        let root = Path::new("/repo");
+        let file = root.join("src/a.rs");
+        let body = "fn alpha() { 1 }";
+        let stub = stub_with(vec![(
+            "/repo/src/a.rs",
+            vec![body_symbol("alpha", &file, 10, 12, body)],
+        )]);
+        let mut callees = Section::new(vec![
+            callee_item("alpha", "src/a.rs", 10),
+            callee_item("beta", "src/b.rs", 20),
+        ]);
+        let mut types = Section::new(vec![type_item("MyType", "src/t.rs", 5)]);
+
+        apply_section_bodies(
+            &stub,
+            root,
+            estimate_tokens(body),
+            Some(&mut callees),
+            Some(&mut types),
+        )
+        .await;
+
+        assert_eq!(*stub.symbol_requests.lock().unwrap(), vec![file]);
+        assert_eq!(callees.items[0].body.as_deref(), Some(body));
+        assert_eq!(callees.items[1].body, None);
+        assert!(matches!(
+            callees.items[1].body_omitted,
+            Some(BodyOmission::TokenBudget)
+        ));
+        assert_eq!(callees.bodies_included, Some(1));
+        assert_eq!(types.items[0].body, None);
+        assert!(matches!(
+            types.items[0].body_omitted,
+            Some(BodyOmission::TokenBudget)
+        ));
+        assert_eq!(types.bodies_included, Some(0));
+    }
+
+    #[tokio::test]
+    async fn exhausting_type_budget_skips_remaining_type_lookups() {
+        let root = Path::new("/repo");
+        let file = root.join("src/t.rs");
+        let body = "struct MyType { x: u32 }";
+        let stub = stub_with(vec![(
+            "/repo/src/t.rs",
+            vec![body_symbol("MyType", &file, 5, 9, body)],
+        )]);
+        let mut types = Section::new(vec![
+            type_item("MyType", "src/t.rs", 5),
+            type_item("OtherType", "src/other.rs", 15),
+        ]);
+
+        apply_section_bodies(&stub, root, estimate_tokens(body), None, Some(&mut types)).await;
+
+        assert_eq!(*stub.symbol_requests.lock().unwrap(), vec![file]);
+        assert_eq!(types.items[0].body.as_deref(), Some(body));
+        assert_eq!(types.items[1].body, None);
+        assert!(matches!(
+            types.items[1].body_omitted,
+            Some(BodyOmission::TokenBudget)
+        ));
+        assert_eq!(types.bodies_included, Some(1));
     }
 
     #[tokio::test]
@@ -1083,6 +1125,7 @@ mod tests {
         let section = callees.unwrap();
         assert_eq!(section.items[0].body, None);
         assert_eq!(section.bodies_included, Some(0));
+        assert!(section.items[0].body_omitted.is_none());
     }
 
     #[tokio::test]
@@ -1100,6 +1143,11 @@ mod tests {
         let section = callees.unwrap();
         assert_eq!(section.items[0].body, None);
         assert_eq!(section.bodies_included, Some(0));
+        assert!(matches!(
+            section.items[0].body_omitted,
+            Some(BodyOmission::TokenBudget)
+        ));
+        assert!(stub.symbol_requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -37,6 +37,7 @@ enum Dialect {
     Plain,
     /// A path wrapped in quotes.
     Quoted,
+    Dart,
 }
 
 pub struct ImportExtractor {
@@ -71,7 +72,7 @@ impl ImportExtractor {
     }
 
     pub fn extraction_digest() -> u64 {
-        let mut described = String::from("imports:4");
+        let mut described = String::from("imports:5");
         for &(language, grammar, query, dialect) in IMPORT_EXTRACTORS {
             let grammar = grammar();
             described.push_str(&format!(
@@ -158,18 +159,26 @@ fn references_of(
             .map(|capture| capture.node)
     };
     if let Some(module) = captured("module") {
-        return vec![format!("self::{}", text_of(module, source))];
+        return vec![format!("self::{}", rust_identifier_name(module, source))];
     }
     let Some(path) = captured("path") else {
         return Vec::new();
     };
     match entry.dialect {
         Dialect::RustUse => use_tree_targets(path, source),
-        Dialect::Plain => vec![text_of(path, source).trim().to_string()],
-        Dialect::Quoted => vec![unquote(text_of(path, source)).to_string()],
+        Dialect::Plain => vec![text_of(path, source).to_string()],
+        Dialect::Quoted | Dialect::Dart => {
+            if has_unhandled_string_syntax(path)
+                || (entry.dialect == Dialect::Dart && !is_plain_dart_string(path))
+            {
+                return Vec::new();
+            }
+            vec![unquote(text_of(path, source)).to_string()]
+        }
         Dialect::Terraform => {
             if captured("block_type").is_none_or(|block| text_of(block, source) != "module")
                 || captured("attribute").is_none_or(|attr| text_of(attr, source) != "source")
+                || has_terraform_string_escapes(path, source)
             {
                 return Vec::new();
             }
@@ -191,7 +200,8 @@ fn use_tree_targets(node: Node<'_>, source: &[u8]) -> Vec<String> {
 
     fn path(node: Node<'_>, source: &[u8]) -> Option<String> {
         match node.kind() {
-            "identifier" | "crate" | "self" | "super" => Some(text_of(node, source).to_string()),
+            "identifier" => Some(rust_identifier_name(node, source).to_string()),
+            "crate" | "self" | "super" => Some(text_of(node, source).to_string()),
             "scoped_identifier" => {
                 let prefix = match node.child_by_field_name("path") {
                     Some(prefix) => path(prefix, source)?,
@@ -263,12 +273,56 @@ fn use_tree_targets(node: Node<'_>, source: &[u8]) -> Vec<String> {
 }
 
 fn unquote(text: &str) -> &str {
-    text.trim()
-        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
+    for quote in ['"', '\'', '`'] {
+        if let Some(inner) = text
+            .strip_prefix(quote)
+            .and_then(|inner| inner.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    text
+}
+
+fn has_unhandled_string_syntax(node: Node<'_>) -> bool {
+    if matches!(node.kind(), "escape_sequence" | "template_substitution") {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .any(has_unhandled_string_syntax)
+}
+
+fn is_plain_dart_string(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let mut parts = node.named_children(&mut cursor);
+    let Some(part) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && matches!(
+            part.kind(),
+            "string_literal_single_quotes" | "string_literal_double_quotes"
+        )
+}
+
+fn has_terraform_string_escapes(node: Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|child| child.kind() == "template_literal")
+        .any(|literal| {
+            let text = text_of(literal, source);
+            text.contains('\\') || text.contains("$${") || text.contains("%%{")
+        })
 }
 
 fn text_of<'a>(node: Node, source: &'a [u8]) -> &'a str {
     node.utf8_text(source).unwrap_or_default()
+}
+
+fn rust_identifier_name<'a>(node: Node, source: &'a [u8]) -> &'a str {
+    let name = text_of(node, source);
+    name.strip_prefix("r#").unwrap_or(name)
 }
 
 /// A `mod x;` with no body names a sibling file; one with a body is an
@@ -402,7 +456,7 @@ const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
         Language::Dart,
         || tree_sitter_dart::LANGUAGE.into(),
         DART_QUERY,
-        Dialect::Quoted,
+        Dialect::Dart,
     ),
     (
         Language::Terraform,
@@ -489,8 +543,11 @@ mod tests {
 
     #[test]
     fn a_mod_declaration_names_a_file_only_when_it_has_no_body() {
-        let source = "mod auth;\nmod tests {\n    fn helper() {}\n}\n";
-        assert_eq!(extract(source, Language::Rust), vec!["self::auth"]);
+        let source = "mod auth;\nmod r#type;\nmod tests {\n    fn helper() {}\n}\n";
+        assert_eq!(
+            extract(source, Language::Rust),
+            vec!["self::auth", "self::type"]
+        );
     }
 
     #[test]
@@ -513,12 +570,17 @@ mod tests {
     fn javascript_reads_declarations_without_guessing_call_targets() {
         let source = "import { A } from \"./services/pack\";\n\
                       export { B } from \"../shared/util\";\n\
+                      import { C } from './he\\u006cper';\n\
+                      export { D } from './he\\x6cper';\n\
                       const legacy = require(\"./legacy\");\n\
                       const noise = format(\"./not-an-import\");\n";
-        assert_eq!(
-            extract(source, Language::JavaScript),
-            vec!["./services/pack", "../shared/util"]
-        );
+        for language in [Language::JavaScript, Language::TypeScript] {
+            assert_eq!(
+                extract(source, language),
+                vec!["./services/pack", "../shared/util"],
+                "{language:?}",
+            );
+        }
     }
 
     #[test]
@@ -538,7 +600,8 @@ mod tests {
         assert_eq!(
             extract(
                 "use crate::{ /* }, fake, { */ api::{self, Client as ApiClient}, store::Record };\n\
-                 use super::{helpers::*, prelude::{*}};\n",
+                 use super::{helpers::*, prelude::{*}};\n\
+                 use crate::r#type::{r#match as local, r#const::*};\n",
                 Language::Rust,
             ),
             vec![
@@ -547,6 +610,8 @@ mod tests {
                 "crate::store::Record",
                 "super::helpers",
                 "super::prelude",
+                "crate::type::match",
+                "crate::type::const",
             ],
         );
     }
@@ -565,10 +630,15 @@ module "wrapper" {
   source = "./wrapper"
   nested { source = "./nested-data" }
 }
+module "unicode" { source = "./he\u006cper" }
+module "interpolation" { source = "./$${helper}" }
+module "directive" { source = "./%%{helper}" }
+module "ordinary-dollar" { source = "./cash$" }
+module "ordinary-percent" { source = "./100%" }
 "#;
         assert_eq!(
             extract(source, Language::Terraform),
-            vec!["./modules/network", "./wrapper"],
+            vec!["./modules/network", "./wrapper", "./cash$", "./100%"],
         );
     }
 
@@ -577,6 +647,20 @@ module "wrapper" {
         assert_eq!(
             extract("package p\nimport `example.com/core`\n", Language::Go),
             vec!["example.com/core"],
+        );
+        assert!(
+            extract(
+                "package p\nimport \"example.com/he\\u006cper\"\n",
+                Language::Go
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            extract(
+                "package p\nimport `example.com/he\\u006cper`\n",
+                Language::Go
+            ),
+            vec!["example.com/he\\u006cper"],
         );
     }
 
@@ -600,6 +684,28 @@ module "wrapper" {
                 Language::Dart
             ),
             vec!["core.dart"],
+        );
+        for source in [
+            "import './he\\u006cper.dart';\n",
+            "import './${name}.dart';\n",
+            "import r'./helper.dart';\n",
+            "import './he' 'lper.dart';\n",
+            "import '''./helper.dart''';\n",
+        ] {
+            assert!(extract(source, Language::Dart).is_empty(), "{source}");
+        }
+        assert_eq!(
+            extract(
+                "import \"./helper'\";\nexport * from \"./helper`\";\n\
+                 import \"./ helper \";\nimport \" leading and trailing \";\n",
+                Language::JavaScript,
+            ),
+            vec![
+                "./helper'",
+                "./helper`",
+                "./ helper ",
+                " leading and trailing "
+            ],
         );
     }
 

@@ -6,7 +6,7 @@ use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
 use crate::cli::symbol_discovery::is_single_file_concentration;
-use crate::cli::utils::{extract_signature, read_line_at, read_lines_around};
+use crate::cli::utils::{extract_signature, read_line_at, read_lines_around, shell_arg};
 
 use super::common::lsp_error_at;
 
@@ -147,6 +147,7 @@ fn refs_next_commands(
     anchor: &str,
     anchored: bool,
 ) -> Vec<String> {
+    let anchor = shell_arg(anchor);
     let unique_files = items
         .iter()
         .map(|item| item.file.as_str())
@@ -155,13 +156,13 @@ fn refs_next_commands(
 
     let mut commands = Vec::new();
     if total == 0 && anchored {
-        commands.push(format!("symora usage {anchor}"));
+        commands.push(format!("symora usage -- {anchor}"));
     }
     if total > limit && unique_files > 1 {
-        commands.push(format!("symora impact {anchor}"));
+        commands.push(format!("symora impact -- {anchor}"));
     }
     if is_single_file_concentration(unique_files, total) {
-        commands.push(format!("symora context {anchor} --all"));
+        commands.push(format!("symora context --all -- {anchor}"));
     }
     commands.truncate(2);
     commands
@@ -185,7 +186,7 @@ mod tests {
     fn no_usages_steers_to_usage() {
         assert_eq!(
             refs_next_commands(&[], 0, 20, "src/main.rs:10:5", true),
-            vec!["symora usage src/main.rs:10:5"]
+            vec!["symora usage -- 'src/main.rs:10:5'"]
         );
     }
 
@@ -209,7 +210,7 @@ mod tests {
         let items = vec![item("src/a.rs", 1), item("src/b.rs", 2)];
         assert_eq!(
             refs_next_commands(&items, 30, 20, "src/main.rs:10:5", true),
-            vec!["symora impact src/main.rs:10:5"]
+            vec!["symora impact -- 'src/main.rs:10:5'"]
         );
     }
 
@@ -218,7 +219,7 @@ mod tests {
         let items = vec![item("src/a.rs", 1), item("src/a.rs", 2)];
         assert_eq!(
             refs_next_commands(&items, 30, 20, "src/main.rs:10:5", true),
-            vec!["symora context src/main.rs:10:5 --all"]
+            vec!["symora context --all -- 'src/main.rs:10:5'"]
         );
     }
 
@@ -231,7 +232,7 @@ mod tests {
         ];
         assert_eq!(
             refs_next_commands(&items, 3, 20, "src/main.rs:10:5", true),
-            vec!["symora context src/main.rs:10:5 --all"]
+            vec!["symora context --all -- 'src/main.rs:10:5'"]
         );
     }
 
