@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -187,14 +187,14 @@ impl ConfigService for DefaultConfigService {
         }
 
         let editor = Self::get_editor();
-        let status =
-            Command::new(&editor)
-                .arg(&path)
-                .status()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "editor".to_string(),
-                    message: format!("Failed to launch editor '{}': {}", editor, e),
-                })?;
+        let status = Command::new(&editor)
+            .arg(&path)
+            .stdout(Stdio::from(std::io::stderr()))
+            .status()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "editor".to_string(),
+                message: format!("Failed to launch editor '{}': {}", editor, e),
+            })?;
 
         if !status.success() {
             return Err(ConfigError::InvalidValue {

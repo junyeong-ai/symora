@@ -4311,3 +4311,145 @@ fn generated_followups_preserve_shell_arguments_and_option_boundaries() {
             .contains(query)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn lifecycle_subprocess_output_preserves_json_and_interactive_input() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for name in ["brew", "apt-get", "sudo"] {
+        let command = bin.join(name);
+        std::fs::write(
+            &command,
+            "#!/bin/sh\nprintf 'installer stdout\\n'\nprintf 'installer stderr\\n' >&2\nIFS= read -r answer || exit 9\nprintf 'installer input: %s\\n' \"$answer\"\nexit 7\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let installed = bin.join("installed-lsp");
+    std::fs::write(&installed, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir(root.join(".symora")).unwrap();
+    let command = serde_json::to_string(installed.to_str().unwrap()).unwrap();
+    let config: String = ["rust", "typescript", "python", "go"]
+        .into_iter()
+        .map(|language| format!("[lsp.servers.{language}]\ncommand = {command}\n"))
+        .collect();
+    std::fs::write(root.join(".symora/config.toml"), config).unwrap();
+
+    let mut child = Command::new(SYMORA)
+        .args(["setup", "--yes", "deps", "--group", "core"])
+        .current_dir(root)
+        .env("PATH", &bin)
+        .env("XDG_CONFIG_HOME", root.join("xdg"))
+        .env("SYMORA_NO_DAEMON", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"installer reply\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("lifecycle stdout must contain only JSON");
+    assert_eq!(response["status"], "ok");
+    let items = response["deps"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5, "{response}");
+    assert_eq!(items[0]["name"], "ripgrep");
+    assert_eq!(items[0]["status"], "failed");
+    assert!(items[0]["note"].as_str().unwrap().contains("status 7"));
+    assert!(
+        items[1..]
+            .iter()
+            .all(|item| item["status"] == "already_installed"),
+        "{response}"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for expected in [
+        "installer stdout",
+        "installer stderr",
+        "installer input: installer reply",
+    ] {
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn config_editor_output_preserves_json_and_interactive_input() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("project with 'quote");
+    std::fs::create_dir_all(root.join(".symora")).unwrap();
+    let config = root.join(".symora/config.toml");
+    let original = "[lsp]\ntimeout_secs = 7\n";
+    std::fs::write(&config, original).unwrap();
+    let argument = fixture.path().join("editor-argument");
+    let editor = fixture.path().join("editor");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'editor stdout\\n'\nprintf 'editor stderr\\n' >&2\nIFS= read -r answer || exit 9\nprintf 'editor input: %s\\n' \"$answer\"\nprintf '%s\\n' \"$1\" > \"$SYMORA_TEST_EDITOR_ARGUMENT\"\nexit \"$SYMORA_TEST_EDITOR_EXIT\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    for exit in [0, 7] {
+        let mut child = Command::new(SYMORA)
+            .args(["config", "edit"])
+            .current_dir(&root)
+            .env("EDITOR", &editor)
+            .env("SYMORA_TEST_EDITOR_ARGUMENT", &argument)
+            .env("SYMORA_TEST_EDITOR_EXIT", exit.to_string())
+            .env("XDG_CONFIG_HOME", fixture.path().join("xdg"))
+            .env("SYMORA_NO_DAEMON", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"editor reply\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("editor stdout must contain only JSON");
+        if exit == 0 {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(response["status"], "opened");
+            assert_eq!(response["path"], ".symora/config.toml");
+        } else {
+            assert!(!output.status.success(), "{output:?}");
+            assert_eq!(response["error"]["code"], "invalid_argument");
+        }
+        let passed = std::fs::read_to_string(&argument).unwrap();
+        assert_eq!(
+            std::path::Path::new(passed.trim_end())
+                .canonicalize()
+                .unwrap(),
+            config.canonicalize().unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for expected in [
+            "editor stdout",
+            "editor stderr",
+            "editor input: editor reply",
+        ] {
+            assert!(stderr.contains(expected), "{stderr}");
+        }
+    }
+}
