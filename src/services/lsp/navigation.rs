@@ -32,7 +32,6 @@ pub(super) async fn find_references(
             let project_root = project_root.clone();
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.sleep_for_cross_file_settle().await;
                 // Snapshot the indexing state the query is issued under —
                 // the marker derives from this, never from a re-read after
                 // the result lands (quiescence racing the request must not
@@ -168,7 +167,6 @@ async fn goto_location(
             let select = &select;
             async move {
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.sleep_for_cross_file_settle().await;
                 let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
@@ -222,7 +220,6 @@ pub(super) async fn find_implementations(
             async move {
                 check_feature_support_live(&client, &file, LspFeature::FindImplementations).await?;
                 ensure_indexed(&client, &file, manager.root()).await;
-                client.sleep_for_cross_file_settle().await;
                 let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;

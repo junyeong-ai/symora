@@ -9,7 +9,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Value, json};
 
-use super::{McpProfile, instructions::INSTRUCTIONS, tools};
+use super::{McpProfile, instructions, tools};
 use crate::app::App;
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("symora", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(instructions::for_profile(self.profile))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {

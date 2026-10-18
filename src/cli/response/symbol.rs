@@ -24,6 +24,8 @@ pub struct SymbolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_omitted: Option<super::BodyOmission>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<SymbolOutput>>,
     /// What produced this row, where an answer merges two producers: `index`
     /// or `workspace`, the words `search symbols` uses. Omitted where one
@@ -33,6 +35,23 @@ pub struct SymbolOutput {
 }
 
 impl SymbolOutput {
+    pub fn body_paths(items: &[Self]) -> Vec<String> {
+        fn collect(items: &[SymbolOutput], prefix: &str, paths: &mut Vec<String>) {
+            for (index, item) in items.iter().enumerate() {
+                let path = format!("{prefix}/{index}");
+                if item.body.is_some() {
+                    paths.push(format!("{path}/body"));
+                }
+                if let Some(children) = &item.children {
+                    collect(children, &format!("{path}/children"), paths);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        collect(items, "/items", &mut paths);
+        paths
+    }
+
     pub fn produced_by(mut self, backend: &str) -> Self {
         self.backend = Some(backend.to_string());
         self
@@ -60,6 +79,7 @@ impl SymbolOutput {
             signature: None,
             documentation: None,
             body: symbol.body.clone(),
+            body_omitted: None,
             children: if symbol.children.is_empty() {
                 None
             } else {

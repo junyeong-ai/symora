@@ -53,14 +53,11 @@ pub struct ContextArgs {
     #[arg(long)]
     pub body: bool,
 
-    /// Attach complete verbatim bodies: the target's whole body
-    /// unbudgeted, then callees in listed order and types under
-    /// --body-tokens (target-only when no section is requested)
+    /// Attach complete bodies under --body-tokens: target first, then callees and types
     #[arg(long)]
     pub with_bodies: bool,
 
-    /// Token budget for the callee/type bodies attached by --with-bodies
-    /// (whole-body-or-nothing per item; inert without --with-bodies)
+    /// Shared approximate token budget for requested bodies (whole bodies only)
     #[arg(long, default_value_t = crate::constants::defaults::CONTEXT_BODY_TOKENS)]
     pub body_tokens: usize,
 }
@@ -126,7 +123,25 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     )
     .await;
 
-    ctx.print_success(response);
+    let mut body_paths = Vec::new();
+    if response.target.body.is_some() {
+        body_paths.push("/target/body".to_string());
+    }
+    if let Some(section) = &response.callees {
+        for (index, item) in section.items.iter().enumerate() {
+            if item.body.is_some() {
+                body_paths.push(format!("/callees/items/{index}/body"));
+            }
+        }
+    }
+    if let Some(section) = &response.types {
+        for (index, item) in section.items.iter().enumerate() {
+            if item.body.is_some() {
+                body_paths.push(format!("/types/items/{index}/body"));
+            }
+        }
+    }
+    ctx.print_source(response, &body_paths);
     Ok(())
 }
 
@@ -141,7 +156,7 @@ async fn fetch_context(
     let resolved_line = analysis.anchor.line;
     let resolved_column = analysis.anchor.column;
 
-    let target = {
+    let mut target = {
         let mut t = TargetOutput::from_symbol_or_fallback(
             analysis.target(),
             &analysis.anchor.file,
@@ -238,15 +253,18 @@ async fn fetch_context(
         },
     );
 
+    let mut remaining = args.body_tokens;
+    if let Some(body) = &target.body {
+        let cost = estimate_tokens(body);
+        if cost <= remaining {
+            remaining -= cost;
+        } else {
+            target.body = None;
+            target.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+        }
+    }
     if args.with_bodies {
-        apply_section_bodies(
-            lsp,
-            root,
-            args.body_tokens,
-            callees.as_mut(),
-            types.as_mut(),
-        )
-        .await;
+        apply_section_bodies(lsp, root, remaining, callees.as_mut(), types.as_mut()).await;
     }
 
     ContextOutput {
@@ -288,7 +306,12 @@ async fn apply_section_bodies(
         && section.showing > 0
     {
         let mut candidates = Vec::with_capacity(section.items.len());
-        for item in &section.items {
+        for item in &mut section.items {
+            if remaining == 0 {
+                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+                candidates.push(None);
+                continue;
+            }
             // Joining an already-absolute path replaces the base, so
             // out-of-root locations (emitted absolute) resolve too.
             let file = root.join(&item.location.file);
@@ -304,8 +327,12 @@ async fn apply_section_bodies(
                 .await,
             );
         }
+        let available: Vec<_> = candidates.iter().map(Option::is_some).collect();
         let (bodies, admitted) = fit_bodies_to_budget(candidates, &mut remaining);
-        for (item, body) in section.items.iter_mut().zip(bodies) {
+        for ((item, body), available) in section.items.iter_mut().zip(bodies).zip(available) {
+            if available && body.is_none() {
+                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+            }
             item.body = body;
         }
         section.bodies_included = Some(admitted);
@@ -316,7 +343,12 @@ async fn apply_section_bodies(
         && section.showing > 0
     {
         let mut candidates = Vec::with_capacity(section.items.len());
-        for item in &section.items {
+        for item in &mut section.items {
+            if remaining == 0 {
+                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+                candidates.push(None);
+                continue;
+            }
             let file = root.join(&item.location.file);
             candidates.push(
                 resolve_body(
@@ -330,8 +362,12 @@ async fn apply_section_bodies(
                 .await,
             );
         }
+        let available: Vec<_> = candidates.iter().map(Option::is_some).collect();
         let (bodies, admitted) = fit_bodies_to_budget(candidates, &mut remaining);
-        for (item, body) in section.items.iter_mut().zip(bodies) {
+        for ((item, body), available) in section.items.iter_mut().zip(bodies).zip(available) {
+            if available && body.is_none() {
+                item.body_omitted = Some(crate::cli::response::BodyOmission::TokenBudget);
+            }
             item.body = body;
         }
         section.bodies_included = Some(admitted);
@@ -515,6 +551,7 @@ async fn fetch_types(
                     location: LocationOutput::from_location(&type_loc, root),
                     detail: None,
                     body: None,
+                    body_omitted: None,
                 }];
                 Section::new(items).with_indexing(answer.indexing)
             }
@@ -923,6 +960,7 @@ mod tests {
             },
             call_site: None,
             body: None,
+            body_omitted: None,
         }
     }
 
@@ -939,6 +977,7 @@ mod tests {
             },
             detail: None,
             body: None,
+            body_omitted: None,
         }
     }
 

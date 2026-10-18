@@ -10,9 +10,10 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
 
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Pack the most relevant files into a token-budgeted context bundle.\n\
-                       Files are ranked with PageRank over the import graph, then top-level\n\
-                       signatures are emitted until the budget is reached.\n\
+    after_long_help = "Summarize files within an approximate token budget.\n\
+                       Files are ranked from syntax-level import paths, then top-level\n\
+                       signatures are emitted until the budget is reached. This is an\n\
+                       orientation aid, not a complete dependency graph.\n\
                        \n\
                        Examples:\n  \
                        symora pack --tokens 4000\n  \
@@ -78,7 +79,7 @@ struct PackFileOutput {
     language: String,
     rank: f64,
     symbols: Vec<PackSymbolOutput>,
-    /// How many the file states, when `--per-file` showed fewer. Absent when
+    /// Total declarations when the per-file cap or token budget showed fewer. Absent when
     /// the list above is all of them, so a shape and a whole one read apart.
     #[serde(skip_serializing_if = "Option::is_none")]
     declared_symbols: Option<usize>,
@@ -99,6 +100,7 @@ pub async fn execute(args: PackArgs, app: &App) -> Result<()> {
     let filter = FileFilter::new(&root);
     let cfg = PackConfig {
         max_symbols_per_file: args.per_file,
+        max_file_size_bytes: app.config().search.max_file_size_bytes(),
         ..PackConfig::default()
     };
 
@@ -119,7 +121,7 @@ pub async fn execute(args: PackArgs, app: &App) -> Result<()> {
                 ctx.print_text(&text);
             }
         },
-        Err(e) => ctx.print_error(e),
+        Err(e) => ctx.print_error(crate::cli::OutputError::invalid(e.to_string())),
     }
 
     Ok(())
@@ -147,8 +149,18 @@ fn build_json_output(
 }
 
 fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
+    let mut hints = Vec::new();
+    if !result.unsupported_import_languages.is_empty() {
+        let languages = result
+            .unsupported_import_languages
+            .iter()
+            .map(|language| language.lsp_id())
+            .collect::<Vec<_>>()
+            .join(", ");
+        hints.push(format!("No import extractor for {languages}; their outgoing dependencies do not contribute to ranking. Use references or inspect source for semantic links."));
+    }
     if result.unsupported_languages.is_empty() {
-        return Vec::new();
+        return hints;
     }
     let languages = result
         .unsupported_languages
@@ -156,9 +168,10 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
         .map(|language| language.lsp_id())
         .collect::<Vec<_>>()
         .join(", ");
-    vec![format!(
+    hints.push(format!(
         "No declaration extractor for {languages}; files in these languages participate in the import graph but have no signatures in this pack. Inspect their source or query their language server."
-    )]
+    ));
+    hints
 }
 
 fn into_file_output(file: PackedFile) -> PackFileOutput {
@@ -223,6 +236,13 @@ fn render_markdown(
             file.rank,
             file.language.lsp_id(),
         ));
+        if file.declared_symbols > file.symbols.len() {
+            out.push_str(&format!(
+                "_Showing {} of {} declarations._\n",
+                file.symbols.len(),
+                file.declared_symbols,
+            ));
+        }
         if file.symbols.is_empty() {
             if crate::services::store::SymbolExtractor::is_supported(file.language) {
                 out.push_str("_(no extractable symbols)_\n\n");
@@ -272,6 +292,7 @@ mod tests {
             estimated_tokens: 50,
             graph_size: 25,
             unsupported_languages: Vec::new(),
+            unsupported_import_languages: Vec::new(),
             unreadable_paths: Vec::new(),
         }
     }
@@ -324,12 +345,19 @@ mod tests {
             per_file: 12,
             shape: PackShape::Markdown,
         };
-        let md = render_markdown(&ctx(), &args, &sample_result());
+        let mut result = sample_result();
+        let md = render_markdown(&ctx(), &args, &result);
         assert!(md.starts_with("# Symora context pack"));
         assert!(md.contains("4000"));
         assert!(md.contains("auth"));
         assert!(md.contains("src/main.rs"));
         assert!(md.contains("pub fn main()"));
+        assert!(!md.contains("Showing"));
+
+        result.files[0].declared_symbols = 3;
+        let partial = render_markdown(&ctx(), &args, &result);
+        assert!(partial.contains("Showing 1 of 3 declarations"));
+        assert!(partial.contains("pub fn main()"));
     }
 
     #[test]

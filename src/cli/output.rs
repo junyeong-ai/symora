@@ -164,6 +164,14 @@ impl OutputContext {
     }
 
     pub fn print_success<T: Serialize>(&self, data: T) {
+        self.print_response(data, &[]);
+    }
+
+    pub fn print_source<T: Serialize>(&self, data: T, body_paths: &[String]) {
+        self.print_response(data, body_paths);
+    }
+
+    fn print_response<T: Serialize>(&self, data: T, body_paths: &[String]) {
         if self.options.quiet {
             return;
         }
@@ -175,9 +183,8 @@ impl OutputContext {
             }
         };
         // Add disclosure before fitting so it counts toward the emitted size.
-        // The fitter only ever drops whole `Section` items — never this
-        // top-level `config_errors` array — so a load failure rides along and is
-        // never dropped to fit; the fitter trims result items where possible.
+        // Source bodies and Section items may be omitted; configuration
+        // failures remain visible in the fixed response envelope.
         self.inject_config_errors(&mut response);
         if self.max_response_chars > 0 && !crate::cli::response::declares_budget(&response) {
             // Measure compact JSON so display format does not change the items.
@@ -186,6 +193,12 @@ impl OutputContext {
                     .map(|s| s.chars().count())
                     .unwrap_or(usize::MAX)
             };
+            crate::cli::response::fit_source_bodies(
+                &mut response,
+                body_paths,
+                self.max_response_chars,
+                &measure,
+            );
             if crate::cli::response::fit_to_char_budget(
                 &mut response,
                 self.max_response_chars,

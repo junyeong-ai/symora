@@ -132,6 +132,7 @@ where
     tracing::trace!("LSP -> {}", json);
 
     let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+    let deadline = crate::infra::deadline::expires_at(timeout);
     // Keep transmission ownership after caller cancellation; close incomplete streams.
     tokio::spawn(async move {
         let write = async {
@@ -144,14 +145,17 @@ where
             stream.write_all(message.as_bytes()).await?;
             stream.flush().await
         };
-        let result = tokio::time::timeout(timeout, write)
-            .await
-            .unwrap_or_else(|_| {
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "LSP frame write timed out",
-                ))
-            });
+        let result = match deadline {
+            Some(end) => tokio::time::timeout_at(end, write)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "LSP frame write timed out",
+                    ))
+                }),
+            None => write.await,
+        };
         if result.is_err() {
             stdin.take();
         }

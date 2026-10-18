@@ -24,10 +24,27 @@ pub(super) struct ContentResultOutput {
     pub score: f64,
 }
 
+#[derive(Clone, Copy)]
+enum ContentSearchScope<'a> {
+    Code,
+    Language(&'a str),
+    Text,
+}
+
+impl<'a> ContentSearchScope<'a> {
+    fn language(self) -> Option<&'a str> {
+        match self {
+            Self::Language(language) => Some(language),
+            Self::Code | Self::Text => None,
+        }
+    }
+}
+
 pub async fn execute_content_search(
     app: &App,
     query: &str,
     language: Option<&str>,
+    paths: Option<&[std::path::PathBuf]>,
     limit: usize,
 ) -> Result<()> {
     let ctx = &app.output;
@@ -37,6 +54,11 @@ pub async fn execute_content_search(
         ctx.print_error(OutputError::invalid("Search query cannot be empty"));
         return Ok(());
     }
+    let search_scope = match (language, paths) {
+        (Some(language), _) => ContentSearchScope::Language(language),
+        (None, Some(_)) => ContentSearchScope::Text,
+        (None, None) => ContentSearchScope::Code,
+    };
 
     // A zero cap cannot be answered honestly: the index reports the total
     // it saw through the window, so an empty window would publish a zero
@@ -70,6 +92,62 @@ pub async fn execute_content_search(
     // through the next `index build` — that snapshot semantic is the price of
     // not re-walking the tree on every query.
     let scope = content_scope(language_filter);
+    if let Some(paths) = paths {
+        if paths.is_empty() {
+            ctx.print_error(OutputError::invalid(
+                "path must contain at least one file or directory",
+            ));
+            return Ok(());
+        }
+        let root = app.root().canonicalize()?;
+        let mut resolved = Vec::new();
+        for path in paths {
+            let absolute = app.root().join(path).canonicalize()?;
+            if !absolute.starts_with(&root) {
+                ctx.print_error(crate::cli::CliInputError::PathOutsideProject(absolute));
+                return Ok(());
+            }
+            if absolute
+                .strip_prefix(&root)
+                .unwrap()
+                .components()
+                .any(|part| matches!(part.as_os_str().to_str(), Some(".git" | ".symora")))
+            {
+                ctx.print_error(OutputError::invalid(
+                    "Content search excludes .git and .symora metadata",
+                ));
+                return Ok(());
+            }
+            resolved.push(app.root().join(absolute.strip_prefix(&root).unwrap()));
+        }
+        let filter = FileFilter::for_paths(app.root(), resolved);
+        let languages = if language_filter.is_some() {
+            scope
+        } else {
+            Vec::new()
+        };
+        let scanned = scan_content(app, query, &languages, limit, Some(&filter)).await;
+        let bounds = (!scanned.unreadable_paths.is_empty())
+            .then(|| {
+                LowerBound::ScanCouldNotReadPaths(relative_paths(
+                    ctx,
+                    &as_paths(&scanned.unreadable_paths),
+                ))
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let response = finish_content_search(
+            scanned.rows,
+            scanned.total,
+            query,
+            search_scope,
+            limit,
+            &bounds,
+            &[],
+        );
+        ctx.print_success(response);
+        return Ok(());
+    }
 
     match app.store.search_content(query, limit, &scope).await {
         Ok(page) => {
@@ -109,7 +187,7 @@ pub async fn execute_content_search(
             let index_bounds = index_holes_bound(ctx, &page.unread_paths, &answered_from_index);
             let mut scan_bound = None;
             if !live.is_empty() {
-                let scanned = scan_content(app, query, &live, limit).await;
+                let scanned = scan_content(app, query, &live, limit, None).await;
                 count += scanned.total;
                 items.extend(scanned.rows);
                 let unread = relative_paths(ctx, &as_paths(&scanned.unreadable_paths));
@@ -125,7 +203,7 @@ pub async fn execute_content_search(
                 items,
                 count,
                 query,
-                language,
+                search_scope,
                 limit,
                 &lower_bounds,
                 &currency,
@@ -153,9 +231,14 @@ pub async fn execute_content_search(
         // and says nothing, while one that could not be opened is a fact about
         // the store that only the surfaces reading it can report.
         Err(e) => {
-            let scanned = scan_content(app, query, &scope, limit).await;
+            let scanned = scan_content(app, query, &scope, limit, None).await;
             ctx.print_success(finish_after_index_failure(
-                ctx, scanned, &e, query, language, limit,
+                ctx,
+                scanned,
+                &e,
+                query,
+                search_scope,
+                limit,
             ));
         }
     }
@@ -172,7 +255,7 @@ fn finish_after_index_failure(
     scanned: ScannedContent,
     error: &crate::error::StoreError,
     query: &str,
-    language: Option<&str>,
+    search_scope: ContentSearchScope<'_>,
     limit: usize,
 ) -> Section<ContentResultOutput> {
     let unread = relative_paths(ctx, &as_paths(&scanned.unreadable_paths));
@@ -184,7 +267,7 @@ fn finish_after_index_failure(
         scanned.rows,
         scanned.total,
         query,
-        language,
+        search_scope,
         limit,
         &lower_bounds,
         &Vec::from_iter(index_unavailable_disclosure(error)),
@@ -204,7 +287,7 @@ fn finish_content_search(
     candidates: Vec<ContentResultOutput>,
     count: usize,
     query: &str,
-    language: Option<&str>,
+    search_scope: ContentSearchScope<'_>,
     limit: usize,
     lower_bounds: &[LowerBound],
     route_facts: &[(String, String)],
@@ -220,13 +303,16 @@ fn finish_content_search(
         .collect();
     hints.extend(content_search_hints(
         query,
-        language,
+        search_scope,
         count,
         truncated,
         items.len(),
         limit,
     ));
-    next_commands.extend(content_search_next_commands(&items, language));
+    next_commands.extend(content_search_next_commands(
+        &items,
+        search_scope.language(),
+    ));
     with_lower_bounds(
         Section::with_total(items, count)
             .with_hints(hints)
@@ -251,15 +337,18 @@ async fn scan_content(
     query: &str,
     languages: &[Language],
     limit: usize,
+    scoped_filter: Option<&FileFilter>,
 ) -> ScannedContent {
     let extensions: Vec<&str> = languages
         .iter()
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
-    if extensions.is_empty() {
+    if extensions.is_empty() && scoped_filter.is_none() {
         return ScannedContent::default();
     }
-    let filter = FileFilter::new(app.root());
+    let filter = scoped_filter
+        .cloned()
+        .unwrap_or_else(|| FileFilter::new(app.root()));
     let discovery = filter.discover_files(&extensions);
     let mut files = discovery.files;
     files.sort();
@@ -270,6 +359,16 @@ async fn scan_content(
         ..ScannedContent::default()
     };
     for file in files {
+        match tokio::fs::metadata(&file).await {
+            Ok(metadata) if metadata.len() > app.config().search.max_file_size_bytes() => continue,
+            Ok(_) => {}
+            Err(error) => {
+                if crate::infra::hides_content(&error) {
+                    scanned.unreadable_paths.push(file.clone());
+                }
+                continue;
+            }
+        }
         let handle = match tokio::fs::File::open(&file).await {
             Ok(handle) => handle,
             Err(e) => {
@@ -363,12 +462,11 @@ struct ScannedContent {
 }
 
 /// Steering for a result set: how to narrow when there is something to
-/// narrow, and — for a zero without `--lang` — what was not searched: an
-/// unscoped content search covers code files, so documentation and
-/// configuration formats reach it only by name.
+/// narrow, and for a zero within the default code scope, what was not
+/// searched. Explicit text scopes also include documentation and configuration.
 fn content_search_hints(
     query: &str,
-    language: Option<&str>,
+    search_scope: ContentSearchScope<'_>,
     count: usize,
     truncated: bool,
     count_shown: usize,
@@ -376,7 +474,7 @@ fn content_search_hints(
 ) -> Vec<String> {
     let mut hints = Vec::new();
     if count == 0 {
-        if language.is_none() {
+        if matches!(search_scope, ContentSearchScope::Code) {
             let unsearched: Vec<&str> = Language::all()
                 .into_iter()
                 .filter(|lang| !lang.is_code())
@@ -396,7 +494,7 @@ fn content_search_hints(
     if truncated && count_shown >= limit {
         hints.push("Narrow results with a longer query phrase or increase --limit".to_string());
     }
-    if language.is_none() {
+    if search_scope.language().is_none() {
         hints.push("Add --lang to limit content search to one language".to_string());
     }
     if !query.contains(' ') {
@@ -512,7 +610,7 @@ mod tests {
             vec![result("src/a.rs", 1)],
             1,
             "zeta",
-            None,
+            ContentSearchScope::Code,
             10,
             &[LowerBound::ScanCouldNotReadPaths(vec![
                 "src/p0".to_string(),
@@ -530,8 +628,15 @@ mod tests {
             "the search's own advice survives behind the disclosure"
         );
 
-        let exact =
-            finish_content_search(vec![result("src/a.rs", 1)], 1, "zeta", None, 10, &[], &[]);
+        let exact = finish_content_search(
+            vec![result("src/a.rs", 1)],
+            1,
+            "zeta",
+            ContentSearchScope::Code,
+            10,
+            &[],
+            &[],
+        );
         assert!(!exact.incomplete);
     }
 
@@ -554,7 +659,7 @@ mod tests {
             scanned(),
             &crate::error::StoreError::Corrupt("boom".to_string()),
             "zeta",
-            None,
+            ContentSearchScope::Code,
             10,
         );
         assert!(
@@ -571,7 +676,7 @@ mod tests {
             scanned(),
             &crate::error::StoreError::NotInitialized,
             "zeta",
-            None,
+            ContentSearchScope::Code,
             10,
         );
         assert!(
@@ -597,7 +702,7 @@ mod tests {
             Vec::new(),
             0,
             "zeta",
-            None,
+            ContentSearchScope::Code,
             10,
             &[LowerBound::IndexBuiltOverUnreadPaths {
                 paths: vec!["src/one".to_string()],
@@ -614,7 +719,7 @@ mod tests {
             Vec::new(),
             0,
             "zeta",
-            None,
+            ContentSearchScope::Code,
             10,
             &[LowerBound::ScanCouldNotReadPaths(vec![
                 "src/p0".to_string(),
@@ -718,7 +823,8 @@ mod tests {
     #[test]
     fn finish_content_search_derives_truncation_from_exact_count() {
         let candidates = vec![result("src/a.rs", 1), result("src/b.rs", 2)];
-        let section = finish_content_search(candidates, 10, "run", None, 2, &[], &[]);
+        let section =
+            finish_content_search(candidates, 10, "run", ContentSearchScope::Code, 2, &[], &[]);
 
         assert_eq!(section.count, 10);
         assert_eq!(section.showing, 2);
@@ -728,7 +834,8 @@ mod tests {
     #[test]
     fn finish_content_search_complete_results_are_not_truncated() {
         let candidates = vec![result("src/a.rs", 1)];
-        let section = finish_content_search(candidates, 1, "run", None, 10, &[], &[]);
+        let section =
+            finish_content_search(candidates, 1, "run", ContentSearchScope::Code, 10, &[], &[]);
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);
@@ -740,11 +847,16 @@ mod tests {
     /// an unscoped search left out: the non-code formats, reachable by name.
     #[test]
     fn an_empty_result_names_what_was_not_searched_instead_of_narrowing() {
-        let hints = content_search_hints("run", None, 0, false, 0, 10);
+        let hints = content_search_hints("run", ContentSearchScope::Code, 0, false, 0, 10);
         assert_eq!(hints.len(), 1);
         assert!(hints[0].contains("Only code files were searched"));
         assert!(hints[0].contains("markdown"));
-        assert!(content_search_hints("run", Some("markdown"), 0, false, 0, 10).is_empty());
-        assert!(!content_search_hints("run", None, 5, false, 5, 10).is_empty());
+        for scope in [
+            ContentSearchScope::Language("markdown"),
+            ContentSearchScope::Text,
+        ] {
+            assert!(content_search_hints("run", scope, 0, false, 0, 10).is_empty());
+        }
+        assert!(!content_search_hints("run", ContentSearchScope::Code, 5, false, 5, 10).is_empty());
     }
 }

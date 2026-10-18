@@ -289,6 +289,8 @@ impl Drop for RequestUse<'_> {
     }
 }
 
+const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(2);
+
 struct PendingRequestGuard {
     runtime: tokio::runtime::Handle,
     id: u64,
@@ -323,12 +325,16 @@ fn send_cancellation(
     timeout: Duration,
 ) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
-        let notification =
-            Notification::new("$/cancelRequest", Some(serde_json::json!({ "id": id })));
-        let writer = stdin.lock_owned().await;
-        if writer.is_some() {
-            let _ = write_notification(writer, &notification, timeout).await;
-        }
+        let _ = crate::infra::deadline::run(timeout, async {
+            let notification =
+                Notification::new("$/cancelRequest", Some(serde_json::json!({ "id": id })));
+            let writer = stdin.lock_owned().await;
+            if writer.is_some() {
+                write_notification(writer, &notification, timeout).await?;
+            }
+            Ok(())
+        })
+        .await;
     })
 }
 
@@ -378,7 +384,6 @@ pub struct LspClient {
     /// Set as the server is sent `initialized`, before the write, so it
     /// stands by the time the server can register a file watcher.
     initialized: AtomicBool,
-    cross_file_waited: AtomicBool,
     /// Whether the server is offered `workspace.didChangeWatchedFiles`; the
     /// manager decides, by [`FileWatch`](super::watch::FileWatch).
     file_watching: bool,
@@ -432,7 +437,6 @@ impl LspClient {
             dispatch_gate: RwLock::new(()),
             terminated: AtomicBool::new(false),
             initialized: AtomicBool::new(false),
-            cross_file_waited: AtomicBool::new(false),
             file_watching,
             watched_files: std::sync::Mutex::new(WatchRegistry::default()),
             settings: RwLock::new(None),
@@ -611,13 +615,9 @@ impl LspClient {
         }
         admit();
         self.initialized.store(true, Ordering::Release);
-        write_notification(
-            stdin_guard,
-            &initialized,
-            self.config.timeout_for(self.language, "initialized"),
-        )
-        .await
-        .map_err(|e| self.handshake_failure(e.into()))?;
+        write_notification(stdin_guard, &initialized, self.config.request_timeout())
+            .await
+            .map_err(|e| self.handshake_failure(e.into()))?;
 
         Ok(())
     }
@@ -951,6 +951,18 @@ impl LspClient {
         method: &str,
         params: Option<Value>,
     ) -> Result<T, LspError> {
+        crate::infra::deadline::run(
+            self.config.request_timeout(),
+            self.request_inner(method, params),
+        )
+        .await
+    }
+
+    async fn request_inner<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<T, LspError> {
         self.usage
             .lock()
             .expect("client usage lock poisoned")
@@ -999,7 +1011,7 @@ impl LspClient {
             id,
             pending: Arc::clone(&self.pending),
             stdin: Arc::clone(&self.stdin),
-            timeout: self.config.timeout_for(self.language, "$/cancelRequest"),
+            timeout: self.config.request_timeout().min(CANCELLATION_TIMEOUT),
         };
 
         // Build and send request
@@ -1012,18 +1024,11 @@ impl LspClient {
             if stdin_guard.is_none() {
                 return Err(LspError::NotConnected);
             }
-            write_request(
-                stdin_guard,
-                &request,
-                self.config.timeout_for(self.language, method),
-            )
-            .await?;
+            write_request(stdin_guard, &request, self.config.request_timeout()).await?;
         }
 
-        let result = timeout(self.config.timeout_for(self.language, method), rx).await;
-
-        match result {
-            Ok(Ok(response)) => match response.into_result() {
+        match rx.await {
+            Ok(response) => match response.into_result() {
                 Ok(result) => {
                     serde_json::from_value(result).map_err(|e| LspError::Protocol(e.to_string()))
                 }
@@ -1035,14 +1040,7 @@ impl LspClient {
                 }
                 Err(err) => Err(err.into()),
             },
-            Ok(Err(_)) => Err(LspError::RequestCancelled),
-            Err(_) => {
-                self.cancel_request(id).await;
-                Err(LspError::Timeout(format!(
-                    "{:?} '{}' timed out. The language server may be busy or unresponsive",
-                    self.language, method
-                )))
-            }
+            Err(_) => Err(LspError::RequestCancelled),
         }
     }
 
@@ -1055,27 +1053,25 @@ impl LspClient {
             &tokio::runtime::Handle::current(),
             Arc::clone(&self.stdin),
             id,
-            self.config.timeout_for(self.language, "$/cancelRequest"),
+            self.config.request_timeout().min(CANCELLATION_TIMEOUT),
         );
         let _ = sent.await;
     }
 
     /// Send a notification (no response expected)
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), LspError> {
-        let notification = Notification::new(method, params);
+        crate::infra::deadline::run(self.config.request_timeout(), async {
+            let notification = Notification::new(method, params);
 
-        let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
-        if stdin_guard.is_none() {
-            return Err(LspError::NotConnected);
-        }
-        write_notification(
-            stdin_guard,
-            &notification,
-            self.config.timeout_for(self.language, method),
-        )
-        .await?;
+            let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
+            if stdin_guard.is_none() {
+                return Err(LspError::NotConnected);
+            }
+            write_notification(stdin_guard, &notification, self.config.request_timeout()).await?;
 
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     /// Background task that reads and dispatches responses. It holds the
@@ -1256,21 +1252,17 @@ impl LspClient {
         }
     }
 
-    /// Shutdown the language server with 3-stage graceful termination
+    /// Request shutdown, then wait for an acknowledged exit or terminate the process.
     pub async fn shutdown(&self) -> Result<(), LspError> {
         *self.shutdown.write().await = true;
 
         // Stage 1: Send LSP shutdown request (2s timeout)
         let shutdown_result = timeout(Duration::from_secs(2), async {
-            if let Ok(()) = self.request::<()>("shutdown", None).await {
-                let _ = self.notify("exit", None).await;
-            }
+            self.request::<()>("shutdown", None).await?;
+            self.notify("exit", None).await
         })
         .await;
-
-        if shutdown_result.is_err() {
-            tracing::debug!("{} LSP shutdown request timed out", self.language);
-        }
+        let acknowledged = matches!(shutdown_result, Ok(Ok(())));
 
         // Close stdin to signal EOF
         if let Ok(mut stdin) = self.stdin.try_lock() {
@@ -1281,7 +1273,11 @@ impl LspClient {
 
         // Stage 2 & 3: Wait for process exit, then force kill
         if let Some(mut child) = self.process.lock().await.take() {
-            match timeout(Duration::from_secs(5), child.wait()).await {
+            if !acknowledged {
+                let _ = child.start_kill();
+            }
+            let remaining = crate::infra::deadline::remaining(Duration::from_secs(5));
+            match timeout(remaining, child.wait()).await {
                 Ok(Ok(status)) => {
                     tracing::debug!("{} language server exited: {:?}", self.language, status);
                 }
@@ -1400,12 +1396,15 @@ impl LspClient {
         // instead of a read. Probed after the caller's read — a write
         // landing between the read and this probe is healed by the next
         // direct sync of the file (every targeted command performs one).
-        let disk = DiskState::probe(&crate::models::lsp::uri_to_path(uri)).await;
-        let (version, outcome) = self.sync_document_inner(uri, content, disk).await?;
-        if outcome == SyncOutcome::Changed {
-            self.notify_did_save(uri).await;
-        }
-        Ok(version)
+        crate::infra::deadline::run(self.config.request_timeout(), async {
+            let disk = DiskState::probe(&crate::models::lsp::uri_to_path(uri)).await;
+            let (version, outcome) = self.sync_document_inner(uri, content, disk).await?;
+            if outcome == SyncOutcome::Changed {
+                self.notify_did_save(uri).await;
+            }
+            Ok(version)
+        })
+        .await
     }
 
     /// Sync `uri`'s overlay to the bytes symora itself just wrote, and
@@ -1416,22 +1415,22 @@ impl LspClient {
     /// fresh open too: the server has never analyzed the post-edit bytes,
     /// and our own write is exactly a save.
     pub async fn sync_edited_document(&self, file: &std::path::Path) -> Result<(), LspError> {
-        let disk = DiskState::probe(file).await;
-        let content = tokio::fs::read_to_string(file)
-            .await
-            .map_err(|e| LspError::Protocol(format!("read {}: {e}", file.display())))?;
-        let uri = path_to_uri(file);
-        let (_, outcome) = self.sync_document_inner(&uri, &content, disk).await?;
-        if outcome != SyncOutcome::Unchanged {
-            self.notify_did_save(&uri).await;
-            if outcome == SyncOutcome::Opened {
-                // The didChange path already noted the content change; a
-                // fresh open of just-edited bytes is the same event for
-                // settle windows and workspace-answer caches.
-                self.note_document_changed();
+        crate::infra::deadline::run(self.config.request_timeout(), async {
+            let disk = DiskState::probe(file).await;
+            let content = tokio::fs::read_to_string(file)
+                .await
+                .map_err(|e| LspError::Protocol(format!("read {}: {e}", file.display())))?;
+            let uri = path_to_uri(file);
+            let (_, outcome) = self.sync_document_inner(&uri, &content, disk).await?;
+            if outcome != SyncOutcome::Unchanged {
+                self.notify_did_save(&uri).await;
+                if outcome == SyncOutcome::Opened {
+                    self.note_document_changed();
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     async fn notify_did_save(&self, uri: &str) {
@@ -1478,10 +1477,6 @@ impl LspClient {
                     (state.version, SyncOutcome::Unchanged, None)
                 }
             } else {
-                // Opening a file the server already indexed from disk adds
-                // no new information — only a content *change* re-arms the
-                // cross-file settle window. Re-arming here put every warm
-                // session through a pointless wait per first-open.
                 let state = DocumentState::new(content, disk);
                 let version = state.version;
                 self.notify(
@@ -1607,24 +1602,6 @@ impl LspClient {
         IndexingState::from_u8(self.indexing_state.load(Ordering::Acquire))
     }
 
-    pub async fn sleep_for_cross_file_settle(&self) {
-        if self
-            .cross_file_waited
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            let wait = self.config.cross_file_wait(self.language);
-            if !wait.is_zero() {
-                tracing::debug!(
-                    "Waiting {}ms for {} cross-file indexing",
-                    wait.as_millis(),
-                    self.language
-                );
-                tokio::time::sleep(wait).await;
-            }
-        }
-    }
-
     /// Apply one indexing event atomically and return the state it
     /// produced. The transition table (`IndexingState::on_event`) is the
     /// only authority; the compare-and-swap loop guarantees a concurrent
@@ -1662,16 +1639,9 @@ impl LspClient {
         self.indexing_state.store(state.to_u8(), Ordering::Release);
     }
 
-    /// A document's content changed under this session (our own edit or
-    /// an external one picked up by the drift sweep). Readiness itself is
-    /// signal-driven and stays put — an edit doesn't unprove a server's
-    /// demonstrated quiescence, and a server that genuinely re-indexes
-    /// reports busy through its status channel — but the next cross-file
-    /// query deserves a fresh settle window, not a latched skip, and any
-    /// cached workspace-wide answer is now of a world that no longer
-    /// exists.
+    /// Invalidate workspace answers when source content changes. Readiness
+    /// remains signal-driven; elapsed time does not confirm indexing.
     pub fn note_document_changed(&self) {
-        self.cross_file_waited.store(false, Ordering::Release);
         bump_content_generation();
     }
 
@@ -1863,12 +1833,8 @@ impl LspClient {
         // wait for the writer instead of silently giving up on contention.
         let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
         if stdin_guard.is_some()
-            && let Err(e) = write_response(
-                stdin_guard,
-                &response,
-                self.config.timeout_for(self.language, &request.method),
-            )
-            .await
+            && let Err(e) =
+                write_response(stdin_guard, &response, self.config.request_timeout()).await
         {
             tracing::warn!("Failed to answer {} from server: {e}", request.method);
         }
@@ -2119,6 +2085,54 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn an_expired_shared_budget_cancels_a_sent_request() {
+        let client = test_client();
+        let mut echo = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        *client.stdin.lock().await = echo.stdin.take();
+        let mut server = Transport::new(echo.stdout.take().unwrap());
+        let operation = {
+            let client = Arc::clone(&client);
+            tokio::spawn(crate::infra::deadline::scope(
+                Duration::from_secs(10),
+                async move { client.request::<Value>("textDocument/hover", None).await },
+            ))
+        };
+        let Message::Request(sent) = server.read_message().await.unwrap() else {
+            panic!("request expected");
+        };
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert!(matches!(
+            operation.await.unwrap(),
+            Err(LspError::Timeout(_))
+        ));
+        tokio::time::resume();
+        assert!(client.pending.lock().unwrap().is_empty());
+        assert!(!client.usage().in_flight);
+        let Message::Notification(cancel) =
+            tokio::time::timeout(Duration::from_secs(5), server.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("cancellation expected");
+        };
+        assert_eq!(cancel.method, "$/cancelRequest");
+        assert_eq!(
+            cancel.params.unwrap()["id"],
+            serde_json::to_value(sent.id).unwrap()
+        );
+        drop(client);
+        echo.wait().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn cancellation_survives_its_caller_while_waiting_for_the_writer() {
         let client = test_client();
         let mut echo = Command::new("cat")
@@ -2162,6 +2176,29 @@ mod tests {
         assert_eq!(cancelled.params.unwrap()["id"], 42);
         drop(client);
         echo.wait().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn notifications_and_document_sync_bound_lock_waits() {
+        let client = test_client();
+        let writer = client.stdin.lock().await;
+        let notification = crate::infra::deadline::scope(Duration::from_secs(1), async {
+            client.notify("textDocument/didSave", None).await
+        })
+        .await;
+        assert!(matches!(notification, Err(LspError::Timeout(_))));
+        drop(writer);
+
+        let cache = client.document_cache.write().await;
+        let synchronization = crate::infra::deadline::scope(Duration::from_secs(1), async {
+            client
+                .sync_document("file:///missing.rs", "fn work() {}")
+                .await
+        })
+        .await;
+        assert!(matches!(synchronization, Err(LspError::Timeout(_))));
+        drop(cache);
+        assert!(!client.terminated.load(Ordering::Acquire));
     }
 
     #[cfg(unix)]

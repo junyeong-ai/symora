@@ -260,6 +260,18 @@ async fn shutdown_signal() {
 }
 
 async fn execute_command(command: Commands, app: &App) -> anyhow::Result<()> {
+    if matches!(&command, Commands::Mcp(_)) {
+        return execute_scoped(command, app).await;
+    }
+    #[cfg(unix)]
+    if matches!(&command, Commands::Daemon(_)) {
+        return execute_scoped(command, app).await;
+    }
+    let limit = std::time::Duration::from_secs(app.config().lsp.timeout_secs);
+    symora::infra::deadline::scope(limit, execute_scoped(command, app)).await
+}
+
+async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
     use symora::cli::commands;
 
     match command {

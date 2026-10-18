@@ -8,11 +8,12 @@
 //! Payloads are compared as parsed `serde_json::Value`, never as bytes —
 //! formatting is a transport concern, meaning is the contract.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const SYMORA: &str = env!("CARGO_BIN_EXE_symora");
 
@@ -28,6 +29,22 @@ struct ParityCase {
 /// Hermetic cases only: no LSP server, no daemon index required. Error
 /// payloads count as payloads — handled failures must also agree.
 const CASES: &[ParityCase] = &[
+    ParityCase {
+        tool: "search_content",
+        arguments: r#"{"query":"source","path":[".claude/skills/symora/SKILL.md"]}"#,
+        cli: &[
+            "search",
+            "content",
+            "source",
+            "--path",
+            ".claude/skills/symora/SKILL.md",
+        ],
+    },
+    ParityCase {
+        tool: "get_diff_impact",
+        arguments: r#"{"revision":"symora_nonexistent_test_revision"}"#,
+        cli: &["diff-impact", "symora_nonexistent_test_revision"],
+    },
     ParityCase {
         tool: "get_project_overview",
         arguments: "{}",
@@ -65,49 +82,98 @@ fn run_cli(args: &[&str]) -> Vec<Value> {
         .collect()
 }
 
-fn run_mcp_tool(tool: &str, arguments: &str) -> Vec<Value> {
-    let mut child = Command::new(SYMORA)
-        .args(["mcp", "serve"])
-        .env("SYMORA_NO_DAEMON", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn symora mcp serve");
+struct McpSession {
+    child: Child,
+    reader: BufReader<ChildStdout>,
+    next_id: u64,
+}
 
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"symora-tests","version":"1"}}}}}}"#
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"{tool}","arguments":{arguments}}}}}"#
-        )
-        .unwrap();
+impl McpSession {
+    fn new(root: Option<&Path>) -> Self {
+        let mut command = Command::new(SYMORA);
+        command
+            .args(["mcp", "serve"])
+            .env("SYMORA_NO_DAEMON", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(root) = root {
+            command.current_dir(root);
+        }
+        let mut child = command.spawn().expect("spawn symora mcp serve");
+        let reader = BufReader::new(child.stdout.take().expect("MCP stdout"));
+        let mut session = Self {
+            child,
+            reader,
+            next_id: 1,
+        };
+        session.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "symora-tests", "version": "1"},
+            }),
+        );
+        session.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        session
     }
-    drop(child.stdin.take());
 
-    let output = child.wait_with_output().expect("wait");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let call_response: Value =
-        serde_json::from_str(stdout.lines().nth(1).expect("tools/call response line"))
-            .expect("valid JSON-RPC response");
+    fn send(&mut self, message: Value) {
+        let stdin = self.child.stdin.as_mut().expect("MCP stdin");
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    }
 
-    call_response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("text content")
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect("tool emits valid JSON"))
-        .collect()
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        loop {
+            let mut line = String::new();
+            assert!(
+                self.reader.read_line(&mut line).expect("read MCP response") > 0,
+                "MCP closed before answering {method}",
+            );
+            let response: Value = serde_json::from_str(&line).expect("valid JSON-RPC response");
+            if response.get("id").is_none() {
+                assert!(
+                    response["method"].is_string(),
+                    "invalid MCP notification: {response}"
+                );
+                continue;
+            }
+            assert_eq!(response["id"], id, "MCP response ID for {method}");
+            assert!(
+                response.get("error").is_none(),
+                "MCP {method} failed: {response}"
+            );
+            return response.get("result").expect("MCP result").clone();
+        }
+    }
+
+    fn call(&mut self, tool: &str, arguments: &str) -> Vec<Value> {
+        let arguments: Value = serde_json::from_str(arguments).expect("tool arguments");
+        let result = self.request("tools/call", json!({"name": tool, "arguments": arguments}));
+        result["content"][0]["text"]
+            .as_str()
+            .expect("text content")
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("tool emits valid JSON"))
+            .collect()
+    }
+}
+
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
+fn run_mcp_tool(tool: &str, arguments: &str) -> Vec<Value> {
+    McpSession::new(None).call(tool, arguments)
 }
 
 #[test]
@@ -128,17 +194,13 @@ fn cli_and_mcp_emit_identical_payloads() {
     }
 }
 
-fn run_at(root: &std::path::Path, args: &[&str], direct: bool) -> Vec<Value> {
+fn run_daemon_cli(root: &Path, args: &[&str]) -> Vec<Value> {
     let mut command = Command::new(SYMORA);
     command
         .current_dir(root)
         .args(args)
-        .args(["--format", "compact"]);
-    if direct {
-        command.env("SYMORA_NO_DAEMON", "1");
-    } else {
-        command.env_remove("SYMORA_NO_DAEMON");
-    }
+        .args(["--format", "compact"])
+        .env_remove("SYMORA_NO_DAEMON");
     let output = command.output().expect("run fixture command");
     let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
@@ -175,7 +237,7 @@ fn discloses_degradation(payload: &[Value]) -> bool {
 fn quiesced(
     backend: &str,
     args: &[&str],
-    run: impl Fn(&[&str]) -> Vec<Value>,
+    mut run: impl FnMut(&[&str]) -> Vec<Value>,
     deadline: Instant,
 ) -> Vec<Value> {
     loop {
@@ -186,7 +248,7 @@ fn quiesced(
         assert!(
             Instant::now() < deadline,
             "{backend} never reached quiescence for {args:?}; parity is undefined while \
-             workspace analysis is still running",
+             workspace analysis is still running; last payload: {payload:?}",
         );
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -195,16 +257,13 @@ fn quiesced(
 const QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Daemon ↔ direct parity for LSP-backed commands. Needs rust-analyzer
-/// and a startable daemon, so it is opt-in:
+/// Daemon CLI ↔ persistent direct MCP parity for LSP-backed commands.
+/// Needs rust-analyzer and a startable daemon, so it is opt-in:
 /// `cargo test --test parity -- --ignored`.
 ///
-/// Each backend is warmed to quiescence before the comparison, because the
-/// invariant is only defined once both have an answer to give: while a
-/// workspace is still being analysed the two sides are looking at different
-/// amounts of the same project, and that difference is disclosed on
-/// purpose. Once quiescent, the payloads are compared whole — no field is
-/// exempted, so a real divergence cannot hide behind an allowance.
+/// Both backends retain their language server while reaching quiescence.
+/// MCP runs the CLI's command layer. Once workspace analysis settles, compare
+/// entire payloads without exempting any fields or degradation markers.
 #[test]
 #[ignore = "requires rust-analyzer and a daemon-capable environment"]
 fn daemon_and_direct_emit_identical_payloads() {
@@ -231,16 +290,49 @@ fn daemon_and_direct_emit_identical_payloads() {
         }
     }
     let _stop = StopDaemon(root);
-    let cases: &[(&[&str], Option<&str>)] = &[
-        (&["symbols", "src/lib.rs", "--depth", "1"], Some("document")),
-        (&["refs", "src/lib.rs:1:8", "--limit", "5"], None),
-        (&["diagnostics", "src/lib.rs"], None),
+    let mut direct_session = McpSession::new(Some(root));
+    let cases = &[
+        (
+            ParityCase {
+                tool: "list_file_symbols",
+                arguments: r#"{"file":"src/lib.rs","depth":1}"#,
+                cli: &["symbols", "src/lib.rs", "--depth", "1"],
+            },
+            Some("document"),
+        ),
+        (
+            ParityCase {
+                tool: "find_references",
+                arguments: r#"{"file":"src/lib.rs","line":1,"column":8,"limit":5}"#,
+                cli: &["refs", "src/lib.rs:1:8", "--limit", "5"],
+            },
+            None,
+        ),
+        (
+            ParityCase {
+                tool: "get_diagnostics",
+                arguments: r#"{"file":"src/lib.rs"}"#,
+                cli: &["diagnostics", "src/lib.rs"],
+            },
+            None,
+        ),
     ];
 
-    for (args, server_backend) in cases {
+    for (case, server_backend) in cases {
+        let args = case.cli;
         let deadline = Instant::now() + QUIESCENCE_TIMEOUT;
-        let direct = quiesced("direct", args, |args| run_at(root, args, true), deadline);
-        let daemon = quiesced("daemon", args, |args| run_at(root, args, false), deadline);
+        let direct = quiesced(
+            "direct MCP",
+            args,
+            |_| direct_session.call(case.tool, case.arguments),
+            deadline,
+        );
+        let daemon = quiesced(
+            "daemon CLI",
+            args,
+            |args| run_daemon_cli(root, args),
+            deadline,
+        );
 
         // A payload is always non-empty — an error object is a payload — so
         // emptiness is not what makes a case vacuous. Two sides that failed

@@ -21,11 +21,9 @@
 //!   `target`, …) applied ONLY when the project ships no root `.gitignore` — a
 //!   project with one is trusted to declare its own ignores, so a tracked
 //!   `vendor/`/`build/` stays indexed;
-//! - hidden entries (any path component starting with `.`), a hard exclusion
-//!   senior to the `.gitignore` rules — a `!`-negation cannot re-include a hidden
-//!   path. This is the ripgrep/fd default (a hidden filter independent of the
-//!   ignore files, not a git concept), and it is what keeps the walk out of
-//!   `.git`, `.symora`, and every dotted working tree unconditionally.
+//! - hidden entries are excluded by default, independently of gitignore rules.
+//!   Explicit content-search roots include hidden paths within those roots;
+//!   `.git` and `.symora` metadata remain excluded in every scope.
 //!
 //! Machine-local git state — the global `core.excludesFile` and
 //! `.git/info/exclude` — is deliberately NOT consulted: it would make the index
@@ -86,6 +84,7 @@ pub struct FileFilter {
 /// whether the query came from the walk or a single-path check.
 struct Policy {
     root: PathBuf,
+    explicit_paths: Option<Vec<PathBuf>>,
     /// `.symora/ignore`, rooted at the project root (a root-anchored source).
     symora_ignore: Option<Gitignore>,
     /// Whether the built-in [`DEFAULT_IGNORE_PATTERNS`] apply — true exactly when
@@ -113,12 +112,21 @@ impl FileFilter {
     /// Build the ignore policy for `root` — a point-in-time snapshot of the
     /// tree's ignore-source files (see the type doc); rebuild after they change.
     pub fn new(root: impl AsRef<Path>) -> Self {
-        let root = root.as_ref().to_path_buf();
+        Self::scoped(root.as_ref(), None)
+    }
+
+    pub fn for_paths(root: &Path, paths: Vec<PathBuf>) -> Self {
+        Self::scoped(root, Some(paths))
+    }
+
+    fn scoped(root: &Path, explicit_paths: Option<Vec<PathBuf>>) -> Self {
+        let root = root.to_path_buf();
         let symora_ignore = load_symora_ignore(&root);
         let apply_defaults = !root.join(".gitignore").is_file();
         Self {
             inner: Arc::new(Policy {
                 root,
+                explicit_paths,
                 symora_ignore,
                 apply_defaults,
                 gitignore_cache: Mutex::new(HashMap::new()),
@@ -154,7 +162,19 @@ impl FileFilter {
     /// there".
     pub fn discover_files(&self, extensions: &[&str]) -> Discovery {
         let policy = self.inner.clone();
-        let walker = WalkBuilder::new(&self.inner.root)
+        let roots = self
+            .inner
+            .explicit_paths
+            .as_deref()
+            .unwrap_or_else(|| std::slice::from_ref(&self.inner.root));
+        let Some(first) = roots.first() else {
+            return Discovery::default();
+        };
+        let mut builder = WalkBuilder::new(first);
+        for root in &roots[1..] {
+            builder.add(root);
+        }
+        let walker = builder
             // The crate is a traversal engine only: disable every built-in
             // filter (hidden, .ignore, all git ignore sources, parents) so the
             // policy is decided in exactly one place — `is_ignored`, via
@@ -196,6 +216,12 @@ impl FileFilter {
             }
             files.push(path.to_path_buf());
         }
+        if self.inner.explicit_paths.is_some() {
+            files.sort();
+            files.dedup();
+            unreadable.sort();
+            unreadable.dedup();
+        }
         Discovery { files, unreadable }
     }
 
@@ -235,13 +261,12 @@ impl Policy {
             return false; // the root itself
         }
 
-        // Hidden entries (`.git`, `.symora`, `.github`, …) are a hard exclusion,
-        // checked before any `.gitignore`: a `!`-negation can never re-include a
-        // hidden path. This is the ripgrep/fd default (hidden is a filter
-        // independent of, and senior to, the ignore files), not git's — git has
-        // no notion of hidden. It is what guarantees the walk never enters `.git`
-        // or `.symora` regardless of project rules.
-        if rel.components().any(is_hidden_component) {
+        // Explicit scopes can include hidden source, but never project metadata.
+        if rel
+            .components()
+            .any(|component| matches!(component.as_os_str().to_str(), Some(".git" | ".symora")))
+            || (self.explicit_paths.is_none() && rel.components().any(is_hidden_component))
+        {
             return true;
         }
 

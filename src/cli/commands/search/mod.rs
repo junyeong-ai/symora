@@ -63,6 +63,10 @@ pub enum SearchCommand {
         /// Search query
         query: String,
 
+        /// Search only these files or directories, including hidden paths; respects ignore rules
+        #[arg(short, long)]
+        path: Option<Vec<PathBuf>>,
+
         /// Language filter
         #[arg(short, long = "lang")]
         language: Option<String>,
@@ -162,11 +166,12 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
         }
         SearchCommand::Content {
             query,
+            path,
             language,
             limit,
         } => {
             let limit = limit.unwrap_or(cfg.search.limit);
-            execute_content_search(app, &query, language.as_deref(), limit).await
+            execute_content_search(app, &query, language.as_deref(), path.as_deref(), limit).await
         }
         SearchCommand::Ast {
             pattern,

@@ -36,11 +36,13 @@ fn main() {
     // optional feature adds a command, a target changes the ABI two
     // processes would meet over, and a profile decides which of the two
     // binaries in a checkout a developer just started.
-    for (key, value) in std::env::vars() {
-        if key.starts_with("CARGO_FEATURE_") || key == "TARGET" || key == "PROFILE" {
-            absorb_bytes(&mut hash, key.as_bytes());
-            absorb_bytes(&mut hash, value.as_bytes());
-        }
+    let mut environment: Vec<_> = std::env::vars()
+        .filter(|(key, _)| key.starts_with("CARGO_FEATURE_") || key == "TARGET" || key == "PROFILE")
+        .collect();
+    environment.sort();
+    for (key, value) in environment {
+        absorb_bytes(&mut hash, key.as_bytes());
+        absorb_bytes(&mut hash, value.as_bytes());
     }
 
     println!("cargo:rustc-env=SYMORA_BUILD_ID={hash:016x}");

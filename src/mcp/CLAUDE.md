@@ -1,6 +1,6 @@
 # src/mcp — MCP Server Rules
 
-`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set — e.g. `get_context` pins the unbudgeted `body` flag false and instead exposes the `with_bodies` option, which attaches the target's whole body and budgets callee/type bodies under body_tokens, disclosing omissions via bodies_included).
+`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set — e.g. `get_context` exposes `with_bodies` and shares `body_tokens` across target/callees/types; `body_omitted` and `bodies_included` disclose omissions).
 
 ## Catalog and handlers must stay in lockstep
 
@@ -21,7 +21,7 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 ## The instructions playbook stays honest by test
 
-The SDK exposes a usage playbook through the protocol-appropriate metadata flow. Hosts inject this playbook (`instructions.rs`) into the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
+The SDK exposes a usage playbook through the protocol-appropriate metadata flow. Hosts inject this playbook (`instructions.rs`) into the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the visible profile catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
 
 ## Location input convention
 

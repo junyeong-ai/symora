@@ -2,7 +2,6 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::error::LspError;
-use crate::models::symbol::Language;
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -24,27 +23,10 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    pub fn for_language(language: Language) -> Self {
-        if crate::config::LanguageProfile::for_language(language).aggressive_retry {
-            Self::aggressive()
-        } else {
-            Self::default()
-        }
-    }
-
     pub fn no_retry() -> Self {
         Self {
             max_attempts: 1,
             ..Default::default()
-        }
-    }
-
-    pub fn aggressive() -> Self {
-        Self {
-            max_attempts: 5,
-            initial_delay: Duration::from_millis(50),
-            max_delay: Duration::from_secs(10),
-            backoff_factor: 2.0,
         }
     }
 

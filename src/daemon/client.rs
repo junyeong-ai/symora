@@ -14,13 +14,8 @@ use crate::daemon::proves_no_listener;
 use crate::daemon::server::DaemonRuntimeConfig;
 use crate::error::LspError;
 use crate::infra::file_lock::FileLock;
-use crate::models::symbol::Language;
 
-pub(super) fn calculate_timeout(
-    config: &LspRuntimeConfig,
-    params: &serde_json::Value,
-    method: &str,
-) -> Duration {
+pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Duration {
     // Daemon-only operations with fixed timeouts
     match method {
         methods::PING
@@ -34,12 +29,12 @@ pub(super) fn calculate_timeout(
         methods::INDEX_CLEAR | methods::INDEX_STATUS => return Duration::from_secs(120),
         methods::SEARCH_SYMBOLS | methods::SEARCH_CONTENT => return Duration::from_secs(60),
         methods::LANGUAGE_STATUS | methods::INDEX_IS_CURRENT | methods::INDEXED_LANGUAGES => {
-            return config.timeout_for(Language::Unknown, "textDocument/hover");
+            return config.request_timeout();
         }
         _ => {}
     }
 
-    crate::daemon::lsp_request_timeout(config, method, params)
+    crate::daemon::lsp_request_timeout(config, method)
         .expect("LSP request method must have a mapping")
 }
 
@@ -254,6 +249,24 @@ impl DaemonClient {
         params: Option<serde_json::Value>,
         timeout_duration: Duration,
     ) -> Result<Response, LspError> {
+        if methods::to_lsp_method(method).is_some() {
+            crate::infra::deadline::run(
+                timeout_duration,
+                self.send_request_inner(method, params, timeout_duration),
+            )
+            .await
+        } else {
+            self.send_request_inner(method, params, timeout_duration)
+                .await
+        }
+    }
+
+    async fn send_request_inner(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        timeout_duration: Duration,
+    ) -> Result<Response, LspError> {
         let stream = UnixStream::connect(&self.config.socket_path)
             .await
             .map_err(|e| {
@@ -268,7 +281,15 @@ impl DaemonClient {
         let mut reader = BufReader::new(reader);
 
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let request = Request::new(id, method, params);
+        let mut request = Request::new(id, method, params);
+        if methods::to_lsp_method(method).is_some() {
+            request.timeout_ms = Some(
+                crate::infra::deadline::remaining(timeout_duration)
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            );
+        }
         let request_json = serde_json::to_string(&request)?;
 
         writer
@@ -325,11 +346,27 @@ impl DaemonClient {
         mut params: serde_json::Value,
     ) -> Result<Response, LspError> {
         self.inject_project(&mut params);
-        let timeout = calculate_timeout(&self.lsp_config, &params, method);
+        let timeout = calculate_timeout(&self.lsp_config, method);
         self.send_request(method, Some(params), timeout).await
     }
 
     async fn request_with_project(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Response, LspError> {
+        if methods::to_lsp_method(method).is_some() {
+            crate::infra::deadline::run(
+                self.lsp_config.request_timeout(),
+                self.request_project_inner(method, params),
+            )
+            .await
+        } else {
+            self.request_project_inner(method, params).await
+        }
+    }
+
+    async fn request_project_inner(
         &self,
         method: &str,
         params: serde_json::Value,

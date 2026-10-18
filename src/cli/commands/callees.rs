@@ -374,6 +374,7 @@ mod tests {
             },
             call_site: None,
             body: None,
+            body_omitted: None,
         }
     }
 

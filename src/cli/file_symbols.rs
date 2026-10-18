@@ -62,7 +62,7 @@ pub async fn declared_in(
         return Err(error);
     }
 
-    let max_bytes = u64::from(app.config().search.max_file_size_mb) * 1024 * 1024;
+    let max_bytes = app.config().search.max_file_size_bytes();
     let content = match tokio::fs::metadata(file).await {
         Ok(meta) if meta.len() > max_bytes => return Err(error),
         Ok(_) => match tokio::fs::read_to_string(file).await {

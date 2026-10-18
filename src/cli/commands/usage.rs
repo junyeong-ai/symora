@@ -17,9 +17,7 @@ use crate::cli::response::disclosure::{
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    LOW_SIGNAL_KIND_PENALTY, TEST_FILE_PENALTY, broad_symbol_kind_bonus,
-    generic_exact_identifier_penalty, is_generic_broad_query, no_languages_error,
-    noisy_suffix_penalty, resolve_search_languages, symbol_match_priority,
+    RankedSymbol, no_languages_error, resolve_search_languages, symbol_rank,
 };
 use crate::cli::utils::{AnchorResolution, read_line_at};
 use crate::error::LspError;
@@ -236,30 +234,16 @@ fn rank_usage_symbols(symbols: &mut [Symbol], query: &str, test_scope: &TestScop
 }
 
 fn usage_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScope) -> i32 {
-    let name = symbol.name.to_ascii_lowercase();
-    let path = symbol.path().to_ascii_lowercase();
-    let kind = symbol.kind.to_string();
-    let match_priority = symbol_match_priority(query, &name, &path);
-    let test_penalty = if test_scope.is_test_file(&symbol.location.file) {
-        TEST_FILE_PENALTY
-    } else {
-        0
-    };
-    let kind_penalty = if symbol.kind.is_low_level() {
-        LOW_SIGNAL_KIND_PENALTY
-    } else {
-        0
-    };
-    let suffix_penalty = noisy_suffix_penalty(&name, &query.to_ascii_lowercase());
-    let generic_exact_penalty =
-        generic_exact_identifier_penalty(query, &name, &kind, symbol.kind.is_low_level());
-    let kind_bonus = broad_symbol_kind_bonus(query, &name, &kind, symbol.kind.is_low_level());
-
-    match_priority + kind_bonus
-        - test_penalty
-        - kind_penalty
-        - suffix_penalty
-        - generic_exact_penalty
+    symbol_rank(
+        query,
+        RankedSymbol {
+            name: &symbol.name,
+            name_path: symbol.name_path.as_deref(),
+            kind: &symbol.kind.to_string(),
+            file: &symbol.location.file,
+        },
+        test_scope,
+    )
 }
 
 /// Hints about how the query was ASKED. What the analysis could not reach is a
@@ -290,14 +274,8 @@ fn member_zero_hint(items: &[UsageResult]) -> Option<String> {
     })
 }
 
-fn usage_hints(query: &str, auto_lang: bool) -> Vec<String> {
+fn usage_hints(auto_lang: bool) -> Vec<String> {
     let mut hints = Vec::new();
-    if is_generic_broad_query(query) {
-        hints.push(
-            "This query is broad; prefer a more specific symbol name or add --lang first"
-                .to_string(),
-        );
-    }
     if auto_lang {
         hints.push(
             "Add --lang for faster and more targeted usage analysis in large workspaces"
@@ -308,8 +286,8 @@ fn usage_hints(query: &str, auto_lang: bool) -> Vec<String> {
     hints
 }
 
-fn usage_hints_for_empty(query: &str, auto_lang: bool, resolved_from: Option<&str>) -> Vec<String> {
-    let mut hints = usage_hints(query, auto_lang);
+fn usage_hints_for_empty(auto_lang: bool, resolved_from: Option<&str>) -> Vec<String> {
+    let mut hints = usage_hints(auto_lang);
     if let Some(loc) = resolved_from {
         hints.push(format!(
             "Workspace symbol lookup was empty for the resolved symbol. Continue with `symora symbols {}` or `symora refs {}` for file-level follow-up.",
@@ -441,7 +419,6 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
             section: with_lower_bounds(
                 Section::new(vec![])
                     .with_hints(resolved.hints(usage_hints_for_empty(
-                        &resolved.query,
                         resolved.language_override.is_none(),
                         resolved_from.as_deref(),
                     )))
@@ -590,10 +567,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         // merely from this page.
         .chain(analyzed.map(LowerBound::AnalysisCapped))
         .collect();
-    let mut hints = resolved.hints(usage_hints(
-        &resolved.query,
-        resolved.language_override.is_none(),
-    ));
+    let mut hints = resolved.hints(usage_hints(resolved.language_override.is_none()));
     if filters.contains(&UsageFilter::ZeroRefs) {
         hints.extend(member_zero_hint(&items));
     }
@@ -1113,7 +1087,7 @@ mod tests {
 
     #[test]
     fn usage_empty_hints_include_file_level_followup_for_resolved_locations() {
-        let hints = usage_hints_for_empty("root", true, Some("src/main.py:54:11"));
+        let hints = usage_hints_for_empty(true, Some("src/main.py:54:11"));
         assert!(hints.iter().any(|h| h.contains("file-level follow-up")));
     }
 

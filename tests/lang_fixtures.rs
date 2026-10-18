@@ -219,7 +219,7 @@ fn context_with_bodies_attaches_whole_type_bodies() {
     );
 
     // A starved budget admits nothing — whole-body-or-nothing, disclosed
-    // as zero, with the items themselves unchanged.
+    // as zero, preserving identity and naming the omission reason.
     let starved = run_in_fixture(&[
         "context".into(),
         format!("{report_rel}:{line}:{col}"),
@@ -237,14 +237,27 @@ fn context_with_bodies_attaches_whole_type_bodies() {
         .map(|i| {
             let mut item = i.clone();
             item.as_object_mut().unwrap().remove("body");
+            item["body_omitted"] = Value::String("token_budget".to_string());
             item
         })
         .collect();
     assert_eq!(
         starved["types"]["items"].as_array().expect("items"),
         &stripped,
-        "starving the budget must not change the items themselves"
+        "starving the budget preserves identity and discloses omission"
     );
+
+    let (target_line, target_column) = find_identifier(&report, "describe", 1);
+    let target = run_in_fixture(&[
+        "context".into(),
+        format!("{report_rel}:{target_line}:{target_column}"),
+        "--body".into(),
+        "--body-tokens".into(),
+        "1".into(),
+    ]);
+    assert_eq!(target["target"]["name"], "describe");
+    assert_eq!(target["target"]["body_omitted"], "token_budget");
+    assert!(target["target"].get("body").is_none());
 }
 
 /// An empty reference set means different things for a member and for a free

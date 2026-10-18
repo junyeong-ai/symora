@@ -13,7 +13,7 @@ CLI inputs and JSON outputs use 1-indexed lines and 1-indexed Unicode-scalar col
 Field names, presence rules, and the shared list-response shape are stable contracts (the canonical field set lives in `.claude/rules/json-output-stability.md`). Treat renames the same way you'd treat a breaking signature change. Don't add decorative fields; an agent has to parse every key you emit.
 
 **3. Daemon and direct execution must agree.**
-The same command in the same repo must produce the same meaning whether it ran through `daemon serve` or in-process. Config loading, timeouts, fallback paths, and error mapping all live above the mode boundary — never embed a mode-specific default below it.
+The same command in the same repo must produce the same meaning whether it ran through `daemon serve` or in-process. Config loading, shared LSP deadlines, fallback paths, and error mapping agree across the mode boundary. Startup and retries consume the same budget; daemon RPCs forward the remaining allowance. Source application must finish or report partial application rather than being aborted midway by that LSP deadline.
 
 **4. Fallback only when it raises success without misleading.**
 A fallback that returns plausible but wrong data is worse than a clear "unsupported" message. When an LSP server lacks a capability, surface that in the response — don't synthesize one to hide it.
@@ -38,7 +38,7 @@ PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
   cargo test --test lang_fixtures --test parity -- --include-ignored
 ```
 
-Daemon parity uses an isolated dependency-free Rust project so it measures the transport boundary without repeatedly indexing this entire workspace.
+Daemon parity uses an isolated dependency-free Rust project. A direct MCP session keeps its language server alive while checking quiescence, then its command output is compared with daemon-backed CLI output. This measures the transport boundary without repeatedly starting the direct server or indexing this entire workspace.
 
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 
