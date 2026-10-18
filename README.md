@@ -138,9 +138,9 @@ symora map summary
     ]
   },
   "next_commands": [
-    "symora map file src/main.ts --related-limit 5",
-    "symora map dir src --limit 10",
-    "symora symbols src/main.ts --depth 1"
+    "symora map file --related-limit 5 -- 'src/main.ts'",
+    "symora map dir --limit 10 -- 'src'",
+    "symora symbols --depth 1 -- 'src/main.ts'"
   ]
 }
 ```
@@ -259,7 +259,7 @@ symora impact src/services/checkout.ts:48 --depth 2
     ],
     "test_caller_ratio": 0.43
   },
-  "next_commands": ["symora impact src/services/checkout.ts:48:9 --depth 3"]
+  "next_commands": ["symora impact --depth 3 -- 'src/services/checkout.ts:48:9'"]
 }
 ```
 > `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. 정적 참조·호출 그래프는 런타임 디스패치, 외부 소비자, 설정 기반 연결을 모두 증명하지 못합니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
@@ -376,7 +376,7 @@ symora status                # 프로젝트 + language server 설치 여부 (동
 
 `pack --tokens`와 `--token-estimate`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수나 전체 JSON 봉투 크기의 상한은 아닙니다.
 
-`context`의 요청 본문은 `--body-tokens`를 대상·피호출자·타입 순서로 공유하며 통째로 포함하거나 생략합니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
+`context`의 요청 본문은 `--body-tokens`를 대상·피호출자·타입 순서로 공유하며 통째로 포함하거나 생략합니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. escape 변환 등 지원하지 않는 문자열 해석이 필요한 모듈 경로는 연결을 생략합니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
 
 `lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 소스 적용 도중의 강제 취소에 사용하지 않습니다.
 

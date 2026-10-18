@@ -408,17 +408,29 @@ fn module_path(abs_path: &Path, root: &Path, language: Language) -> Vec<String> 
 type Graph = BTreeMap<usize, Vec<usize>>;
 
 fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
-    let mut by_module: HashMap<&[String], Vec<usize>> = HashMap::new();
-    let mut by_directory: HashMap<&[String], Vec<usize>> = HashMap::new();
+    let mut exact = PathIndex::default();
+    let mut suffixes = PathIndex::default();
     for node in nodes {
+        exact
+            .by_module
+            .entry(node.module_path.as_slice())
+            .or_default()
+            .push(node.id);
+        exact
+            .by_directory
+            .entry(node.directory.as_slice())
+            .or_default()
+            .push(node.id);
         for start in 0..node.module_path.len() {
-            by_module
+            suffixes
+                .by_module
                 .entry(&node.module_path[start..])
                 .or_default()
                 .push(node.id);
         }
         for start in 0..=node.directory.len() {
-            by_directory
+            suffixes
+                .by_directory
                 .entry(&node.directory[start..])
                 .or_default()
                 .push(node.id);
@@ -426,8 +438,8 @@ fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> Graph {
     }
     let index = ProjectIndex {
         nodes,
-        by_module,
-        by_directory,
+        exact,
+        suffixes,
         module_prefix,
     };
 
@@ -466,7 +478,6 @@ enum Reference {
 
 impl Reference {
     fn parse(raw: &str, language: Language) -> Self {
-        let raw = raw.trim().trim_matches(['"', '\'', '`']);
         if language == Language::Python {
             let dots = raw.bytes().take_while(|byte| *byte == b'.').count();
             let components = raw[dots..]
@@ -551,12 +562,18 @@ fn split_components(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// The project's files, indexed by every suffix of their module path and of
-/// their directory, plus the module prefix its own imports carry.
-struct ProjectIndex<'a> {
-    nodes: &'a [Node],
+#[derive(Default)]
+struct PathIndex<'a> {
     by_module: HashMap<&'a [String], Vec<usize>>,
     by_directory: HashMap<&'a [String], Vec<usize>>,
+}
+
+/// Relative imports address exact project paths. Absolute module names can
+/// omit source-root prefixes, so their candidate index also contains suffixes.
+struct ProjectIndex<'a> {
+    nodes: &'a [Node],
+    exact: PathIndex<'a>,
+    suffixes: PathIndex<'a>,
     module_prefix: &'a [String],
 }
 
@@ -572,7 +589,7 @@ impl ProjectIndex<'_> {
                 };
                 let mut path = from.directory[..base].to_vec();
                 path.extend_from_slice(components);
-                self.at(&path, from.language)
+                self.at(&self.exact, &path, from.language)
             }
             Reference::Absolute(components) => {
                 // A declared module prefix is part of the reference but not
@@ -592,7 +609,7 @@ impl ProjectIndex<'_> {
                     if candidate.is_empty() {
                         continue;
                     }
-                    let hit = self.at(candidate, from.language);
+                    let hit = self.at(&self.suffixes, candidate, from.language);
                     if !hit.is_empty() {
                         return hit;
                     }
@@ -602,9 +619,8 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// The nodes at an exact project path: the file it names, or — where a
-    /// package IS a directory — every file the directory holds.
-    fn at(&self, path: &[String], language: Language) -> Vec<usize> {
+    /// A module candidate, or every compatible file when the package is a directory.
+    fn at(&self, index: &PathIndex<'_>, path: &[String], language: Language) -> Vec<usize> {
         let compatible = |id: &&usize| {
             let target = self.nodes[**id].language;
             target == language
@@ -616,7 +632,7 @@ impl ProjectIndex<'_> {
                     Language::JavaScript | Language::TypeScript | Language::Vue
                 ))
         };
-        if let Some(files) = self.by_module.get(path) {
+        if let Some(files) = index.by_module.get(path) {
             let candidates: Vec<_> = files.iter().filter(compatible).copied().collect();
             match candidates.as_slice() {
                 [only] => return vec![*only],
@@ -625,7 +641,7 @@ impl ProjectIndex<'_> {
             }
         }
         if package_is_directory(language)
-            && let Some(files) = self.by_directory.get(path)
+            && let Some(files) = index.by_directory.get(path)
         {
             return files.iter().filter(compatible).copied().collect();
         }
@@ -996,11 +1012,11 @@ mod tests {
             abs(&["github.com", "acme", "w", "internal", "store"])
         );
         assert_eq!(
-            Reference::parse("\"./services/pack\"", Language::TypeScript),
+            Reference::parse("./services/pack", Language::TypeScript),
             rel(0, &["services", "pack"])
         );
         assert_eq!(
-            Reference::parse("\"../../shared/util\"", Language::TypeScript),
+            Reference::parse("../../shared/util", Language::TypeScript),
             rel(2, &["shared", "util"])
         );
         assert_eq!(
@@ -1041,6 +1057,48 @@ mod tests {
         ];
         assert_eq!(edges_of(&nodes, 0), vec!["src/a/b/utils.ts"]);
         assert_eq!(edges_of(&nodes, 3), vec!["src/a/utils.ts"]);
+    }
+
+    #[test]
+    fn relative_paths_only_reach_exact_project_paths() {
+        for (language, caller, import, target, nested) in [
+            (
+                Language::TypeScript,
+                "caller.ts",
+                "import {helper} from './helper';\n",
+                "helper.ts",
+                "nested/helper.ts",
+            ),
+            (
+                Language::Python,
+                "pkg/caller.py",
+                "from .helper import value\n",
+                "pkg/helper.py",
+                "nested/pkg/helper.py",
+            ),
+            (
+                Language::Rust,
+                "lib.rs",
+                "mod helper;\n",
+                "helper.rs",
+                "nested/helper.rs",
+            ),
+            (
+                Language::Terraform,
+                "main.tf",
+                "module \"network\" { source = \"./network\" }\n",
+                "network/main.tf",
+                "nested/network/main.tf",
+            ),
+        ] {
+            let mut nodes = vec![
+                node_in(0, caller, import, language),
+                node_in(1, nested, "", language),
+            ];
+            assert!(edges_of(&nodes, 0).is_empty(), "{language:?}");
+            nodes.push(node_in(2, target, "", language));
+            assert_eq!(edges_of(&nodes, 0), vec![target], "{language:?}");
+        }
     }
 
     /// Go repeats its declared module path in every intra-project import,
@@ -1487,6 +1545,34 @@ mod tests {
             node_in(2, "web/util.test.py", "", Language::Python),
         ];
         assert_eq!(edges_of(&js, 0), vec!["web/util.test.ts"]);
+        let escaped = vec![
+            node_in(
+                0,
+                "web/caller.ts",
+                "import {helper} from './he\\u006cper';\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "web/helper.ts", "", Language::TypeScript),
+            node_in(2, "web/he\\u006cper.ts", "", Language::TypeScript),
+        ];
+        assert!(edges_of(&escaped, 0).is_empty());
+        for (literal, target, decoy) in [
+            ("./helper'", "web/helper'.ts", "web/helper.ts"),
+            ("./helper`", "web/helper`.ts", "web/helper.ts"),
+            ("./ helper ", "web/ helper .ts", "web/ helper.ts"),
+        ] {
+            let nodes = vec![
+                node_in(
+                    0,
+                    "web/caller.ts",
+                    &format!("import \"{literal}\";\n"),
+                    Language::TypeScript,
+                ),
+                node_in(1, target, "", Language::TypeScript),
+                node_in(2, decoy, "", Language::TypeScript),
+            ];
+            assert_eq!(edges_of(&nodes, 0), vec![target], "{literal:?}");
+        }
         let tf = vec![
             node_in(
                 0,
@@ -1501,5 +1587,22 @@ mod tests {
             edges_of(&tf, 0),
             vec!["network/main.tf", "network/variables.tf"]
         );
+        for (literal, target, decoy) in [
+            ("./he\\u006cper", "helper/main.tf", "he\\u006cper/main.tf"),
+            ("./$${helper}", "${helper}/main.tf", "$${helper}/main.tf"),
+            ("./%%{helper}", "%{helper}/main.tf", "%%{helper}/main.tf"),
+        ] {
+            let nodes = vec![
+                node_in(
+                    0,
+                    "main.tf",
+                    &format!("module \"helper\" {{ source = \"{literal}\" }}\n"),
+                    Language::Terraform,
+                ),
+                node_in(1, target, "", Language::Terraform),
+                node_in(2, decoy, "", Language::Terraform),
+            ];
+            assert!(edges_of(&nodes, 0).is_empty(), "{literal:?}");
+        }
     }
 }

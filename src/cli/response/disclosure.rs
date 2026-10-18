@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use super::{CoverageGap, Section};
 use crate::cli::OutputContext;
+use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
 use crate::models::symbol::Language;
 use crate::services::store::UnreadPath;
@@ -470,15 +471,25 @@ pub fn symbol_coverage_next_commands(
     };
     let lang = gap.language.lsp_id();
     if gap.reason == CoverageReason::NotSearched {
-        return vec![format!("symora search symbols '{query}' --lang {lang}")];
+        return vec![format!(
+            "symora search symbols --lang {lang} -- {}",
+            shell_arg(query)
+        )];
     }
     if gap.reason == CoverageReason::NotConsulted {
         return match UnconsultedIndex::of(gap.language, route) {
             UnconsultedIndex::NoExtractor => literal_query(query)
-                .map(|literal| format!("symora search content '{literal}' --lang {lang}"))
+                .map(|literal| {
+                    format!(
+                        "symora search content --lang {lang} -- {}",
+                        shell_arg(&literal)
+                    )
+                })
                 .into_iter()
                 .collect(),
-            UnconsultedIndex::Skipped => vec![format!("symora search symbols '{query}'")],
+            UnconsultedIndex::Skipped => {
+                vec![format!("symora search symbols -- {}", shell_arg(query))]
+            }
             UnconsultedIndex::NotHeld => match route {
                 DisclosureRoute::WorkspaceOnly(
                     WorkspaceSearchRoute::IndexRebuilding | WorkspaceSearchRoute::IndexUnreadable,
@@ -489,12 +500,17 @@ pub fn symbol_coverage_next_commands(
     }
     match route {
         DisclosureRoute::IndexConsulted => literal_query(query)
-            .map(|literal| format!("symora search content '{literal}' --lang {lang}"))
+            .map(|literal| {
+                format!(
+                    "symora search content --lang {lang} -- {}",
+                    shell_arg(&literal)
+                )
+            })
             .into_iter()
             .chain(std::iter::once(format!("symora doctor {lang}")))
             .collect(),
         DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced) => vec![
-            format!("symora search symbols '{query}'"),
+            format!("symora search symbols -- {}", shell_arg(query)),
             format!("symora doctor {lang}"),
         ],
         // The index cannot be asked to help yet, so the only remedy left is
@@ -516,7 +532,10 @@ pub fn symbol_coverage_next_commands(
                 ]
             } else {
                 vec![
-                    format!("symora search content '{query}' --lang {lang}"),
+                    format!(
+                        "symora search content --lang {lang} -- {}",
+                        shell_arg(query)
+                    ),
                     format!("symora doctor {lang}"),
                 ]
             }
@@ -945,7 +964,7 @@ mod tests {
         let forced = route(WorkspaceSearchRoute::Forced);
         assert_eq!(
             symbol_coverage_next_commands("alpha", &rust, forced),
-            ["symora search symbols 'alpha'"]
+            ["symora search symbols -- 'alpha'"]
         );
         assert!(
             symbol_coverage_hints(&rust, forced)[0]
@@ -963,7 +982,7 @@ mod tests {
         assert_eq!(
             symbol_coverage_next_commands("alpha", &other, not_built),
             [format!(
-                "symora search content 'alpha' --lang {}",
+                "symora search content --lang {} -- 'alpha'",
                 unextracted.lsp_id()
             )]
         );

@@ -149,6 +149,34 @@ fn pyright_resolves_across_package_boundaries() {
         "area references must include the cross-package call site, got {refs}"
     );
 
+    let signed = run_in_fixture(&[
+        "symbols".into(),
+        geometry_rel.into(),
+        "--symbol".into(),
+        "Circle".into(),
+        "--signature".into(),
+        "--depth".into(),
+        "3".into(),
+    ]);
+    assert_eq!(signed["backend"], "document", "{signed}");
+    let items = signed["items"].as_array().expect("signature items");
+    assert!(items.iter().any(|item| {
+        item["children"]
+            .as_array()
+            .is_some_and(|children| !children.is_empty())
+    }));
+    fn has_body(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => object.contains_key("body") || object.values().any(has_body),
+            Value::Array(items) => items.iter().any(has_body),
+            _ => false,
+        }
+    }
+    assert!(
+        !has_body(&signed),
+        "signature output contains source bodies: {signed}"
+    );
+
     // diagnostics on the importing file are clean: a broken venv or
     // wiped settings surface as phantom missing-import diagnostics.
     let diagnostics = run_in_fixture(&["diagnostics".into(), report_rel.into()]);

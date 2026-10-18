@@ -8,7 +8,7 @@ use crate::app::App;
 use crate::cli::analysis::{Anchor, resolve_anchor};
 use crate::cli::output::OutputContext;
 use crate::cli::response::Section;
-use crate::cli::utils::AnchorResolution;
+use crate::cli::utils::{AnchorResolution, shell_arg};
 use crate::cli::{ErrorCode, LocationArg, OutputError, ParsedLocation};
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, Indexed};
@@ -36,14 +36,17 @@ pub(crate) fn lsp_error_at(err: LspError, file: &str, line: u32, column: u32) ->
     }
     if recoverable {
         return mapped.with_hint(format!(
-            "Retry, or use `symora symbols {file}` and `symora usage {file}:{line}:{column}` \
+            "Retry, or use `symora symbols -- {}` and `symora usage -- {}` \
              to continue from file-level analysis.",
+            shell_arg(file),
+            shell_arg(&format!("{file}:{line}:{column}")),
         ));
     }
     mapped.with_hint(format!(
         "The server reported why above — resolve that, then retry. \
-         Until it can start, `symora map file {file}` and `symora search content` \
+         Until it can start, `symora map file -- {}` and `symora search content` \
          answer without a language server.",
+        shell_arg(file),
     ))
 }
 

@@ -14,6 +14,7 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
                        Files are ranked from syntax-level import paths, then top-level\n\
                        signatures are emitted until the budget is reached. This is an\n\
                        orientation aid, not a complete dependency graph.\n\
+                       Unsupported escape or string syntax is omitted from import edges.\n\
                        \n\
                        Examples:\n  \
                        symora pack --tokens 4000\n  \

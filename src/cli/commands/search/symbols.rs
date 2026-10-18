@@ -17,6 +17,7 @@ use crate::cli::symbol_discovery::{
     DetectedLanguages, RankedSymbol, candidate_budget, no_languages_error, relevance_of,
     resolve_search_languages, symbol_lookup_hints, symbol_rank,
 };
+use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
@@ -1125,18 +1126,24 @@ fn symbol_search_next_commands(
     let mut commands = Vec::new();
     if let Some(first) = results.first() {
         let lang_flag = language
-            .map(|lang| format!(" --lang {lang}"))
+            .map(|lang| format!(" --lang={}", shell_arg(lang)))
             .unwrap_or_default();
         let symbol_key = first.name_path.as_deref().unwrap_or(&first.name);
         commands.push(format!(
-            "symora symbols {} --symbol '{}' --depth 2",
-            first.file, symbol_key
+            "symora symbols --symbol={} --depth 2 -- {}",
+            shell_arg(symbol_key),
+            shell_arg(&first.file)
         ));
-        commands.push(format!("symora map file {} --related-limit 5", first.file));
+        commands.push(format!(
+            "symora map file --related-limit 5 -- {}",
+            shell_arg(&first.file)
+        ));
         if !looks_like_symbol_path(query) {
             commands.push(format!(
-                "symora search symbols '{}'{} --kind {}",
-                query, lang_flag, first.kind
+                "symora search symbols{} --kind={} -- {}",
+                lang_flag,
+                shell_arg(&first.kind),
+                shell_arg(query)
             ));
         }
     }
@@ -1441,7 +1448,7 @@ mod tests {
             assert!(section.hints[0].contains("never searched"), "{route:?}");
             assert_eq!(
                 section.next_commands,
-                vec!["symora search symbols 'common' --lang go"],
+                vec!["symora search symbols --lang go -- 'common'"],
                 "{route:?}"
             );
         }
@@ -1468,7 +1475,10 @@ mod tests {
         assert!(hints[0].contains("server_not_installed"));
         assert_eq!(
             symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted),
-            vec!["symora search content 'q' --lang lua", "symora doctor lua"]
+            vec![
+                "symora search content --lang lua -- 'q'",
+                "symora doctor lua"
+            ]
         );
     }
 
@@ -1508,7 +1518,7 @@ mod tests {
         assert_eq!(shortfall[0].language, Language::Go);
         assert_eq!(
             symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted),
-            vec!["symora search content 'q' --lang go", "symora doctor go"]
+            vec!["symora search content --lang go -- 'q'", "symora doctor go"]
         );
     }
 
@@ -1640,7 +1650,7 @@ mod tests {
         assert_eq!(
             section.next_commands,
             vec![
-                "symora search content 'handler' --lang lua",
+                "symora search content --lang lua -- 'handler'",
                 "symora doctor lua"
             ]
         );
@@ -1689,7 +1699,7 @@ mod tests {
         assert_eq!(
             section.next_commands,
             vec![
-                format!("symora search content 'alpha' --lang {language}"),
+                format!("symora search content --lang {language} -- 'alpha'"),
                 format!("symora doctor {language}"),
             ]
         );
@@ -1712,7 +1722,7 @@ mod tests {
         assert!(section.hints[0].contains("workspace symbol lookup failed"));
         assert_eq!(
             section.next_commands,
-            vec!["symora search symbols 'alpha'", "symora doctor rust"]
+            vec!["symora search symbols -- 'alpha'", "symora doctor rust"]
         );
     }
 

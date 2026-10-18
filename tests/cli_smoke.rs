@@ -3186,7 +3186,7 @@ fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
         assert!(
             json["error"]["hint"]
                 .as_str()
-                .is_some_and(|hint| hint.contains("$(git merge-base HEAD~1 HEAD)")),
+                .is_some_and(|hint| hint.contains("$(git merge-base -- 'HEAD~1' HEAD)")),
             "the refusal names the revision that measures the branch: {json}"
         );
     }
@@ -3290,7 +3290,7 @@ fn a_base_off_the_branch_says_what_else_the_diff_takes_back() {
             .as_array()
             .is_some_and(|hints| hints.iter().any(|h| h
                 .as_str()
-                .is_some_and(|h| h.contains("$(git merge-base side HEAD)")))),
+                .is_some_and(|h| h.contains("$(git merge-base -- 'side' HEAD)")))),
         "{off}"
     );
 
@@ -3984,6 +3984,11 @@ fn explicit_content_paths_search_hidden_text_without_expanding_the_default_scope
         std::fs::create_dir(dir.path().join(path)).unwrap();
     }
     std::fs::write(dir.path().join(".claude/guide.md"), "unique_scope_marker\n").unwrap();
+    std::fs::write(
+        dir.path().join(".claude/team's guide.md"),
+        "unique_scope_marker: driver's ready\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join(".claude/skip.md"), "unique_scope_marker\n").unwrap();
     std::fs::write(dir.path().join(".gitignore"), "skip.md\n").unwrap();
     std::fs::write(dir.path().join(".git/metadata"), "unique_scope_marker\n").unwrap();
@@ -4013,9 +4018,10 @@ fn explicit_content_paths_search_hidden_text_without_expanding_the_default_scope
             ".claude/guide.md",
         ],
     );
-    assert_eq!(answer["count"], 1, "{answer}");
+    assert_eq!(answer["count"], 2, "{answer}");
     assert_eq!(answer["items"][0]["file"], ".claude/guide.md");
     assert_eq!(answer["items"][0]["backend"], "scan");
+    assert!(answer.get("next_commands").is_none(), "{answer}");
     let missing = json_ok(
         dir.path(),
         &[
@@ -4035,4 +4041,76 @@ fn explicit_content_paths_search_hidden_text_without_expanding_the_default_scope
     assert!(!denied.status.success());
     let denied: serde_json::Value = serde_json::from_slice(&denied.stdout).unwrap();
     assert_eq!(denied["error"]["code"], "invalid_argument");
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_followups_preserve_shell_arguments_and_option_boundaries() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let directory = "-$(printf expanded) O'Reilly";
+    std::fs::create_dir(root.join(directory)).unwrap();
+    let file = format!("{directory}/main.py");
+    std::fs::write(root.join(&file), "def main():\n    return 1\n").unwrap();
+    let query = "-O'Reilly $(printf expanded)";
+    std::fs::write(root.join("style.css"), format!("/* {query} */\n")).unwrap();
+
+    let execute_followup = |command: &str| {
+        let script =
+            format!("symora() {{ \"$SYMORA_TEST_BINARY\" --deterministic \"$@\"; }}\n{command}");
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .env("SYMORA_TEST_BINARY", SYMORA)
+            .env("SYMORA_NO_DAEMON", "1")
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{command}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    let summary = json_ok(root, &["--deterministic", "map", "summary"]);
+    let map_file = summary["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|command| command.starts_with("symora map file "))
+        .expect("file follow-up");
+    assert_eq!(execute_followup(map_file)["file"], file);
+
+    let search = json_ok(
+        root,
+        &[
+            "--deterministic",
+            "search",
+            "symbols",
+            "--lang",
+            "css",
+            "--workspace-symbols",
+            "--",
+            query,
+        ],
+    );
+    let content = search["next_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|command| command.starts_with("symora search content "))
+        .expect("content follow-up");
+    let found = execute_followup(content);
+    assert_eq!(found["count"], 1, "{found}");
+    assert_eq!(found["items"][0]["file"], "style.css");
+    assert!(
+        found["items"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains(query)
+    );
 }

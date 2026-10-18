@@ -297,7 +297,7 @@ fn finish_content_search(
 
     let truncated = items.len() < count;
     let mut hints: Vec<String> = route_facts.iter().map(|(fact, _)| fact.clone()).collect();
-    let mut next_commands: Vec<String> = route_facts
+    let next_commands: Vec<String> = route_facts
         .iter()
         .map(|(_, remedy)| remedy.clone())
         .collect();
@@ -308,10 +308,6 @@ fn finish_content_search(
         truncated,
         items.len(),
         limit,
-    ));
-    next_commands.extend(content_search_next_commands(
-        &items,
-        search_scope.language(),
     ));
     with_lower_bounds(
         Section::with_total(items, count)
@@ -505,33 +501,6 @@ fn content_search_hints(
     }
     hints.truncate(3);
     hints
-}
-
-fn content_search_next_commands(
-    results: &[ContentResultOutput],
-    language: Option<&str>,
-) -> Vec<String> {
-    if results.len() <= 1 {
-        return Vec::new();
-    }
-
-    let mut commands = Vec::new();
-    if let Some(first) = results.first() {
-        commands.push(format!("symora map file {} --related-limit 5", first.file));
-        commands.push(format!("symora symbols {} --depth 1", first.file));
-        if language.is_none() {
-            let lang = Language::from_path(std::path::Path::new(&first.file));
-            if lang != Language::Unknown {
-                commands.push(format!(
-                    "symora search content '{}' --lang {}",
-                    first.content.trim(),
-                    lang.lsp_id()
-                ));
-            }
-        }
-    }
-    commands.truncate(3);
-    commands
 }
 
 fn rank_content_results(
