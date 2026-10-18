@@ -650,8 +650,19 @@ pub struct LspCallHierarchyItem {
     pub selection_range: Range,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub data: Option<Value>,
+}
+
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// Call hierarchy incoming call
@@ -791,6 +802,7 @@ mod tests {
         });
         for data in [
             None,
+            Some(Value::Null),
             Some(serde_json::json!({
                 "session": ["target", 7, null], "nested": { "ready": true }
             })),

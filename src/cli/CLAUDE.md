@@ -27,7 +27,7 @@ Incoming/outgoing traversals share `call_graph::walk`, including deterministic f
 
 ## Mutations and execution
 
-All source splices use `commands/edit.rs`: one resolution/validation path, `LineSplice`, exact preview hunks, and typed output. Resolve CLI stdin before acquiring the write lock; MCP content is literal, including `-`.
+All source writes use `commands/edit.rs`: project-boundary validation, revision checks, previews, and typed output. Range batches share validated original-document byte offsets for application and metadata. Resolve CLI stdin before acquiring the write lock; MCP content is literal, including `-`.
 
 LSP edits from rename, actions, and format use `apply_text_edits` / `apply_workspace_edits`. Source writes use `write_file` with observed content and retain the edit lock through resolution/application. Preserve revision hashes and check them again before replacement. `atomic_write` without a source precondition is for host configuration. Dry runs hold no write lock; multi-file application preflights and reports earlier applied files on failure.
 

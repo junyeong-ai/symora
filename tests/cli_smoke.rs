@@ -1434,6 +1434,84 @@ fn pattern_batches_apply_disjoint_ranges_against_the_original_document() {
         {
             assert_eq!(before["bytes_changed"], after["bytes_changed"]);
         }
+        let actual_delta = expected.len() as i64 - source.len() as i64;
+        let reported_delta: i64 = applied["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["bytes_changed"].as_i64().unwrap())
+            .sum();
+        assert_eq!(reported_delta, actual_delta, "{applied}");
+    }
+}
+
+#[test]
+fn pattern_previews_and_metadata_preserve_original_eof_and_line_endings() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sample.py");
+    for (source, pattern, replacement, expected, hunk) in [
+        (
+            "x = 1\n",
+            "(module)",
+            "x = 2",
+            "x = 2",
+            "@@ -1,1 +1,1 @@\n-x = 1\n+x = 2\n\\ No newline at end of file\n",
+        ),
+        (
+            "x = 1\r\n",
+            "(module)",
+            "x = 2\n",
+            "x = 2\r\n",
+            "@@ -1,1 +1,1 @@\n-x = 1\r\n+x = 2\r\n",
+        ),
+        (
+            "x = 1",
+            "(module)",
+            "x = 2\n",
+            "x = 2\n",
+            "@@ -1,1 +1,1 @@\n-x = 1\n\\ No newline at end of file\n+x = 2\n",
+        ),
+        (
+            "",
+            "(module)",
+            "x = 2\n",
+            "x = 2\n",
+            "@@ -0,0 +1,1 @@\n+x = 2\n",
+        ),
+        ("x = 1\n", "(module)", "", "", "@@ -1,1 +0,0 @@\n-x = 1\n"),
+        (
+            "answer = call(\r\n    1,\n    2\r\n)\n",
+            "(call)",
+            "value",
+            "answer = value\n",
+            "@@ -1,4 +1,1 @@\n-answer = call(\r\n-    1,\n-    2\r\n-)\n+answer = value\n",
+        ),
+    ] {
+        std::fs::write(&file, source).unwrap();
+        let args = [
+            "edit",
+            "pattern",
+            "sample.py",
+            "--pattern",
+            pattern,
+            "--lang",
+            "python",
+            "--text",
+            replacement,
+            "--index",
+            "all",
+        ];
+        let preview = json_ok(dir.path(), &[&args[..], &["--dry-run"]].concat());
+        assert_eq!(preview["count"], 1, "{preview}");
+        assert_eq!(preview["items"][0]["preview"], hunk, "{preview}");
+        assert_eq!(std::fs::read(&file).unwrap(), source.as_bytes());
+
+        let applied = json_ok(dir.path(), &args);
+        assert_eq!(applied["count"], 1, "{applied}");
+        assert_eq!(std::fs::read(&file).unwrap(), expected.as_bytes());
+        let delta = expected.len() as i64 - source.len() as i64;
+        assert_eq!(applied["items"][0]["bytes_changed"], delta, "{applied}");
+        assert_eq!(preview["items"][0]["bytes_changed"], delta, "{preview}");
     }
 }
 
