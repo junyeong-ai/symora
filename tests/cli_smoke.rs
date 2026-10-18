@@ -1345,6 +1345,125 @@ fn a_path_the_grammar_answer_prints_addresses_its_member() {
     }
 }
 
+#[test]
+fn pattern_batches_refuse_overlapping_original_ranges_before_preview_or_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sample.py");
+    for (source, pattern, replacement) in [
+        (
+            "answer = outer(inner())\ntail = 42\n",
+            "(call) @target",
+            "replacement",
+        ),
+        (
+            "def outer():\n    def inner():\n        return 1\n    return inner()\n\ndef tail():\n    return 2\n",
+            "(function_definition) @target",
+            "def replacement():\n    pass",
+        ),
+    ] {
+        std::fs::write(&file, source).unwrap();
+        for preview in [true, false] {
+            let mut args = vec![
+                "edit",
+                "pattern",
+                "sample.py",
+                "--pattern",
+                pattern,
+                "--lang",
+                "python",
+                "--text",
+                replacement,
+                "--index",
+                "all",
+            ];
+            if preview {
+                args.push("--dry-run");
+            }
+            let out = run_in(dir.path(), &args);
+            assert!(!out.status.success(), "{args:?} unexpectedly succeeded");
+            let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(response["error"]["code"], "conflict", "{response}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+        }
+    }
+}
+
+#[test]
+fn pattern_batches_apply_disjoint_ranges_against_the_original_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sample.py");
+    for (source, pattern, replacement, expected) in [
+        (
+            "label = '가😀'; answer = first() + second()\ntail = 42\n",
+            "(call) @target",
+            "replacement",
+            "label = '가😀'; answer = replacement + replacement\ntail = 42\n",
+        ),
+        (
+            "def first():\r\n    return 1\r\n\r\ndef second():\r\n    return 2\r\n",
+            "(function_definition) @target",
+            "def replacement():\n    pass",
+            "def replacement():\r\n    pass\r\n\r\ndef replacement():\r\n    pass\r\n",
+        ),
+    ] {
+        std::fs::write(&file, source).unwrap();
+        let args = [
+            "edit",
+            "pattern",
+            "sample.py",
+            "--pattern",
+            pattern,
+            "--lang",
+            "python",
+            "--text",
+            replacement,
+            "--index",
+            "all",
+        ];
+        let preview = json_ok(dir.path(), &[&args[..], &["--dry-run"]].concat());
+        assert_eq!(preview["count"], 2, "{preview}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
+        let applied = json_ok(dir.path(), &args);
+        assert_eq!(applied["count"], 2, "{applied}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), expected);
+        for (before, after) in preview["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(applied["items"].as_array().unwrap())
+        {
+            assert_eq!(before["bytes_changed"], after["bytes_changed"]);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn formatting_application_obeys_the_source_edit_project_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let outside = dir.path().join("external.go");
+    let source = "package main\n";
+    std::fs::write(&outside, source).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("linked.go")).unwrap();
+    for target in [outside.to_str().unwrap(), "../external.go", "linked.go"] {
+        let out = run_in(&root, &["format", target, "--apply"]);
+        assert!(!out.status.success(), "format applied outside {root:?}");
+        let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("outside project boundary"),
+            "{response}"
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), source);
+        assert!(root.join("linked.go").is_symlink());
+    }
+}
+
 /// A symbol found across the workspace takes its body from the same read the
 /// file form answers from, so it has one whether or not the file's server
 /// answers.

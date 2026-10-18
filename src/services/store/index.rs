@@ -49,10 +49,9 @@ const META_BUILD_COMPLETED_AT: &str = "build_completed_at";
 /// another operation superseded can never mark the index whole.
 const META_BUILD_EPOCH: &str = "build_epoch";
 
-/// The stat of every file the last completed build discovered, reduced to one
-/// value. What it answers is whether the tree still looks the way that build
-/// read it, which is the difference between an index-backed zero that means
-/// "nothing declares this" and one that means "nothing declared it then".
+/// The file-size policy and stat of every file the last completed build
+/// discovered, reduced to one value. It confirms the build still describes
+/// the current search domain and tree.
 const META_TREE_FINGERPRINT: &str = "tree_fingerprint";
 
 /// What produced the rows: the extraction queries of the binary that wrote
@@ -218,8 +217,8 @@ fn extraction_digest() -> String {
     format!("{:016x}", SymbolExtractor::extraction_digest())
 }
 
-/// A fingerprint of the tree a build read: the path, size, and modification
-/// time of every file it discovered, in one stable order.
+/// A fingerprint of the build's file-size policy and the path, size, and
+/// modification time of every file it discovered, in one stable order.
 ///
 /// Taken before opening files so ordinary concurrent writes invalidate the
 /// recorded view. This is metadata currency, not byte-for-byte verification:
@@ -230,7 +229,7 @@ fn extraction_digest() -> String {
 /// `unread_paths` and every answer drawn from the index is a lower bound on
 /// its account; saying the tree moved as well would name a second fact that
 /// no rebuild can clear.
-fn tree_fingerprint(root: &Path, files: &[PathBuf]) -> String {
+fn tree_fingerprint(root: &Path, files: &[PathBuf], max_file_size_bytes: u64) -> String {
     let mut entries: Vec<String> = files
         .iter()
         .map(|path| {
@@ -247,7 +246,7 @@ fn tree_fingerprint(root: &Path, files: &[PathBuf]) -> String {
         .collect();
     entries.sort();
     format!(
-        "{:016x}",
+        "{max_file_size_bytes}:{:016x}",
         crate::infra::hash_content(&entries.join("\u{2}"))
     )
 }
@@ -1133,7 +1132,8 @@ impl Store {
             .iter()
             .map(|path| path.display().to_string())
             .collect();
-        let fingerprint = tree_fingerprint(&self.project_root, &files);
+        let fingerprint =
+            tree_fingerprint(&self.project_root, &files, self.config.max_file_size_bytes);
 
         // Rows an older set of queries produced cannot be refreshed in place:
         // a file whose bytes are unchanged is skipped, so the only pass that
@@ -1228,7 +1228,7 @@ impl Store {
         Ok(recorded == Some(extraction_digest()))
     }
 
-    /// Whether the tree still looks the way the last completed build read it.
+    /// Whether the size policy and tree still match the last completed build.
     ///
     /// The walk is the build's own — same scope, so a language the build never
     /// covered cannot make the index look behind — and the comparison is
@@ -1254,10 +1254,11 @@ impl Store {
             return Ok(false);
         };
         let root = self.project_root.clone();
+        let max_file_size_bytes = self.config.max_file_size_bytes;
         let current = tokio::task::spawn_blocking(move || {
             let extensions = build.scope.extensions();
             let Discovery { files, .. } = FileFilter::new(&root).discover_files(&extensions);
-            tree_fingerprint(&root, &files)
+            tree_fingerprint(&root, &files, max_file_size_bytes)
         })
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -1637,6 +1638,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after.file_count, 1, "the oversized file keeps no rows");
+    }
+
+    #[tokio::test]
+    async fn index_currency_includes_the_file_size_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("small.py"), "def kept():\n    return 1\n").unwrap();
+        std::fs::write(
+            root.join("large.py"),
+            format!("def policy_probe():\n    return 1\n#{}\n", "x".repeat(128)),
+        )
+        .unwrap();
+
+        let mut store = Store::open(
+            root,
+            StoreConfig {
+                max_file_size_bytes: 1024,
+                ..StoreConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(store.tree_is_current().await.unwrap());
+        let unlimited = crate::models::config::SearchConfig {
+            max_file_size_mb: 0,
+            ..crate::models::config::SearchConfig::default()
+        }
+        .max_file_size_bytes();
+        let mut previous_matches = 1;
+
+        for (max_file_size_bytes, expected_matches) in [(32, 0), (2048, 1), (unlimited, 1), (32, 0)]
+        {
+            drop(store);
+            store = Store::open(
+                root,
+                StoreConfig {
+                    max_file_size_bytes,
+                    ..StoreConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                !store.tree_is_current().await.unwrap(),
+                "a changed size policy cannot certify the existing snapshot"
+            );
+            assert_eq!(
+                store
+                    .search_symbols("policy_probe", 10, None, Some(Language::Python))
+                    .await
+                    .unwrap()
+                    .total,
+                previous_matches,
+                "the completed symbol snapshot remains readable"
+            );
+            assert_eq!(
+                store
+                    .search_content("policy_probe", 10, &[Language::Python])
+                    .await
+                    .unwrap()
+                    .total,
+                previous_matches,
+                "the completed content snapshot remains readable"
+            );
+
+            let stats = store.index(IndexOptions::default()).await.unwrap();
+            assert_eq!(stats.file_count, 1 + expected_matches);
+            assert!(store.tree_is_current().await.unwrap());
+            assert_eq!(
+                store
+                    .search_symbols("policy_probe", 10, None, Some(Language::Python))
+                    .await
+                    .unwrap()
+                    .total,
+                expected_matches
+            );
+            assert_eq!(
+                store
+                    .search_content("policy_probe", 10, &[Language::Python])
+                    .await
+                    .unwrap()
+                    .total,
+                expected_matches
+            );
+            previous_matches = expected_matches;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_fingerprint_does_not_certify_index_currency() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("lib.rs");
+        std::fs::write(&path, "fn legacy_probe() {}\n").unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let (size, modified) = file_stamp(&path).unwrap();
+        let legacy = format!(
+            "{:016x}",
+            crate::infra::hash_content(&format!("lib.rs\u{1}{size}\u{1}{modified}"))
+        );
+        store
+            .db
+            .call(move |conn| {
+                write_meta(conn, META_TREE_FINGERPRINT, &legacy)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(!store.tree_is_current().await.unwrap());
+        assert_eq!(
+            store
+                .search_symbols("legacy_probe", 10, None, None)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+        store.index(IndexOptions::default()).await.unwrap();
+        assert!(store.tree_is_current().await.unwrap());
     }
 
     #[tokio::test]

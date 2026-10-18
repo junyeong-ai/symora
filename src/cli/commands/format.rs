@@ -33,7 +33,11 @@ pub async fn execute(args: FormatArgs, app: &App) -> Result<()> {
         .then(|| super::edit::lock_edits(app.root()))
         .transpose()?;
     let ctx = &app.output;
-    let file = match resolve_project_file(&args.file, app.root()) {
+    let file = match if args.apply {
+        super::edit::resolve_file_path(app, &args.file)
+    } else {
+        resolve_project_file(&args.file, app.root()).map_err(anyhow::Error::from)
+    } {
         Ok(p) => p,
         Err(e) => {
             ctx.print_error(e);

@@ -373,14 +373,14 @@ impl AstQueryService for DefaultAstQueryService {
             .get(&language)
             .ok_or(SearchError::UnsupportedLanguage(language))?;
 
-        let pattern_with_capture = if pattern.contains('@') {
-            pattern.to_string()
-        } else {
-            format!("{} @match", pattern.trim())
-        };
-
-        let query = Query::new(&entry.ts_language, &pattern_with_capture)
+        let query = Query::new(&entry.ts_language, pattern)
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
+        let query = if query.capture_names().is_empty() {
+            Query::new(&entry.ts_language, &format!("{pattern}\n@match"))
+                .map_err(|e| SearchError::InvalidPattern(e.to_string()))?
+        } else {
+            query
+        };
 
         let mut answer = AstAnswer::default();
         let extensions: Vec<&str> = language.extensions().to_vec();
@@ -735,6 +735,32 @@ pub fn world() -> i32 {
         assert!(matches.is_ok());
         let matches = matches.unwrap();
         assert_eq!(matches.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn default_capture_uses_query_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decorated.py");
+        std::fs::write(&path, "@decorate\ndef local():\n    pass\n").unwrap();
+        let service = DefaultAstQueryService::default();
+
+        for (pattern, capture) in [
+            (r#""@""#, "match"),
+            ("\"@\" ; @ is not a capture here", "match"),
+            (r#""@" @token"#, "token"),
+        ] {
+            let answer = service
+                .query(pattern, SymbolLanguage::Python, std::slice::from_ref(&path))
+                .await
+                .unwrap();
+            assert_eq!(answer.matches.len(), 1, "{pattern}: {answer:?}");
+            assert_eq!(answer.matches[0].text, "@");
+            assert_eq!(
+                answer.matches[0].captures,
+                vec![(capture.to_string(), "@".to_string())],
+                "{pattern}"
+            );
+        }
     }
 
     #[test]
