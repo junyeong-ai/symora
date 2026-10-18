@@ -41,9 +41,11 @@ while True:
             "name": "target", "kind": 12, "uri": message["params"]["textDocument"]["uri"],
             "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
             "selectionRange": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 10}},
+            "data": {"session": ["target", 7, None], "nested": {"ready": True}},
         }]
     elif method == "callHierarchy/incomingCalls":
         item = message["params"]["item"]
+        assert item["data"] == {"session": ["target", 7, None], "nested": {"ready": True}}
         result = [{"from": dict(item, name="caller"), "fromRanges": [item["range"]]}]
     elif method == "exit":
         sys.exit()
