@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::Result;
 use clap::Args;
@@ -11,6 +11,7 @@ use futures::future::join_all;
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::config::LspRuntimeConfig;
+use crate::infra::lsp::configuration::ServerConfiguration;
 use crate::infra::lsp::health::serves_workspace;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
 use crate::models::symbol::Language;
@@ -44,9 +45,8 @@ struct LanguageStatus {
     /// about the filesystem: a version-manager shim, a wrapper that cannot
     /// launch, and a working server all satisfy it alike.
     installed: bool,
-    /// Whether the server actually serves this workspace, verified through
-    /// the LSP handshake wherever the version probe could not settle it.
-    /// An agent branches on this, never on `installed` alone.
+    /// Whether a fresh server completed the LSP handshake. This does not
+    /// verify import resolution or workspace indexing completeness.
     serves: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
@@ -66,6 +66,37 @@ struct LanguageStatus {
     command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    python_interpreter: Option<PythonInterpreter>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+enum PythonInterpreter {
+    Settings { python_path: serde_json::Value },
+    ProjectEnvironment { python_path: String },
+    ServerDefault,
+}
+
+fn python_interpreter(root: &Path, config: &LspRuntimeConfig) -> PythonInterpreter {
+    if let Some(path) = config
+        .servers
+        .get("python")
+        .and_then(|server| server.settings.as_ref())
+        .and_then(|settings| settings.get("python"))
+        .and_then(|python| python.get("pythonPath"))
+    {
+        return PythonInterpreter::Settings {
+            python_path: path.clone(),
+        };
+    }
+    let configuration = ServerConfiguration::resolve(Language::Python, root, config);
+    match configuration.settings["python"]["pythonPath"].as_str() {
+        Some(path) => PythonInterpreter::ProjectEnvironment {
+            python_path: path.to_string(),
+        },
+        None => PythonInterpreter::ServerDefault,
+    }
 }
 
 #[derive(Serialize)]
@@ -83,12 +114,15 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     // Re-load through the same ConfigService every command uses, so the
     // report reflects on-disk config and can disclose load failures that
     // App::new falls back from silently.
-    let (overrides, config_errors) = match app.config_service.load(false).await {
+    let (config, config_errors) = match app.config_service.load(false).await {
         Ok(config) => {
             let errors = config.problems();
-            (config.lsp.servers, errors)
+            (config, errors)
         }
-        Err(e) => (BTreeMap::new(), vec![e.to_string()]),
+        Err(e) => (
+            crate::models::config::SymoraConfig::default(),
+            vec![e.to_string()],
+        ),
     };
     // Resolved through the same parser every `--lang` uses, so one
     // vocabulary addresses a language across the whole CLI. A substring
@@ -111,7 +145,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
 
     // Narrow before probing: a single-language report must not pay for
     // spawning every other language's server.
-    let all_servers: Vec<_> = check_all_servers(servers::merged(&overrides))
+    let all_servers: Vec<_> = check_all_servers(servers::merged(&config.lsp.servers))
         .into_iter()
         .filter(|s| requested.is_none_or(|language| s.language == language))
         .collect();
@@ -125,7 +159,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     // Handshakes are independent, and a server that never answers costs its
     // whole tier budget — run them together so one unresponsive server
     // delays the report by its own timeout rather than by everyone else's.
-    let runtime = Arc::new(LspRuntimeConfig::from(app.config()));
+    let runtime = Arc::new(LspRuntimeConfig::from(&config));
     let serving = join_all(all_servers.iter().map(|server| {
         let runtime = Arc::clone(&runtime);
         async move {
@@ -180,6 +214,8 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 source: overridden.then(|| "config".to_string()),
                 command: overridden.then_some(s.command),
                 install,
+                python_interpreter: (s.language == Language::Python)
+                    .then(|| python_interpreter(app.root(), &runtime)),
             }
         })
         .collect();
@@ -240,6 +276,7 @@ mod tests {
             source: None,
             command: None,
             install: None,
+            python_interpreter: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["symbol_extraction"], false);
@@ -264,10 +301,66 @@ mod tests {
             source: None,
             command: None,
             install: Some("`rust-analyzer` resolves but does not serve".to_string()),
+            python_interpreter: None,
         };
         let value = serde_json::to_value(&status).unwrap();
         assert_eq!(value["installed"], true);
         assert_eq!(value["serves"], false);
         assert!(value["install"].is_string());
+    }
+
+    #[test]
+    fn interpreter_report_distinguishes_settings_discovery_and_server_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = LspRuntimeConfig::default();
+        let report = |config: &LspRuntimeConfig| {
+            serde_json::to_value(python_interpreter(root.path(), config)).unwrap()
+        };
+        assert_eq!(
+            report(&config),
+            serde_json::json!({"source": "server_default"})
+        );
+
+        let bin = root
+            .path()
+            .join(".venv")
+            .join(if cfg!(windows) { "Scripts" } else { "bin" });
+        std::fs::create_dir_all(&bin).unwrap();
+        let interpreter = bin.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        });
+        std::fs::write(&interpreter, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let discovered = report(&config);
+        assert_eq!(discovered["source"], "project_environment");
+        assert_eq!(
+            Path::new(discovered["python_path"].as_str().unwrap()),
+            interpreter.canonicalize().unwrap()
+        );
+
+        config.servers.insert(
+            "python".into(),
+            crate::models::config::ServerOverride {
+                settings: Some(
+                    serde_json::json!({"python": {"pythonPath": "/explicit/python"}})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            report(&config),
+            serde_json::json!({
+                "source": "settings", "python_path": "/explicit/python"
+            })
+        );
     }
 }
