@@ -387,7 +387,7 @@ Requested `context` bodies share `--body-tokens` in target/callee/type order, wh
 
 
 
-When the language server does not explicitly confirm workspace readiness, results carry `indexing: "unconfirmed"`. Log text, ended progress tasks, and elapsed time do not prove completion. A zero in this state does not prove absence. Rename can apply server-provided edits while preserving this marker; a timeout after explicit server activity blocks application.
+When the language server does not explicitly confirm workspace readiness, results carry `indexing: "unconfirmed"`. Log text, ended progress tasks, and elapsed time do not prove completion. A zero in this state does not prove absence. Rename refuses application under both `unconfirmed` and `timed_out`; `--dry-run` previews the current edit set. Servers without a completion channel may remain unconfirmed.
 
 ## Search index
 

@@ -65,7 +65,7 @@ symora diagnostics src/auth.py --with-context
 - Prefer a returned symbol path over line numbers for sequential edits. `insert-before`/`insert-after` take `--code`; range replace and AST pattern take `--text`. Range `--expect` checks the live text.
 - Preview first. Applied edits can request `--with-diagnostics`; symbol replacement/insertion can also use `--verify-callers`. Unknown diagnostics are not clean; run relevant project checks.
 - Delete's `--expect-no-references` requires verified static reference freedom. A static zero alone does not establish that code is unused.
-- Rename can apply with `indexing: unconfirmed`; preview and validate usages. `timed_out` blocks application.
+- Rename requires confirmed workspace readiness to apply. `unconfirmed` and `timed_out` permit previews only; retrying cannot add a missing completion channel.
 - Source edits resolve within the project and are checked against observed content under a shared lock. AST batch replacements require non-overlapping matches. Multi-file application is not atomic; inspect already-applied files before retrying an error.
 
 ## Recover

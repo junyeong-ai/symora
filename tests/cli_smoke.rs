@@ -3998,6 +3998,69 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
 
 #[test]
 #[cfg(unix)]
+fn unconfirmed_rename_previews_the_edit_set_without_applying_it() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("rename protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("main.go");
+    let original = "package main\nfunc abc() {}\nfunc caller() { abc() }\n";
+    let other = "package main\nfunc other() { abc() }\n";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(root.path().join("other.go"), other).unwrap();
+    std::fs::write(root.path().join("go.mod"), "module example.com/fixture\n").unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"go": {
+        "command": "python3", "args": [server, source, "unconfirmed-rename"]
+    }}}});
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let preview = json_ok(
+        root.path(),
+        &["rename", "main.go:3:17", "Renamed", "--dry-run"],
+    );
+    assert_eq!(preview["affected_files"], 1, "{preview}");
+    assert_eq!(preview["indexing"], "unconfirmed", "{preview}");
+    assert_eq!(preview["dry_run"], true, "{preview}");
+    assert!(preview.get("config_errors").is_none(), "{preview}");
+    assert!(
+        preview["message"]
+            .as_str()
+            .unwrap()
+            .contains("application is refused")
+    );
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+
+    let output = run_in(root.path(), &["rename", "main.go:3:17", "Renamed"]);
+    let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "precondition_failed");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unconfirmed")
+    );
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("other.go")).unwrap(),
+        other
+    );
+}
+
+#[test]
+#[cfg(unix)]
 fn unrelated_hover_text_cannot_suppress_a_rename() {
     let python = std::path::Path::new("/usr/bin/python3");
     if !Command::new(python)

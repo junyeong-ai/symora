@@ -45,6 +45,12 @@ while True:
             "hoverProvider": True,
             "renameProvider": {"prepareProvider": True}
         }}
+    elif method == "initialized" and mode == "unrelated-hover":
+        notification = {"jsonrpc": "2.0", "method": "experimental/serverStatus",
+                        "params": {"health": "ok", "quiescent": True}}
+        body = json.dumps(notification).encode()
+        sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        sys.stdout.buffer.flush()
     elif method == "textDocument/prepareRename" and mode != "unrelated-hover":
         result = {"placeholder": "abc", "range": {
             "start": {"line": 1, "character": 5},
@@ -54,7 +60,7 @@ while True:
         result = []
     elif method == "textDocument/hover" and mode == "unrelated-hover":
         result = {"contents": "Renamed helper documentation."}
-    elif method == "textDocument/rename" and mode == "unrelated-hover":
+    elif method == "textDocument/rename" and mode in ("unrelated-hover", "unconfirmed-rename"):
         result = {"changes": {source.as_uri(): [{
             "range": {"start": {"line": line, "character": column},
                       "end": {"line": line, "character": column + 3}},
