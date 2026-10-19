@@ -103,6 +103,17 @@ pub async fn execute_symbol_search(
         return Ok(());
     }
 
+    let kind = match kind.map(str::parse::<SymbolKind>).transpose() {
+        Ok(kind) => kind,
+        Err(error) => {
+            ctx.print_error(OutputError::invalid(error).with_hint(format!(
+                "Valid kinds: {}",
+                SymbolKind::all_kind_names().join(", ")
+            )));
+            return Ok(());
+        }
+    };
+
     // `*` wildcards are the file-tree matcher's syntax; neither the LIKE index
     // nor the LSP workspace search honors them (they would fuzzy-strip the star
     // and surface unrelated crates), so resolve a glob against the index with
@@ -140,7 +151,7 @@ pub async fn execute_symbol_search(
         .search_symbols(
             query,
             candidate_budget(limit),
-            kind.map(SymbolKind::parse_or_default),
+            kind,
             explicit_index_language(language),
         )
         .await
@@ -259,7 +270,7 @@ async fn execute_glob_symbol_search(
     app: &App,
     query: &str,
     language: Option<&str>,
-    kind: Option<&str>,
+    kind: Option<SymbolKind>,
     limit: usize,
 ) -> Result<()> {
     let ctx = &app.output;
@@ -277,12 +288,7 @@ async fn execute_glob_symbol_search(
     // for. `finish_symbol_search` caps the emitted page at the display `limit`.
     let page = match app
         .store
-        .search_symbols(
-            seed,
-            usize::MAX,
-            kind.map(SymbolKind::parse_or_default),
-            explicit_index_language(language),
-        )
+        .search_symbols(seed, usize::MAX, kind, explicit_index_language(language))
         .await
     {
         Ok(page) => page,
@@ -391,7 +397,7 @@ async fn execute_workspace_symbol_search(
     app: &App,
     query: &str,
     language: Option<&str>,
-    kind: Option<&str>,
+    kind: Option<SymbolKind>,
     limit: usize,
     routed: WorkspaceRoute<'_>,
 ) -> Result<()> {
@@ -471,7 +477,7 @@ async fn execute_workspace_symbol_search(
                 .search_symbols(
                     query,
                     candidate_budget(limit),
-                    kind.map(SymbolKind::parse_or_default),
+                    kind,
                     explicit_index_language(language),
                 )
                 .await,
@@ -596,7 +602,7 @@ fn finish_symbol_search(
     count: usize,
     query: &str,
     language: Option<&str>,
-    kind: Option<&str>,
+    kind: Option<SymbolKind>,
     limit: usize,
     test_scope: &TestScope,
     shortfall: &[Uncovered],
@@ -649,12 +655,11 @@ struct WorkspaceSymbolLookup {
 async fn collect_workspace_symbol_results(
     app: &App,
     query: &str,
-    kind: Option<&str>,
+    kind: Option<SymbolKind>,
     limit: usize,
     languages: &[Language],
 ) -> WorkspaceSymbolLookup {
     let ctx = &app.output;
-    let parsed_kind = kind.map(crate::models::symbol::SymbolKind::parse_or_default);
     let mut failures = Vec::new();
     if languages.is_empty() {
         return WorkspaceSymbolLookup {
@@ -709,7 +714,7 @@ async fn collect_workspace_symbol_results(
                 &symbols,
                 Some(query),
                 false,
-                parsed_kind.as_ref().map(std::slice::from_ref),
+                kind.as_ref().map(std::slice::from_ref),
                 None,
                 false,
             )
@@ -717,7 +722,7 @@ async fn collect_workspace_symbol_results(
             symbols
                 .into_iter()
                 .filter(|symbol| {
-                    kind_matches(symbol, parsed_kind.as_ref())
+                    kind_matches(symbol, kind.as_ref())
                         && symbol
                             .name
                             .to_ascii_lowercase()
@@ -876,13 +881,12 @@ fn merge_symbol_results(
 async fn collect_document_path_results(
     app: &App,
     query: &str,
-    kind: Option<&str>,
+    kind: Option<SymbolKind>,
     limit: usize,
     languages: &[Language],
     seed_results: &[SymbolResultOutput],
 ) -> DocumentExpansion {
     let ctx = &app.output;
-    let parsed_kind = kind.map(crate::models::symbol::SymbolKind::parse_or_default);
     let leaf = workspace_query_from_pattern(query);
     if leaf.is_empty() {
         return DocumentExpansion::default();
@@ -959,7 +963,7 @@ async fn collect_document_path_results(
             &symbols,
             Some(query),
             false,
-            parsed_kind.as_ref().map(std::slice::from_ref),
+            kind.as_ref().map(std::slice::from_ref),
             None,
             false,
         );
@@ -1099,7 +1103,7 @@ fn score_workspace_symbol(query: &str, symbol: &crate::models::symbol::Symbol) -
 fn symbol_search_hints(
     query: &str,
     language: Option<&str>,
-    kind: Option<&str>,
+    kind: Option<SymbolKind>,
     truncated: bool,
     result_count: usize,
     limit: usize,

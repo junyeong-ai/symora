@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cli::LocationArg;
+use crate::models::lsp::IndexingDegradation;
 
 pub fn schema_object(fields: &[(&str, &str, &str)], required: &[&str]) -> Value {
     let mut props = serde_json::Map::new();
@@ -128,9 +129,10 @@ pub fn section_output_schema(items_description: &str) -> Value {
             "next_commands": { "type": "array", "items": { "type": "string" } },
             "indexing": {
                 "type": "string",
-                "enum": ["timed_out"],
-                "description": "Present only when computed under degraded \
-                                workspace indexing — results are a lower bound",
+                "enum": [IndexingDegradation::TimedOut, IndexingDegradation::Unconfirmed],
+                "description": "Workspace analysis was not verified complete: \
+                                timed_out exhausted the wait; unconfirmed means \
+                                no explicit completion signal. Results may be partial",
             },
             "error": {
                 "type": "object",

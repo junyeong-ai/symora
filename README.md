@@ -6,7 +6,7 @@
 
 # Symora
 
-**컴파일러처럼 코드베이스를 읽으세요 — 문자열이 아니라 심볼 단위로.** Symora는 "이게 어디 정의돼 있지", "누가 이걸 호출하지", "이걸 바꾸면 뭐가 깨지지" 같은 질문에 정확한 구조화 JSON으로 답하는 CLI입니다. AI 코딩 에이전트와 스크립트를 위해 설계됐습니다.
+**AI 코딩 에이전트를 위한 심볼 중심 코드 분석 도구.** Symora는 language server 탐색, 인덱스 검색, 구문 분석을 CLI와 MCP 서버로 제공하며 구조화된 JSON을 반환합니다.
 
 [![CI](https://github.com/junyeong-ai/symora/workflows/CI/badge.svg)](https://github.com/junyeong-ai/symora/actions)
 [![Rust](https://img.shields.io/badge/rust-1.98.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
@@ -18,7 +18,7 @@
 
 ## Symora란?
 
-grep은 *문자열*을 찾고, Symora는 *의미*를 찾습니다. 하나의 CLI 뒤에 네 가지 엔진을 결합합니다.
+코드 탐색과 수정을 위해 네 가지 엔진을 결합합니다.
 
 - **LSP 의미 분석** — 에디터가 쓰는 바로 그 language server(rust-analyzer, pyright, typescript-language-server, gopls 등)에서 실제 정의·참조·호출 계층을 가져옵니다.
 - **SQLite 심볼/콘텐츠 인덱스** — 저장소의 심볼과 콘텐츠를 검색하며, 디스크에 지속됩니다.
@@ -31,7 +31,7 @@ grep은 *문자열*을 찾고, Symora는 *의미*를 찾습니다. 하나의 CLI
 
 ## 왜 Symora인가?
 
-코딩 에이전트(또는 새로 합류한 팀원)는 늘 같은 질문을 반복합니다. 텍스트 검색은 느리고 노이즈가 많지만, Symora는 정확히 답합니다.
+코딩 에이전트(또는 새로 합류한 팀원)는 선언, 참조, 소스 맥락이 필요합니다. Symora는 텍스트 검색을 보완하는 구조화된 답을 제공합니다.
 
 | 질문 | 명령 |
 | --- | --- |
@@ -39,8 +39,8 @@ grep은 *문자열*을 찾고, Symora는 *의미*를 찾습니다. 하나의 CLI
 | `processOrder`는 어디 정의돼 있지? | `symora search symbols processOrder` |
 | 이 심볼은 맥락 속에서 뭘 하지? | `symora context <file:line> --all` |
 | 누가 호출하지? | `symora callers <file:line>` |
-| 바꾸면 뭐가 깨지지? | `symora impact <file:line>` |
-| 안전하게 바꾸기(먼저 미리보기) | `symora edit replace-body … --dry-run` |
+| 변경에 영향을 받을 수 있는 정적 의존성은? | `symora impact <file:line>` |
+| 심볼 수정 미리보기 | `symora edit replace-body … --dry-run` |
 
 ---
 
@@ -50,23 +50,28 @@ grep은 *문자열*을 찾고, Symora는 *의미*를 찾습니다. 하나의 CLI
 # 1. 설치 (사전 빌드 바이너리, SHA-256 검증)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 
-# 2. 현재 프로젝트의 검색 인덱스 빌드 (소스 변경 후 증분 갱신)
-cd your-project && symora search index build
+# 2. 프로젝트로 이동
+cd your-project
 
-# 3. 질문하기
+# 3. 알고 있는 범위부터 탐색
 symora map summary                          # 저장소 개요
-symora search symbols AuthService           # 심볼 찾기
-symora context src/auth/service.ts:42 --all # 그 심볼의 모든 것
+symora context src/auth/service.ts:42 --body # 알고 있는 심볼 확인
 symora impact src/auth/service.ts:42        # 변경 영향 범위
+
+# 선택: 이름·콘텐츠를 반복 검색할 때 인덱스 빌드, 소스 변경 후 증분 갱신
+symora search index build
+symora search symbols AuthService           # 심볼 찾기
 ```
 
 LSP 기반 명령은 해당 언어의 language server가 필요합니다. `symora doctor <lang>`로 확인하고, 출력에 나온 명령으로 설치하세요.
+
+결과를 완전한 목록으로 취급하기 전에 `indexing`, `incomplete`, `coverage_gaps`를 확인하세요. `indexing: "unconfirmed"`는 워크스페이스 분석 완료를 확인할 수 없었다는 뜻이며, 참조가 적거나 없어도 일부 결과일 수 있습니다.
 
 ---
 
 ## 동작 방식
 
-하나의 명령 레이어가 두 표면(CLI와 MCP)을 제공하고, 따뜻한 daemon 또는 in-process로 실행됩니다 — 결과는 어느 쪽이든 동일합니다.
+하나의 명령 레이어가 CLI와 MCP를 제공합니다. daemon과 in-process 실행은 같은 출력 계약을 사용하며, language server 상태와 인덱싱에 따라 관측 결과가 달라질 수 있습니다.
 
 ```mermaid
 flowchart TD
@@ -87,7 +92,7 @@ flowchart TD
 
 ## 탐색 흐름
 
-Symora는 *대략적인* 감에서 *정확한* 답으로 이동하도록 설계됐습니다.
+Symora는 저장소의 구조에서 개별 선언과 관계로 탐색 범위를 좁히도록 설계됐습니다.
 
 ```mermaid
 flowchart LR
@@ -233,7 +238,7 @@ symora callers src/services/checkout.ts:48
 ```
 > 운영 코드의 진입점 두 곳(HTTP 라우트와 백그라운드 잡)과 테스트 함수 두 개입니다. `location`은 호출자가 선언된 위치, `call_site`는 내 심볼을 호출하는 정확한 라인입니다.
 
-### ⑤ 바꾸면 뭐가 깨지지?
+### ⑤ 변경에 영향을 받을 수 있는 정적 의존성은?
 
 ```bash
 symora impact src/services/checkout.ts:48 --depth 2
@@ -298,8 +303,8 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 ## 명령 그룹
 
 ```bash
-# 탐색 (인덱스 + tree-sitter; language server 불필요)
-symora search symbols AuthUser              # fuzzy 심볼 검색
+# 탐색 (인덱스, AST, 라이브 워크스페이스 조회)
+symora search symbols AuthUser              # 이름·경로 검색과 순위화
 symora search symbols AuthUser --workspace-symbols   # 인덱스 건너뛰고 라이브 LSP 강제
 symora search content "async function"      # 순위가 매겨진 전문 검색
 symora search ast '(class_declaration) @c' --lang typescript   # 구조적 AST 매칭
@@ -311,7 +316,7 @@ symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련
 symora map dir src/services                 # 디렉터리 목록
 symora map related src/services/checkout.ts # 이름·디렉터리 기반 다음 파일 후보
 
-# 심볼 & 들여다보기 (LSP)
+# 심볼 & 들여다보기 (LSP 또는 AST 선언; 의미 분석은 LSP 필요)
 symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
 symora symbols src/services/checkout.ts --body      # 트리 + 소스 본문
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
@@ -322,7 +327,7 @@ symora hover src/services/checkout.ts:48:9          # 타입 / 시그니처
 symora signature src/services/checkout.ts:55:20     # 호출 지점 시그니처 도움말
 
 # 네비게이션 (LSP)
-symora refs src/services/checkout.ts:48             # 모든 참조
+symora refs src/services/checkout.ts:48             # 참조; indexing 확인
 symora callers src/services/checkout.ts:48          # 들어오는 호출
 symora callees src/services/checkout.ts:48          # 나가는 호출
 symora callees src/services/checkout.ts:48 --depth 3            # 도달 가능 집합
@@ -547,7 +552,7 @@ symora daemon start | stop | restart | status
 | `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 인덱스 범위 밖에서 심볼 검색은 language server를 조회할 수 있고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. |
 | 검색 결과의 `coverage_gaps` | 그 언어는 답에 들어 있지 않습니다. `reason: "unavailable"`이면 `message`에 실패 원인의 첫 줄(서버가 `initialize`를 거부했다면 그 이유)이 실리고, hint와 `next_commands`는 조회가 실패한 언어부터 다룹니다. |
-| `indexing: "timed_out"` | language server가 아직 워크스페이스를 읽는 중입니다. 목록이면 count가 하한이고, `def`·`hover`처럼 답이 하나인 명령에서 비어 있으면 "아직 확정 안 됨"이지 "없음"이 아닙니다. 따뜻해진 뒤 재시도. `rename`은 이 상태에서 적용을 거부하고 미리보기만 합니다 — 편집 집합이 하한이면 일부 호출부만 바뀝니다. |
+| `indexing: "timed_out"` | 워크스페이스 작업이 인덱싱 대기 한도를 넘었습니다. 목록의 count는 하한이며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 보고된 작업이 끝난 뒤 재시도하세요. `rename`은 적용을 거부하며, 현재 편집 집합을 확인하려면 `--dry-run`을 명시해야 합니다. |
 | `incomplete: true` | count가 하한 — 답이 자기 소스가 가진 전부를 담지 못했습니다. 원인은 `hints`가 이름을 대고, 고칠 방법이 있으면 `next_commands`에 담깁니다. `unread_paths`가 함께 오면 그 경로들의 권한부터 확인하세요 — 읽히지 않는 경로에는 재빌드도 닿지 않습니다. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
 | `search index`의 `conflict` | 다른 프로세스가 인덱스를 다시 만드는 중 — 그대로 재시도. 절반만 적용된 상태는 남지 않습니다. |

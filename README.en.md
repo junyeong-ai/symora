@@ -6,7 +6,7 @@
 
 # Symora
 
-**Read a codebase the way a compiler does — by symbol, not by string.** Symora is a CLI that answers "where is this defined", "who calls this", and "what breaks if I change this" with precise, structured JSON, built for AI coding agents and scripts.
+**Symbol-centric code intelligence for AI coding agents.** Symora combines language-server navigation, indexed search, and syntax analysis in a CLI and MCP server with structured JSON results.
 
 [![CI](https://github.com/junyeong-ai/symora/workflows/CI/badge.svg)](https://github.com/junyeong-ai/symora/actions)
 [![Rust](https://img.shields.io/badge/rust-1.98.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
@@ -18,10 +18,10 @@
 
 ## What is Symora?
 
-Grep finds *text*. Symora finds *meaning*. It combines four engines behind one CLI:
+Symora combines four engines for code exploration and editing:
 
 - **LSP semantics** — real definitions, references, and call hierarchy from the same language servers your editor uses (rust-analyzer, pyright, typescript-language-server, gopls, and more).
-- **SQLite symbol/content index** — millisecond fuzzy search across the whole repo, persistent on disk.
+- **SQLite symbol/content index** — persistent name/path and content search with ranked results.
 - **tree-sitter AST search** — structural pattern matching, no language server required.
 - **A reusable daemon** — keeps language-server sessions warm so repeated calls stay fast.
 
@@ -31,7 +31,7 @@ Every command prints JSON by default, so an agent or a shell script can parse th
 
 ## Why Symora?
 
-A coding agent (or a new teammate) constantly asks the same questions. Text search answers them slowly and noisily. Symora answers them exactly:
+A coding agent (or a new teammate) needs declarations, references, and source context. Symora complements text search with structured answers:
 
 | Question | Command |
 | --- | --- |
@@ -39,8 +39,8 @@ A coding agent (or a new teammate) constantly asks the same questions. Text sear
 | Where is `processOrder` defined? | `symora search symbols processOrder` |
 | What does this symbol do, in context? | `symora context <file:line> --all` |
 | Who calls it? | `symora callers <file:line>` |
-| What breaks if I change it? | `symora impact <file:line>` |
-| Change it safely (preview first) | `symora edit replace-body … --dry-run` |
+| Which static dependencies may be affected? | `symora impact <file:line>` |
+| Preview a symbol edit | `symora edit replace-body … --dry-run` |
 
 ---
 
@@ -50,23 +50,28 @@ A coding agent (or a new teammate) constantly asks the same questions. Text sear
 # 1. Install (prebuilt binary, SHA-256 verified)
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/symora/main/scripts/install.sh | bash
 
-# 2. Build the search index for the current project (once)
-cd your-project && symora search index build
+# 2. Enter the project
+cd your-project
 
-# 3. Ask questions
+# 3. Start with the scope you know
 symora map summary                          # repo overview
-symora search symbols AuthService           # find a symbol
-symora context src/auth/service.ts:42 --all # everything about it
+symora context src/auth/service.ts:42 --body # inspect a known symbol
 symora impact src/auth/service.ts:42        # blast radius of a change
+
+# Optional: build an index for repeated name/content discovery; refresh after changes
+symora search index build
+symora search symbols AuthService           # find a symbol
 ```
 
 LSP-backed commands also need the matching language server. Check with `symora doctor <lang>` and install with the command it prints.
+
+Check `indexing`, `incomplete`, and `coverage_gaps` before treating results as complete. `indexing: "unconfirmed"` means workspace analysis completion could not be verified; a small or empty reference set can still be partial.
 
 ---
 
 ## How it works
 
-One command layer serves two surfaces (CLI and MCP) and runs against either a warm daemon or in-process — the result is identical either way.
+One command layer serves both CLI and MCP. Daemon and in-process execution share output contracts; language-server state and indexing can affect the observed results.
 
 ```mermaid
 flowchart TD
@@ -87,7 +92,7 @@ flowchart TD
 
 ## The exploration flow
 
-Symora is designed to move from a *rough* idea to an *exact* answer:
+Symora is designed to narrow exploration from repository orientation to specific declarations and their relationships:
 
 ```mermaid
 flowchart LR
@@ -233,7 +238,7 @@ symora callers src/services/checkout.ts:48
 ```
 > Two production entry points — the HTTP route and a background job — and two test functions. `location` is where the caller is declared; `call_site` is the exact line that calls your symbol.
 
-### ⑤ What breaks if I change it?
+### ⑤ Which static dependencies may be affected?
 
 ```bash
 symora impact src/services/checkout.ts:48 --depth 2
@@ -298,8 +303,8 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 ## Command groups
 
 ```bash
-# Discovery (index + tree-sitter; no language server needed)
-symora search symbols AuthUser              # fuzzy symbol search
+# Discovery (index, AST, and live workspace lookup)
+symora search symbols AuthUser              # ranked name/path search
 symora search symbols AuthUser --workspace-symbols   # force live LSP, skip the index
 symora search content "async function"      # ranked full-text search
 symora search ast '(class_declaration) @c' --lang typescript   # structural AST match
@@ -311,7 +316,7 @@ symora map file src/services/checkout.ts    # one file: symbols, siblings, relat
 symora map dir src/services                 # directory listing
 symora map related src/services/checkout.ts # nearby files by name and directory
 
-# Symbols & inspection (LSP)
+# Symbols & inspection (LSP or AST declarations; semantic queries require LSP)
 symora symbols src/services/checkout.ts --depth 2   # full symbol tree
 symora symbols src/services/checkout.ts --body      # tree + source bodies
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
@@ -322,7 +327,7 @@ symora hover src/services/checkout.ts:48:9          # type / signature
 symora signature src/services/checkout.ts:55:20     # signature help at a call
 
 # Navigation (LSP)
-symora refs src/services/checkout.ts:48             # all references
+symora refs src/services/checkout.ts:48             # references; inspect indexing
 symora callers src/services/checkout.ts:48          # incoming calls
 symora callees src/services/checkout.ts:48          # outgoing calls
 symora callees src/services/checkout.ts:48 --depth 3            # reachable set
@@ -553,7 +558,7 @@ Run `symora <command> --help` for any command's flags. Output fields are describ
 | `count: 0` from `search …` | Check `symora search index status` and the response's hints and `coverage_gaps`. An empty `languages` means no symbol build has completed — run `symora search index build`. Outside indexed coverage, symbol search may consult a language server; content search scans files. `--deterministic` never consults a language server. |
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. |
 | `coverage_gaps` on a search | That language is missing from the answer. With `reason: "unavailable"`, `message` carries the failure's first line (for a server that rejected `initialize`, its reason), and the hints and `next_commands` lead with the languages whose lookup failed. |
-| `indexing: "timed_out"` | The language server is still reading the workspace. On a list the count is a lower bound; on a single answer (`def`, `hover`) an empty result means not settled yet, not nothing there. Retry once it's warm. `rename` refuses to apply under it and previews instead — a partial edit set renames some call sites and leaves the rest. |
+| `indexing: "timed_out"` | Workspace work exceeded the indexing wait. List counts are lower bounds; an empty `def` or `hover` result does not prove absence. Retry after the reported work finishes. `rename` refuses application; pass `--dry-run` explicitly to inspect the current edit set. |
 | `incomplete: true` | The count is a lower bound — the answer does not hold everything its own sources held. The leading `hints` name the cause; `next_commands` carries the fix where one exists. If `unread_paths` came with it, check those paths' permissions — no rebuild reaches a path nothing can read. |
 | `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
 | `conflict` from `search index` | Another process is rebuilding the index — retry as-is; nothing is left half-applied. |

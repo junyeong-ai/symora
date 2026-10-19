@@ -38,7 +38,7 @@ const MAX_USAGE_SYMBOLS: usize = 200;
     after_long_help = "Use `usage` after you already know the symbol family you care about.\nPrefer `search symbols` first for broad discovery, then run `usage` with a more specific name or --lang.\nYou can also pass a location like `src/main.rs:42` to analyze the symbol at that position.\n"
 )]
 pub struct UsageArgs {
-    /// Search pattern (symbol name or regex)
+    /// Symbol name or file:line:column location
     pub pattern: String,
 
     /// Sort results by metric

@@ -196,8 +196,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ).with_output_schema(section_output_schema("Content-line matches: file, line, content, score")),
         ToolDefinition::read_only(
             "list_file_symbols",
-            "List symbols defined in one file (precise, not heuristic). Use after \
-                          file_overview when you need the full symbol tree.",
+            "List declarations in a known file, with optional bodies or signatures. \
+             Reports backend: document for the language server's nested tree, \
+             or ast for flat syntax-derived declarations with name_path.",
             schema_object(
                 &[
                     ("file", "string", "Project-relative file path"),
@@ -239,7 +240,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "find_references",
-            "All references to the symbol at file:line[:column].",
+            "References to the symbol at file:line[:column]. Check indexing before \
+             treating the count as complete; unconfirmed does not verify workspace readiness.",
             with_extra(
                 location_schema(),
                 &[
@@ -440,8 +442,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ])),
         ToolDefinition::read_only(
             "find_implementations",
-            "All concrete implementations of a trait/interface at \
-                          file:line[:column].",
+            "Language-server implementations of a trait/interface at file:line[:column]. \
+             Structural conformance and runtime dispatch may not be enumerated.",
             with_extra(
                 location_schema(),
                 &[("limit", "integer", "Maximum results")],

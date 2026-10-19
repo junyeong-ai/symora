@@ -14,12 +14,6 @@ pub(super) fn python_init_options(root: &Path) -> Value {
                 "diagnosticMode": "openFilesOnly",
                 "autoImportCompletions": false,
                 "indexing": true,
-                // "Information" is load-bearing, not verbosity: pyright's
-                // "Found N source files" Info log is its only reliable
-                // workspace-scan readiness signal (it emits no
-                // $/progress for the initial scan). "Warning" silences
-                // it and turns every cold start into a full
-                // indexing-wait timeout.
                 "logLevel": "Information",
                 // Derived from the native-index ignore policy so pyright's
                 // workspace scan and the index agree on which files exist —
