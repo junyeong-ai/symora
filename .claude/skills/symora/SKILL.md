@@ -73,6 +73,7 @@ symora diagnostics src/auth.py --with-context
 Failures emit `{ "error": { "code", "message", "hint" } }` on stdout and exit nonzero; logs use stderr.
 
 - On `server_not_installed` / `lsp_unavailable`, run `doctor <lang>` and read `serves`, not only `installed`. A configured absolute server command avoids a broken version-manager shim. After project config changes, `daemon restart --project` unloads only this project's sessions; its next request starts fresh servers. Active requests or pending server startup return `conflict`. Changes to the daemon's own configuration or inherited environment require a full `daemon restart`.
+- For persistent cross-package omissions, verify the project's environment and native server configuration. `doctor python` reports the supplied selection in `python_interpreter`; `serves` confirms only the handshake. Waiting does not prepare an environment, and a missing `.venv` alone does not prove a fault.
 - On `unsupported`, choose an index/AST/source alternative. On `conflict`, wait as directed and re-read. On `cancelled` with a content-change hint, resolve the target again. Repair `precondition_failed` and `config_errors` before depending on the result.
 - `lsp.timeout_secs` is the shared LSP work budget: startup, requests, and retries consume it together. Narrow expensive queries or explicitly configure a suitable budget; repeated calls do not resolve a missing capability.
 

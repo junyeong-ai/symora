@@ -189,7 +189,9 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
                 Some(format!(
                     "`{}` resolves but does not serve this workspace — run it directly to \
                      see why (a version-manager shim that cannot dispatch, or a missing \
-                     toolchain the server needs), then run `symora daemon restart`",
+                     toolchain the server needs). After repairing project settings, run \
+                     `symora daemon restart --project`; changes to the daemon's inherited \
+                     environment require a full `symora daemon restart`",
                     s.command
                 ))
             } else if overridden {
