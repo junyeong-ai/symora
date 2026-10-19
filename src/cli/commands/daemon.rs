@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 
 use crate::app::App;
 use crate::cli::OutputError;
+use crate::daemon::wire::ProjectRestartStatus;
 use crate::daemon::{DaemonClient, DaemonRuntimeConfig, DaemonServer, DaemonStart};
 use crate::error::LspError;
 
@@ -29,7 +30,11 @@ pub enum DaemonCommand {
     Stop,
 
     /// Restart the daemon in the background
-    Restart,
+    Restart {
+        /// Unload only this project; start its servers on the next request
+        #[arg(long)]
+        project: bool,
+    },
 
     /// Check daemon status
     Status,
@@ -83,7 +88,27 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
             Ok(())
         }
 
-        DaemonCommand::Restart => {
+        DaemonCommand::Restart { project: true } => {
+            let client = DaemonClient::new(app.root())?;
+            match client.restart_project().await {
+                Ok(ProjectRestartStatus::Restarted) => ctx.print_success(serde_json::json!({
+                    "restarted": true,
+                    "message": "Project unloaded; language servers will start on the next request"
+                })),
+                Ok(ProjectRestartStatus::NotLoaded) => ctx.print_success(serde_json::json!({
+                    "restarted": false,
+                    "message": "Project was not loaded"
+                })),
+                Ok(ProjectRestartStatus::Busy) => ctx.print_error(
+                    OutputError::conflict("Project has active requests")
+                        .with_hint("Wait for active requests to finish, then retry `symora daemon restart --project`."),
+                ),
+                Err(e) => ctx.print_error(OutputError::from(e)),
+            }
+            Ok(())
+        }
+
+        DaemonCommand::Restart { project: false } => {
             let client = DaemonClient::new(app.root())?;
             let restarted = match client.shutdown().await {
                 Ok(_) => client.ensure_running().await.map(|_| ()),

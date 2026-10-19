@@ -10,6 +10,15 @@ def send(message):
 
 observed = {}
 waiting = []
+
+
+def answer(request):
+    result = observed
+    if request["method"] == "textDocument/hover":
+        result = {"contents": {"kind": "plaintext", "value": observed["pull"][1]["marker"]}}
+    send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+
+
 while True:
     length = None
     while True:
@@ -24,7 +33,7 @@ while True:
     method = message.get("method")
     if method == "initialize":
         observed["initialization_options"] = message["params"].get("initializationOptions")
-        result = {"capabilities": {}}
+        result = {"capabilities": {"hoverProvider": True}}
     elif method == "initialized":
         send({"jsonrpc": "2.0", "id": "configuration", "method": "workspace/configuration",
               "params": {"items": [{}, {"section": "python.analysis"}, {"section": "missing"}]}})
@@ -34,15 +43,16 @@ while True:
         continue
     elif method is None and message.get("id") == "configuration":
         observed["pull"] = message["result"]
-        for request_id in waiting:
-            send({"jsonrpc": "2.0", "id": request_id, "result": observed})
+        for request in waiting:
+            answer(request)
         waiting.clear()
         continue
-    elif method == "test/configuration":
+    elif method in ("test/configuration", "textDocument/hover"):
         if "pull" not in observed:
-            waiting.append(message["id"])
+            waiting.append(message)
             continue
-        result = observed
+        answer(message)
+        continue
     elif method == "exit":
         sys.exit()
     elif "id" not in message or method is None:

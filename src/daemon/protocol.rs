@@ -189,6 +189,7 @@ pub mod methods {
     pub const PING: &str = "ping";
     pub const STATUS: &str = "status";
     pub const SHUTDOWN: &str = "shutdown";
+    pub const RESTART_PROJECT: &str = "restart_project";
 
     pub const REFRESH_FILES: &str = "refresh_files";
     pub const NOTE_FILES_EDITED: &str = "note_files_edited";
@@ -228,8 +229,9 @@ pub mod methods {
             PREPARE_RENAME => Some("textDocument/prepareRename"),
             RENAME => Some("textDocument/rename"),
             FORMAT => Some("textDocument/formatting"),
-            PING | STATUS | SHUTDOWN | REFRESH_FILES | NOTE_FILES_EDITED | LANGUAGE_STATUS
-            | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS | SEARCH_CONTENT => None,
+            PING | STATUS | SHUTDOWN | RESTART_PROJECT | REFRESH_FILES | NOTE_FILES_EDITED
+            | LANGUAGE_STATUS | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS
+            | SEARCH_CONTENT => None,
             _ => None,
         }
     }

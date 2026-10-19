@@ -21,6 +21,7 @@ pub(super) fn calculate_timeout(config: &LspRuntimeConfig, method: &str) -> Dura
         methods::PING
         | methods::STATUS
         | methods::SHUTDOWN
+        | methods::RESTART_PROJECT
         | methods::REFRESH_FILES
         | methods::NOTE_FILES_EDITED => {
             return Duration::from_secs(30);
@@ -666,6 +667,26 @@ impl DaemonClient {
     }
 
     // Daemon Control Operations
+
+    /// Unload only this project's services without starting or replacing a daemon.
+    pub async fn restart_project(&self) -> Result<super::wire::ProjectRestartStatus, LspError> {
+        match self.ping().await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(LspError::Protocol(
+                    "Running daemon belongs to a different build; project restart requires the same binary"
+                        .to_string(),
+                ));
+            }
+            Err(LspError::NotConnected) => return Ok(super::wire::ProjectRestartStatus::NotLoaded),
+            Err(e) => return Err(e),
+        }
+        let result = self
+            .send_request_with_project(methods::RESTART_PROJECT, serde_json::json!({}))
+            .await
+            .and_then(Self::extract_result)?;
+        Ok(serde_json::from_value(result)?)
+    }
 
     pub async fn status(&self) -> Result<serde_json::Value, LspError> {
         self.send_request(methods::STATUS, None, Duration::from_secs(30))

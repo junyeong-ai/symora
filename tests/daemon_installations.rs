@@ -54,6 +54,93 @@ struct Daemons {
     binaries: Vec<PathBuf>,
 }
 
+#[test]
+fn project_restart_reloads_settings_without_stopping_other_sessions() {
+    let python = Path::new("/usr/bin/python3");
+    if !Command::new(python)
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("configuration protocol fixture requires /usr/bin/python3");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    copy_binary(&exe);
+    let _cleanup = Daemons {
+        home: home.path().to_path_buf(),
+        binaries: vec![exe.clone()],
+    };
+    let first = home.path().join("first");
+    let second = home.path().join("second");
+    let server =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp/configuration_server.py");
+    let configure = |root: &Path, marker: &str| {
+        std::fs::create_dir_all(root.join(".symora")).unwrap();
+        std::fs::write(root.join("main.py"), "value = 1\n").unwrap();
+        let config: symora::models::config::SymoraConfig =
+            serde_json::from_value(serde_json::json!({
+                "lsp": {"servers": {"python": {
+                    "command": python, "args": [server],
+                    "settings": {"python": {"analysis": {"marker": marker}}}
+                }}}
+            }))
+            .unwrap();
+        std::fs::write(
+            root.join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+    };
+    configure(&first, "first");
+    configure(&second, "second");
+    let run = |root: &Path, args: &[&str]| {
+        let out = project_command(&exe, home.path(), args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(value.get("error").is_none(), "{value}");
+        value
+    };
+    assert_eq!(
+        run(&first, &["daemon", "restart", "--project"])["restarted"],
+        false
+    );
+    assert_eq!(json_ok(&exe, home.path(), "status")["running"], false);
+    assert_eq!(run(&first, &["hover", "main.py:1:1"])["content"], "first");
+    assert_eq!(run(&second, &["hover", "main.py:1:1"])["content"], "second");
+    let before = json_ok(&exe, home.path(), "status");
+    assert_eq!(before["active_projects"], 2);
+
+    configure(&first, "changed");
+    assert_eq!(run(&first, &["hover", "main.py:1:1"])["content"], "first");
+    assert_eq!(
+        run(&first, &["daemon", "restart", "--project"])["restarted"],
+        true
+    );
+    let after = json_ok(&exe, home.path(), "status");
+    assert_eq!(after["pid"], before["pid"]);
+    assert_eq!(after["active_projects"], 1);
+    let unchanged = before["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| Path::new(row["project"].as_str().unwrap()) == second.canonicalize().unwrap())
+        .unwrap();
+    assert_eq!(&after["projects"][0], unchanged);
+    assert_eq!(run(&first, &["hover", "main.py:1:1"])["content"], "changed");
+    assert_eq!(run(&second, &["hover", "main.py:1:1"])["content"], "second");
+    assert_eq!(json_ok(&exe, home.path(), "status")["pid"], before["pid"]);
+}
+
 impl Drop for Daemons {
     fn drop(&mut self) {
         for exe in &self.binaries {
@@ -204,6 +291,18 @@ fn installation_replaces_a_stale_build_at_its_own_key() {
             }
         }
     });
+    let output = project_command(&exe, home.path(), &["daemon", "restart", "--project"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let rejected: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different build"),
+        "{rejected}"
+    );
     let started = json_ok(&exe, home.path(), "start");
     assert_eq!(started["started"], true);
     assert_eq!(
@@ -441,6 +540,13 @@ fn concurrent_readers_cannot_replace_a_mutation_request_snapshot() {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+        let restart = project_command(&exe, home.path(), &["daemon", "restart", "--project"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(!restart.status.success());
+        let rejected: serde_json::Value = serde_json::from_slice(&restart.stdout).unwrap();
+        assert_eq!(rejected["error"]["code"], "conflict", "{rejected}");
         let reader = project_command(
             &exe,
             home.path(),
