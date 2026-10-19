@@ -35,7 +35,7 @@ while True:
     message = json.loads(sys.stdin.buffer.read(length))
     method = message.get("method")
     if method == "initialize":
-        if len(sys.argv) > 1:
+        if len(sys.argv) > 1 and sys.argv[1] != "--shutdown-barrier":
             Path(sys.argv[1]).write_text(str(os.getpid()))
             while not Path(sys.argv[2]).exists():
                 time.sleep(0.01)
@@ -61,6 +61,10 @@ while True:
         answer(message)
         continue
     elif method == "exit":
+        if len(sys.argv) > 1 and sys.argv[1] == "--shutdown-barrier":
+            Path(sys.argv[2]).write_text(str(os.getpid()))
+            while not Path(sys.argv[3]).exists():
+                time.sleep(0.01)
         sys.exit()
     elif "id" not in message or method is None:
         continue
