@@ -12,7 +12,7 @@ use crate::models::symbol::Location;
 use super::converters::*;
 use super::helpers::*;
 use super::position::PositionConverter;
-use super::service::{DefaultLspService, degradation_of, ensure_indexed};
+use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn find_references(
     service: &DefaultLspService,
@@ -31,16 +31,12 @@ pub(super) async fn find_references(
             let manager = Arc::clone(&manager);
             let project_root = project_root.clone();
             async move {
-                ensure_indexed(&client, &file, manager.root()).await;
-                // Snapshot the indexing state the query is issued under —
-                // the marker derives from this, never from a re-read after
-                // the result lands (quiescence racing the request must not
-                // strip the marker from a lower-bound answer).
-                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
@@ -53,7 +49,7 @@ pub(super) async fn find_references(
                     .await?;
 
                 if result.is_null() {
-                    return Ok(Indexed::new(Vec::new(), ran_under));
+                    return Ok(indexing.finish(Vec::new()));
                 }
 
                 let locations: Vec<LspLocation> = serde_json::from_value(result)
@@ -64,9 +60,8 @@ pub(super) async fn find_references(
                 let all_locations: Vec<Location> =
                     locations.iter().map(|l| convert_location(l, &mut conv)).collect();
 
-                Ok(Indexed::new(
-                    filter_locations_within_project(all_locations, &project_root),
-                    ran_under,
+                Ok(indexing.finish(
+                    filter_locations_within_project(all_locations, &project_root)
                 ))
             }
         })
@@ -166,12 +161,11 @@ async fn goto_location(
             let method = method.clone();
             let select = &select;
             async move {
-                ensure_indexed(&client, &file, manager.root()).await;
-                let ran_under = degradation_of(client.indexing_state());
-
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
@@ -194,9 +188,9 @@ async fn goto_location(
                     Some(loc) => {
                         let mut conv = PositionConverter::new(client.position_encoding().await);
                         let converted = convert_location(&loc, &mut conv);
-                        Ok(Indexed::new(Some((loc, converted)), ran_under))
+                        Ok(indexing.finish(Some((loc, converted))))
                     }
-                    None => Ok(Indexed::new(None, ran_under)),
+                    None => Ok(indexing.finish(None)),
                 }
             }
         })
@@ -219,12 +213,12 @@ pub(super) async fn find_implementations(
             let manager = Arc::clone(&manager);
             async move {
                 check_feature_support_live(&client, &file, LspFeature::FindImplementations).await?;
-                ensure_indexed(&client, &file, manager.root()).await;
-                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
@@ -257,11 +251,10 @@ pub(super) async fn find_implementations(
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
-                Ok(Indexed::new(
+                Ok(indexing.finish(
                     locs.iter()
                         .map(|l| convert_location(l, &mut conv))
                         .collect(),
-                    ran_under,
                 ))
             }
         })

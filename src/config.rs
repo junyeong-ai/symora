@@ -65,7 +65,6 @@ impl LspRuntimeConfig {
     pub fn indexing_wait(&self, language: Language) -> Duration {
         match language {
             Language::Rust => Duration::from_secs(8),
-            Language::Java => Duration::from_secs(10),
             _ => Duration::ZERO,
         }
     }

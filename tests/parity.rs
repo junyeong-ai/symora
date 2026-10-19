@@ -382,3 +382,69 @@ fn degradation_is_detected_at_any_depth() {
     assert!(!discloses_degradation(&[clean]));
     assert!(!discloses_degradation(&[]));
 }
+
+#[test]
+#[cfg(unix)]
+fn unconfirmed_rename_is_refused_by_cli_mcp_and_daemon() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        eprintln!("rename protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("main.go");
+    let original = "package main\nfunc abc() {}\nfunc caller() { abc() }\n";
+    std::fs::write(&source, original).unwrap();
+    std::fs::write(root.path().join("go.mod"), "module example.com/fixture\n").unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp/code_action_server.py");
+    let config = json!({"lsp":{"servers":{"go":{
+        "command":"python3", "args":[server, source, "unconfirmed-rename"]
+    }}}});
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let mut expected = None;
+    for direct in [true, false] {
+        let mut command = Command::new(SYMORA);
+        command.current_dir(root.path()).args([
+            "rename",
+            "main.go:3:17",
+            "Renamed",
+            "--format",
+            "compact",
+        ]);
+        if direct {
+            command.env("SYMORA_NO_DAEMON", "1");
+        } else {
+            command.env_remove("SYMORA_NO_DAEMON");
+        }
+        let output = command.output().unwrap();
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{result}");
+        assert_eq!(result["error"]["code"], "precondition_failed", "{result}");
+        if let Some(ref expected) = expected {
+            assert_eq!(&result, expected);
+        } else {
+            expected = Some(result);
+        }
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+    }
+    let mut session = McpSession::new(Some(root.path()));
+    let result = session.request("tools/call", json!({
+        "name":"rename_symbol", "arguments":{"file":"main.go", "line":3, "column":17, "new_name":"Renamed"}
+    }));
+    assert_eq!(result["isError"], true, "{result}");
+    let payload: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(Some(&payload), expected.as_ref());
+    assert_eq!(result["structuredContent"], payload);
+    assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+}

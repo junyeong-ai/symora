@@ -11,7 +11,7 @@ use crate::models::lsp::{CallHierarchyItem, Indexed, TypeHierarchyItem, path_to_
 use super::converters::*;
 use super::helpers::*;
 use super::position::PositionConverter;
-use super::service::{DefaultLspService, degradation_of, ensure_indexed};
+use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn incoming_calls(
     service: &DefaultLspService,
@@ -56,14 +56,12 @@ async fn call_hierarchy(
                 // Pre-flight: the static table only hints; if it says None but
                 // this server advertises call hierarchy, attempt the request.
                 check_feature_support_live(&client, &file, feature).await?;
-                ensure_indexed(&client, &file, manager.root()).await;
-                // Computation-time snapshot — the output marker derives
-                // from the state the query was issued under.
-                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let prepare_params = serde_json::json!({
                     "textDocument": { "uri": uri },
@@ -84,7 +82,7 @@ async fn call_hierarchy(
                     if !client.feature_advertised(feature).await {
                         return Err(unsupported_error(&file, feature));
                     }
-                    return Ok(Indexed::new(vec![], ran_under));
+                    return Ok(indexing.finish(vec![]));
                 }
 
                 let follow_params = serde_json::json!({ "item": items.first().unwrap() });
@@ -100,7 +98,7 @@ async fn call_hierarchy(
                         .request("callHierarchy/incomingCalls", Some(follow_params))
                         .await?;
 
-                    Ok(Indexed::new(
+                    Ok(indexing.finish(
                         calls
                             .unwrap_or_default()
                             .into_iter()
@@ -117,15 +115,14 @@ async fn call_hierarchy(
                                     .first()
                                     .map(|r| uri_range_to_location(&c.from.uri, r, &mut conv)),
                             })
-                            .collect(),
-                        ran_under,
+                            .collect()
                     ))
                 } else {
                     let calls: Option<Vec<CallHierarchyOutgoingCall>> = client
                         .request("callHierarchy/outgoingCalls", Some(follow_params))
                         .await?;
 
-                    Ok(Indexed::new(
+                    Ok(indexing.finish(
                         calls
                             .unwrap_or_default()
                             .into_iter()
@@ -142,8 +139,7 @@ async fn call_hierarchy(
                                     .first()
                                     .map(|r| uri_range_to_location(&uri, r, &mut conv)),
                             })
-                            .collect(),
-                        ran_under,
+                            .collect()
                     ))
                 }
             }
@@ -188,12 +184,12 @@ async fn type_hierarchy(
             let method = method.clone();
             async move {
                 check_feature_support_live(&client, &file, LspFeature::TypeHierarchy).await?;
-                ensure_indexed(&client, &file, manager.root()).await;
-                let ran_under = degradation_of(client.indexing_state());
 
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let prepare_params = serde_json::json!({
                     "textDocument": { "uri": uri },
@@ -211,7 +207,7 @@ async fn type_hierarchy(
                     if !client.feature_advertised(LspFeature::TypeHierarchy).await {
                         return Err(unsupported_error(&file, LspFeature::TypeHierarchy));
                     }
-                    return Ok(Indexed::new(vec![], ran_under));
+                    return Ok(indexing.finish(vec![]));
                 }
 
                 let follow_params = serde_json::json!({ "item": items.first().unwrap() });
@@ -221,13 +217,12 @@ async fn type_hierarchy(
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
-                Ok(Indexed::new(
+                Ok(indexing.finish(
                     results
                         .unwrap_or_default()
                         .into_iter()
                         .filter_map(|item| parse_type_hierarchy_item(&item, &mut conv))
-                        .collect(),
-                    ran_under,
+                        .collect()
                 ))
             }
         })

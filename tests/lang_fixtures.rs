@@ -621,3 +621,56 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     let refused = run(&["edit", "delete", "svc.py", "--symbol", "TOTAL", "--dry-run"]);
     assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
 }
+
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn pyright_unconfirmed_rename_is_preview_only() {
+    if !pyright_on_path() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let files = [
+        ("target.py", "def target():\n    return 1\n"),
+        ("caller.py", "from target import target\nvalue = target()\n"),
+    ];
+    for (name, content) in files {
+        std::fs::write(root.path().join(name), content).unwrap();
+    }
+    std::fs::write(
+        root.path().join("pyrightconfig.json"),
+        r#"{"include":["."]}"#,
+    )
+    .unwrap();
+    for dry_run in [true, false] {
+        let mut command = Command::new(SYMORA);
+        command
+            .args([
+                "rename",
+                "target.py:1:5",
+                "renamed_target",
+                "--format",
+                "compact",
+            ])
+            .current_dir(root.path())
+            .env("SYMORA_NO_DAEMON", "1");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let output = command.output().unwrap();
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if dry_run {
+            assert!(output.status.success(), "{result}");
+            assert_eq!(result["indexing"], "unconfirmed", "{result}");
+            assert!(result["affected_files"].as_u64().unwrap() > 0, "{result}");
+        } else {
+            assert!(!output.status.success(), "{result}");
+            assert_eq!(result["error"]["code"], "precondition_failed", "{result}");
+        }
+        for (name, content) in files {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(name)).unwrap(),
+                content
+            );
+        }
+    }
+}
