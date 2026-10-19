@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
+use futures::future::join_all;
 use tokio::sync::{OnceCell, RwLock, mpsc, watch};
 
 use super::client::LspClient;
@@ -494,13 +495,14 @@ impl LspManager {
             .collect();
 
         let count = stopping.len();
-        for (lang, client) in stopping {
+        join_all(stopping.into_iter().map(|(lang, client)| async move {
             if let Err(e) = client.shutdown().await {
                 tracing::warn!("Error shutting down {:?} server: {}", lang, e);
             } else {
                 tracing::info!("{:?} language server stopped", lang);
             }
-        }
+        }))
+        .await;
         count
     }
 
@@ -750,6 +752,59 @@ pub(crate) mod tests {
         let mut config = crate::config::LspRuntimeConfig::default();
         config.max_concurrent_servers = cap;
         LspManager::new(PathBuf::from("/test"), Arc::new(config), FileWatch::Off)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_sends_exit_to_all_servers_before_waiting_for_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("release");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/lsp/configuration_server.py");
+        let mut config = crate::config::LspRuntimeConfig::default();
+        for language in [Language::Python, Language::Go] {
+            config.servers.insert(
+                language.lsp_id().into(),
+                crate::models::config::ServerOverride {
+                    command: Some("python3".into()),
+                    args: Some(vec![
+                        fixture.display().to_string(),
+                        "--shutdown-barrier".into(),
+                        root.path().join(language.lsp_id()).display().to_string(),
+                        release.display().to_string(),
+                    ]),
+                    ..Default::default()
+                },
+            );
+        }
+        let manager = Arc::new(LspManager::new(
+            root.path().to_path_buf(),
+            Arc::new(config),
+            FileWatch::Off,
+        ));
+        let python = manager.get_client(Language::Python).await.unwrap();
+        let go = manager.get_client(Language::Go).await.unwrap();
+        let stopping = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.shutdown_all().await }
+        });
+        let exits = tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.path().join("python").exists() || !root.path().join("go").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        std::fs::write(release, "").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stopping)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            exits.is_ok(),
+            "every server must receive exit before waiting for process termination"
+        );
+        assert!(!python.is_running().await);
+        assert!(!go.is_running().await);
     }
 
     #[test]
