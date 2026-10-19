@@ -46,25 +46,6 @@ pub enum ConfigCommand {
     },
 }
 
-/// Everything about the loaded config that did not take effect: keys no
-/// setting consumes, and `[lsp.servers]` stanzas that were rejected. One
-/// list, so a command discloses every way the file differs from what is
-/// running.
-fn config_problems(config: &crate::models::config::SymoraConfig) -> Vec<String> {
-    config
-        .ignored_keys
-        .iter()
-        .cloned()
-        .chain(
-            config
-                .lsp
-                .server_override_errors
-                .iter()
-                .map(ToString::to_string),
-        )
-        .collect()
-}
-
 #[derive(Serialize)]
 struct ConfigInitOutput {
     status: String,
@@ -159,7 +140,7 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
                 Ok(config) => {
                     let response = ConfigShowOutput {
                         level,
-                        config_errors: config_problems(&config),
+                        config_errors: config.problems(),
                         config: config_to_json(&config),
                     };
                     ctx.print_success(response);

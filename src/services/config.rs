@@ -461,7 +461,14 @@ fn resolve_config(raw: RawSymoraConfig, ignored_keys: Vec<String>) -> SymoraConf
 
 /// The field set a [lsp.servers.<lang>] stanza accepts — the
 /// `ServerOverride` fields, kept in lockstep by the unit test below.
-const SERVER_OVERRIDE_FIELDS: [&str; 4] = ["command", "args", "tier", "env"];
+const SERVER_OVERRIDE_FIELDS: [&str; 6] = [
+    "command",
+    "args",
+    "tier",
+    "env",
+    "initialization_options",
+    "settings",
+];
 
 /// Partition [lsp.servers] stanzas: strictly canonical `Language::lsp_id`
 /// keys with only known, well-typed fields are applied; alias keys,
@@ -705,6 +712,55 @@ tier = "slow"
     }
 
     #[test]
+    fn server_configuration_preserves_nested_values() {
+        let config = resolve_str(
+            r#"[lsp.servers.python.initialization_options]
+client = "headless"
+[lsp.servers.python.settings.python]
+pythonPath = "/workspace/.venv/bin/python"
+[lsp.servers.python.settings.python.analysis]
+extraPaths = ["packages/core/src"]
+autoSearchPaths = false
+exclude = []
+"#,
+        );
+        assert!(config.lsp.server_override_errors.is_empty());
+        let server = &config.lsp.servers["python"];
+        assert_eq!(
+            server.initialization_options.as_ref().unwrap()["client"],
+            "headless"
+        );
+        let settings = server.settings.as_ref().unwrap();
+        assert_eq!(
+            settings["python"]["pythonPath"],
+            "/workspace/.venv/bin/python"
+        );
+        assert_eq!(settings["python"]["analysis"]["autoSearchPaths"], false);
+        assert_eq!(
+            settings["python"]["analysis"]["exclude"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            settings["python"]["analysis"]["extraPaths"],
+            serde_json::json!(["packages/core/src"])
+        );
+    }
+
+    #[test]
+    fn server_configuration_requires_objects() {
+        for field in ["settings", "initialization_options"] {
+            for value in ["false", "[]", "\"value\""] {
+                let config = resolve_str(&format!(
+                    "[lsp]\ntimeout_secs = 9\n[lsp.servers.python]\n{field} = {value}\n"
+                ));
+                assert_eq!(config.lsp.timeout_secs, 9);
+                assert!(config.lsp.servers.is_empty());
+                assert_eq!(config.lsp.server_override_errors.len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn server_env_resolves_and_merges() {
         let config = resolve_str(
             r#"[lsp.servers.python]
@@ -891,6 +947,8 @@ comand = "/custom/rust-analyzer"
             args: Some(vec![]),
             tier: Some(ServerTier::Fast),
             env: Some(BTreeMap::new()),
+            initialization_options: Some(serde_json::Map::new()),
+            settings: Some(serde_json::Map::new()),
         };
         let table = toml::Value::try_from(&full).unwrap();
         let mut keys: Vec<&str> = table

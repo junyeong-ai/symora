@@ -33,6 +33,21 @@ pub struct SymoraConfig {
     pub ignored_keys: Vec<String>,
 }
 
+impl SymoraConfig {
+    pub fn problems(&self) -> Vec<String> {
+        self.ignored_keys
+            .iter()
+            .cloned()
+            .chain(
+                self.lsp
+                    .server_override_errors
+                    .iter()
+                    .map(ToString::to_string),
+            )
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: Option<String>,
@@ -110,7 +125,7 @@ impl Default for LspConfig {
 
 /// A [lsp.servers.<lang>] launch override. An absent field inherits the
 /// builtin default for that server; an explicit `args = []` means no args.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ServerOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -120,6 +135,10 @@ pub struct ServerOverride {
     pub tier: Option<ServerTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initialization_options: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// A rejected [lsp.servers] stanza or field, recorded at config

@@ -101,6 +101,7 @@ mod tests {
                 args: None,
                 tier: None,
                 env: None,
+                ..Default::default()
             },
         );
         let runtime = LspRuntimeConfig::from(&config);

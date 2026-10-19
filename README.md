@@ -430,6 +430,18 @@ env = { NODE_OPTIONS = "--max-old-space-size=2048" } # 생략 가능; 서버 환
 
 `env`의 항목은 서버가 상속한 환경 변수에 더해집니다. 예를 들어 pyright 같은 Node 기반 서버는 `NODE_OPTIONS = "--max-old-space-size=2048"`로 힙 상한을 낮출 수 있습니다.
 
+서버별 `initialization_options`는 LSP 초기화 옵션, `settings`는 실행 중 설정입니다. 두 객체는 각 기본값에 재귀적으로 병합하며 배열과 개별 값은 교체합니다. `settings`는 초기화 직후 알림과 `workspace/configuration` 응답으로 전달합니다. 하위 키의 의미는 해당 언어 서버의 설정을 따릅니다.
+
+```toml
+[lsp.servers.python.settings.python]
+pythonPath = "/path/to/project/.venv/bin/python"
+
+[lsp.servers.python.settings.python.analysis]
+extraPaths = ["packages/core/src"]
+```
+
+프로젝트가 사용하는 환경이나 서버 자체 설정을 우선 준비하세요. 위 경로는 명시적인 설정 예시이며 Symora가 패키지 경로를 추측해 추가하지는 않습니다. 같은 언어의 프로젝트 설정 stanza는 사용자 설정 stanza 전체를 대체합니다.
+
 키는 `symora doctor`가 출력하는 `language` id입니다. 잘못된 키는 doctor의 `config_errors`로 보고되며 조용히 적용되지 않습니다. daemon은 프로젝트를 처음 처리할 때 그 설정을 읽어 재시작하거나 프로젝트가 유휴 상태가 될 때까지 유지하므로, 변경 후 `symora daemon restart`를 실행하세요.
 
 파일 탐색은 프로젝트의 `.gitignore`(루트·중첩, 디렉터리별 시맨틱 완전 지원)를 따르며, symora 전용 제외는 `.symora/ignore`(gitignore 문법)로 추가할 수 있습니다. 루트 `.gitignore`가 없으면 흔한 의존성·빌드 디렉터리(`node_modules`, `target`, `dist` …)를 기본 제외합니다. 기기별 git 설정인 `.git/info/exclude`와 전역 `core.excludesFile`은 읽지 않으므로, 같은 트리는 어느 기기에서든 같은 인덱스가 됩니다. 기본 탐색은 `.gitignore`와 별개로 숨김 항목을 제외합니다. `search content '문구' --path .claude`는 지정한 파일·디렉터리의 숨김 텍스트와 문서 형식을 직접 검색합니다. 프로젝트 ignore와 크기 제한은 적용하며 `.git`·`.symora`는 계속 제외합니다. 명시한 경로가 지속성 인덱스의 범위를 넓히지는 않습니다.

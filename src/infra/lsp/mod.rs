@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod client;
+pub mod configuration;
 pub mod health;
 pub mod init_options;
 pub mod manager;

@@ -76,15 +76,10 @@ impl App {
         tracing::debug!("Initializing Symora at {:?}", root);
 
         let config_service = Arc::new(DefaultConfigService::new(&root));
-        // A whole-config load failure (malformed `.symora/config.toml`, I/O
-        // error) must not vanish: the run proceeds on defaults, but the failure
-        // is captured and surfaced on whatever command the user ran, never left
-        // visible only to `doctor`. Rejected `[lsp.servers]` stanzas are a
-        // softer class already disclosed by doctor / config show, so they are
-        // not duplicated here.
+        // A default-backed answer must disclose settings that were not applied.
         let (config, config_errors) = match config_service.load(false).await {
             Ok(config) => {
-                let errors = config.ignored_keys.clone();
+                let errors = config.problems();
                 (config, errors)
             }
             Err(e) => {

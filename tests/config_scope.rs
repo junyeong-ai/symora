@@ -169,10 +169,7 @@ fn ignored_daemon_keys_reach_app_and_doctor() {
     for args in [&["config", "path"][..], &["doctor", "rust"][..]] {
         let value = json_ok(root.path(), home.path(), args);
         assert_eq!(value["config_errors"][0], expected, "{args:?}");
-        assert_eq!(
-            value["config_errors"].as_array().unwrap().len(),
-            if args[0] == "doctor" { 2 } else { 1 }
-        );
+        assert_eq!(value["config_errors"].as_array().unwrap().len(), 2);
         if args[0] == "doctor" {
             assert!(
                 value["config_errors"][1]
