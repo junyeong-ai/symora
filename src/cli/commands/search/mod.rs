@@ -41,7 +41,7 @@ pub enum SearchCommand {
         /// Search query
         query: String,
 
-        /// Language filter for LSP workspace search
+        /// Language filter
         #[arg(short, long = "lang")]
         language: Option<String>,
 

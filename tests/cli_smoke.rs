@@ -3587,6 +3587,63 @@ fn a_short_answer_holds_the_best_matches_not_the_first_page() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn symbol_search_rejects_invalid_kinds_before_selecting_a_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    for route in [
+        vec!["Probe"],
+        vec!["*Probe*"],
+        vec!["Probe", "--workspace-symbols"],
+    ] {
+        let args = [
+            &["search", "symbols"][..],
+            &route,
+            &["--kind", "nonsense", "--lang", "rust"],
+        ]
+        .concat();
+        let out = run_in(dir.path(), &args);
+        assert!(!out.status.success(), "{args:?}");
+        let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("nonsense")
+        );
+        assert!(
+            response["error"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("function")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn indexed_symbol_search_filters_canonical_and_alias_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn ProbeHandler() {}\npub trait ProbeInterface {}\n",
+    )
+    .unwrap();
+    json_ok(dir.path(), &["search", "index", "build"]);
+    for query in ["Probe", "*Probe*"] {
+        for (kind, expected) in [("function", "ProbeHandler"), ("trait", "ProbeInterface")] {
+            let response = json_ok(
+                dir.path(),
+                &["search", "symbols", query, "--kind", kind, "--lang", "rust"],
+            );
+            assert_eq!(response["count"], 1, "{response}");
+            assert_eq!(response["items"][0]["name"], expected, "{response}");
+            assert_eq!(response["items"][0]["backend"], "index", "{response}");
+        }
+    }
+}
+
 /// The two symbol surfaces answer one question, so they order it one way. Two
 /// copies of the ranking had already drifted apart on which kinds are
 /// low-signal, which put the same symbol at the head of one answer and the

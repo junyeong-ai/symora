@@ -103,6 +103,35 @@ pub async fn dispatch(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn symbol_search_reports_invalid_kind_as_a_tool_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = App::new_at(
+            dir.path().to_path_buf(),
+            crate::cli::OutputOptions::default(),
+            crate::app::Wiring {
+                use_daemon: false,
+                deterministic: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let result = dispatch(
+            "search_symbols",
+            serde_json::json!({"query": "Probe", "kind": "nonsense"}),
+            &app,
+            McpProfile::ReadOnly,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_error);
+        assert_eq!(
+            result.structured.unwrap()["error"]["code"],
+            "invalid_argument"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn explicit_content_paths_preserve_project_relative_paths_and_reject_empty_scope() {
@@ -309,6 +338,33 @@ mod tests {
                  failure validates",
                 tool.name,
             );
+        }
+    }
+
+    #[test]
+    fn output_schemas_accept_serialized_indexing_states() {
+        let states = [
+            crate::models::lsp::IndexingDegradation::TimedOut,
+            crate::models::lsp::IndexingDegradation::Unconfirmed,
+        ];
+        let reference_schema = tool("find_references").output_schema.as_ref().unwrap();
+        assert!(reference_schema["properties"]["indexing"]["enum"].is_array());
+        for tool in catalog() {
+            let Some(allowed) = tool
+                .output_schema
+                .as_ref()
+                .and_then(|s| s["properties"]["indexing"]["enum"].as_array())
+            else {
+                continue;
+            };
+            for state in states {
+                let serialized = serde_json::to_value(state).unwrap();
+                assert!(
+                    allowed.contains(&serialized),
+                    "{}: output schema rejects indexing: {serialized}",
+                    tool.name
+                );
+            }
         }
     }
 

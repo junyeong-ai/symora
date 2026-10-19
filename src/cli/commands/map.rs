@@ -316,8 +316,8 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
     let ctx = &app.output;
     let scan = scan_project_files(app);
     let unread_paths = scan.unread_at(ctx, app.root());
-    let records = scan.records.clone();
-    let Some(target) = find_record(&records, path, app.root()) else {
+    let records = &scan.records;
+    let Some(target) = find_record(records, path, app.root()) else {
         ctx.print_error(scan.missing_target(app.root(), path));
         return Ok(());
     };
@@ -357,13 +357,13 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
         Err(e) => (None, None, Section::error(e)),
     };
 
-    let related_files = collect_related_files(&target, &records, related_limit);
+    let related_files = collect_related_files(&target, records, related_limit);
     let siblings = records
         .iter()
         .filter(|r| r.parent == target.parent && r.rel_path != target.rel_path)
         .map(|r| r.rel_path.clone())
         .collect();
-    let counterpart_files = detect_counterparts(&target, &records)
+    let counterpart_files = detect_counterparts(&target, records)
         .into_iter()
         .map(|r| r.rel_path.clone())
         .collect();
@@ -735,12 +735,6 @@ fn classify_entrypoint(record: &FileRecord, file_name: &str) -> Option<(&'static
         "index.ts" | "index.tsx" | "index.js" | "index.jsx" => ("index/export hub", 34),
         _ if record.rel_path.starts_with("src/main.") => ("source entry candidate", 95),
         _ if record.rel_path.starts_with("bin/") => ("binary entry candidate", 88),
-        _ if record.rel_path.ends_with("/main.py")
-            || record.rel_path.ends_with("/main.ts")
-            || record.rel_path.ends_with("/main.js") =>
-        {
-            ("module entry candidate", 78)
-        }
         _ => return None,
     };
 

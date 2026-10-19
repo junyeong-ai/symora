@@ -38,7 +38,7 @@ Filesystem-relative references resolve against exact project paths. Rust module-
 - `Default*` — in-process (direct LSP child processes; the store's SQLite opens lazily on first use).
 - `Daemon*` — forwards to a `symora daemon` over a Unix socket.
 
-Both implementations of a trait must produce identical results for the same inputs — anything that diverges is a parity bug (invariant #3). A read against a missing store reports `NotInitialized` so the caller falls back to a filesystem scan; a present-but-unopenable store surfaces the real error.
+Both implementations preserve the same result semantics and error contracts. Compare payloads under equivalent source and server state; indexing can change observations between calls (invariant #3). A read against a missing store reports `NotInitialized` so the caller falls back to a filesystem scan; a present-but-unopenable store surfaces the real error.
 
 Rename captures its request-document hash before the retry loop and retains it across all attempts and server restarts.
 
