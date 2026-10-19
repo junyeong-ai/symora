@@ -55,11 +55,15 @@ impl ProjectContext {
     }
 
     pub(super) fn is_idle(&self, timeout: Duration) -> bool {
-        if self.in_flight.load(Ordering::Acquire) != 0 {
+        if self.is_busy() {
             return false;
         }
         let last = self.last_used.load(Ordering::Relaxed);
         epoch_millis().saturating_sub(last) > timeout.as_millis() as u64
+    }
+
+    fn is_busy(&self) -> bool {
+        self.in_flight.load(Ordering::Acquire) != 0 || self.lsp.has_pending_start()
     }
 }
 
@@ -126,7 +130,7 @@ pub(super) async fn restart_project(projects: &ProjectsMap, project: &str) -> Pr
         let Some(context) = guard.get(path) else {
             return ProjectRestartStatus::NotLoaded;
         };
-        if context.in_flight.load(Ordering::Acquire) != 0 {
+        if context.is_busy() {
             return ProjectRestartStatus::Busy;
         }
         guard.remove(path).unwrap()
@@ -138,6 +142,92 @@ pub(super) async fn restart_project(projects: &ProjectsMap, project: &str) -> Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restart_refuses_a_server_start_after_its_caller_is_cancelled() {
+        use crate::services::lsp::LspService;
+
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("ready");
+        let release = root.path().join("release");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/lsp/configuration_server.py");
+        let mut config = crate::models::config::SymoraConfig::default();
+        config.lsp.timeout_secs = 5;
+        config.lsp.servers.insert(
+            "python".into(),
+            crate::models::config::ServerOverride {
+                command: Some("python3".into()),
+                args: Some(vec![
+                    fixture.display().to_string(),
+                    ready.display().to_string(),
+                    release.display().to_string(),
+                ]),
+                ..Default::default()
+            },
+        );
+        std::fs::create_dir(root.path().join(".symora")).unwrap();
+        std::fs::write(
+            root.path().join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("main.py"), "value = 1\n").unwrap();
+        let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
+        let request = tokio::spawn({
+            let projects = Arc::clone(&projects);
+            let path = root.path().to_path_buf();
+            async move {
+                let lease = get_context(&projects, path.to_str().unwrap())
+                    .await
+                    .unwrap();
+                lease.lsp.hover(&path.join("main.py"), 1, 1).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        {
+            let guard = projects.read().await;
+            let context = guard.get(root.path()).unwrap();
+            assert_eq!(context.in_flight.load(Ordering::Acquire), 0);
+            context
+                .last_used
+                .store(epoch_millis() - 1000, Ordering::Relaxed);
+            assert!(!context.is_idle(Duration::ZERO));
+        }
+        let path = root.path().to_str().unwrap();
+        let outcome = restart_project(&projects, path).await;
+        std::fs::write(&release, "").unwrap();
+        assert_eq!(outcome, ProjectRestartStatus::Busy);
+        let restarted = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let outcome = restart_project(&projects, path).await;
+                if outcome != ProjectRestartStatus::Busy {
+                    break outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(restarted, ProjectRestartStatus::Restarted);
+        let pid = std::fs::read_to_string(&ready)
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
 
     #[tokio::test]
     async fn restart_preserves_busy_requests_other_projects_and_reloads_config() {

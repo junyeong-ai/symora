@@ -100,8 +100,8 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
                     "message": "Project was not loaded"
                 })),
                 Ok(ProjectRestartStatus::Busy) => ctx.print_error(
-                    OutputError::conflict("Project has active requests")
-                        .with_hint("Wait for active requests to finish, then retry `symora daemon restart --project`."),
+                    OutputError::conflict("Project has active requests or a language server is starting")
+                        .with_hint("Wait for requests and server startup to finish, then retry `symora daemon restart --project`."),
                 ),
                 Err(e) => ctx.print_error(OutputError::from(e)),
             }
