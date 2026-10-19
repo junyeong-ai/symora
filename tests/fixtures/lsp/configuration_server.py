@@ -1,5 +1,8 @@
 import json
+import os
+from pathlib import Path
 import sys
+import time
 
 
 def send(message):
@@ -32,6 +35,10 @@ while True:
     message = json.loads(sys.stdin.buffer.read(length))
     method = message.get("method")
     if method == "initialize":
+        if len(sys.argv) > 1:
+            Path(sys.argv[1]).write_text(str(os.getpid()))
+            while not Path(sys.argv[2]).exists():
+                time.sleep(0.01)
         observed["initialization_options"] = message["params"].get("initializationOptions")
         result = {"capabilities": {"hoverProvider": True}}
     elif method == "initialized":

@@ -6,6 +6,10 @@ use crate::models::lsp::ServerStatus;
 use crate::models::symbol::Language;
 
 impl DefaultLspService {
+    pub(crate) fn has_pending_start(&self) -> bool {
+        self.manager.has_pending_start()
+    }
+
     pub async fn shutdown(&self) {
         self.health_shutdown.store(true, Ordering::Release);
         self.health_handle.abort();

@@ -479,6 +479,12 @@ impl LspManager {
         self.stop(|_| true).await;
     }
 
+    pub(crate) fn has_pending_start(&self) -> bool {
+        self.pool()
+            .values()
+            .any(|state| matches!(state, ClientState::Initializing(_)))
+    }
+
     /// Take every entry `which` selects out of the pool and stop its server.
     async fn stop(&self, mut which: impl FnMut(&ClientState) -> bool) -> usize {
         let stopping: Vec<(Language, Arc<LspClient>)> = self
