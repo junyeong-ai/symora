@@ -130,9 +130,9 @@ pub fn section_output_schema(items_description: &str) -> Value {
             "indexing": {
                 "type": "string",
                 "enum": [IndexingDegradation::TimedOut, IndexingDegradation::Unconfirmed],
-                "description": "Workspace analysis was not verified complete: \
-                                timed_out exhausted the wait; unconfirmed means \
-                                no explicit completion signal. Results may be partial",
+                "description": "Workspace readiness was not confirmed throughout the query: \
+                                timed_out exhausted the readiness wait; unconfirmed means \
+                                readiness was absent or changed. Results may be partial",
             },
             "error": {
                 "type": "object",

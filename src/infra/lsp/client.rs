@@ -934,9 +934,8 @@ impl LspClient {
             text_document: Some(text_document),
             workspace: Some(workspace),
             // `serverStatusNotification` asks rust-analyzer to send
-            // `experimental/serverStatus` — the authoritative quiescent
-            // signal the readiness state machine prefers over progress
-            // titles. Other servers ignore unknown experimental keys.
+            // `experimental/serverStatus`. Healthy quiescence confirms
+            // readiness. Other servers ignore unknown experimental keys.
             experimental: Some(serde_json::json!({
                 "serverStatusNotification": true
             })),

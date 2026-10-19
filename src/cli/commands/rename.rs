@@ -140,8 +140,8 @@ fn refuse_partial_rename(
     let degradation = indexing.filter(|_| !dry_run)?;
     let hint = match degradation {
         IndexingDegradation::TimedOut => {
-            "Use `--dry-run` to inspect the edits. Retry after the language server finishes \
-             the reported workspace work."
+            "Use `--dry-run` to inspect the edits. The readiness wait exhausted its budget; \
+             retrying may help when the language server subsequently confirms readiness."
         }
         IndexingDegradation::Unconfirmed => {
             "Use `--dry-run` to inspect the edits. The language server has not confirmed \

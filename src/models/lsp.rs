@@ -14,15 +14,15 @@ pub struct Position {
 /// Why a result set may be an incomplete lower bound.
 ///
 /// Surfaced on `refs` / `callers` / `callees` / `impact` so an agent can
-/// distinguish "few results" from "not everything was searched". Absent =
-/// complete.
+/// distinguish "few results" from "not everything was searched". Absence
+/// means no readiness degradation; source and coverage limits still apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexingDegradation {
     /// The workspace-indexing wait hit its budget; results are a lower
     /// bound. Retrying after the server warms up may return more.
     TimedOut,
-    /// The server provided no whole-workspace readiness confirmation.
+    /// Workspace readiness was not confirmed throughout the query.
     Unconfirmed,
 }
 
