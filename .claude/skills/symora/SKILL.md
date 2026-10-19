@@ -44,7 +44,7 @@ Lists carry `count`, `showing`, and `items`. These markers qualify the answer:
 | `incomplete` / `unread_paths` | Counts are lower bounds within the consulted sources; inspect the cause. |
 | `coverage_gaps` | Named languages were not fully searched; use the indicated source or remedy. |
 | `stale` / currency hints | The index is a snapshot; refresh before current enumeration. New files can require refresh even without stale returned rows. |
-| `indexing` | `unconfirmed` lacks an explicit completion signal; `timed_out` exceeded the wait. Neither proves absence. Retry cannot add a missing completion channel. |
+| `indexing` | `unconfirmed` means workspace readiness was not confirmed throughout the query; `timed_out` exceeded the readiness wait. Neither proves absence. Retry cannot add a missing completion channel. |
 | `degraded_column` | Verify the source position before editing. |
 | `body_omitted` | `token_budget` or `response_size`: read the complete source at the returned location, or adjust that budget. |
 

@@ -65,7 +65,7 @@ symora search symbols AuthService           # 심볼 찾기
 
 LSP 기반 명령은 해당 언어의 language server가 필요합니다. `symora doctor <lang>`로 확인하고, 출력에 나온 명령으로 설치하세요.
 
-결과를 완전한 목록으로 취급하기 전에 `indexing`, `incomplete`, `coverage_gaps`를 확인하세요. `indexing: "unconfirmed"`는 워크스페이스 분석 완료를 확인할 수 없었다는 뜻이며, 참조가 적거나 없어도 일부 결과일 수 있습니다.
+결과를 완전한 목록으로 취급하기 전에 `indexing`, `incomplete`, `coverage_gaps`를 확인하세요. `indexing: "unconfirmed"`는 요청 전체에 걸쳐 워크스페이스 준비 상태를 확인할 수 없었다는 뜻이며, 참조가 적거나 없어도 일부 결과일 수 있습니다.
 
 ---
 
@@ -374,7 +374,7 @@ symora status                # 프로젝트 + language server 설치 여부 (동
   ```
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 잘못된 CLI 인자도 같은 봉투로 나옵니다 — `invalid_argument` 코드에 clap의 산문이 아닌 JSON이라, 어떤 실패든 stdout 한 스트림만 파싱하면 됩니다. 예외는 하나뿐입니다: "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
 - **위치는 1-indexed** — 입력과 출력 모두이며, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `def`·`hover`·`signature`·`typedef`는 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 좌표로 file과 line을 담으며 column은 없습니다.
-- **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. 이는 소스가 뒤처졌다는 신호와는 다른 축입니다: `stale`과 `indexing: "timed_out"`은 소스가 뒤처졌다는 뜻이고, `incomplete`는 답이 짧다는 뜻입니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
+- **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 언어 서버의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
 - **`--format compact`**는 단일 라인 JSON을 출력합니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 이후 필요한 경우 목록 항목을 줄이고 `truncated`와 설정 키를 지목하는 hint를 반환합니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
 ---
@@ -387,7 +387,7 @@ symora status                # 프로젝트 + language server 설치 여부 (동
 
 
 
-언어 서버가 워크스페이스 분석 완료를 명시하지 않으면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 모두 실제 적용을 거부합니다. `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 완료 알림이 없는 서버는 계속 미확인 상태일 수 있습니다.
+요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 모두 실제 적용을 거부합니다. `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 현재 Symora는 rust-analyzer의 정상 상태와 작업 완료를 함께 나타내는 알림을 인식합니다. 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
 
 ## 검색 인덱스
 
@@ -566,7 +566,7 @@ symora daemon start | stop | restart | status
 | `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 인덱스 범위 밖에서 심볼 검색은 language server를 조회할 수 있고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart --project`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. daemon이 상속한 환경을 바꿨다면 전체 `symora daemon restart`가 필요합니다. |
 | 검색 결과의 `coverage_gaps` | 그 언어는 답에 들어 있지 않습니다. `reason: "unavailable"`이면 `message`에 실패 원인의 첫 줄(서버가 `initialize`를 거부했다면 그 이유)이 실리고, hint와 `next_commands`는 조회가 실패한 언어부터 다룹니다. |
-| `indexing: "timed_out"` | 워크스페이스 작업이 인덱싱 대기 한도를 넘었습니다. 목록의 count는 하한이며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 보고된 작업이 끝난 뒤 재시도하세요. `rename`은 적용을 거부하며, 현재 편집 집합을 확인하려면 `--dry-run`을 명시해야 합니다. |
+| `indexing: "timed_out"` / `"unconfirmed"` | 해당 요청에서 워크스페이스 준비 상태를 확인하지 못했습니다. 목록은 일부 결과일 수 있으며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 서버 작업이 끝난 뒤 재시도할 수 있지만, 지원하는 준비 완료 신호가 없는 서버는 계속 미확인 상태입니다. `rename`은 적용을 거부하며, 현재 편집 집합은 `--dry-run`으로 확인할 수 있습니다. |
 | `incomplete: true` | count가 하한 — 답이 자기 소스가 가진 전부를 담지 못했습니다. 원인은 `hints`가 이름을 대고, 고칠 방법이 있으면 `next_commands`에 담깁니다. `unread_paths`가 함께 오면 그 경로들의 권한부터 확인하세요 — 읽히지 않는 경로에는 재빌드도 닿지 않습니다. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
 | `search index`의 `conflict` | 다른 프로세스가 인덱스를 다시 만드는 중 — 그대로 재시도. 절반만 적용된 상태는 남지 않습니다. |
