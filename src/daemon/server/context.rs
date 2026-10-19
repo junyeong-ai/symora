@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 use super::config::DaemonRuntimeConfig;
 use crate::daemon::protocol::RpcError;
+use crate::daemon::wire::ProjectRestartStatus;
 use crate::infra::lsp::watch::FileWatch;
 use crate::services::lsp::DefaultLspService;
 use crate::services::store::DefaultStoreService;
@@ -109,19 +110,81 @@ pub(super) async fn get_context(
         }
     }
 
-    let ctx = Arc::new(ProjectContext::new(&path));
-
     let mut guard = projects.write().await;
     if let Some(existing) = guard.get(&path) {
         return Ok(ProjectLease::acquire(existing));
     }
+    let ctx = Arc::new(ProjectContext::new(&path));
     guard.insert(path, Arc::clone(&ctx));
     Ok(ProjectLease::acquire(&ctx))
+}
+
+pub(super) async fn restart_project(projects: &ProjectsMap, project: &str) -> ProjectRestartStatus {
+    let context = {
+        let mut guard = projects.write().await;
+        let path = std::path::Path::new(project);
+        let Some(context) = guard.get(path) else {
+            return ProjectRestartStatus::NotLoaded;
+        };
+        if context.in_flight.load(Ordering::Acquire) != 0 {
+            return ProjectRestartStatus::Busy;
+        }
+        guard.remove(path).unwrap()
+    };
+    context.lsp.shutdown().await;
+    ProjectRestartStatus::Restarted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn restart_preserves_busy_requests_other_projects_and_reloads_config() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let projects: ProjectsMap = Arc::new(RwLock::new(HashMap::new()));
+        let path = first.path().to_str().unwrap();
+        assert_eq!(
+            restart_project(&projects, path).await,
+            ProjectRestartStatus::NotLoaded
+        );
+        assert!(projects.read().await.is_empty());
+
+        let lease = get_context(&projects, path).await.unwrap();
+        let previous = Arc::clone(&lease);
+        let other = get_context(&projects, second.path().to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            restart_project(&projects, path).await,
+            ProjectRestartStatus::Busy
+        );
+        assert!(Arc::ptr_eq(
+            projects.read().await.get(first.path()).unwrap(),
+            &previous
+        ));
+        drop(lease);
+
+        std::fs::create_dir(first.path().join(".symora")).unwrap();
+        std::fs::write(
+            first.path().join(".symora/config.toml"),
+            "[lsp]\ntimeout_secs = 17\n",
+        )
+        .unwrap();
+        assert_eq!(
+            restart_project(&projects, path).await,
+            ProjectRestartStatus::Restarted
+        );
+        {
+            let guard = projects.read().await;
+            assert!(!guard.contains_key(first.path()));
+            assert!(Arc::ptr_eq(guard.get(second.path()).unwrap(), &other));
+        }
+        let fresh = get_context(&projects, path).await.unwrap();
+        assert!(!Arc::ptr_eq(&fresh, &previous));
+        assert_eq!(fresh.config.request_timeout(), Duration::from_secs(17));
+    }
 
     #[tokio::test]
     async fn live_lease_defers_idle_time_until_release() {

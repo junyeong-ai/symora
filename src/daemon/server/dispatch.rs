@@ -12,7 +12,7 @@ use crate::error::LspError;
 use crate::services::lsp::LspService;
 
 use super::config::DaemonRuntimeConfig;
-use super::context::{ProjectContext, ProjectsMap, get_context};
+use super::context::{ProjectContext, ProjectsMap, get_context, restart_project};
 use super::handlers;
 use super::store_handlers;
 
@@ -42,6 +42,18 @@ pub(super) async fn dispatch(
         )
         .await
         .map_err(timeout_error)?,
+        methods::RESTART_PROJECT => {
+            let params = request.params.unwrap_or(serde_json::json!({}));
+            let p: ProjectParams = parse_params(&params)?;
+            Ok(to_json(
+                tokio::time::timeout(
+                    NON_LSP_REQUEST_TIMEOUT,
+                    restart_project(projects, &p.project),
+                )
+                .await
+                .map_err(timeout_error)?,
+            )?)
+        }
         _ => {
             let params = request.params.unwrap_or(serde_json::json!({}));
             let p: ProjectParams = parse_params(&params)?;

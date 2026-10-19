@@ -7,6 +7,14 @@ use crate::models::symbol::SymbolKind;
 use crate::models::{diagnostic, lsp, symbol};
 use crate::services::store::UnreadPath;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRestartStatus {
+    Restarted,
+    NotLoaded,
+    Busy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Location {
     pub file: String,
