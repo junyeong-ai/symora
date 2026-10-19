@@ -622,7 +622,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "rename_symbol",
             "LSP rename for the symbol at file:line:column. Returns the affected \
                           file list and per-file edit count. Set dry_run=true to preview \
-                          without writing. ⚠ Mutates source files when dry_run is false.",
+                          without writing. Application requires confirmed workspace readiness. \
+                          ⚠ Mutates source files when dry_run is false.",
             with_required(
                 with_extra(
                     position_exact_location_schema(),

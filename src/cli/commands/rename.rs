@@ -106,9 +106,13 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                         affected_files: changes.len(),
                         changes,
                         message: if args.dry_run {
-                            Some(
-                                "Preview only. Run without --dry-run to apply changes.".to_string(),
-                            )
+                            Some(match answer.indexing {
+                                Some(_) => "Preview only. Workspace readiness was not confirmed; \
+                                            application is refused."
+                                    .to_string(),
+                                None => "Preview only. Run without --dry-run to apply changes."
+                                    .to_string(),
+                            })
                         } else {
                             None
                         },
@@ -133,18 +137,24 @@ fn refuse_partial_rename(
     indexing: Option<IndexingDegradation>,
     dry_run: bool,
 ) -> Option<OutputError> {
-    let degradation =
-        indexing.filter(|state| !dry_run && *state == IndexingDegradation::TimedOut)?;
+    let degradation = indexing.filter(|_| !dry_run)?;
+    let hint = match degradation {
+        IndexingDegradation::TimedOut => {
+            "Use `--dry-run` to inspect the edits. Retry after the language server finishes \
+             the reported workspace work."
+        }
+        IndexingDegradation::Unconfirmed => {
+            "Use `--dry-run` to inspect the edits. The language server has not confirmed \
+             workspace readiness; retrying alone does not establish completeness."
+        }
+    };
     Some(
         OutputError::precondition_failed(format!(
             "Rename refused: workspace completeness is not confirmed for the edit set \
              (indexing: {})",
             degradation.as_str(),
         ))
-        .with_hint(
-            "Use `--dry-run` to inspect the edits. Retry after the language server finishes \
-             the reported workspace work.",
-        ),
+        .with_hint(hint),
     )
 }
 
@@ -177,18 +187,17 @@ mod tests {
     use crate::cli::errors::ErrorCode;
 
     #[test]
-    fn a_rename_computed_during_unfinished_workspace_work_applies_nothing() {
-        let degraded = Some(IndexingDegradation::TimedOut);
-        assert_eq!(
-            refuse_partial_rename(degraded, false).map(|e| e.code),
-            Some(ErrorCode::PreconditionFailed)
-        );
-        assert!(refuse_partial_rename(degraded, true).is_none());
+    fn unverified_rename_edits_are_preview_only() {
+        for degradation in [
+            IndexingDegradation::TimedOut,
+            IndexingDegradation::Unconfirmed,
+        ] {
+            let error = refuse_partial_rename(Some(degradation), false).unwrap();
+            assert_eq!(error.code, ErrorCode::PreconditionFailed);
+            assert!(error.message.contains(degradation.as_str()));
+            assert!(refuse_partial_rename(Some(degradation), true).is_none());
+        }
         assert!(refuse_partial_rename(None, false).is_none());
-    }
-
-    #[test]
-    fn a_server_without_a_completion_channel_can_apply_its_workspace_edit() {
-        assert!(refuse_partial_rename(Some(IndexingDegradation::Unconfirmed), false).is_none());
+        assert!(refuse_partial_rename(None, true).is_none());
     }
 }
