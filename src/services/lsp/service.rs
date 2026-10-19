@@ -8,7 +8,7 @@ use super::LspService;
 use super::cache::{SymbolCache, WorkspaceSymbolCache};
 use crate::error::LspError;
 use crate::infra::lsp::watch::FileWatch;
-use crate::infra::lsp::{HealthMonitor, IndexingState, LspClient, LspManager};
+use crate::infra::lsp::{HealthMonitor, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
     ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
@@ -337,25 +337,17 @@ impl Drop for DefaultLspService {
     }
 }
 
-/// Preserve computation-time readiness, including an absent completion signal.
-pub(super) fn degradation_of(state: IndexingState) -> Option<IndexingDegradation> {
-    match state {
-        IndexingState::TimedOut => Some(IndexingDegradation::TimedOut),
-        IndexingState::Unconfirmed | IndexingState::NotStarted => {
-            Some(IndexingDegradation::Unconfirmed)
-        }
-        IndexingState::InProgress => Some(IndexingDegradation::TimedOut),
-        IndexingState::Ready => None,
-    }
-}
-
-pub(super) async fn ensure_indexed(client: &LspClient, file: &Path, root: &Path) {
+pub(super) async fn ensure_indexed(
+    client: &LspClient,
+    file: &Path,
+    root: &Path,
+) -> Option<IndexingDegradation> {
     use super::helpers::find_project_entry;
     use crate::infra::lsp::client::IndexingState;
 
     let state = client.indexing_state();
     if state.is_usable() {
-        return;
+        return state.degradation();
     }
 
     // A server that has seen no document yet may never start indexing —
@@ -372,5 +364,5 @@ pub(super) async fn ensure_indexed(client: &LspClient, file: &Path, root: &Path)
         }
     }
 
-    client.await_indexing_signal().await;
+    client.await_indexing_signal().await
 }

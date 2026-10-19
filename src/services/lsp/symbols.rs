@@ -51,7 +51,7 @@ pub(super) async fn find_symbols(
                 // non-answer, not "no symbols". Give the workspace its
                 // bounded indexing wait and ask once more before judging.
                 if result.is_null() && client.indexing_state() != IndexingState::Ready {
-                    ensure_indexed(&client, &file_clone, &root).await;
+                    let _ = ensure_indexed(&client, &file_clone, &root).await;
                     result = client
                         .request("textDocument/documentSymbol", Some(params))
                         .await?;
@@ -174,18 +174,17 @@ pub(super) async fn workspace_symbols(
                 let client = manager.get_client(language).await?;
 
                 let root = manager.root();
-                if let Some(file) = find_first_file(root, language) {
+                let waited = if let Some(file) = find_first_file(root, language) {
                     tracing::debug!("Opening file for workspace indexing: {:?}", file);
                     let content = read_file_validated(&file, max_file_size).await?;
                     let uri = path_to_uri(&file);
                     client.sync_document(&uri, &content).await?;
-                    client.await_indexing_signal().await;
+                    client.await_indexing_signal().await
                 } else {
                     tracing::warn!("No {} files found in workspace for indexing", language);
-                }
-                // Snapshot at computation time: the marker rides with the
-                // answer (and gates caching), never a post-hoc state read.
-                let ran_under = super::service::degradation_of(client.indexing_state());
+                    Some(crate::models::lsp::IndexingDegradation::Unconfirmed)
+                };
+                let indexing = client.indexing_query(waited);
 
                 let params = serde_json::json!({ "query": query });
                 tracing::debug!(
@@ -218,7 +217,7 @@ pub(super) async fn workspace_symbols(
                     })
                     .collect();
 
-                Ok(Indexed::new(dedup_symbols(all_symbols), ran_under))
+                Ok(indexing.finish(dedup_symbols(all_symbols)))
             }
         })
         .await?;
@@ -277,7 +276,7 @@ mod tests {
         for state in [
             IndexingState::NotStarted,
             IndexingState::InProgress,
-            IndexingState::TimedOut,
+            IndexingState::Unconfirmed,
         ] {
             match parse_null(state) {
                 Err(LspError::Indexing { language }) => {

@@ -37,12 +37,9 @@ impl IndexingDegradation {
     }
 }
 
-/// A workspace-dependent query result paired with the indexing state it
-/// was computed under, captured at computation time inside the service
-/// layer. Reading the state *after* the result returns is racy: a
-/// quiescence signal landing mid-request would strip the marker from an
-/// answer that was computed against an incomplete index — exactly the
-/// cold-start lower bound the marker exists to disclose.
+/// A workspace-dependent result qualified by readiness throughout its query.
+/// A later completion cannot certify an earlier result, and workspace work
+/// that starts during the query invalidates its initial confirmation.
 #[derive(Debug, Clone, Default)]
 pub struct Indexed<T> {
     pub data: T,

@@ -304,14 +304,8 @@ impl LspManager {
     /// Returns `None` when there's still headroom under
     /// `max_concurrent_servers`.
     ///
-    /// Deliberately NOT keyed on `IndexingState`: `Initializing` is
-    /// already immune (the `_ => None` arm below), and `InProgress` is
-    /// self-bounding — `await_indexing_signal` races an unconditional sleep,
-    /// so a hung server transitions to `TimedOut` and becomes evictable
-    /// on its own. Adding an `InProgress` immunity would make a full pool
-    /// of indexing clients unevictable. When the pool is at capacity and
-    /// every occupant is `Initializing` (this returns `None`), `get_client`
-    /// waits for one to settle rather than exceeding the cap.
+    /// Initializing clients retain their pool claims. Live clients remain
+    /// evictable while a caller waits for workspace readiness.
     fn pick_eviction_target(&self, clients: &HashMap<Language, ClientState>) -> Option<Language> {
         let cap = self.runtime_config.max_concurrent_servers.max(1);
         if clients.len() < cap {

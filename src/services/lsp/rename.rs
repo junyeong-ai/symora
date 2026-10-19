@@ -7,7 +7,7 @@ use crate::models::lsp::{Indexed, PrepareRenameResult, RenameResult, path_to_uri
 use super::converters::*;
 use super::helpers::*;
 use super::position::encoded_offset_to_byte;
-use super::service::{DefaultLspService, degradation_of, ensure_indexed};
+use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn prepare_rename(
     service: &DefaultLspService,
@@ -24,15 +24,10 @@ pub(super) async fn prepare_rename(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
-                // Renameability is decided from the cross-file reference set,
-                // so the same readiness gate every other LSP query uses must
-                // run first — otherwise a cold server answers "no references"
-                // for a symbol it simply has not indexed yet.
-                ensure_indexed(&client, &file, manager.root()).await;
-
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let _ = ensure_indexed(&client, &file, manager.root()).await;
 
                 let encoding = client.position_encoding().await;
                 let params = serde_json::json!({
@@ -132,13 +127,10 @@ pub(super) async fn rename(
             async move {
                 let content = read_file_validated(&file, max_file_size).await?;
                 verify_document_snapshot(&file, &content, Some(expected_hash))?;
-                // Rename rewrites references across the workspace, so wait for
-                // the index to settle before issuing it — the same gate the
-                // navigation queries use.
-                ensure_indexed(&client, &file, manager.root()).await;
-                let ran_under = degradation_of(client.indexing_state());
 
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
                 let params = serde_json::json!({
                     "textDocument": { "uri": uri },
                     "position": to_lsp_position(line, column, &content, client.position_encoding().await),
@@ -151,9 +143,8 @@ pub(super) async fn rename(
                     Some(expected_hash),
                     &snapshots,
                 )?;
-                Ok(Indexed::new(
-                    (result, client.position_encoding().await, snapshots),
-                    ran_under,
+                Ok(indexing.finish(
+                    (result, client.position_encoding().await, snapshots)
                 ))
             }
         })

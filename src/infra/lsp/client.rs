@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
@@ -21,7 +22,7 @@ use super::protocol::{
 use super::transport::{Transport, write_notification, write_request, write_response};
 use super::watch::{FileChange, WATCHED_FILES_METHOD, WatchRegistry};
 use crate::error::LspError;
-use crate::models::lsp::path_to_uri;
+use crate::models::lsp::{Indexed, IndexingDegradation, path_to_uri};
 use crate::models::symbol::Language;
 
 type PendingRequest = oneshot::Sender<Response>;
@@ -202,16 +203,13 @@ impl DocumentCache {
     }
 }
 
-/// Workspace readiness confirmed by structured server status. Silence and
-/// work-progress completion do not establish that a workspace is fully analyzed.
+/// Workspace readiness reported by a healthy server's structured status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum IndexingState {
-    NotStarted = 0,
-    InProgress = 1,
-    Ready = 2,
-    TimedOut = 3,
-    Unconfirmed = 4,
+    NotStarted,
+    InProgress,
+    Ready,
+    Unconfirmed,
 }
 
 /// The events that may move [`IndexingState`]. Every state change goes
@@ -219,52 +217,77 @@ pub enum IndexingState {
 /// the legal transitions live in exactly one testable place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexingEvent {
-    /// A bounded wait is claiming the session (start of
-    /// `await_indexing_signal`). A pure no-op on the state — waiting is not
-    /// evidence the server is indexing.
-    WaitStarted,
-    /// The wait budget expired without establishing readiness.
-    WaitTimedOut,
+    /// A quiet wait ended without a workspace status.
+    WaitUnconfirmed,
     /// An explicit workspace status confirms quiescence.
     ServerQuiescent,
     /// The server reports work in progress.
     ServerBusy,
+    /// The server cannot confirm a healthy workspace.
+    ServerUnconfirmed,
 }
 
 impl IndexingState {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::InProgress,
-            2 => Self::Ready,
-            3 => Self::TimedOut,
-            4 => Self::Unconfirmed,
-            _ => Self::NotStarted,
+    pub fn is_usable(self) -> bool {
+        matches!(self, Self::Ready | Self::Unconfirmed)
+    }
+
+    pub fn degradation(self) -> Option<IndexingDegradation> {
+        match self {
+            Self::Ready => None,
+            _ => Some(IndexingDegradation::Unconfirmed),
         }
     }
 
-    fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    pub fn is_usable(self) -> bool {
-        matches!(self, Self::Ready | Self::TimedOut | Self::Unconfirmed)
-    }
-
-    /// Only structured workspace status produces `Ready`. Usable unconfirmed
-    /// states avoid charging the full wait budget on every subsequent query.
     pub fn on_event(self, event: IndexingEvent) -> IndexingState {
         use IndexingEvent::*;
         use IndexingState::*;
         match (self, event) {
             (_, ServerQuiescent) => Ready,
-            (TimedOut, ServerBusy) => TimedOut,
+            (_, ServerUnconfirmed) => Unconfirmed,
             (_, ServerBusy) => InProgress,
-            (state, WaitStarted) => state,
-            (InProgress, WaitTimedOut) => TimedOut,
-            (NotStarted, WaitTimedOut) => Unconfirmed,
-            (state, WaitTimedOut) => state,
+            (NotStarted, WaitUnconfirmed) => Unconfirmed,
+            (state, WaitUnconfirmed) => state,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IndexingStatus {
+    state: IndexingState,
+    revision: u64,
+}
+
+/// Qualifies a result across the request, including a complete busy/ready cycle.
+#[must_use]
+pub struct IndexingQuery<'a> {
+    client: &'a LspClient,
+    initial: IndexingStatus,
+    degradation: Option<IndexingDegradation>,
+}
+
+impl IndexingQuery<'_> {
+    pub fn finish<T>(self, data: T) -> Indexed<T> {
+        let current = self.client.indexing_status();
+        let indexing = self.degradation.or_else(|| {
+            (self.initial.revision != current.revision).then_some(IndexingDegradation::Unconfirmed)
+        });
+        Indexed::new(data, indexing)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ServerHealth {
+    Ok,
+    Warning,
+    Error,
+}
+
+#[derive(Deserialize)]
+struct ServerStatus {
+    health: ServerHealth,
+    quiescent: bool,
 }
 
 struct ClientUseState {
@@ -370,7 +393,7 @@ pub struct LspClient {
     /// response. Every inbound/outbound position conversion reads this.
     position_encoding: RwLock<PositionEncoding>,
     shutdown: RwLock<bool>,
-    indexing_state: AtomicU8,
+    indexing_status: std::sync::Mutex<IndexingStatus>,
     indexing_notify: Notify,
     /// Serializes the drift sweep's `didClose` against in-flight requests:
     /// each request holds a read guard for its full dispatch window, and
@@ -427,7 +450,10 @@ impl LspClient {
             capabilities: RwLock::new(None),
             position_encoding: RwLock::new(PositionEncoding::default()),
             shutdown: RwLock::new(false),
-            indexing_state: AtomicU8::new(IndexingState::NotStarted.to_u8()),
+            indexing_status: std::sync::Mutex::new(IndexingStatus {
+                state: IndexingState::NotStarted,
+                revision: 0,
+            }),
             indexing_notify: Notify::new(),
             dispatch_gate: RwLock::new(()),
             terminated: AtomicBool::new(false),
@@ -1245,7 +1271,6 @@ impl LspClient {
                         }
                     }
                     "experimental/serverStatus" => self.observe_server_status(&params),
-                    "language/status" => self.observe_language_status(&params),
                     "window/logMessage" | "window/showMessage" => {
                         if let Some(msg) = params.get("message").and_then(|m| m.as_str()) {
                             let msg_type = params.get("type").and_then(|t| t.as_u64());
@@ -1616,45 +1641,58 @@ impl LspClient {
         }
     }
 
-    pub fn indexing_state(&self) -> IndexingState {
-        IndexingState::from_u8(self.indexing_state.load(Ordering::Acquire))
+    fn indexing_status(&self) -> IndexingStatus {
+        *self
+            .indexing_status
+            .lock()
+            .expect("indexing status lock poisoned")
     }
 
-    /// Apply one indexing event atomically and return the state it
-    /// produced. The transition table (`IndexingState::on_event`) is the
-    /// only authority; the compare-and-swap loop guarantees a concurrent
-    /// signal is incorporated, never overwritten — the failure mode the
-    /// old blind `store` had (a quiescence landing mid-update was stomped
-    /// and its wake-up lost, latching a permanent false `TimedOut`).
-    pub fn apply_indexing_event(&self, event: IndexingEvent) -> IndexingState {
-        loop {
-            let current = self.indexing_state();
-            let next = current.on_event(event);
-            if next == current {
-                return current;
-            }
-            if self
-                .indexing_state
-                .compare_exchange(
-                    current.to_u8(),
-                    next.to_u8(),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                if next.is_usable() {
-                    self.indexing_notify.notify_waiters();
-                }
-                return next;
-            }
+    pub fn indexing_state(&self) -> IndexingState {
+        self.indexing_status().state
+    }
+
+    pub fn indexing_query(&self, waited: Option<IndexingDegradation>) -> IndexingQuery<'_> {
+        let initial = self.indexing_status();
+        let degradation = if initial.state == IndexingState::Ready {
+            None
+        } else {
+            waited.or(initial.state.degradation())
+        };
+        IndexingQuery {
+            client: self,
+            initial,
+            degradation,
         }
     }
 
-    /// Test-only raw setter for staging a scenario mid-table.
+    pub fn apply_indexing_event(&self, event: IndexingEvent) -> IndexingState {
+        let mut status = self
+            .indexing_status
+            .lock()
+            .expect("indexing status lock poisoned");
+        let previous = status.state;
+        let next = previous.on_event(event);
+        if matches!(
+            event,
+            IndexingEvent::ServerBusy | IndexingEvent::ServerUnconfirmed
+        ) {
+            status.revision += 1;
+        }
+        if previous == IndexingState::Ready && next != IndexingState::Ready {
+            bump_content_generation();
+        }
+        status.state = next;
+        drop(status);
+        if next != previous && next.is_usable() {
+            self.indexing_notify.notify_waiters();
+        }
+        next
+    }
+
     #[cfg(test)]
     fn force_indexing_state(&self, state: IndexingState) {
-        self.indexing_state.store(state.to_u8(), Ordering::Release);
+        self.indexing_status.lock().unwrap().state = state;
     }
 
     /// Invalidate workspace answers when source content changes. Readiness
@@ -1663,94 +1701,55 @@ impl LspClient {
         bump_content_generation();
     }
 
-    pub async fn await_indexing_signal(&self) -> IndexingState {
-        // `TimedOut` is terminal-usable: re-waiting the full budget on
-        // every request would make a slow server cost the timeout per
-        // query forever. Recovery is signal-driven — a later quiescence
-        // signal flips the state to `Ready` — and degraded answers stay
-        // marked via the `indexing` marker until one arrives. Claiming the
-        // wait is a no-op transition (it is not evidence the server is
-        // indexing), so a `Ready`/`TimedOut` that landed since the caller
-        // checked is returned, never overwritten.
-        let state = self.apply_indexing_event(IndexingEvent::WaitStarted);
+    pub async fn await_indexing_signal(&self) -> Option<IndexingDegradation> {
+        let state = self.indexing_state();
         if state.is_usable() {
-            return state;
+            return state.degradation();
         }
-
-        let max_wait = self.indexing_timeout();
-        if max_wait.is_zero() {
-            // No budget means we do not wait. A server that already signalled it
-            // is indexing (`InProgress`) is disclosed as `TimedOut`; one that has
-            // signalled nothing remains unconfirmed.
-            return self.apply_indexing_event(IndexingEvent::WaitTimedOut);
-        }
-
-        tracing::debug!(
-            "Waiting {}ms for {} workspace indexing",
-            max_wait.as_millis(),
-            self.language
-        );
-
-        let deadline = tokio::time::Instant::now() + max_wait;
+        let wait_limit = self.config.indexing_wait(self.language);
+        let policy_deadline = tokio::time::Instant::now() + wait_limit;
+        let deadline = crate::infra::deadline::expires_at(wait_limit)
+            .unwrap_or(policy_deadline)
+            .min(policy_deadline);
+        let quiet_wait = deadline == policy_deadline;
         loop {
             let notified = self.indexing_notify.notified();
             tokio::pin!(notified);
-            // Register the waiter BEFORE re-reading the state, so a
-            // quiescence signal that lands in the gap either flips the
-            // state we are about to read or wakes the registered waiter —
-            // it can no longer fall between the two.
             notified.as_mut().enable();
             let current = self.indexing_state();
             if current.is_usable() {
-                return current;
+                return current.degradation();
             }
             tokio::select! {
-                _ = &mut notified => {
-                    let state = self.indexing_state();
-                    if state.is_usable() {
-                        tracing::debug!("{} indexing completed via notification", self.language);
-                        return state;
-                    }
-                    // A busy signal re-opened InProgress between the wake
-                    // and the read: keep waiting on the remaining budget.
-                }
+                _ = &mut notified => {},
                 _ = tokio::time::sleep_until(deadline) => {
-                    tracing::debug!("{} indexing timeout", self.language);
-                    // The transition refuses to conclude anything but an
-                    // in-flight wait, so a Ready that arrived between the
-                    // deadline firing and this store is returned intact.
-                    return self.apply_indexing_event(IndexingEvent::WaitTimedOut);
+                    let current = if quiet_wait {
+                        self.apply_indexing_event(IndexingEvent::WaitUnconfirmed)
+                    } else {
+                        self.indexing_state()
+                    };
+                    return if current.is_usable() {
+                        current.degradation()
+                    } else {
+                        Some(IndexingDegradation::TimedOut)
+                    };
                 }
             }
         }
     }
 
-    fn indexing_timeout(&self) -> Duration {
-        self.config.indexing_wait(self.language)
-    }
-
-    /// The authoritative quiescence channel (rust-analyzer's
-    /// `experimental/serverStatus`, requested via the matching client
-    /// capability): quiescent=true means the workspace is fully analyzed,
-    /// false that the server is (re)working — including after edits, so
-    /// readiness re-evaluates after edits. This channel takes precedence over
-    /// generic progress notifications.
     fn observe_server_status(&self, params: &Value) {
-        if let Some(quiescent) = params.get("quiescent").and_then(|v| v.as_bool()) {
-            self.apply_indexing_event(if quiescent {
-                IndexingEvent::ServerQuiescent
-            } else {
-                IndexingEvent::ServerBusy
-            });
-        }
-    }
-
-    fn observe_language_status(&self, params: &Value) {
-        if params.get("type").and_then(|v| v.as_str()) == Some("ProjectStatus")
-            && params.get("message").and_then(|v| v.as_str()) == Some("OK")
-        {
-            self.apply_indexing_event(IndexingEvent::ServerQuiescent);
-        }
+        let Ok(status) = serde_json::from_value::<ServerStatus>(params.clone()) else {
+            return;
+        };
+        let event = if !status.quiescent {
+            IndexingEvent::ServerBusy
+        } else if matches!(status.health, ServerHealth::Ok) {
+            IndexingEvent::ServerQuiescent
+        } else {
+            IndexingEvent::ServerUnconfirmed
+        };
+        self.apply_indexing_event(event);
     }
 
     fn classify_log_level(language: Language, message: &str, msg_type: Option<u64>) -> LogLevel {
@@ -2547,7 +2546,7 @@ mod tests {
         notify_client(
             &client,
             "experimental/serverStatus",
-            serde_json::json!({"quiescent": true}),
+            serde_json::json!({"health": "ok", "quiescent": true}),
         )
         .await;
         assert_eq!(client.indexing_state(), IndexingState::Ready);
@@ -2555,7 +2554,7 @@ mod tests {
         notify_client(
             &client,
             "experimental/serverStatus",
-            serde_json::json!({"quiescent": false}),
+            serde_json::json!({"health": "ok", "quiescent": false}),
         )
         .await;
         assert_eq!(client.indexing_state(), IndexingState::InProgress);
@@ -2563,52 +2562,145 @@ mod tests {
         notify_client(
             &client,
             "experimental/serverStatus",
-            serde_json::json!({"quiescent": true}),
+            serde_json::json!({"health": "ok", "quiescent": true}),
         )
         .await;
         assert_eq!(client.indexing_state(), IndexingState::Ready);
     }
 
-    /// A quiescence signal also clears an earlier timed-out verdict —
-    /// the degradation marker must stop the moment the server is ready.
-    #[tokio::test]
-    async fn server_status_clears_a_timed_out_verdict() {
+    #[tokio::test(start_paused = true)]
+    async fn a_short_wait_does_not_end_another_callers_wait() {
         let client = test_client();
-        client.force_indexing_state(IndexingState::TimedOut);
-
-        notify_client(
-            &client,
-            "experimental/serverStatus",
-            serde_json::json!({"quiescent": true}),
-        )
+        client.apply_indexing_event(IndexingEvent::ServerBusy);
+        let patient = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.await_indexing_signal().await }
+        });
+        let start = tokio::time::Instant::now();
+        let short = crate::infra::deadline::scope(Duration::from_secs(1), async {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            client.await_indexing_signal().await
+        })
         .await;
-        assert_eq!(client.indexing_state(), IndexingState::Ready);
+        assert_eq!(short, Some(IndexingDegradation::TimedOut));
+        assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(1));
+        assert_eq!(client.indexing_state(), IndexingState::InProgress);
+        assert!(!patient.is_finished());
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(patient.await.unwrap(), None);
     }
 
-    /// A busy signal must NOT clear a timed-out verdict: the index is
-    /// still incomplete, so the disclosed degraded state stands until a
-    /// quiescence signal proves completion. (Clearing it would let the
-    /// next answer emit unmarked off the same incomplete index.)
-    #[tokio::test]
-    async fn server_busy_does_not_clear_a_timed_out_verdict() {
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_and_expired_waits_preserve_server_progress() {
         let client = test_client();
-        client.force_indexing_state(IndexingState::TimedOut);
+        client.apply_indexing_event(IndexingEvent::ServerBusy);
+        let cancelled = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.await_indexing_signal().await }
+        });
+        tokio::task::yield_now().await;
+        cancelled.abort();
+        assert!(cancelled.await.unwrap_err().is_cancelled());
+        assert_eq!(client.indexing_state(), IndexingState::InProgress);
+        let waited = client.await_indexing_signal().await;
+        assert_eq!(waited, Some(IndexingDegradation::TimedOut));
+        assert_eq!(client.indexing_query(waited).finish(()).indexing, waited);
+        assert_eq!(client.indexing_state(), IndexingState::InProgress);
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(client.await_indexing_signal().await, None);
+        assert!(client.indexing_query(None).finish(()).indexing.is_none());
+    }
 
-        notify_client(
-            &client,
-            "experimental/serverStatus",
-            serde_json::json!({"quiescent": false}),
-        )
-        .await;
-        assert_eq!(client.indexing_state(), IndexingState::TimedOut);
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_server_stays_unconfirmed_until_it_reports_readiness() {
+        let client = test_client();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            client.await_indexing_signal().await,
+            Some(IndexingDegradation::Unconfirmed)
+        );
+        let after_wait = tokio::time::Instant::now();
+        assert_eq!(
+            after_wait - started,
+            client.config.indexing_wait(Language::Rust)
+        );
+        assert_eq!(
+            client.await_indexing_signal().await,
+            Some(IndexingDegradation::Unconfirmed)
+        );
+        assert_eq!(tokio::time::Instant::now(), after_wait);
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(client.await_indexing_signal().await, None);
+    }
 
-        notify_client(
-            &client,
-            "experimental/serverStatus",
+    #[tokio::test]
+    async fn quiescence_requires_a_valid_healthy_server_status() {
+        let client = test_client();
+        for params in [
             serde_json::json!({"quiescent": true}),
+            serde_json::json!({"health": "unknown", "quiescent": true}),
+            serde_json::json!({"health": "ok", "quiescent": "true"}),
+        ] {
+            notify_client(&client, "experimental/serverStatus", params).await;
+            assert_eq!(client.indexing_state(), IndexingState::NotStarted);
+        }
+        for health in ["warning", "error"] {
+            client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+            notify_client(
+                &client,
+                "experimental/serverStatus",
+                serde_json::json!({"health": health, "quiescent": true}),
+            )
+            .await;
+            assert_eq!(client.indexing_state(), IndexingState::Unconfirmed);
+        }
+    }
+
+    #[tokio::test]
+    async fn project_health_and_document_diagnostics_do_not_confirm_workspace_readiness() {
+        let client = test_client();
+        notify_client(
+            &client,
+            "language/status",
+            serde_json::json!({"type": "ProjectStatus", "message": "OK"}),
         )
         .await;
-        assert_eq!(client.indexing_state(), IndexingState::Ready);
+        notify_client(
+            &client,
+            "textDocument/publishDiagnostics",
+            serde_json::json!({"uri": "file:///tmp/other.py", "diagnostics": []}),
+        )
+        .await;
+        assert_eq!(client.indexing_state(), IndexingState::NotStarted);
+    }
+
+    #[test]
+    fn query_readiness_covers_the_entire_computation() {
+        let client = test_client();
+        let unconfirmed = client.indexing_query(None);
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(
+            unconfirmed.finish(()).indexing,
+            Some(IndexingDegradation::Unconfirmed)
+        );
+        assert!(client.indexing_query(None).finish(()).indexing.is_none());
+
+        let interrupted = client.indexing_query(None);
+        client.apply_indexing_event(IndexingEvent::ServerBusy);
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(
+            interrupted.finish(()).indexing,
+            Some(IndexingDegradation::Unconfirmed)
+        );
+        assert!(client.indexing_query(None).finish(()).indexing.is_none());
+
+        let unhealthy = client.indexing_query(None);
+        client.apply_indexing_event(IndexingEvent::ServerUnconfirmed);
+        client.apply_indexing_event(IndexingEvent::ServerQuiescent);
+        assert_eq!(
+            unhealthy.finish(()).indexing,
+            Some(IndexingDegradation::Unconfirmed)
+        );
     }
 
     #[tokio::test]
@@ -2625,53 +2717,32 @@ mod tests {
         }
     }
 
-    /// The full transition table: every pair not explicitly legal is a
-    /// no-op. This is the single place the legal moves are encoded, so
-    /// the race fixes (no blind stores) reduce to this table being right.
     #[test]
     fn indexing_transition_table_is_exact() {
         use IndexingEvent::*;
         use IndexingState::*;
-
-        let states = [NotStarted, InProgress, Ready, TimedOut, Unconfirmed];
-
-        // A quiescence signal is the only path to Ready, from anywhere.
-        for state in states {
+        for state in [NotStarted, InProgress, Ready, Unconfirmed] {
             assert_eq!(state.on_event(ServerQuiescent), Ready);
+            assert_eq!(state.on_event(ServerUnconfirmed), Unconfirmed);
+            assert_eq!(state.on_event(ServerBusy), InProgress);
+            assert_eq!(
+                state.on_event(WaitUnconfirmed),
+                if state == NotStarted {
+                    Unconfirmed
+                } else {
+                    state
+                }
+            );
         }
-
-        // Busy — the only opener of InProgress — re-opens from anywhere except
-        // the disclosed TimedOut. This is real server activity, the evidence a
-        // later timeout needs to mean a genuine lower bound.
-        assert_eq!(NotStarted.on_event(ServerBusy), InProgress);
-        assert_eq!(InProgress.on_event(ServerBusy), InProgress);
-        assert_eq!(Ready.on_event(ServerBusy), InProgress);
-        assert_eq!(TimedOut.on_event(ServerBusy), TimedOut);
-
-        // Claiming the wait is a pure no-op: waiting is NOT evidence the server
-        // is indexing, so it never moves NotStarted into InProgress (nor stomps
-        // a Ready/TimedOut that landed since the caller checked).
-        assert_eq!(NotStarted.on_event(WaitStarted), NotStarted);
-        assert_eq!(InProgress.on_event(WaitStarted), InProgress);
-        assert_eq!(Ready.on_event(WaitStarted), Ready);
-        assert_eq!(TimedOut.on_event(WaitStarted), TimedOut);
-
-        assert_eq!(InProgress.on_event(WaitTimedOut), TimedOut);
-        assert_eq!(NotStarted.on_event(WaitTimedOut), Unconfirmed);
-        assert_eq!(Ready.on_event(WaitTimedOut), Ready);
-        assert_eq!(TimedOut.on_event(WaitTimedOut), TimedOut);
     }
 
-    /// An already-quiescent server must never be re-latched into a false
-    /// TimedOut by a waiter racing the signal: the wait claim is a
-    /// transition, so the landed Ready is returned, not overwritten.
     #[tokio::test]
-    async fn wait_returns_a_ready_that_landed_before_the_claim() {
+    async fn waiting_preserves_an_existing_readiness_confirmation() {
         let client = test_client();
         client.apply_indexing_event(IndexingEvent::ServerQuiescent);
-        assert_eq!(client.await_indexing_signal().await, IndexingState::Ready);
+        assert_eq!(client.await_indexing_signal().await, None);
         // And again — quiescence is durable across repeated waits.
-        assert_eq!(client.await_indexing_signal().await, IndexingState::Ready);
+        assert_eq!(client.await_indexing_signal().await, None);
     }
 
     #[tokio::test]
@@ -2703,13 +2774,9 @@ mod tests {
         client.note_document_changed();
         assert_eq!(client.indexing_state(), IndexingState::Ready);
 
-        client.force_indexing_state(IndexingState::TimedOut);
+        client.force_indexing_state(IndexingState::InProgress);
         client.note_document_changed();
-        assert_eq!(
-            client.indexing_state(),
-            IndexingState::TimedOut,
-            "an edit doesn't complete an incomplete index either"
-        );
+        assert_eq!(client.indexing_state(), IndexingState::InProgress);
     }
 
     /// Every content change advances the workspace generation, so caches

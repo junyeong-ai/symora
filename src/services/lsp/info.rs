@@ -10,7 +10,7 @@ use crate::models::lsp::{HoverInfo, Indexed, SignatureHelp, path_to_uri};
 use super::converters::*;
 use super::helpers::*;
 use super::position::PositionConverter;
-use super::service::{DefaultLspService, degradation_of, ensure_indexed};
+use super::service::{DefaultLspService, ensure_indexed};
 
 pub(super) async fn hover(
     service: &DefaultLspService,
@@ -27,12 +27,11 @@ pub(super) async fn hover(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
-                ensure_indexed(&client, &file, manager.root()).await;
-                let ran_under = degradation_of(client.indexing_state());
-
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
@@ -50,17 +49,14 @@ pub(super) async fn hover(
 
                 let mut conv = PositionConverter::new(client.position_encoding().await)
                     .with_content(&file, &content);
-                Ok(Indexed::new(
-                    result.map(|h| {
-                        let hover_text = extract_hover_content(&h.contents);
-                        let range = h.range.map(|r| range_to_location(&file, &r, &mut conv));
-                        HoverInfo {
-                            content: hover_text,
-                            range,
-                        }
-                    }),
-                    ran_under,
-                ))
+                Ok(indexing.finish(result.map(|h| {
+                    let hover_text = extract_hover_content(&h.contents);
+                    let range = h.range.map(|r| range_to_location(&file, &r, &mut conv));
+                    HoverInfo {
+                        content: hover_text,
+                        range,
+                    }
+                })))
             }
         })
         .await
@@ -81,12 +77,11 @@ pub(super) async fn signature_help(
             let file = file.clone();
             let manager = Arc::clone(&manager);
             async move {
-                ensure_indexed(&client, &file, manager.root()).await;
-                let ran_under = degradation_of(client.indexing_state());
-
                 let content = read_file_validated(&file, max_file_size).await?;
                 let uri = path_to_uri(&file);
                 client.sync_document(&uri, &content).await?;
+                let waited = ensure_indexed(&client, &file, manager.root()).await;
+                let indexing = client.indexing_query(waited);
 
                 let params = TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier::new(&uri),
@@ -106,10 +101,7 @@ pub(super) async fn signature_help(
                     .await?;
 
                 let encoding = client.position_encoding().await;
-                Ok(Indexed::new(
-                    result.and_then(|v| parse_signature_help(&v, encoding)),
-                    ran_under,
-                ))
+                Ok(indexing.finish(result.and_then(|v| parse_signature_help(&v, encoding))))
             }
         })
         .await

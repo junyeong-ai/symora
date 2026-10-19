@@ -9,12 +9,21 @@ pending = None
 requested = False
 
 
+def send_message(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    sys.stdout.buffer.flush()
+
+
 def send(request_id, result=None, error=None):
     response = {"jsonrpc": "2.0", "id": request_id}
     response["error" if error else "result"] = error if error else result
-    body = json.dumps(response).encode()
-    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-    sys.stdout.buffer.flush()
+    send_message(response)
+
+
+def server_status(health="ok", quiescent=True):
+    send_message({"jsonrpc": "2.0", "method": "experimental/serverStatus",
+                  "params": {"health": health, "quiescent": quiescent}})
 
 
 def workspace_edit():
@@ -45,12 +54,11 @@ while True:
             "hoverProvider": True,
             "renameProvider": {"prepareProvider": True}
         }}
-    elif method == "initialized" and mode == "unrelated-hover":
-        notification = {"jsonrpc": "2.0", "method": "experimental/serverStatus",
-                        "params": {"health": "ok", "quiescent": True}}
-        body = json.dumps(notification).encode()
-        sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-        sys.stdout.buffer.flush()
+    elif method == "initialized":
+        if mode in ("unrelated-hover", "busy-rename"):
+            server_status()
+        elif mode in ("warning-rename", "error-rename"):
+            server_status(health=mode.split("-")[0])
     elif method == "textDocument/prepareRename" and mode != "unrelated-hover":
         result = {"placeholder": "abc", "range": {
             "start": {"line": 1, "character": 5},
@@ -60,7 +68,15 @@ while True:
         result = []
     elif method == "textDocument/hover" and mode == "unrelated-hover":
         result = {"contents": "Renamed helper documentation."}
-    elif method == "textDocument/rename" and mode in ("unrelated-hover", "unconfirmed-rename"):
+    elif method == "textDocument/rename" and mode in (
+        "unrelated-hover", "unconfirmed-rename", "warning-rename", "error-rename",
+        "busy-rename", "late-ready-rename"
+    ):
+        if mode == "busy-rename":
+            server_status(quiescent=False)
+            server_status()
+        elif mode == "late-ready-rename":
+            server_status()
         result = {"changes": {source.as_uri(): [{
             "range": {"start": {"line": line, "character": column},
                       "end": {"line": line, "character": column + 3}},
