@@ -113,7 +113,7 @@ impl HealthMonitor {
                 if self.manager.critical_failure_reason(lang).await.is_none() {
                     let reason = format!(
                         "language server stayed unhealthy after {} restart attempts; \
-                         auto-restart abandoned — run `symora daemon restart` after fixing it",
+                         auto-restart abandoned — run `symora daemon restart --project` after fixing it",
                         attempts
                     );
                     tracing::error!("{:?} language server giving up: {}", lang, reason);

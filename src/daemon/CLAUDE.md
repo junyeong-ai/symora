@@ -16,6 +16,8 @@ A daemon leaves its socket and pid files behind: the next daemon settles them wh
 
 A daemon that has held no project and had no connection open for `idle_timeout` shuts down through `DaemonServer::shutdown`, and the client starts one on demand; work the daemon does outside a project or a connection does not keep it alive.
 
+Project restart unloads only the addressed project's retained services and preserves its on-disk index. Active requests and outstanding server starts prevent restart or idle eviction. Release the projects-map lock before awaiting server shutdown so other projects remain serviceable.
+
 ## Request timeouts
 
 LSP operations use the project's retained `lsp.timeout_secs` budget. CLI/MCP establish a shared deadline, and daemon requests carry remaining milliseconds. Admission waits and dispatch preparation consume that allowance; expired queued requests do not start project work. The server also clamps it to the project's retained configuration. Initialization and retries consume the same budget; language/operation multipliers do not extend it. Timeout errors retain their typed wire identity. Non-LSP store/lifecycle operations keep their separate bounds.

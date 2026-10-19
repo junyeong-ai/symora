@@ -280,7 +280,7 @@ fn not_found_hint(install: &str, searched: &[PathBuf]) -> String {
     let mut hint = format!(
         "{install}. Searched: {}. If the server is installed somewhere off PATH, set \
          command = \"/absolute/path\" under [lsp.servers.<language>] in \
-         .symora/config.toml and run `symora daemon restart`",
+         .symora/config.toml and run `symora daemon restart --project`",
         searched
             .iter()
             .map(|d| d.display().to_string())
@@ -303,7 +303,7 @@ fn override_not_found_hint(command: &str, searched: &[PathBuf]) -> String {
     format!(
         "command `{command}` is set by [lsp.servers] in symora config but was not found \
          or not executable. Searched: {}. Fix the override's path or remove it to fall \
-         back to the builtin server, then run `symora daemon restart`",
+         back to the builtin server, then run `symora daemon restart --project`",
         searched
             .iter()
             .map(|d| d.display().to_string())
