@@ -39,7 +39,7 @@ impl Transport {
         let json =
             String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        tracing::trace!("LSP <- {}", json);
+        tracing::trace!(bytes = json.len(), "Received LSP frame");
 
         Message::parse(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
@@ -108,6 +108,19 @@ pub async fn write_notification(
     write_message(stdin, json, timeout).await
 }
 
+pub async fn write_notifications(
+    stdin: OwnedMutexGuard<Option<ChildStdin>>,
+    notifications: &[Notification],
+    timeout: Duration,
+) -> io::Result<()> {
+    let mut frames = String::new();
+    for notification in notifications {
+        let json = serde_json::to_string(notification).map_err(io::Error::other)?;
+        frames.push_str(&format!("Content-Length: {}\r\n\r\n{}", json.len(), json));
+    }
+    write_frames(stdin, frames, timeout).await
+}
+
 /// Write an LSP response to stdin (for server-initiated requests)
 pub async fn write_response(
     stdin: OwnedMutexGuard<Option<ChildStdin>>,
@@ -122,16 +135,26 @@ pub async fn write_response(
 
 /// Write a raw JSON message with LSP framing
 async fn write_message<W>(
-    mut stdin: OwnedMutexGuard<Option<W>>,
+    stdin: OwnedMutexGuard<Option<W>>,
     json: String,
     timeout: Duration,
 ) -> io::Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    tracing::trace!("LSP -> {}", json);
-
     let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+    write_frames(stdin, message, timeout).await
+}
+
+async fn write_frames<W>(
+    mut stdin: OwnedMutexGuard<Option<W>>,
+    message: String,
+    timeout: Duration,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    tracing::trace!(bytes = message.len(), "Writing LSP frames");
     let deadline = crate::infra::deadline::expires_at(timeout);
     // Keep transmission ownership after caller cancellation; close incomplete streams.
     tokio::spawn(async move {

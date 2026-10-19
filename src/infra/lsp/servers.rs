@@ -1382,6 +1382,7 @@ mod tests {
                 args: None,
                 tier: None,
                 env: None,
+                ..Default::default()
             },
         );
         let merged = merged(&overrides);
@@ -1402,6 +1403,7 @@ mod tests {
                 args: Some(vec![]),
                 tier: Some(ServerTier::Fast),
                 env: None,
+                ..Default::default()
             },
         );
         let merged = merged(&overrides);

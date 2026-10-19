@@ -85,18 +85,7 @@ pub async fn execute(args: DoctorArgs, app: &App) -> Result<()> {
     // App::new falls back from silently.
     let (overrides, config_errors) = match app.config_service.load(false).await {
         Ok(config) => {
-            let errors = config
-                .ignored_keys
-                .iter()
-                .cloned()
-                .chain(
-                    config
-                        .lsp
-                        .server_override_errors
-                        .iter()
-                        .map(ToString::to_string),
-                )
-                .collect();
+            let errors = config.problems();
             (config.lsp.servers, errors)
         }
         Err(e) => (BTreeMap::new(), vec![e.to_string()]),

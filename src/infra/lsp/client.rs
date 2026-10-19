@@ -10,7 +10,6 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
 use tokio::time::timeout;
 
-use super::init_options::init_options;
 use super::protocol::{
     ClientCapabilities, ClientInfo, DidChangeWatchedFilesParams, GeneralClientCapabilities,
     InitializeParams, InitializeResult, LspDiagnostic, Message, Notification, Position,
@@ -388,11 +387,7 @@ pub struct LspClient {
     /// manager decides, by [`FileWatch`](super::watch::FileWatch).
     file_watching: bool,
     watched_files: std::sync::Mutex<WatchRegistry>,
-    /// The initializationOptions payload, kept as the single source of
-    /// truth for settings: servers that pull configuration at runtime
-    /// (`workspace/configuration` — pyright reads `python.pythonPath`
-    /// this way, not from initializationOptions) are answered from the
-    /// same payload instead of empty objects that wipe their settings.
+    /// The settings snapshot used for this session's configuration replies.
     settings: RwLock<Option<serde_json::Value>>,
 }
 
@@ -561,8 +556,12 @@ impl LspClient {
 
     /// Initialize the language server
     async fn initialize(&self, admit: impl FnOnce()) -> Result<(), LspError> {
-        let init_options = init_options(self.language, &self.root);
-        *self.settings.write().await = init_options.clone();
+        let configuration = super::configuration::ServerConfiguration::resolve(
+            self.language,
+            &self.root,
+            &self.config,
+        );
+        *self.settings.write().await = Some(configuration.settings.clone());
 
         let params = InitializeParams {
             process_id: Some(std::process::id()),
@@ -580,7 +579,7 @@ impl LspClient {
                 name: "symora".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
-            initialization_options: init_options,
+            initialization_options: configuration.initialization_options,
         };
 
         tracing::debug!(
@@ -608,16 +607,35 @@ impl LspClient {
         // Store capabilities
         *self.capabilities.write().await = Some(result);
 
-        let initialized = Notification::new("initialized", Some(serde_json::json!({})));
+        let mut notifications = vec![Notification::new(
+            "initialized",
+            Some(serde_json::json!({})),
+        )];
+        if self
+            .config
+            .servers
+            .get(self.language.lsp_id())
+            .and_then(|server| server.settings.as_ref())
+            .is_some()
+        {
+            notifications.push(Notification::new(
+                "workspace/didChangeConfiguration",
+                Some(serde_json::json!({"settings": configuration.settings})),
+            ));
+        }
         let stdin_guard = Arc::clone(&self.stdin).lock_owned().await;
         if stdin_guard.is_none() {
             return Err(self.handshake_failure(LspError::NotConnected));
         }
         admit();
         self.initialized.store(true, Ordering::Release);
-        write_notification(stdin_guard, &initialized, self.config.request_timeout())
-            .await
-            .map_err(|e| self.handshake_failure(e.into()))?;
+        super::transport::write_notifications(
+            stdin_guard,
+            &notifications,
+            self.config.request_timeout(),
+        )
+        .await
+        .map_err(|e| self.handshake_failure(e.into()))?;
 
         Ok(())
     }
@@ -1840,11 +1858,7 @@ impl LspClient {
         }
     }
 
-    /// Answer `workspace/configuration` from the initializationOptions
-    /// payload. Servers like pyright read their effective settings from
-    /// this pull, not from initializationOptions — answering with empty
-    /// objects silently wipes every injected setting (pythonPath first
-    /// among them). Unknown sections still answer `{}`.
+    /// Sections use the same settings snapshot throughout a server session.
     async fn handle_workspace_configuration(
         &self,
         params: &Option<Value>,
@@ -2013,6 +2027,57 @@ mod tests {
             Arc::new(crate::config::LspRuntimeConfig::default()),
             false,
         )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configuration_reaches_initialization_notifications_and_section_pulls() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = serde_json::json!({"python": {"analysis": {
+            "extraPaths": ["packages/core/src"], "autoSearchPaths": false
+        }}});
+        let mut config = crate::config::LspRuntimeConfig::default();
+        config.servers.insert(
+            "python".into(),
+            crate::models::config::ServerOverride {
+                initialization_options: Some(
+                    serde_json::json!({"client": "configured"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                settings: Some(settings.as_object().unwrap().clone()),
+                ..Default::default()
+            },
+        );
+        let client = LspClient::new(
+            Language::Python,
+            root.path().to_path_buf(),
+            Arc::new(config),
+            false,
+        );
+        let launch = super::super::servers::ServerLaunch {
+            command: PathBuf::from("python3"),
+            args: vec![
+                "-u".into(),
+                "-c".into(),
+                include_str!("../../../tests/fixtures/lsp/configuration_server.py").into(),
+            ],
+            env: Default::default(),
+        };
+        client.start(&launch, || {}).await.unwrap();
+        let observed: Value = client.request("test/configuration", None).await.unwrap();
+        assert_eq!(observed["initialization_options"]["client"], "configured");
+        assert!(observed["initialization_options"].get("python").is_some());
+        assert_eq!(observed["notification"], observed["pull"][0]);
+        assert_eq!(
+            observed["pull"][0]["python"]["analysis"]["extraPaths"],
+            settings["python"]["analysis"]["extraPaths"]
+        );
+        assert_eq!(observed["pull"][1]["autoSearchPaths"], false);
+        assert_eq!(observed["pull"][1]["useLibraryCodeForTypes"], true);
+        assert_eq!(observed["pull"][2], serde_json::json!({}));
+        client.shutdown().await.unwrap();
     }
 
     #[tokio::test]

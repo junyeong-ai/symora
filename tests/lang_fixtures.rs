@@ -110,6 +110,53 @@ fn pyright_on_path() -> bool {
 }
 
 #[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn explicit_settings_resolve_a_package_without_a_virtual_environment() {
+    if !pyright_on_path() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let core = "packages/core/src/fixture_core/geometry.py";
+    let app = "packages/app/src/fixture_app/report.py";
+    for path in [core, app] {
+        let destination = root.path().join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::copy(fixture_root().join(path), destination).unwrap();
+    }
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    assert!(!root.path().join(".venv").exists());
+    let (line, column) = find_identifier(&root.path().join(app), "Circle", 1);
+    let run = || {
+        let output = Command::new(SYMORA)
+            .args([
+                "def",
+                &format!("{app}:{line}:{column}"),
+                "--format",
+                "compact",
+            ])
+            .current_dir(root.path())
+            .env("SYMORA_NO_DAEMON", "1")
+            .env_remove("VIRTUAL_ENV")
+            .env_remove("PYTHONPATH")
+            .output()
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{response}");
+        assert!(response.get("error").is_none(), "{response}");
+        response
+    };
+    let missing = run();
+    assert_ne!(missing["definition"]["file"], core, "{missing}");
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        "[lsp.servers.python.settings.python.analysis]\nextraPaths = [\"packages/core/src\"]\n",
+    )
+    .unwrap();
+    let configured = run();
+    assert_eq!(configured["definition"]["file"], core, "{configured}");
+}
+
+#[test]
 #[ignore = "requires pyright + a built fixture venv; run: cargo test --test lang_fixtures -- --ignored"]
 fn pyright_resolves_across_package_boundaries() {
     if !prerequisites_ready() {

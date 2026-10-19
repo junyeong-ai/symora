@@ -430,6 +430,18 @@ env = { NODE_OPTIONS = "--max-old-space-size=2048" } # optional; server environm
 
 Entries in `env` are added to the server's inherited environment. For example, you can lower the heap limit of a Node-based server such as pyright with `NODE_OPTIONS = "--max-old-space-size=2048"`.
 
+Per-server `initialization_options` supplies LSP initialization options; `settings` supplies runtime configuration. Each object merges recursively into its respective defaults; arrays and scalar values replace defaults. Settings are sent immediately after initialization and returned through `workspace/configuration`. Nested keys follow the language server's own configuration schema.
+
+```toml
+[lsp.servers.python.settings.python]
+pythonPath = "/path/to/project/.venv/bin/python"
+
+[lsp.servers.python.settings.python.analysis]
+extraPaths = ["packages/core/src"]
+```
+
+Prepare the project's environment or native server configuration first. These paths are explicit examples; Symora does not infer package paths. A project override replaces the entire user-level stanza for that language.
+
 The key is the `language` id printed by `symora doctor`. A rejected key is reported in doctor's `config_errors` and never silently applied. The daemon reads a project's config when it first serves that project and keeps it until restarted or until the project goes idle, so run `symora daemon restart` after editing it.
 
 File discovery follows the project's `.gitignore` (root and nested, with full per-directory semantics), plus an optional `.symora/ignore` — gitignore syntax — for symora-only exclusions. When a project ships no root `.gitignore`, common dependency and build directories (`node_modules`, `target`, `dist`, …) are skipped by default. Machine-local git state — `.git/info/exclude` and the global `core.excludesFile` — is not read, so the same tree indexes the same way on every machine. Default discovery excludes hidden entries, independently of `.gitignore`. `search content 'text' --path .claude` explicitly searches a named file/directory live, including hidden text and documentation formats. Project ignores and size limits still apply; `.git` and `.symora` remain excluded. Explicit paths do not widen the persistent index.
