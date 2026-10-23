@@ -38,11 +38,11 @@ PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
   cargo test --test lang_fixtures --test parity -- --include-ignored
 ```
 
-Daemon parity uses an isolated dependency-free Rust project. A direct MCP session keeps its language server alive while checking quiescence, then its command output is compared with daemon-backed CLI output. This measures the transport boundary without repeatedly starting the direct server or indexing this entire workspace.
+Daemon parity uses an isolated dependency-free Rust project. A direct MCP session keeps its language server alive while checking quiescence, then its command output is compared with daemon-backed CLI output. This measures the transport boundary without repeatedly starting the direct server or indexing this entire workspace. A test that reaches a daemon runs its own copy of the binary: a daemon is per installation, so one a manual run of the same build left behind, started under another environment, would otherwise answer it.
 
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 
-Two ways a test here passes without testing anything, both worth checking for by injecting the defect and watching it fail. A test that skips itself when the environment cannot produce the condition — most of them, since permission bits do not constrain root — must decide that by probing the environment directly (`read_dir` on the blocked path, `cfg!(feature = ...)`), never by reading the output under test; a guard that consults the answer takes a defect for the environment and passes in silence. And an assertion that a field is ABSENT must first establish the command succeeded (`json_ok`), because an `{"error": ...}` response is missing every field and satisfies it just as well.
+Two ways a test here passes without testing anything, both worth checking for by injecting the defect and watching it fail. A test that skips itself when the environment cannot produce the condition — most of them, since permission bits do not constrain root — must decide that by probing the environment directly (`read_dir` on the blocked path, `pyright --version`), never by reading the output under test; a guard that consults the answer takes a defect for the environment and passes in silence. And an assertion that a field is ABSENT must first establish the command succeeded (`json_ok`), because an `{"error": ...}` response is missing every field and satisfies it just as well.
 
 ## Anti-goals
 

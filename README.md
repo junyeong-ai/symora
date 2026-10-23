@@ -118,6 +118,11 @@ symora map summary
 ```json
 {
   "root": "/home/dev/shopflow",
+  "next_commands": [
+    "symora map file --related-limit 5 -- 'src/main.ts'",
+    "symora pack --tokens 4000 --focus='src'",
+    "symora symbols --depth 1 -- 'src/main.ts'"
+  ],
   "total_files": 84,
   "code_files": 67,
   "support_files": 17,
@@ -141,12 +146,7 @@ symora map summary
       { "file": "src/main.ts", "reason": "main entry file" },
       { "file": "src/app.ts", "reason": "application bootstrap candidate" }
     ]
-  },
-  "next_commands": [
-    "symora map file --related-limit 5 -- 'src/main.ts'",
-    "symora pack --tokens 4000 --focus='src'",
-    "symora symbols --depth 1 -- 'src/main.ts'"
-  ]
+  }
 }
 ```
 > TypeScript 코드 파일 67개 중 49개가 `src`에 있고, `entrypoints`는 파일명·경로에 따른 시작점 후보를 보여 줍니다. 실제 실행 경로는 소스와 설정에서 확인하세요. `languages`는 코드 언어만 세며, JSON 같은 데이터 파일은 `support_files`에 들어갑니다. 더 깊은 브리핑이 필요하면 `symora pack --tokens 4000`이 구문상 import 경로에 따른 PageRank 순위로 정리해 줍니다.
@@ -248,11 +248,6 @@ symora impact src/services/checkout.ts:48 --depth 2
   "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48 },
   "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
   "coverage": { "count": 3, "files": ["tests/checkout.test.ts"] },
-  "files": [
-    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 },
-    { "file": "src/jobs/orderWorker.ts", "is_test": false, "refs": 1 },
-    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 }
-  ],
   "blast_radius": {
     "direct_callers": 4,
     "transitive_callers": 7,
@@ -264,7 +259,12 @@ symora impact src/services/checkout.ts:48 --depth 2
     ],
     "test_caller_ratio": 0.43
   },
-  "next_commands": ["symora impact --depth 3 -- 'src/services/checkout.ts:48:9'"]
+  "next_commands": ["symora impact --depth 3 -- 'src/services/checkout.ts:48:9'"],
+  "files": [
+    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 },
+    { "file": "src/jobs/orderWorker.ts", "is_test": false, "refs": 1 },
+    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 }
+  ]
 }
 ```
 > `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. 정적 참조·호출 그래프는 런타임 디스패치, 외부 소비자, 설정 기반 연결을 모두 증명하지 못합니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
@@ -363,7 +363,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 모든 명령은 기계 파싱을 위해 설계됐고, 규칙은 안정적입니다.
 
-- **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `incomplete`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, `error`.
+- **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `incomplete`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, `error`. 목록을 한정하는 필드는 그 목록보다 앞에 오므로, 응답의 앞부분만 읽어도 한정자를 놓치지 않습니다.
 - **명령 실패**는 구조화 JSON이고 0이 아닌 코드로 종료합니다.
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
@@ -373,17 +373,15 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 - **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 언어 서버의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
 - **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 이후 필요한 경우 목록 항목을 줄이고 `truncated`와 설정 키를 지목하는 hint를 반환합니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
----
-
 `pack --tokens`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수나 전체 JSON 봉투 크기의 상한은 아닙니다.
 
 `context`의 요청 본문은 `--body-tokens`를 대상·피호출자·타입 순서로 공유하며 통째로 포함하거나 생략합니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. escape 변환 등 지원하지 않는 문자열 해석이 필요한 모듈 경로는 연결을 생략합니다. Rust 상대 모듈 경로는 crate/module 소유권을 확인할 수 없어 연결을 생략하고, 실제 제외 시 hint로 알립니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
 
 `lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 소스 적용 도중의 강제 취소에 사용하지 않습니다.
 
-
-
 요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 상태에서 실제 적용을 거부하며, `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 검토한 `unconfirmed` 편집 집합은 `--accept-unconfirmed`로 적용하며, 응답에는 그 표지가 그대로 남습니다. `timed_out`은 재시도로 준비 완료가 확인될 수 있으므로 계속 거부합니다. 현재 Symora는 rust-analyzer의 정상 상태와 작업 완료를 함께 나타내는 알림을 인식합니다. 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
+
+---
 
 ## 검색 인덱스
 
@@ -410,8 +408,8 @@ symora search index clear
 `idle_timeout_mins`는 프로젝트와 각 언어 서버가 마지막 요청이 끝난 후 유지되는 시간을 지정합니다. 프로젝트도 요청도 없이 이 시간이 지나면 daemon도 종료되며, 다음 명령이 다시 시작합니다.
 
 ```bash
-symora config init            # 로컬 설정 작성
-symora config init --global   # 사용자 설정 작성
+symora config init            # 모든 기본값을 주석으로 담은 프로젝트 설정 작성
+symora config init --global   # 사용자 설정에 같은 템플릿 작성
 ```
 
 주요 설정: LSP timeout·limit, daemon 동작, 테스트 파일 패턴, 언어별 서버 오버라이드.
@@ -526,7 +524,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 ## 플랫폼 참고
 
 - **Linux**, **macOS**: 지원.
-- **Windows**: daemon 워크플로와 SQLite 인덱스 미지원. 데몬은 Unix domain socket을, 인덱스는 프로세스 간 배타를 위해 Unix 파일 락(`flock`)을 쓰기 때문입니다 — `search index build`는 그 사실을 오류로 알리고, 검색은 언어 서버와 트리 스캔으로 그대로 동작합니다.
+- **Windows**: 사전 빌드 바이너리와 CI 검증이 없습니다. 데몬은 Unix domain socket으로 통신하므로 모든 명령이 in-process로 실행됩니다.
 
 Unix에서는 daemon이 기본 켜짐(`SYMORA_NO_DAEMON=1`이면 in-process 강제). 모드는 시작 시 한 번 결정되며 런타임 폴백은 없습니다. `daemon start`/`daemon restart`는 데몬이 실제로 응답할 때까지 기다렸다가 반환하므로, 성공 응답은 곧 서비스 가능 상태를 뜻합니다. 동시에 여러 명령이 콜드 스타트를 만나도 데몬은 하나만 뜹니다. 각 설치(실행 파일 경로)는 자체 daemon을 실행하므로 저장소별로 고정한 버전이 서로의 daemon을 교체하지 않습니다.
 

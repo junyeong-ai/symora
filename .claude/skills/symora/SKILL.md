@@ -24,7 +24,7 @@ symora diff-impact
 - `symbols` and `map file` use the language server when available, otherwise AST declarations; `backend` identifies the producer. `--deterministic` permits only index/grammar sources and returns `unsupported` for semantic operations.
 - For repeated workspace queries, inspect `search index status` and build incrementally with `search index build` when coverage is absent or the response requests refresh. Wait for an existing build. `--force` rebuilds everything.
 - `map summary` and `pack --tokens 4000` are optional orientation tools. `map file` adds a file's name-matched counterparts, such as its tests, and nearby files; these are path suggestions, not dependency evidence. Pack uses syntax-derived import paths, not a complete dependency graph or task-relevance model. Rust relative module paths require unresolved crate/module ownership and are omitted with a hint. Use `--focus` for a known area; an unmatched focus is refused. Check coverage hints and `declared_symbols` before treating excerpts as complete.
-- `diff-impact [REV]` compares tracked working-tree changes with one revision, not a revision range; `--staged` uses the index. Read `unmeasured_files` and `incomplete`.
+- `diff-impact [REV]` compares tracked working-tree changes with one revision, not a revision range; for a branch, pass `$(git merge-base main HEAD)`. `--staged` uses the index. Read `unmeasured_files` and `incomplete`.
 
 ## Address the intended symbol
 
