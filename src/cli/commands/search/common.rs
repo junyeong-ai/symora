@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
+use crate::cli::response::disclosure::name_some;
 use crate::cli::{CliInputError, ErrorCode, OutputError};
+use crate::infra::file_filter::FileFilter;
 
 /// A query is a path-like pattern when it carries `/`, `*`, or `[` rather
 /// than a plain identifier. The callers route these forms specially — a `*`
@@ -16,8 +18,10 @@ pub fn looks_like_symbol_path(query: &str) -> bool {
 ///
 /// A named path is an assertion about the tree, so a typo fails rather than
 /// searching a domain the caller did not mean and answering `0`, and every
-/// missing path is named at once. A path must also lie inside the project and
-/// outside its `.git` and `.symora` metadata.
+/// missing path is named at once. A path must also lie inside the project,
+/// outside its `.git` and `.symora` metadata, and outside what the project's
+/// ignore rules exclude: naming a path narrows a search and never widens it,
+/// so an ignored one would answer `0` about files no search reads.
 pub(super) fn resolve_search_paths(
     app: &App,
     paths: &[PathBuf],
@@ -64,6 +68,25 @@ pub(super) fn resolve_search_paths(
             OutputError::not_found(format!("Path not found: {}", missing.join(", ")))
                 .with_hint("Check the --path arguments against the tree and retry."),
         );
+    }
+    let policy = FileFilter::for_paths(
+        app.root(),
+        resolved.iter().map(|path| app.root().join(path)).collect(),
+    );
+    let ignored: Vec<String> = resolved
+        .iter()
+        .filter(|path| policy.is_ignored(&app.root().join(path)))
+        .map(|path| path.display().to_string())
+        .collect();
+    if !ignored.is_empty() {
+        return Err(OutputError::unsupported(format!(
+            "The project's ignore rules exclude {}, and no search reads an ignored path",
+            name_some(&ignored)
+        ))
+        .with_hint(
+            "Read the file directly, or change `.gitignore` or `.symora/ignore` to bring it into \
+             the project.",
+        ));
     }
     Ok(resolved)
 }

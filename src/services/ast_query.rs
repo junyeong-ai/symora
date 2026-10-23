@@ -1,6 +1,6 @@
 //! AST Query Service
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -23,51 +23,6 @@ pub struct AstMatch {
     pub captures: Vec<(String, String)>,
 }
 
-/// The roots to search, given what the caller asked for.
-///
-/// Every named path is a root of its own, because naming one is what reaches
-/// a corner the ignore policy excludes: a directory walked as a root applies
-/// that policy relative to ITSELF, so `--path build` searches a `build/` the
-/// project ignores. Dropping it because another argument contains it would
-/// make the same argument mean different things depending on what stands
-/// beside it, and answer a smaller domain than the caller named without
-/// saying so.
-///
-/// What overlap must not do is count twice, and that is settled per FILE (see
-/// `query`) rather than by discarding a root. Resolving to canonical paths is
-/// what makes both possible: it collapses spellings of one path into one, and
-/// gives the walk absolute names a later file can be compared against. A path
-/// that will not resolve is counted as unread here, because it is a path the
-/// search could not read.
-fn search_roots(paths: &[PathBuf], unread: &mut Vec<PathBuf>) -> Vec<PathBuf> {
-    // Deduplicate what was ASKED FOR before resolving it, so a path repeated
-    // verbatim is one path even when it does not resolve. Two different
-    // spellings of the same unresolvable path stay two: nothing can tell them
-    // apart, precisely because nothing can resolve them.
-    let mut given: Vec<&PathBuf> = paths.iter().collect();
-    given.sort();
-    given.dedup();
-
-    let mut roots: Vec<PathBuf> = Vec::new();
-    for path in given {
-        match std::fs::canonicalize(path) {
-            Ok(path) => roots.push(path),
-            Err(e) => {
-                if crate::infra::hides_content(&e) {
-                    unread.push(path.clone());
-                }
-            }
-        }
-    }
-    // `Ord for Path` compares components, not bytes, so the order is
-    // structural rather than by spelling, and an ancestor precedes what it
-    // contains — which keeps the emitted matches in one order however the
-    // arguments were given.
-    roots.sort();
-    roots.dedup();
-    roots
-}
-
 /// A query's answer: the matches, and how many paths it could not search.
 ///
 /// A pattern search over a tree is only exact over the files it actually read,
@@ -84,11 +39,14 @@ pub struct AstAnswer {
 
 #[async_trait]
 pub trait AstQueryService: Send + Sync {
+    /// Match `pattern` against the files of `language` that `scope`
+    /// discovers. The scope carries the project's ignore policy and the roots
+    /// to walk, so every caller draws the domain the way discovery does.
     async fn query(
         &self,
         pattern: &str,
         language: SymbolLanguage,
-        paths: &[PathBuf],
+        scope: &FileFilter,
     ) -> Result<AstAnswer, SearchError>;
 }
 
@@ -295,24 +253,17 @@ impl DefaultAstQueryService {
 
         Ok(results)
     }
-    /// Search one file, once, recording what the answer ends up short of.
-    ///
-    /// An explicit path and one the walk found reach this the same way, so the
-    /// two cannot draw the domain differently: a file over the size cap is
-    /// outside the search rather than a hole in it, while a read that fails
-    /// leaves what the file holds unknown and shortens the answer. `searched`
-    /// is what keeps overlapping roots from matching one file twice.
+    /// Search one file, recording what the answer ends up short of: a file
+    /// over the size cap is outside the search rather than a hole in it, while
+    /// a read that fails leaves what the file holds unknown and shortens the
+    /// answer.
     async fn search_one(
         &self,
         path: &Path,
         query: &Query,
         language: SymbolLanguage,
-        searched: &mut HashSet<PathBuf>,
         answer: &mut AstAnswer,
     ) {
-        if !searched.insert(path.to_path_buf()) {
-            return;
-        }
         if let Ok(meta) = tokio::fs::metadata(path).await
             && meta.len() > self.max_file_size_bytes
         {
@@ -366,7 +317,7 @@ impl AstQueryService for DefaultAstQueryService {
         &self,
         pattern: &str,
         language: SymbolLanguage,
-        paths: &[PathBuf],
+        scope: &FileFilter,
     ) -> Result<AstAnswer, SearchError> {
         let entry = self
             .parsers
@@ -382,48 +333,13 @@ impl AstQueryService for DefaultAstQueryService {
             query
         };
 
-        let mut answer = AstAnswer::default();
-        let extensions: Vec<&str> = language.extensions().to_vec();
-        // Roots can overlap — `--path pkg --path pkg/inner`, or a directory
-        // spelled two ways — and a file reached from two of them would be
-        // matched twice. `count` is the number of matches found, so that is
-        // wrong in the output before it is wasted work. Canonical names make
-        // one file one entry however it was reached.
-        let mut searched: HashSet<PathBuf> = HashSet::new();
-
-        for path in search_roots(paths, &mut answer.unread_paths) {
-            let path = path.as_path();
-            // A metadata error makes both predicates false, so an explicit
-            // path the query could not stat would otherwise fall through
-            // every branch and leave an unqualified zero behind — unless the
-            // path went away between the walk and the stat, which leaves
-            // nothing for the answer to be short of.
-            let metadata = match std::fs::metadata(path) {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    if crate::infra::hides_content(&e) {
-                        answer.unread_paths.push(path.to_path_buf());
-                    }
-                    continue;
-                }
-            };
-            if metadata.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str())
-                    && extensions.contains(&ext)
-                {
-                    self.search_one(path, &query, language, &mut searched, &mut answer)
-                        .await;
-                }
-            } else if metadata.is_dir() {
-                let filter = FileFilter::new(path);
-                let discovery = filter.discover_files(&extensions);
-                answer.unread_paths.extend(discovery.unreadable);
-
-                for file_path in discovery.files {
-                    self.search_one(&file_path, &query, language, &mut searched, &mut answer)
-                        .await;
-                }
-            }
+        let discovery = scope.discover_files(language.extensions());
+        let mut answer = AstAnswer {
+            matches: Vec::new(),
+            unread_paths: discovery.unreadable,
+        };
+        for file in &discovery.files {
+            self.search_one(file, &query, language, &mut answer).await;
         }
 
         // One total order over the matches, because the emitted page is a
@@ -438,103 +354,46 @@ impl AstQueryService for DefaultAstQueryService {
                 .then_with(|| (a.start_line, a.start_column).cmp(&(b.start_line, b.start_column)))
                 .then_with(|| (a.end_line, a.end_column).cmp(&(b.end_line, b.end_column)))
         });
-        // Two roots that both reach a directory nobody can enter each report
-        // it, and one hole is one hole.
         answer.unread_paths.sort();
-        answer.unread_paths.dedup();
         Ok(answer)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
-    /// A named path is a root of its own — that is what reaches a corner the
-    /// ignore policy excludes — so none is dropped for standing under another.
-    /// Overlap is settled per file instead, because `count` is the number of
-    /// matches found and one file matched twice is wrong in the output before
-    /// it is wasted work.
+    fn run(scope: &FileFilter) -> AstAnswer {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(DefaultAstQueryService::default().query(
+                "(function_item) @f",
+                SymbolLanguage::Rust,
+                scope,
+            ))
+            .unwrap()
+    }
+
+    /// `count` is the number of matches found, so a file reached from two
+    /// named roots is matched once.
     #[test]
-    fn every_named_path_is_a_root_and_no_file_is_searched_twice() {
+    fn overlapping_roots_match_a_file_once() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join("pkg/inner")).unwrap();
         std::fs::write(root.join("pkg/inner/a.rs"), "fn a() {}\n").unwrap();
 
-        let mut unread = Vec::new();
-        let roots = search_roots(
-            &[
+        let answer = run(&FileFilter::for_paths(
+            root,
+            vec![
                 root.join("pkg"),
                 root.join("pkg/inner"),
-                root.join("./pkg"),
                 root.join("pkg/inner/a.rs"),
             ],
-            &mut unread,
-        );
-        assert_eq!(
-            roots.len(),
-            3,
-            "one spelling each, and a nested name is still its own root: {roots:?}"
-        );
-        assert!(roots[0].ends_with("pkg"), "an ancestor leads: {roots:?}");
-        assert!(unread.is_empty());
-
-        // The file under both of them is matched once, not once per root.
-        let service = DefaultAstQueryService::default();
-        let answer = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(service.query(
-                "(function_item) @f",
-                SymbolLanguage::Rust,
-                &[
-                    root.join("pkg"),
-                    root.join("pkg/inner"),
-                    root.join("pkg/inner/a.rs"),
-                ],
-            ))
-            .unwrap();
+        ));
         assert_eq!(answer.matches.len(), 1, "one file, one match: {answer:?}");
-
-        // Two trees that do not contain each other stay two, and a name that
-        // shares a prefix without being under it is not swallowed.
-        std::fs::create_dir_all(root.join("pkgtools")).unwrap();
-        let mut unread = Vec::new();
-        let roots = search_roots(&[root.join("pkg"), root.join("pkgtools")], &mut unread);
-        assert_eq!(roots.len(), 2, "{roots:?}");
-
-        // A path that is simply not there settles the domain: the caller is
-        // told so before the walk starts, and one that vanishes after holds
-        // nothing for the answer to be short of.
-        let mut unread = Vec::new();
-        let roots = search_roots(&[root.join("nope")], &mut unread);
-        assert!(roots.is_empty());
-        assert!(unread.is_empty());
-
-        // A path the walk cannot resolve MIGHT hold matches, so it is the
-        // shortfall it looks like — and one asked for twice is still one path.
-        use std::os::unix::fs::PermissionsExt;
-        let blocked = root.join("blocked");
-        std::fs::create_dir(&blocked).unwrap();
-        std::fs::write(blocked.join("b.rs"), "fn b() {}\n").unwrap();
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let hidden = blocked.join("b.rs");
-
-        // Probed against the tree, never read off the value under test: a guard
-        // that consults the answer would take a defect for the environment.
-        let mode_bites = std::fs::read_to_string(&hidden).is_err();
-
-        let mut unread = Vec::new();
-        search_roots(std::slice::from_ref(&hidden), &mut unread);
-        let mut twice = Vec::new();
-        search_roots(&[hidden.clone(), hidden], &mut twice);
-        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        if mode_bites {
-            assert_eq!(unread.len(), 1);
-            assert_eq!(twice.len(), 1, "one path asked for twice is one path");
-        }
     }
 
     /// A capped page is a prefix, so the order it is a prefix OF has to be the
@@ -556,17 +415,7 @@ mod tests {
             .unwrap();
         }
 
-        let service = DefaultAstQueryService::default();
-        let answer = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(service.query(
-                "(function_item) @f",
-                SymbolLanguage::Rust,
-                &[root.to_path_buf()],
-            ))
-            .unwrap();
+        let answer = run(&FileFilter::new(root));
 
         let emitted: Vec<(String, u32)> = answer
             .matches
@@ -583,55 +432,30 @@ mod tests {
         assert_eq!(emitted, expected, "by file, then by position");
     }
 
-    /// Naming a path the project ignores is how a caller reaches it, and that
-    /// cannot depend on what else was named: dropping it because another
-    /// argument contains it answers a smaller domain than was asked for and
-    /// says nothing about having done so.
+    /// A named directory is searched as content search reads it: the
+    /// project's ignore rules still apply beneath it, and hidden files inside
+    /// it are part of what was named.
     #[test]
-    fn a_named_path_the_ignore_policy_excludes_is_searched_beside_its_ancestor() {
+    fn a_named_directory_keeps_the_project_ignore_rules_and_its_hidden_files() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::create_dir_all(root.join("generated")).unwrap();
+        for sub in ["src/generated", "src/.local"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
         std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
         std::fs::write(root.join("src/kept.rs"), "fn kept() {}\n").unwrap();
-        std::fs::write(root.join("generated/g.rs"), "fn generated() {}\n").unwrap();
+        std::fs::write(root.join("src/generated/g.rs"), "fn generated() {}\n").unwrap();
+        std::fs::write(root.join("src/.local/h.rs"), "fn local() {}\n").unwrap();
 
-        let service = DefaultAstQueryService::default();
-        let run = |paths: Vec<PathBuf>| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(service.query("(function_item) @f", SymbolLanguage::Rust, &paths))
-                .unwrap()
-        };
-
-        let alone = run(vec![root.join("generated")]);
-        assert_eq!(
-            alone.matches.len(),
-            1,
-            "naming an ignored directory is what reaches it: {alone:?}"
-        );
-
-        let beside = run(vec![root.join("."), root.join("generated")]);
-        let files: Vec<String> = beside
+        let answer = run(&FileFilter::for_paths(root, vec![root.join("src")]));
+        let mut files: Vec<String> = answer
             .matches
             .iter()
-            .map(|m| m.file.display().to_string())
+            .map(|m| m.file.strip_prefix(root).unwrap().display().to_string())
             .collect();
-        assert!(
-            files.iter().any(|f| f.ends_with("generated/g.rs")),
-            "an ancestor standing beside it must not swallow it: {files:?}"
-        );
-        assert!(
-            files.iter().any(|f| f.ends_with("src/kept.rs")),
-            "{files:?}"
-        );
-        assert_eq!(files.len(), 2, "and neither is counted twice: {files:?}");
+        files.sort();
+        assert_eq!(files, ["src/.local/h.rs", "src/kept.rs"]);
     }
-
-    use super::*;
 
     #[test]
     fn char_column_is_one_indexed_and_char_based() {
@@ -750,7 +574,11 @@ pub fn world() -> i32 {
             (r#""@" @token"#, "token"),
         ] {
             let answer = service
-                .query(pattern, SymbolLanguage::Python, std::slice::from_ref(&path))
+                .query(
+                    pattern,
+                    SymbolLanguage::Python,
+                    &FileFilter::for_paths(dir.path(), vec![path.clone()]),
+                )
                 .await
                 .unwrap();
             assert_eq!(answer.matches.len(), 1, "{pattern}: {answer:?}");

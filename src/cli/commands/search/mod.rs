@@ -87,7 +87,7 @@ pub enum SearchCommand {
         #[arg(short, long = "lang")]
         language: String,
 
-        /// Search path (defaults to project root)
+        /// Search only these files or directories, including hidden paths; respects ignore rules
         #[arg(short, long)]
         path: Option<Vec<PathBuf>>,
 

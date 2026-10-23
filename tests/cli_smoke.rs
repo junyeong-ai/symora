@@ -839,6 +839,43 @@ fn a_named_path_that_is_not_there_fails_rather_than_answering_zero() {
     }
 }
 
+/// Naming a path narrows a search and never widens it, so a path the
+/// project's ignore rules exclude is refused by every search, whether it is
+/// the ignored directory or a file beneath it, rather than answered with a
+/// zero about files no search reads.
+#[test]
+fn a_named_path_the_ignore_rules_exclude_is_refused_by_every_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+    std::fs::create_dir(root.join("generated")).unwrap();
+    std::fs::write(root.join("generated/g.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+
+    for search in [
+        &["ast", "function_item", "-l", "rust"][..],
+        &["content", "alpha"],
+        &["symbols", "alpha"],
+    ] {
+        for ignored in ["generated", "generated/g.rs"] {
+            let mut args = vec!["--deterministic", "search"];
+            args.extend_from_slice(search);
+            args.extend(["--path", "a.rs", "--path", ignored]);
+            let out = run_in(root, &args);
+            let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+            assert_eq!(json["error"]["code"], "unsupported", "{search:?}: {json}");
+            assert_eq!(
+                json["error"]["message"],
+                format!(
+                    "The project's ignore rules exclude {ignored}, and no search reads an \
+                     ignored path"
+                ),
+                "{search:?}"
+            );
+        }
+    }
+}
+
 /// `--path` confines a symbol search the way it confines content and AST
 /// search, and a follow-up the answer advises keeps the confinement.
 #[test]
@@ -879,15 +916,12 @@ fn search_symbols_answers_only_inside_the_named_paths() {
 
     assert_eq!(search(&["."])["count"], 3);
 
-    std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
-    for skipped in [".hidden", "generated"] {
-        std::fs::create_dir(root.join(skipped)).unwrap();
-        std::fs::write(
-            root.join(skipped).join("mod.py"),
-            "def shared_marker():\n    pass\n",
-        )
-        .unwrap();
-    }
+    std::fs::create_dir(root.join(".hidden")).unwrap();
+    std::fs::write(
+        root.join(".hidden/mod.py"),
+        "def shared_marker():\n    pass\n",
+    )
+    .unwrap();
     let refusal = |path: &str| {
         let out = run_in(root, &["search", "symbols", "shared_*", "--path", path]);
         let refusal = common::parse_response(&out.stdout).unwrap();
@@ -906,10 +940,6 @@ fn search_symbols_answers_only_inside_the_named_paths() {
         )["count"],
         1,
         "the advised search finds what symbol search could not cover"
-    );
-    assert!(
-        !refusal("generated").contains("search content"),
-        "content search skips an ignored path too, so it is not advised"
     );
 }
 
