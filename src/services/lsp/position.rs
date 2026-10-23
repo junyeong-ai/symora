@@ -122,8 +122,8 @@ impl PositionConverter {
     }
 
     /// 0-indexed Unicode-scalar offset for an inbound wire `(line0, character)`
-    /// on `file` — decodes a RESULT position (hover/def/refs/folding/selection/
-    /// code-action/inlay) for display.
+    /// on `file` — decodes a RESULT position (hover/def/refs/code-action) for
+    /// display.
     ///
     /// When the line is unreadable it degrades to `wire_char`. This is exact for
     /// a single-byte (ASCII) line and the request's own file is always seeded, so

@@ -100,15 +100,6 @@ impl LspService for DeterministicLspService {
         declined()
     }
 
-    async fn signature_help(
-        &self,
-        _file: &Path,
-        _line: u32,
-        _column: u32,
-    ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
-        declined()
-    }
-
     async fn diagnostics(&self, _file: &Path) -> Result<DiagnosticsReport, LspError> {
         declined()
     }
@@ -168,31 +159,6 @@ impl LspService for DeterministicLspService {
         declined()
     }
 
-    async fn inlay_hints(
-        &self,
-        _file: &Path,
-        _start_line: u32,
-        _end_line: u32,
-    ) -> Result<Vec<InlayHint>, LspError> {
-        declined()
-    }
-
-    async fn folding_ranges(&self, _file: &Path) -> Result<Vec<FoldingRange>, LspError> {
-        declined()
-    }
-
-    async fn selection_ranges(
-        &self,
-        _file: &Path,
-        _positions: Vec<(u32, u32)>,
-    ) -> Result<Vec<SelectionRange>, LspError> {
-        declined()
-    }
-
-    async fn code_lenses(&self, _file: &Path) -> Result<Vec<CodeLens>, LspError> {
-        declined()
-    }
-
     async fn code_actions(
         &self,
         _file: &Path,
@@ -207,10 +173,6 @@ impl LspService for DeterministicLspService {
         _file: &Path,
         _action: &CodeAction,
     ) -> Result<ApplyActionResult, LspError> {
-        declined()
-    }
-
-    async fn format(&self, _file: &Path) -> Result<Vec<TextEdit>, LspError> {
         declined()
     }
 
@@ -285,10 +247,6 @@ mod tests {
             s.find_implementations(f, 1, 1).await.map(|_| ()),
         );
         declined_by("hover", s.hover(f, 1, 1).await.map(|_| ()));
-        declined_by(
-            "signature_help",
-            s.signature_help(f, 1, 1).await.map(|_| ()),
-        );
         declined_by("diagnostics", s.diagnostics(f).await.map(|_| ()));
         declined_by(
             "prepare_rename",
@@ -305,15 +263,7 @@ mod tests {
         );
         declined_by("supertypes", s.supertypes(f, 1, 1).await.map(|_| ()));
         declined_by("subtypes", s.subtypes(f, 1, 1).await.map(|_| ()));
-        declined_by("inlay_hints", s.inlay_hints(f, 1, 2).await.map(|_| ()));
-        declined_by("folding_ranges", s.folding_ranges(f).await.map(|_| ()));
-        declined_by(
-            "selection_ranges",
-            s.selection_ranges(f, vec![(1, 1)]).await.map(|_| ()),
-        );
-        declined_by("code_lenses", s.code_lenses(f).await.map(|_| ()));
         declined_by("code_actions", s.code_actions(f, 1, 1).await.map(|_| ()));
-        declined_by("format", s.format(f).await.map(|_| ()));
         let action = CodeAction {
             expected_hash: None,
             document_hashes: Default::default(),

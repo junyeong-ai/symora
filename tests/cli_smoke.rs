@@ -26,7 +26,6 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "supertypes",
     "subtypes",
     "hover",
-    "signature",
     "context",
     "impact",
     "diff-impact",
@@ -39,11 +38,6 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "edit",
     "rename",
     "actions",
-    "inlay-hints",
-    "folding",
-    "selection",
-    "code-lens",
-    "format",
     "daemon",
     "mcp",
 ];
@@ -1512,33 +1506,6 @@ fn pattern_previews_and_metadata_preserve_original_eof_and_line_endings() {
         let delta = expected.len() as i64 - source.len() as i64;
         assert_eq!(applied["items"][0]["bytes_changed"], delta, "{applied}");
         assert_eq!(preview["items"][0]["bytes_changed"], delta, "{preview}");
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn formatting_application_obeys_the_source_edit_project_boundary() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("project");
-    std::fs::create_dir(&root).unwrap();
-    let outside = dir.path().join("external.go");
-    let source = "package main\n";
-    std::fs::write(&outside, source).unwrap();
-    std::os::unix::fs::symlink(&outside, root.join("linked.go")).unwrap();
-    for target in [outside.to_str().unwrap(), "../external.go", "linked.go"] {
-        let out = run_in(&root, &["format", target, "--apply"]);
-        assert!(!out.status.success(), "format applied outside {root:?}");
-        let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
-        assert!(
-            response["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("outside project boundary"),
-            "{response}"
-        );
-        assert_eq!(std::fs::read_to_string(&outside).unwrap(), source);
-        assert!(root.join("linked.go").is_symlink());
     }
 }
 

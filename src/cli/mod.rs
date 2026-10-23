@@ -28,13 +28,11 @@ use clap::{Parser, Subcommand};
 use commands::daemon::DaemonArgs;
 use commands::{
     actions::ActionsArgs, bench::BenchArgs, callees::CalleesArgs, callers::CallersArgs,
-    code_lens::CodeLensArgs, config::ConfigArgs, context::ContextArgs, def::DefArgs,
-    diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs,
-    folding::FoldingArgs, format::FormatArgs, hover::HoverArgs, impact::ImpactArgs,
-    implementations::ImplementationsArgs, init::InitArgs, inlay_hints::InlayHintsArgs,
-    map::MapArgs, mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs,
-    search::SearchArgs, selection::SelectionArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
-    signature::SignatureArgs, status::StatusArgs, subtypes::SubtypesArgs,
+    config::ConfigArgs, context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs,
+    diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs,
+    impact::ImpactArgs, implementations::ImplementationsArgs, init::InitArgs, map::MapArgs,
+    mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
+    selfcmd::SelfcmdArgs, setup::SetupArgs, status::StatusArgs, subtypes::SubtypesArgs,
     supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
 };
 
@@ -175,8 +173,6 @@ pub enum Commands {
     Subtypes(SubtypesArgs),
     /// Get hover information
     Hover(HoverArgs),
-    /// Get function signature at position
-    Signature(SignatureArgs),
 
     // Context
     /// Gather all context for a symbol
@@ -209,18 +205,6 @@ pub enum Commands {
     Rename(RenameArgs),
     /// Code actions (refactoring, quickfix)
     Actions(ActionsArgs),
-
-    // LSP Features
-    /// Get inlay hints for a file
-    InlayHints(InlayHintsArgs),
-    /// Get folding ranges for a file
-    Folding(FoldingArgs),
-    /// Get selection ranges at position
-    Selection(SelectionArgs),
-    /// Get code lenses for a file
-    CodeLens(CodeLensArgs),
-    /// Format a file using LSP
-    Format(FormatArgs),
 
     // Daemon (Unix only)
     #[cfg(unix)]

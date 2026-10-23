@@ -28,7 +28,7 @@ pub use editing::{
 };
 pub use lsp::{
     CallHierarchyOutput, DefinitionOutput, DiagnosticOutput, DisclosesIndexing, HoverOutput,
-    ParameterOutput, SignatureHelpOutput, SignatureItemOutput, TypeInfoOutput,
+    TypeInfoOutput,
 };
 pub use symbol::{ServerStatusOutput, SymbolOutput};
 

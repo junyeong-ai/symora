@@ -292,7 +292,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Supertypes(args) => commands::supertypes::execute(args, app).await,
         Commands::Subtypes(args) => commands::subtypes::execute(args, app).await,
         Commands::Hover(args) => commands::hover::execute(args, app).await,
-        Commands::Signature(args) => commands::signature::execute(args, app).await,
 
         // Context
         Commands::Context(args) => commands::context::execute(args, app).await,
@@ -315,11 +314,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Actions(args) => commands::actions::execute(args, app).await,
 
         // LSP Features
-        Commands::InlayHints(args) => commands::inlay_hints::execute(args, app).await,
-        Commands::Folding(args) => commands::folding::execute(args, app).await,
-        Commands::Selection(args) => commands::selection::execute(args, app).await,
-        Commands::CodeLens(args) => commands::code_lens::execute(args, app).await,
-        Commands::Format(args) => commands::format::execute(args, app).await,
 
         // Daemon
         #[cfg(unix)]

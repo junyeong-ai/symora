@@ -46,25 +46,6 @@ pub(crate) struct ApplyActionParams {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct InlayHintsParams {
-    pub file: String,
-    pub start_line: u32,
-    pub end_line: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SelectionRangeParams {
-    pub file: String,
-    pub positions: Vec<PositionInput>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct PositionInput {
-    pub line: u32,
-    pub column: u32,
-}
-
-#[derive(Debug, Deserialize)]
 pub(crate) struct SearchSymbolsParams {
     pub query: String,
     #[serde(default)]

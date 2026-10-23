@@ -144,15 +144,6 @@ async fn dispatch_project(
             .await
         }
 
-        methods::SIGNATURE_HELP => {
-            handle_position(params, Arc::clone(&ctx), |ctx, f, l, c| async move {
-                to_json(wire::SignatureResponse::from_help(
-                    ctx.lsp.signature_help(&f, l, c).await?,
-                ))
-            })
-            .await
-        }
-
         methods::INCOMING_CALLS => {
             handle_position(params, Arc::clone(&ctx), |ctx, f, l, c| async move {
                 to_json(wire::CallsResponse::from(
@@ -218,33 +209,8 @@ async fn dispatch_project(
             .await
         }
 
-        methods::FOLDING_RANGES => {
-            handle_file(params, Arc::clone(&ctx), |ctx, f| async move {
-                to_json(wire::FoldingRangesResponse::from(
-                    ctx.lsp.folding_ranges(&f).await?,
-                ))
-            })
-            .await
-        }
-
-        methods::CODE_LENSES => {
-            handle_file(params, Arc::clone(&ctx), |ctx, f| async move {
-                to_json(wire::CodeLensResponse::from(ctx.lsp.code_lenses(&f).await?))
-            })
-            .await
-        }
-
-        methods::FORMAT => {
-            handle_file(params, Arc::clone(&ctx), |ctx, f| async move {
-                to_json(wire::FormatResponse::from(ctx.lsp.format(&f).await?))
-            })
-            .await
-        }
-
         // Special operations
         methods::RENAME => handlers::handle_rename(params, &ctx).await,
-        methods::INLAY_HINTS => handlers::handle_inlay_hints(params, &ctx).await,
-        methods::SELECTION_RANGES => handlers::handle_selection_ranges(params, &ctx).await,
         methods::APPLY_CODE_ACTION => handlers::handle_apply_action(params, &ctx).await,
 
         // Language status

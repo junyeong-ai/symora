@@ -4,13 +4,10 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::daemon::params::{
-    ApplyActionParams, FileParams, InlayHintsParams, LanguageStatusParams, RenameParams,
-    SelectionRangeParams, WorkspaceSymbolParams,
+    ApplyActionParams, FileParams, LanguageStatusParams, RenameParams, WorkspaceSymbolParams,
 };
 use crate::daemon::protocol::RpcError;
-use crate::daemon::wire::{
-    self, InlayHintsResponse, RenameResponse, SelectionRangesResponse, SymbolsResponse,
-};
+use crate::daemon::wire::{self, RenameResponse, SymbolsResponse};
 use crate::models::lsp::{FindSymbolsOptions, ServerStatus};
 use crate::models::symbol::Language;
 use crate::services::lsp::LspService;
@@ -157,70 +154,6 @@ pub(super) async fn handle_rename(
             .data
             .map(|result| result.changes.iter().map(wire::FileChange::from).collect()),
         indexing: result.indexing,
-    })
-    .map_err(RpcError::from)
-}
-
-pub(super) async fn handle_inlay_hints(
-    params: &serde_json::Value,
-    ctx: &ProjectContext,
-) -> Result<serde_json::Value, RpcError> {
-    let p: InlayHintsParams = parse_params(params)?;
-
-    let hints = ctx
-        .lsp
-        .inlay_hints(Path::new(&p.file), p.start_line, p.end_line)
-        .await
-        .map_err(RpcError::from)?;
-
-    to_json(InlayHintsResponse {
-        count: hints.len(),
-        hints: hints
-            .iter()
-            .map(|h| wire::InlayHint {
-                line: h.position.line,
-                character: h.position.character,
-                label: h.label.clone(),
-                kind: Some(h.kind.to_lsp()),
-                padding_left: h.padding_left,
-                padding_right: h.padding_right,
-            })
-            .collect(),
-    })
-    .map_err(RpcError::from)
-}
-
-pub(super) async fn handle_selection_ranges(
-    params: &serde_json::Value,
-    ctx: &ProjectContext,
-) -> Result<serde_json::Value, RpcError> {
-    let p: SelectionRangeParams = parse_params(params)?;
-
-    let positions: Vec<(u32, u32)> = p
-        .positions
-        .iter()
-        .map(|pos| (pos.line, pos.column))
-        .collect();
-
-    let ranges = ctx
-        .lsp
-        .selection_ranges(Path::new(&p.file), positions)
-        .await
-        .map_err(RpcError::from)?;
-
-    fn to_wire(r: &crate::models::lsp::SelectionRange) -> wire::SelectionRange {
-        wire::SelectionRange {
-            start_line: r.range.start.line,
-            start_character: r.range.start.character,
-            end_line: r.range.end.line,
-            end_character: r.range.end.character,
-            parent: r.parent.as_ref().map(|p| Box::new(to_wire(p))),
-        }
-    }
-
-    to_json(SelectionRangesResponse {
-        count: ranges.len(),
-        ranges: ranges.iter().map(to_wire).collect(),
     })
     .map_err(RpcError::from)
 }

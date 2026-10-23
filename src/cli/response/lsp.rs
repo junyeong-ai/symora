@@ -126,38 +126,6 @@ impl TypeInfoOutput {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct SignatureHelpOutput {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub signatures: Vec<SignatureItemOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_signature: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_parameter: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub indexing: Option<IndexingDegradation>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SignatureItemOutput {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub documentation: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub parameters: Vec<ParameterOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_parameter: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ParameterOutput {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub documentation: Option<String>,
-}
-
 macro_rules! discloses_indexing {
     ($($type:ty),+ $(,)?) => {
         $(impl DisclosesIndexing for $type {
@@ -169,4 +137,4 @@ macro_rules! discloses_indexing {
     };
 }
 
-discloses_indexing!(DefinitionOutput, HoverOutput, SignatureHelpOutput);
+discloses_indexing!(DefinitionOutput, HoverOutput);

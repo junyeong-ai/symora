@@ -22,9 +22,8 @@ use crate::error::LspError;
 use crate::infra::lsp::ServerStatusDetail;
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
-    FoldingRange, HoverInfo, Indexed, InlayHint, PrepareRenameResult, RenameResult, SelectionRange,
-    ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
+    Indexed, PrepareRenameResult, RenameResult, ServerStatus, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -90,13 +89,6 @@ pub trait LspService: Send + Sync {
         column: u32,
     ) -> Result<Indexed<Option<HoverInfo>>, LspError>;
 
-    async fn signature_help(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Option<SignatureHelp>>, LspError>;
-
     async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError>;
 
     async fn prepare_rename(
@@ -142,26 +134,6 @@ pub trait LspService: Send + Sync {
         column: u32,
     ) -> Result<Indexed<Vec<TypeHierarchyItem>>, LspError>;
 
-    /// Inlay hints across an inclusive line range. The surface is line-granular
-    /// by contract — there are no column bounds — so the type cannot advertise a
-    /// precision it does not honor; the implementation spans whole lines.
-    async fn inlay_hints(
-        &self,
-        file: &Path,
-        start_line: u32,
-        end_line: u32,
-    ) -> Result<Vec<InlayHint>, LspError>;
-
-    async fn folding_ranges(&self, file: &Path) -> Result<Vec<FoldingRange>, LspError>;
-
-    async fn selection_ranges(
-        &self,
-        file: &Path,
-        positions: Vec<(u32, u32)>,
-    ) -> Result<Vec<SelectionRange>, LspError>;
-
-    async fn code_lenses(&self, file: &Path) -> Result<Vec<CodeLens>, LspError>;
-
     async fn code_actions(
         &self,
         file: &Path,
@@ -174,8 +146,6 @@ pub trait LspService: Send + Sync {
         file: &Path,
         action: &CodeAction,
     ) -> Result<ApplyActionResult, LspError>;
-
-    async fn format(&self, file: &Path) -> Result<Vec<TextEdit>, LspError>;
 
     async fn is_available(&self, language: Language) -> bool;
 

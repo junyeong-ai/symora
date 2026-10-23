@@ -324,7 +324,6 @@ symora symbols --symbol 'CheckoutService/processOrder' --body   # workspace-wide
 symora symbols --name processOrder --lang ts        # find a method across the workspace, one language
 symora def src/services/checkout.ts:48:9            # go to definition
 symora hover src/services/checkout.ts:48:9          # type / signature
-symora signature src/services/checkout.ts:55:20     # signature help at a call
 
 # Navigation (LSP)
 symora refs src/services/checkout.ts:48             # references; inspect indexing
@@ -351,7 +350,6 @@ symora edit replace       <file>:10 --end <file>:12 --text "new lines"
 symora edit pattern       <file> --pattern '(function_item) @f' --lang rust --text "…"
 symora rename src/services/checkout.ts:48:9 settleOrder --dry-run
 symora actions list src/services/checkout.ts:48:9   # available code actions
-symora format src/services/checkout.ts              # LSP format preview (`--apply` writes it)
 
 # Health & diagnostics
 symora doctor                # language servers: verified serving / missing + install commands
@@ -373,7 +371,7 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `signature`, and `typedef` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
+- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, and `typedef` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
 - **`--format compact`** emits single-line JSON. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. List reductions retain totals and disclose `truncated` and a size-limit hint. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 
@@ -552,11 +550,11 @@ symora daemon start | stop | restart | status
 | --- | --- |
 | **Discover** | `search symbols`, `search content`, `search ast`, `search nodes`, `pack` |
 | **Map** | `map summary`, `map file`, `map dir`, `map related` |
-| **Inspect** | `symbols`, `def`, `hover`, `signature` |
+| **Inspect** | `symbols`, `def`, `hover` |
 | **Navigate** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
 | **Analyze** | `context`, `usage`, `impact`, `diff-impact` |
-| **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions`, `format` |
-| **Diagnose** | `diagnostics`, `inlay-hints`, `folding`, `selection`, `code-lens` |
+| **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
+| **Diagnose** | `diagnostics` |
 | **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp`, `bench` |
 
 Run `symora <command> --help` for any command's flags. Output fields are described in [the output contract](#the-output-contract) and in the output schemas `symora mcp tools` prints.

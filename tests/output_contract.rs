@@ -21,9 +21,8 @@ use symora::cli::errors::{ErrorCode, OutputError};
 use symora::cli::response::{
     ActionOutput, AffectedFileOutput, ApplyActionOutput, CallHierarchyOutput, CoverageGap,
     DefinitionOutput, DiagnosticOutput, EditOutput, FileChangeOutput, HoverOutput, ImpactOutput,
-    LineRange, LocationOutput, ParameterOutput, RefOutput, Section, ServerStatusOutput,
-    SignatureHelpOutput, SignatureItemOutput, SymbolOutput, TargetOutput, TestCoverageOutput,
-    TestOutput, TypeInfoOutput, fit_to_char_budget,
+    LineRange, LocationOutput, RefOutput, Section, ServerStatusOutput, SymbolOutput, TargetOutput,
+    TestCoverageOutput, TestOutput, TypeInfoOutput, fit_to_char_budget,
 };
 use symora::models::diagnostic::DiagnosticsStatus;
 use symora::models::lsp::{CallHierarchyItem, IndexingDegradation, TypeHierarchyItem};
@@ -766,32 +765,6 @@ fn file_change_output() {
     let out = FileChangeOutput {
         file: "src/api.rs".to_string(),
         edit_count: 4,
-    };
-    assert_json_snapshot!(out);
-}
-
-#[test]
-fn signature_help_output_full() {
-    let out = SignatureHelpOutput {
-        signatures: vec![SignatureItemOutput {
-            label: "fn process(&self, name: &str) -> Result<()>".to_string(),
-            documentation: Some("Process the request.".to_string()),
-            parameters: vec![
-                ParameterOutput {
-                    label: "&self".to_string(),
-                    documentation: None,
-                },
-                ParameterOutput {
-                    label: "name: &str".to_string(),
-                    documentation: Some("the name".to_string()),
-                },
-            ],
-            active_parameter: Some(1),
-        }],
-        active_signature: Some(0),
-        active_parameter: Some(1),
-        message: None,
-        indexing: None,
     };
     assert_json_snapshot!(out);
 }

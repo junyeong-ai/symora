@@ -5,7 +5,7 @@ use crate::error::LspError;
 use crate::infra::lsp::LspClient;
 use crate::infra::lsp::protocol::{Hover, TextDocumentIdentifier, TextDocumentPositionParams};
 use crate::models::diagnostic::{Diagnostic, DiagnosticsReport, DiagnosticsStatus};
-use crate::models::lsp::{HoverInfo, Indexed, SignatureHelp, path_to_uri};
+use crate::models::lsp::{HoverInfo, Indexed, path_to_uri};
 
 use super::converters::*;
 use super::helpers::*;
@@ -57,51 +57,6 @@ pub(super) async fn hover(
                         range,
                     }
                 })))
-            }
-        })
-        .await
-}
-
-pub(super) async fn signature_help(
-    service: &DefaultLspService,
-    file: &Path,
-    line: u32,
-    column: u32,
-) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
-    let max_file_size = service.max_file_size_bytes();
-    let file = file.to_path_buf();
-    let manager = Arc::clone(&service.manager);
-
-    service
-        .execute_with_retry(&file, |client| {
-            let file = file.clone();
-            let manager = Arc::clone(&manager);
-            async move {
-                let content = read_file_validated(&file, max_file_size).await?;
-                let uri = path_to_uri(&file);
-                client.sync_document(&uri, &content).await?;
-                let waited = ensure_indexed(&client, &file, manager.root()).await;
-                let indexing = client.indexing_query(waited);
-
-                let params = TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier::new(&uri),
-                    position: to_lsp_position(
-                        line,
-                        column,
-                        &content,
-                        client.position_encoding().await,
-                    ),
-                };
-
-                let result: Option<serde_json::Value> = client
-                    .request(
-                        "textDocument/signatureHelp",
-                        Some(serde_json::to_value(params)?),
-                    )
-                    .await?;
-
-                let encoding = client.position_encoding().await;
-                Ok(indexing.finish(result.and_then(|v| parse_signature_help(&v, encoding))))
             }
         })
         .await

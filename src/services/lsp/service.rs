@@ -11,10 +11,9 @@ use crate::infra::lsp::watch::FileWatch;
 use crate::infra::lsp::{HealthMonitor, LspClient, LspManager};
 use crate::models::diagnostic::DiagnosticsReport;
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
-    FoldingRange, HoverInfo, Indexed, IndexingDegradation, InlayHint, PrepareRenameResult,
-    RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
-    path_to_uri,
+    ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
+    Indexed, IndexingDegradation, PrepareRenameResult, RenameResult, ServerStatus,
+    TypeHierarchyItem, path_to_uri,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 
@@ -182,15 +181,6 @@ impl LspService for DefaultLspService {
         info::hover(self, file, line, column).await
     }
 
-    async fn signature_help(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
-        info::signature_help(self, file, line, column).await
-    }
-
     async fn diagnostics(&self, file: &Path) -> Result<DiagnosticsReport, LspError> {
         info::diagnostics(self, file).await
     }
@@ -250,31 +240,6 @@ impl LspService for DefaultLspService {
         hierarchy::subtypes(self, file, line, column).await
     }
 
-    async fn inlay_hints(
-        &self,
-        file: &Path,
-        start_line: u32,
-        end_line: u32,
-    ) -> Result<Vec<InlayHint>, LspError> {
-        editor::inlay_hints(self, file, start_line, end_line).await
-    }
-
-    async fn folding_ranges(&self, file: &Path) -> Result<Vec<FoldingRange>, LspError> {
-        editor::folding_ranges(self, file).await
-    }
-
-    async fn selection_ranges(
-        &self,
-        file: &Path,
-        positions: Vec<(u32, u32)>,
-    ) -> Result<Vec<SelectionRange>, LspError> {
-        editor::selection_ranges(self, file, positions).await
-    }
-
-    async fn code_lenses(&self, file: &Path) -> Result<Vec<CodeLens>, LspError> {
-        editor::code_lenses(self, file).await
-    }
-
     async fn code_actions(
         &self,
         file: &Path,
@@ -290,10 +255,6 @@ impl LspService for DefaultLspService {
         action: &CodeAction,
     ) -> Result<ApplyActionResult, LspError> {
         editor::apply_code_action(self, file, action).await
-    }
-
-    async fn format(&self, file: &Path) -> Result<Vec<TextEdit>, LspError> {
-        editor::format(self, file).await
     }
 
     async fn is_available(&self, language: Language) -> bool {
