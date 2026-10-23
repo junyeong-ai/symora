@@ -86,7 +86,7 @@ flowchart TD
 ```
 
 - **두 백엔드, 다른 요구.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 서빙하면 서버의 트리로, 아니면 컴파일된 문법으로 답하고 `backend`(`document`|`ast`)로 어느 쪽인지 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요하며, 서버가 어떤 기능을 지원하지 않으면 구조화된 `unsupported` 응답이나 근사임을 밝힌 대체 답(call hierarchy가 없을 때 `callers`의 `callers_status: "references_derived"`)으로 *정직하게* 격하되며, 정적 분석과 서버별 기능의 한계를 명시합니다.
-- **daemon은 자동.** Unix에서는 호출 간에 language server 세션을 따뜻하게 유지해 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있습니다.
+- **daemon은 자동.** Unix에서는 호출 간에 language server 세션을 따뜻하게 유지해 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스에서는 자동으로 in-process로 실행합니다. 어느 쪽이든 답은 같습니다.
 
 ---
 

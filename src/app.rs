@@ -92,6 +92,9 @@ impl App {
 
         let runtime_config = Arc::new(LspRuntimeConfig::from(&config));
 
+        #[cfg(unix)]
+        let use_daemon = use_daemon && crate::daemon::DaemonClient::new(&root)?.can_start_daemon();
+
         let ast = Arc::new(DefaultAstQueryService::new(
             runtime_config.max_file_size_bytes,
         ));
