@@ -10,7 +10,7 @@ Use `Section<T>` for enumerations. Shape lower bounds, coverage, currency, hints
 
 Source-bearing responses use `OutputContext::print_source` with explicitly enumerated body paths. It omits whole bodies before dropping list items and never edits arbitrary nested data. Preserve declaration identity and signature; `body_omitted` names the budget. Context budgets target, callees, then types together. Recount `bodies_included` after response fitting.
 
-`symbol_discovery` owns ranking, language detection, and steering. Textual exactness precedes path suffix, prefix, and substring matches; test scope and kind only break ties within those tiers. Do not infer query intent from ASCII word length or identifier suffixes. `map related` is a path suggestion, not semantic dependency evidence.
+`symbol_discovery` owns ranking, language detection, and steering. Textual exactness precedes path suffix, prefix, and substring matches; test scope and kind only break ties within those tiers. Do not infer query intent from ASCII word length or identifier suffixes. The counterpart and related files of `map file` are path suggestions, not semantic dependency evidence.
 
 ## Locations and references
 

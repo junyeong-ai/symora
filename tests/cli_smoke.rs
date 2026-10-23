@@ -472,10 +472,6 @@ fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
         code_of(&["--format", "compact", "map", "file", "blocked/b.rs"]),
         "io"
     );
-    assert_eq!(
-        code_of(&["--format", "compact", "map", "related", "blocked/b.rs"]),
-        "io"
-    );
 
     // A path that genuinely is not there still reads as not there.
     std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
@@ -1013,47 +1009,6 @@ fn an_unlimited_file_size_still_allows_grammar_based_symbol_reads() {
         ],
     );
     assert_eq!(syntax["count"], 1);
-}
-
-#[test]
-fn related_file_suggestions_do_not_start_a_language_server() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join(".symora")).unwrap();
-    let marker = dir.path().join("server-started");
-    let args = vec![
-        "-c",
-        "touch \"$1\"; exit 1",
-        "probe",
-        marker.to_str().unwrap(),
-    ];
-    let config = toml::toml! {
-        [lsp.servers.python]
-        command = "/bin/sh"
-        args = args
-    };
-    std::fs::write(
-        dir.path().join(".symora/config.toml"),
-        toml::to_string(&config).unwrap(),
-    )
-    .unwrap();
-    for name in ["target", "neighbor"] {
-        std::fs::write(
-            dir.path().join(format!("{name}.py")),
-            format!("def {name}():\n    pass\n"),
-        )
-        .unwrap();
-    }
-    let answer = json_ok(dir.path(), &["map", "related", "target.py"]);
-    assert_eq!(answer["related_files"][0]["file"], "neighbor.py");
-    assert!(
-        !marker.exists(),
-        "a file suggestion started a language server"
-    );
-    let support = json_ok(dir.path(), &["doctor", "python"]);
-    assert!(
-        marker.exists(),
-        "the configured probe did not run: {support}"
-    );
 }
 
 #[test]
@@ -3620,13 +3575,6 @@ fn a_map_list_says_how_much_the_limit_cut_from_it() {
     assert_eq!(summary["entrypoints"]["truncated"], true, "{summary}");
     assert_eq!(summary["top_directories"]["count"], 16, "{summary}");
     assert_eq!(summary["top_directories"]["showing"], 5, "{summary}");
-
-    let listing = json_ok(
-        root,
-        &["--format", "compact", "map", "dir", "flat", "--limit", "6"],
-    );
-    assert_eq!(listing["files"]["count"], 20, "{listing}");
-    assert_eq!(listing["files"]["showing"], 6, "{listing}");
 
     let file = json_ok(
         root,

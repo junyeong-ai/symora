@@ -144,7 +144,7 @@ symora map summary
   },
   "next_commands": [
     "symora map file --related-limit 5 -- 'src/main.ts'",
-    "symora map dir --limit 10 -- 'src'",
+    "symora pack --tokens 4000 --focus='src'",
     "symora symbols --depth 1 -- 'src/main.ts'"
   ]
 }
@@ -313,8 +313,6 @@ symora pack --tokens 4000                   # token-budgeted, PageRank-ranked re
 # Project & file overview
 symora map summary                          # repo shape
 symora map file src/services/checkout.ts    # one file: symbols, siblings, related files
-symora map dir src/services                 # directory listing
-symora map related src/services/checkout.ts # nearby files by name and directory
 
 # Symbols & inspection (LSP or AST declarations; semantic queries require LSP)
 symora symbols src/services/checkout.ts --depth 2   # full symbol tree
@@ -548,7 +546,7 @@ symora daemon start | stop | restart | status
 | Group | Commands |
 | --- | --- |
 | **Discover** | `search symbols`, `search content`, `search ast`, `search nodes`, `pack` |
-| **Map** | `map summary`, `map file`, `map dir`, `map related` |
+| **Map** | `map summary`, `map file` |
 | **Inspect** | `symbols`, `def`, `hover` |
 | **Navigate** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
 | **Analyze** | `context`, `usage`, `impact`, `diff-impact` |
