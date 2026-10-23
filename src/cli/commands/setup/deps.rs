@@ -65,8 +65,8 @@ pub struct DepsOutcome {
     pub group: DepsGroup,
     pub count: usize,
     pub showing: usize,
-    pub items: Vec<DepResult>,
     pub truncated: bool,
+    pub items: Vec<DepResult>,
 }
 
 #[derive(Serialize, Debug)]

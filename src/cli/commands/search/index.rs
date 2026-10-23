@@ -34,16 +34,16 @@ struct IndexStatusOutput {
     /// fix their permissions and rebuild, or refresh one of them on its own.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
-    /// The languages this index answers authoritatively for — empty until a
-    /// build completes. Row counts alone cannot tell a whole index from one
-    /// a narrowed build or a per-file refresh left partial, and a symbol
-    /// search reads as complete only for the languages listed here.
-    languages: Vec<String>,
     /// The build to run when no completed one stands behind these counts.
     /// A never-built index is the one state every search reads as absence,
     /// and it is the only state the remedy is unconditional in.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     next_commands: Vec<String>,
+    /// The languages this index answers authoritatively for — empty until a
+    /// build completes. Row counts alone cannot tell a whole index from one
+    /// a narrowed build or a per-file refresh left partial, and a symbol
+    /// search reads as complete only for the languages listed here.
+    languages: Vec<String>,
 }
 
 #[derive(Serialize)]

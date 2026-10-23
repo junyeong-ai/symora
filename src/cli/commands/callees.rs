@@ -53,8 +53,6 @@ pub struct CalleesArgs {
 /// its shallowest discovery, with the traversal's honest lower-bound markers.
 #[derive(Debug, Serialize)]
 struct CalleesReachOutput {
-    #[serde(flatten)]
-    section: Section<CallHierarchyOutput>,
     /// Depth actually reached.
     depth: u32,
     /// The walk stopped at the depth cap with callees still unexplored — a
@@ -77,6 +75,8 @@ struct CalleesReachOutput {
     /// across every surface (`AnchorResolution::as_status`).
     #[serde(skip_serializing_if = "Option::is_none")]
     anchor_status: Option<&'static str>,
+    #[serde(flatten)]
+    section: Section<CallHierarchyOutput>,
 }
 
 /// Whether the anchor reaches the target through resolved outgoing calls.
@@ -110,10 +110,6 @@ struct CalleesPathOutput {
     /// `no_static_path` as an absolute "unreachable".
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     dynamic_dispatch_possible: bool,
-    /// The ordered frames from the first hop through the target — present
-    /// only when `reachability` is `found`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chain: Option<Vec<CallHierarchyOutput>>,
     /// Depth actually reached.
     depth: u32,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -140,6 +136,10 @@ struct CalleesPathOutput {
     indexing: Option<IndexingDegradation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     hints: Vec<String>,
+    /// The ordered frames from the first hop through the target — present
+    /// only when `reachability` is `found`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain: Option<Vec<CallHierarchyOutput>>,
 }
 
 pub async fn execute(args: CalleesArgs, app: &App) -> Result<()> {

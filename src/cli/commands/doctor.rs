@@ -27,14 +27,14 @@ pub struct DoctorArgs {
 #[derive(Serialize)]
 struct DoctorOutput {
     platform: String,
-    languages: Vec<LanguageStatus>,
-    summary: Summary,
     /// Config problems affecting this report: rejected [lsp.servers]
     /// stanzas — non-canonical keys, unknown fields, mistyped values —
     /// (recorded at load, never applied) and/or a whole-config load
     /// failure (the report then reflects builtin defaults).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     config_errors: Vec<String>,
+    summary: Summary,
+    languages: Vec<LanguageStatus>,
 }
 
 #[derive(Serialize)]

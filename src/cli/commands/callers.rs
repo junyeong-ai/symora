@@ -34,10 +34,10 @@ pub struct CallersArgs {
 /// `Section` contract untouched.
 #[derive(Debug, Serialize)]
 struct CallersOutput {
-    #[serde(flatten)]
-    section: Section<CallHierarchyOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     callers_status: Option<&'static str>,
+    #[serde(flatten)]
+    section: Section<CallHierarchyOutput>,
 }
 
 pub async fn execute(args: CallersArgs, app: &App) -> Result<()> {

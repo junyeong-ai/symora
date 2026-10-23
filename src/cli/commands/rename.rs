@@ -29,11 +29,11 @@ struct RenameOutput {
     new_name: String,
     dry_run: bool,
     affected_files: usize,
-    changes: Vec<FileChangeOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     indexing: Option<IndexingDegradation>,
+    changes: Vec<FileChangeOutput>,
 }
 
 pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
