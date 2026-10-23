@@ -152,6 +152,17 @@ impl Symbol {
         }
     }
 
+    /// Give each `workspace/symbol` result the path it is addressed by,
+    /// [`Self::workspace_name_path`], so ranking, deduplication, and path
+    /// patterns read the same key from a live answer as from a document tree.
+    pub fn assign_workspace_paths(symbols: &mut [Symbol]) {
+        for symbol in symbols {
+            if let Some(path) = symbol.workspace_name_path() {
+                symbol.name_path = Some(path);
+            }
+        }
+    }
+
     /// Give each symbol the qualifier that distinguishes it from its
     /// same-named siblings — its kind, and only where its kind is unique
     /// among them.

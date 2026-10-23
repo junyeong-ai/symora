@@ -167,6 +167,7 @@ async fn collect_usage_symbols(app: &App, pattern: &str, languages: &[Language])
             Err(e) => failures.push((*language, e)),
         }
     }
+    Symbol::assign_workspace_paths(&mut symbols);
     UsageLookup {
         symbols: dedupe_usage_symbols(symbols),
         failures,
