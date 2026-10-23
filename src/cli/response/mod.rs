@@ -30,7 +30,7 @@ pub use lsp::{
     CallHierarchyOutput, DefinitionOutput, DiagnosticOutput, DisclosesIndexing, HoverOutput,
     TypeInfoOutput,
 };
-pub use symbol::{ServerStatusOutput, SymbolOutput};
+pub use symbol::{ServerStatusOutput, SymbolOutput, SymbolSource};
 
 use std::path::Path;
 

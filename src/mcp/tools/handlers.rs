@@ -58,7 +58,6 @@ pub async fn dispatch(name: &str, arguments: Value, app: &App) -> Result<Capture
         "get_index_status" => run_index_status(arguments, app).await,
         "build_index" => run_build_index(arguments, app).await,
         "list_file_symbols" => run_list_file_symbols(arguments, app).await,
-        "inspect_symbol" => run_inspect_symbol(arguments, app).await,
         "find_definition" => run_find_definition(arguments, app).await,
         "find_references" => run_find_references(arguments, app).await,
         "find_callers" => run_find_callers(arguments, app).await,
@@ -200,6 +199,10 @@ struct SearchSymbolsInput {
     path: Option<Vec<std::path::PathBuf>>,
     language: Option<String>,
     kind: Option<String>,
+    #[serde(default)]
+    body: bool,
+    #[serde(default)]
+    signature: bool,
     limit: Option<usize>,
 }
 
@@ -214,6 +217,8 @@ async fn run_search_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
                     language: input.language,
                     kind: input.kind,
                     workspace_symbols: false,
+                    body: input.body,
+                    signature: input.signature,
                     limit: input.limit,
                 },
             },
@@ -358,46 +363,11 @@ async fn run_list_file_symbols(args: Value, app: &App) -> Result<CapturedOutput>
     capture(app, move |a| async move {
         crate::cli::commands::symbols::execute(
             SymbolsArgs {
-                file: Some(input.file),
-                name: None,
+                file: input.file,
                 symbol: None,
-                lang: None,
                 body: input.body,
                 signature: input.signature,
                 depth: input.depth,
-                kind: None,
-                exclude: None,
-                substring: false,
-                structural: false,
-                limit: None,
-            },
-            &a,
-        )
-        .await
-    })
-    .await
-}
-
-#[derive(Deserialize)]
-struct InspectSymbolInput {
-    symbol_path: String,
-    language: Option<String>,
-    #[serde(default)]
-    body: bool,
-}
-
-async fn run_inspect_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
-    let input: InspectSymbolInput = parse_args(args)?;
-    capture(app, move |a| async move {
-        crate::cli::commands::symbols::execute(
-            SymbolsArgs {
-                file: None,
-                name: None,
-                symbol: Some(input.symbol_path),
-                lang: input.language,
-                body: input.body,
-                signature: false,
-                depth: 0,
                 kind: None,
                 exclude: None,
                 substring: false,
@@ -936,14 +906,21 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
     Some(match tool {
         "get_project_overview" => &[],
         "get_file_overview" => &["path", "depth", "related_limit"],
-        "search_symbols" => &["query", "path", "language", "kind", "limit"],
+        "search_symbols" => &[
+            "query",
+            "path",
+            "language",
+            "kind",
+            "body",
+            "signature",
+            "limit",
+        ],
         "search_content" => &["query", "path", "language", "limit"],
         "check_language_support" => &["language"],
         "search_ast" => &["pattern", "language", "path", "limit"],
         "get_index_status" => &[],
         "build_index" => &["force", "languages"],
         "list_file_symbols" => &["file", "depth", "body", "signature"],
-        "inspect_symbol" => &["symbol_path", "language", "body"],
         "find_definition" | "get_hover" => &["file", "line", "column"],
         "find_references" => &["file", "line", "column", "snippet", "limit"],
         "find_callers" => &["file", "line", "column", "limit", "no_fallback"],
@@ -1038,7 +1015,6 @@ pub(super) fn deserialize_input(tool: &str, args: Value) -> Option<Result<(), St
         "get_index_status" => check::<IndexStatusInput>(args),
         "build_index" => check::<BuildIndexInput>(args),
         "list_file_symbols" => check::<ListFileSymbolsInput>(args),
-        "inspect_symbol" => check::<InspectSymbolInput>(args),
         "find_definition" | "get_hover" => check::<LocationInput>(args),
         "find_references" => check::<FindReferencesInput>(args),
         "find_callers" => check::<FindCallersInput>(args),

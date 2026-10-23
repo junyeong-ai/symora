@@ -28,11 +28,26 @@ pub struct SymbolOutput {
     pub body_omitted: Option<super::BodyOmission>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<SymbolOutput>>,
-    /// What produced this row, where an answer merges two producers: `index`
-    /// or `workspace`, the words `search symbols` uses. Omitted where one
-    /// producer answered the whole response and a top-level `backend` says so.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
+}
+
+/// The source a symbol row carries beside its location. A body is the whole
+/// definition and is emitted with its signature, so asking for both asks for
+/// the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolSource {
+    Location,
+    Signature,
+    Body,
+}
+
+impl SymbolSource {
+    pub fn new(body: bool, signature: bool) -> Self {
+        match (body, signature) {
+            (true, _) => Self::Body,
+            (false, true) => Self::Signature,
+            (false, false) => Self::Location,
+        }
+    }
 }
 
 impl SymbolOutput {
@@ -51,11 +66,6 @@ impl SymbolOutput {
         let mut paths = Vec::new();
         collect(items, "/items", &mut paths);
         paths
-    }
-
-    pub fn produced_by(mut self, backend: &str) -> Self {
-        self.backend = Some(backend.to_string());
-        self
     }
 
     pub fn from_symbol(symbol: &Symbol, root: &Path) -> Self {
@@ -84,7 +94,6 @@ impl SymbolOutput {
                 )
             }),
             container: symbol.container.clone(),
-            backend: None,
             signature: if signature_only {
                 extract_signature(symbol)
             } else {

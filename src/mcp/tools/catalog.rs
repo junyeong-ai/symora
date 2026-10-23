@@ -35,8 +35,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::read_only(
             "search_symbols",
-            "Fast rough symbol discovery by name or path-like pattern across the \
-                          workspace. Use this when you don't yet know the exact file.",
+            "Symbol discovery by name or path-like pattern (e.g. 'Handler/process', \
+                          '*/method') across the workspace, for when you don't know the file. \
+                          body or signature reads each match's source, so a known declaration \
+                          needs no second call.",
             {
                 let mut schema = schema_object(
                     &[
@@ -51,6 +53,12 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "string",
                             "Optional kind filter (function, class, struct, ...)",
                         ),
+                        (
+                            "body",
+                            "boolean",
+                            "Attach each match's complete definition and signature",
+                        ),
+                        ("signature", "boolean", "Attach each match's signature"),
                         ("limit", "integer", "Maximum results"),
                     ],
                     &["query"],
@@ -64,7 +72,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         )
         .with_output_schema(with_extra(
             section_output_schema(
-                "Symbol matches: name, name_path, kind, file, line, column, score",
+                "Symbol matches: name, name_path, kind, file, line, column, score, and \
+                 signature/body when requested",
             ),
             &[(
                 "coverage_gaps",
@@ -230,20 +239,6 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                  taking absent nesting for structure",
             )],
         )),
-        ToolDefinition::read_only(
-            "inspect_symbol",
-            "Resolve a symbol path (e.g., 'Handler/process', a bare name, or a '*/method' \
-                          wildcard) and return its definition info. Use after search_symbols to \
-                          follow up precisely.",
-            schema_object(
-                &[
-                    ("symbol_path", "string", "Symbol path like 'Class/method'"),
-                    ("language", "string", "Optional language filter"),
-                    ("body", "boolean", "Include source body"),
-                ],
-                &["symbol_path"],
-            ),
-        ),
         ToolDefinition::read_only(
             "find_definition",
             "LSP go-to-definition for the symbol at a precise file:line:column.",
@@ -693,8 +688,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "replace_symbol_body",
-            "Replace the symbol's ENTIRE definition — the span its body from \
-                          inspect_symbol or list_file_symbols covers: any decorator, attribute \
+            "Replace the symbol's ENTIRE definition — the span covered by the body \
+                          search_symbols or list_file_symbols returns: any decorator, attribute \
                           or doc-comment lines it opens with, its signature, braces and body. \
                           Pass the complete definition as body, not just the inner code; a body \
                           read there, changed and passed back keeps those lines. Target by file + symbol path \

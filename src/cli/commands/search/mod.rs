@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::app::App;
+use crate::cli::response::SymbolSource;
 
 mod ast;
 mod common;
@@ -14,17 +15,17 @@ mod symbols;
 pub use ast::{execute_ast_search, execute_list_nodes};
 pub use content::execute_content_search;
 pub use index::execute_index_command;
-pub use symbols::execute_symbol_search;
+pub use symbols::{SymbolQuery, execute_symbol_search};
 
 #[derive(Args, Debug)]
 #[command(
     after_long_help = "Use `search` when you have a rough name or phrase but not an exact file.\n\
                        Use `search symbols` for approximate workspace discovery.\n\
-                       Use `symbols` once you already know the file or a symbol path.\n\
+                       Use `symbols` once you already know the file.\n\
                        Typical flow:\n  \
                        1. `symora search symbols auth`\n  \
                        2. `symora map file <match>`\n  \
-                       3. `symora symbols <file>` or `symora symbols --symbol <path>`\n  \
+                       3. `symora symbols <file>` or `symora search symbols <Class/method> --body`\n  \
                        4. `symora refs <loc>`\n"
 )]
 pub struct SearchArgs {
@@ -54,6 +55,14 @@ pub enum SearchCommand {
         /// Force live LSP workspace-symbol search (bypass the index)
         #[arg(long)]
         workspace_symbols: bool,
+
+        /// Attach each result's complete definition
+        #[arg(long, conflicts_with = "signature")]
+        body: bool,
+
+        /// Attach each result's signature
+        #[arg(long, conflicts_with = "body")]
+        signature: bool,
 
         /// Maximum results
         #[arg(long)]
@@ -140,17 +149,22 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
             language,
             kind,
             workspace_symbols,
+            body,
+            signature,
             limit,
         } => {
             let limit = limit.unwrap_or(cfg.search.limit);
             execute_symbol_search(
                 app,
-                &query,
-                language.as_deref(),
-                kind.as_deref(),
-                path.as_deref(),
-                workspace_symbols,
-                limit,
+                SymbolQuery {
+                    query: &query,
+                    language: language.as_deref(),
+                    kind: kind.as_deref(),
+                    paths: path.as_deref(),
+                    workspace_symbols,
+                    source: SymbolSource::new(body, signature),
+                    limit,
+                },
             )
             .await
         }

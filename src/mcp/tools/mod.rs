@@ -257,7 +257,6 @@ mod tests {
             "search_symbols",
             "search_content",
             "list_file_symbols",
-            "inspect_symbol",
             "find_definition",
             "find_references",
             "find_callers",
