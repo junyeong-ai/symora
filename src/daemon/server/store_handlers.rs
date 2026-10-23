@@ -31,6 +31,7 @@ pub(super) async fn handle_search_symbols(
     ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
     let p: SearchSymbolsParams = parse_params(params)?;
+    let within: Vec<std::path::PathBuf> = p.within.iter().map(std::path::PathBuf::from).collect();
 
     let kind_filter = p.kind.as_ref().map(|k| SymbolKind::parse_or_default(k));
     let lang_filter = p
@@ -45,7 +46,7 @@ pub(super) async fn handle_search_symbols(
             p.limit.unwrap_or(100),
             kind_filter,
             lang_filter,
-            &p.within,
+            &within,
         )
         .await
         .map_err(RpcError::from)?;

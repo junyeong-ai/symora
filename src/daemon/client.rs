@@ -561,7 +561,10 @@ impl DaemonClient {
             "limit": limit,
             "kind": kind,
             "language": language,
-            "within": within,
+            "within": within
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>(),
         });
         self.request_with_project(methods::SEARCH_SYMBOLS, params)
             .await
