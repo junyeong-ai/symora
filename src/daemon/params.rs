@@ -55,7 +55,7 @@ pub(crate) struct SearchSymbolsParams {
     #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
-    pub within: Vec<std::path::PathBuf>,
+    pub within: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
