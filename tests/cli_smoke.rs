@@ -821,29 +821,63 @@ fn a_named_path_that_is_not_there_fails_rather_than_answering_zero() {
     let root = dir.path();
     std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
 
-    let out = run_in(
-        root,
-        &[
-            "--format",
-            "compact",
-            "search",
-            "ast",
-            "function_item",
-            "-l",
-            "rust",
-            "--path",
-            "does/not/exist",
-        ],
-    );
-    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
-    assert_eq!(json["error"]["code"], "not_found", "{json}");
+    for search in [
+        &["ast", "function_item", "-l", "rust"][..],
+        &["content", "alpha"],
+        &["symbols", "alpha"],
+    ] {
+        let mut args = vec!["--deterministic", "search"];
+        args.extend_from_slice(search);
+        args.extend(["--path", "a.rs", "--path", "does/not/exist"]);
+        let out = run_in(root, &args);
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+        assert_eq!(json["error"]["code"], "not_found", "{search:?}: {json}");
+        assert_eq!(
+            json["error"]["message"], "Path not found: does/not/exist",
+            "{search:?}: the path that is missing is the one named"
+        );
+    }
+}
+
+/// `--path` confines a symbol search the way it confines content and AST
+/// search, and a follow-up the answer advises keeps the confinement.
+#[test]
+fn search_symbols_answers_only_inside_the_named_paths() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    for file in ["pkg/a/mod.py", "pkg/b/mod.py", "other/mod.py"] {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "def shared_marker():\n    pass\n").unwrap();
+    }
+    json_ok(root, &["search", "index", "build"]);
+    let search = |paths: &[&str]| {
+        let mut args = vec!["--deterministic", "search", "symbols", "shared_marker"];
+        for path in paths {
+            args.extend(["--path", path]);
+        }
+        json_ok(root, &args)
+    };
+
+    let file = search(&["pkg/a/mod.py"]);
+    assert_eq!(file["count"], 1, "{file}");
+    assert_eq!(file["items"][0]["file"], "pkg/a/mod.py");
+
+    let directory = search(&["pkg"]);
+    assert_eq!(directory["count"], 2, "{directory}");
     assert!(
-        json["error"]["message"]
-            .as_str()
+        directory["next_commands"]
+            .as_array()
             .unwrap()
-            .contains("does/not/exist"),
-        "the path that is missing is the one named: {json}"
+            .iter()
+            .any(|command| command
+                .as_str()
+                .unwrap()
+                .starts_with("symora search symbols --path='pkg' --kind=")),
+        "{directory}"
     );
+
+    assert_eq!(search(&["."])["count"], 3);
 }
 
 /// The build's shortfall names the paths it is about, so the reader can act on

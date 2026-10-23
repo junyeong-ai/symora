@@ -370,7 +370,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
         }
     };
 
-    let detected = resolve_search_languages(app, resolved.language_override.as_deref());
+    let detected = resolve_search_languages(app, resolved.language_override.as_deref(), &[]);
     if detected.languages.is_empty() {
         ctx.print_error(no_languages_error(
             ctx,

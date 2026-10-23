@@ -306,6 +306,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 # 탐색 (인덱스, AST, 라이브 워크스페이스 조회)
 symora search symbols AuthUser              # 이름·경로 검색과 순위화
 symora search symbols AuthUser --workspace-symbols   # 인덱스 건너뛰고 라이브 LSP 강제
+symora search symbols AuthUser --path src/auth      # 이 파일·디렉터리에 선언된 심볼만
 symora search content "async function"      # 순위가 매겨진 전문 검색
 symora search ast '(class_declaration) @c' --lang typescript   # 구조적 AST 매칭
 symora pack --tokens 4000                   # 토큰 예산 기반, PageRank 순위 저장소 브리핑

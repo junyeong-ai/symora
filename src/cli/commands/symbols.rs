@@ -218,7 +218,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     } = params;
     let ctx = &app.output;
 
-    let detected = resolve_search_languages(app, lang);
+    let detected = resolve_search_languages(app, lang, &[]);
     if detected.languages.is_empty() {
         ctx.print_error(no_languages_error(ctx, &detected, lang));
         return Ok(());
@@ -271,7 +271,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
     let mut workspace_only: Option<WorkspaceSearchRoute> = None;
     match app
         .store
-        .search_symbols(&query, candidate_budget(limit), None, index_lang)
+        .search_symbols(&query, candidate_budget(limit), None, index_lang, &[])
         .await
     {
         Ok(page) => {
@@ -435,6 +435,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
             .with_coverage_gaps(shortfall.iter().map(CoverageGap::from).collect()),
         &shortfall,
         &query,
+        &[],
         route,
         &bounds,
         &route_facts,

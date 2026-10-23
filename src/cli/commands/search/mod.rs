@@ -39,6 +39,10 @@ pub enum SearchCommand {
         /// Search query
         query: String,
 
+        /// Search only symbols declared in these files or directories
+        #[arg(short, long)]
+        path: Option<Vec<PathBuf>>,
+
         /// Language filter
         #[arg(short, long = "lang")]
         language: Option<String>,
@@ -132,6 +136,7 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
     match args.command {
         SearchCommand::Symbols {
             query,
+            path,
             language,
             kind,
             workspace_symbols,
@@ -143,6 +148,7 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
                 &query,
                 language.as_deref(),
                 kind.as_deref(),
+                path.as_deref(),
                 workspace_symbols,
                 limit,
             )

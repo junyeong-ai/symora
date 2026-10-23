@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,7 @@ use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
     index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, ordered_bounds,
-    relative_stale_files, unconfirmed_by_live_lookup, with_coverage_disclosure,
+    path_flags, relative_stale_files, unconfirmed_by_live_lookup, with_coverage_disclosure,
     workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section};
@@ -24,7 +25,7 @@ use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::TestScope;
 use crate::services::store::SymbolSearchResult;
 
-use super::common::looks_like_symbol_path;
+use super::common::{looks_like_symbol_path, resolve_search_paths};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SymbolResultOutput {
@@ -64,11 +65,24 @@ fn with_emitted_stale(
     section.with_stale(stale)
 }
 
+/// A symbol search as the caller asked for it. Every route answers the same
+/// request, and the follow-ups it advises re-run it rather than a wider one.
+struct SymbolSearch<'a> {
+    query: &'a str,
+    language: Option<&'a str>,
+    kind: Option<SymbolKind>,
+    /// Project-relative files or directories the answer is confined to;
+    /// empty confines nothing.
+    within: &'a [PathBuf],
+    limit: usize,
+}
+
 pub async fn execute_symbol_search(
     app: &App,
     query: &str,
     language: Option<&str>,
     kind: Option<&str>,
+    paths: Option<&[PathBuf]>,
     workspace_symbols: bool,
     limit: usize,
 ) -> Result<()> {
@@ -114,15 +128,39 @@ pub async fn execute_symbol_search(
         }
     };
 
+    let within = match paths
+        .map(|paths| resolve_search_paths(app, paths))
+        .transpose()
+    {
+        Ok(within) => within.unwrap_or_default(),
+        Err(error) => {
+            ctx.print_error(error);
+            return Ok(());
+        }
+    };
+    // The project root among them confines nothing.
+    let within = if within.iter().any(|path| path.as_os_str().is_empty()) {
+        Vec::new()
+    } else {
+        within
+    };
+    let search = SymbolSearch {
+        query,
+        language,
+        kind,
+        within: &within,
+        limit,
+    };
+
     // `*` wildcards are the file-tree matcher's syntax; neither the LIKE index
     // nor the LSP workspace search honors them (they would fuzzy-strip the star
     // and surface unrelated crates), so resolve a glob against the index with
     // our own matcher instead of routing it to either.
     if query.contains('*') {
-        return execute_glob_symbol_search(app, query, language, kind, limit).await;
+        return execute_glob_symbol_search(app, &search).await;
     }
 
-    let detected = resolve_search_languages(app, language);
+    let detected = resolve_search_languages(app, language, &within);
     let use_workspace = workspace_symbols || looks_like_symbol_path(query);
 
     if use_workspace {
@@ -133,10 +171,7 @@ pub async fn execute_symbol_search(
         };
         return execute_workspace_symbol_search(
             app,
-            query,
-            language,
-            kind,
-            limit,
+            &search,
             WorkspaceRoute {
                 route,
                 detected: &detected,
@@ -153,6 +188,7 @@ pub async fn execute_symbol_search(
             candidate_budget(limit),
             kind,
             explicit_index_language(language),
+            &within,
         )
         .await
     {
@@ -168,7 +204,7 @@ pub async fn execute_symbol_search(
             let mut skipped = Vec::new();
             let mut workspace_indexing = None;
             let covered = page.covered.clone();
-            let lower_bounds = ordered_bounds(
+            let mut lower_bounds = ordered_bounds(
                 detected.shortfall(ctx),
                 index_holes_bound(ctx, &page.unread_paths, &covered),
             );
@@ -179,7 +215,9 @@ pub async fn execute_symbol_search(
             );
             if !uncovered.is_empty() {
                 let lookup =
-                    collect_workspace_symbol_results(app, query, kind, limit, &uncovered).await;
+                    collect_workspace_symbol_results(app, query, kind, limit, &uncovered, &within)
+                        .await;
+                lower_bounds.extend(narrowed_live_answer(&lookup.narrowed, &covered, true));
                 workspace_indexing = lookup.indexing;
                 let live_total = lookup.total;
                 candidates = merge_symbol_results(candidates, lookup.results);
@@ -210,21 +248,13 @@ pub async fn execute_symbol_search(
             .await;
             let section = with_coverage_disclosure(
                 with_emitted_stale(
-                    finish_symbol_search(
-                        candidates,
-                        count,
-                        query,
-                        language,
-                        kind,
-                        limit,
-                        app.test_scope(),
-                        &shortfall,
-                    ),
+                    finish_symbol_search(candidates, count, &search, app.test_scope(), &shortfall),
                     &stale_files,
                 )
                 .with_indexing(workspace_indexing),
                 &shortfall,
                 query,
+                &within,
                 DisclosureRoute::IndexConsulted,
                 &lower_bounds,
                 &currency_facts,
@@ -244,10 +274,7 @@ pub async fn execute_symbol_search(
             };
             return execute_workspace_symbol_search(
                 app,
-                query,
-                language,
-                kind,
-                limit,
+                &search,
                 WorkspaceRoute {
                     route,
                     detected: &detected,
@@ -266,14 +293,15 @@ pub async fn execute_symbol_search(
 /// shared matcher accepts. The index can't `LIKE`-glob and the LSP workspace
 /// search can't honor `*` at all, so this is the one path that globs against
 /// real project symbols without fuzzy-stripped noise.
-async fn execute_glob_symbol_search(
-    app: &App,
-    query: &str,
-    language: Option<&str>,
-    kind: Option<SymbolKind>,
-    limit: usize,
-) -> Result<()> {
+async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Result<()> {
     let ctx = &app.output;
+    let &SymbolSearch {
+        query,
+        language,
+        kind,
+        within,
+        ..
+    } = search;
 
     let seed = query
         .split(['*', '/', '[', ']'])
@@ -288,7 +316,13 @@ async fn execute_glob_symbol_search(
     // for. `finish_symbol_search` caps the emitted page at the display `limit`.
     let page = match app
         .store
-        .search_symbols(seed, usize::MAX, kind, explicit_index_language(language))
+        .search_symbols(
+            seed,
+            usize::MAX,
+            kind,
+            explicit_index_language(language),
+            within,
+        )
         .await
     {
         Ok(page) => page,
@@ -319,7 +353,7 @@ async fn execute_glob_symbol_search(
     let covered = page.covered.clone();
     // No live lookup runs on this route, so the index answers for everything
     // its scope covers — including the zeroes.
-    let detected = resolve_search_languages(app, language);
+    let detected = resolve_search_languages(app, language, within);
     let lower_bounds = ordered_bounds(
         detected.shortfall(ctx),
         index_holes_bound(ctx, &page.unread_paths, &covered),
@@ -344,20 +378,12 @@ async fn execute_glob_symbol_search(
     let currency_facts = index_currency_disclosure(app.store.as_ref(), &covered).await;
     ctx.print_success(with_coverage_disclosure(
         with_emitted_stale(
-            finish_symbol_search(
-                matches,
-                count,
-                query,
-                language,
-                kind,
-                limit,
-                app.test_scope(),
-                &shortfall,
-            ),
+            finish_symbol_search(matches, count, search, app.test_scope(), &shortfall),
             &stale_files,
         ),
         &shortfall,
         query,
+        within,
         DisclosureRoute::IndexConsulted,
         &lower_bounds,
         &currency_facts,
@@ -395,10 +421,7 @@ struct WorkspaceRoute<'a> {
 
 async fn execute_workspace_symbol_search(
     app: &App,
-    query: &str,
-    language: Option<&str>,
-    kind: Option<SymbolKind>,
-    limit: usize,
+    search: &SymbolSearch<'_>,
     routed: WorkspaceRoute<'_>,
 ) -> Result<()> {
     let WorkspaceRoute {
@@ -406,6 +429,13 @@ async fn execute_workspace_symbol_search(
         detected,
         index_unavailable,
     } = routed;
+    let &SymbolSearch {
+        query,
+        language,
+        kind,
+        within,
+        limit,
+    } = search;
     let ctx = &app.output;
     let languages = &detected.languages;
     if languages.is_empty() {
@@ -413,7 +443,8 @@ async fn execute_workspace_symbol_search(
         return Ok(());
     }
 
-    let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages).await;
+    let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages, within).await;
+    let mut narrowed = lookup.narrowed;
     // The fan-out overfetches and then cuts, so its rows are the whole live
     // answer only when nothing was cut. Read before the rows are moved.
     let mut live = Contribution {
@@ -436,9 +467,17 @@ async fn execute_workspace_symbol_search(
             // Document expansion is part of the same live answer: what it finds
             // is live, and what it had to leave behind leaves the live side cut
             // short just as the fan-out's own cap does.
-            let expanded =
-                collect_document_path_results(app, query, kind, limit, languages, &candidates)
-                    .await;
+            let expanded = collect_document_path_results(
+                app,
+                query,
+                kind,
+                limit,
+                languages,
+                within,
+                &candidates,
+            )
+            .await;
+            narrowed.extend(expanded.narrowed);
             live.found |= !expanded.results.is_empty();
             live.cut_short |= expanded.capped;
             // Said on its own, not only through `unmerged_overlap`: rows left
@@ -479,6 +518,7 @@ async fn execute_workspace_symbol_search(
                     candidate_budget(limit),
                     kind,
                     explicit_index_language(language),
+                    within,
                 )
                 .await,
         ),
@@ -536,6 +576,14 @@ async fn execute_workspace_symbol_search(
     let mut lower_bounds = {
         let mut bounds = ordered_bounds(detected.shortfall(ctx), index_bounds);
         bounds.extend(lower_bounds);
+        bounds.extend(narrowed_live_answer(
+            &narrowed,
+            &index_covered,
+            !matches!(
+                route,
+                WorkspaceSearchRoute::IndexRebuilding | WorkspaceSearchRoute::IndexUnreadable
+            ),
+        ));
         bounds
     };
     lower_bounds.dedup();
@@ -562,16 +610,7 @@ async fn execute_workspace_symbol_search(
     );
     let section = with_coverage_disclosure(
         with_emitted_stale(
-            finish_symbol_search(
-                candidates,
-                count,
-                query,
-                language,
-                kind,
-                limit,
-                app.test_scope(),
-                &shortfall,
-            ),
+            finish_symbol_search(candidates, count, search, app.test_scope(), &shortfall),
             &stale_files,
         )
         // Any emitted language having run timed-out makes the whole
@@ -579,6 +618,7 @@ async fn execute_workspace_symbol_search(
         .with_indexing(indexing),
         &shortfall,
         query,
+        within,
         if index_consulted {
             DisclosureRoute::IndexConsulted
         } else {
@@ -600,19 +640,16 @@ async fn execute_workspace_symbol_search(
 fn finish_symbol_search(
     mut candidates: Vec<SymbolResultOutput>,
     count: usize,
-    query: &str,
-    language: Option<&str>,
-    kind: Option<SymbolKind>,
-    limit: usize,
+    search: &SymbolSearch<'_>,
     test_scope: &TestScope,
     shortfall: &[Uncovered],
 ) -> Section<SymbolResultOutput> {
-    rank_symbol_results(&mut candidates, query, test_scope);
-    candidates.truncate(limit);
+    rank_symbol_results(&mut candidates, search.query, test_scope);
+    candidates.truncate(search.limit);
 
     let truncated = candidates.len() < count;
-    let hints = symbol_search_hints(query, language, kind, truncated, candidates.len(), limit);
-    let next_commands = symbol_search_next_commands(&candidates, query, language);
+    let hints = symbol_search_hints(search, truncated, candidates.len());
+    let next_commands = symbol_search_next_commands(&candidates, search);
     Section::with_total(candidates, count)
         .with_hints(hints)
         .with_next_commands(next_commands)
@@ -650,6 +687,11 @@ struct WorkspaceSymbolLookup {
     /// server is the sole source for all of them and this is a genuine
     /// lower-bound marker rather than warm-up noise.
     indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// Languages whose server answer reached outside `within`. A server
+    /// answers for the whole workspace, so those rows took places in an answer
+    /// it may have capped, and matches inside `within` it held back are not
+    /// in `total`.
+    narrowed: Vec<Language>,
 }
 
 async fn collect_workspace_symbol_results(
@@ -658,6 +700,7 @@ async fn collect_workspace_symbol_results(
     kind: Option<SymbolKind>,
     limit: usize,
     languages: &[Language],
+    within: &[PathBuf],
 ) -> WorkspaceSymbolLookup {
     let ctx = &app.output;
     let mut failures = Vec::new();
@@ -668,6 +711,7 @@ async fn collect_workspace_symbol_results(
             failures,
             skipped: Vec::new(),
             indexing: None,
+            narrowed: Vec::new(),
         };
     }
     // Per-language LSP degradation, recorded as the fan-out runs. The two
@@ -686,6 +730,7 @@ async fn collect_workspace_symbol_results(
     let mut seen = HashSet::new();
     let mut results = Vec::new();
     let mut skipped: Vec<Language> = Vec::new();
+    let mut narrowed: Vec<Language> = Vec::new();
 
     for (queried, language) in languages.iter().enumerate() {
         if results.len() >= overfetch_limit.saturating_mul(2) {
@@ -707,6 +752,11 @@ async fn collect_workspace_symbol_results(
             if let Some(path) = symbol.workspace_name_path() {
                 symbol.name_path = Some(path);
             }
+        }
+        let before = symbols.len();
+        symbols.retain(|symbol| is_within(ctx, &symbol.location.file, within));
+        if symbols.len() < before {
+            narrowed.push(*language);
         }
 
         let filtered = if looks_like_symbol_path(query) {
@@ -787,7 +837,44 @@ async fn collect_workspace_symbol_results(
         // First marker wins — a single IndexingDegradation variant, so order
         // is immaterial.
         indexing: lsp_degradation.iter().find_map(|(_, d)| *d),
+        narrowed,
     }
+}
+
+/// Whether a file lies at or under one of the project-relative paths a search
+/// is confined to; every file does when it names none.
+fn is_within(ctx: &OutputContext, file: &Path, within: &[PathBuf]) -> bool {
+    within.is_empty() || {
+        let relative = PathBuf::from(ctx.relative_path(file));
+        within.iter().any(|path| relative.starts_with(path))
+    }
+}
+
+/// The bound a path-confined live answer is, for the languages it alone
+/// answered. Where the index answered a language, its rows already hold every
+/// match inside the paths as of the build, so a server's narrowed answer
+/// costs that language nothing. `buildable` is whether the index is in a
+/// state a build can be started over.
+fn narrowed_live_answer(
+    narrowed: &[Language],
+    answered_by_index: &[Language],
+    buildable: bool,
+) -> Option<LowerBound> {
+    let mut languages: Vec<Language> = narrowed
+        .iter()
+        .copied()
+        .filter(|language| !answered_by_index.contains(language))
+        .collect();
+    languages.sort_by_key(|language| language.lsp_id());
+    languages.dedup();
+    let indexable = buildable
+        && languages
+            .iter()
+            .all(|language| crate::services::store::SymbolExtractor::is_supported(*language));
+    (!languages.is_empty()).then_some(LowerBound::LiveAnswerNarrowed {
+        languages,
+        indexable,
+    })
 }
 
 /// What one source of an answer brought, in the only two terms the union
@@ -884,6 +971,7 @@ async fn collect_document_path_results(
     kind: Option<SymbolKind>,
     limit: usize,
     languages: &[Language],
+    within: &[PathBuf],
     seed_results: &[SymbolResultOutput],
 ) -> DocumentExpansion {
     let ctx = &app.output;
@@ -906,8 +994,11 @@ async fn collect_document_path_results(
 
     let mut failures = Vec::new();
     let mut skipped = Vec::new();
+    let mut narrowed = Vec::new();
     if candidate_files.len() < limit {
-        let seeds = collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages).await;
+        let seeds =
+            collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages, within).await;
+        narrowed = seeds.narrowed;
         // The leaf requery is a fan-out like any other, and what it could not
         // ask about is a coverage fact — discarding it here would leave the
         // caller publishing a set of languages it never actually covered.
@@ -1003,6 +1094,7 @@ async fn collect_document_path_results(
         undescribed,
         failures,
         skipped,
+        narrowed,
     }
 }
 
@@ -1011,7 +1103,8 @@ async fn collect_document_path_results(
 ///
 /// The expansion is a fan-out of its own: it requeries the leaf across the
 /// same languages, so its failures and skips are coverage facts the caller has
-/// to publish. `capped` and `undescribed` are narrower and separate: rows left
+/// to publish, and the languages it narrowed bound the answer as the fan-out's
+/// own do. `capped` and `undescribed` are narrower and separate: rows left
 /// behind by a cap are cured by raising `--limit`, a file no server would
 /// describe is not, and only the cap makes the union with an index answer
 /// uncountable.
@@ -1022,6 +1115,7 @@ struct DocumentExpansion {
     undescribed: bool,
     failures: Vec<(Language, LspError)>,
     skipped: Vec<Language>,
+    narrowed: Vec<Language>,
 }
 
 fn rank_of(result: &SymbolResultOutput, query: &str, test_scope: &TestScope) -> i32 {
@@ -1101,35 +1195,33 @@ fn score_workspace_symbol(query: &str, symbol: &crate::models::symbol::Symbol) -
 }
 
 fn symbol_search_hints(
-    query: &str,
-    language: Option<&str>,
-    kind: Option<SymbolKind>,
+    search: &SymbolSearch<'_>,
     truncated: bool,
     result_count: usize,
-    limit: usize,
 ) -> Vec<String> {
     symbol_lookup_hints(
-        looks_like_symbol_path(query),
-        language.is_none(),
-        kind.is_none(),
+        looks_like_symbol_path(search.query),
+        search.language.is_none(),
+        search.kind.is_none(),
         truncated,
         result_count,
-        limit,
+        search.limit,
     )
 }
 
 fn symbol_search_next_commands(
     results: &[SymbolResultOutput],
-    query: &str,
-    language: Option<&str>,
+    search: &SymbolSearch<'_>,
 ) -> Vec<String> {
     if !needs_symbol_follow_up(results) {
         return Vec::new();
     }
 
+    let query = search.query;
     let mut commands = Vec::new();
     if let Some(first) = results.first() {
-        let lang_flag = language
+        let lang_flag = search
+            .language
             .map(|lang| format!(" --lang={}", shell_arg(lang)))
             .unwrap_or_default();
         let symbol_key = first.name_path.as_deref().unwrap_or(&first.name);
@@ -1144,8 +1236,9 @@ fn symbol_search_next_commands(
         ));
         if !looks_like_symbol_path(query) {
             commands.push(format!(
-                "symora search symbols{} --kind={} -- {}",
+                "symora search symbols{}{} --kind={} -- {}",
                 lang_flag,
+                path_flags(search.within),
                 shell_arg(&first.kind),
                 shell_arg(query)
             ));
@@ -1216,10 +1309,47 @@ mod tests {
         assert_eq!(unmerged_overlap(nothing, cut), None);
     }
 
+    /// A narrowed server answer bounds only the languages nothing else
+    /// answered: the index already holds every match inside the paths for the
+    /// languages it covers.
+    #[test]
+    fn a_narrowed_live_answer_bounds_only_the_languages_it_alone_answered() {
+        let narrowed = |languages: Vec<Language>, indexable| {
+            Some(LowerBound::LiveAnswerNarrowed {
+                languages,
+                indexable,
+            })
+        };
+        assert_eq!(narrowed_live_answer(&[], &[], true), None);
+        assert_eq!(
+            narrowed_live_answer(&[Language::Rust, Language::Go], &[Language::Rust], true),
+            narrowed(vec![Language::Go], true)
+        );
+        assert_eq!(
+            narrowed_live_answer(&[Language::Rust, Language::Rust], &[], false),
+            narrowed(vec![Language::Rust], false),
+            "an index that cannot be built now is no remedy"
+        );
+        assert_eq!(
+            narrowed_live_answer(&[Language::Rust], &[Language::Rust], true),
+            None
+        );
+    }
+
     #[test]
     fn symbol_hints_are_empty_for_exact_single_result() {
-        let hints = symbol_search_hints("SearchCommand/Content", None, None, false, 1, 10);
+        let hints = symbol_search_hints(&search("SearchCommand/Content", 10), false, 1);
         assert!(hints.is_empty());
+    }
+
+    fn search(query: &str, limit: usize) -> SymbolSearch<'_> {
+        SymbolSearch {
+            query,
+            language: None,
+            kind: None,
+            within: &[],
+            limit,
+        }
     }
 
     fn result(name: &str, file: &str) -> SymbolResultOutput {
@@ -1244,16 +1374,8 @@ mod tests {
             result("beta", "src/b.rs"),
             result("gamma", "src/c.rs"),
         ];
-        let section = finish_symbol_search(
-            candidates,
-            3,
-            "alpha",
-            None,
-            None,
-            2,
-            &TestScope::new(),
-            &[],
-        );
+        let section =
+            finish_symbol_search(candidates, 3, &search("alpha", 2), &TestScope::new(), &[]);
 
         assert_eq!(section.count, 3);
         assert_eq!(section.showing, 2);
@@ -1314,34 +1436,20 @@ mod tests {
         let partial = finish_symbol_search(
             vec![result("foo", "src/a.rs")],
             1,
-            "foo",
-            None,
-            None,
-            10,
+            &search("foo", 10),
             &TestScope::new(),
             &shortfall,
         );
         assert_eq!(partial.coverage_gaps, published);
 
-        let empty = finish_symbol_search(
-            vec![],
-            0,
-            "foo",
-            None,
-            None,
-            10,
-            &TestScope::new(),
-            &shortfall,
-        );
+        let empty =
+            finish_symbol_search(vec![], 0, &search("foo", 10), &TestScope::new(), &shortfall);
         assert_eq!(empty.coverage_gaps, published);
 
         let complete = finish_symbol_search(
             vec![result("foo", "src/a.rs")],
             1,
-            "foo",
-            None,
-            None,
-            10,
+            &search("foo", 10),
             &TestScope::new(),
             &[],
         );
@@ -1393,16 +1501,8 @@ mod tests {
     #[test]
     fn finish_symbol_search_complete_results_are_not_truncated() {
         let candidates = vec![result("alpha", "src/a.rs")];
-        let section = finish_symbol_search(
-            candidates,
-            1,
-            "alpha",
-            None,
-            None,
-            10,
-            &TestScope::new(),
-            &[],
-        );
+        let section =
+            finish_symbol_search(candidates, 1, &search("alpha", 10), &TestScope::new(), &[]);
 
         assert_eq!(section.count, 1);
         assert_eq!(section.showing, 1);
@@ -1445,6 +1545,7 @@ mod tests {
                 Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
                 &shortfall,
                 "common",
+                &[],
                 route,
                 &[],
                 &[],
@@ -1478,7 +1579,7 @@ mod tests {
         assert!(hints[0].contains("lua"));
         assert!(hints[0].contains("server_not_installed"));
         assert_eq!(
-            symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted),
+            symbol_coverage_next_commands("q", &[], &shortfall, DisclosureRoute::IndexConsulted),
             vec![
                 "symora search content --lang lua -- 'q'",
                 "symora doctor lua"
@@ -1501,7 +1602,7 @@ mod tests {
         assert!(shortfall.is_empty());
         assert!(symbol_coverage_hints(&shortfall, DisclosureRoute::IndexConsulted).is_empty());
         assert!(
-            symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted)
+            symbol_coverage_next_commands("q", &[], &shortfall, DisclosureRoute::IndexConsulted)
                 .is_empty()
         );
     }
@@ -1521,7 +1622,7 @@ mod tests {
         assert_eq!(shortfall.len(), 1);
         assert_eq!(shortfall[0].language, Language::Go);
         assert_eq!(
-            symbol_coverage_next_commands("q", &shortfall, DisclosureRoute::IndexConsulted),
+            symbol_coverage_next_commands("q", &[], &shortfall, DisclosureRoute::IndexConsulted),
             vec!["symora search content --lang go -- 'q'", "symora doctor go"]
         );
     }
@@ -1622,6 +1723,7 @@ mod tests {
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &shortfall,
             "Nonexistent/missing_xyz",
+            &[],
             DisclosureRoute::IndexConsulted,
             &[],
             &[],
@@ -1641,6 +1743,7 @@ mod tests {
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &shortfall,
             "Mod/handler",
+            &[],
             DisclosureRoute::IndexConsulted,
             &[],
             &[],
@@ -1667,6 +1770,7 @@ mod tests {
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
             "alpha",
+            &[],
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             &[],
             &[],
@@ -1694,6 +1798,7 @@ mod tests {
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
             "alpha",
+            &[],
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             &[],
             &[],
@@ -1718,6 +1823,7 @@ mod tests {
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
             "alpha",
+            &[],
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced),
             &[],
             &[],
@@ -1740,6 +1846,7 @@ mod tests {
             Section::with_total(vec![result("alpha", "src/a.rs")], 1),
             &gaps(&failures, &[]),
             "alpha",
+            &[],
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             &[],
             &[],

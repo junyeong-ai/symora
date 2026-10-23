@@ -554,12 +554,14 @@ impl DaemonClient {
         limit: Option<usize>,
         kind: Option<&str>,
         language: Option<&str>,
+        within: &[std::path::PathBuf],
     ) -> Result<serde_json::Value, LspError> {
         let params = serde_json::json!({
             "query": query,
             "limit": limit,
             "kind": kind,
             "language": language,
+            "within": within,
         });
         self.request_with_project(methods::SEARCH_SYMBOLS, params)
             .await

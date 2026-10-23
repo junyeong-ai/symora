@@ -118,8 +118,10 @@ pub const REBUILD_TEXT_INDEX: &str =
 /// `lang_count` is the number of language parameters bound after the query
 /// (?1), the limit (?2), and the optional kind — the search's domain,
 /// restricting rows to those languages. Zero means no language restriction
-/// (the whole table).
-pub fn build_symbol_search_query(with_kind: bool, lang_count: usize) -> String {
+/// (the whole table). `path_count` pairs follow them, each a file's path and
+/// that path as a directory prefix, restricting rows to files at or under one
+/// of them; zero means no path restriction.
+pub fn build_symbol_search_query(with_kind: bool, lang_count: usize, path_count: usize) -> String {
     let kind_filter = if with_kind { " AND s.kind = ?3" } else { "" };
     // Bind order is query(?1), limit(?2), the optional kind, then one slot
     // per covered language, so the first language slot is ?4 when a kind
@@ -130,6 +132,19 @@ pub fn build_symbol_search_query(with_kind: bool, lang_count: usize) -> String {
             .map(|i| format!("?{}", i + first_lang_slot))
             .collect();
         format!(" AND f.language IN ({})", slots.join(", "))
+    } else {
+        String::new()
+    };
+    let first_path_slot = first_lang_slot + lang_count;
+    let path_filter = if path_count > 0 {
+        let clauses: Vec<String> = (0..path_count)
+            .map(|i| {
+                let exact = first_path_slot + 2 * i;
+                let prefix = exact + 1;
+                format!("f.path = ?{exact} OR substr(f.path, 1, length(?{prefix})) = ?{prefix}")
+            })
+            .collect();
+        format!(" AND ({})", clauses.join(" OR "))
     } else {
         String::new()
     };
@@ -166,7 +181,7 @@ JOIN files f ON s.file_id = f.id
 WHERE (
     s.name LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE
     OR (s.name_path IS NOT NULL AND s.name_path LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE)
-){kind_filter}{lang_filter}
+){kind_filter}{lang_filter}{path_filter}
 ORDER BY score DESC, LENGTH(COALESCE(s.name_path, s.name)) ASC, f.path ASC, s.line ASC, s.col ASC
 LIMIT ?2"#
     )

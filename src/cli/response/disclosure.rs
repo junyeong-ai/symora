@@ -256,6 +256,16 @@ pub enum LowerBound {
     /// apart from a failed analysis because raising the cap reaches them,
     /// where a failure is what retrying is for.
     AnalysisCapped(usize),
+    /// A language server answered these languages for the whole workspace and
+    /// the answer was confined to the requested paths afterwards, so matches
+    /// inside them that a capped answer held back are not counted.
+    LiveAnswerNarrowed {
+        languages: Vec<Language>,
+        /// Whether a build can take the server's place: every language has a
+        /// symbol extractor and nothing stands in the way of building, so the
+        /// index answers the confined search exactly.
+        indexable: bool,
+    },
 }
 
 impl LowerBound {
@@ -294,6 +304,24 @@ impl LowerBound {
                  those past the cap answered none of the filters applied and are missing from \
                  the count; raise --max-symbols to reach them"
             ),
+            Self::LiveAnswerNarrowed {
+                languages,
+                indexable,
+            } => format!(
+                "The language server answered {} for the whole workspace and the answer was \
+                 confined to --path afterwards, so matches a capped answer held back are not \
+                 counted{}",
+                languages
+                    .iter()
+                    .map(|language| language.lsp_id())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if *indexable {
+                    "; a built index answers a confined search exactly"
+                } else {
+                    ""
+                }
+            ),
         }
     }
 
@@ -301,6 +329,9 @@ impl LowerBound {
         match self {
             Self::IndexBuiltOverUnreadPaths { repairable, .. } => {
                 repairable.then(|| "symora search index build --force".to_string())
+            }
+            Self::LiveAnswerNarrowed { indexable, .. } => {
+                indexable.then(|| "symora search index build".to_string())
             }
             Self::ScanCouldNotReadPaths(_)
             | Self::UnmergedOverlap
@@ -463,6 +494,7 @@ pub fn literal_query(query: &str) -> Option<String> {
 /// help one it does not.
 pub fn symbol_coverage_next_commands(
     query: &str,
+    within: &[PathBuf],
     shortfall: &[Uncovered],
     route: DisclosureRoute,
 ) -> Vec<String> {
@@ -470,9 +502,10 @@ pub fn symbol_coverage_next_commands(
         return Vec::new();
     };
     let lang = gap.language.lsp_id();
+    let paths = path_flags(within);
     if gap.reason == CoverageReason::NotSearched {
         return vec![format!(
-            "symora search symbols --lang {lang} -- {}",
+            "symora search symbols --lang {lang}{paths} -- {}",
             shell_arg(query)
         )];
     }
@@ -481,14 +514,17 @@ pub fn symbol_coverage_next_commands(
             UnconsultedIndex::NoExtractor => literal_query(query)
                 .map(|literal| {
                     format!(
-                        "symora search content --lang {lang} -- {}",
+                        "symora search content --lang {lang}{paths} -- {}",
                         shell_arg(&literal)
                     )
                 })
                 .into_iter()
                 .collect(),
             UnconsultedIndex::Skipped => {
-                vec![format!("symora search symbols -- {}", shell_arg(query))]
+                vec![format!(
+                    "symora search symbols{paths} -- {}",
+                    shell_arg(query)
+                )]
             }
             UnconsultedIndex::NotHeld => match route {
                 DisclosureRoute::WorkspaceOnly(
@@ -502,7 +538,7 @@ pub fn symbol_coverage_next_commands(
         DisclosureRoute::IndexConsulted => literal_query(query)
             .map(|literal| {
                 format!(
-                    "symora search content --lang {lang} -- {}",
+                    "symora search content --lang {lang}{paths} -- {}",
                     shell_arg(&literal)
                 )
             })
@@ -510,7 +546,7 @@ pub fn symbol_coverage_next_commands(
             .chain(std::iter::once(format!("symora doctor {lang}")))
             .collect(),
         DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced) => vec![
-            format!("symora search symbols -- {}", shell_arg(query)),
+            format!("symora search symbols{paths} -- {}", shell_arg(query)),
             format!("symora doctor {lang}"),
         ],
         // The index cannot be asked to help yet, so the only remedy left is
@@ -533,7 +569,7 @@ pub fn symbol_coverage_next_commands(
             } else {
                 vec![
                     format!(
-                        "symora search content --lang {lang} -- {}",
+                        "symora search content --lang {lang}{paths} -- {}",
                         shell_arg(query)
                     ),
                     format!("symora doctor {lang}"),
@@ -541,6 +577,15 @@ pub fn symbol_coverage_next_commands(
             }
         }
     }
+}
+
+/// `--path` flags that re-run a search over the paths it was confined to, each
+/// led by a space; empty for a search confined to nothing.
+pub fn path_flags(within: &[PathBuf]) -> String {
+    within
+        .iter()
+        .map(|path| format!(" --path={}", shell_arg(&path.display().to_string())))
+        .collect()
 }
 
 /// How much advice one answer carries. Two facts and two remedies is what an
@@ -605,6 +650,7 @@ pub fn with_coverage_disclosure<T>(
     section: Section<T>,
     shortfall: &[Uncovered],
     query: &str,
+    within: &[PathBuf],
     route: DisclosureRoute,
     lower_bounds: &[LowerBound],
     route_facts: &[(String, String)],
@@ -630,7 +676,7 @@ pub fn with_coverage_disclosure<T>(
         // The remedies answer the first gap, so they travel with it.
         advice.push((
             first,
-            symbol_coverage_next_commands(query, shortfall, route),
+            symbol_coverage_next_commands(query, within, shortfall, route),
         ));
         advice.extend(gaps.map(|hint| (hint, Vec::new())));
     }
@@ -971,14 +1017,14 @@ mod tests {
 
         let not_built = route(WorkspaceSearchRoute::IndexNotBuilt);
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &rust, not_built),
+            symbol_coverage_next_commands("alpha", &[], &rust, not_built),
             ["symora search index build"]
         );
         assert!(symbol_coverage_hints(&rust, not_built)[0].contains("the index does not hold it"));
 
         let forced = route(WorkspaceSearchRoute::Forced);
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &rust, forced),
+            symbol_coverage_next_commands("alpha", &[], &rust, forced),
             ["symora search symbols -- 'alpha'"]
         );
         assert!(
@@ -987,7 +1033,7 @@ mod tests {
         );
 
         let rebuilding = route(WorkspaceSearchRoute::IndexRebuilding);
-        assert!(symbol_coverage_next_commands("alpha", &rust, rebuilding).is_empty());
+        assert!(symbol_coverage_next_commands("alpha", &[], &rust, rebuilding).is_empty());
 
         let unextracted = Language::all()
             .into_iter()
@@ -995,7 +1041,7 @@ mod tests {
             .expect("a language the index does not extract");
         let other = gap(unextracted);
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &other, not_built),
+            symbol_coverage_next_commands("alpha", &[], &other, not_built),
             [format!(
                 "symora search content --lang {} -- 'alpha'",
                 unextracted.lsp_id()
@@ -1013,7 +1059,7 @@ mod tests {
         assert!(!SymbolExtractor::is_supported(Language::Css));
         assert!(!SymbolExtractor::is_supported(Language::Html));
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &mixed, not_built),
+            symbol_coverage_next_commands("alpha", &[], &mixed, not_built),
             ["symora search index build"],
             "the build that cures the project's own language leads"
         );
@@ -1077,7 +1123,7 @@ mod tests {
             "{hints:?}"
         );
         assert!(
-            symbol_coverage_next_commands("q", &shortfall, route)
+            symbol_coverage_next_commands("q", &[], &shortfall, route)
                 .contains(&"symora doctor javascript".to_string())
         );
     }
@@ -1095,6 +1141,7 @@ mod tests {
         let commands = |error: &StoreError| {
             symbol_coverage_next_commands(
                 "alpha",
+                &[],
                 &shortfall,
                 DisclosureRoute::WorkspaceOnly(
                     workspace_route_for(error).expect("a store state has a route"),
@@ -1119,7 +1166,12 @@ mod tests {
             );
             assert_ne!(
                 commands(&out_of_reach),
-                symbol_coverage_next_commands("alpha", &shortfall, DisclosureRoute::IndexConsulted),
+                symbol_coverage_next_commands(
+                    "alpha",
+                    &[],
+                    &shortfall,
+                    DisclosureRoute::IndexConsulted
+                ),
                 "{out_of_reach} left the index out of the answer, so it may not be steered \
                  as though the index had narrowed one"
             );
@@ -1320,6 +1372,7 @@ mod tests {
             Section::with_total(Vec::<()>::new(), 0),
             &[],
             "zzz*",
+            &[],
             DisclosureRoute::IndexConsulted,
             &bounds,
             &wildcard,
@@ -1338,6 +1391,7 @@ mod tests {
             Section::with_total(Vec::<()>::new(), 0),
             &[],
             "zzz*",
+            &[],
             DisclosureRoute::IndexConsulted,
             &bounds[..1],
             &wildcard,

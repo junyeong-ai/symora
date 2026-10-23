@@ -63,6 +63,17 @@ const CASES: &[ParityCase] = &[
         cli: &["search", "content", ""],
     },
     ParityCase {
+        tool: "search_symbols",
+        arguments: r#"{"query":"x","path":["symora_missing_parity_path"]}"#,
+        cli: &[
+            "search",
+            "symbols",
+            "x",
+            "--path",
+            "symora_missing_parity_path",
+        ],
+    },
+    ParityCase {
         tool: "get_diagnostics",
         arguments: r#"{"file":"src/main.rs","severity":"bogus"}"#,
         cli: &["diagnostics", "src/main.rs", "--severity", "bogus"],
