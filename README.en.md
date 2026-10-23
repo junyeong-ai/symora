@@ -118,6 +118,11 @@ symora map summary
 ```json
 {
   "root": "/home/dev/shopflow",
+  "next_commands": [
+    "symora map file --related-limit 5 -- 'src/main.ts'",
+    "symora pack --tokens 4000 --focus='src'",
+    "symora symbols --depth 1 -- 'src/main.ts'"
+  ],
   "total_files": 84,
   "code_files": 67,
   "support_files": 17,
@@ -141,12 +146,7 @@ symora map summary
       { "file": "src/main.ts", "reason": "main entry file" },
       { "file": "src/app.ts", "reason": "application bootstrap candidate" }
     ]
-  },
-  "next_commands": [
-    "symora map file --related-limit 5 -- 'src/main.ts'",
-    "symora pack --tokens 4000 --focus='src'",
-    "symora symbols --depth 1 -- 'src/main.ts'"
-  ]
+  }
 }
 ```
 > 49 of the 67 TypeScript code files live under `src`. `entrypoints` suggests starting points from file names and paths; confirm execution paths in source and configuration. `languages` counts code languages only; data files such as JSON are `support_files`. `symora pack --tokens 4000` gives a deeper brief ranked by PageRank over syntax-derived import paths when you want one.
@@ -248,11 +248,6 @@ symora impact src/services/checkout.ts:48 --depth 2
   "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48 },
   "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
   "coverage": { "count": 3, "files": ["tests/checkout.test.ts"] },
-  "files": [
-    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 },
-    { "file": "src/jobs/orderWorker.ts", "is_test": false, "refs": 1 },
-    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 }
-  ],
   "blast_radius": {
     "direct_callers": 4,
     "transitive_callers": 7,
@@ -264,7 +259,12 @@ symora impact src/services/checkout.ts:48 --depth 2
     ],
     "test_caller_ratio": 0.43
   },
-  "next_commands": ["symora impact --depth 3 -- 'src/services/checkout.ts:48:9'"]
+  "next_commands": ["symora impact --depth 3 -- 'src/services/checkout.ts:48:9'"],
+  "files": [
+    { "file": "tests/checkout.test.ts",  "is_test": true,  "refs": 3 },
+    { "file": "src/jobs/orderWorker.ts", "is_test": false, "refs": 1 },
+    { "file": "src/routes/checkout.ts",  "is_test": false, "refs": 1 }
+  ]
 }
 ```
 > `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
@@ -363,7 +363,7 @@ Global flags work before or after the subcommand: `symora --format pretty search
 
 Every command is built for machine parsing, and the rules are stable:
 
-- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — `truncated`, `stale`, `incomplete`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, and `error`.
+- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — `truncated`, `stale`, `incomplete`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, and `error`. Fields that qualify a list come before the lists they qualify, so a reader that keeps only the head of a response still has them.
 - **Command failures** are structured JSON and exit non-zero:
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
@@ -373,17 +373,15 @@ Every command is built for machine parsing, and the rules are stable:
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
 - **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. List reductions retain totals and disclose `truncated` and a size-limit hint. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 
----
-
 `pack --tokens` uses a character-based approximation. It does not bound model-specific token counts or the entire JSON envelope.
 
 Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; module strings requiring unsupported decoding are omitted. Rust relative module paths are omitted without crate/module ownership, with a hint when encountered. An unmatched `--focus` is refused.
 
 `lsp.timeout_secs` is the shared LSP work budget for one command. Startup, requests, and retries consume it together, and daemon RPCs carry the remaining allowance. It does not interrupt source application midway.
 
-
-
 Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed throughout the query. Log text, ended progress tasks, and elapsed time do not prove completion. A zero in this state does not prove absence. Rename refuses application under `unconfirmed` and `timed_out`, and `--dry-run` previews the current edit set. `--accept-unconfirmed` applies a reviewed `unconfirmed` set and keeps the marker in the response; `timed_out` stays refused, since a retry may still confirm readiness. Symora currently recognizes rust-analyzer's healthy quiescent status. Servers without a supported readiness signal, including default Pyright, remain unconfirmed even when their previews look complete.
+
+---
 
 ## Search index
 
@@ -410,8 +408,8 @@ Precedence: `.symora/config.toml` → `~/.config/symora/config.toml` (honors `XD
 `idle_timeout_mins` sets how long a project and each language server remain alive after their last request finishes. The daemon itself exits once it has gone that long with no project and no request, and the next command starts it again.
 
 ```bash
-symora config init            # write a local config
-symora config init --global   # write the user config
+symora config init            # project config listing every default, commented out
+symora config init --global   # the same for the user config
 ```
 
 Common settings: LSP timeouts and limits, daemon behavior, test-file patterns, and per-language server overrides:
@@ -532,7 +530,7 @@ For a known file or declaration, go directly to `symbols`, `context`, `refs`, or
 ## Platform notes
 
 - **Linux** and **macOS**: supported.
-- **Windows**: the daemon workflow and the SQLite index are unsupported — the daemon speaks over a Unix domain socket, and the index relies on Unix file locks (`flock`) to keep two processes from rewriting it at once. `search index build` says so rather than building without that guarantee; search keeps working through the language server and a tree scan.
+- **Windows**: no prebuilt binary and no CI coverage. The daemon speaks over a Unix domain socket, so every command runs in-process.
 
 On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` return once the daemon actually answers, so a success response means it is serving. Concurrent commands meeting a cold start bring up exactly one daemon. Each installation (executable path) runs its own daemon, so versions pinned per repository do not replace each other's daemon.
 
