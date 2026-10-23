@@ -100,7 +100,9 @@ async fn async_main() -> anyhow::Result<()> {
     let mut cli = parse_cli()?;
 
     let output_options = OutputOptions {
-        format: cli.format,
+        format: cli
+            .format
+            .unwrap_or_else(symora::cli::OutputFormat::for_stdout),
         quiet: cli.quiet,
     };
 
