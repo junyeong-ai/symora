@@ -3664,13 +3664,35 @@ exec cat > /dev/null
 
 #[test]
 #[cfg(unix)]
-fn positive_index_results_disclose_new_files_until_rebuilt() {
+fn positive_index_results_disclose_new_files_of_their_language_until_rebuilt() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path();
     std::fs::write(root.join("first.py"), "def snapshot_marker():\n    pass\n").unwrap();
+    std::fs::write(root.join("lib.rs"), "fn snapshot_marker() {}\n").unwrap();
     json_ok(root, &["search", "index", "build"]);
     std::fs::write(root.join("second.py"), "def snapshot_marker():\n    pass\n").unwrap();
     for mode in ["symbols", "content"] {
+        let untouched = json_ok(
+            root,
+            &[
+                "--deterministic",
+                "search",
+                mode,
+                "snapshot_marker",
+                "--lang",
+                "rust",
+            ],
+        );
+        assert_eq!(untouched["count"], 1, "{untouched}");
+        assert!(
+            !untouched["hints"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|hint| hint.as_str().unwrap().contains("indexed snapshot")),
+            "{untouched}"
+        );
+
         let result = json_ok(
             root,
             &[

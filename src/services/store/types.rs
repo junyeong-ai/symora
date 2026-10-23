@@ -4,6 +4,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::symbol::{Language, SymbolKind};
 
+/// How the tree compares with the last completed build, language by
+/// language: the files a build would discover now against the ones it read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "languages")]
+pub enum TreeCurrency {
+    /// Every language's files match the build.
+    Current,
+    /// These languages' files were added, removed, resized, or modified since.
+    Behind(Vec<Language>),
+    /// The comparison cannot be made: no build has completed, one is running,
+    /// or the completed one recorded no fingerprint this binary reads.
+    Unknown,
+}
+
 /// A path a build could not read, and whether the walk knew it to be a file.
 ///
 /// The distinction is load-bearing, and only the walk can make it: a file's

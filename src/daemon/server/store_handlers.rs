@@ -151,11 +151,11 @@ pub(super) async fn handle_index_status(
     serde_json::to_value(stats).map_err(RpcError::from)
 }
 
-pub(super) async fn handle_index_is_current(
+pub(super) async fn handle_tree_currency(
     ctx: &ProjectContext,
 ) -> Result<serde_json::Value, RpcError> {
-    let current = ctx.store.index_is_current().await.map_err(RpcError::from)?;
-    serde_json::to_value(current).map_err(RpcError::from)
+    let currency = ctx.store.tree_currency().await.map_err(RpcError::from)?;
+    serde_json::to_value(currency).map_err(RpcError::from)
 }
 
 pub(super) async fn handle_indexed_languages(

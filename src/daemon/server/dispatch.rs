@@ -225,7 +225,7 @@ async fn dispatch_project(
         methods::SEARCH_CONTENT => store_handlers::handle_search_content(params, &ctx).await,
         methods::INDEX_BUILD => store_handlers::handle_index_build(params, &ctx).await,
         methods::INDEX_STATUS => store_handlers::handle_index_status(&ctx).await,
-        methods::INDEX_IS_CURRENT => store_handlers::handle_index_is_current(&ctx).await,
+        methods::TREE_CURRENCY => store_handlers::handle_tree_currency(&ctx).await,
         methods::INDEXED_LANGUAGES => store_handlers::handle_indexed_languages(&ctx).await,
         methods::INDEX_CLEAR => store_handlers::handle_index_clear(&ctx).await,
 
@@ -355,7 +355,7 @@ mod tests {
             methods::SEARCH_CONTENT,
             methods::INDEX_BUILD,
             methods::INDEX_STATUS,
-            methods::INDEX_IS_CURRENT,
+            methods::TREE_CURRENCY,
             methods::INDEXED_LANGUAGES,
             methods::INDEX_CLEAR,
         ] {

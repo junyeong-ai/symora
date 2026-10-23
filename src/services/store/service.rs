@@ -18,6 +18,7 @@ use crate::models::symbol::{Language, SymbolKind};
 use super::index::Store;
 use super::types::{
     ContentSearchResult, IndexOptions, IndexStats, SearchPage, StoreConfig, SymbolSearchResult,
+    TreeCurrency,
 };
 
 #[async_trait]
@@ -53,14 +54,15 @@ pub trait StoreService: Send + Sync {
     /// result from an uncovered one is a lower bound no matter its size.
     async fn indexed_languages(&self) -> Result<Vec<Language>, StoreError>;
 
-    /// Whether the tree still looks the way the last completed build read it.
+    /// Which languages' files moved since the last completed build read them.
     ///
-    /// Stat-only over the build's own scope — no file is opened — and false
-    /// wherever the question cannot be settled. It is what separates an
-    /// index-backed zero that means "nothing declares this" from one that
-    /// means "nothing declared it at build time", so it is asked only where a
-    /// zero would otherwise have to be published unqualified.
-    async fn index_is_current(&self) -> Result<bool, StoreError>;
+    /// Stat-only over the build's own scope — no file is opened — and
+    /// [`TreeCurrency::Unknown`] wherever the question cannot be settled. It
+    /// is what separates an index-backed zero that means "nothing declares
+    /// this" from one that means "nothing declared it at build time", so it is
+    /// asked only where a zero would otherwise have to be published
+    /// unqualified.
+    async fn tree_currency(&self) -> Result<TreeCurrency, StoreError>;
 
     async fn index_clear(&self) -> Result<(), StoreError>;
 
@@ -171,8 +173,8 @@ impl StoreService for DefaultStoreService {
         self.store().await?.indexed_languages().await
     }
 
-    async fn index_is_current(&self) -> Result<bool, StoreError> {
-        self.store().await?.tree_is_current().await
+    async fn tree_currency(&self) -> Result<TreeCurrency, StoreError> {
+        self.store().await?.tree_currency().await
     }
 
     async fn index_status(&self) -> Result<IndexStats, StoreError> {
