@@ -77,4 +77,4 @@ Failures emit `{ "error": { "code", "message", "hint" } }` on stdout and exit no
 - On `unsupported`, choose an index/AST/source alternative. On `conflict`, wait as directed and re-read. On `cancelled` with a content-change hint, resolve the target again. Repair `precondition_failed` and `config_errors` before depending on the result.
 - `lsp.timeout_secs` is the shared LSP work budget: startup, requests, and retries consume it together. Narrow expensive queries or explicitly configure a suitable budget; repeated calls do not resolve a missing capability.
 
-Use `--format compact` for one-line JSON. `--check-version '<requirement>'` enforces a binary contract. `setup skill` installs the playbook bundled with that binary; `--git-ref` explicitly selects another source.
+Output is one-line JSON when stdout is not a terminal; `--format pretty` indents it. `--check-version '<requirement>'` enforces a binary contract. `setup skill` installs the playbook bundled with that binary; `--git-ref` explicitly selects another source.

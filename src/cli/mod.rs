@@ -68,9 +68,9 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output format: pretty (default) or compact (single-line JSON).
-    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Pretty)]
-    pub format: OutputFormat,
+    /// Output format [default: pretty on a terminal, compact otherwise]
+    #[arg(long, value_enum, global = true)]
+    pub format: Option<OutputFormat>,
 
     /// Refuse to run unless this binary's version satisfies the SemVer
     /// requirement (e.g. `0.21`, `>=0.21,<0.22`). A pinned caller sets it so a

@@ -9,11 +9,25 @@ use super::errors::OutputError;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum OutputFormat {
-    /// Pretty-printed JSON (default; human-readable).
+    /// Indented JSON.
     #[default]
     Pretty,
-    /// Minified single-line JSON (token-efficient for AI agents).
+    /// Single-line JSON.
     Compact,
+}
+
+impl OutputFormat {
+    /// The format when none is requested: indented for a person at a
+    /// terminal, one line for a program reading the output through a pipe.
+    pub fn for_stdout() -> Self {
+        use std::io::IsTerminal;
+
+        if std::io::stdout().is_terminal() {
+            Self::Pretty
+        } else {
+            Self::Compact
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
