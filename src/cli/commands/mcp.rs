@@ -17,13 +17,15 @@ pub struct McpArgs {
 pub enum McpCommand {
     /// Start an MCP server speaking JSON-RPC 2.0 over the chosen transport.
     Serve {
-        /// Transport for the MCP channel. Stdio is the default — most
-        /// agents (Claude Code, Cursor, Codex) expect it. HTTP is for
-        /// remote agents and shared hosting.
+        /// Transport for the MCP channel. Stdio is what agent hosts launch.
+        /// HTTP serves clients on this machine that connect to a running
+        /// server; reach it from elsewhere only through an authenticated
+        /// proxy.
         #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
         transport: McpTransport,
 
-        /// Bind address for `--transport http`. Default is loopback only.
+        /// Loopback address to bind for `--transport http`; any other
+        /// address is refused.
         #[arg(long, default_value = "127.0.0.1")]
         host: IpAddr,
 
@@ -53,7 +55,7 @@ pub enum McpCommand {
 pub enum McpTransport {
     /// Line-delimited JSON-RPC over stdin/stdout.
     Stdio,
-    /// JSON-RPC 2.0 over HTTP POST `/`.
+    /// MCP streamable HTTP on `/`, bound to loopback.
     Http,
 }
 
