@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -15,7 +14,6 @@ pub trait ConfigService: Send + Sync {
     async fn load(&self, global_only: bool) -> Result<SymoraConfig, ConfigError>;
     fn config_path(&self, global: bool) -> PathBuf;
     async fn init(&self, global: bool, force: bool) -> Result<PathBuf, ConfigError>;
-    async fn edit(&self, global: bool) -> Result<PathBuf, ConfigError>;
 }
 
 const GLOBAL_ONLY_SECTION: &str = "daemon";
@@ -94,18 +92,6 @@ impl DefaultConfigService {
         tokio::fs::write(path, default_config_template(scope)?).await?;
         Ok(())
     }
-
-    fn get_editor() -> String {
-        std::env::var("EDITOR").unwrap_or_else(|_| {
-            if cfg!(target_os = "macos") {
-                "open".to_string()
-            } else if cfg!(target_os = "windows") {
-                "notepad".to_string()
-            } else {
-                "vi".to_string()
-            }
-        })
-    }
 }
 
 fn load_raw_sync(path: &Path, scope: ConfigScope) -> Result<RawParse, ConfigError> {
@@ -183,37 +169,6 @@ impl ConfigService for DefaultConfigService {
             ConfigScope::Project
         };
         Self::write_default_config(&path, scope).await?;
-        Ok(path)
-    }
-
-    async fn edit(&self, global: bool) -> Result<PathBuf, ConfigError> {
-        let path = self.config_path(global);
-
-        if !path.exists() {
-            return Err(ConfigError::NotFound(format!(
-                "Config file does not exist: {}\nRun: symora config init{}",
-                path.display(),
-                if global { " --global" } else { "" }
-            )));
-        }
-
-        let editor = Self::get_editor();
-        let status = Command::new(&editor)
-            .arg(&path)
-            .stdout(Stdio::from(std::io::stderr()))
-            .status()
-            .map_err(|e| ConfigError::InvalidValue {
-                key: "editor".to_string(),
-                message: format!("Failed to launch editor '{}': {}", editor, e),
-            })?;
-
-        if !status.success() {
-            return Err(ConfigError::InvalidValue {
-                key: "editor".to_string(),
-                message: "Editor exited with error".to_string(),
-            });
-        }
-
         Ok(path)
     }
 }

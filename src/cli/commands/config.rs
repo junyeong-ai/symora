@@ -37,13 +37,6 @@ pub enum ConfigCommand {
         #[arg(long)]
         global: bool,
     },
-
-    /// Edit configuration with default editor
-    Edit {
-        /// Edit global config
-        #[arg(long)]
-        global: bool,
-    },
 }
 
 #[derive(Serialize)]
@@ -70,12 +63,6 @@ struct ConfigPathOutput {
     level: &'static str,
     path: String,
     exists: bool,
-}
-
-#[derive(Serialize)]
-struct ConfigEditOutput {
-    status: String,
-    path: String,
 }
 
 fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
@@ -160,21 +147,6 @@ pub async fn execute(args: ConfigArgs, app: &App) -> Result<()> {
             };
             ctx.print_success(response);
         }
-
-        ConfigCommand::Edit { global } => match app.config_service.edit(global).await {
-            Ok(path) => {
-                let response = ConfigEditOutput {
-                    status: "opened".to_string(),
-                    path: if global {
-                        path.display().to_string()
-                    } else {
-                        ctx.relative_path(&path)
-                    },
-                };
-                ctx.print_success(response);
-            }
-            Err(e) => ctx.print_error(e),
-        },
     }
 
     Ok(())
