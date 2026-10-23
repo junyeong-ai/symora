@@ -17,15 +17,6 @@ categories = ["command-line-utilities", "development-tools"]
 name = "symora"
 path = "src/main.rs"
 
-[features]
-default = []
-# Optional local embeddings backend (ONNX via fastembed-rs) — adds the
-# natural-language `search semantic` command. Off by default: the dependency
-# tree is large (ort + tokenizers) and the default SQLite symbol/substring
-# search covers most navigation without it.
-# Enable with: `cargo install symora --features embeddings`.
-embeddings = ["dep:fastembed"]
-
 [dependencies]
 # Async runtime — tracked on the latest tokio 1.x. Minor bumps are
 # semver-compatible and gated by the test suite; 2.0 is a deliberate migration.
@@ -102,9 +93,6 @@ axum = { version = "0.8.9", default-features = false, features = ["json", "tokio
 # (services/store/db.rs: one owner thread + channel), so the driver is a
 # direct dependency and tracks upstream on our schedule.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-
-# Optional local embeddings (gated behind the `embeddings` feature).
-fastembed = { version = "7.1.1", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"], optional = true }
 
 # Unix file locking (for daemon)
 [target.'cfg(unix)'.dependencies]

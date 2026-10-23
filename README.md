@@ -553,8 +553,6 @@ symora daemon start | stop | restart | status
 
 어떤 명령이든 `symora <command> --help`로 플래그를 볼 수 있습니다. 출력 필드는 [출력 계약](#출력-계약)과 `symora mcp tools`의 출력 스키마에 있습니다.
 
-> `search semantic`(자연어 검색)은 선택적 `embeddings` 피처로 빌드한 경우에만 동작합니다. 사전 빌드 바이너리를 포함한 기본 빌드에서는 `unsupported`를 반환하므로, 쓰려면 `cargo install --path . --features embeddings`로 빌드하세요.
-
 ---
 
 ## 문제 해결
