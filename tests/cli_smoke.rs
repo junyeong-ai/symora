@@ -878,6 +878,29 @@ fn search_symbols_answers_only_inside_the_named_paths() {
     );
 
     assert_eq!(search(&["."])["count"], 3);
+
+    std::fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+    for skipped in [".hidden", "generated"] {
+        std::fs::create_dir(root.join(skipped)).unwrap();
+        std::fs::write(
+            root.join(skipped).join("mod.py"),
+            "def shared_marker():\n    pass\n",
+        )
+        .unwrap();
+        let out = run_in(
+            root,
+            &["search", "symbols", "shared_marker", "--path", skipped],
+        );
+        let refusal = common::parse_response(&out.stdout).unwrap();
+        assert_eq!(refusal["error"]["code"], "unsupported", "{refusal}");
+        assert!(
+            refusal["error"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("search content"),
+            "{refusal}"
+        );
+    }
 }
 
 /// The build's shortfall names the paths it is about, so the reader can act on
@@ -3735,6 +3758,26 @@ fn positive_index_results_disclose_new_files_of_their_language_until_rebuilt() {
     std::fs::write(root.join("lib.rs"), "fn snapshot_marker() {}\n").unwrap();
     json_ok(root, &["search", "index", "build"]);
     std::fs::write(root.join("second.py"), "def snapshot_marker():\n    pass\n").unwrap();
+    let confined = json_ok(
+        root,
+        &[
+            "--deterministic",
+            "search",
+            "symbols",
+            "snapshot_marker",
+            "--path",
+            "lib.rs",
+        ],
+    );
+    assert_eq!(confined["count"], 1, "{confined}");
+    assert!(
+        !confined["hints"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|hint| hint.as_str().unwrap().contains("indexed snapshot")),
+        "a path holding only Rust is not behind for Python: {confined}"
+    );
     for mode in ["symbols", "content"] {
         let untouched = json_ok(
             root,

@@ -262,6 +262,23 @@ fn tree_fingerprints(
         .collect()
 }
 
+/// The unread paths that could hold rows inside `confined`: one at or under a
+/// confined path, or one a confined path lies under. Every one of them when
+/// nothing is confined.
+fn unread_within(unread: &[UnreadPath], confined: &[PathBuf]) -> Vec<UnreadPath> {
+    unread
+        .iter()
+        .filter(|hole| {
+            let hole = Path::new(&hole.path);
+            confined.is_empty()
+                || confined
+                    .iter()
+                    .any(|path| hole.starts_with(path) || path.starts_with(hole))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The languages whose fingerprint differs between two readings of the tree,
 /// a language present in only one of them included.
 fn languages_behind(
@@ -540,10 +557,14 @@ impl Store {
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
         let requested = language;
-        let within: Vec<String> = within
+        let confined: Vec<PathBuf> = within
+            .iter()
+            .map(|path| self.project_root.join(path))
+            .collect();
+        let within: Vec<String> = confined
             .iter()
             .flat_map(|path| {
-                let file = self.project_root.join(path).display().to_string();
+                let file = path.display().to_string();
                 let directory = format!("{file}{}", std::path::MAIN_SEPARATOR);
                 [file, directory]
             })
@@ -565,6 +586,7 @@ impl Store {
                         .collect(),
                     None => build.scope.languages(),
                 };
+                let unread_paths = unread_within(&build.unread_paths, &confined);
                 if covered.is_empty() {
                     return Ok(Some((
                         SearchPage {
@@ -572,7 +594,7 @@ impl Store {
                             rows: Vec::new(),
                             stale_files: Vec::new(),
                             covered,
-                            unread_paths: build.unread_paths.clone(),
+                            unread_paths,
                         },
                         Vec::new(),
                     )));
@@ -633,7 +655,7 @@ impl Store {
                     rows,
                     stale_files: Vec::new(),
                     covered,
-                    unread_paths: build.unread_paths.clone(),
+                    unread_paths,
                 };
                 Ok(Some((page, snapshot)))
             })
@@ -2942,6 +2964,31 @@ mod tests {
             .unwrap();
         assert_eq!(py.rows.len(), 1);
         assert!(py.rows[0].file.ends_with("mod.py"));
+    }
+
+    /// A hole bounds a confined answer only where it could hold rows inside
+    /// the paths: under one of them, or above one.
+    #[test]
+    fn only_unread_paths_overlapping_the_confinement_bound_it() {
+        let hole = |path: &str| UnreadPath {
+            path: path.to_string(),
+            is_file: false,
+        };
+        let holes = [hole("/r/locked"), hole("/r/src/a/deep"), hole("/r")];
+        let kept = |confined: &[&str]| -> Vec<String> {
+            let confined: Vec<PathBuf> = confined.iter().map(PathBuf::from).collect();
+            unread_within(&holes, &confined)
+                .into_iter()
+                .map(|hole| hole.path)
+                .collect()
+        };
+        assert_eq!(kept(&["/r/src/a"]), ["/r/src/a/deep", "/r"]);
+        assert_eq!(
+            kept(&["/r/src/ab"]),
+            ["/r"],
+            "a sibling sharing a prefix is apart"
+        );
+        assert_eq!(kept(&[]), ["/r/locked", "/r/src/a/deep", "/r"]);
     }
 
     #[tokio::test]
