@@ -1,7 +1,7 @@
 //! Single source of truth for the user-level paths the lifecycle commands
 //! touch. Mirrors the conventions used elsewhere in the crate:
 //!
-//! - `config_dir` follows `services::config::DefaultConfigService::global_config_path`
+//! - `config_dir` is where the config service reads the global configuration
 //!   (XDG_CONFIG_HOME with `~/.config` fallback).
 //! - `daemon_dir` matches `daemon::server::config::DaemonRuntimeConfig::load`
 //!   (`$HOME/.symora`, falling back to `/tmp/.symora` when HOME is unset).
@@ -35,8 +35,7 @@ pub fn skill_dir() -> Result<PathBuf> {
     Ok(home()?.join(".claude").join("skills").join(SKILL_NAME))
 }
 
-/// `${XDG_CONFIG_HOME:-$HOME/.config}/symora` — same lookup as
-/// `services::config::DefaultConfigService::global_config_path`.
+/// `${XDG_CONFIG_HOME:-$HOME/.config}/symora`.
 pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
