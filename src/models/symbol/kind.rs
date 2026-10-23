@@ -3,10 +3,10 @@ use std::str::FromStr;
 
 /// Defines [`SymbolKind`] together with every projection that must agree on
 /// the wire spelling of a variant: serde, [`Display`], [`FromStr`], the
-/// `ALL` slice, and the canonical-name lookup. Listing a variant once here
+/// `ALL` slice, and [`SymbolKind::as_str`]. Listing a variant once here
 /// makes the four projections impossible to drift apart — adding a variant
-/// is a single edit the compiler then forces to completion (the
-/// `canonical_name` match is exhaustive).
+/// is a single edit the compiler then forces to completion (the `as_str`
+/// match is exhaustive).
 macro_rules! symbol_kinds {
     (
         kinds { $( $variant:ident => $name:literal ),+ $(,)? }
@@ -26,14 +26,14 @@ macro_rules! symbol_kinds {
 
             /// The single wire spelling of this kind, shared by serde,
             /// `Display`, and `FromStr`.
-            const fn canonical_name(self) -> &'static str {
+            pub const fn as_str(self) -> &'static str {
                 match self { $( SymbolKind::$variant => $name ),+ }
             }
         }
 
         impl fmt::Display for SymbolKind {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.canonical_name())
+                f.write_str(self.as_str())
             }
         }
 
@@ -153,7 +153,7 @@ impl SymbolKind {
     /// These are the documented spellings; [`FromStr`] additionally accepts
     /// the aliases declared alongside them.
     pub fn all_kind_names() -> Vec<&'static str> {
-        Self::ALL.iter().map(|k| k.canonical_name()).collect()
+        Self::ALL.iter().map(|k| k.as_str()).collect()
     }
 }
 

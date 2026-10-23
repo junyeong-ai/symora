@@ -16,9 +16,7 @@ use crate::cli::response::disclosure::{
     LiveLookup, LowerBound, coverage_shortfall, with_lower_bounds,
 };
 use crate::cli::response::{CoverageGap, Section};
-use crate::cli::symbol_discovery::{
-    RankedSymbol, no_languages_error, resolve_search_languages, symbol_rank,
-};
+use crate::cli::symbol_discovery::{no_languages_error, resolve_search_languages, sort_by_rank};
 use crate::cli::utils::{AnchorResolution, read_line_at, shell_arg};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
@@ -222,30 +220,6 @@ fn dedupe_usage_symbols(symbols: Vec<Symbol>) -> Vec<Symbol> {
     deduped
 }
 
-fn rank_usage_symbols(symbols: &mut [Symbol], query: &str, test_scope: &TestScope) {
-    symbols.sort_by(|a, b| {
-        usage_symbol_priority(b, query, test_scope)
-            .cmp(&usage_symbol_priority(a, query, test_scope))
-            .then_with(|| a.name.len().cmp(&b.name.len()))
-            .then_with(|| a.location.file.cmp(&b.location.file))
-            .then_with(|| a.location.line.cmp(&b.location.line))
-            .then_with(|| a.location.column.cmp(&b.location.column))
-    });
-}
-
-fn usage_symbol_priority(symbol: &Symbol, query: &str, test_scope: &TestScope) -> i32 {
-    symbol_rank(
-        query,
-        RankedSymbol {
-            name: &symbol.name,
-            name_path: symbol.name_path.as_deref(),
-            kind: &symbol.kind.to_string(),
-            file: &symbol.location.file,
-        },
-        test_scope,
-    )
-}
-
 /// Hints about how the query was ASKED. What the analysis could not reach is a
 /// lower bound rather than advice, and `LowerBound::AnalysisCapped` states it
 /// once — including on the empty answer, which needs it most.
@@ -397,7 +371,7 @@ pub async fn execute(args: UsageArgs, app: &App) -> Result<()> {
     // Coverage gaps — disclosed on every result, empty or not, so partial
     // coverage is always visible rather than hidden behind a count.
     let gaps = coverage_gaps(&failures, &skipped);
-    rank_usage_symbols(&mut symbols, &resolved.query, app.test_scope());
+    sort_by_rank(&mut symbols, &resolved.query, app.test_scope());
 
     if symbols.is_empty() {
         // No server could answer at all: that failure is the result, not an

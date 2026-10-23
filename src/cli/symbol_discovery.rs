@@ -5,13 +5,14 @@
 //! [`crate::cli::response::disclosure`] instead — this module decides what to
 //! look for and in what order, that one decides how to admit what was missed.
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::cli::errors::ErrorCode;
 use crate::cli::response::disclosure::{LowerBound, as_paths, name_some, relative_paths};
 use crate::cli::{OutputContext, OutputError};
-use crate::models::symbol::Language;
+use crate::models::symbol::{Language, Symbol};
 use crate::services::test_scope::TestScope;
 
 /// Candidate window for ranking before emission. Exhausting this window
@@ -25,11 +26,32 @@ pub fn candidate_budget(limit: usize) -> usize {
 }
 
 /// What ranking reads from a match, over the row types the surfaces carry.
+#[derive(Clone, Copy)]
 pub struct RankedSymbol<'a> {
     pub name: &'a str,
     pub name_path: Option<&'a str>,
     pub kind: &'a str,
     pub file: &'a Path,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// A row a symbol surface ranks.
+pub trait Rankable {
+    fn ranked(&self) -> RankedSymbol<'_>;
+}
+
+impl Rankable for Symbol {
+    fn ranked(&self) -> RankedSymbol<'_> {
+        RankedSymbol {
+            name: &self.name,
+            name_path: self.name_path.as_deref(),
+            kind: self.kind.as_str(),
+            file: &self.location.file,
+            line: self.location.line,
+            column: self.location.column,
+        }
+    }
 }
 
 /// A kind that names a value rather than a declaration to navigate to.
@@ -68,6 +90,23 @@ pub fn symbol_rank(query: &str, symbol: RankedSymbol<'_>, test_scope: &TestScope
     let test = i32::from(test_scope.is_test_file(symbol.file));
     let value = i32::from(low_signal_kind(symbol.kind));
     priority - (test * 2 + value)
+}
+
+/// Orders matches best first: by [`symbol_rank`], then the shorter name, then
+/// position. Every symbol surface sorts through this, so a candidate cut taken
+/// over the rows the final ranking reads keeps exactly the matches that
+/// ranking would lead with.
+pub fn sort_by_rank<T: Rankable>(rows: &mut [T], query: &str, test_scope: &TestScope) {
+    rows.sort_by_cached_key(|row| {
+        let symbol = row.ranked();
+        (
+            Reverse(symbol_rank(query, symbol, test_scope)),
+            symbol.name.len(),
+            symbol.file.to_path_buf(),
+            symbol.line,
+            symbol.column,
+        )
+    });
 }
 
 pub fn symbol_lookup_hints(
@@ -294,21 +333,22 @@ mod tests {
         assert!(!is_single_file_concentration(2, 5));
     }
 
+    fn ranked<'a>(name: &'a str, kind: &'a str, file: &'a str) -> RankedSymbol<'a> {
+        RankedSymbol {
+            name,
+            name_path: None,
+            kind,
+            file: Path::new(file),
+            line: 1,
+            column: 1,
+        }
+    }
+
     #[test]
     fn exact_matches_precede_prefixes_and_substrings_across_symbol_kinds() {
         let scope = TestScope::new();
-        let rank = |name: &str, kind: &str| {
-            symbol_rank(
-                "user",
-                RankedSymbol {
-                    name,
-                    name_path: None,
-                    kind,
-                    file: Path::new("src/lib.rs"),
-                },
-                &scope,
-            )
-        };
+        let rank =
+            |name: &str, kind: &str| symbol_rank("user", ranked(name, kind, "src/lib.rs"), &scope);
 
         let exact = rank("user", "variable");
         let prefix = rank("userservice", "class");
@@ -322,6 +362,43 @@ mod tests {
             exact > substring,
             "the declaration spelled exactly as asked outranks a name that merely contains it: \
              {exact} vs {substring}"
+        );
+    }
+
+    #[test]
+    fn sorting_demotes_tests_within_a_tier_and_breaks_ties_by_position() {
+        struct Row(&'static str, &'static str, &'static str, u32);
+        impl Rankable for Row {
+            fn ranked(&self) -> RankedSymbol<'_> {
+                RankedSymbol {
+                    line: self.3,
+                    ..ranked(self.0, self.1, self.2)
+                }
+            }
+        }
+        let mut rows = [
+            Row("UserStore", "class", "a/user.rs", 1),
+            Row("User", "class", "a/tests/user.rs", 1),
+            Row("User", "class", "b/user.rs", 9),
+            Row("User", "class", "b/user.rs", 2),
+            Row("User", "variable", "a/user.rs", 1),
+        ];
+        sort_by_rank(&mut rows, "user", &TestScope::new());
+        let order: Vec<_> = rows
+            .iter()
+            .map(|row| (row.0, row.1, row.2, row.3))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("User", "class", "b/user.rs", 2),
+                ("User", "class", "b/user.rs", 9),
+                ("User", "variable", "a/user.rs", 1),
+                ("User", "class", "a/tests/user.rs", 1),
+                ("UserStore", "class", "a/user.rs", 1),
+            ],
+            "an exact name leads every prefix; within it a value kind and then a test file \
+             give way, and position settles what rank and length cannot"
         );
     }
 }
