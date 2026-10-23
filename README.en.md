@@ -86,7 +86,7 @@ flowchart TD
 ```
 
 - **Two backends, different needs.** Index and `search ast`/`map` work with no language server. `symbols` and `map file` answer from the server's tree when one serves and from the compiled-in grammar when not, and say which in `backend` (`document` | `ast`). The other LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language, and when a server lacks a capability they degrade *honestly* — a structured `unsupported` response, or a fallback that says it is one (`callers` without call hierarchy marks `callers_status: "references_derived"`) — never a silently-wrong answer.
-- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process.
+- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process; a sandbox that cannot write the daemon directory (`~/.symora`) runs in-process on its own. The answers are the same either way.
 
 ---
 

@@ -802,3 +802,42 @@ fn edit_notifications_do_not_start_daemon_when_listener_disappears_after_ping() 
         );
     }
 }
+
+/// A sandbox that forbids the daemon's directory still gets answers: the
+/// process runs in process instead of failing every command on the startup
+/// lock it cannot open.
+#[test]
+fn an_unwritable_daemon_directory_runs_in_process() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let restore =
+        || std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    if std::fs::create_dir(home.path().join("probe")).is_ok() {
+        restore();
+        return;
+    }
+
+    let out = project_command(
+        Path::new(env!("CARGO_BIN_EXE_symora")),
+        home.path(),
+        &["--format", "compact", "search", "content", "alpha"],
+    )
+    .current_dir(&project)
+    .output()
+    .unwrap();
+    restore();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["count"], 1, "{value}");
+    assert!(!home.path().join(".symora").exists());
+}
