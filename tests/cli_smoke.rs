@@ -9,7 +9,9 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const SYMORA: &str = env!("CARGO_BIN_EXE_symora");
+mod common;
+
+use common::{SYMORA, no_global_config};
 
 const ALL_SUBCOMMANDS: &[&str] = &[
     "init",
@@ -41,10 +43,16 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "mcp",
 ];
 
+/// An in-process `symora` command isolated from the machine's configuration.
+fn symora() -> Command {
+    let mut command = common::symora();
+    command.env("SYMORA_NO_DAEMON", "1");
+    command
+}
+
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(SYMORA)
+    symora()
         .args(args)
-        .env("SYMORA_NO_DAEMON", "1")
         .output()
         .expect("symora binary should exist")
 }
@@ -69,9 +77,8 @@ fn json_ok(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
 
 #[cfg(unix)]
 fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(SYMORA)
+    symora()
         .args(args)
-        .env("SYMORA_NO_DAEMON", "1")
         .current_dir(dir)
         .output()
         .expect("symora binary should exist")
@@ -149,9 +156,8 @@ fn unknown_subcommand_is_rejected_with_nonzero_exit() {
 
 #[test]
 fn mcp_initialize_returns_protocol_version() {
-    let mut child = Command::new(SYMORA)
+    let mut child = symora()
         .args(["mcp", "serve"])
-        .env("SYMORA_NO_DAEMON", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -181,9 +187,8 @@ fn mcp_initialize_returns_protocol_version() {
 
 #[test]
 fn mcp_tools_list_advertises_pack_and_search() {
-    let mut child = Command::new(SYMORA)
+    let mut child = symora()
         .args(["mcp", "serve"])
-        .env("SYMORA_NO_DAEMON", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1917,9 +1922,8 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
         assert_eq!(changed, ["a", "c"], "{key}={value}: {page}");
     }
 
-    let out = Command::new(SYMORA)
+    let out = symora()
         .arg("diff-impact")
-        .env("SYMORA_NO_DAEMON", "1")
         .env("GIT_DIFF_OPTS", "-u5")
         .current_dir(repo)
         .output()
@@ -3665,9 +3669,8 @@ exec cat > /dev/null
         ),
     )
     .unwrap();
-    let out = Command::new(SYMORA)
+    let out = symora()
         .args(["--format", "compact", "doctor", "go"])
-        .env("SYMORA_NO_DAEMON", "1")
         .env("XDG_CONFIG_HOME", dir.path().join("config"))
         .env("HOME", dir.path())
         .current_dir(dir.path())
@@ -3959,10 +3962,9 @@ fn stdin_edit_payload_is_interpreted_once() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("a.txt");
     std::fs::write(&file, "original\n").unwrap();
-    let mut child = Command::new(SYMORA)
+    let mut child = symora()
         .args(["edit", "replace", "a.txt:1:1", "--text", "-"])
         .current_dir(directory.path())
-        .env("SYMORA_NO_DAEMON", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4101,6 +4103,7 @@ fn generated_followups_preserve_shell_arguments_and_option_boundaries() {
             .args(["-c", &script])
             .env("SYMORA_TEST_BINARY", SYMORA)
             .env("SYMORA_NO_DAEMON", "1")
+            .env("XDG_CONFIG_HOME", no_global_config())
             .current_dir(root)
             .output()
             .unwrap();
@@ -4183,12 +4186,11 @@ fn lifecycle_subprocess_output_preserves_json_and_interactive_input() {
         .collect();
     std::fs::write(root.join(".symora/config.toml"), config).unwrap();
 
-    let mut child = Command::new(SYMORA)
+    let mut child = symora()
         .args(["setup", "--yes", "deps", "--group", "core"])
         .current_dir(root)
         .env("PATH", &bin)
         .env("XDG_CONFIG_HOME", root.join("xdg"))
-        .env("SYMORA_NO_DAEMON", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -4247,14 +4249,13 @@ fn config_editor_output_preserves_json_and_interactive_input() {
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     for exit in [0, 7] {
-        let mut child = Command::new(SYMORA)
+        let mut child = symora()
             .args(["config", "edit"])
             .current_dir(&root)
             .env("EDITOR", &editor)
             .env("SYMORA_TEST_EDITOR_ARGUMENT", &argument)
             .env("SYMORA_TEST_EDITOR_EXIT", exit.to_string())
             .env("XDG_CONFIG_HOME", fixture.path().join("xdg"))
-            .env("SYMORA_NO_DAEMON", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

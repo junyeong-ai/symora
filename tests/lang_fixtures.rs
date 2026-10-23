@@ -18,7 +18,9 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-const SYMORA: &str = env!("CARGO_BIN_EXE_symora");
+mod common;
+
+use common::symora;
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/python/monorepo")
@@ -58,7 +60,7 @@ fn find_identifier(path: &Path, ident: &str, occurrence: usize) -> (u32, u32) {
 }
 
 fn run_in_fixture(args: &[String]) -> Value {
-    let output = Command::new(SYMORA)
+    let output = symora()
         .args(args)
         .args(["--format", "compact"])
         .current_dir(fixture_root())
@@ -127,7 +129,7 @@ fn explicit_settings_resolve_a_package_without_a_virtual_environment() {
     assert!(!root.path().join(".venv").exists());
     let (line, column) = find_identifier(&root.path().join(app), "Circle", 1);
     let run = || {
-        let output = Command::new(SYMORA)
+        let output = symora()
             .args([
                 "def",
                 &format!("{app}:{line}:{column}"),
@@ -454,7 +456,7 @@ fn diff_impact_hands_a_changed_local_to_its_function() {
     )
     .unwrap();
 
-    let output = Command::new(SYMORA)
+    let output = symora()
         .args(["diff-impact", "--format", "compact"])
         .current_dir(repo)
         .env("SYMORA_NO_DAEMON", "1")
@@ -526,7 +528,7 @@ fn diff_impact_gives_a_class_the_lines_no_member_covers() {
         ),
     ] {
         std::fs::write(repo.join("svc.py"), content).unwrap();
-        let output = Command::new(SYMORA)
+        let output = symora()
             .args(["diff-impact", "--format", "compact"])
             .current_dir(repo)
             .env("SYMORA_NO_DAEMON", "1")
@@ -577,7 +579,7 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     )
     .unwrap();
     let run = |args: &[&str]| -> Value {
-        let output = Command::new(SYMORA)
+        let output = symora()
             .args(args)
             .args(["--format", "compact"])
             .current_dir(repo)
@@ -642,7 +644,7 @@ fn pyright_unconfirmed_rename_is_preview_only() {
     )
     .unwrap();
     for dry_run in [true, false] {
-        let mut command = Command::new(SYMORA);
+        let mut command = symora();
         command
             .args([
                 "rename",

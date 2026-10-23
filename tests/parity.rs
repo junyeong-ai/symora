@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-const SYMORA: &str = env!("CARGO_BIN_EXE_symora");
+mod common;
+
+use common::symora;
 
 struct ParityCase {
     /// MCP tool name.
@@ -68,7 +70,7 @@ const CASES: &[ParityCase] = &[
 ];
 
 fn run_cli(args: &[&str]) -> Vec<Value> {
-    let output = Command::new(SYMORA)
+    let output = symora()
         .args(args)
         .args(["--format", "compact"])
         .env("SYMORA_NO_DAEMON", "1")
@@ -90,7 +92,7 @@ struct McpSession {
 
 impl McpSession {
     fn new(root: Option<&Path>) -> Self {
-        let mut command = Command::new(SYMORA);
+        let mut command = symora();
         command
             .args(["mcp", "serve"])
             .env("SYMORA_NO_DAEMON", "1")
@@ -195,7 +197,7 @@ fn cli_and_mcp_emit_identical_payloads() {
 }
 
 fn run_daemon_cli(root: &Path, args: &[&str]) -> Vec<Value> {
-    let mut command = Command::new(SYMORA);
+    let mut command = symora();
     command
         .current_dir(root)
         .args(args)
@@ -283,7 +285,7 @@ fn daemon_and_direct_emit_identical_payloads() {
     struct StopDaemon<'a>(&'a std::path::Path);
     impl Drop for StopDaemon<'_> {
         fn drop(&mut self) {
-            let _ = Command::new(SYMORA)
+            let _ = symora()
                 .current_dir(self.0)
                 .args(["daemon", "stop"])
                 .output();
@@ -413,7 +415,7 @@ fn unconfirmed_rename_is_refused_by_cli_mcp_and_daemon() {
 
     let mut expected = None;
     for direct in [true, false] {
-        let mut command = Command::new(SYMORA);
+        let mut command = symora();
         command.current_dir(root.path()).args([
             "rename",
             "main.go:3:17",
