@@ -747,6 +747,8 @@ struct RenameSymbolInput {
     new_name: String,
     #[serde(default)]
     dry_run: bool,
+    #[serde(default)]
+    accept_unconfirmed: bool,
 }
 
 async fn run_rename_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -757,6 +759,7 @@ async fn run_rename_symbol(args: Value, app: &App) -> Result<CapturedOutput> {
                 location: input.loc.to_string(),
                 new_name: input.new_name,
                 dry_run: input.dry_run,
+                accept_unconfirmed: input.accept_unconfirmed,
             },
             &a,
         )
@@ -969,7 +972,14 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
             "with_suggestions",
         ],
         "build_context_pack" => &["tokens", "focus", "per_file", "shape"],
-        "rename_symbol" => &["file", "line", "column", "new_name", "dry_run"],
+        "rename_symbol" => &[
+            "file",
+            "line",
+            "column",
+            "new_name",
+            "dry_run",
+            "accept_unconfirmed",
+        ],
         "list_code_actions" => &["file", "line", "column", "kind", "preferred"],
         "apply_code_action" => &["file", "line", "column", "title", "dry_run"],
         "replace_symbol_body" => &[
