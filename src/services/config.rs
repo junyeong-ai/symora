@@ -20,13 +20,31 @@ pub trait ConfigService: Send + Sync {
 
 const GLOBAL_ONLY_SECTION: &str = "daemon";
 
-pub(crate) fn serialize_project_config(config: &SymoraConfig) -> Result<String, ConfigError> {
-    let content = toml::to_string_pretty(config).map_err(|e| ConfigError::Parse(e.to_string()))?;
-    let mut document = content
+/// The file `config init` writes: every key at its current default, commented
+/// out. A written value would pin today's default in the file, so a release
+/// that changes it would never reach this configuration; a commented one
+/// documents the key and leaves the default in charge.
+fn default_config_template(scope: ConfigScope) -> Result<String, ConfigError> {
+    let defaults = toml::to_string_pretty(&SymoraConfig::default())
+        .map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let mut document = defaults
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| ConfigError::Parse(e.to_string()))?;
-    document.remove(GLOBAL_ONLY_SECTION);
-    Ok(document.to_string())
+    if matches!(scope, ConfigScope::Project) {
+        document.remove(GLOBAL_ONLY_SECTION);
+    }
+    let mut template = String::from(
+        "# Symora configuration. Every key is optional and shown at its default;\n\
+         # uncomment one to override it.\n\n",
+    );
+    for line in document.to_string().lines() {
+        if !line.is_empty() {
+            template.push_str("# ");
+            template.push_str(line);
+        }
+        template.push('\n');
+    }
+    Ok(template)
 }
 
 #[derive(Clone, Copy)]
@@ -73,14 +91,7 @@ impl DefaultConfigService {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let config = SymoraConfig::default();
-        let content = match scope {
-            ConfigScope::Global => {
-                toml::to_string_pretty(&config).map_err(|e| ConfigError::Parse(e.to_string()))?
-            }
-            ConfigScope::Project => serialize_project_config(&config)?,
-        };
-        tokio::fs::write(path, content).await?;
+        tokio::fs::write(path, default_config_template(scope)?).await?;
         Ok(())
     }
 
