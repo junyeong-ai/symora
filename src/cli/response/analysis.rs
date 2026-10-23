@@ -179,9 +179,7 @@ pub struct ImpactOutput {
     pub target: TargetOutput,
     pub refs: RefOutput,
     pub coverage: TestCoverageOutput,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<AffectedFileOutput>,
-    /// Transitive caller graph + risk + confidence. Absent only when the
+    /// Direct and transitive caller counts by depth. Absent only when the
     /// LSP failed to start a call hierarchy at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blast_radius: Option<crate::cli::blast_radius::BlastRadius>,
@@ -193,6 +191,8 @@ pub struct ImpactOutput {
     /// truncated file list) or concentrated in one file — never boilerplate.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AffectedFileOutput>,
 }
 
 #[cfg(test)]

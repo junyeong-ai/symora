@@ -69,18 +69,18 @@ fn section_empty() {
 #[test]
 fn section_with_items_and_truncation() {
     let section = Section::with_total(vec![1u32, 2, 3], 10);
-    assert_json_snapshot!(section, @r###"
+    assert_json_snapshot!(section, @r#"
     {
       "count": 10,
       "showing": 3,
+      "truncated": true,
       "items": [
         1,
         2,
         3
-      ],
-      "truncated": true
+      ]
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -88,22 +88,22 @@ fn section_with_hints_and_next_commands() {
     let section = Section::with_total(vec![1u32], 4)
         .with_hints(vec!["narrow the query".to_string()])
         .with_next_commands(vec!["symora map file src/a.rs".to_string()]);
-    assert_json_snapshot!(section, @r###"
+    assert_json_snapshot!(section, @r#"
     {
       "count": 4,
       "showing": 1,
-      "items": [
-        1
-      ],
       "truncated": true,
       "hints": [
         "narrow the query"
       ],
       "next_commands": [
         "symora map file src/a.rs"
+      ],
+      "items": [
+        1
       ]
     }
-    "###);
+    "#);
 }
 
 /// Pins the post-fit shape and the disclosure wording of the
@@ -166,34 +166,34 @@ fn fitter_preserves_config_errors_while_trimming_section_items() {
 #[test]
 fn section_with_bodies_included() {
     let section = Section::new(vec![1u32]).with_bodies_included(Some(1));
-    assert_json_snapshot!(section, @r###"
+    assert_json_snapshot!(section, @r#"
     {
       "count": 1,
       "showing": 1,
+      "bodies_included": 1,
       "items": [
         1
-      ],
-      "bodies_included": 1
+      ]
     }
-    "###);
+    "#);
 }
 
 #[test]
 fn section_with_structured_error() {
     let section: Section<i32> =
         Section::error(OutputError::not_found("symbol not found").with_hint("try a broader query"));
-    assert_json_snapshot!(section, @r###"
+    assert_json_snapshot!(section, @r#"
     {
       "count": 0,
       "showing": 0,
-      "items": [],
       "error": {
         "code": "not_found",
         "message": "symbol not found",
         "hint": "try a broader query"
-      }
+      },
+      "items": []
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -261,19 +261,19 @@ fn section_discloses_coverage_gaps() {
             reason: "not_indexed".to_string(),
             message: None,
         }]);
-    assert_json_snapshot!(section, @r###"
+    assert_json_snapshot!(section, @r#"
     {
       "count": 0,
       "showing": 0,
-      "items": [],
       "coverage_gaps": [
         {
           "language": "lua",
           "reason": "not_indexed"
         }
-      ]
+      ],
+      "items": []
     }
-    "###);
+    "#);
 }
 
 #[test]
@@ -285,18 +285,18 @@ fn section_marks_a_count_that_is_only_a_lower_bound() {
     let bounded: Section<LocationOutput> = Section::with_total(vec![], 3)
         .with_incomplete(true)
         .with_hints(vec!["2 path(s) could not be read".to_string()]);
-    assert_json_snapshot!(bounded, @r###"
+    assert_json_snapshot!(bounded, @r#"
     {
       "count": 3,
       "showing": 0,
-      "items": [],
       "truncated": true,
       "incomplete": true,
       "hints": [
         "2 path(s) could not be read"
-      ]
+      ],
+      "items": []
     }
-    "###);
+    "#);
 
     let exact: Section<LocationOutput> = Section::with_total(vec![], 3);
     let json = serde_json::to_value(&exact).unwrap();

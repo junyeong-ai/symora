@@ -43,7 +43,6 @@ use super::errors::OutputError;
 ///
 /// - `count` — total matches found
 /// - `showing` — number actually emitted in `items`
-/// - `items` — the result array
 /// - `truncated` — present (and `true`) only when `showing < count`
 /// - `stale` — present (and `true`) only when index-served rows came from
 ///   files that changed on disk after indexing
@@ -52,11 +51,11 @@ use super::errors::OutputError;
 ///   ran (`context --with-bodies`) and that still contain items
 /// - `coverage_gaps` — languages a search could not cover; populated by every
 ///   symbol-search route, omitted (empty) on every other list response
+/// - `items` — the result array, after every field that qualifies it
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Section<T> {
     pub count: usize,
     pub showing: usize,
-    pub items: Vec<T>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
     /// Present when a file backing one of `items` changed on disk after it
@@ -126,6 +125,10 @@ pub struct Section<T> {
     pub coverage_gaps: Vec<CoverageGap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<OutputError>,
+    /// Last, so a reader that sees only the head of a response — a pipe
+    /// through `head`, a host that caps tool output — still has the counts
+    /// and markers that say how far to trust the list.
+    pub items: Vec<T>,
 }
 
 /// A language a search did not cover, with a stable machine-branchable reason.
@@ -278,7 +281,7 @@ pub fn fit_source_bodies(
             .pointer_mut(parent)
             .and_then(serde_json::Value::as_object_mut)
         {
-            item.remove("body");
+            item.shift_remove("body");
             item.insert(
                 "body_omitted".to_string(),
                 serde_json::to_value(BodyOmission::ResponseSize).expect("body omission serializes"),
@@ -421,8 +424,8 @@ pub fn fit_to_char_budget(
                 .pointer_mut(&candidate.path)
                 .and_then(serde_json::Value::as_object_mut)
         {
-            node.remove("bodies_included");
-            node.remove("stale");
+            node.shift_remove("bodies_included");
+            node.shift_remove("stale");
         }
         dropped = true;
         // The removals above shrink the response too, so a section emptied at
@@ -491,6 +494,26 @@ fn collect_section_paths(
 /// The structural Section test: the typed key triple plus the
 /// `items.len() == showing` consistency check. Non-empty `items` also
 /// excludes `Section::error`'s 0/0/[] shape — there is nothing to drop.
+/// Move every section's `items` after its other fields, wherever the section
+/// sits: flattened into a response beside fields of its own, nested under a
+/// key, or extended by the size fitter with `truncated` and a hint.
+pub fn order_items_last(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for child in map.values_mut() {
+                order_items_last(child);
+            }
+            let is_section = map.get("count").is_some_and(serde_json::Value::is_u64)
+                && map.get("showing").is_some_and(serde_json::Value::is_u64);
+            if is_section && let Some(items) = map.shift_remove("items") {
+                map.insert("items".to_string(), items);
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(order_items_last),
+        _ => {}
+    }
+}
+
 fn is_section_shaped(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     if map
         .get("count")
