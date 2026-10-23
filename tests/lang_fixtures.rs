@@ -11,7 +11,8 @@
 //!   (cd tests/fixtures/python/monorepo && npm ci --ignore-scripts && uv sync --frozen)
 //!   PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
 //!     cargo test --test lang_fixtures -- --include-ignored
-//! Missing prerequisites skip loudly instead of failing.
+//! Missing prerequisites skip loudly instead of failing, except under `CI`,
+//! where the job installs them and a skip would pass without testing.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -85,13 +86,22 @@ fn prerequisites_ready() -> bool {
     }
     let venv = fixture_root().join(".venv/bin/python");
     if !venv.is_file() {
-        eprintln!(
-            "SKIP: fixture venv missing — run `uv sync --frozen` in {}",
+        return skip(&format!(
+            "fixture venv missing — run `uv sync --frozen` in {}",
             fixture_root().display()
-        );
-        return false;
+        ));
     }
     true
+}
+
+/// Report a missing prerequisite: a skip locally, a failure under `CI`.
+fn skip(reason: &str) -> bool {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "CI installs every prerequisite, so none may be missing: {reason}"
+    );
+    eprintln!("SKIP: {reason}");
+    false
 }
 
 fn pyright_on_path() -> bool {
@@ -103,12 +113,7 @@ fn pyright_on_path() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
-    if !found {
-        eprintln!(
-            "SKIP: pyright does not run here — follow tests/fixtures/python/monorepo/README.md"
-        );
-    }
-    found
+    found || skip("pyright does not run here — follow tests/fixtures/python/monorepo/README.md")
 }
 
 #[test]
@@ -626,7 +631,7 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
 
 #[test]
 #[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
-fn pyright_unconfirmed_rename_is_preview_only() {
+fn pyright_rename_applies_only_once_its_unconfirmed_edits_are_accepted() {
     if !pyright_on_path() {
         return;
     }
@@ -643,7 +648,7 @@ fn pyright_unconfirmed_rename_is_preview_only() {
         r#"{"include":["."]}"#,
     )
     .unwrap();
-    for dry_run in [true, false] {
+    let rename = |flag: Option<&str>| {
         let mut command = symora();
         command
             .args([
@@ -653,26 +658,33 @@ fn pyright_unconfirmed_rename_is_preview_only() {
                 "--format",
                 "compact",
             ])
+            .args(flag)
             .current_dir(root.path())
             .env("SYMORA_NO_DAEMON", "1");
-        if dry_run {
-            command.arg("--dry-run");
-        }
         let output = command.output().unwrap();
         let result: Value = common::parse_response(&output.stdout).unwrap();
-        if dry_run {
-            assert!(output.status.success(), "{result}");
-            assert_eq!(result["indexing"], "unconfirmed", "{result}");
-            assert!(result["affected_files"].as_u64().unwrap() > 0, "{result}");
-        } else {
-            assert!(!output.status.success(), "{result}");
-            assert_eq!(result["error"]["code"], "precondition_failed", "{result}");
-        }
-        for (name, content) in files {
-            assert_eq!(
-                std::fs::read_to_string(root.path().join(name)).unwrap(),
-                content
-            );
-        }
+        (output.status.success(), result)
+    };
+    let read = |name: &str| std::fs::read_to_string(root.path().join(name)).unwrap();
+
+    let (ok, preview) = rename(Some("--dry-run"));
+    assert!(ok, "{preview}");
+    assert_eq!(preview["indexing"], "unconfirmed", "{preview}");
+    assert_eq!(preview["affected_files"], 2, "{preview}");
+
+    let (ok, refusal) = rename(None);
+    assert!(!ok, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "precondition_failed", "{refusal}");
+    for (name, content) in files {
+        assert_eq!(read(name), content);
     }
+
+    let (ok, applied) = rename(Some("--accept-unconfirmed"));
+    assert!(ok, "{applied}");
+    assert_eq!(applied["indexing"], "unconfirmed", "{applied}");
+    assert_eq!(read("target.py"), "def renamed_target():\n    return 1\n");
+    assert_eq!(
+        read("caller.py"),
+        "from target import renamed_target\nvalue = renamed_target()\n"
+    );
 }

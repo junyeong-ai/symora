@@ -9,7 +9,7 @@
 //! formatting is a transport concern, meaning is the contract.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 mod common;
 
-use common::symora;
+use common::{no_global_config, symora};
 
 struct ParityCase {
     /// MCP tool name.
@@ -207,13 +207,63 @@ fn cli_and_mcp_emit_identical_payloads() {
     }
 }
 
-fn run_daemon_cli(root: &Path, args: &[&str]) -> Vec<Value> {
-    let mut command = symora();
-    command
-        .current_dir(root)
-        .args(args)
-        .args(["--format", "compact"])
-        .env_remove("SYMORA_NO_DAEMON");
+/// A daemon only one test talks to. A copy of the binary is an installation
+/// of its own, so its daemon starts from this suite's isolated environment
+/// instead of joining one a manual run of the same build left behind, and
+/// two tests never stop each other's. Dropping it stops the daemon.
+struct IsolatedDaemon {
+    exe: PathBuf,
+}
+
+impl IsolatedDaemon {
+    fn for_test(name: &str) -> Self {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("parity-daemon")
+            .join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let daemon = Self {
+            exe: dir.join("symora"),
+        };
+        if daemon.exe.exists() {
+            daemon.stop();
+        }
+        // Copy in a child so this process never holds the executable open for
+        // writing, which a concurrent fork could inherit (ETXTBSY on Linux).
+        let copied = Command::new("cp")
+            .arg(env!("CARGO_BIN_EXE_symora"))
+            .arg(&daemon.exe)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        daemon
+    }
+
+    fn command(&self, root: &Path) -> Command {
+        let mut command = Command::new(&self.exe);
+        command
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", no_global_config())
+            .env_remove("SYMORA_NO_DAEMON");
+        command
+    }
+
+    fn stop(&self) {
+        let _ = self
+            .command(Path::new(env!("CARGO_TARGET_TMPDIR")))
+            .args(["daemon", "stop"])
+            .output();
+    }
+}
+
+impl Drop for IsolatedDaemon {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn run_daemon_cli(daemon: &IsolatedDaemon, root: &Path, args: &[&str]) -> Vec<Value> {
+    let mut command = daemon.command(root);
+    command.args(args).args(["--format", "compact"]);
     let output = command.output().expect("run fixture command");
     let payload: Value = common::parse_response(&output.stdout).unwrap_or_else(|error| {
         panic!(
@@ -293,16 +343,7 @@ fn daemon_and_direct_emit_identical_payloads() {
         "pub fn add(a: u32, b: u32) -> u32 { a + b }\npub fn answer() -> u32 { add(20, 22) }\n",
     )
     .unwrap();
-    struct StopDaemon<'a>(&'a std::path::Path);
-    impl Drop for StopDaemon<'_> {
-        fn drop(&mut self) {
-            let _ = symora()
-                .current_dir(self.0)
-                .args(["daemon", "stop"])
-                .output();
-        }
-    }
-    let _stop = StopDaemon(root);
+    let daemon = IsolatedDaemon::for_test("daemon_and_direct_emit_identical_payloads");
     let mut direct_session = McpSession::new(Some(root));
     let cases = &[
         (
@@ -343,7 +384,7 @@ fn daemon_and_direct_emit_identical_payloads() {
         let daemon = quiesced(
             "daemon CLI",
             args,
-            |args| run_daemon_cli(root, args),
+            |args| run_daemon_cli(&daemon, root, args),
             deadline,
         );
 
@@ -424,21 +465,19 @@ fn unconfirmed_rename_is_refused_by_cli_mcp_and_daemon() {
     )
     .unwrap();
 
+    let daemon = IsolatedDaemon::for_test("unconfirmed_rename_is_refused_by_cli_mcp_and_daemon");
     let mut expected = None;
     for direct in [true, false] {
-        let mut command = symora();
-        command.current_dir(root.path()).args([
-            "rename",
-            "main.go:3:17",
-            "Renamed",
-            "--format",
-            "compact",
-        ]);
-        if direct {
-            command.env("SYMORA_NO_DAEMON", "1");
+        let mut command = if direct {
+            let mut command = symora();
+            command
+                .current_dir(root.path())
+                .env("SYMORA_NO_DAEMON", "1");
+            command
         } else {
-            command.env_remove("SYMORA_NO_DAEMON");
-        }
+            daemon.command(root.path())
+        };
+        command.args(["rename", "main.go:3:17", "Renamed", "--format", "compact"]);
         let output = command.output().unwrap();
         let result: Value = common::parse_response(&output.stdout).unwrap();
         assert!(!output.status.success(), "{result}");

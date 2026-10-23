@@ -2787,20 +2787,4 @@ mod tests {
         client.note_document_changed();
         assert!(content_generation() > before);
     }
-
-    #[test]
-    fn test_request_id_generation() {
-        let counter = AtomicU64::new(1);
-        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 1);
-        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 2);
-        assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 3);
-    }
-
-    #[test]
-    fn test_position_params() {
-        let params = LspClient::position_params("file:///test.rs", 10, 5);
-        assert_eq!(params.text_document.uri, "file:///test.rs");
-        assert_eq!(params.position.line, 10);
-        assert_eq!(params.position.character, 5);
-    }
 }

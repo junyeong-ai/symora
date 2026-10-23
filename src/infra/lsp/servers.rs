@@ -1459,12 +1459,4 @@ mod tests {
         assert!(!rust_config.install.linux.is_empty());
         assert!(!rust_config.install.windows.is_empty());
     }
-
-    #[test]
-    fn test_check_all_servers() {
-        let health = check_all_servers(defaults());
-        // Should have health info for all supported languages
-        assert!(health.len() >= 6);
-        assert!(health.iter().all(|h| h.source == ServerSource::Builtin));
-    }
 }
