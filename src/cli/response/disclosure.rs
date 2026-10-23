@@ -252,9 +252,9 @@ pub enum LowerBound {
     /// rather than having failed them.
     SymbolsNotAnalysed(usize),
     /// Analysis stopped at this many symbols before running out of candidates,
-    /// so the ones past the cap answered none of the filters either. Kept
-    /// apart from a failed analysis because raising the cap reaches them,
-    /// where a failure is what retrying is for.
+    /// so the ones past the cap are absent from every count. Kept apart from
+    /// a failed analysis because raising the cap reaches them, where a failure
+    /// is what retrying is for.
     AnalysisCapped(usize),
     /// A language server answered these languages for the whole workspace and
     /// the answer was confined to the requested paths afterwards, so matches
@@ -301,8 +301,8 @@ impl LowerBound {
                 .to_string(),
             Self::AnalysisCapped(symbols) => format!(
                 "Analysis stopped at {symbols} symbol(s) before running out of candidates, so \
-                 those past the cap answered none of the filters applied and are missing from \
-                 the count; raise --max-symbols to reach them"
+                 those past the cap are missing from the counts; raise --max-symbols to reach \
+                 them"
             ),
             Self::LiveAnswerNarrowed {
                 languages,
