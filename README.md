@@ -549,7 +549,7 @@ symora daemon start | stop | restart | status
 | **분석** | `context`, `usage`, `impact`, `diff-impact` |
 | **편집** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
 | **진단** | `diagnostics` |
-| **관리** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp`, `bench` |
+| **관리** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
 
 어떤 명령이든 `symora <command> --help`로 플래그를 볼 수 있습니다. 출력 필드는 [출력 계약](#출력-계약)과 `symora mcp tools`의 출력 스키마에 있습니다.
 

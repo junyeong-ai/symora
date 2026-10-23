@@ -46,9 +46,6 @@ pub mod defaults {
     /// Keeps memory-bound monorepos from exhausting RAM / FDs.
     pub const LSP_MAX_CONCURRENT_SERVERS: usize = 12;
 
-    /// Iteration cap for the bench command warm-loop.
-    pub const BENCH_DEFAULT_ITERATIONS: usize = 50;
-
     /// MCP HTTP transport default port.
     pub const MCP_HTTP_DEFAULT_PORT: u16 = 7700;
 }
