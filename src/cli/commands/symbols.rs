@@ -344,11 +344,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
             indexing = indexing.or(batch.indexing);
         }
         let mut batch = batch.data;
-        for symbol in &mut batch {
-            if let Some(path) = symbol.workspace_name_path() {
-                symbol.name_path = Some(path);
-            }
-        }
+        Symbol::assign_workspace_paths(&mut batch);
         for symbol in batch {
             if seen.insert(workspace_dedup_key(&symbol)) {
                 symbols.push(symbol);

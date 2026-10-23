@@ -785,11 +785,7 @@ async fn collect_workspace_symbol_results(
             }
         };
 
-        for symbol in &mut symbols {
-            if let Some(path) = symbol.workspace_name_path() {
-                symbol.name_path = Some(path);
-            }
-        }
+        Symbol::assign_workspace_paths(&mut symbols);
         let before = symbols.len();
         symbols.retain(|symbol| is_within(ctx, &symbol.location.file, within));
         if symbols.len() < before {
