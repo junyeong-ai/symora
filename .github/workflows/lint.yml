@@ -17,6 +17,7 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,6 +35,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RUSTFLAGS: -D warnings
     steps:
@@ -48,7 +50,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -56,6 +58,7 @@ jobs:
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,6 +70,7 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

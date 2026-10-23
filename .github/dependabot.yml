@@ -37,3 +37,18 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  # The pyright the real-server fixture tests run; npm is how the job gets it.
+  - package-ecosystem: npm
+    directory: /tests/fixtures/python/monorepo
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
