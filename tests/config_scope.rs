@@ -60,25 +60,29 @@ fn config_show_daemon_scope() {
 fn config_init_respects_scope() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    let value = json_ok(root.path(), home.path(), &["config", "init"]);
-    assert_eq!(value["status"], "created");
-    let project_text = std::fs::read_to_string(root.path().join(".symora/config.toml")).unwrap();
-    let project: toml::Table = toml::from_str(&project_text).unwrap();
-    assert!(!project.contains_key("daemon"));
+    let uncommented = |text: &str| -> toml::Table {
+        let (_header, body) = text.split_once("\n\n").unwrap();
+        let lines: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("# "))
+            .collect();
+        toml::from_str(&lines.join("\n")).unwrap()
+    };
+    let defaults = toml::Table::try_from(symora::models::config::SymoraConfig::default()).unwrap();
+
     let value = json_ok(root.path(), home.path(), &["config", "init", "--global"]);
     assert_eq!(value["status"], "created");
-    let global_text = std::fs::read_to_string(home.path().join("symora/config.toml")).unwrap();
-    assert_eq!(
-        global_text,
-        toml::to_string_pretty(&symora::models::config::SymoraConfig::default()).unwrap()
-    );
-    let global: toml::Table = toml::from_str(&global_text).unwrap();
-    assert!(global.contains_key("daemon"));
-    let daemon_start = global_text.find("[daemon]\n").unwrap();
-    let daemon_end = daemon_start + global_text[daemon_start..].find("[output]\n").unwrap();
-    let mut expected = global_text;
-    expected.replace_range(daemon_start..daemon_end, "");
-    assert_eq!(project_text, expected);
+    let global = std::fs::read_to_string(home.path().join("symora/config.toml")).unwrap();
+    assert!(toml::from_str::<toml::Table>(&global).unwrap().is_empty());
+    assert_eq!(uncommented(&global), defaults);
+
+    let value = json_ok(root.path(), home.path(), &["config", "init"]);
+    assert_eq!(value["status"], "created");
+    let project = std::fs::read_to_string(root.path().join(".symora/config.toml")).unwrap();
+    assert!(toml::from_str::<toml::Table>(&project).unwrap().is_empty());
+    let mut project_defaults = defaults;
+    project_defaults.remove("daemon");
+    assert_eq!(uncommented(&project), project_defaults);
 }
 
 #[test]
