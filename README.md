@@ -144,7 +144,7 @@ symora map summary
   },
   "next_commands": [
     "symora map file --related-limit 5 -- 'src/main.ts'",
-    "symora map dir --limit 10 -- 'src'",
+    "symora pack --tokens 4000 --focus='src'",
     "symora symbols --depth 1 -- 'src/main.ts'"
   ]
 }
@@ -313,8 +313,6 @@ symora pack --tokens 4000                   # 토큰 예산 기반, PageRank 순
 # 프로젝트 & 파일 개요
 symora map summary                          # 저장소 형태
 symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련 파일
-symora map dir src/services                 # 디렉터리 목록
-symora map related src/services/checkout.ts # 이름·디렉터리 기반 다음 파일 후보
 
 # 심볼 & 들여다보기 (LSP 또는 AST 선언; 의미 분석은 LSP 필요)
 symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
@@ -542,7 +540,7 @@ symora daemon start | stop | restart | status
 | 그룹 | 명령 |
 | --- | --- |
 | **탐색** | `search symbols`, `search content`, `search ast`, `search nodes`, `pack` |
-| **맵** | `map summary`, `map file`, `map dir`, `map related` |
+| **맵** | `map summary`, `map file` |
 | **들여다보기** | `symbols`, `def`, `hover` |
 | **네비게이션** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
 | **분석** | `context`, `usage`, `impact`, `diff-impact` |

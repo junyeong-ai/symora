@@ -16,7 +16,7 @@ use crate::models::symbol::{Language, Symbol};
 
 #[derive(Args, Debug)]
 #[command(
-    after_long_help = "Typical workflow:\n  1. `symora map summary` for entrypoints and major areas\n  2. `symora search symbols <query>` for rough workspace discovery\n  3. `symora map file <path>` for one file overview\n  4. `symora map related <path>` when you need adjacent files\n  5. `symora symbols <file>` or `symora refs <loc>` for precise follow-up\n"
+    after_long_help = "Typical workflow:\n  1. `symora map summary` for entrypoints and major areas\n  2. `symora search symbols <query>` for rough workspace discovery\n  3. `symora map file <path>` for one file, its tests, and its neighbours\n  4. `symora symbols <file>` or `symora refs <loc>` for precise follow-up\n"
 )]
 pub struct MapArgs {
     #[command(subcommand)]
@@ -43,25 +43,6 @@ pub enum MapCommand {
         /// Maximum related files to show
         #[arg(long, default_value = "8")]
         related_limit: usize,
-    },
-    /// Show map for a directory
-    Dir {
-        /// Directory path relative to project root
-        #[arg(default_value = ".")]
-        path: String,
-
-        /// Maximum child directories/files to show
-        #[arg(long, default_value = "12")]
-        limit: usize,
-    },
-    /// Suggest nearby files from names and directory layout
-    Related {
-        /// File path relative to project root
-        path: String,
-
-        /// Maximum related files to show
-        #[arg(long, default_value = "10")]
-        limit: usize,
     },
 }
 
@@ -158,37 +139,6 @@ struct MapFileOutput {
 }
 
 #[derive(Debug, Serialize)]
-struct MapDirOutput {
-    /// Present (true) only when the walk could not read part of the tree, so
-    /// the counts below are a lower bound.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    incomplete: bool,
-    /// The paths that flag stands for, scoped to this directory as the flag
-    /// is, so the shortfall can be checked rather than only noted.
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    unread_paths: Vec<String>,
-    path: String,
-    file_count: usize,
-    test_files: usize,
-    languages: Vec<LanguageMapOutput>,
-    child_directories: Section<DirectoryMapOutput>,
-    files: Section<DirFileOutput>,
-}
-
-#[derive(Debug, Serialize)]
-struct DirFileOutput {
-    path: String,
-    language: String,
-    test_file: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct MapRelatedOutput {
-    target: String,
-    related_files: Vec<RelatedFileOutput>,
-}
-
-#[derive(Debug, Serialize)]
 struct RelatedFileOutput {
     file: String,
     language: String,
@@ -227,8 +177,6 @@ pub async fn execute(args: MapArgs, app: &App) -> Result<()> {
             depth,
             related_limit,
         } => execute_file(app, &path, depth, related_limit).await,
-        MapCommand::Dir { path, limit } => execute_dir(app, &path, limit).await,
-        MapCommand::Related { path, limit } => execute_related(app, &path, limit).await,
     }
 }
 
@@ -384,128 +332,6 @@ async fn execute_file(app: &App, path: &str, depth: u32, related_limit: usize) -
     Ok(())
 }
 
-async fn execute_dir(app: &App, path: &str, limit: usize) -> Result<()> {
-    let ctx = &app.output;
-    let scan = scan_project_files(app);
-    let dir = normalize_dir_arg(path);
-
-    let records_in_dir: Vec<_> = scan
-        .records
-        .iter()
-        .filter(|r| is_under_dir(&r.rel_path, &dir))
-        .cloned()
-        .collect();
-
-    // "No source files here" is a claim about the directory, and a walk that
-    // could not enter part of it never learned that. Saying so would turn a
-    // permission problem into a fact about the code.
-    if records_in_dir.is_empty() && scan.missed_anything_at(&app.root().join(&dir)) {
-        ctx.print_error(
-            OutputError::new(
-                crate::cli::errors::ErrorCode::Io,
-                format!(
-                "Directory could not be read whole, so it has no readable source files to list: {}",
-                    if dir.is_empty() { "." } else { &dir }
-                ),
-            )
-            .with_hint("Check the permissions on that directory and retry."),
-        );
-        return Ok(());
-    }
-
-    if records_in_dir.is_empty() {
-        ctx.print_error(OutputError::not_found(format!(
-            "Directory has no indexed source files: {}",
-            path
-        )));
-        return Ok(());
-    }
-
-    let mut by_language: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    let mut child_dirs: HashMap<String, (usize, usize)> = HashMap::new();
-
-    for record in &records_in_dir {
-        let entry = by_language
-            .entry(record.language.lsp_id().to_string())
-            .or_insert((0, 0));
-        entry.0 += 1;
-        if record.is_test {
-            entry.1 += 1;
-        }
-
-        if let Some(child) = immediate_child_dir(&dir, &record.rel_path) {
-            let child_entry = child_dirs.entry(child).or_insert((0, 0));
-            child_entry.0 += 1;
-            if record.is_test {
-                child_entry.1 += 1;
-            }
-        }
-    }
-
-    let languages = by_language
-        .into_iter()
-        .map(|(language, (file_count, test_files))| LanguageMapOutput {
-            language,
-            file_count,
-            test_files,
-        })
-        .collect();
-
-    let mut child_directories: Vec<_> = child_dirs
-        .into_iter()
-        .map(|(path, (file_count, test_files))| DirectoryMapOutput {
-            path,
-            file_count,
-            test_files,
-        })
-        .collect();
-    child_directories.sort_by(|a, b| {
-        b.file_count
-            .cmp(&a.file_count)
-            .then_with(|| a.path.cmp(&b.path))
-    });
-
-    let mut files: Vec<_> = records_in_dir
-        .iter()
-        .filter(|r| immediate_child_dir(&dir, &r.rel_path).is_none())
-        .map(|r| DirFileOutput {
-            path: r.rel_path.clone(),
-            language: r.language.lsp_id().to_string(),
-            test_file: r.is_test,
-        })
-        .collect();
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let unread_paths = scan.unread_at(ctx, &app.root().join(&dir));
-    ctx.print_success(MapDirOutput {
-        incomplete: !unread_paths.is_empty(),
-        unread_paths,
-        path: if dir.is_empty() { ".".to_string() } else { dir },
-        file_count: records_in_dir.len(),
-        test_files: records_in_dir.iter().filter(|r| r.is_test).count(),
-        languages,
-        child_directories: limited(child_directories, limit),
-        files: limited(files, limit),
-    });
-    Ok(())
-}
-
-async fn execute_related(app: &App, path: &str, limit: usize) -> Result<()> {
-    let ctx = &app.output;
-    let scan = scan_project_files(app);
-    let records = scan.records.clone();
-    let Some(target) = find_record(&records, path, app.root()) else {
-        ctx.print_error(scan.missing_target(app.root(), path));
-        return Ok(());
-    };
-
-    ctx.print_success(MapRelatedOutput {
-        target: target.rel_path.clone(),
-        related_files: collect_related_files(&target, &records, limit),
-    });
-    Ok(())
-}
-
 fn scan_project_files(app: &App) -> ProjectScan {
     let extensions: Vec<&str> = Language::all()
         .into_iter()
@@ -530,7 +356,7 @@ fn scan_project_files(app: &App) -> ProjectScan {
 /// `map`'s counts are read as facts about the project — a language absent from
 /// `languages` is taken to mean the project has none — so a walk that could
 /// not enter part of the tree has to say so. Paths rather than a tally because
-/// `map dir` answers about one subtree: a count alone would mark it incomplete
+/// `map file` answers about one file: a count alone would mark it incomplete
 /// for a failure that happened somewhere else entirely.
 struct ProjectScan {
     records: Vec<FileRecord>,
@@ -642,33 +468,6 @@ fn normalize_path_arg(input: &str, root: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
-}
-
-fn normalize_dir_arg(input: &str) -> String {
-    let trimmed = input.trim_matches('/');
-    if trimmed == "." || trimmed.is_empty() {
-        String::new()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn is_under_dir(rel_path: &str, dir: &str) -> bool {
-    dir.is_empty() || rel_path == dir || rel_path.starts_with(&format!("{dir}/"))
-}
-
-fn immediate_child_dir(dir: &str, rel_path: &str) -> Option<String> {
-    let rest = if dir.is_empty() {
-        rel_path
-    } else {
-        rel_path.strip_prefix(&format!("{dir}/"))?
-    };
-    let (first, _) = rest.split_once('/')?;
-    Some(if dir.is_empty() {
-        first.to_string()
-    } else {
-        format!("{dir}/{first}")
-    })
 }
 
 fn detect_entrypoints(records: &[&FileRecord]) -> Vec<EntryPointOutput> {
@@ -967,7 +766,7 @@ fn map_summary_next_commands(
     }
     if let Some(dir) = top_directories.first() {
         commands.push(format!(
-            "symora map dir --limit 10 -- {}",
+            "symora pack --tokens 4000 --focus={}",
             shell_arg(&dir.path)
         ));
     }
@@ -1015,25 +814,6 @@ mod tests {
             blocked.missing_target(root, "notes.txt").code,
             crate::cli::errors::ErrorCode::Io
         );
-    }
-
-    #[test]
-    fn normalizes_dir_arg() {
-        assert_eq!(normalize_dir_arg("."), "");
-        assert_eq!(normalize_dir_arg("src/"), "src");
-    }
-
-    #[test]
-    fn finds_immediate_child_dir() {
-        assert_eq!(
-            immediate_child_dir("", "src/cli/mod.rs"),
-            Some("src".to_string())
-        );
-        assert_eq!(
-            immediate_child_dir("src", "src/cli/mod.rs"),
-            Some("src/cli".to_string())
-        );
-        assert_eq!(immediate_child_dir("src", "src/main.rs"), None);
     }
 
     #[test]
