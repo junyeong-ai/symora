@@ -387,7 +387,6 @@ async fn run(command: EditCommand, app: &App) -> Result<()> {
 
 /// Shared tail for symbol-targeted line edits: resolve the span with the
 /// stale-range guard, splice, emit one `EditOutput`, refresh the index.
-#[allow(clippy::too_many_arguments)]
 async fn symbol_edit(
     app: &App,
     operation: &'static str,
