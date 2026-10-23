@@ -21,6 +21,12 @@ pub struct RenameArgs {
     /// Preview changes without applying
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Apply although the language server cannot confirm workspace readiness
+    /// (`indexing: unconfirmed`), after reviewing a `--dry-run`; the response
+    /// keeps the marker. A readiness wait that timed out is still refused.
+    #[arg(long)]
+    pub accept_unconfirmed: bool,
 }
 
 #[derive(Serialize)]
@@ -62,7 +68,9 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
         }
     };
 
-    if let Some(refusal) = refuse_partial_rename(answer.indexing, args.dry_run) {
+    if let Some(refusal) =
+        refuse_partial_rename(answer.indexing, args.dry_run, args.accept_unconfirmed)
+    {
         ctx.print_error(refusal);
         return Ok(());
     }
@@ -105,17 +113,7 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
                         dry_run: args.dry_run,
                         affected_files: changes.len(),
                         changes,
-                        message: if args.dry_run {
-                            Some(match answer.indexing {
-                                Some(_) => "Preview only. Workspace readiness was not confirmed; \
-                                            application is refused."
-                                    .to_string(),
-                                None => "Preview only. Run without --dry-run to apply changes."
-                                    .to_string(),
-                            })
-                        } else {
-                            None
-                        },
+                        message: rename_message(args.dry_run, answer.indexing).map(str::to_string),
                         indexing: answer.indexing,
                     };
                     ctx.print_success(response);
@@ -133,9 +131,16 @@ pub async fn execute(args: RenameArgs, app: &App) -> Result<()> {
 /// sites and leaves the rest — a broken tree the disclosure cannot undo.
 /// A preview still runs: it shows what has been computed so far, marked as
 /// the lower bound it is.
+///
+/// The two degradations differ in what can settle them. A timed-out wait is
+/// one a retry can still see confirmed, so it is never applied. An
+/// unconfirmed one is usually a server with no readiness channel at all,
+/// where no retry ever confirms, so the caller may accept it once they have
+/// reviewed the preview.
 fn refuse_partial_rename(
     indexing: Option<IndexingDegradation>,
     dry_run: bool,
+    accept_unconfirmed: bool,
 ) -> Option<OutputError> {
     let degradation = indexing.filter(|_| !dry_run)?;
     let hint = match degradation {
@@ -143,9 +148,11 @@ fn refuse_partial_rename(
             "Use `--dry-run` to inspect the edits. The readiness wait exhausted its budget; \
              retrying may help when the language server subsequently confirms readiness."
         }
+        IndexingDegradation::Unconfirmed if accept_unconfirmed => return None,
         IndexingDegradation::Unconfirmed => {
-            "Use `--dry-run` to inspect the edits. The language server has not confirmed \
-             workspace readiness; retrying alone does not establish completeness."
+            "Use `--dry-run` to inspect the edits, then apply them with `--accept-unconfirmed`. \
+             The language server has not confirmed workspace readiness; retrying alone does \
+             not establish completeness."
         }
     };
     Some(
@@ -156,6 +163,28 @@ fn refuse_partial_rename(
         ))
         .with_hint(hint),
     )
+}
+
+/// What a rename that went through says about itself: a preview names how
+/// its edits can be applied, and an application the server could not confirm
+/// names what is left to check.
+fn rename_message(dry_run: bool, indexing: Option<IndexingDegradation>) -> Option<&'static str> {
+    match (dry_run, indexing) {
+        (true, None) => Some("Preview only. Run without --dry-run to apply changes."),
+        (true, Some(IndexingDegradation::Unconfirmed)) => Some(
+            "Preview only. Workspace readiness was not confirmed; review the edits, then apply \
+             them with --accept-unconfirmed.",
+        ),
+        (true, Some(IndexingDegradation::TimedOut)) => Some(
+            "Preview only. The readiness wait timed out; application is refused until a retry \
+             confirms readiness.",
+        ),
+        (false, Some(_)) => Some(
+            "Applied without confirmed workspace readiness; check that no reference kept the \
+             old name.",
+        ),
+        (false, None) => None,
+    }
 }
 
 async fn get_symbol_name_at_position(app: &App, loc: &ParsedLocation) -> Option<String> {
@@ -187,17 +216,24 @@ mod tests {
     use crate::cli::errors::ErrorCode;
 
     #[test]
-    fn unverified_rename_edits_are_preview_only() {
+    fn unverified_rename_edits_are_preview_only_unless_an_unconfirmed_one_is_accepted() {
         for degradation in [
             IndexingDegradation::TimedOut,
             IndexingDegradation::Unconfirmed,
         ] {
-            let error = refuse_partial_rename(Some(degradation), false).unwrap();
+            let error = refuse_partial_rename(Some(degradation), false, false).unwrap();
             assert_eq!(error.code, ErrorCode::PreconditionFailed);
             assert!(error.message.contains(degradation.as_str()));
-            assert!(refuse_partial_rename(Some(degradation), true).is_none());
+            assert!(refuse_partial_rename(Some(degradation), true, false).is_none());
         }
-        assert!(refuse_partial_rename(None, false).is_none());
-        assert!(refuse_partial_rename(None, true).is_none());
+        assert!(
+            refuse_partial_rename(Some(IndexingDegradation::Unconfirmed), false, true).is_none()
+        );
+        assert!(
+            refuse_partial_rename(Some(IndexingDegradation::TimedOut), false, true).is_some(),
+            "a wait a retry can still settle is never accepted"
+        );
+        assert!(refuse_partial_rename(None, false, false).is_none());
+        assert!(refuse_partial_rename(None, true, false).is_none());
     }
 }

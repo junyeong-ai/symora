@@ -629,7 +629,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "rename_symbol",
             "LSP rename for the symbol at file:line:column. Returns the affected \
                           file list and per-file edit count. Set dry_run=true to preview \
-                          without writing. Application requires confirmed workspace readiness. \
+                          without writing. Application requires confirmed workspace readiness \
+                          unless accept_unconfirmed is set after reviewing a preview. \
                           ⚠ Mutates source files when dry_run is false.",
             with_required(
                 with_extra(
@@ -640,6 +641,13 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "dry_run",
                             "boolean",
                             "Preview the rename without writing (default false)",
+                        ),
+                        (
+                            "accept_unconfirmed",
+                            "boolean",
+                            "Apply although the server cannot confirm workspace readiness \
+                             (indexing: unconfirmed); review a dry_run first. A timed-out \
+                             readiness wait is still refused (default false)",
                         ),
                     ],
                 ),

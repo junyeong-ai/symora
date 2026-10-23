@@ -383,7 +383,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 
 
-요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 모두 실제 적용을 거부합니다. `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 현재 Symora는 rust-analyzer의 정상 상태와 작업 완료를 함께 나타내는 알림을 인식합니다. 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
+요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 상태에서 실제 적용을 거부하며, `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 검토한 `unconfirmed` 편집 집합은 `--accept-unconfirmed`로 적용하며, 응답에는 그 표지가 그대로 남습니다. `timed_out`은 재시도로 준비 완료가 확인될 수 있으므로 계속 거부합니다. 현재 Symora는 rust-analyzer의 정상 상태와 작업 완료를 함께 나타내는 알림을 인식합니다. 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
 
 ## 검색 인덱스
 
@@ -560,7 +560,7 @@ symora daemon start | stop | restart | status
 | `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 인덱스 범위 밖에서 심볼 검색은 language server를 조회할 수 있고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart --project`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. daemon이 상속한 환경을 바꿨다면 전체 `symora daemon restart`가 필요합니다. |
 | 검색 결과의 `coverage_gaps` | 그 언어는 답에 들어 있지 않습니다. `reason: "unavailable"`이면 `message`에 실패 원인의 첫 줄(서버가 `initialize`를 거부했다면 그 이유)이 실리고, hint와 `next_commands`는 조회가 실패한 언어부터 다룹니다. |
-| `indexing: "timed_out"` / `"unconfirmed"` | 해당 요청에서 워크스페이스 준비 상태를 확인하지 못했습니다. 목록은 일부 결과일 수 있으며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 서버 작업이 끝난 뒤 재시도할 수 있지만, 지원하는 준비 완료 신호가 없는 서버는 계속 미확인 상태입니다. `rename`은 적용을 거부하며, 현재 편집 집합은 `--dry-run`으로 확인할 수 있습니다. |
+| `indexing: "timed_out"` / `"unconfirmed"` | 해당 요청에서 워크스페이스 준비 상태를 확인하지 못했습니다. 목록은 일부 결과일 수 있으며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 서버 작업이 끝난 뒤 재시도할 수 있지만, 지원하는 준비 완료 신호가 없는 서버는 계속 미확인 상태입니다. `rename`은 적용을 거부합니다. `--dry-run`으로 편집 집합을 확인한 뒤, `unconfirmed` 상태라면 `--accept-unconfirmed`로 적용할 수 있습니다. |
 | `incomplete: true` | count가 하한 — 답이 자기 소스가 가진 전부를 담지 못했습니다. 원인은 `hints`가 이름을 대고, 고칠 방법이 있으면 `next_commands`에 담깁니다. `unread_paths`가 함께 오면 그 경로들의 권한부터 확인하세요 — 읽히지 않는 경로에는 재빌드도 닿지 않습니다. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
 | `search index`의 `conflict` | 다른 프로세스가 인덱스를 다시 만드는 중 — 그대로 재시도. 절반만 적용된 상태는 남지 않습니다. |

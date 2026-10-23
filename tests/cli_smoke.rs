@@ -3838,17 +3838,69 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
     }
 }
 
+/// A Go project served by the scripted rename server in `mode`, which never
+/// confirms workspace readiness: `main.go` declares and calls `abc`, and
+/// `other.go` calls it too.
+#[cfg(unix)]
+struct UnconfirmedRename {
+    root: tempfile::TempDir,
+    original: &'static str,
+    other: &'static str,
+}
+
+#[cfg(unix)]
+impl UnconfirmedRename {
+    fn served_by(mode: &str) -> Option<Self> {
+        if !Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            eprintln!("rename protocol fixture requires python3");
+            return None;
+        }
+        let fixture = Self {
+            root: tempfile::tempdir().unwrap(),
+            original: "package main\nfunc abc() {}\nfunc caller() { abc() }\n",
+            other: "package main\nfunc other() { abc() }\n",
+        };
+        let root = fixture.root.path();
+        std::fs::write(fixture.source(), fixture.original).unwrap();
+        std::fs::write(root.join("other.go"), fixture.other).unwrap();
+        std::fs::write(root.join("go.mod"), "module example.com/fixture\n").unwrap();
+        std::fs::create_dir(root.join(".symora")).unwrap();
+        let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/lsp/code_action_server.py");
+        let config = serde_json::json!({"lsp": {"servers": {"go": {
+            "command": "python3", "args": [server, fixture.source(), mode]
+        }}}});
+        std::fs::write(
+            root.join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        Some(fixture)
+    }
+
+    fn source(&self) -> std::path::PathBuf {
+        self.root.path().join("main.go")
+    }
+
+    fn assert_untouched(&self) {
+        assert_eq!(
+            std::fs::read_to_string(self.source()).unwrap(),
+            self.original
+        );
+        assert_eq!(
+            std::fs::read_to_string(self.root.path().join("other.go")).unwrap(),
+            self.other
+        );
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn unconfirmed_rename_previews_the_edit_set_without_applying_it() {
-    if !Command::new("python3")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("rename protocol fixture requires python3");
-        return;
-    }
     for mode in [
         "unconfirmed-rename",
         "warning-rename",
@@ -3856,29 +3908,12 @@ fn unconfirmed_rename_previews_the_edit_set_without_applying_it() {
         "busy-rename",
         "late-ready-rename",
     ] {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("main.go");
-        let original = "package main\nfunc abc() {}\nfunc caller() { abc() }\n";
-        let other = "package main\nfunc other() { abc() }\n";
-        std::fs::write(&source, original).unwrap();
-        std::fs::write(root.path().join("other.go"), other).unwrap();
-        std::fs::write(root.path().join("go.mod"), "module example.com/fixture\n").unwrap();
-        std::fs::create_dir(root.path().join(".symora")).unwrap();
-        let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/lsp/code_action_server.py");
-        let config = serde_json::json!({"lsp": {"servers": {"go": {
-            "command": "python3", "args": [server, source, mode]
-        }}}});
-        std::fs::write(
-            root.path().join(".symora/config.toml"),
-            toml::to_string(&config).unwrap(),
-        )
-        .unwrap();
+        let Some(fixture) = UnconfirmedRename::served_by(mode) else {
+            return;
+        };
+        let root = fixture.root.path();
 
-        let preview = json_ok(
-            root.path(),
-            &["rename", "main.go:3:17", "Renamed", "--dry-run"],
-        );
+        let preview = json_ok(root, &["rename", "main.go:3:17", "Renamed", "--dry-run"]);
         assert_eq!(preview["affected_files"], 1, "{preview}");
         assert_eq!(preview["indexing"], "unconfirmed", "{preview}");
         assert_eq!(preview["dry_run"], true, "{preview}");
@@ -3887,11 +3922,12 @@ fn unconfirmed_rename_previews_the_edit_set_without_applying_it() {
             preview["message"]
                 .as_str()
                 .unwrap()
-                .contains("application is refused")
+                .contains("--accept-unconfirmed"),
+            "{preview}"
         );
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+        fixture.assert_untouched();
 
-        let output = run_in(root.path(), &["rename", "main.go:3:17", "Renamed"]);
+        let output = run_in(root, &["rename", "main.go:3:17", "Renamed"]);
         let refusal: serde_json::Value = common::parse_response(&output.stdout).unwrap();
         assert!(!output.status.success(), "{refusal}");
         assert_eq!(refusal["error"]["code"], "precondition_failed");
@@ -3901,12 +3937,29 @@ fn unconfirmed_rename_previews_the_edit_set_without_applying_it() {
                 .unwrap()
                 .contains("unconfirmed")
         );
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("other.go")).unwrap(),
-            other
-        );
+        fixture.assert_untouched();
     }
+}
+
+/// Accepting an unconfirmed edit set applies exactly the set the preview
+/// showed and keeps the marker that says how far it can be trusted.
+#[test]
+#[cfg(unix)]
+fn an_accepted_unconfirmed_rename_applies_and_keeps_its_marker() {
+    let Some(fixture) = UnconfirmedRename::served_by("unconfirmed-rename") else {
+        return;
+    };
+    let applied = json_ok(
+        fixture.root.path(),
+        &["rename", "main.go:3:17", "Renamed", "--accept-unconfirmed"],
+    );
+    assert_eq!(applied["dry_run"], false, "{applied}");
+    assert_eq!(applied["affected_files"], 1, "{applied}");
+    assert_eq!(applied["indexing"], "unconfirmed", "{applied}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.source()).unwrap(),
+        "package main\nfunc Renamed() {}\nfunc caller() { Renamed() }\n"
+    );
 }
 
 #[test]
