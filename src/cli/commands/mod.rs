@@ -1,5 +1,4 @@
 pub mod actions;
-pub mod bench;
 pub mod callees;
 pub mod callers;
 pub mod common;

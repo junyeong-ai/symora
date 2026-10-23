@@ -306,7 +306,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Search(args) => commands::search::execute(args, app).await,
         Commands::Map(args) => commands::map::execute(args, app).await,
         Commands::Pack(args) => commands::pack::execute(args, app).await,
-        Commands::Bench(args) => commands::bench::execute(args, app).await,
 
         // Edit
         Commands::Edit(args) => commands::edit::execute(args, app).await,

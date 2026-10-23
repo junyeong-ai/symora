@@ -555,7 +555,7 @@ symora daemon start | stop | restart | status
 | **Analyze** | `context`, `usage`, `impact`, `diff-impact` |
 | **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
 | **Diagnose** | `diagnostics` |
-| **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp`, `bench` |
+| **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
 
 Run `symora <command> --help` for any command's flags. Output fields are described in [the output contract](#the-output-contract) and in the output schemas `symora mcp tools` prints.
 

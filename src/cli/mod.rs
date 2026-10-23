@@ -27,13 +27,13 @@ use clap::{Parser, Subcommand};
 #[cfg(unix)]
 use commands::daemon::DaemonArgs;
 use commands::{
-    actions::ActionsArgs, bench::BenchArgs, callees::CalleesArgs, callers::CallersArgs,
-    config::ConfigArgs, context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs,
-    diff_impact::DiffImpactArgs, doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs,
-    impact::ImpactArgs, implementations::ImplementationsArgs, init::InitArgs, map::MapArgs,
-    mcp::McpArgs, pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs,
-    selfcmd::SelfcmdArgs, setup::SetupArgs, status::StatusArgs, subtypes::SubtypesArgs,
-    supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
+    actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, config::ConfigArgs,
+    context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
+    doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs, impact::ImpactArgs,
+    implementations::ImplementationsArgs, init::InitArgs, map::MapArgs, mcp::McpArgs,
+    pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs,
+    setup::SetupArgs, status::StatusArgs, subtypes::SubtypesArgs, supertypes::SupertypesArgs,
+    symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -195,8 +195,6 @@ pub enum Commands {
     Map(MapArgs),
     /// Build a token-budgeted context pack ranked by an import-graph PageRank
     Pack(PackArgs),
-    /// Measure end-to-end latency of LSP-less hot paths on this repository
-    Bench(BenchArgs),
 
     // Edit
     /// Source mutations: replace-body, insert-before/after, delete, replace, pattern

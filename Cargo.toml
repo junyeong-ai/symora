@@ -107,19 +107,6 @@ tikv-jemallocator = "0.7.0"
 [dev-dependencies]
 tokio-test = "0.4.6"
 insta = { version = "1.49.0", features = ["json", "redactions"] }
-criterion = { version = "0.8.2", features = ["html_reports"] }
-
-[[bench]]
-name = "pack"
-harness = false
-
-[[bench]]
-name = "errors"
-harness = false
-
-[[bench]]
-name = "blast_radius"
-harness = false
 
 [profile.release]
 lto = true
