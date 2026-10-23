@@ -95,7 +95,6 @@ where
         OutputOptions {
             format: OutputFormat::Compact,
             quiet: false,
-            token_estimate: false,
         },
     );
     // Grab the failure-flag handle before the scoped App moves into the

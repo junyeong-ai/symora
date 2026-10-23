@@ -55,8 +55,4 @@ pub mod defaults {
 pub mod env {
     /// Set to `"1"` to disable daemon usage for one invocation.
     pub const NO_DAEMON: &str = "SYMORA_NO_DAEMON";
-
-    /// Internal: the workspace dispatcher sets this in spawned children
-    /// to force compact JSON for the parent envelope.
-    pub const FORMAT_OVERRIDE: &str = "SYMORA_FORMAT_OVERRIDE";
 }

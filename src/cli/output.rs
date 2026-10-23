@@ -20,7 +20,6 @@ pub enum OutputFormat {
 pub struct OutputOptions {
     pub format: OutputFormat,
     pub quiet: bool,
-    pub token_estimate: bool,
 }
 
 /// Sink the formatted JSON line is written to.
@@ -258,20 +257,13 @@ impl OutputContext {
 
     /// Emit raw text output (used by markdown / plain-text shapes that bypass
     /// the JSON contract — pack's `--shape markdown` is the canonical case).
-    /// `quiet` still suppresses output; `token-estimate` reports against the
-    /// full text on stderr.
+    /// `quiet` still suppresses output.
     pub fn print_text(&self, text: &str) {
         if self.options.quiet {
             return;
         }
         for line in text.split_inclusive('\n') {
             self.sink.write_line(line.trim_end_matches('\n'));
-        }
-        if self.options.token_estimate {
-            eprintln!(
-                "[symora token-estimate≈{}]",
-                crate::utils::estimate_tokens(text)
-            );
         }
     }
 
@@ -282,15 +274,7 @@ impl OutputContext {
         };
 
         match serialized {
-            Ok(json) => {
-                self.sink.write_line(&json);
-                if self.options.token_estimate {
-                    eprintln!(
-                        "[symora token-estimate≈{}]",
-                        crate::utils::estimate_tokens(&json)
-                    );
-                }
-            }
+            Ok(json) => self.sink.write_line(&json),
             Err(e) => eprintln!("Failed to serialize output: {e}"),
         }
     }

@@ -99,27 +99,15 @@ fn parse_cli() -> anyhow::Result<Cli> {
 async fn async_main() -> anyhow::Result<()> {
     let mut cli = parse_cli()?;
 
-    let format =
-        if std::env::var(symora::constants::env::FORMAT_OVERRIDE).as_deref() == Ok("compact") {
-            symora::cli::OutputFormat::Compact
-        } else {
-            cli.format
-        };
-
     let output_options = OutputOptions {
-        format,
+        format: cli.format,
         quiet: cli.quiet,
-        token_estimate: cli.token_estimate,
     };
 
     if let Some(requirement) = cli.check_version.as_deref()
         && let Err(e) = symora::cli::check_version(requirement)
     {
         refuse(e);
-    }
-
-    if let Some(name) = cli.workspace.as_deref() {
-        return run_workspace_dispatch(name, output_options, &mut cli.command).await;
     }
 
     if let Some(input) = read_edit_stdin(&mut cli.command)? {
@@ -202,44 +190,6 @@ fn read_edit_stdin(command: &mut Commands) -> anyhow::Result<Option<String>> {
     } else {
         Ok(None)
     }
-}
-
-async fn run_workspace_dispatch(
-    name: &str,
-    output_options: OutputOptions,
-    command: &mut Commands,
-) -> anyhow::Result<()> {
-    use symora::cli::OutputContext;
-    use symora::cli::workspace::{WorkspaceConfig, run_workspace, strip_workspace_flag};
-
-    let ws = WorkspaceConfig::load(name)
-        .map_err(|e| anyhow::anyhow!("Failed to load workspace '{name}': {e}"))?;
-    let exe = std::env::current_exe()?;
-    let argv: Vec<String> = std::env::args().collect();
-    let forwarded = strip_workspace_flag(argv).into_iter().skip(1).collect();
-
-    let input = read_edit_stdin(command)?;
-    let envelope = run_workspace(ws, &exe, forwarded, input).await;
-    let any_failed = envelope
-        .get("items")
-        .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().any(|entry| entry.get("error").is_some()))
-        .unwrap_or(false);
-
-    let cwd = std::env::current_dir()?;
-    let output_options = OutputOptions {
-        quiet: output_options.quiet && !any_failed,
-        ..output_options
-    };
-    OutputContext::new(cwd, output_options).print_success(envelope);
-
-    if any_failed {
-        // CI / `set -e` users need a non-zero exit when at least one root
-        // failed, even though the JSON envelope reports both successes and
-        // failures together.
-        std::process::exit(2);
-    }
-    Ok(())
 }
 
 async fn shutdown_signal() {
