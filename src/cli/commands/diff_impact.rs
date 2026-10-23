@@ -21,8 +21,8 @@ use crate::services::store::{SymbolExtractor, TypeHeaders};
 
 #[derive(Args, Debug)]
 pub struct DiffImpactArgs {
-    /// The commit the working tree is compared with — one revision, not a
-    /// range (default: HEAD)
+    /// Revision the working tree is compared with: one revision, not a range.
+    /// For a branch's own changes, pass `$(git merge-base main HEAD)`
     #[arg(default_value = "HEAD")]
     pub revision: String,
 

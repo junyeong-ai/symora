@@ -37,27 +37,18 @@ use commands::{
 const LONG_ABOUT: &str = r#"
 Symora - Symbol-centric code intelligence CLI for AI coding agents
 
-Provides LSP-powered code intelligence for codebase navigation,
-semantic analysis, and code search. Built for AI coding agents.
-
-QUICK START:
-  symora symbols src/main.rs     List symbols in file
-  symora refs src/main.rs:10:5   Find references
-  symora callers src/main.rs:10  Find who calls this
+Answers navigation, impact, and edit questions from language servers, a
+SQLite symbol/content index, and tree-sitter grammars, as JSON on stdout.
 
 CHOOSE A QUERY:
-  Known file or symbol: `symbols <file>` or `symbols <file> --symbol <path>`
-  Unknown name or text: `search symbols <query>` or `search content <query>`
-  Project orientation: optional `map summary` or `pack --tokens 4000`
-  Exact semantic follow-up: `refs <loc>`, `callers <loc>`, or `context <loc>`
+  Known file or symbol:   symbols <file> [--symbol <path>]
+  Unknown name or text:   search symbols <query> | search content <query>
+  Who uses it:            refs <loc> | callers <loc> | context <loc>
+  What a change reaches:  impact <loc> | diff-impact [REVISION]
+  Orientation:            map summary | pack --tokens 4000
+  Edit by declaration:    edit replace-body <file> --symbol <path> --dry-run
 
-EXAMPLES:
-  symora symbols src/lib.rs --body          Include source code
-  symora refs src/api.rs:25:10 --snippet    Include code snippets
-  symora context src/main.rs:50 --all       Get full context
-  symora impact src/api.rs:30:5             Analyze change impact
-
-For more: https://github.com/junyeong-ai/symora
+<loc> is file:line[:column], 1-indexed. Run `symora <command> --help` for its options.
 "#;
 
 #[derive(Parser, Debug)]
@@ -69,31 +60,29 @@ pub struct Cli {
     pub command: Commands,
 
     /// Output format [default: pretty on a terminal, compact otherwise]
-    #[arg(long, value_enum, global = true)]
+    #[arg(long, value_enum, global = true, help_heading = GLOBAL)]
     pub format: Option<OutputFormat>,
 
-    /// Refuse to run unless this binary's version satisfies the SemVer
-    /// requirement (e.g. `0.21`, `>=0.21,<0.22`). A pinned caller sets it so a
-    /// version whose output it was not written against fails loudly instead of
-    /// being parsed as if it were.
-    #[arg(long, global = true, value_name = "REQ")]
+    /// Refuse to run unless this binary satisfies the SemVer requirement,
+    /// e.g. `0.34` or `>=0.34,<0.35`
+    #[arg(long, global = true, value_name = "REQ", help_heading = GLOBAL)]
     pub check_version: Option<String>,
 
-    /// Answer only from the index and the compiled-in grammars, never a
-    /// language server, so which servers a machine has installed cannot
-    /// change the answer. A command with no such source fails instead of
-    /// degrading to a weaker answer wearing the same shape.
-    #[arg(long, global = true)]
+    /// Answer only from the index and compiled-in grammars, never a language
+    /// server; a command that needs one fails as `unsupported`
+    #[arg(long, global = true, help_heading = GLOBAL)]
     pub deterministic: bool,
 
-    /// Quiet mode (errors only)
-    #[arg(short, long, global = true)]
+    /// Print errors only
+    #[arg(short, long, global = true, help_heading = GLOBAL)]
     pub quiet: bool,
 
-    /// Enable debug logging
-    #[arg(short, long, global = true)]
+    /// Log debug detail to stderr
+    #[arg(short, long, global = true, help_heading = GLOBAL)]
     pub verbose: bool,
 }
+
+const GLOBAL: &str = "Global Options";
 
 /// Hold the running binary to a caller's pinned requirement.
 ///
@@ -174,7 +163,7 @@ pub enum Commands {
     // Search
     /// Search rough symbol/content matches when you do not know the exact file yet
     Search(SearchArgs),
-    /// Explore project structure, file overviews, and related files
+    /// Project overview, or one file's declarations, tests, and neighbours
     Map(MapArgs),
     /// Build a token-budgeted context pack ranked by an import-graph PageRank
     Pack(PackArgs),
