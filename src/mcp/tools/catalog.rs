@@ -122,23 +122,25 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "Structural search by tree-sitter query — the grammar's own node shapes, not \
                           text. Answers for languages no symbol extractor or language server \
                           covers, and finds forms a name cannot express.",
-            schema_object(
-                &[
-                    (
-                        "pattern",
-                        "string",
-                        "Tree-sitter query, e.g. \"(function_definition) @f\"",
-                    ),
-                    ("language", "string", "Language the grammar belongs to"),
-                    (
-                        "path",
-                        "string",
-                        "Optional project-relative file or directory to search, including hidden paths",
-                    ),
-                    ("limit", "integer", "Maximum results"),
-                ],
-                &["pattern", "language"],
-            ),
+            {
+                let mut schema = schema_object(
+                    &[
+                        (
+                            "pattern",
+                            "string",
+                            "Tree-sitter query, e.g. \"(function_definition) @f\"",
+                        ),
+                        ("language", "string", "Language the grammar belongs to"),
+                        ("limit", "integer", "Maximum results"),
+                    ],
+                    &["pattern", "language"],
+                );
+                schema["properties"]["path"] = serde_json::json!({
+                    "type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Project-relative files/directories to search, including hidden paths"
+                });
+                schema
+            },
         )
         .with_output_schema(section_output_schema(
             "Matches: file, start_line, end_line, start_column, end_column, text, captures",

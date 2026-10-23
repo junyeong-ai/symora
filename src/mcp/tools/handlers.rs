@@ -279,7 +279,7 @@ async fn run_check_language_support(args: Value, app: &App) -> Result<CapturedOu
 struct SearchAstInput {
     pattern: String,
     language: String,
-    path: Option<String>,
+    path: Option<Vec<std::path::PathBuf>>,
     limit: Option<usize>,
 }
 
@@ -291,7 +291,7 @@ async fn run_search_ast(args: Value, app: &App) -> Result<CapturedOutput> {
                 command: SearchCommand::Ast {
                     pattern: input.pattern,
                     language: input.language,
-                    path: input.path.map(|p| vec![std::path::PathBuf::from(p)]),
+                    path: input.path,
                     limit: input.limit,
                 },
             },
