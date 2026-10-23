@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # Async runtime — tracked on the latest tokio 1.x. Minor bumps are
 # semver-compatible and gated by the test suite; 2.0 is a deliberate migration.
-tokio = { version = "1.53.3", features = ["full", "process", "sync"] }
+tokio = { version = "1.54.1", features = ["full", "process", "sync"] }
 futures = "0.3.34"
 
 # CLI
@@ -65,7 +65,7 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-lua = "0.5"
 tree-sitter-kotlin-sg = "0.4.1"
 tree-sitter-swift = "0.7.4"
-tree-sitter-scala = "0.26.2"
+tree-sitter-scala = "0.26.3"
 tree-sitter-elixir = "0.3.5"
 tree-sitter-dart = "0.2.0"
 tree-sitter-hcl = "1.1.0"
@@ -84,7 +84,7 @@ globset = "0.4.20"
 # Workspace file watching: the client half of `workspace/didChangeWatchedFiles`.
 notify = "8.2.0"
 tempfile = "3.27"
-rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3.7.0", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 # HTTP transport for the MCP server (`symora mcp serve --transport http`).
 axum = { version = "0.8.9", default-features = false, features = ["json", "tokio", "http1"] }
