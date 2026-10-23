@@ -63,14 +63,7 @@ impl DefaultConfigService {
     }
 
     fn global_config_path() -> PathBuf {
-        // XDG standard: ~/.config/symora/config.toml
-        std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .ok()
-            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("symora")
-            .join("config.toml")
+        crate::services::dist::paths::config_dir().join("config.toml")
     }
 
     fn project_config_path(&self) -> PathBuf {
