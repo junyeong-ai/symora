@@ -21,7 +21,7 @@ use crate::cli::utils::extract_signature;
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
-use crate::services::store::{SymbolExtractor, SymbolSearchResult};
+use crate::services::store::SymbolSearchResult;
 
 #[derive(Args, Debug)]
 #[command(
@@ -335,12 +335,13 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
                 continue;
             }
         };
-        // Authoritativeness is PER-LANGUAGE: this is an index-primary answer, so
-        // an indexed language's LSP pass is enrichment over the authoritative
-        // index and its warmup marker is dropped, but an UNINDEXED language's LSP
-        // is its sole source — disclose only that, so a bare query spanning both
-        // still surfaces the unindexed language's timeout.
-        if !SymbolExtractor::is_supported(*language) {
+        // Authoritativeness is PER-LANGUAGE: where the index answered a
+        // language, the server's pass enriches authoritative rows and its warmup
+        // marker is dropped; for any other language — one with no extractor, or
+        // one an index that is not built or not readable did not answer — the
+        // server is the sole source, and its marker is what keeps a zero from
+        // reading as an absence.
+        if !covered.contains(language) {
             indexing = indexing.or(batch.indexing);
         }
         let mut batch = batch.data;
