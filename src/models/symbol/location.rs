@@ -100,14 +100,19 @@ impl Location {
         )
     }
 
-    /// Whether this location covers a position in `file`: from its start
-    /// through its end, or only its start when it has no end.
+    /// Whether this location covers a position in `file`.
     pub fn covers(&self, file: &Path, line: u32, column: u32) -> bool {
+        self.file == file && self.spans(line, column)
+    }
+
+    /// Whether a position lies within this location: from its start through
+    /// its end, or only its start when it has no end.
+    pub fn spans(&self, line: u32, column: u32) -> bool {
         let end = (
             self.end_line.unwrap_or(self.line),
             self.end_column.unwrap_or(self.column),
         );
-        self.file == file && self.effective_start() <= (line, column) && (line, column) <= end
+        self.effective_start() <= (line, column) && (line, column) <= end
     }
 }
 

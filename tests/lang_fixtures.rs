@@ -649,29 +649,24 @@ fn an_unbuilt_index_is_advised_when_pyright_answers_alone() {
         r#"{"include":["."]}"#,
     )
     .unwrap();
-    for search in [
-        &["search", "symbols", "target"][..],
-        &["symbols", "--name", "target"],
-    ] {
-        let output = symora()
-            .args(search)
-            .args(["--lang", "python", "--format", "compact"])
-            .current_dir(root.path())
-            .env("SYMORA_NO_DAEMON", "1")
-            .output()
-            .unwrap();
-        let result: Value = common::parse_response(&output.stdout).unwrap();
-        assert!(output.status.success(), "{search:?}: {result}");
-        assert_eq!(result["indexing"], "unconfirmed", "{search:?}: {result}");
-        assert!(
-            result["next_commands"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|command| command == "symora search index build"),
-            "{search:?}: {result}"
-        );
-    }
+    let output = symora()
+        .args(["search", "symbols", "target", "--lang", "python"])
+        .args(["--format", "compact"])
+        .current_dir(root.path())
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    let result: Value = common::parse_response(&output.stdout).unwrap();
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["indexing"], "unconfirmed", "{result}");
+    assert!(
+        result["next_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "symora search index build"),
+        "{result}"
+    );
 }
 
 #[test]

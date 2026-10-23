@@ -467,7 +467,7 @@ fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
     // "no languages" would be a claim the walk never got to make.
     assert_eq!(code_of(&["--format", "compact", "usage", "beta"]), "io");
     assert_eq!(
-        code_of(&["--format", "compact", "symbols", "--name", "beta"]),
+        code_of(&["--format", "compact", "search", "symbols", "beta"]),
         "io"
     );
     assert_eq!(
@@ -1002,20 +1002,20 @@ fn stale_speaks_only_for_the_files_behind_the_items_emitted() {
 
     let stale_of = |args: &[&str]| json_ok(root, args)["stale"].clone();
     assert_eq!(
-        stale_of(&["--format", "compact", "symbols", "--name", "Probe"]),
+        stale_of(&["--format", "compact", "search", "symbols", "Probe"]),
         serde_json::Value::Bool(true),
         "the answer holds the row whose file moved"
     );
     assert_eq!(
         stale_of(&[
-            "--format", "compact", "symbols", "--name", "Probe", "--kind", "struct"
+            "--format", "compact", "search", "symbols", "Probe", "--kind", "struct"
         ]),
         serde_json::Value::Null,
         "the only row left is backed by a file that never moved"
     );
     assert_eq!(
         stale_of(&[
-            "--format", "compact", "symbols", "--name", "Probe", "--kind", "function"
+            "--format", "compact", "search", "symbols", "Probe", "--kind", "function"
         ]),
         serde_json::Value::Bool(true),
         "and the row that did move still says so on its own"
@@ -1434,11 +1434,11 @@ fn pattern_previews_and_metadata_preserve_original_eof_and_line_endings() {
     }
 }
 
-/// A symbol found across the workspace takes its body from the same read the
-/// file form answers from, so it has one whether or not the file's server
-/// answers.
+/// A symbol found across the workspace takes its source from the same read
+/// `symbols <file>` answers from, so it has one whether or not the file's
+/// server answers.
 #[test]
-fn a_workspace_symbol_takes_its_body_from_whatever_reads_its_file() {
+fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("svc.py"),
@@ -1459,7 +1459,7 @@ fn a_workspace_symbol_takes_its_body_from_whatever_reads_its_file() {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let query = ["symbols", "--symbol", "Service/start", "--lang", "python"];
+    let query = ["search", "symbols", "Service/start", "--lang", "python"];
     let bodied = json_ok(dir.path(), &[&query[..], &["--body"]].concat());
     assert_eq!(
         bodied["items"][0]["body"], "    def start(self):\n        return 1",
@@ -1683,53 +1683,6 @@ fn a_body_read_changed_and_passed_back_keeps_its_decorator() {
         std::fs::read_to_string(root.join("m.py")).unwrap(),
         "import functools\n\n\n@functools.cache\ndef top():\n    return 3\n"
     );
-}
-
-/// A symbol-path answer merges the index with a live lookup, so each row says
-/// which one produced it — the word `search symbols` already uses. Without it
-/// a caller cannot tell a row the index vouches for from one a language server
-/// supplied, which is the difference between a checkable answer and a guess.
-#[test]
-fn a_merged_symbol_answer_names_each_row_producer() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("mod.py"),
-        "class Holder:\n    def existing(self):\n        pass\n",
-    )
-    .unwrap();
-    json_ok(dir.path(), &["search", "index", "build"]);
-
-    let page = json_ok(
-        dir.path(),
-        &["symbols", "--symbol", "Holder/existing", "--lang", "python"],
-    );
-    let rows = page["items"].as_array().expect("items");
-    assert!(!rows.is_empty(), "the index holds this symbol: {page}");
-    for row in rows {
-        assert!(
-            row["backend"].is_string(),
-            "a merged answer must name each row's producer: {page}"
-        );
-    }
-    assert_eq!(rows[0]["backend"], "index");
-
-    let confined = json_ok(
-        dir.path(),
-        &[
-            "symbols",
-            "--symbol",
-            "Holder/existing",
-            "--lang",
-            "python",
-            "--deterministic",
-        ],
-    );
-    for row in confined["items"].as_array().expect("items") {
-        assert_eq!(
-            row["backend"], "index",
-            "a confined answer holds no row a server supplied: {confined}"
-        );
-    }
 }
 
 /// Ranking orders an answer; it does not decide which declarations a caller
@@ -3565,67 +3518,6 @@ fn indexed_symbol_search_filters_canonical_and_alias_kinds() {
     }
 }
 
-/// The two symbol surfaces answer one question, so they order it one way. Two
-/// copies of the ranking had already drifted apart on which kinds are
-/// low-signal, which put the same symbol at the head of one answer and the
-/// tail of the other.
-#[test]
-fn both_symbol_surfaces_order_a_query_the_same_way() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("tests")).unwrap();
-    std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    std::fs::write(
-        dir.path().join("tests/test_store.py"),
-        "def store():\n    pass\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join("src/store.py"),
-        "class StoreService:\n    def store(self):\n        pass\n",
-    )
-    .unwrap();
-    json_ok(dir.path(), &["search", "index", "build"]);
-
-    let searched = json_ok(
-        dir.path(),
-        &[
-            "search",
-            "symbols",
-            "store",
-            "--lang",
-            "python",
-            "--deterministic",
-        ],
-    );
-    let named = json_ok(
-        dir.path(),
-        &[
-            "symbols",
-            "--name",
-            "store",
-            "--lang",
-            "python",
-            "--deterministic",
-        ],
-    );
-
-    let lead = |v: &serde_json::Value, file_at: fn(&serde_json::Value) -> Option<&str>| {
-        v["items"]
-            .as_array()
-            .expect("items")
-            .first()
-            .and_then(file_at)
-            .map(str::to_string)
-    };
-    let searched_lead = lead(&searched, |i| i["file"].as_str());
-    let named_lead = lead(&named, |i| i["location"]["file"].as_str());
-    assert!(searched_lead.is_some(), "search found nothing: {searched}");
-    assert_eq!(
-        searched_lead, named_lead,
-        "one question, two orders: {searched} vs {named}"
-    );
-}
-
 /// A row's published relevance is the value that ordered it, so a caller can
 /// cut a tail by number instead of guessing where the answer stops being
 /// good. Two numbers — one deciding the order, another printed beside it —
@@ -3884,21 +3776,6 @@ fn positive_index_results_disclose_new_files_of_their_language_until_rebuilt() {
         );
         assert_eq!(result["count"], 2, "{result}");
     }
-}
-
-#[test]
-fn file_and_workspace_name_search_cannot_be_mixed() {
-    let result = run(&[
-        "symbols",
-        "src/main.rs",
-        "--name",
-        "main",
-        "--format",
-        "compact",
-    ]);
-    assert!(!result.status.success());
-    let payload: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-    assert!(payload.get("error").is_some());
 }
 
 #[test]

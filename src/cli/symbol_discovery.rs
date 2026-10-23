@@ -109,45 +109,6 @@ pub fn sort_by_rank<T: Rankable>(rows: &mut [T], query: &str, test_scope: &TestS
     });
 }
 
-pub fn symbol_lookup_hints(
-    path_mode: bool,
-    lang_is_none: bool,
-    no_kind_filter: bool,
-    truncated: bool,
-    result_count: usize,
-    limit: usize,
-) -> Vec<String> {
-    if result_count <= 1 && !truncated {
-        return Vec::new();
-    }
-
-    let mut hints = Vec::new();
-    // Only when the emission cap is what bound the list. A count above the
-    // rows can also come from matches noise suppression removed, or from a
-    // source total larger than the rows in hand — raising `--limit` surfaces
-    // neither, so prescribing it would send an agent after results that
-    // cannot arrive.
-    if truncated && result_count >= limit {
-        hints.push("Narrow results with a longer query or increase --limit".to_string());
-    }
-    if !path_mode {
-        hints.push(
-            "Use --symbol with a path-like query such as Class/method or */update for precise matches"
-                .to_string(),
-        );
-    }
-    if lang_is_none {
-        hints.push("Add --lang to constrain search in mixed-language workspaces".to_string());
-    }
-    if no_kind_filter {
-        hints.push(
-            "Add --kind to focus on classes, methods, functions, or other symbol kinds".to_string(),
-        );
-    }
-    hints.truncate(3);
-    hints
-}
-
 /// True when a result set worth steering on sits entirely in one file:
 /// more than one match, all sharing a single file. Excludes empty and
 /// single-match sets (nothing to concentrate) and multi-file spreads.
@@ -155,15 +116,15 @@ pub fn is_single_file_concentration(unique_files: usize, total: usize) -> bool {
     total > 1 && unique_files == 1
 }
 
-/// Relevance tier of a name/path against a query. The ladder is intentionally
-/// coarse — exact (40) > anchored path suffix (34) > prefix (24) > substring
-/// (16) > no match (0) — so penalties and bonuses (expressed relative to these
-/// steps) can reorder within a tier without crossing it.
 /// The top of the ladder: a name spelled exactly as the query asked. Nothing
 /// scores above it — the broad-query bonus needs a name the term only appears
 /// inside — so it is what a published relevance reads as whole.
 pub const EXACT_MATCH_PRIORITY: i32 = 40;
 
+/// Relevance tier of a name/path against a query. The ladder is intentionally
+/// coarse — exact (40) > anchored path suffix (34) > prefix (24) > substring
+/// (16) > no match (0) — so penalties and bonuses (expressed relative to these
+/// steps) can reorder within a tier without crossing it.
 pub fn symbol_match_priority(query: &str, name: &str, path: &str) -> i32 {
     let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
     let name = name.to_ascii_lowercase();

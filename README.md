@@ -307,6 +307,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 symora search symbols AuthUser              # 이름·경로 검색과 순위화
 symora search symbols AuthUser --workspace-symbols   # 인덱스 건너뛰고 라이브 LSP 강제
 symora search symbols AuthUser --path src/auth      # 이 파일·디렉터리에 선언된 심볼만
+symora search symbols 'CheckoutService/processOrder' --body   # 파일을 몰라도 선언의 소스 읽기
 symora search content "async function"      # 순위가 매겨진 전문 검색
 symora search ast '(class_declaration) @c' --lang typescript   # 구조적 AST 매칭
 symora pack --tokens 4000                   # 토큰 예산 기반, PageRank 순위 저장소 브리핑
@@ -319,8 +320,6 @@ symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련
 symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
 symora symbols src/services/checkout.ts --body      # 트리 + 소스 본문
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
-symora symbols --symbol 'CheckoutService/processOrder' --body   # 파일 없이 워크스페이스 전역(인덱스 기반)
-symora symbols --name processOrder --lang ts        # 워크스페이스에서 메서드 찾기 (단일 언어)
 symora def src/services/checkout.ts:48:9            # 정의로 이동
 symora hover src/services/checkout.ts:48:9          # 타입 / 시그니처
 

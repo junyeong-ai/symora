@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -13,12 +13,12 @@ use crate::cli::response::disclosure::{
     index_unavailable_disclosure, literal_query, ordered_bounds, path_flags, relative_stale_files,
     unconfirmed_by_live_lookup, with_coverage_disclosure, workspace_route_for,
 };
-use crate::cli::response::{CoverageGap, Section};
+use crate::cli::response::{CoverageGap, Section, SymbolSource};
 use crate::cli::symbol_discovery::{
     DetectedLanguages, Rankable, RankedSymbol, candidate_budget, no_languages_error, relevance_of,
-    resolve_search_languages, sort_by_rank, symbol_lookup_hints, symbol_rank,
+    resolve_search_languages, sort_by_rank, symbol_rank,
 };
-use crate::cli::utils::shell_arg;
+use crate::cli::utils::{extract_signature, shell_arg};
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
@@ -47,6 +47,10 @@ pub(super) struct SymbolResultOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 /// `stale` narrowed to the rows this section actually emitted.
@@ -75,6 +79,7 @@ struct SymbolSearch<'a> {
     /// Project-relative files or directories the answer is confined to;
     /// empty confines nothing.
     within: &'a [PathBuf],
+    source: SymbolSource,
     limit: usize,
 }
 
@@ -97,16 +102,28 @@ impl SymbolSearch<'_> {
     }
 }
 
-pub async fn execute_symbol_search(
-    app: &App,
-    query: &str,
-    language: Option<&str>,
-    kind: Option<&str>,
-    paths: Option<&[PathBuf]>,
-    workspace_symbols: bool,
-    limit: usize,
-) -> Result<()> {
+/// A symbol search as the command line or a tool call states it.
+pub struct SymbolQuery<'a> {
+    pub query: &'a str,
+    pub language: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub paths: Option<&'a [PathBuf]>,
+    pub workspace_symbols: bool,
+    pub source: SymbolSource,
+    pub limit: usize,
+}
+
+pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Result<()> {
     let ctx = &app.output;
+    let SymbolQuery {
+        query,
+        language,
+        kind,
+        paths,
+        workspace_symbols,
+        source,
+        limit,
+    } = request;
 
     let query = query.trim();
     if query.is_empty() {
@@ -173,6 +190,7 @@ pub async fn execute_symbol_search(
         language,
         kind,
         within: &within,
+        source,
         limit,
     };
 
@@ -286,7 +304,7 @@ pub async fn execute_symbol_search(
                 &lower_bounds,
                 &currency_facts,
             );
-            ctx.print_success(section);
+            publish(app, section, &search).await;
         }
         // Nothing to read the index for: never built, a build owns it, or it
         // could not be opened at all. Live LSP workspace symbols answer in its
@@ -407,7 +425,7 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         &search.currency_languages(covered.clone(), &detected),
     )
     .await;
-    ctx.print_success(with_coverage_disclosure(
+    let section = with_coverage_disclosure(
         with_emitted_stale(
             finish_symbol_search(matches, count, search, app.test_scope(), &shortfall),
             &stale_files,
@@ -418,7 +436,8 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         DisclosureRoute::IndexConsulted,
         &lower_bounds,
         &currency_facts,
-    ));
+    );
+    publish(app, section, search).await;
     Ok(())
 }
 
@@ -437,6 +456,8 @@ fn index_result_output(row: SymbolSearchResult, ctx: &OutputContext) -> SymbolRe
         container: row.container,
         backend: Some("index".to_string()),
         score: row.score,
+        signature: None,
+        body: None,
     }
 }
 
@@ -466,6 +487,7 @@ async fn execute_workspace_symbol_search(
         kind,
         within,
         limit,
+        ..
     } = search;
     let ctx = &app.output;
     let languages = &detected.languages;
@@ -664,7 +686,7 @@ async fn execute_workspace_symbol_search(
         &lower_bounds,
         &route_facts,
     );
-    ctx.print_success(section);
+    publish(app, section, search).await;
     Ok(())
 }
 
@@ -691,6 +713,77 @@ fn finish_symbol_search(
         .with_hints(hints)
         .with_next_commands(next_commands)
         .with_coverage_gaps(shortfall.iter().map(CoverageGap::from).collect())
+}
+
+/// Emit a finished answer with the source the search asked for attached to
+/// the rows it kept.
+async fn publish(app: &App, mut section: Section<SymbolResultOutput>, search: &SymbolSearch<'_>) {
+    attach_source(app, &mut section.items, search.source).await;
+    let body_paths: Vec<String> = section
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.body.is_some())
+        .map(|(index, _)| format!("/items/{index}/body"))
+        .collect();
+    app.output.print_source(section, &body_paths);
+}
+
+/// Read each row's source from its file's declarations, as `symbols <file>`
+/// reads them: an index or workspace row carries only where its name is. One
+/// read per file. A row whose declaration that read does not surface carries
+/// no source rather than a neighbour's.
+async fn attach_source(app: &App, rows: &mut [SymbolResultOutput], source: SymbolSource) {
+    if source == SymbolSource::Location {
+        return;
+    }
+    let options = FindSymbolsOptions::default()
+        .with_depth(u32::MAX)
+        .with_body();
+    let mut declared: HashMap<String, Vec<Symbol>> = HashMap::new();
+    for row in rows {
+        if !declared.contains_key(&row.file) {
+            let symbols =
+                crate::cli::declared_in(app, &app.root().join(&row.file), options.clone())
+                    .await
+                    .map(|answer| answer.symbols)
+                    .unwrap_or_default();
+            declared.insert(row.file.clone(), symbols);
+        }
+        let Some(declaration) = declaration_of(&declared[&row.file], row) else {
+            continue;
+        };
+        row.signature = extract_signature(declaration);
+        if source == SymbolSource::Body {
+            row.body = declaration.body.clone();
+        }
+    }
+}
+
+/// The declaration a row names among its file's declarations: the one with
+/// its path, and where the file declares that path more than once (overloads,
+/// one method in two impl blocks), the one whose span holds the row.
+fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Option<&'a Symbol> {
+    fn collect<'a>(symbols: &'a [Symbol], path: &str, found: &mut Vec<&'a Symbol>) {
+        for symbol in symbols {
+            if symbol.path() == path {
+                found.push(symbol);
+            }
+            collect(&symbol.children, path, found);
+        }
+    }
+    let mut named = Vec::new();
+    collect(
+        declared,
+        row.name_path.as_deref().unwrap_or(&row.name),
+        &mut named,
+    );
+    match named.as_slice() {
+        [only] => Some(*only),
+        _ => named
+            .into_iter()
+            .find(|symbol| symbol.location.spans(row.line, row.column)),
+    }
 }
 
 /// The single language to scope an index `search_symbols` query to: `Some` only
@@ -1177,6 +1270,8 @@ fn live_result_output(symbol: Symbol, backend: &str, query: &str, app: &App) -> 
         degraded_column: symbol.location.degraded_column,
         container: symbol.container,
         backend: Some(backend.to_string()),
+        signature: None,
+        body: None,
     }
 }
 
@@ -1199,14 +1294,32 @@ fn symbol_search_hints(
     truncated: bool,
     result_count: usize,
 ) -> Vec<String> {
-    symbol_lookup_hints(
-        looks_like_symbol_path(search.query),
-        search.language.is_none(),
-        search.kind.is_none(),
-        truncated,
-        result_count,
-        search.limit,
-    )
+    if result_count <= 1 && !truncated {
+        return Vec::new();
+    }
+
+    let mut hints = Vec::new();
+    // Only when the emission cap is what bound the list. A count above the
+    // rows can also come from matches noise suppression removed, or from a
+    // source total larger than the rows in hand — raising `--limit` surfaces
+    // neither, so prescribing it would send an agent after results that
+    // cannot arrive.
+    if truncated && result_count >= search.limit {
+        hints.push("Narrow results with a longer query or increase --limit".to_string());
+    }
+    if !looks_like_symbol_path(search.query) {
+        hints.push("Query a path such as Class/method or */update for precise matches".to_string());
+    }
+    if search.language.is_none() {
+        hints.push("Add --lang to constrain search in mixed-language workspaces".to_string());
+    }
+    if search.kind.is_none() {
+        hints.push(
+            "Add --kind to focus on classes, methods, functions, or other symbol kinds".to_string(),
+        );
+    }
+    hints.truncate(3);
+    hints
 }
 
 fn symbol_search_next_commands(
@@ -1348,6 +1461,7 @@ mod tests {
             language: None,
             kind: None,
             within: &[],
+            source: SymbolSource::Location,
             limit,
         }
     }
@@ -1364,7 +1478,55 @@ mod tests {
             container: None,
             backend: Some("index".to_string()),
             score: 1.0,
+            signature: None,
+            body: None,
         }
+    }
+
+    /// A row names its declaration by path, and where its file declares that
+    /// path twice — one method in two impl blocks — by the span that holds
+    /// it, so neither row carries the other's source. A path declared once is
+    /// that declaration wherever the row's producer put its position.
+    #[test]
+    fn a_row_takes_the_source_of_the_declaration_that_holds_it() {
+        let declared = |path: &str, line: u32, end: u32| {
+            let mut symbol = Symbol::new(
+                "render".to_string(),
+                SymbolKind::Method,
+                crate::models::symbol::Location::full(
+                    PathBuf::from("lib.rs"),
+                    line,
+                    8,
+                    line,
+                    5,
+                    end,
+                    6,
+                ),
+            );
+            symbol.name_path = Some(path.to_string());
+            symbol
+        };
+        let file = [
+            declared("Widget/render", 4, 6),
+            declared("Paint/render", 16, 16),
+            declared("Widget/render", 20, 22),
+        ];
+        let row = |path: &str, line: u32| SymbolResultOutput {
+            name: "render".to_string(),
+            name_path: Some(path.to_string()),
+            line,
+            column: 8,
+            ..result("render", "lib.rs")
+        };
+
+        let lines = |row: SymbolResultOutput| {
+            declaration_of(&file, &row).map(|symbol| symbol.location.line)
+        };
+        assert_eq!(lines(row("Widget/render", 4)), Some(4));
+        assert_eq!(lines(row("Widget/render", 20)), Some(20));
+        assert_eq!(lines(row("Widget/render", 10)), None);
+        assert_eq!(lines(row("Paint/render", 15)), Some(16));
+        assert_eq!(lines(row("Canvas/render", 4)), None);
     }
 
     #[test]

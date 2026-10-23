@@ -307,6 +307,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 symora search symbols AuthUser              # ranked name/path search
 symora search symbols AuthUser --workspace-symbols   # force live LSP, skip the index
 symora search symbols AuthUser --path src/auth      # only symbols declared in these files/directories
+symora search symbols 'CheckoutService/processOrder' --body   # a declaration's source without knowing its file
 symora search content "async function"      # ranked full-text search
 symora search ast '(class_declaration) @c' --lang typescript   # structural AST match
 symora pack --tokens 4000                   # token-budgeted, PageRank-ranked repo brief
@@ -319,8 +320,6 @@ symora map file src/services/checkout.ts    # one file: symbols, siblings, relat
 symora symbols src/services/checkout.ts --depth 2   # full symbol tree
 symora symbols src/services/checkout.ts --body      # tree + source bodies
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
-symora symbols --symbol 'CheckoutService/processOrder' --body   # workspace-wide (index-backed), no file needed
-symora symbols --name processOrder --lang ts        # find a method across the workspace, one language
 symora def src/services/checkout.ts:48:9            # go to definition
 symora hover src/services/checkout.ts:48:9          # type / signature
 
