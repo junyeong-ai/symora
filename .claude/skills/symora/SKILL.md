@@ -31,7 +31,7 @@ symora diff-impact
 Lines and Unicode-scalar columns are 1-indexed.
 
 - For `refs`, callers/callees, implementations, type hierarchy, context, impact, and location-based usage: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
-- `def`, hover, signature, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.
+- `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.
 - Read the echoed target and `anchor_status`. A binding is a local or parameter absent from the document-symbol tree. Source edits address declarations, not body tokens.
 
 ## Interpret limits

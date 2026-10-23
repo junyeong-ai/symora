@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::lsp::{CodeActionKind, FoldingRangeKind, InlayHintKind};
+use crate::models::lsp::CodeActionKind;
 use crate::models::symbol::SymbolKind;
 use crate::models::{diagnostic, lsp, symbol};
 use crate::services::store::UnreadPath;
@@ -243,23 +243,6 @@ pub struct RelatedInformation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Signature {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub documentation: Option<String>,
-    pub parameters: Vec<Parameter>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_parameter: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Parameter {
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub documentation: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
@@ -347,26 +330,6 @@ impl From<FileChange> for lsp::FileChangeWithEdits {
             file: PathBuf::from(val.file),
             edits: val.edits.into_iter().map(Into::into).collect(),
             expected_hash: val.expected_hash,
-        }
-    }
-}
-
-impl From<Parameter> for lsp::ParameterInfo {
-    fn from(val: Parameter) -> Self {
-        Self {
-            label: val.label,
-            documentation: val.documentation,
-        }
-    }
-}
-
-impl From<Signature> for lsp::SignatureInfo {
-    fn from(val: Signature) -> Self {
-        Self {
-            label: val.label,
-            documentation: val.documentation,
-            parameters: val.parameters.into_iter().map(Into::into).collect(),
-            active_parameter: val.active_parameter,
         }
     }
 }
@@ -461,19 +424,6 @@ pub struct DiagnosticsResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SignatureResponse {
-    pub signatures: Vec<Signature>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_signature: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_parameter: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub indexing: Option<lsp::IndexingDegradation>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct PrepareRenameResponse {
     pub placeholder: Option<String>,
 }
@@ -513,54 +463,6 @@ pub struct CodeAction {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApplyActionResponse {
     pub changes: Vec<FileChange>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FormatResponse {
-    pub count: usize,
-    pub edits: Vec<FormatEdit>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FormatEdit {
-    pub start_line: u32,
-    pub start_character: u32,
-    pub end_line: u32,
-    pub end_character: u32,
-    pub new_text: String,
-}
-
-impl From<&lsp::TextEdit> for FormatEdit {
-    fn from(edit: &lsp::TextEdit) -> Self {
-        Self {
-            start_line: edit.range.start.line,
-            start_character: edit.range.start.character,
-            end_line: edit.range.end.line,
-            end_character: edit.range.end.character,
-            new_text: edit.new_text.clone(),
-        }
-    }
-}
-
-impl From<FormatEdit> for lsp::TextEdit {
-    fn from(edit: FormatEdit) -> Self {
-        Self {
-            range: lsp::Range::new(
-                lsp::Position::new(edit.start_line, edit.start_character),
-                lsp::Position::new(edit.end_line, edit.end_character),
-            ),
-            new_text: edit.new_text,
-        }
-    }
-}
-
-impl From<Vec<lsp::TextEdit>> for FormatResponse {
-    fn from(edits: Vec<lsp::TextEdit>) -> Self {
-        Self {
-            count: edits.len(),
-            edits: edits.iter().map(FormatEdit::from).collect(),
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -609,141 +511,6 @@ impl From<TypeHierarchyItem> for lsp::TypeHierarchyItem {
             location: symbol::Location::point(PathBuf::from(val.file), val.line, val.column)
                 .with_degraded_column(val.degraded_column == Some(true)),
             detail: val.detail,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct InlayHintsResponse {
-    pub count: usize,
-    pub hints: Vec<InlayHint>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InlayHint {
-    pub line: u32,
-    pub character: u32,
-    pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<u32>,
-    #[serde(default)]
-    pub padding_left: bool,
-    #[serde(default)]
-    pub padding_right: bool,
-}
-
-impl From<InlayHint> for lsp::InlayHint {
-    fn from(val: InlayHint) -> Self {
-        Self {
-            position: lsp::Position::new(val.line, val.character),
-            label: val.label,
-            kind: InlayHintKind::from_lsp(val.kind),
-            padding_left: val.padding_left,
-            padding_right: val.padding_right,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FoldingRangesResponse {
-    pub count: usize,
-    pub ranges: Vec<FoldingRange>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FoldingRange {
-    pub start_line: u32,
-    pub end_line: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_character: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub end_character: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub collapsed_text: Option<String>,
-}
-
-impl From<FoldingRange> for lsp::FoldingRange {
-    fn from(val: FoldingRange) -> Self {
-        Self {
-            start_line: val.start_line,
-            end_line: val.end_line,
-            start_character: val.start_character,
-            end_character: val.end_character,
-            kind: FoldingRangeKind::from_lsp(val.kind.as_deref()),
-            collapsed_text: val.collapsed_text,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SelectionRangesResponse {
-    pub count: usize,
-    pub ranges: Vec<SelectionRange>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelectionRange {
-    pub start_line: u32,
-    pub start_character: u32,
-    pub end_line: u32,
-    pub end_character: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<Box<SelectionRange>>,
-}
-
-impl From<SelectionRange> for lsp::SelectionRange {
-    fn from(val: SelectionRange) -> Self {
-        Self {
-            range: lsp::Range::new(
-                lsp::Position::new(val.start_line, val.start_character),
-                lsp::Position::new(val.end_line, val.end_character),
-            ),
-            parent: val.parent.map(|p| Box::new((*p).into())),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CodeLensResponse {
-    pub count: usize,
-    pub lenses: Vec<CodeLens>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeLens {
-    pub start_line: u32,
-    pub start_character: u32,
-    pub end_line: u32,
-    pub end_character: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command: Option<CodeLensCommand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeLensCommand {
-    pub title: String,
-    pub command: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub arguments: Vec<serde_json::Value>,
-}
-
-impl From<CodeLens> for lsp::CodeLens {
-    fn from(val: CodeLens) -> Self {
-        Self {
-            range: lsp::Range::new(
-                lsp::Position::new(val.start_line, val.start_character),
-                lsp::Position::new(val.end_line, val.end_character),
-            ),
-            command: val.command.map(|cmd| lsp::CodeLensCommand {
-                title: cmd.title,
-                command: cmd.command,
-                arguments: cmd.arguments,
-            }),
-            data: val.data,
         }
     }
 }
@@ -839,44 +606,6 @@ impl HoverResponse {
     }
 }
 
-impl SignatureResponse {
-    pub fn from_help(help: lsp::Indexed<Option<lsp::SignatureHelp>>) -> Self {
-        let indexing = help.indexing;
-        match help.data {
-            Some(h) => Self {
-                signatures: h
-                    .signatures
-                    .iter()
-                    .map(|s| Signature {
-                        label: s.label.clone(),
-                        documentation: s.documentation.clone(),
-                        parameters: s
-                            .parameters
-                            .iter()
-                            .map(|p| Parameter {
-                                label: p.label.clone(),
-                                documentation: p.documentation.clone(),
-                            })
-                            .collect(),
-                        active_parameter: s.active_parameter,
-                    })
-                    .collect(),
-                active_signature: h.active_signature,
-                active_parameter: h.active_parameter,
-                message: None,
-                indexing,
-            },
-            None => Self {
-                signatures: vec![],
-                active_signature: None,
-                active_parameter: None,
-                message: Some("No signature help available".into()),
-                indexing,
-            },
-        }
-    }
-}
-
 impl From<diagnostic::DiagnosticsReport> for DiagnosticsResponse {
     fn from(report: diagnostic::DiagnosticsReport) -> Self {
         Self {
@@ -906,48 +635,6 @@ impl From<diagnostic::DiagnosticsReport> for DiagnosticsResponse {
                             message: ri.message.clone(),
                         })
                         .collect(),
-                })
-                .collect(),
-        }
-    }
-}
-
-impl From<Vec<lsp::FoldingRange>> for FoldingRangesResponse {
-    fn from(ranges: Vec<lsp::FoldingRange>) -> Self {
-        Self {
-            count: ranges.len(),
-            ranges: ranges
-                .iter()
-                .map(|r| FoldingRange {
-                    start_line: r.start_line,
-                    end_line: r.end_line,
-                    start_character: r.start_character,
-                    end_character: r.end_character,
-                    kind: Some(r.kind.to_string()),
-                    collapsed_text: r.collapsed_text.clone(),
-                })
-                .collect(),
-        }
-    }
-}
-
-impl From<Vec<lsp::CodeLens>> for CodeLensResponse {
-    fn from(lenses: Vec<lsp::CodeLens>) -> Self {
-        Self {
-            count: lenses.len(),
-            lenses: lenses
-                .iter()
-                .map(|l| CodeLens {
-                    start_line: l.range.start.line,
-                    start_character: l.range.start.character,
-                    end_line: l.range.end.line,
-                    end_character: l.range.end.character,
-                    command: l.command.as_ref().map(|c| CodeLensCommand {
-                        title: c.title.clone(),
-                        command: c.command.clone(),
-                        arguments: c.arguments.clone(),
-                    }),
-                    data: l.data.clone(),
                 })
                 .collect(),
         }

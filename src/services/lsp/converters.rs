@@ -4,13 +4,10 @@ use crate::error::LspError;
 use crate::infra::lsp::protocol::{
     DocumentSymbol, HoverContents, LspLocation, LspSymbolKind, Range,
 };
-use crate::models::lsp::{
-    FileChangeWithEdits, FindSymbolsOptions, ParameterInfo, SignatureHelp, SignatureInfo,
-    uri_to_path,
-};
+use crate::models::lsp::{FileChangeWithEdits, FindSymbolsOptions, uri_to_path};
 use crate::models::symbol::{Location, Symbol, SymbolKind};
 
-use super::position::{PositionConverter, encoded_offset_to_byte};
+use super::position::PositionConverter;
 use crate::infra::lsp::protocol::PositionEncoding;
 
 pub(super) fn convert_symbol_kind(kind: LspSymbolKind) -> SymbolKind {
@@ -432,100 +429,6 @@ pub(super) fn parse_text_edits(
         });
     }
     Ok(out)
-}
-
-pub(super) fn parse_signature_help(
-    value: &serde_json::Value,
-    encoding: PositionEncoding,
-) -> Option<SignatureHelp> {
-    let signatures = value.get("signatures")?.as_array()?;
-
-    let parsed_signatures: Vec<SignatureInfo> = signatures
-        .iter()
-        .filter_map(|sig| {
-            let label = sig.get("label")?.as_str()?.to_string();
-            let documentation = sig.get("documentation").and_then(|d| {
-                if let Some(s) = d.as_str() {
-                    Some(s.to_string())
-                } else {
-                    d.get("value")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                }
-            });
-
-            let parameters: Vec<ParameterInfo> = sig
-                .get("parameters")
-                .and_then(|p| p.as_array())
-                .map(|params| {
-                    params
-                        .iter()
-                        .filter_map(|param| {
-                            let param_label = param.get("label").and_then(|l| {
-                                if let Some(s) = l.as_str() {
-                                    Some(s.to_string())
-                                } else if let Some(arr) = l.as_array() {
-                                    // labelOffset indexes the label STRING in the
-                                    // negotiated wire encoding, not a source line.
-                                    let start = arr.first()?.as_u64()? as u32;
-                                    let end = arr.get(1)?.as_u64()? as u32;
-                                    let byte_start =
-                                        encoded_offset_to_byte(encoding, &label, start);
-                                    let byte_end = encoded_offset_to_byte(encoding, &label, end);
-                                    label.get(byte_start..byte_end).map(|s| s.to_string())
-                                } else {
-                                    None
-                                }
-                            })?;
-
-                            let param_doc = param.get("documentation").and_then(|d| {
-                                if let Some(s) = d.as_str() {
-                                    Some(s.to_string())
-                                } else {
-                                    d.get("value")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string())
-                                }
-                            });
-
-                            Some(ParameterInfo {
-                                label: param_label,
-                                documentation: param_doc,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let active_parameter = sig
-                .get("activeParameter")
-                .and_then(|a| a.as_u64())
-                .map(|a| a as u32);
-
-            Some(SignatureInfo {
-                label,
-                documentation,
-                parameters,
-                active_parameter,
-            })
-        })
-        .collect();
-
-    if parsed_signatures.is_empty() {
-        return None;
-    }
-
-    Some(SignatureHelp {
-        signatures: parsed_signatures,
-        active_signature: value
-            .get("activeSignature")
-            .and_then(|a| a.as_u64())
-            .map(|a| a as u32),
-        active_parameter: value
-            .get("activeParameter")
-            .and_then(|a| a.as_u64())
-            .map(|a| a as u32),
-    })
 }
 
 #[cfg(test)]

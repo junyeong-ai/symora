@@ -415,7 +415,6 @@ impl DaemonClient {
         goto_type_definition => methods::GOTO_TYPE_DEFINITION,
         find_implementations => methods::FIND_IMPLEMENTATIONS,
         hover => methods::HOVER,
-        signature_help => methods::SIGNATURE_HELP,
         incoming_calls => methods::INCOMING_CALLS,
         outgoing_calls => methods::OUTGOING_CALLS,
         supertypes => methods::SUPERTYPES,
@@ -428,9 +427,6 @@ impl DaemonClient {
 
     rpc_file! {
         diagnostics => methods::DIAGNOSTICS,
-        folding_ranges => methods::FOLDING_RANGES,
-        code_lenses => methods::CODE_LENSES,
-        format => methods::FORMAT,
     }
 
     // Custom Parameter Operations
@@ -465,38 +461,6 @@ impl DaemonClient {
             "new_name": new_name
         });
         self.request_with_project(methods::RENAME, params)
-            .await
-            .and_then(Self::extract_result)
-    }
-
-    pub async fn inlay_hints(
-        &self,
-        file: &Path,
-        start_line: u32,
-        end_line: u32,
-    ) -> Result<serde_json::Value, LspError> {
-        let params = serde_json::json!({
-            "file": file.display().to_string(),
-            "start_line": start_line,
-            "end_line": end_line
-        });
-        self.request_with_project(methods::INLAY_HINTS, params)
-            .await
-            .and_then(Self::extract_result)
-    }
-
-    pub async fn selection_ranges(
-        &self,
-        file: &Path,
-        positions: &[(u32, u32)],
-    ) -> Result<serde_json::Value, LspError> {
-        let params = serde_json::json!({
-            "file": file.display().to_string(),
-            "positions": positions.iter()
-                .map(|(l, c)| serde_json::json!({"line": l, "column": c}))
-                .collect::<Vec<_>>()
-        });
-        self.request_with_project(methods::SELECTION_RANGES, params)
             .await
             .and_then(Self::extract_result)
     }

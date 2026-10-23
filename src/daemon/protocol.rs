@@ -172,16 +172,11 @@ pub mod methods {
     pub const FIND_IMPLEMENTATIONS: &str = "find_implementations";
     pub const WORKSPACE_SYMBOLS: &str = "workspace_symbols";
     pub const HOVER: &str = "hover";
-    pub const SIGNATURE_HELP: &str = "signature_help";
     pub const DIAGNOSTICS: &str = "diagnostics";
     pub const INCOMING_CALLS: &str = "incoming_calls";
     pub const OUTGOING_CALLS: &str = "outgoing_calls";
     pub const SUPERTYPES: &str = "supertypes";
     pub const SUBTYPES: &str = "subtypes";
-    pub const INLAY_HINTS: &str = "inlay_hints";
-    pub const FOLDING_RANGES: &str = "folding_ranges";
-    pub const SELECTION_RANGES: &str = "selection_ranges";
-    pub const CODE_LENSES: &str = "code_lenses";
     pub const CODE_ACTIONS: &str = "code_actions";
     pub const APPLY_CODE_ACTION: &str = "apply_code_action";
     pub const PREPARE_RENAME: &str = "prepare_rename";
@@ -194,8 +189,6 @@ pub mod methods {
     pub const REFRESH_FILES: &str = "refresh_files";
     pub const NOTE_FILES_EDITED: &str = "note_files_edited";
     pub const LANGUAGE_STATUS: &str = "language_status";
-
-    pub const FORMAT: &str = "format";
 
     pub const SEARCH_SYMBOLS: &str = "search_symbols";
     pub const SEARCH_CONTENT: &str = "search_content";
@@ -214,21 +207,15 @@ pub mod methods {
             FIND_SYMBOLS => Some("textDocument/documentSymbol"),
             WORKSPACE_SYMBOLS => Some("workspace/symbol"),
             HOVER => Some("textDocument/hover"),
-            SIGNATURE_HELP => Some("textDocument/signatureHelp"),
             DIAGNOSTICS => Some("textDocument/publishDiagnostics"),
             INCOMING_CALLS => Some("callHierarchy/incomingCalls"),
             OUTGOING_CALLS => Some("callHierarchy/outgoingCalls"),
             SUPERTYPES => Some("typeHierarchy/supertypes"),
             SUBTYPES => Some("typeHierarchy/subtypes"),
-            INLAY_HINTS => Some("textDocument/inlayHint"),
-            FOLDING_RANGES => Some("textDocument/foldingRange"),
-            SELECTION_RANGES => Some("textDocument/selectionRange"),
-            CODE_LENSES => Some("textDocument/codeLens"),
             CODE_ACTIONS => Some("textDocument/codeAction"),
             APPLY_CODE_ACTION => Some("codeAction/resolve"),
             PREPARE_RENAME => Some("textDocument/prepareRename"),
             RENAME => Some("textDocument/rename"),
-            FORMAT => Some("textDocument/formatting"),
             PING | STATUS | SHUTDOWN | RESTART_PROJECT | REFRESH_FILES | NOTE_FILES_EDITED
             | LANGUAGE_STATUS | INDEX_BUILD | INDEX_STATUS | INDEX_CLEAR | SEARCH_SYMBOLS
             | SEARCH_CONTENT => None,

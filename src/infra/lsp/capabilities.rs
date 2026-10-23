@@ -27,8 +27,6 @@ pub enum LspFeature {
     CodeActions,
     /// typeHierarchy/supertypes + typeHierarchy/subtypes
     TypeHierarchy,
-    /// textDocument/inlayHint
-    InlayHints,
 }
 
 impl LspFeature {
@@ -47,7 +45,6 @@ impl LspFeature {
             Self::OutgoingCalls => "outgoing calls",
             Self::CodeActions => "code actions",
             Self::TypeHierarchy => "type hierarchy",
-            Self::InlayHints => "inlay hints",
         }
     }
 }
@@ -105,7 +102,6 @@ pub fn get_support_level(language: Language, feature: LspFeature) -> SupportLeve
         (Language::Kotlin, GotoTypeDefinition) => Partial,
         (Language::Kotlin, IncomingCalls | OutgoingCalls) => None,
         (Language::Kotlin, TypeHierarchy) => None,
-        (Language::Kotlin, InlayHints) => None,
         (Language::Kotlin, Rename) => Partial,
         (Language::Kotlin, _) => Full,
 
@@ -301,7 +297,6 @@ mod tests {
             OutgoingCalls,
             CodeActions,
             TypeHierarchy,
-            InlayHints,
         ];
         for language in Language::all() {
             for feature in features {

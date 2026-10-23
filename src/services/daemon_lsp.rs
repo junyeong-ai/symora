@@ -6,18 +6,15 @@ use serde_json::Value;
 
 use crate::daemon::DaemonClient;
 use crate::daemon::wire::{
-    ApplyActionResponse, CallsResponse, CodeActionsResponse, CodeLensResponse, DefinitionResponse,
-    DiagnosticsResponse, FoldingRangesResponse, FormatResponse, HoverResponse,
-    ImplementationsResponse, InlayHintsResponse, PrepareRenameResponse, ReferencesResponse,
-    RenameResponse, SelectionRangesResponse, SignatureResponse, SymbolsResponse,
-    TypeHierarchyResponse,
+    ApplyActionResponse, CallsResponse, CodeActionsResponse, DefinitionResponse,
+    DiagnosticsResponse, HoverResponse, ImplementationsResponse, PrepareRenameResponse,
+    ReferencesResponse, RenameResponse, SymbolsResponse, TypeHierarchyResponse,
 };
 use crate::error::LspError;
 use crate::models::diagnostic::{Diagnostic, DiagnosticSeverity, DiagnosticTag, DiagnosticsReport};
 use crate::models::lsp::{
-    ApplyActionResult, CallHierarchyItem, CodeAction, CodeLens, Definition, FindSymbolsOptions,
-    FoldingRange, HoverInfo, Indexed, InlayHint, Position, PrepareRenameResult, Range,
-    RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit, TypeHierarchyItem,
+    ApplyActionResult, CallHierarchyItem, CodeAction, Definition, FindSymbolsOptions, HoverInfo,
+    Indexed, Position, PrepareRenameResult, Range, RenameResult, ServerStatus, TypeHierarchyItem,
 };
 use crate::models::symbol::{Language, Location, Symbol};
 use crate::services::lsp::LspService;
@@ -164,30 +161,6 @@ impl LspService for DaemonLspService {
                     content,
                     range: range.map(Into::into),
                 }),
-            response.indexing,
-        ))
-    }
-
-    async fn signature_help(
-        &self,
-        file: &Path,
-        line: u32,
-        column: u32,
-    ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
-        let result = self.client.signature_help(file, line, column).await?;
-
-        let response: SignatureResponse = parse(result)?;
-
-        if response.signatures.is_empty() {
-            return Ok(Indexed::new(None, response.indexing));
-        }
-
-        Ok(Indexed::new(
-            Some(SignatureHelp {
-                signatures: response.signatures.into_iter().map(Into::into).collect(),
-                active_signature: response.active_signature,
-                active_parameter: response.active_parameter,
-            }),
             response.indexing,
         ))
     }
@@ -341,39 +314,6 @@ impl LspService for DaemonLspService {
         ))
     }
 
-    async fn inlay_hints(
-        &self,
-        file: &Path,
-        start_line: u32,
-        end_line: u32,
-    ) -> Result<Vec<InlayHint>, LspError> {
-        let result = self.client.inlay_hints(file, start_line, end_line).await?;
-        let response: InlayHintsResponse = parse(result)?;
-        Ok(response.hints.into_iter().map(Into::into).collect())
-    }
-
-    async fn folding_ranges(&self, file: &Path) -> Result<Vec<FoldingRange>, LspError> {
-        let result = self.client.folding_ranges(file).await?;
-        let response: FoldingRangesResponse = parse(result)?;
-        Ok(response.ranges.into_iter().map(Into::into).collect())
-    }
-
-    async fn selection_ranges(
-        &self,
-        file: &Path,
-        positions: Vec<(u32, u32)>,
-    ) -> Result<Vec<SelectionRange>, LspError> {
-        let result = self.client.selection_ranges(file, &positions).await?;
-        let response: SelectionRangesResponse = parse(result)?;
-        Ok(response.ranges.into_iter().map(Into::into).collect())
-    }
-
-    async fn code_lenses(&self, file: &Path) -> Result<Vec<CodeLens>, LspError> {
-        let result = self.client.code_lenses(file).await?;
-        let response: CodeLensResponse = parse(result)?;
-        Ok(response.lenses.into_iter().map(Into::into).collect())
-    }
-
     async fn code_actions(
         &self,
         file: &Path,
@@ -402,12 +342,6 @@ impl LspService for DaemonLspService {
         Ok(ApplyActionResult {
             changes: response.changes.into_iter().map(Into::into).collect(),
         })
-    }
-
-    async fn format(&self, file: &Path) -> Result<Vec<TextEdit>, LspError> {
-        let result = self.client.format(file).await?;
-        let response: FormatResponse = parse(result)?;
-        Ok(response.edits.into_iter().map(Into::into).collect())
     }
 
     async fn is_available(&self, language: Language) -> bool {

@@ -6,8 +6,7 @@ use super::errors::{ErrorCode, OutputError};
 
 /// Resolve a bare file argument against the project root and confirm it is a
 /// real file before any language-server call. File-only commands (`symbols`,
-/// `map file`, `inlay-hints`, `folding`, `selection`, `code-lens`, `format`,
-/// `diagnostics`, `edit`) otherwise hand a mistyped path straight to the
+/// `map file`, `diagnostics`, `edit`) otherwise hand a mistyped path straight to the
 /// server, which surfaces it as an opaque `internal` "Protocol error: No such
 /// file" — indistinguishable from a real tool failure. This is the file-only
 /// counterpart to `LocationArg`'s position validation, mapping a bad path to

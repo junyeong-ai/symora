@@ -624,9 +624,8 @@ mod tests {
 
     use crate::error::LspError;
     use crate::models::lsp::{
-        ApplyActionResult, CodeAction, CodeLens, FoldingRange, HoverInfo, Indexed, InlayHint,
-        PrepareRenameResult, RenameResult, SelectionRange, ServerStatus, SignatureHelp, TextEdit,
-        TypeHierarchyItem,
+        ApplyActionResult, CodeAction, HoverInfo, Indexed, PrepareRenameResult, RenameResult,
+        ServerStatus, TypeHierarchyItem,
     };
     use crate::models::symbol::{Language, Location, SymbolKind};
 
@@ -809,14 +808,6 @@ mod tests {
         ) -> Result<Indexed<Option<HoverInfo>>, LspError> {
             unreachable!()
         }
-        async fn signature_help(
-            &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
-        ) -> Result<Indexed<Option<SignatureHelp>>, LspError> {
-            unreachable!()
-        }
         async fn diagnostics(
             &self,
             _file: &Path,
@@ -872,27 +863,6 @@ mod tests {
         ) -> Result<crate::models::lsp::Indexed<Vec<TypeHierarchyItem>>, LspError> {
             unreachable!()
         }
-        async fn inlay_hints(
-            &self,
-            _file: &Path,
-            _start_line: u32,
-            _end_line: u32,
-        ) -> Result<Vec<InlayHint>, LspError> {
-            unreachable!()
-        }
-        async fn folding_ranges(&self, _file: &Path) -> Result<Vec<FoldingRange>, LspError> {
-            unreachable!()
-        }
-        async fn selection_ranges(
-            &self,
-            _file: &Path,
-            _positions: Vec<(u32, u32)>,
-        ) -> Result<Vec<SelectionRange>, LspError> {
-            unreachable!()
-        }
-        async fn code_lenses(&self, _file: &Path) -> Result<Vec<CodeLens>, LspError> {
-            unreachable!()
-        }
         async fn code_actions(
             &self,
             _file: &Path,
@@ -906,9 +876,6 @@ mod tests {
             _file: &Path,
             _action: &CodeAction,
         ) -> Result<ApplyActionResult, LspError> {
-            unreachable!()
-        }
-        async fn format(&self, _file: &Path) -> Result<Vec<TextEdit>, LspError> {
             unreachable!()
         }
         async fn is_available(&self, _language: Language) -> bool {
