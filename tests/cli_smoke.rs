@@ -887,20 +887,30 @@ fn search_symbols_answers_only_inside_the_named_paths() {
             "def shared_marker():\n    pass\n",
         )
         .unwrap();
-        let out = run_in(
-            root,
-            &["search", "symbols", "shared_marker", "--path", skipped],
-        );
+    }
+    let refusal = |path: &str| {
+        let out = run_in(root, &["search", "symbols", "shared_*", "--path", path]);
         let refusal = common::parse_response(&out.stdout).unwrap();
         assert_eq!(refusal["error"]["code"], "unsupported", "{refusal}");
-        assert!(
-            refusal["error"]["hint"]
-                .as_str()
-                .unwrap()
-                .contains("search content"),
-            "{refusal}"
-        );
-    }
+        refusal["error"]["hint"].as_str().unwrap().to_string()
+    };
+    assert_eq!(
+        refusal(".hidden"),
+        "Read its text with `symora search content --path='.hidden' -- 'shared_'`.",
+        "the advised search reads the query's literal text, not its glob"
+    );
+    assert_eq!(
+        json_ok(
+            root,
+            &["search", "content", "--path=.hidden", "--", "shared_"]
+        )["count"],
+        1,
+        "the advised search finds what symbol search could not cover"
+    );
+    assert!(
+        !refusal("generated").contains("search content"),
+        "content search skips an ignored path too, so it is not advised"
+    );
 }
 
 /// The build's shortfall names the paths it is about, so the reader can act on
