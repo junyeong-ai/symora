@@ -40,7 +40,13 @@ pub(super) async fn handle_search_symbols(
 
     let page = ctx
         .store
-        .search_symbols(&p.query, p.limit.unwrap_or(100), kind_filter, lang_filter)
+        .search_symbols(
+            &p.query,
+            p.limit.unwrap_or(100),
+            kind_filter,
+            lang_filter,
+            &p.within,
+        )
         .await
         .map_err(RpcError::from)?;
 

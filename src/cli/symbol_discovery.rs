@@ -5,7 +5,7 @@
 //! [`crate::cli::response::disclosure`] instead — this module decides what to
 //! look for and in what order, that one decides how to admit what was missed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::cli::errors::ErrorCode;
@@ -151,11 +151,16 @@ pub fn symbol_match_priority(query: &str, name: &str, path: &str) -> i32 {
 /// while naming a format explicitly is a request, and requests are honored.
 /// An unrecognized name covers nothing, which its caller reports.
 ///
-/// Detection walks the tree, so it can miss a language whose only files sit
-/// under a path it could not read. That language never enters the requested
-/// set, so no coverage gap can name it — the walk's shortfall is reported
-/// instead, and it is what makes the answer a lower bound.
-pub fn resolve_search_languages(app: &App, language: Option<&str>) -> DetectedLanguages {
+/// Detection walks the tree — only the project-relative paths in `within`
+/// when it names any — so it can miss a language whose only files sit under a
+/// path it could not read. That language never enters the requested set, so
+/// no coverage gap can name it — the walk's shortfall is reported instead, and
+/// it is what makes the answer a lower bound.
+pub fn resolve_search_languages(
+    app: &App,
+    language: Option<&str>,
+    within: &[PathBuf],
+) -> DetectedLanguages {
     match language.map(Language::parse_or_default) {
         Some(Language::Unknown) => DetectedLanguages::default(),
         Some(lang) => DetectedLanguages {
@@ -163,7 +168,7 @@ pub fn resolve_search_languages(app: &App, language: Option<&str>) -> DetectedLa
             unread_paths: Vec::new(),
         },
         None => {
-            let detected = detect_languages_by_file_count(app.root(), &Language::all());
+            let detected = detect_languages_by_file_count(app.root(), &Language::all(), within);
             DetectedLanguages {
                 languages: detected
                     .languages
@@ -243,6 +248,7 @@ impl DetectedLanguages {
 pub fn detect_languages_by_file_count(
     root: &Path,
     all_languages: &[Language],
+    within: &[PathBuf],
 ) -> DetectedLanguages {
     use std::collections::HashMap;
 
@@ -250,7 +256,14 @@ pub fn detect_languages_by_file_count(
         .iter()
         .flat_map(|lang| lang.extensions().iter().copied())
         .collect();
-    let filter = crate::infra::file_filter::FileFilter::new(root);
+    let filter = if within.is_empty() {
+        crate::infra::file_filter::FileFilter::new(root)
+    } else {
+        crate::infra::file_filter::FileFilter::for_paths(
+            root,
+            within.iter().map(|path| root.join(path)).collect(),
+        )
+    };
     let discovery = filter.discover_files(&extensions);
     let mut counts: HashMap<Language, usize> = HashMap::new();
 

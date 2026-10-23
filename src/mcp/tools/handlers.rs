@@ -197,6 +197,7 @@ async fn run_file_overview(args: Value, app: &App) -> Result<CapturedOutput> {
 #[derive(Deserialize)]
 struct SearchSymbolsInput {
     query: String,
+    path: Option<Vec<std::path::PathBuf>>,
     language: Option<String>,
     kind: Option<String>,
     limit: Option<usize>,
@@ -209,6 +210,7 @@ async fn run_search_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
             SearchArgs {
                 command: SearchCommand::Symbols {
                     query: input.query,
+                    path: input.path,
                     language: input.language,
                     kind: input.kind,
                     workspace_symbols: false,
@@ -931,7 +933,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
     Some(match tool {
         "get_project_overview" => &[],
         "get_file_overview" => &["path", "depth", "related_limit"],
-        "search_symbols" => &["query", "language", "kind", "limit"],
+        "search_symbols" => &["query", "path", "language", "kind", "limit"],
         "search_content" => &["query", "path", "language", "limit"],
         "check_language_support" => &["language"],
         "search_ast" => &["pattern", "language", "path", "limit"],

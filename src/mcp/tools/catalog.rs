@@ -37,23 +37,30 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "search_symbols",
             "Fast rough symbol discovery by name or path-like pattern across the \
                           workspace. Use this when you don't yet know the exact file.",
-            schema_object(
-                &[
-                    ("query", "string", "Partial symbol name or path pattern"),
-                    (
-                        "language",
-                        "string",
-                        "Optional language filter (rust, python, ...)",
-                    ),
-                    (
-                        "kind",
-                        "string",
-                        "Optional kind filter (function, class, struct, ...)",
-                    ),
-                    ("limit", "integer", "Maximum results"),
-                ],
-                &["query"],
-            ),
+            {
+                let mut schema = schema_object(
+                    &[
+                        ("query", "string", "Partial symbol name or path pattern"),
+                        (
+                            "language",
+                            "string",
+                            "Optional language filter (rust, python, ...)",
+                        ),
+                        (
+                            "kind",
+                            "string",
+                            "Optional kind filter (function, class, struct, ...)",
+                        ),
+                        ("limit", "integer", "Maximum results"),
+                    ],
+                    &["query"],
+                );
+                schema["properties"]["path"] = serde_json::json!({
+                    "type": "array", "items": {"type": "string"}, "minItems": 1,
+                    "description": "Project-relative files/directories whose declarations to search"
+                });
+                schema
+            },
         )
         .with_output_schema(with_extra(
             section_output_schema(

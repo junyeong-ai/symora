@@ -525,17 +525,29 @@ impl Store {
     /// left behind cannot answer for a language it no longer covers, and the
     /// caller's live read of the remainder can neither duplicate a row nor
     /// miss a language.
+    ///
+    /// `within` confines the rows, count included, to files at or under these
+    /// project-relative paths; empty confines nothing.
     pub async fn search_symbols(
         &self,
         query: &str,
         limit: usize,
         kind_filter: Option<SymbolKind>,
         language: Option<Language>,
+        within: &[PathBuf],
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
         let query = query.to_string();
         let limit = limit as i64;
         let kind_str = kind_filter.map(|k| k.to_string());
         let requested = language;
+        let within: Vec<String> = within
+            .iter()
+            .flat_map(|path| {
+                let file = self.project_root.join(path).display().to_string();
+                let directory = format!("{file}{}", std::path::MAIN_SEPARATOR);
+                [file, directory]
+            })
+            .collect();
 
         let answer = self
             .db
@@ -568,13 +580,15 @@ impl Store {
 
                 let lang_ids: Vec<String> =
                     covered.iter().map(|l| l.lsp_id().to_string()).collect();
-                let sql = build_symbol_search_query(kind_str.is_some(), lang_ids.len());
+                let sql =
+                    build_symbol_search_query(kind_str.is_some(), lang_ids.len(), within.len() / 2);
                 let mut stmt = tx.prepare(&sql)?;
                 let params: Vec<rusqlite::types::Value> =
                     std::iter::once(rusqlite::types::Value::from(query))
                         .chain(std::iter::once(rusqlite::types::Value::from(limit)))
                         .chain(kind_str.map(rusqlite::types::Value::from))
                         .chain(lang_ids.into_iter().map(rusqlite::types::Value::from))
+                        .chain(within.into_iter().map(rusqlite::types::Value::from))
                         .collect();
                 let rows = stmt.query(rusqlite::params_from_iter(params))?;
 
@@ -1729,7 +1743,7 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .search_symbols("policy_probe", 10, None, Some(Language::Python))
+                    .search_symbols("policy_probe", 10, None, Some(Language::Python), &[])
                     .await
                     .unwrap()
                     .total,
@@ -1751,7 +1765,7 @@ mod tests {
             assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
             assert_eq!(
                 store
-                    .search_symbols("policy_probe", 10, None, Some(Language::Python))
+                    .search_symbols("policy_probe", 10, None, Some(Language::Python), &[])
                     .await
                     .unwrap()
                     .total,
@@ -1788,7 +1802,7 @@ mod tests {
         assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Unknown);
         assert_eq!(
             store
-                .search_symbols("unread_probe", 10, None, None)
+                .search_symbols("unread_probe", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -1843,7 +1857,10 @@ mod tests {
 
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
         store.index(IndexOptions::default()).await.unwrap();
-        let before = store.search_symbols("alpha", 10, None, None).await.unwrap();
+        let before = store
+            .search_symbols("alpha", 10, None, None, &[])
+            .await
+            .unwrap();
         assert_eq!(before.total, 1);
 
         std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -1860,7 +1877,10 @@ mod tests {
             matches!(refreshed, Err(StoreError::Io(_))),
             "an unreadable path is surfaced, not silently treated as a deletion"
         );
-        let after = store.search_symbols("alpha", 10, None, None).await.unwrap();
+        let after = store
+            .search_symbols("alpha", 10, None, None, &[])
+            .await
+            .unwrap();
         assert_eq!(
             after.total, 1,
             "rows survive a refresh that could not learn whether the file is gone"
@@ -1890,7 +1910,7 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
         assert_eq!(
             store
-                .search_symbols("doomed", 10, None, None)
+                .search_symbols("doomed", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -1916,7 +1936,7 @@ mod tests {
         }
         assert_eq!(
             store
-                .search_symbols("doomed", 10, None, None)
+                .search_symbols("doomed", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -1925,7 +1945,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .search_symbols("kept", 10, None, None)
+                .search_symbols("kept", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -1955,7 +1975,7 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
         assert_eq!(
             store
-                .search_symbols("hidden", 10, None, None)
+                .search_symbols("hidden", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -1972,7 +1992,7 @@ mod tests {
         }
         assert_eq!(
             store
-                .search_symbols("hidden", 10, None, None)
+                .search_symbols("hidden", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -2032,7 +2052,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .search_symbols("beta", 10, None, None)
+                .search_symbols("beta", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -2062,7 +2082,10 @@ mod tests {
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
         store.index(IndexOptions::default()).await.unwrap();
 
-        let page = store.search_symbols("alpha", 10, None, None).await.unwrap();
+        let page = store
+            .search_symbols("alpha", 10, None, None, &[])
+            .await
+            .unwrap();
         assert_eq!(page.total, 1);
         assert!(
             page.rows.iter().all(|row| row.file.ends_with("lib.rs")),
@@ -2112,7 +2135,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .search_symbols("alpha", 10, None, None)
+                .search_symbols("alpha", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,
@@ -2123,7 +2146,7 @@ mod tests {
 
     async fn total_matches(store: &Store, query: &str) -> usize {
         store
-            .search_symbols(query, 50, None, None)
+            .search_symbols(query, 50, None, None, &[])
             .await
             .unwrap()
             .total
@@ -2187,7 +2210,7 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
 
         let symbols = store
-            .search_symbols("same_probe", 1, None, None)
+            .search_symbols("same_probe", 1, None, None, &[])
             .await
             .unwrap();
         assert_eq!(symbols.total, 2);
@@ -2383,7 +2406,9 @@ mod tests {
             Err(StoreError::NotInitialized)
         ));
         assert!(matches!(
-            builder.search_symbols("handle_probe", 10, None, None).await,
+            builder
+                .search_symbols("handle_probe", 10, None, None, &[])
+                .await,
             Err(StoreError::NotInitialized)
         ));
     }
@@ -2874,7 +2899,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(total_matches(&store, "alpha").await, 0);
-        let page = store.search_symbols("beta", 50, None, None).await.unwrap();
+        let page = store
+            .search_symbols("beta", 50, None, None, &[])
+            .await
+            .unwrap();
         assert_eq!(page.total, 1);
         assert!(!page.stale());
     }
@@ -2894,7 +2922,7 @@ mod tests {
 
         // Unfiltered, the name spans both languages.
         let all = store
-            .search_symbols("shared", 50, None, None)
+            .search_symbols("shared", 50, None, None, &[])
             .await
             .unwrap();
         assert_eq!(all.rows.len(), 2);
@@ -2902,18 +2930,66 @@ mod tests {
         // A language filter scopes the index to exactly that language — no
         // cross-language leakage.
         let rust = store
-            .search_symbols("shared", 50, None, Some(Language::Rust))
+            .search_symbols("shared", 50, None, Some(Language::Rust), &[])
             .await
             .unwrap();
         assert_eq!(rust.rows.len(), 1);
         assert!(rust.rows[0].file.ends_with("lib.rs"));
 
         let py = store
-            .search_symbols("shared", 50, None, Some(Language::Python))
+            .search_symbols("shared", 50, None, Some(Language::Python), &[])
             .await
             .unwrap();
         assert_eq!(py.rows.len(), 1);
         assert!(py.rows[0].file.ends_with("mod.py"));
+    }
+
+    #[tokio::test]
+    async fn search_symbols_within_paths_confines_rows_and_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for file in ["src/a/lib.rs", "src/ab/lib.rs", "src/b.rs"] {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "pub fn shared() {}\n").unwrap();
+        }
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        let files = |page: &SearchPage<SymbolSearchResult>| -> Vec<PathBuf> {
+            page.rows
+                .iter()
+                .map(|row| row.file.strip_prefix(root).unwrap().to_path_buf())
+                .collect()
+        };
+
+        let directory = store
+            .search_symbols("shared", 50, None, None, &[PathBuf::from("src/a")])
+            .await
+            .unwrap();
+        assert_eq!(
+            directory.total, 1,
+            "a sibling sharing the prefix is outside"
+        );
+        assert_eq!(files(&directory), [PathBuf::from("src/a/lib.rs")]);
+
+        let mixed = store
+            .search_symbols(
+                "shared",
+                1,
+                None,
+                None,
+                &[PathBuf::from("src/b.rs"), PathBuf::from("src/ab")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(mixed.total, 2, "the count is taken inside the paths");
+        assert_eq!(mixed.rows.len(), 1);
+
+        let everything = store
+            .search_symbols("shared", 50, None, None, &[])
+            .await
+            .unwrap();
+        assert_eq!(everything.total, 3);
     }
 
     #[tokio::test]
@@ -3086,7 +3162,7 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
         assert!(
             !store
-                .search_symbols("alpha", 50, None, None)
+                .search_symbols("alpha", 50, None, None, &[])
                 .await
                 .unwrap()
                 .stale()
@@ -3097,7 +3173,10 @@ mod tests {
         tokio::fs::write(&file, "fn alpha() { changed() }\n")
             .await
             .unwrap();
-        let page = store.search_symbols("alpha", 50, None, None).await.unwrap();
+        let page = store
+            .search_symbols("alpha", 50, None, None, &[])
+            .await
+            .unwrap();
         assert_eq!(page.total, 1);
         assert!(page.stale());
 
@@ -3105,7 +3184,7 @@ mod tests {
         store.index(IndexOptions::default()).await.unwrap();
         assert!(
             !store
-                .search_symbols("alpha", 50, None, None)
+                .search_symbols("alpha", 50, None, None, &[])
                 .await
                 .unwrap()
                 .stale()
@@ -3125,7 +3204,7 @@ mod tests {
         tokio::fs::remove_file(&file).await.unwrap();
         assert!(
             store
-                .search_symbols("alpha", 50, None, None)
+                .search_symbols("alpha", 50, None, None, &[])
                 .await
                 .unwrap()
                 .stale()
@@ -3154,7 +3233,7 @@ mod tests {
             .unwrap();
         assert!(
             !store
-                .search_symbols("alpha", 50, None, None)
+                .search_symbols("alpha", 50, None, None, &[])
                 .await
                 .unwrap()
                 .stale()
@@ -3164,7 +3243,7 @@ mod tests {
             .unwrap();
         assert!(
             !store
-                .search_symbols("alpha", 50, None, None)
+                .search_symbols("alpha", 50, None, None, &[])
                 .await
                 .unwrap()
                 .stale()

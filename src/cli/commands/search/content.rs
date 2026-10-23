@@ -14,6 +14,8 @@ use crate::cli::response::disclosure::{
     with_lower_bounds,
 };
 
+use super::common::resolve_search_paths;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct ContentResultOutput {
     pub file: String,
@@ -93,34 +95,17 @@ pub async fn execute_content_search(
     // not re-walking the tree on every query.
     let scope = content_scope(language_filter);
     if let Some(paths) = paths {
-        if paths.is_empty() {
-            ctx.print_error(OutputError::invalid(
-                "path must contain at least one file or directory",
-            ));
-            return Ok(());
-        }
-        let root = app.root().canonicalize()?;
-        let mut resolved = Vec::new();
-        for path in paths {
-            let absolute = app.root().join(path).canonicalize()?;
-            if !absolute.starts_with(&root) {
-                ctx.print_error(crate::cli::CliInputError::PathOutsideProject(absolute));
+        let resolved = match resolve_search_paths(app, paths) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                ctx.print_error(error);
                 return Ok(());
             }
-            if absolute
-                .strip_prefix(&root)
-                .unwrap()
-                .components()
-                .any(|part| matches!(part.as_os_str().to_str(), Some(".git" | ".symora")))
-            {
-                ctx.print_error(OutputError::invalid(
-                    "Content search excludes .git and .symora metadata",
-                ));
-                return Ok(());
-            }
-            resolved.push(app.root().join(absolute.strip_prefix(&root).unwrap()));
-        }
-        let filter = FileFilter::for_paths(app.root(), resolved);
+        };
+        let filter = FileFilter::for_paths(
+            app.root(),
+            resolved.iter().map(|path| app.root().join(path)).collect(),
+        );
         let languages = if language_filter.is_some() {
             scope
         } else {

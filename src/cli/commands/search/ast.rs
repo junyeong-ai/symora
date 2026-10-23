@@ -11,6 +11,8 @@ use crate::models::symbol::Language;
 
 use crate::cli::response::disclosure::{LowerBound, as_paths, relative_paths, with_lower_bounds};
 
+use super::common::resolve_search_paths;
+
 #[derive(Serialize)]
 struct AstMatchOutput {
     file: String,
@@ -35,24 +37,6 @@ struct NodeTypeOutput {
     node_type: &'static str,
     example: &'static str,
     query: String,
-}
-
-/// The paths a caller named that are definitely not there.
-///
-/// A named path is an assertion about the tree, so a typo has to fail rather
-/// than search a domain the caller did not mean and answer `0`. Only a
-/// definite `Ok(false)` counts: a path the check itself could not resolve may
-/// well be there, and the walk reports that as the shortfall it is.
-fn missing_paths(paths: &[PathBuf]) -> Option<OutputError> {
-    let missing: Vec<String> = paths
-        .iter()
-        .filter(|path| matches!(path.try_exists(), Ok(false)))
-        .map(|path| path.display().to_string())
-        .collect();
-    (!missing.is_empty()).then(|| {
-        OutputError::not_found(format!("Path not found: {}", missing.join(", ")))
-            .with_hint("Check the --path arguments against the tree and retry.")
-    })
 }
 
 /// Auto-wrap bare identifiers like `function_definition` so users don't
@@ -107,12 +91,12 @@ pub async fn execute_ast_search(
         }
     };
     let paths = match path {
-        Some(paths) => match missing_paths(&paths) {
-            Some(error) => {
+        Some(paths) => match resolve_search_paths(app, &paths) {
+            Ok(resolved) => resolved.iter().map(|path| app.root().join(path)).collect(),
+            Err(error) => {
                 ctx.print_error(error);
                 return Ok(());
             }
-            None => paths,
         },
         None => vec![app.root().to_path_buf()],
     };

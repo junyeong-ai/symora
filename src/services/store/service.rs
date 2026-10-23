@@ -23,12 +23,15 @@ use super::types::{
 
 #[async_trait]
 pub trait StoreService: Send + Sync {
+    /// `within` confines the answer to files at or under these
+    /// project-relative paths; empty confines nothing.
     async fn search_symbols(
         &self,
         query: &str,
         limit: usize,
         kind: Option<SymbolKind>,
         language: Option<Language>,
+        within: &[PathBuf],
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError>;
 
     /// Search content rows of exactly the given languages — the domain is
@@ -146,10 +149,11 @@ impl StoreService for DefaultStoreService {
         limit: usize,
         kind: Option<SymbolKind>,
         language: Option<Language>,
+        within: &[PathBuf],
     ) -> Result<SearchPage<SymbolSearchResult>, StoreError> {
         self.store_for_read()
             .await?
-            .search_symbols(query, limit, kind, language)
+            .search_symbols(query, limit, kind, language, within)
             .await
     }
 
@@ -242,7 +246,7 @@ mod tests {
 
         // A read on a never-built project: NotInitialized, but the DB file
         // now exists on disk.
-        let read = service.search_symbols("alpha", 10, None, None).await;
+        let read = service.search_symbols("alpha", 10, None, None, &[]).await;
         assert!(matches!(read, Err(StoreError::NotInitialized)));
         assert!(Store::db_path(root).exists());
 
@@ -254,7 +258,7 @@ mod tests {
             .await
             .unwrap();
 
-        let after = service.search_symbols("beta", 10, None, None).await;
+        let after = service.search_symbols("beta", 10, None, None, &[]).await;
         assert!(
             matches!(after, Err(StoreError::NotInitialized)),
             "a read-materialized store must stay never-built after an edit"
@@ -280,13 +284,13 @@ mod tests {
             .unwrap();
 
         let page = service
-            .search_symbols("beta", 10, None, None)
+            .search_symbols("beta", 10, None, None, &[])
             .await
             .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(
             service
-                .search_symbols("alpha", 10, None, None)
+                .search_symbols("alpha", 10, None, None, &[])
                 .await
                 .unwrap()
                 .total,

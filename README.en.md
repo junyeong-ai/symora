@@ -306,6 +306,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 # Discovery (index, AST, and live workspace lookup)
 symora search symbols AuthUser              # ranked name/path search
 symora search symbols AuthUser --workspace-symbols   # force live LSP, skip the index
+symora search symbols AuthUser --path src/auth      # only symbols declared in these files/directories
 symora search content "async function"      # ranked full-text search
 symora search ast '(class_declaration) @c' --lang typescript   # structural AST match
 symora pack --tokens 4000                   # token-budgeted, PageRank-ranked repo brief
