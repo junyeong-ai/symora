@@ -113,8 +113,6 @@ pub struct ChangedSymbolImpact {
     /// limitation is at least as disclosed as a partial (callers-only) one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refs_status: Option<&'static str>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub callers: Vec<CallHierarchyOutput>,
     /// Present only when callers were requested but the list is not authoritative:
     /// "unavailable" (the incoming-call query failed) or "indexing_degraded" (it
     /// ran under degraded workspace indexing, so the list is a lower bound). An
@@ -126,6 +124,8 @@ pub struct ChangedSymbolImpact {
     /// a live-symbol measurement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion: Option<DeletionResolution>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<CallHierarchyOutput>,
 }
 
 #[derive(Debug, Clone, Serialize)]

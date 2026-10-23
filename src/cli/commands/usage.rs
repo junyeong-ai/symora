@@ -306,11 +306,6 @@ pub struct UsageOutput {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_from: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub filters_applied: Vec<String>,
-    /// If set, indicates analysis was truncated at this many symbols
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub analyzed: Option<usize>,
     /// Languages absent from this result — a server that failed, or one left
     /// unsearched after enough candidates were found. Present whenever
     /// coverage is partial, so the reported `count` is never mistaken for an
@@ -318,6 +313,11 @@ pub struct UsageOutput {
     /// marker provides.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub coverage_gaps: Vec<CoverageGap>,
+    /// If set, indicates analysis was truncated at this many symbols
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyzed: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub filters_applied: Vec<String>,
     #[serde(flatten)]
     pub section: Section<UsageResult>,
 }

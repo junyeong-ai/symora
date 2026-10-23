@@ -25,7 +25,7 @@ Use `Section<T>` for enumerated sets whose length grows with the repository or f
 - `items`: whole result objects.
 - `truncated`: present and true when `showing < count`.
 
-Every field that qualifies a list precedes it: the output layer emits a section's `items` last, a response's own bulk list (`diff-impact` `changes`, `impact` `files`) is its last field, and injected `config_errors` leads the response, so a reader that sees only the head still has the counts and markers.
+In every object, the fields that qualify a list (`config_errors`, `error`, `truncated`, `stale`, `incomplete`, `indexing`, `coverage_gaps`, `unread_paths`, `unmeasured_files`, `bodies_included`, `body_omitted`, `*_status`, `hints`, `next_commands`) precede the object's lists, so a reader that sees only the head of a response still has them. Declare output fields in that order; the output layer also emits each section's `items` last and leads with injected `config_errors`. `tests/common/mod.rs` checks every response the integration tests parse.
 
 Bounded summaries and rankings without an enumeration claim may remain arrays. Map's individually limited lists use their own sections; a neighbouring subtree total does not count an immediate directory listing.
 

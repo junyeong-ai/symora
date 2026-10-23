@@ -142,7 +142,7 @@ fn explicit_settings_resolve_a_package_without_a_virtual_environment() {
             .env_remove("PYTHONPATH")
             .output()
             .unwrap();
-        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let response: Value = common::parse_response(&output.stdout).unwrap();
         assert!(output.status.success(), "{response}");
         assert!(response.get("error").is_none(), "{response}");
         response
@@ -463,7 +463,7 @@ fn diff_impact_hands_a_changed_local_to_its_function() {
         .stderr(Stdio::null())
         .output()
         .expect("run symora");
-    let page: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+    let page: Value = common::parse_response(&output.stdout).expect("JSON on stdout");
     let rows: Vec<String> = page["changes"]
         .as_array()
         .expect("changes")
@@ -535,7 +535,7 @@ fn diff_impact_gives_a_class_the_lines_no_member_covers() {
             .stderr(Stdio::null())
             .output()
             .expect("run symora");
-        let page: Value = serde_json::from_slice(&output.stdout).expect("JSON on stdout");
+        let page: Value = common::parse_response(&output.stdout).expect("JSON on stdout");
         let rows: Vec<String> = page["changes"]
             .as_array()
             .expect("changes")
@@ -587,7 +587,7 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
             .stderr(Stdio::null())
             .output()
             .expect("run symora");
-        serde_json::from_slice(&output.stdout).expect("JSON on stdout")
+        common::parse_response(&output.stdout).expect("JSON on stdout")
     };
 
     let listed = run(&["symbols", "svc.py"]);
@@ -659,7 +659,7 @@ fn pyright_unconfirmed_rename_is_preview_only() {
             command.arg("--dry-run");
         }
         let output = command.output().unwrap();
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result: Value = common::parse_response(&output.stdout).unwrap();
         if dry_run {
             assert!(output.status.success(), "{result}");
             assert_eq!(result["indexing"], "unconfirmed", "{result}");

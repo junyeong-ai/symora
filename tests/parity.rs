@@ -204,7 +204,7 @@ fn run_daemon_cli(root: &Path, args: &[&str]) -> Vec<Value> {
         .args(["--format", "compact"])
         .env_remove("SYMORA_NO_DAEMON");
     let output = command.output().expect("run fixture command");
-    let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+    let payload: Value = common::parse_response(&output.stdout).unwrap_or_else(|error| {
         panic!(
             "invalid output for {args:?}: {error}; stderr: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -429,7 +429,7 @@ fn unconfirmed_rename_is_refused_by_cli_mcp_and_daemon() {
             command.env_remove("SYMORA_NO_DAEMON");
         }
         let output = command.output().unwrap();
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result: Value = common::parse_response(&output.stdout).unwrap();
         assert!(!output.status.success(), "{result}");
         assert_eq!(result["error"]["code"], "precondition_failed", "{result}");
         if let Some(ref expected) = expected {

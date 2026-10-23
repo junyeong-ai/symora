@@ -70,7 +70,9 @@ fn json_ok(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout).expect("JSON on stdout")
+    let value = common::parse_response(&out.stdout).expect("JSON on stdout");
+    common::assert_qualifiers_lead(&value);
+    value
 }
 
 #[cfg(unix)]
@@ -117,7 +119,7 @@ fn map_summary_emits_valid_json_with_compact_format() {
         String::from_utf8_lossy(&out.stderr)
     );
     let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("map summary stdout must be valid JSON");
+        common::parse_response(&out.stdout).expect("map summary stdout must be valid JSON");
     assert!(json.get("languages").is_some());
     assert!(
         json["total_files"].as_u64().unwrap_or(0) > 0,
@@ -132,7 +134,7 @@ fn pack_emits_valid_json_with_focus_bias() {
     ]);
     assert!(out.status.success());
     let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("pack stdout must be valid JSON");
+        common::parse_response(&out.stdout).expect("pack stdout must be valid JSON");
     assert_eq!(json["focus"], "src");
     assert!(json["files"]["count"].as_u64().unwrap_or(0) > 0);
     assert!(json["budget_tokens"].as_u64().unwrap() == 500);
@@ -352,7 +354,7 @@ fn doctor_reports_override_provenance_and_spawnability() {
     let out = run_in(dir.path(), &["--format", "compact", "doctor", "rust"]);
     assert!(out.status.success());
     let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("doctor stdout must be valid JSON");
+        common::parse_response(&out.stdout).expect("doctor stdout must be valid JSON");
     let rust = json["languages"]
         .as_array()
         .unwrap()
@@ -367,7 +369,7 @@ fn doctor_reports_override_provenance_and_spawnability() {
     // emits no config_errors at all.
     let out = run_in(dir.path(), &["--format", "compact", "doctor"]);
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     let go = json["languages"]
         .as_array()
         .unwrap()
@@ -387,7 +389,7 @@ fn doctor_reports_override_provenance_and_spawnability() {
     .unwrap();
     let out = run_in(dir.path(), &["--format", "compact", "doctor", "rust"]);
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     let errors = json["config_errors"]
         .as_array()
         .expect("config_errors must be present for a rejected key");
@@ -408,7 +410,7 @@ fn doctor_reports_override_provenance_and_spawnability() {
     // name and presence rule as doctor.
     let out = run_in(dir.path(), &["--format", "compact", "config", "show"]);
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(json["config"]["lsp"]["timeout_secs"], 99);
     assert_eq!(json["config"]["lsp"]["servers"], serde_json::json!({}));
     let errors = json["config_errors"]
@@ -424,7 +426,7 @@ fn doctor_reports_override_provenance_and_spawnability() {
     std::fs::write(config_dir.join("config.toml"), "[lsp]\ntimeout_secs = 99\n").unwrap();
     let out = run_in(dir.path(), &["--format", "compact", "config", "show"]);
     assert!(out.status.success());
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert!(json.get("config_errors").is_none());
 }
 
@@ -447,7 +449,7 @@ fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
 
     let code_of = |args: &[&str]| -> String {
         let out = run_in(root, args);
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         json["error"]["code"]
             .as_str()
             .unwrap_or_default()
@@ -507,7 +509,7 @@ fn a_wildcard_zero_says_it_was_never_confirmed_against_disk() {
         root,
         &["--format", "compact", "search", "symbols", "*Zeta*"],
     );
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(json["count"], 0, "the index has no row for it yet");
     let hints = json["hints"]
         .as_array()
@@ -521,7 +523,7 @@ fn a_wildcard_zero_says_it_was_never_confirmed_against_disk() {
         root,
         &["--format", "compact", "search", "symbols", "*Alpha*"],
     );
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(json["count"], 1);
     assert!(
         json["hints"].as_array().is_some_and(|hints| hints
@@ -571,7 +573,7 @@ fn every_route_that_answers_from_a_holed_index_says_the_count_is_short() {
             "search symbols '{query}' failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(
             json["incomplete"],
             serde_json::Value::Bool(true),
@@ -624,7 +626,7 @@ fn edit_reindexes_the_store_so_search_sees_the_new_content() {
             "search {kind} '{query}' failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         json["count"].clone()
     };
 
@@ -685,7 +687,7 @@ fn a_symbol_zero_is_authoritative_until_the_tree_moves() {
             "search symbols '{query}' failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(json["count"], 0, "query '{query}' should find nothing");
         json
     };
@@ -770,7 +772,7 @@ fn a_symbol_zero_is_authoritative_until_the_tree_moves() {
             "nonexistent_missing_xyz",
         ],
     );
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(
         json["count"], 1,
         "the prescribed rebuild must reach the file the disclosure was about: {json}"
@@ -833,7 +835,7 @@ fn a_named_path_that_is_not_there_fails_rather_than_answering_zero() {
             "does/not/exist",
         ],
     );
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(json["error"]["code"], "not_found", "{json}");
     assert!(
         json["error"]["message"]
@@ -866,7 +868,7 @@ fn a_holed_build_names_the_paths_it_could_not_read() {
     let mode_bites = std::fs::read_dir(&blocked).is_err();
     run_in(root, &["--format", "compact", "search", "index", "build"]);
     let out = run_in(root, &["--format", "compact", "search", "index", "status"]);
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     if !mode_bites {
@@ -958,7 +960,7 @@ impl Widget {
     );
 
     let out = run_in(dir.path(), &["refs", "main.rs:3:12", "--deterministic"]);
-    let refused: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+    let refused: serde_json::Value = common::parse_response(&out.stdout).expect("JSON on stdout");
     assert_eq!(
         refused["error"]["code"], "unsupported",
         "references have no source that derives from the tree alone: {refused}"
@@ -1201,7 +1203,7 @@ fn pattern_batches_refuse_overlapping_original_ranges_before_preview_or_write() 
             }
             let out = run_in(dir.path(), &args);
             assert!(!out.status.success(), "{args:?} unexpectedly succeeded");
-            let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            let response: serde_json::Value = common::parse_response(&out.stdout).unwrap();
             assert_eq!(response["error"]["code"], "conflict", "{response}");
             assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
         }
@@ -1501,7 +1503,7 @@ fn a_statement_declaring_several_names_is_each_ones_declaration() {
             args.extend(["--body", "var hi = 3"]);
         }
         let out = run_in(repo, &args);
-        let refused: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let refused: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
         let message = refused["error"]["message"].as_str().unwrap_or_default();
         assert!(message.contains(other), "{operation} {symbol}: {refused}");
@@ -1520,7 +1522,7 @@ fn a_statement_declaring_several_names_is_each_ones_declaration() {
     );
     assert_eq!(on_name["target_symbol"], "lo", "{on_name}");
     let out = run_in(repo, &["edit", "delete", "p.go:5:1", "--dry-run"]);
-    let on_keyword: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let on_keyword: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(
         on_keyword["error"]["code"], "invalid_argument",
         "{on_keyword}"
@@ -1819,7 +1821,7 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
     }
 
     let out = run_in(repo, &["diff-impact", "main"]);
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
 }
 
@@ -1881,7 +1883,7 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
         .current_dir(repo)
         .output()
         .expect("symora binary should exist");
-    let page: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+    let page: serde_json::Value = common::parse_response(&out.stdout).expect("JSON on stdout");
     let mut changed: Vec<&str> = page["changes"]
         .as_array()
         .expect("changes")
@@ -3170,7 +3172,7 @@ fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
     let repo = repo_with_a_deleted_function();
     for range in ["HEAD~1..HEAD", "HEAD~1...HEAD"] {
         let out = run_in(repo.path(), &["diff-impact", range]);
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
         assert!(
             json["error"]["hint"]
@@ -3396,7 +3398,7 @@ fn symbol_search_rejects_invalid_kinds_before_selecting_a_backend() {
         .concat();
         let out = run_in(dir.path(), &args);
         assert!(!out.status.success(), "{args:?}");
-        let response: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let response: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
         assert!(
             response["error"]["message"]
@@ -3627,7 +3629,7 @@ exec cat > /dev/null
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert!(json.get("error").is_none(), "{json}");
     assert!(json.get("config_errors").is_none(), "{json}");
     assert_eq!(json["summary"]["serving"], 1);
@@ -3767,7 +3769,7 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
                 "compact",
             ],
         );
-        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
         if mutate {
             assert!(!output.status.success(), "{payload}");
             assert!(payload.get("error").is_some(), "{payload}");
@@ -3834,7 +3836,7 @@ fn unconfirmed_rename_previews_the_edit_set_without_applying_it() {
         assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
 
         let output = run_in(root.path(), &["rename", "main.go:3:17", "Renamed"]);
-        let refusal: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let refusal: serde_json::Value = common::parse_response(&output.stdout).unwrap();
         assert!(!output.status.success(), "{refusal}");
         assert_eq!(refusal["error"]["code"], "precondition_failed");
         assert!(
@@ -3891,7 +3893,7 @@ fn unrelated_hover_text_cannot_suppress_a_rename() {
         root.path(),
         &["rename", "main.go:3:17", "Renamed", "--format", "compact"],
     );
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
     assert!(output.status.success(), "{payload}");
     assert!(payload.get("error").is_none(), "{payload}");
     assert_eq!(payload["affected_files"], 1, "{payload}");
@@ -4151,7 +4153,7 @@ fn lifecycle_subprocess_output_preserves_json_and_interactive_input() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let response: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("lifecycle stdout must contain only JSON");
+        common::parse_response(&output.stdout).expect("lifecycle stdout must contain only JSON");
     assert_eq!(response["status"], "ok");
     let items = response["deps"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 5, "{response}");

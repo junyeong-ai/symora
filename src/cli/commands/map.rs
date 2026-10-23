@@ -68,6 +68,8 @@ struct MapSummaryOutput {
     /// than only noted.
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     unread_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    next_commands: Vec<String>,
     total_files: usize,
     code_files: usize,
     support_files: usize,
@@ -76,8 +78,6 @@ struct MapSummaryOutput {
     languages: Vec<LanguageMapOutput>,
     top_directories: Section<DirectoryMapOutput>,
     entrypoints: Section<EntryPointOutput>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    next_commands: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
