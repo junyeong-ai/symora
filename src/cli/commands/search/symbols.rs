@@ -20,6 +20,7 @@ use crate::cli::symbol_discovery::{
 };
 use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
+use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
 use crate::services::TestScope;
@@ -75,6 +76,25 @@ struct SymbolSearch<'a> {
     /// empty confines nothing.
     within: &'a [PathBuf],
     limit: usize,
+}
+
+impl SymbolSearch<'_> {
+    /// The languages whose index currency bears on this answer: every one it
+    /// drew on, or, when confined, those with files inside its paths. A change
+    /// to another language's files moves no row the paths hold.
+    fn currency_languages(
+        &self,
+        drawn_on: Vec<Language>,
+        detected: &DetectedLanguages,
+    ) -> Vec<Language> {
+        if self.within.is_empty() {
+            return drawn_on;
+        }
+        drawn_on
+            .into_iter()
+            .filter(|language| detected.languages.contains(language))
+            .collect()
+    }
 }
 
 pub async fn execute_symbol_search(
@@ -138,6 +158,26 @@ pub async fn execute_symbol_search(
             return Ok(());
         }
     };
+    // Discovery skips hidden and ignored paths, so the index holds nothing
+    // under one and its zero would read as an answer about it.
+    let discovery = FileFilter::new(app.root());
+    if let Some(path) = within
+        .iter()
+        .find(|path| discovery.is_ignored(&app.root().join(path)))
+    {
+        ctx.print_error(
+            OutputError::unsupported(format!(
+                "Symbol search does not cover {}: hidden and ignored paths are not indexed",
+                path.display()
+            ))
+            .with_hint(format!(
+                "Read its text with `symora search content --path={} -- {}`.",
+                shell_arg(&path.display().to_string()),
+                shell_arg(query)
+            )),
+        );
+        return Ok(());
+    }
     // The project root among them confines nothing.
     let within = if within.iter().any(|path| path.as_os_str().is_empty()) {
         Vec::new()
@@ -239,11 +279,14 @@ pub async fn execute_symbol_search(
             );
             let currency_facts = index_currency_disclosure(
                 app.store.as_ref(),
-                &if count > 0 {
-                    covered.clone()
-                } else {
-                    unconfirmed_by_live_lookup(&covered, &failures, &skipped)
-                },
+                &search.currency_languages(
+                    if count > 0 {
+                        covered.clone()
+                    } else {
+                        unconfirmed_by_live_lookup(&covered, &failures, &skipped)
+                    },
+                    &detected,
+                ),
             )
             .await;
             let section = with_coverage_disclosure(
@@ -375,7 +418,11 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         },
     );
     // Wildcards consult only the index, including for positive results.
-    let currency_facts = index_currency_disclosure(app.store.as_ref(), &covered).await;
+    let currency_facts = index_currency_disclosure(
+        app.store.as_ref(),
+        &search.currency_languages(covered.clone(), &detected),
+    )
+    .await;
     ctx.print_success(with_coverage_disclosure(
         with_emitted_stale(
             finish_symbol_search(matches, count, search, app.test_scope(), &shortfall),
@@ -581,7 +628,9 @@ async fn execute_workspace_symbol_search(
             &index_covered,
             !matches!(
                 route,
-                WorkspaceSearchRoute::IndexRebuilding | WorkspaceSearchRoute::IndexUnreadable
+                WorkspaceSearchRoute::Forced
+                    | WorkspaceSearchRoute::IndexRebuilding
+                    | WorkspaceSearchRoute::IndexUnreadable
             ),
         ));
         bounds
@@ -600,11 +649,14 @@ async fn execute_workspace_symbol_search(
     route_facts.extend(
         index_currency_disclosure(
             app.store.as_ref(),
-            &if count > 0 {
-                index_covered.clone()
-            } else {
-                unconfirmed_by_live_lookup(&index_covered, &failures, &skipped)
-            },
+            &search.currency_languages(
+                if count > 0 {
+                    index_covered.clone()
+                } else {
+                    unconfirmed_by_live_lookup(&index_covered, &failures, &skipped)
+                },
+                detected,
+            ),
         )
         .await,
     );
@@ -853,8 +905,9 @@ fn is_within(ctx: &OutputContext, file: &Path, within: &[PathBuf]) -> bool {
 /// The bound a path-confined live answer is, for the languages it alone
 /// answered. Where the index answered a language, its rows already hold every
 /// match inside the paths as of the build, so a server's narrowed answer
-/// costs that language nothing. `buildable` is whether the index is in a
-/// state a build can be started over.
+/// costs that language nothing. `buildable` is whether building the index
+/// would answer the search again: not while it is rebuilding or unreadable,
+/// nor for a search that bypasses it.
 fn narrowed_live_answer(
     narrowed: &[Language],
     answered_by_index: &[Language],
