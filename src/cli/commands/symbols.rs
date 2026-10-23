@@ -8,8 +8,9 @@ use crate::cli::OutputError;
 use crate::cli::resolve_project_file;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, WorkspaceSearchRoute, coverage_shortfall,
-    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, literal_query,
-    ordered_bounds, unconfirmed_by_live_lookup, with_coverage_disclosure, workspace_route_for,
+    index_currency_disclosure, index_holes_bound, index_not_built_disclosure,
+    index_unavailable_disclosure, literal_query, ordered_bounds, unconfirmed_by_live_lookup,
+    with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
@@ -408,6 +409,9 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
         DisclosureRoute::WorkspaceOnly(reason)
     });
     let mut route_facts = Vec::from_iter(unavailable);
+    route_facts.extend(
+        workspace_only.and_then(|reason| index_not_built_disclosure(reason, indexing, &languages)),
+    );
     route_facts.extend(
         index_currency_disclosure(
             app.store.as_ref(),

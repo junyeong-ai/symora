@@ -691,6 +691,9 @@ pub fn with_coverage_disclosure<T>(
     // commands follow the results — so they fill whatever room is left.
     hints.extend(section.hints.iter().cloned());
     commands.extend(section.next_commands.iter().cloned());
+    // Two facts can share a remedy; it is offered once, in its first place.
+    let mut offered = HashSet::new();
+    commands.retain(|command| offered.insert(command.clone()));
     hints.truncate(ADVICE_LIMIT);
     commands.truncate(ADVICE_LIMIT);
     let section = section.with_hints(hints).with_next_commands(commands);
@@ -845,6 +848,38 @@ pub async fn index_currency_disclosure(
         ),
         "symora search index build".to_string(),
     )]
+}
+
+/// What an unbuilt index costs a symbol answer a language server gave alone
+/// without confirming workspace readiness: the answer may be short, and a
+/// build answers the languages the index extracts without waiting on the
+/// server. Nothing to say where the index was built, the server confirmed
+/// readiness, or the index extracts none of the languages, since a build
+/// changes nothing there.
+pub fn index_not_built_disclosure(
+    route: WorkspaceSearchRoute,
+    indexing: Option<crate::models::lsp::IndexingDegradation>,
+    languages: &[Language],
+) -> Option<(String, String)> {
+    if route != WorkspaceSearchRoute::IndexNotBuilt || indexing.is_none() {
+        return None;
+    }
+    let extracted: Vec<&str> = languages
+        .iter()
+        .filter(|language| crate::services::store::SymbolExtractor::is_supported(**language))
+        .map(|language| language.lsp_id())
+        .collect();
+    (!extracted.is_empty()).then(|| {
+        (
+            format!(
+                "The search index is not built, so this answer rests on a language server that \
+                 did not confirm workspace readiness; a built index answers {} without waiting \
+                 for it",
+                extracted.join(", ")
+            ),
+            "symora search index build".to_string(),
+        )
+    })
 }
 
 /// What a rebuilding index costs an answer that could not consult it. Its

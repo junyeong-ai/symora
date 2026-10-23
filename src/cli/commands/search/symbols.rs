@@ -9,9 +9,9 @@ use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
-    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, literal_query,
-    ordered_bounds, path_flags, relative_stale_files, unconfirmed_by_live_lookup,
-    with_coverage_disclosure, workspace_route_for,
+    index_currency_disclosure, index_holes_bound, index_not_built_disclosure,
+    index_unavailable_disclosure, literal_query, ordered_bounds, path_flags, relative_stale_files,
+    unconfirmed_by_live_lookup, with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
@@ -630,6 +630,7 @@ async fn execute_workspace_symbol_search(
         },
     );
     let mut route_facts = Vec::from_iter(supplement_unavailable.or(index_unavailable));
+    route_facts.extend(index_not_built_disclosure(route, indexing, languages));
     route_facts.extend(
         index_currency_disclosure(
             app.store.as_ref(),
@@ -1855,6 +1856,54 @@ mod tests {
         assert!(section.hints[0].contains("rust"));
         assert!(section.hints[0].contains("workspace symbol lookup failed"));
         assert!(section.hints[0].contains("server_not_installed"));
+        assert_eq!(
+            section.next_commands,
+            vec!["symora search index build", "symora doctor rust"]
+        );
+    }
+
+    /// An unbuilt index is advised where a build would change the answer: the
+    /// server did not confirm readiness, and the index extracts the language.
+    /// Beside a gap prescribing the same build, the build is offered once.
+    #[test]
+    fn an_unbuilt_index_is_advised_only_where_a_build_would_answer() {
+        let unconfirmed = Some(crate::models::lsp::IndexingDegradation::Unconfirmed);
+        let unbuilt = WorkspaceSearchRoute::IndexNotBuilt;
+        let fact = index_not_built_disclosure(unbuilt, unconfirmed, &[Language::Rust])
+            .expect("a build answers rust");
+        assert!(fact.0.contains("rust"), "{}", fact.0);
+        assert!(
+            index_not_built_disclosure(unbuilt, None, &[Language::Rust]).is_none(),
+            "a server that confirmed readiness answered in full"
+        );
+        assert!(
+            index_not_built_disclosure(
+                WorkspaceSearchRoute::Forced,
+                unconfirmed,
+                &[Language::Rust]
+            )
+            .is_none(),
+            "a search that bypasses the index gains nothing from one"
+        );
+        let extractorless = Language::all()
+            .into_iter()
+            .find(|language| {
+                language.is_code()
+                    && !crate::services::store::SymbolExtractor::is_supported(*language)
+            })
+            .expect("some code language has no extractor");
+        assert!(index_not_built_disclosure(unbuilt, unconfirmed, &[extractorless]).is_none());
+
+        let failures = vec![server_failure(Language::Rust)];
+        let section = with_coverage_disclosure(
+            Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
+            &gaps(&failures, &[]),
+            "alpha",
+            &[],
+            DisclosureRoute::WorkspaceOnly(unbuilt),
+            &[],
+            &[fact],
+        );
         assert_eq!(
             section.next_commands,
             vec!["symora search index build", "symora doctor rust"]
