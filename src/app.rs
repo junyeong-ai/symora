@@ -13,7 +13,6 @@ use crate::services::daemon_lsp::DaemonLspService;
 #[cfg(unix)]
 use crate::services::daemon_store::DaemonStoreService;
 use crate::services::lsp::{DefaultLspService, DeterministicLspService, LspService};
-use crate::services::project::{DefaultProjectService, ProjectService};
 use crate::services::store::{DefaultStoreService, StoreConfig, StoreService};
 
 pub struct App {
@@ -21,7 +20,6 @@ pub struct App {
     pub(crate) output: OutputContext,
     pub(crate) lsp: Arc<dyn LspService + Send + Sync>,
     pub(crate) ast: Arc<dyn AstQueryService>,
-    pub(crate) project: Arc<dyn ProjectService>,
     pub(crate) store: Arc<dyn StoreService>,
     pub(crate) config_service: Arc<dyn ConfigService>,
     pub(crate) config: SymoraConfig,
@@ -94,7 +92,6 @@ impl App {
 
         let runtime_config = Arc::new(LspRuntimeConfig::from(&config));
 
-        let project = Arc::new(DefaultProjectService::new(&root));
         let ast = Arc::new(DefaultAstQueryService::new(
             runtime_config.max_file_size_bytes,
         ));
@@ -154,7 +151,6 @@ impl App {
             output,
             lsp,
             ast,
-            project,
             store,
             config_service,
             config,
@@ -194,7 +190,6 @@ impl App {
             output,
             lsp: Arc::clone(&self.lsp),
             ast: Arc::clone(&self.ast),
-            project: Arc::clone(&self.project),
             store: Arc::clone(&self.store),
             config_service: Arc::clone(&self.config_service),
             config: self.config.clone(),

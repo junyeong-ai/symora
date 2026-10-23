@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ConfigError, LspError, ProjectError, SearchError, StoreError};
+use crate::error::{ConfigError, LspError, SearchError, StoreError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,7 +16,6 @@ pub enum ErrorCode {
     Cancelled,
     ParseError,
     StoreNotInitialized,
-    AlreadyExists,
     /// What the command needs moved or is held by someone else: an edit
     /// range that no longer matches the on-disk file (the analysis ran
     /// against a stale revision), or an index another process is rebuilding.
@@ -260,16 +259,6 @@ impl From<ConfigError> for OutputError {
             ConfigError::NotFound(_) => Self::new(ErrorCode::NotFound, message),
             ConfigError::InvalidValue { .. } => Self::new(ErrorCode::InvalidArgument, message),
             ConfigError::Io(_) => Self::new(ErrorCode::Io, message),
-        }
-    }
-}
-
-impl From<ProjectError> for OutputError {
-    fn from(err: ProjectError) -> Self {
-        let message = err.to_string();
-        match err {
-            ProjectError::AlreadyExists(_) => Self::new(ErrorCode::AlreadyExists, message),
-            ProjectError::Io(_) => Self::new(ErrorCode::Io, message),
         }
     }
 }

@@ -81,10 +81,7 @@ struct ConfigEditOutput {
 fn config_to_json(config: &SymoraConfig) -> serde_json::Value {
     serde_json::json!({
         "project": {
-            "name": config.project.name,
-            "languages": config.project.languages.iter()
-                .map(|l| l.lsp_id())
-                .collect::<Vec<_>>(),
+            "entry_files": config.project.entry_files,
         },
         "lsp": {
             "timeout_secs": config.lsp.timeout_secs,

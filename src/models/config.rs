@@ -3,8 +3,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::symbol::Language;
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymoraConfig {
     #[serde(default)]
@@ -50,11 +48,6 @@ impl SymoraConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProjectConfig {
-    pub name: Option<String>,
-
-    #[serde(default)]
-    pub languages: Vec<Language>,
-
     #[serde(default)]
     pub entry_files: std::collections::BTreeMap<String, Vec<String>>,
 }

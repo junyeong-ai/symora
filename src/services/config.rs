@@ -337,12 +337,6 @@ fn merge_project(
     overlay: crate::models::config::ProjectConfig,
 ) -> crate::models::config::ProjectConfig {
     crate::models::config::ProjectConfig {
-        name: overlay.name.or(base.name),
-        languages: if overlay.languages.is_empty() {
-            base.languages
-        } else {
-            overlay.languages
-        },
         entry_files: {
             let mut merged = base.entry_files;
             merged.extend(overlay.entry_files);

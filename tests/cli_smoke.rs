@@ -14,8 +14,6 @@ mod common;
 use common::{SYMORA, no_global_config};
 
 const ALL_SUBCOMMANDS: &[&str] = &[
-    "init",
-    "status",
     "config",
     "doctor",
     "symbols",

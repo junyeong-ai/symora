@@ -354,7 +354,6 @@ symora actions list src/services/checkout.ts:48:9   # available code actions
 # Health & diagnostics
 symora doctor                # language servers: verified serving / missing + install commands
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
-symora status                # project + whether language servers are installed (serving: doctor's `serves`; daemon: `symora daemon status`)
 ```
 
 Global flags work before or after the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.21`, `>=0.21,<0.22`), so a caller that parses the output never has to compare `--version` strings itself.
@@ -555,7 +554,7 @@ symora daemon start | stop | restart | status
 | **Analyze** | `context`, `usage`, `impact`, `diff-impact` |
 | **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
 | **Diagnose** | `diagnostics` |
-| **Manage** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
+| **Manage** | `search index`, `doctor`, `config`, `daemon`, `setup`, `self`, `mcp` |
 
 Run `symora <command> --help` for any command's flags. Output fields are described in [the output contract](#the-output-contract) and in the output schemas `symora mcp tools` prints.
 
