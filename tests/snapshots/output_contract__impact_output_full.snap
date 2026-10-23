@@ -1,6 +1,5 @@
 ---
 source: tests/output_contract.rs
-assertion_line: 681
 expression: out
 ---
 {
@@ -24,13 +23,6 @@ expression: out
       "tests/api.rs"
     ]
   },
-  "files": [
-    {
-      "file": "src/handler.rs",
-      "is_test": false,
-      "refs": 5
-    }
-  ],
   "blast_radius": {
     "direct_callers": 4,
     "transitive_callers": 9,
@@ -53,5 +45,12 @@ expression: out
   },
   "next_commands": [
     "symora impact src/main.rs:12:4 --depth 2"
+  ],
+  "files": [
+    {
+      "file": "src/handler.rs",
+      "is_test": false,
+      "refs": 5
+    }
   ]
 }

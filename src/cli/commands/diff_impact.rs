@@ -46,7 +46,6 @@ pub struct DiffImpactOutput {
     pub changed_symbols_count: usize,
     pub total_references: usize,
     pub coverage: DiffCoverage,
-    pub changes: Vec<ChangedSymbolImpact>,
     /// Files whose changes could not be measured in full: nothing could read
     /// the symbols of their changed lines (removed lines are read by the
     /// grammar compiled into symora alone), they are symbolic links, whose
@@ -67,6 +66,7 @@ pub struct DiffImpactOutput {
     pub incomplete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+    pub changes: Vec<ChangedSymbolImpact>,
 }
 
 /// Test coverage summary for diff analysis (aggregate over all changed symbols)

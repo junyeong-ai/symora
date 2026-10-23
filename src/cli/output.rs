@@ -220,6 +220,7 @@ impl OutputContext {
                 tracing::debug!("response fitted to output.max_response_chars");
             }
         }
+        crate::cli::response::order_items_last(&mut response);
         self.emit(&response);
     }
 
@@ -237,10 +238,11 @@ impl OutputContext {
     }
 
     /// Surface captured whole-config load failures as a top-level
-    /// `config_errors` array. Injected only when there are failures and the
-    /// command did not already emit its own `config_errors` (doctor / config
-    /// show own that key), so it never clobbers a command's report and stays
-    /// absent in the clean-config common case.
+    /// `config_errors` array, first in the response because it qualifies all
+    /// of it. Injected only when there are failures and the command did not
+    /// already emit its own `config_errors` (doctor / config show own that
+    /// key), so it never clobbers a command's report and stays absent in the
+    /// clean-config common case.
     fn inject_config_errors(&self, response: &mut serde_json::Value) {
         if self.config_errors.is_empty() {
             return;
@@ -248,7 +250,8 @@ impl OutputContext {
         if let Some(obj) = response.as_object_mut()
             && !obj.contains_key("config_errors")
         {
-            obj.insert(
+            obj.shift_insert(
+                0,
                 "config_errors".to_string(),
                 serde_json::json!(self.config_errors),
             );
@@ -321,6 +324,45 @@ mod tests {
     #[test]
     fn output_format_default_is_pretty() {
         assert_eq!(OutputFormat::default(), OutputFormat::Pretty);
+    }
+
+    /// A reader that sees only the head of a response keeps what qualifies
+    /// it: configuration failures lead, and a section's items follow every
+    /// marker, the size fitter's own included.
+    #[test]
+    fn qualifiers_precede_the_items_they_qualify() {
+        let buf = BufferedSink::new();
+        let ctx = OutputContext::with_sink(
+            PathBuf::from("/project"),
+            OutputOptions {
+                format: OutputFormat::Compact,
+                ..Default::default()
+            },
+            Arc::new(buf.clone()),
+        )
+        .with_config_errors(vec!["bad key".to_string()])
+        .with_max_response_chars(300);
+        let items: Vec<String> = (0..40).map(|i| format!("item-{i}")).collect();
+        ctx.print_success(serde_json::json!({
+            "count": 40,
+            "showing": 40,
+            "items": items,
+            "indexing": "unconfirmed",
+            "nested": { "count": 0, "showing": 0, "items": [], "hints": ["h"] },
+        }));
+        let captured = buf.take();
+        let response: serde_json::Value = serde_json::from_str(&captured[0]).unwrap();
+        let keys = |value: &serde_json::Value| -> Vec<String> {
+            value.as_object().unwrap().keys().cloned().collect()
+        };
+        let top = keys(&response);
+        assert_eq!(top.first().map(String::as_str), Some("config_errors"));
+        assert_eq!(top.last().map(String::as_str), Some("items"));
+        assert_eq!(response["truncated"], true, "{response}");
+        assert_eq!(
+            keys(&response["nested"]).last().map(String::as_str),
+            Some("items")
+        );
     }
 
     #[test]

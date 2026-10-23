@@ -25,6 +25,8 @@ Use `Section<T>` for enumerated sets whose length grows with the repository or f
 - `items`: whole result objects.
 - `truncated`: present and true when `showing < count`.
 
+Every field that qualifies a list precedes it: the output layer emits a section's `items` last, a response's own bulk list (`diff-impact` `changes`, `impact` `files`) is its last field, and injected `config_errors` leads the response, so a reader that sees only the head still has the counts and markers.
+
 Bounded summaries and rankings without an enumeration claim may remain arrays. Map's individually limited lists use their own sections; a neighbouring subtree total does not count an immediate directory listing.
 
 A command-level token budget applies inside the command; `pack` stays within its character-based estimate, which is not a model-specific token count or an envelope limit. Other responses use `output.max_response_chars` (default 20000; 0 disables) as a sizing target. The output layer measures compact JSON independently of display format. Source-bearing commands identify body paths explicitly through `print_source`; whole bodies are omitted before list items, preserving declaration identities and disclosing `body_omitted: response_size`. Never discover source bodies by matching arbitrary JSON keys. List fitting preserves totals and adds a size-limit hint. Fixed metadata may still exceed the target. Never slice strings or return invalid JSON to meet it. Recount `bodies_included` after fitting; omit it when its section becomes empty.
