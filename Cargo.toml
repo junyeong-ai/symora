@@ -94,10 +94,6 @@ axum = { version = "0.8.9", default-features = false, features = ["json", "tokio
 # direct dependency and tracks upstream on our schedule.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 
-# Unix file locking (for daemon)
-[target.'cfg(unix)'.dependencies]
-libc = "0.2.191"
-
 # jemalloc on Linux/macOS: cuts fragmentation across SQLite batches and the
 # LSP fan-out arena. cfg-gated because the upstream crate doesn't build on
 # Windows or wasm.
@@ -107,6 +103,10 @@ tikv-jemallocator = "0.7.0"
 [dev-dependencies]
 tokio-test = "0.4.6"
 insta = { version = "1.49.0", features = ["json", "redactions"] }
+
+# A test that a stopped server's pid names no process tells ESRCH from EPERM.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2.191"
 
 [profile.release]
 lto = true
