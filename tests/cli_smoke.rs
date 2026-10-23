@@ -438,57 +438,6 @@ fn doctor_reports_override_provenance_and_spawnability() {
     assert!(json.get("config_errors").is_none());
 }
 
-/// An applied edit re-indexes the touched file in the same flow, so a
-/// A file the embed loop cannot read shortens the corpus on every run, so
-/// every run has to say so. The cache's mtime is its freshness record, and
-/// stamping the live one on a file that was given up on makes it mean "up to
-/// date" instead: the failure would be disclosed once and then never again,
-/// leaving every later run — the ones actually likely to be scripted —
-/// reading as an exhaustive ranking.
-#[cfg(unix)]
-#[test]
-fn a_permanently_unreadable_file_shortens_every_semantic_run_and_says_so_every_time() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
-    std::fs::write(root.join("b.rs"), "pub fn beta() {}\n").unwrap();
-    std::fs::set_permissions(root.join("b.rs"), std::fs::Permissions::from_mode(0o000)).unwrap();
-
-    // Whether this run can assert anything is settled by the build's features
-    // and by probing the tree — never by reading the output under test, which
-    // would take a defect for the environment and pass silently.
-    if !cfg!(feature = "embeddings") || std::fs::read_to_string(root.join("b.rs")).is_ok() {
-        std::fs::set_permissions(root.join("b.rs"), std::fs::Permissions::from_mode(0o644))
-            .unwrap();
-        return;
-    }
-
-    let incomplete_of = || -> serde_json::Value {
-        json_ok(
-            root,
-            &["--format", "compact", "search", "semantic", "alpha"],
-        )["incomplete"]
-            .clone()
-    };
-
-    for run in 1..=3 {
-        assert_eq!(
-            incomplete_of(),
-            serde_json::Value::Bool(true),
-            "run {run} did not disclose a file that is still unreadable"
-        );
-    }
-
-    std::fs::set_permissions(root.join("b.rs"), std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(
-        incomplete_of(),
-        serde_json::Value::Null,
-        "a shortfall that is cured must stop being reported"
-    );
-}
-
 /// A walk turned away from part of the tree learned nothing about what lives
 /// there, so no command may draw a conclusion from its absence. "No languages
 /// here", "file not in this project", and "no source files" are all such
@@ -947,74 +896,6 @@ fn a_holed_build_names_the_paths_it_could_not_read() {
             .collect::<Vec<_>>(),
         vec!["blocked"],
         "the path is named where the reader's own files are: {json}"
-    );
-}
-
-/// A file the embed loop could not read must leave behind no record a later
-/// run can take for freshness. Recording the failure under the mtime the file
-/// had is exactly such a record: mtimes recur — a timestamp-preserving
-/// restore, or a permission change, which does not move one at all — and the
-/// run that meets one skips a file it has never embedded, with nothing left to
-/// say the corpus is short. Absence has no value to collide with.
-#[cfg(unix)]
-#[test]
-fn a_read_failure_leaves_no_record_a_later_run_can_take_for_freshness() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    std::fs::write(root.join("a.rs"), "pub fn alpha() {}\n").unwrap();
-    let target = root.join("b.rs");
-    std::fs::write(&target, "pub fn beta() {}\n").unwrap();
-    let original = std::fs::metadata(&target).unwrap().modified().unwrap();
-
-    let search = || -> serde_json::Value {
-        json_ok(
-            root,
-            &[
-                "--format",
-                "compact",
-                "search",
-                "semantic",
-                "database connection pool",
-            ],
-        )
-    };
-    // Whether this run can assert anything is settled by the build's features
-    // and by probing the tree — never by reading the output under test, which
-    // would take a defect for the environment and pass silently.
-    if !cfg!(feature = "embeddings") {
-        return;
-    }
-    search();
-
-    // The content moves, so the cache's record of this file is stale and the
-    // next run has to read it — which is the run that fails.
-    std::fs::write(&target, "pub fn database_connection_pool() {}\n").unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let mode_bites = std::fs::read_to_string(&target).is_err();
-    search();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
-    if !mode_bites {
-        return;
-    }
-
-    // The file comes back with the timestamp it had when it was last embedded
-    // successfully — the shape a restore from an archive leaves.
-    std::fs::File::options()
-        .write(true)
-        .open(&target)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(original))
-        .unwrap();
-
-    let json = search();
-    let items = json["items"].as_array().cloned().unwrap_or_default();
-    assert!(
-        items
-            .iter()
-            .any(|item| item["file"].as_str() == Some("b.rs")),
-        "the file was never embedded, and a recurring mtime made the run skip it: {json}"
     );
 }
 

@@ -559,8 +559,6 @@ symora daemon start | stop | restart | status
 
 Run `symora <command> --help` for any command's flags. Output fields are described in [the output contract](#the-output-contract) and in the output schemas `symora mcp tools` prints.
 
-> `search semantic` (natural-language search) exists only in builds compiled with the optional `embeddings` feature. A default build — the prebuilt binaries included — reports `unsupported`; build with `cargo install --path . --features embeddings` to use it.
-
 ---
 
 ## Troubleshooting

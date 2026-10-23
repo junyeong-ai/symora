@@ -7,25 +7,11 @@
 //! a single, machine-consumable JSON surface. The primary consumer is an
 //! AI agent invoking commands through a shell or the MCP protocol.
 //!
-//! ## Capabilities
-//!
-//! - **Navigation** — `def`, `refs`, `callers`, `callees`, `implementations`,
-//!   `supertypes`, `subtypes`, `typedef`, `hover`, `signature`
-//! - **Analysis** — `context`, `impact` (with N-hop blast radius),
-//!   `diff-impact`, `usage`, `diagnostics`
-//! - **Discovery** — `search symbols`, `search content`, `search ast`,
-//!   `search semantic` (opt-in embeddings), `map`, `pack`
-//! - **Editing** — `edit replace-body`, `edit insert-before`,
-//!   `edit insert-after`, `edit delete`, `edit replace`, `edit pattern`,
-//!   `rename`, `actions`
-//! - **Operations** — `bench`, `daemon`, `mcp serve` (stdio + HTTP),
-//!   workspace fan-out across multiple repos
-//!
 //! ## Crate layout
 //!
 //! - [`app`] — runtime composition (services, output, config)
 //! - [`cli`] — command surface, output contract, analysis helpers
-//! - [`services`] — LSP, AST, project, store, pack, embeddings
+//! - [`services`] — LSP, AST, project, store, pack
 //! - [`infra`] — file filtering, LSP transport, AST parser pool
 //! - [`mcp`] — Model Context Protocol server (stdio + HTTP)
 //! - [`models`] — domain types shared across layers

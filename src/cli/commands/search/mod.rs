@@ -9,13 +9,11 @@ mod ast;
 mod common;
 mod content;
 mod index;
-mod semantic;
 mod symbols;
 
 pub use ast::{execute_ast_search, execute_list_nodes};
 pub use content::execute_content_search;
 pub use index::execute_index_command;
-pub use semantic::execute_semantic_search;
 pub use symbols::execute_symbol_search;
 
 #[derive(Args, Debug)]
@@ -106,20 +104,6 @@ pub enum SearchCommand {
         #[command(subcommand)]
         command: IndexCommand,
     },
-
-    /// Natural-language semantic search (requires the 'embeddings' feature).
-    Semantic {
-        /// Natural-language query, e.g. "where is the retry logic".
-        query: String,
-
-        /// Optional language filter
-        #[arg(short, long = "lang")]
-        language: Option<String>,
-
-        /// Maximum results
-        #[arg(long)]
-        limit: Option<usize>,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -184,13 +168,5 @@ pub async fn execute(args: SearchArgs, app: &App) -> Result<()> {
         }
         SearchCommand::Nodes { language } => execute_list_nodes(app, &language),
         SearchCommand::Index { command } => execute_index_command(app, command).await,
-        SearchCommand::Semantic {
-            query,
-            language,
-            limit,
-        } => {
-            let limit = limit.unwrap_or(cfg.search.limit);
-            execute_semantic_search(app, &query, language.as_deref(), limit).await
-        }
     }
 }

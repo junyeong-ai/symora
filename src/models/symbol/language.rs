@@ -329,7 +329,7 @@ impl Language {
     }
 
     /// Whether an unscoped search covers this language — the fan-out it pays
-    /// for, the corpus it embeds, the files it ranks and scans. Documentation
+    /// for, the files it ranks and scans. Documentation
     /// and data formats are covered only when named: a symbol query has
     /// nothing to ask one, and listing it as a language the answer could not
     /// cover is noise rather than a gap. Narrowing this narrows every one of

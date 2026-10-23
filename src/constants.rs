@@ -49,11 +49,6 @@ pub mod defaults {
     /// Iteration cap for the bench command warm-loop.
     pub const BENCH_DEFAULT_ITERATIONS: usize = 50;
 
-    /// Source-line window per chunk in `search semantic`. 30 ≈ a typical
-    /// function body — small enough to embed precisely, large enough to
-    /// carry context.
-    pub const SEMANTIC_CHUNK_LINES: usize = 30;
-
     /// MCP HTTP transport default port.
     pub const MCP_HTTP_DEFAULT_PORT: u16 = 7700;
 }
