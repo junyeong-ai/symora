@@ -15,8 +15,8 @@ use crate::cli::response::disclosure::{
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
-    DetectedLanguages, RankedSymbol, candidate_budget, no_languages_error, relevance_of,
-    resolve_search_languages, symbol_lookup_hints, symbol_rank,
+    DetectedLanguages, Rankable, RankedSymbol, candidate_budget, no_languages_error, relevance_of,
+    resolve_search_languages, sort_by_rank, symbol_lookup_hints, symbol_rank,
 };
 use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
@@ -835,37 +835,13 @@ async fn collect_workspace_symbol_results(
         }
     }
 
-    results.sort_by(|a, b| {
-        score_workspace_symbol(query, b)
-            .partial_cmp(&score_workspace_symbol(query, a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.location.file.cmp(&b.location.file))
-            .then_with(|| a.location.line.cmp(&b.location.line))
-            .then_with(|| a.location.column.cmp(&b.location.column))
-    });
-
     let total = results.len();
     let mut outputs: Vec<_> = results
         .into_iter()
-        .take(overfetch_limit)
-        .map(|symbol| {
-            let score = score_workspace_symbol(query, &symbol);
-            SymbolResultOutput {
-                name: symbol.name,
-                name_path: symbol.name_path,
-                kind: symbol.kind.to_string(),
-                file: ctx.relative_path(&symbol.location.file),
-                line: symbol.location.line,
-                column: symbol.location.column,
-                degraded_column: symbol.location.degraded_column,
-                container: symbol.container,
-                backend: Some("workspace".to_string()),
-                score,
-            }
-        })
+        .map(|symbol| live_result_output(symbol, "workspace", query, app))
         .collect();
-    rank_symbol_results(&mut outputs, query, app.test_scope());
+    sort_by_rank(&mut outputs, query, app.test_scope());
+    outputs.truncate(overfetch_limit);
     WorkspaceSymbolLookup {
         results: outputs,
         total,
@@ -1051,7 +1027,6 @@ async fn collect_document_path_results(
     within: &[PathBuf],
     seed_results: &[SymbolResultOutput],
 ) -> DocumentExpansion {
-    let ctx = &app.output;
     let leaf = workspace_query_from_pattern(query);
     if leaf.is_empty() {
         return DocumentExpansion::default();
@@ -1137,32 +1112,20 @@ async fn collect_document_path_results(
         );
 
         for symbol in matched {
-            let file_rel = ctx.relative_path(&symbol.location.file);
             let key = format!(
                 "{}:{}:{}:{}",
-                file_rel,
+                symbol.location.file.display(),
                 symbol.location.line,
                 symbol.location.column,
                 symbol.path()
             );
             if seen_symbols.insert(key) {
-                expanded.push(SymbolResultOutput {
-                    score: score_workspace_symbol(query, &symbol),
-                    name: symbol.name,
-                    name_path: symbol.name_path,
-                    kind: symbol.kind.to_string(),
-                    file: file_rel,
-                    line: symbol.location.line,
-                    column: symbol.location.column,
-                    degraded_column: symbol.location.degraded_column,
-                    container: symbol.container,
-                    backend: Some("document".to_string()),
-                });
+                expanded.push(live_result_output(symbol, "document", query, app));
             }
         }
     }
 
-    rank_symbol_results(&mut expanded, query, app.test_scope());
+    sort_by_rank(&mut expanded, query, app.test_scope());
     capped |= expanded.len() > limit;
     expanded.truncate(limit);
     DocumentExpansion {
@@ -1195,30 +1158,42 @@ struct DocumentExpansion {
     narrowed: Vec<Language>,
 }
 
-fn rank_of(result: &SymbolResultOutput, query: &str, test_scope: &TestScope) -> i32 {
-    symbol_rank(
-        query,
+impl Rankable for SymbolResultOutput {
+    fn ranked(&self) -> RankedSymbol<'_> {
         RankedSymbol {
-            name: &result.name,
-            name_path: result.name_path.as_deref(),
-            kind: &result.kind,
-            file: std::path::Path::new(&result.file),
-        },
-        test_scope,
-    )
+            name: &self.name,
+            name_path: self.name_path.as_deref(),
+            kind: &self.kind,
+            file: Path::new(&self.file),
+            line: self.line,
+            column: self.column,
+        }
+    }
 }
 
+/// Orders the rows and publishes each one's rank as its `score`, so an index
+/// row's own ladder never reaches the output beside a live row's.
 fn rank_symbol_results(results: &mut [SymbolResultOutput], query: &str, test_scope: &TestScope) {
-    results.sort_by(|a, b| {
-        rank_of(b, query, test_scope)
-            .cmp(&rank_of(a, query, test_scope))
-            .then_with(|| a.name.len().cmp(&b.name.len()))
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-            .then_with(|| a.column.cmp(&b.column))
-    });
+    sort_by_rank(results, query, test_scope);
     for result in results.iter_mut() {
-        result.score = relevance_of(rank_of(result, query, test_scope));
+        result.score = relevance_of(symbol_rank(query, result.ranked(), test_scope));
+    }
+}
+
+/// A language server's row in the emitted shape, scored by the rank that
+/// orders it.
+fn live_result_output(symbol: Symbol, backend: &str, query: &str, app: &App) -> SymbolResultOutput {
+    SymbolResultOutput {
+        score: relevance_of(symbol_rank(query, symbol.ranked(), app.test_scope())),
+        file: app.output.relative_path(&symbol.location.file),
+        name: symbol.name,
+        name_path: symbol.name_path,
+        kind: symbol.kind.to_string(),
+        line: symbol.location.line,
+        column: symbol.location.column,
+        degraded_column: symbol.location.degraded_column,
+        container: symbol.container,
+        backend: Some(backend.to_string()),
     }
 }
 
@@ -1234,41 +1209,6 @@ fn kind_matches(
     kind: Option<&crate::models::symbol::SymbolKind>,
 ) -> bool {
     kind.is_none_or(|expected| &symbol.kind == expected)
-}
-
-fn score_workspace_symbol(query: &str, symbol: &crate::models::symbol::Symbol) -> f64 {
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
-    let name = symbol.name.to_ascii_lowercase();
-    let path = symbol
-        .name_path
-        .as_deref()
-        .unwrap_or(&symbol.name)
-        .to_ascii_lowercase();
-    let last = q.rsplit('/').next().unwrap_or(&q);
-
-    if looks_like_symbol_path(query) {
-        if path == q {
-            1.0
-        } else if path.ends_with(&format!("/{q}")) {
-            0.96
-        } else if name == last {
-            0.78
-        } else if path.contains(last) {
-            0.68
-        } else {
-            0.5
-        }
-    } else if name == q {
-        1.0
-    } else if path.ends_with(&format!("/{q}")) {
-        0.95
-    } else if name.starts_with(&q) {
-        0.9
-    } else if name.contains(&q) {
-        0.75
-    } else {
-        0.5
-    }
 }
 
 fn symbol_search_hints(

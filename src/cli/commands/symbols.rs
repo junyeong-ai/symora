@@ -14,14 +14,13 @@ use crate::cli::response::disclosure::{
 };
 use crate::cli::response::{CoverageGap, Section, SymbolOutput};
 use crate::cli::symbol_discovery::{
-    RankedSymbol, candidate_budget, no_languages_error, resolve_search_languages,
-    symbol_lookup_hints, symbol_rank,
+    candidate_budget, no_languages_error, resolve_search_languages, sort_by_rank,
+    symbol_lookup_hints,
 };
 use crate::cli::utils::extract_signature;
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
-use crate::services::TestScope;
 use crate::services::store::{SymbolExtractor, SymbolSearchResult};
 
 #[derive(Args, Debug)]
@@ -376,7 +375,7 @@ async fn execute_workspace(params: WorkspaceParams<'_>, app: &App) -> Result<()>
 
     let mut filtered = filtered;
     if name_query.is_some() && symbol_query.is_none() {
-        sort_workspace_symbols(&mut filtered, &query, app.test_scope());
+        sort_by_rank(&mut filtered, &query, app.test_scope());
     }
 
     let total = filtered.len();
@@ -565,31 +564,6 @@ fn workspace_symbol_hints(
         result_count,
         limit,
     )
-}
-
-fn workspace_rank(symbol: &Symbol, query: &str, test_scope: &TestScope) -> i32 {
-    let kind = symbol.kind.to_string();
-    symbol_rank(
-        query,
-        RankedSymbol {
-            name: &symbol.name,
-            name_path: Some(symbol.path()),
-            kind: &kind,
-            file: &symbol.location.file,
-        },
-        test_scope,
-    )
-}
-
-fn sort_workspace_symbols(symbols: &mut [Symbol], query: &str, test_scope: &TestScope) {
-    symbols.sort_by(|a, b| {
-        workspace_rank(b, query, test_scope)
-            .cmp(&workspace_rank(a, query, test_scope))
-            .then_with(|| a.name.len().cmp(&b.name.len()))
-            .then_with(|| a.location.file.cmp(&b.location.file))
-            .then_with(|| a.location.line.cmp(&b.location.line))
-            .then_with(|| a.location.column.cmp(&b.location.column))
-    });
 }
 
 fn effective_workspace_query(name_query: Option<&str>, symbol_query: Option<&str>) -> String {
