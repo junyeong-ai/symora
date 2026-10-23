@@ -367,7 +367,7 @@ fn doctor_reports_override_provenance_and_spawnability() {
 
     // Builtin rows carry neither source nor command, and a clean config
     // emits no config_errors at all.
-    let out = run_in(dir.path(), &["--format", "compact", "doctor"]);
+    let out = run_in(dir.path(), &["--format", "compact", "doctor", "go"]);
     assert!(out.status.success());
     let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     let go = json["languages"]
@@ -1740,7 +1740,16 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "change"]);
 
-    let capped = json_ok(repo, &["diff-impact", "HEAD~1", "--max-symbols", "1"]);
+    let capped = json_ok(
+        repo,
+        &[
+            "--deterministic",
+            "diff-impact",
+            "HEAD~1",
+            "--max-symbols",
+            "1",
+        ],
+    );
     assert_eq!(
         capped["incomplete"].as_bool(),
         Some(true),
@@ -1753,7 +1762,16 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
         "the cause of `incomplete`, the cap, leads the hints: {capped}"
     );
 
-    let whole = json_ok(repo, &["diff-impact", "HEAD~1", "--max-symbols", "0"]);
+    let whole = json_ok(
+        repo,
+        &[
+            "--deterministic",
+            "diff-impact",
+            "HEAD~1",
+            "--max-symbols",
+            "0",
+        ],
+    );
     assert_eq!(
         whole["incomplete"].as_bool(),
         None,
@@ -1787,6 +1805,12 @@ fn a_diff_in_a_serverless_language_still_names_what_changed() {
     .unwrap();
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-qm", "change"]);
+    std::fs::create_dir(repo.join(".symora")).unwrap();
+    std::fs::write(
+        repo.join(".symora/config.toml"),
+        "[lsp.servers.terraform]\ncommand = \"/nonexistent/terraform-ls\"\n",
+    )
+    .unwrap();
 
     let page = json_ok(repo, &["diff-impact", "HEAD~1"]);
     let names: Vec<&str> = page["changes"]
@@ -1844,7 +1868,10 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
     std::fs::write(repo.join("m.py"), "def added():\n    return 1\n").unwrap();
     git(repo, &["add", "m.py"]);
 
-    for args in [&["diff-impact"][..], &["diff-impact", "--staged"]] {
+    for args in [
+        &["--deterministic", "diff-impact"][..],
+        &["--deterministic", "diff-impact", "--staged"],
+    ] {
         let page = json_ok(repo, args);
         assert_eq!(page["changes"][0]["name"], "added", "{args:?}: {page}");
         assert_eq!(
@@ -1854,7 +1881,7 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
         assert!(page["hints"].is_null(), "{args:?}: {page}");
     }
 
-    let out = run_in(repo, &["diff-impact", "main"]);
+    let out = run_in(repo, &["--deterministic", "diff-impact", "main"]);
     let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
     assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
 }
@@ -1898,7 +1925,7 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
         ("diff.interHunkContext", "10"),
     ] {
         git(repo, &["config", key, value]);
-        let page = json_ok(repo, &["diff-impact"]);
+        let page = json_ok(repo, &["--deterministic", "diff-impact"]);
         git(repo, &["config", "--unset", key]);
 
         let mut changed: Vec<&str> = page["changes"]
@@ -1912,7 +1939,7 @@ fn a_users_diff_configuration_does_not_change_what_is_measured() {
     }
 
     let out = symora()
-        .arg("diff-impact")
+        .args(["--deterministic", "diff-impact"])
         .env("GIT_DIFF_OPTS", "-u5")
         .current_dir(repo)
         .output()
@@ -2021,7 +2048,7 @@ fn a_change_that_names_no_lines_is_still_counted() {
     std::fs::write(repo.join("empty.py"), "").unwrap();
     git(repo, &["add", "-A"]);
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
     assert_eq!(page["changed_symbols_count"], 0, "{page}");
     assert!(page["unmeasured_files"].is_null(), "{page}");
@@ -2088,7 +2115,7 @@ fn a_rename_is_measured_the_same_whatever_the_rename_setting() {
     .unwrap();
     git(repo, &["add", "-A"]);
 
-    let baseline = rows(&json_ok(repo, &["diff-impact"]));
+    let baseline = rows(&json_ok(repo, &["--deterministic", "diff-impact"]));
     for row in [
         r#""gone" "deleted" "resolved" "old.py""#,
         r#""edit" "modified" null "new.py""#,
@@ -2099,7 +2126,7 @@ fn a_rename_is_measured_the_same_whatever_the_rename_setting() {
     }
     for (key, value) in [("diff.renames", "false"), ("diff.renames", "copies")] {
         git(repo, &["config", key, value]);
-        let page = json_ok(repo, &["diff-impact"]);
+        let page = json_ok(repo, &["--deterministic", "diff-impact"]);
         git(repo, &["config", "--unset", key]);
         assert_eq!(rows(&page), baseline, "{key}={value}");
     }
@@ -2125,7 +2152,7 @@ fn a_binary_file_whose_content_is_unchanged_is_not_unmeasured() {
     git(repo, &["mv", "blob.py", "moved.py"]);
     git(repo, &["add", "-A"]);
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
     assert!(page["unmeasured_files"].is_null(), "{page}");
     assert!(page["hints"].is_null(), "{page}");
@@ -2153,7 +2180,7 @@ fn a_file_name_git_quotes_is_measured_under_its_own_name() {
     std::fs::write(repo.join("we\"ird.py"), "def w():\n    return 2\n").unwrap();
     std::fs::write(repo.join("back\\slash.py"), "def keep():\n    return 1\n").unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     let rows: Vec<String> = page["changes"]
         .as_array()
         .expect("changes")
@@ -2200,7 +2227,7 @@ fn a_file_name_that_is_not_utf8_is_measured() {
     )
     .unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     let rows: Vec<String> = page["changes"]
         .as_array()
         .expect("changes")
@@ -2240,7 +2267,7 @@ fn two_files_whose_names_render_alike_are_each_unmeasured() {
         std::fs::write(repo.join(name), b"\0two").unwrap();
     }
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
     assert_eq!(
         page["unmeasured_files"],
@@ -2286,7 +2313,7 @@ fn removed_lines_no_grammar_reads_are_unmeasured() {
     )
     .unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 4, "{page}");
     let names: Vec<&str> = page["changes"]
         .as_array()
@@ -2338,7 +2365,7 @@ fn a_declaration_replaced_in_place_is_deleted_only_when_it_is_gone() {
     )
     .unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     let deleted: Vec<String> = page["changes"]
         .as_array()
         .expect("changes")
@@ -2460,7 +2487,7 @@ fn a_local_the_grammar_reads_is_never_reported_deleted() {
     )
     .unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     let rows: Vec<String> = page["changes"]
         .as_array()
         .expect("changes")
@@ -2508,7 +2535,7 @@ fn a_local_in_a_body_a_member_stands_for_is_never_reported() {
     std::fs::write(repo.join("Svc.kt"), kotlin("twice")).unwrap();
     std::fs::write(repo.join("handler.ts"), handler("helper")).unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     let rows = named_rows(&page);
     assert!(rows.iter().all(|(_, change)| change != "deleted"), "{page}");
     for local in ["doubled", "twice", "inner", "helper"] {
@@ -2555,7 +2582,7 @@ fn a_function_in_a_body_no_member_stands_for_stands_for_itself() {
     std::fs::write(repo.join("svc.test.ts"), test_file("buildInput")).unwrap();
     std::fs::write(repo.join("boot.ts"), iife(2)).unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     let rows = named_rows(&page);
     assert!(
         rows.contains(&("makeInput".to_string(), "deleted".to_string())),
@@ -3017,7 +3044,7 @@ fn a_base_that_is_not_text_leaves_its_file_unmeasured() {
     )
     .unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert!(
         page["changes"]
             .as_array()
@@ -3060,7 +3087,7 @@ fn a_symbolic_link_is_counted_but_not_read_through() {
     std::os::unix::fs::symlink("v1.py", repo.join("blob.py")).unwrap();
     git(repo, &["add", "-A"]);
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 4, "{page}");
     assert_eq!(page["changes"][0]["name"], "three", "{page}");
     assert_eq!(page["changes"].as_array().map(Vec::len), Some(1), "{page}");
@@ -3092,7 +3119,7 @@ fn a_staged_change_with_no_lines_is_not_unmeasured_under_edits() {
     std::fs::write(repo.join("new.py"), "def o():\n    return 2\n").unwrap();
     std::fs::write(repo.join("mode.py"), "def m():\n    return 2\n").unwrap();
 
-    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
     assert!(page["unmeasured_files"].is_null(), "{page}");
     assert!(page["hints"].is_null(), "{page}");
@@ -3116,7 +3143,7 @@ fn a_staged_change_under_a_mode_change_alone_is_measured() {
     git(repo, &["add", "-A"]);
     std::fs::set_permissions(repo.join("m.py"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
     assert_eq!(page["changes"][0]["name"], "a", "{page}");
     assert!(page["unmeasured_files"].is_null(), "{page}");
     assert!(page["hints"].is_null(), "{page}");
@@ -3148,7 +3175,7 @@ fn a_conflicted_file_is_disclosed_by_a_staged_diff() {
         .expect("git");
     assert!(!merge.status.success(), "the merge conflicts");
 
-    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
     assert_eq!(
         page["unmeasured_files"],
         serde_json::json!(["m.py"]),
@@ -3180,7 +3207,7 @@ fn a_file_git_reports_as_binary_is_counted_and_disclosed() {
     std::fs::write(repo.join("gen.py"), "def g():\n    return 2\n").unwrap();
     std::fs::write(repo.join(".git/info/attributes"), "gen.py -diff\n").unwrap();
 
-    let page = json_ok(repo, &["diff-impact"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact"]);
     assert_eq!(page["changed_files_count"], 2, "{page}");
     assert_eq!(page["changes"][0]["name"], "a", "{page}");
     assert_eq!(
@@ -3205,7 +3232,7 @@ fn a_file_git_reports_as_binary_is_counted_and_disclosed() {
 fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
     let repo = repo_with_a_deleted_function();
     for range in ["HEAD~1..HEAD", "HEAD~1...HEAD"] {
-        let out = run_in(repo.path(), &["diff-impact", range]);
+        let out = run_in(repo.path(), &["--deterministic", "diff-impact", range]);
         let json: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(json["error"]["code"], "invalid_argument", "{json}");
         assert!(
@@ -3216,7 +3243,7 @@ fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
         );
     }
 
-    let single = json_ok(repo.path(), &["diff-impact", "HEAD~1"]);
+    let single = json_ok(repo.path(), &["--deterministic", "diff-impact", "HEAD~1"]);
     assert!(
         single["changes"]
             .as_array()
@@ -3234,7 +3261,10 @@ fn a_diff_range_is_refused_with_the_revisions_that_express_it() {
 #[test]
 fn a_diff_run_from_a_subdirectory_measures_that_subdirectory() {
     let repo = repo_with_a_deleted_function();
-    let page = json_ok(&repo.path().join("pkg"), &["diff-impact", "HEAD~1"]);
+    let page = json_ok(
+        &repo.path().join("pkg"),
+        &["--deterministic", "diff-impact", "HEAD~1"],
+    );
     assert_eq!(
         page["changed_files_count"], 1,
         "top.py lies outside the project: {page}"
@@ -3269,7 +3299,7 @@ fn staged_lines_under_unstaged_edits_are_unmeasured_and_say_why() {
     )
     .unwrap();
 
-    let page = json_ok(repo, &["diff-impact", "--staged"]);
+    let page = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
     assert_eq!(
         page["unmeasured_files"],
         serde_json::json!(["pkg/m.py"]),
@@ -3288,7 +3318,7 @@ fn staged_lines_under_unstaged_edits_are_unmeasured_and_say_why() {
     );
 
     git(repo, &["add", "pkg/m.py"]);
-    let staged = json_ok(repo, &["diff-impact", "--staged"]);
+    let staged = json_ok(repo, &["--deterministic", "diff-impact", "--staged"]);
     assert!(
         staged["unmeasured_files"].is_null(),
         "fully staged, the index is what is on disk: {staged}"
@@ -3309,7 +3339,7 @@ fn a_base_off_the_branch_says_what_else_the_diff_takes_back() {
     git(repo, &["commit", "-qm", "side"]);
     git(repo, &["checkout", "-q", "-"]);
 
-    let off = json_ok(repo, &["diff-impact", "side"]);
+    let off = json_ok(repo, &["--deterministic", "diff-impact", "side"]);
     assert!(
         off["hints"]
             .as_array()
@@ -3319,7 +3349,7 @@ fn a_base_off_the_branch_says_what_else_the_diff_takes_back() {
         "{off}"
     );
 
-    let on = json_ok(repo, &["diff-impact", "HEAD~1"]);
+    let on = json_ok(repo, &["--deterministic", "diff-impact", "HEAD~1"]);
     assert!(
         on["hints"].is_null(),
         "an ancestor base needs no warning: {on}"
