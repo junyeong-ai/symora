@@ -3778,6 +3778,31 @@ fn positive_index_results_disclose_new_files_of_their_language_until_rebuilt() {
     }
 }
 
+/// An agent reads a usage error from stdout and never sees clap's prose, so
+/// the JSON carries what clap said: what is wrong, with the arguments it
+/// names, and how the command is used.
+#[test]
+fn a_usage_error_names_what_is_wrong_and_how_the_command_is_used() {
+    let refused = |args: &[&str]| {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let field = |name: &str| json["error"][name].as_str().unwrap_or_default().to_string();
+        (field("message"), field("hint"))
+    };
+
+    let (message, hint) = refused(&["symbols"]);
+    assert_eq!(
+        message,
+        "the following required arguments were not provided: <FILE>"
+    );
+    assert!(hint.starts_with("Usage: symora symbols <FILE>."), "{hint}");
+
+    let (message, hint) = refused(&["symbolz"]);
+    assert_eq!(message, "unrecognized subcommand 'symbolz'");
+    assert!(hint.contains("'symbols'"), "{hint}");
+}
+
 #[test]
 #[cfg(unix)]
 fn code_action_ranges_remain_bound_to_the_request_content() {

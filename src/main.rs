@@ -80,20 +80,43 @@ fn parse_cli() -> anyhow::Result<Cli> {
             let _ = e.print();
             std::process::exit(0);
         }
-        Err(e) => {
-            let message = e
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or("invalid arguments")
-                .trim_start_matches("error: ")
-                .to_string();
-            refuse(
-                symora::cli::OutputError::invalid(message)
-                    .with_hint("Run the command with --help for its accepted arguments."),
-            )
-        }
+        // Clap answers a missing subcommand with the whole help text, which
+        // states no error to report and is the one case `usage_error` cannot
+        // read as one.
+        Err(e) if e.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => refuse(
+            symora::cli::OutputError::invalid("a subcommand is required")
+                .with_hint("Run the command with --help to list its subcommands."),
+        ),
+        Err(e) => refuse(usage_error(&e)),
     }
+}
+
+/// A usage error in the shape every other failure takes. Clap states the
+/// error in its first paragraph, with any arguments or values it lists, then
+/// gives its tips, the usage line and where help is, a paragraph each: the
+/// statement is the message and the rest is the hint.
+fn usage_error(error: &clap::Error) -> symora::cli::OutputError {
+    let rendered = error.to_string();
+    let mut paragraphs = rendered
+        .split("\n\n")
+        .map(|paragraph| {
+            paragraph
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|paragraph| !paragraph.is_empty());
+    let statement = paragraphs.next().unwrap_or_default();
+    let message = statement.strip_prefix("error: ").unwrap_or(&statement);
+    let hint: Vec<String> = paragraphs
+        .map(|paragraph| match paragraph.ends_with('.') {
+            true => paragraph,
+            false => format!("{paragraph}."),
+        })
+        .collect();
+    symora::cli::OutputError::invalid(message).with_hint(hint.join(" "))
 }
 
 async fn async_main() -> anyhow::Result<()> {
