@@ -9,9 +9,9 @@ use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
-    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, ordered_bounds,
-    path_flags, relative_stale_files, unconfirmed_by_live_lookup, with_coverage_disclosure,
-    workspace_route_for,
+    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, literal_query,
+    ordered_bounds, path_flags, relative_stale_files, unconfirmed_by_live_lookup,
+    with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section};
 use crate::cli::symbol_discovery::{
@@ -158,24 +158,8 @@ pub async fn execute_symbol_search(
             return Ok(());
         }
     };
-    // Discovery skips hidden and ignored paths, so the index holds nothing
-    // under one and its zero would read as an answer about it.
-    let discovery = FileFilter::new(app.root());
-    if let Some(path) = within
-        .iter()
-        .find(|path| discovery.is_ignored(&app.root().join(path)))
-    {
-        ctx.print_error(
-            OutputError::unsupported(format!(
-                "Symbol search does not cover {}: hidden and ignored paths are not indexed",
-                path.display()
-            ))
-            .with_hint(format!(
-                "Read its text with `symora search content --path={} -- {}`.",
-                shell_arg(&path.display().to_string()),
-                shell_arg(query)
-            )),
-        );
+    if let Some(refusal) = uncovered_path(app, &within, query) {
+        ctx.print_error(refusal);
         return Ok(());
     }
     // The project root among them confines nothing.
@@ -900,6 +884,45 @@ fn is_within(ctx: &OutputContext, file: &Path, within: &[PathBuf]) -> bool {
         let relative = PathBuf::from(ctx.relative_path(file));
         within.iter().any(|path| relative.starts_with(path))
     }
+}
+
+/// Why a confined symbol search cannot answer for a path it was given, if it
+/// cannot.
+///
+/// Discovery skips hidden and ignored paths, so the index holds nothing under
+/// one and its zero would read as an answer about it. Content search takes a
+/// named hidden path as given and reads it; it skips an ignored one too, so
+/// there is no search to send the caller to.
+fn uncovered_path(app: &App, within: &[PathBuf], query: &str) -> Option<OutputError> {
+    let discovery = FileFilter::new(app.root());
+    let path = within
+        .iter()
+        .find(|path| discovery.is_ignored(&app.root().join(path)))?;
+    let absolute = app.root().join(path);
+    let shown = path.display().to_string();
+    if FileFilter::for_paths(app.root(), vec![absolute.clone()]).is_ignored(&absolute) {
+        return Some(
+            OutputError::unsupported(format!(
+                "Symbol search does not cover {shown}: the project's ignore rules exclude it"
+            ))
+            .with_hint(
+                "Ignore rules (`.gitignore`, `.symora/ignore`) keep it out of the index and out \
+                 of content search as well.",
+            ),
+        );
+    }
+    Some(
+        OutputError::unsupported(format!(
+            "Symbol search does not cover {shown}: hidden paths are not indexed"
+        ))
+        .with_hint(format!(
+            "Read its text with `symora search content --path={}{}`.",
+            shell_arg(&shown),
+            literal_query(query)
+                .map(|literal| format!(" -- {}", shell_arg(&literal)))
+                .unwrap_or_default()
+        )),
+    )
 }
 
 /// The bound a path-confined live answer is, for the languages it alone
