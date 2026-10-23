@@ -1007,11 +1007,7 @@ exec sleep 600
                 file_watch: FileWatch,
             ) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
-                config.lsp.timeout_secs = if behavior == "hang" {
-                    1
-                } else {
-                    3 + u64::from(delay_secs)
-                };
+                config.lsp.timeout_secs = 3 + u64::from(delay_secs);
                 config
                     .lsp
                     .servers
@@ -1332,10 +1328,28 @@ exec sleep 600
         async fn an_abandoned_start_neither_leaks_nor_blocks_the_next_caller() {
             let fake = FakeServer::new();
             let manager = fake.manager("hang", 0);
-            let abandoned =
-                tokio::time::timeout(Duration::from_millis(200), manager.get_client(Language::Go))
-                    .await;
-            assert!(abandoned.is_err());
+            // Abandoned once the server has run, so the leak check below is
+            // about a process that existed rather than one the start budget
+            // killed before it could record itself.
+            let finished = bounded(async {
+                let start = manager.get_client(Language::Go);
+                tokio::pin!(start);
+                loop {
+                    tokio::select! {
+                        result = &mut start => break Some(result),
+                        () = tokio::time::sleep(Duration::from_millis(20)) => {
+                            if !fake.pids().is_empty() {
+                                break None;
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+            assert!(
+                finished.is_none(),
+                "a hanging start finished before it was abandoned"
+            );
 
             assert!(bounded(manager.get_client(Language::Go)).await.is_err());
             fake.assert_all_gone().await;
