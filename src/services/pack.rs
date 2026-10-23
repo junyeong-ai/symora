@@ -323,10 +323,10 @@ struct CollectedNodes {
 /// Not a default: the mtime is the cache's whole freshness test, so a stand-in
 /// value would be recorded and then matched by the same stand-in on every
 /// later run — a permanent cache hit serving stale imports and signatures for
-/// a file that keeps changing, with nothing saying so. Nanoseconds for the
-/// same reason the embedding cache uses them: at whole-second resolution two
-/// edits inside one second are indistinguishable, and the second one is
-/// invisible until some later edit happens to land in a different second.
+/// a file that keeps changing, with nothing saying so. Nanoseconds because at
+/// whole-second resolution two edits inside one second are indistinguishable,
+/// and the second one is invisible until some later edit happens to land in a
+/// different second.
 fn file_mtime(metadata: &std::fs::Metadata) -> Option<i64> {
     metadata
         .modified()

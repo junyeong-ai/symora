@@ -227,7 +227,7 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
     use symora::cli::commands;
 
     match command {
-        // Project
+        // Environment
         Commands::Config(args) => commands::config::execute(args, app).await,
         Commands::Doctor(args) => commands::doctor::execute(args, app).await,
 
@@ -261,8 +261,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
         Commands::Edit(args) => commands::edit::execute(args, app).await,
         Commands::Rename(args) => commands::rename::execute(args, app).await,
         Commands::Actions(args) => commands::actions::execute(args, app).await,
-
-        // LSP Features
 
         // Daemon
         #[cfg(unix)]

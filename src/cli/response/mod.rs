@@ -491,9 +491,6 @@ fn collect_section_paths(
     }
 }
 
-/// The structural Section test: the typed key triple plus the
-/// `items.len() == showing` consistency check. Non-empty `items` also
-/// excludes `Section::error`'s 0/0/[] shape — there is nothing to drop.
 /// Move every section's `items` after its other fields, wherever the section
 /// sits: flattened into a response beside fields of its own, nested under a
 /// key, or extended by the size fitter with `truncated` and a hint.
@@ -514,6 +511,9 @@ pub fn order_items_last(value: &mut serde_json::Value) {
     }
 }
 
+/// The structural Section test: the typed key triple plus the
+/// `items.len() == showing` consistency check. Non-empty `items` also
+/// excludes `Section::error`'s 0/0/[] shape — there is nothing to drop.
 fn is_section_shaped(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     if map
         .get("count")
