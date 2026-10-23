@@ -629,6 +629,47 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
 }
 
+/// Pyright never confirms workspace readiness, so with no index a symbol
+/// search rests on an answer it cannot vouch for, and the index it extracts
+/// Python into is what to build.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn an_unbuilt_index_is_advised_when_pyright_answers_alone() {
+    if !pyright_on_path() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("target.py"),
+        "def target():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("pyrightconfig.json"),
+        r#"{"include":["."]}"#,
+    )
+    .unwrap();
+    let output = symora()
+        .args([
+            "search", "symbols", "target", "--lang", "python", "--format", "compact",
+        ])
+        .current_dir(root.path())
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    let result: Value = common::parse_response(&output.stdout).unwrap();
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["indexing"], "unconfirmed", "{result}");
+    assert!(
+        result["next_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "symora search index build"),
+        "{result}"
+    );
+}
+
 #[test]
 #[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
 fn pyright_rename_applies_only_once_its_unconfirmed_edits_are_accepted() {
