@@ -388,7 +388,7 @@ Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed 
 
 Symora keeps a persistent SQLite index at `.symora/store.db` in each project.
 
-The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. Row-level `stale` markers cannot detect omitted new files. Positive results also carry currency hints when the working tree has changed.
+The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. Row-level `stale` markers cannot detect omitted new files. Positive results also carry currency hints naming the languages whose files changed since the build.
 
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted

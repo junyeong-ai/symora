@@ -22,7 +22,7 @@ use crate::cli::OutputContext;
 use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
 use crate::models::symbol::Language;
-use crate::services::store::UnreadPath;
+use crate::services::store::{TreeCurrency, UnreadPath};
 
 /// Why a language is missing from an answer, as a stable marker an agent
 /// branches on — install a server, retry a timeout, narrow with `--lang`,
@@ -743,7 +743,8 @@ pub fn unconfirmed_by_live_lookup(
         .collect()
 }
 
-/// Qualify snapshot results when the index no longer matches the working tree.
+/// Qualify snapshot results for the unconfirmed languages whose files the
+/// index may no longer match.
 pub async fn index_currency_disclosure(
     store: &dyn crate::services::store::StoreService,
     unconfirmed: &[Language],
@@ -751,15 +752,29 @@ pub async fn index_currency_disclosure(
     if unconfirmed.is_empty() {
         return Vec::new();
     }
-    match store.index_is_current().await {
-        Ok(true) => return Vec::new(),
-        Ok(false) => {}
+    let (qualified, state) = match store.tree_currency().await {
+        Ok(TreeCurrency::Current) => return Vec::new(),
+        Ok(TreeCurrency::Behind(behind)) => (
+            unconfirmed
+                .iter()
+                .copied()
+                .filter(|language| behind.contains(language))
+                .collect::<Vec<_>>(),
+            "is behind the working tree",
+        ),
+        Ok(TreeCurrency::Unknown) => (
+            unconfirmed.to_vec(),
+            "cannot be compared with the working tree",
+        ),
         Err(error) => {
             return vec![(
                 format!("Could not verify index currency: {error}"),
                 "symora search index status".to_string(),
             )];
         }
+    };
+    if qualified.is_empty() {
+        return Vec::new();
     }
     if store
         .index_status()
@@ -772,15 +787,15 @@ pub async fn index_currency_disclosure(
             "symora search index status".to_string(),
         )];
     }
-    let languages = unconfirmed
+    let languages = qualified
         .iter()
         .map(|language| language.lsp_id())
         .collect::<Vec<_>>()
         .join(", ");
     vec![(
         format!(
-            "The index is behind the working tree for {languages}; results describe the indexed \
-             snapshot and may omit symbols or content added since the last build"
+            "The index {state} for {languages}; results describe the indexed snapshot and may \
+             omit symbols or content added since the last build"
         ),
         "symora search index build".to_string(),
     )]

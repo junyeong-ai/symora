@@ -16,6 +16,7 @@ use crate::error::{LspError, StoreError};
 use crate::models::symbol::{Language, SymbolKind};
 use crate::services::store::{
     ContentSearchResult, IndexOptions, IndexStats, SearchPage, StoreService, SymbolSearchResult,
+    TreeCurrency,
 };
 
 pub struct DaemonStoreService {
@@ -101,8 +102,8 @@ impl StoreService for DaemonStoreService {
         serde_json::from_value(response).map_err(|e| StoreError::Database(e.to_string()))
     }
 
-    async fn index_is_current(&self) -> Result<bool, StoreError> {
-        let response = self.client.index_is_current().await.map_err(store_error)?;
+    async fn tree_currency(&self) -> Result<TreeCurrency, StoreError> {
+        let response = self.client.tree_currency().await.map_err(store_error)?;
         serde_json::from_value(response).map_err(|e| StoreError::Database(e.to_string()))
     }
 

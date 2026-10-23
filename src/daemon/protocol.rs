@@ -195,7 +195,7 @@ pub mod methods {
     pub const INDEX_BUILD: &str = "index_build";
     pub const INDEX_STATUS: &str = "index_status";
     pub const INDEXED_LANGUAGES: &str = "indexed_languages";
-    pub const INDEX_IS_CURRENT: &str = "index_is_current";
+    pub const TREE_CURRENCY: &str = "tree_currency";
     pub const INDEX_CLEAR: &str = "index_clear";
 
     pub fn to_lsp_method(daemon_method: &str) -> Option<&'static str> {

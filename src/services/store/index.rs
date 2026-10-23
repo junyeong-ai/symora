@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -217,8 +218,9 @@ fn extraction_digest() -> String {
     format!("{:016x}", SymbolExtractor::extraction_digest())
 }
 
-/// A fingerprint of the build's file-size policy and the path, size, and
-/// modification time of every file it discovered, in one stable order.
+/// A fingerprint per language of the build's file-size policy and the path,
+/// size, and modification time of every file of that language it discovered,
+/// in one stable order, so a change names the languages it touched.
 ///
 /// Taken before opening files so ordinary concurrent writes invalidate the
 /// recorded view. This is metadata currency, not byte-for-byte verification:
@@ -229,26 +231,56 @@ fn extraction_digest() -> String {
 /// `unread_paths` and every answer drawn from the index is a lower bound on
 /// its account; saying the tree moved as well would name a second fact that
 /// no rebuild can clear.
-fn tree_fingerprint(root: &Path, files: &[PathBuf], max_file_size_bytes: u64) -> String {
-    let mut entries: Vec<String> = files
-        .iter()
-        .map(|path| {
-            let name = path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string();
-            match file_stamp(path) {
-                Some((size, modified)) => format!("{name}\u{1}{size}\u{1}{modified}"),
-                None => format!("{name}\u{1}?"),
-            }
+fn tree_fingerprints(
+    root: &Path,
+    files: &[PathBuf],
+    max_file_size_bytes: u64,
+) -> HashMap<Language, String> {
+    let mut entries: HashMap<Language, Vec<String>> = HashMap::new();
+    for path in files {
+        let name = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        let entry = match file_stamp(path) {
+            Some((size, modified)) => format!("{name}\u{1}{size}\u{1}{modified}"),
+            None => format!("{name}\u{1}?"),
+        };
+        entries
+            .entry(Language::from_path(path))
+            .or_default()
+            .push(entry);
+    }
+    entries
+        .into_iter()
+        .map(|(language, mut entries)| {
+            entries.sort();
+            let digest = crate::infra::hash_content(&entries.join("\u{2}"));
+            (language, format!("{max_file_size_bytes}:{digest:016x}"))
         })
+        .collect()
+}
+
+/// The languages whose fingerprint differs between two readings of the tree,
+/// a language present in only one of them included.
+fn languages_behind(
+    recorded: &HashMap<Language, String>,
+    current: &HashMap<Language, String>,
+) -> Vec<Language> {
+    let mut behind: Vec<Language> = recorded
+        .iter()
+        .filter(|(language, fingerprint)| current.get(*language) != Some(*fingerprint))
+        .map(|(language, _)| *language)
+        .chain(
+            current
+                .keys()
+                .filter(|language| !recorded.contains_key(*language))
+                .copied(),
+        )
         .collect();
-    entries.sort();
-    format!(
-        "{max_file_size_bytes}:{:016x}",
-        crate::infra::hash_content(&entries.join("\u{2}"))
-    )
+    behind.sort_by_key(|language| language.lsp_id());
+    behind
 }
 
 /// A file's size and modification time in nanoseconds, or `None` where the
@@ -910,11 +942,13 @@ impl Store {
         &self,
         epoch: i64,
         scope: &BuildScope,
-        fingerprint: String,
+        fingerprints: HashMap<Language, String>,
         unread_paths: Vec<UnreadPath>,
         defer_text_index: bool,
     ) -> Result<(), StoreError> {
         let value = scope.meta_value();
+        let fingerprints = serde_json::to_string(&fingerprints)
+            .map_err(|e| StoreError::Database(e.to_string()))?;
         let owned = self
             .db
             .call(move |conn| {
@@ -928,7 +962,7 @@ impl Store {
                     }
                     write_meta(&tx, META_BUILD_SCOPE, &value)?;
                     write_meta(&tx, META_BUILD_COMPLETED_AT, &now_unix().to_string())?;
-                    write_meta(&tx, META_TREE_FINGERPRINT, &fingerprint)?;
+                    write_meta(&tx, META_TREE_FINGERPRINT, &fingerprints)?;
                     write_meta(&tx, META_EXTRACTOR, &extraction_digest())?;
                     // The rows qualify exactly the marker written beside them,
                     // so they are replaced wholesale in the same transaction:
@@ -1132,8 +1166,8 @@ impl Store {
             .iter()
             .map(|path| path.display().to_string())
             .collect();
-        let fingerprint =
-            tree_fingerprint(&self.project_root, &files, self.config.max_file_size_bytes);
+        let fingerprints =
+            tree_fingerprints(&self.project_root, &files, self.config.max_file_size_bytes);
 
         // Rows an older set of queries produced cannot be refreshed in place:
         // a file whose bytes are unchanged is skipped, so the only pass that
@@ -1215,7 +1249,7 @@ impl Store {
         unread_paths.sort_by(|a, b| a.path.cmp(&b.path));
         unread_paths.dedup_by(|a, b| a.path == b.path);
 
-        self.publish_build(epoch, &scope, fingerprint, unread_paths, defer_text_index)
+        self.publish_build(epoch, &scope, fingerprints, unread_paths, defer_text_index)
             .await?;
         let _ = self.reclaim_free_pages().await;
         let _ = self.checkpoint().await;
@@ -1228,21 +1262,20 @@ impl Store {
         Ok(recorded == Some(extraction_digest()))
     }
 
-    /// Whether the size policy and tree still match the last completed build.
+    /// Which languages' files moved since the last completed build.
     ///
     /// The walk is the build's own — same scope, so a language the build never
     /// covered cannot make the index look behind — and the comparison is
-    /// stat-only: no file is opened. `false` wherever the question cannot be
-    /// settled: no build has completed, one is running now, or this binary
-    /// wrote no fingerprint. A match confirms recorded filesystem metadata,
-    /// not a content comparison or a transactional filesystem snapshot.
+    /// stat-only: no file is opened. A match confirms recorded filesystem
+    /// metadata, not a content comparison or a transactional filesystem
+    /// snapshot.
     ///
-    /// A build is the only thing that records a fingerprint. A per-file
+    /// A build is the only thing that records fingerprints. A per-file
     /// refresh deliberately does not: it brings the files it was given in
     /// line, which is not the whole-tree correspondence this claims.
-    pub async fn tree_is_current(&self) -> Result<bool, StoreError> {
+    pub async fn tree_currency(&self) -> Result<TreeCurrency, StoreError> {
         if self.build_in_progress() {
-            return Ok(false);
+            return Ok(TreeCurrency::Unknown);
         }
         let recorded = self
             .db
@@ -1250,19 +1283,27 @@ impl Store {
                 Ok(read_completed_build(conn)?.zip(read_meta(conn, META_TREE_FINGERPRINT)?))
             })
             .await?;
-        let Some((build, fingerprint)) = recorded else {
-            return Ok(false);
+        let Some((build, recorded)) = recorded else {
+            return Ok(TreeCurrency::Unknown);
+        };
+        let Ok(recorded) = serde_json::from_str::<HashMap<Language, String>>(&recorded) else {
+            return Ok(TreeCurrency::Unknown);
         };
         let root = self.project_root.clone();
         let max_file_size_bytes = self.config.max_file_size_bytes;
         let current = tokio::task::spawn_blocking(move || {
             let extensions = build.scope.extensions();
             let Discovery { files, .. } = FileFilter::new(&root).discover_files(&extensions);
-            tree_fingerprint(&root, &files, max_file_size_bytes)
+            tree_fingerprints(&root, &files, max_file_size_bytes)
         })
         .await
         .map_err(|e| StoreError::Database(e.to_string()))?;
-        Ok(current == fingerprint)
+        let behind = languages_behind(&recorded, &current);
+        Ok(if behind.is_empty() {
+            TreeCurrency::Current
+        } else {
+            TreeCurrency::Behind(behind)
+        })
     }
 
     async fn index_file(&self, path: &Path) -> Result<(), StoreError> {
@@ -1661,7 +1702,7 @@ mod tests {
         .await
         .unwrap();
         store.index(IndexOptions::default()).await.unwrap();
-        assert!(store.tree_is_current().await.unwrap());
+        assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
         let unlimited = crate::models::config::SearchConfig {
             max_file_size_mb: 0,
             ..crate::models::config::SearchConfig::default()
@@ -1681,8 +1722,9 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(
-                !store.tree_is_current().await.unwrap(),
+            assert_eq!(
+                store.tree_currency().await.unwrap(),
+                TreeCurrency::Behind(vec![Language::Python]),
                 "a changed size policy cannot certify the existing snapshot"
             );
             assert_eq!(
@@ -1706,7 +1748,7 @@ mod tests {
 
             let stats = store.index(IndexOptions::default()).await.unwrap();
             assert_eq!(stats.file_count, 1 + expected_matches);
-            assert!(store.tree_is_current().await.unwrap());
+            assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
             assert_eq!(
                 store
                     .search_symbols("policy_probe", 10, None, Some(Language::Python))
@@ -1728,39 +1770,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_legacy_fingerprint_does_not_certify_index_currency() {
+    async fn a_fingerprint_this_binary_cannot_read_leaves_currency_unknown() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let path = root.join("lib.rs");
-        std::fs::write(&path, "fn legacy_probe() {}\n").unwrap();
+        std::fs::write(root.join("lib.rs"), "fn unread_probe() {}\n").unwrap();
         let store = Store::open(root, StoreConfig::default()).await.unwrap();
         store.index(IndexOptions::default()).await.unwrap();
-
-        let (size, modified) = file_stamp(&path).unwrap();
-        let legacy = format!(
-            "{:016x}",
-            crate::infra::hash_content(&format!("lib.rs\u{1}{size}\u{1}{modified}"))
-        );
         store
             .db
-            .call(move |conn| {
-                write_meta(conn, META_TREE_FINGERPRINT, &legacy)?;
+            .call(|conn| {
+                write_meta(conn, META_TREE_FINGERPRINT, "1048576:00c0ffee00c0ffee")?;
                 Ok(())
             })
             .await
             .unwrap();
 
-        assert!(!store.tree_is_current().await.unwrap());
+        assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Unknown);
         assert_eq!(
             store
-                .search_symbols("legacy_probe", 10, None, None)
+                .search_symbols("unread_probe", 10, None, None)
                 .await
                 .unwrap()
                 .total,
             1
         );
         store.index(IndexOptions::default()).await.unwrap();
-        assert!(store.tree_is_current().await.unwrap());
+        assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
+    }
+
+    #[tokio::test]
+    async fn a_change_names_only_the_languages_whose_files_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lib.rs"), "fn kept() {}\n").unwrap();
+        std::fs::write(root.join("app.py"), "def kept():\n    pass\n").unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+        assert_eq!(store.tree_currency().await.unwrap(), TreeCurrency::Current);
+
+        std::fs::write(root.join("app.py"), "def edited():\n    return 1\n").unwrap();
+        assert_eq!(
+            store.tree_currency().await.unwrap(),
+            TreeCurrency::Behind(vec![Language::Python])
+        );
+
+        std::fs::write(root.join("main.go"), "package main\n").unwrap();
+        assert_eq!(
+            store.tree_currency().await.unwrap(),
+            TreeCurrency::Behind(vec![Language::Go, Language::Python]),
+            "a language the build never saw is behind once its files appear"
+        );
+
+        store.index(IndexOptions::default()).await.unwrap();
+        std::fs::remove_file(root.join("main.go")).unwrap();
+        assert_eq!(
+            store.tree_currency().await.unwrap(),
+            TreeCurrency::Behind(vec![Language::Go]),
+            "a language whose last file is gone is behind until rebuilt"
+        );
     }
 
     #[tokio::test]
@@ -2577,7 +2644,7 @@ mod tests {
             .unwrap();
         writer.index_file(&file).await.unwrap();
         writer
-            .publish_build(epoch, &BuildScope::All, String::new(), Vec::new(), true)
+            .publish_build(epoch, &BuildScope::All, HashMap::new(), Vec::new(), true)
             .await
             .unwrap();
         reader.text_index_integrity().await.unwrap();
@@ -2678,7 +2745,7 @@ mod tests {
                 .publish_build(
                     overtaken,
                     &BuildScope::All,
-                    String::new(),
+                    HashMap::new(),
                     Vec::new(),
                     false
                 )
@@ -2689,7 +2756,7 @@ mod tests {
 
         let owned = store.begin_build(Reindex::InPlace, false).await.unwrap();
         store
-            .publish_build(owned, &BuildScope::All, String::new(), Vec::new(), false)
+            .publish_build(owned, &BuildScope::All, HashMap::new(), Vec::new(), false)
             .await
             .unwrap();
         assert_eq!(store.build_scope().await.unwrap(), Some(BuildScope::All));
