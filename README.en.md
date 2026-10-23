@@ -357,7 +357,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 symora status                # project + whether language servers are installed (serving: doctor's `serves`; daemon: `symora daemon status`)
 ```
 
-Global flags work before or after the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose). `--workspace <name>`, `--token-estimate`, `--deterministic`, and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.21`, `>=0.21,<0.22`), so a caller that parses the output never has to compare `--version` strings itself.
+Global flags work before or after the subcommand: `symora --format compact search symbols X` (single-line JSON), `symora -q rename …` (errors only), `symora -v status` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.21`, `>=0.21,<0.22`), so a caller that parses the output never has to compare `--version` strings itself.
 
 ---
 
@@ -377,7 +377,7 @@ Every command is built for machine parsing, and the rules are stable:
 
 ---
 
-`pack --tokens` and `--token-estimate` use a character-based approximation. They do not bound model-specific token counts or the entire JSON envelope.
+`pack --tokens` uses a character-based approximation. It does not bound model-specific token counts or the entire JSON envelope.
 
 Requested `context` bodies share `--body-tokens` in target/callee/type order, whole-body-or-nothing; `body_omitted: "token_budget"` discloses budget omissions. Pack provides syntax-derived orientation and discloses unsupported import languages; module strings requiring unsupported decoding are omitted. Rust relative module paths are omitted without crate/module ownership, with a hint when encountered. An unmatched `--focus` is refused.
 

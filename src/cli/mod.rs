@@ -10,7 +10,6 @@ pub mod output;
 pub mod response;
 pub mod symbol_discovery;
 pub mod utils;
-pub mod workspace;
 
 pub use analysis::LocationAnalysis;
 pub use blast_radius::BlastRadius;
@@ -20,7 +19,6 @@ pub use file_symbols::{FileSymbols, SymbolBackend, declared_in};
 pub use input_error::{CliInputError, resolve_project_file};
 pub use location::{LocationArg, ParsedLocation};
 pub use output::{OutputContext, OutputFormat, OutputOptions};
-pub use workspace::WorkspaceConfig;
 
 use clap::{Parser, Subcommand};
 
@@ -74,16 +72,6 @@ pub struct Cli {
     /// Output format: pretty (default) or compact (single-line JSON).
     #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Pretty)]
     pub format: OutputFormat,
-
-    /// Run the command across every root in the named workspace
-    /// (~/.config/symora/workspaces/&lt;name&gt;.toml). Each root gets its own
-    /// child invocation; results are bundled into a single JSON envelope.
-    #[arg(long, global = true)]
-    pub workspace: Option<String>,
-
-    /// Print an estimated token count for the response to stderr (does not alter stdout).
-    #[arg(long, global = true)]
-    pub token_estimate: bool,
 
     /// Refuse to run unless this binary's version satisfies the SemVer
     /// requirement (e.g. `0.21`, `>=0.21,<0.22`). A pinned caller sets it so a
