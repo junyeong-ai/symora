@@ -226,8 +226,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
 
     match command {
         // Project
-        Commands::Init(args) => commands::init::execute(args, app).await,
-        Commands::Status(args) => commands::status::execute(args, app).await,
         Commands::Config(args) => commands::config::execute(args, app).await,
         Commands::Doctor(args) => commands::doctor::execute(args, app).await,
 

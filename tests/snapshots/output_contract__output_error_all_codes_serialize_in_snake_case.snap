@@ -48,10 +48,6 @@ expression: payload
     "message": "x"
   },
   {
-    "code": "already_exists",
-    "message": "x"
-  },
-  {
     "code": "conflict",
     "message": "x"
   },

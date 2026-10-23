@@ -401,15 +401,6 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Error)]
-pub enum ProjectError {
-    #[error("Project already initialized at: {0}")]
-    AlreadyExists(std::path::PathBuf),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

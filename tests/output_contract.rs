@@ -210,7 +210,6 @@ fn output_error_all_codes_serialize_in_snake_case() {
         ErrorCode::Cancelled,
         ErrorCode::ParseError,
         ErrorCode::StoreNotInitialized,
-        ErrorCode::AlreadyExists,
         ErrorCode::Conflict,
         ErrorCode::PreconditionFailed,
         ErrorCode::FileTooLarge,

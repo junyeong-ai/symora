@@ -28,10 +28,10 @@ use commands::{
     actions::ActionsArgs, callees::CalleesArgs, callers::CallersArgs, config::ConfigArgs,
     context::ContextArgs, def::DefArgs, diagnostics::DiagnosticsArgs, diff_impact::DiffImpactArgs,
     doctor::DoctorArgs, edit::EditArgs, hover::HoverArgs, impact::ImpactArgs,
-    implementations::ImplementationsArgs, init::InitArgs, map::MapArgs, mcp::McpArgs,
-    pack::PackArgs, refs::RefsArgs, rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs,
-    setup::SetupArgs, status::StatusArgs, subtypes::SubtypesArgs, supertypes::SupertypesArgs,
-    symbols::SymbolsArgs, typedef::TypedefArgs, usage::UsageArgs,
+    implementations::ImplementationsArgs, map::MapArgs, mcp::McpArgs, pack::PackArgs,
+    refs::RefsArgs, rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
+    subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs,
+    usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -41,7 +41,6 @@ Provides LSP-powered code intelligence for codebase navigation,
 semantic analysis, and code search. Built for AI coding agents.
 
 QUICK START:
-  symora init                    Initialize project
   symora symbols src/main.rs     List symbols in file
   symora refs src/main.rs:10:5   Find references
   symora callers src/main.rs:10  Find who calls this
@@ -130,11 +129,7 @@ pub fn check_version(requirement: &str) -> Result<(), OutputError> {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    // Project
-    /// Initialize a new project
-    Init(InitArgs),
-    /// Show project status
-    Status(StatusArgs),
+    // Environment
     /// Configuration management
     Config(ConfigArgs),
     /// Diagnose environment and language servers

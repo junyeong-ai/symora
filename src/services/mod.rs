@@ -11,7 +11,6 @@ pub mod imports;
 pub mod lsp;
 pub mod pack;
 mod pack_cache;
-pub mod project;
 pub mod store;
 pub mod test_scope;
 
@@ -22,6 +21,5 @@ pub use daemon_lsp::DaemonLspService;
 #[cfg(unix)]
 pub use daemon_store::DaemonStoreService;
 pub use lsp::{DefaultLspService, LspService};
-pub use project::{DefaultProjectService, ProjectService};
 pub use store::{DefaultStoreService, Store, StoreService};
 pub use test_scope::{TestClassifier, TestScope};

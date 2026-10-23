@@ -354,7 +354,6 @@ symora actions list src/services/checkout.ts:48:9   # 가능한 코드 액션
 # 상태 & 진단
 symora doctor                # language server: 실제 동작 여부(serves) / 누락 + 설치 명령
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
-symora status                # 프로젝트 + language server 설치 여부 (동작 여부는 doctor의 `serves`, daemon은 `symora daemon status`)
 ```
 
 전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format compact search symbols X`(단일 라인 JSON), `symora -q rename …`(에러만), `symora -v status`(verbose). `--deterministic`과 `--check-version <REQ>`도 전역입니다. `--deterministic`은 인덱스와 내장 문법으로만 답하게 해 language server 설치 여부와 무관하게 같은 답을 내며, 그런 소스가 없는 명령은 `unsupported`로 실패합니다. `--check-version`은 이 바이너리가 요구 버전(`0.21`, `>=0.21,<0.22`)을 만족하지 않으면 실행을 거부하므로, 출력을 파싱하는 호출자가 `--version` 문자열을 직접 비교할 필요가 없습니다.
@@ -549,7 +548,7 @@ symora daemon start | stop | restart | status
 | **분석** | `context`, `usage`, `impact`, `diff-impact` |
 | **편집** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
 | **진단** | `diagnostics` |
-| **관리** | `search index`, `doctor`, `status`, `init`, `config`, `daemon`, `setup`, `self`, `mcp` |
+| **관리** | `search index`, `doctor`, `config`, `daemon`, `setup`, `self`, `mcp` |
 
 어떤 명령이든 `symora <command> --help`로 플래그를 볼 수 있습니다. 출력 필드는 [출력 계약](#출력-계약)과 `symora mcp tools`의 출력 스키마에 있습니다.
 
