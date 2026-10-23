@@ -1,12 +1,12 @@
 //! Advisory locks over a file, for the state two symora processes share.
 //!
 //! A daemon and a direct run touch the same index and the same socket, so
-//! some operations need a turn rather than a merge. `flock` gives that
-//! with the one property a lease cannot: the OS releases it however the
-//! holder ends, so a killed process leaves nothing to time out or reclaim
-//! by guesswork. Every lock is scoped to the value's lifetime.
+//! some operations need a turn rather than a merge. An OS file lock (`flock`
+//! on Unix) gives that with the one property a lease cannot: the OS releases
+//! it however the holder ends, so a killed process leaves nothing to time out
+//! or reclaim by guesswork. Every lock is scoped to the value's lifetime.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::Path;
 
@@ -55,43 +55,23 @@ enum Mode {
 /// `Ok(false)` is contention; an error is anything else the OS reported.
 /// Never blocks: a caller that cannot have its turn now decides for itself
 /// whether to wait, and can stop waiting.
-#[cfg(unix)]
 fn lock(file: &File, mode: Mode) -> io::Result<bool> {
-    use std::os::unix::io::AsRawFd;
-    let operation = match mode {
-        Mode::Exclusive => libc::LOCK_EX,
-        Mode::Shared => libc::LOCK_SH,
+    let attempt = match mode {
+        Mode::Exclusive => file.try_lock(),
+        Mode::Shared => file.try_lock_shared(),
     };
-    // SAFETY: flock with a valid fd is safe.
-    if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    match error.kind() {
-        io::ErrorKind::WouldBlock => Ok(false),
-        _ => Err(error),
+    match attempt {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(error)) => Err(error),
     }
 }
 
-/// Symora ships for Unix only (see the release targets), and the state
-/// these locks protect — one index, one socket — is corrupted by a second
-/// writer, not merely delayed. A platform without an implementation is
-/// told so rather than handed a lock that locks nothing.
-#[cfg(not(unix))]
-fn lock(_file: &File, _mode: Mode) -> io::Result<bool> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "advisory file locking is not implemented on this platform",
-    ))
-}
-
-#[cfg(unix)]
+/// Unlocked explicitly rather than on close: a descriptor a child inherited
+/// shares the lock, and would otherwise hold it for as long as it lives.
 impl Drop for FileLock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.file.unlock();
     }
 }
 

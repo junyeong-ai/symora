@@ -2,27 +2,13 @@
 //!
 //! Output goes to stderr so structured JSON on stdout stays clean.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 /// Whether stdin is connected to a terminal. When false, every prompt
 /// resolves to the supplied default — this is what makes
 /// `curl … | bash -s -- symora setup --yes` behave predictably.
 pub fn stdin_is_tty() -> bool {
-    is_tty(libc_stdin_fd())
-}
-
-fn libc_stdin_fd() -> i32 {
-    0
-}
-
-#[cfg(unix)]
-fn is_tty(fd: i32) -> bool {
-    unsafe { libc::isatty(fd) == 1 }
-}
-
-#[cfg(not(unix))]
-fn is_tty(_fd: i32) -> bool {
-    false
+    io::stdin().is_terminal()
 }
 
 /// Prompt for free-form input with a default.
