@@ -7,6 +7,7 @@ use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
 use crate::infra::ast::{format_query_error, get_node_types, supported_languages};
+use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
 
 use crate::cli::response::disclosure::{LowerBound, as_paths, relative_paths, with_lower_bounds};
@@ -90,18 +91,21 @@ pub async fn execute_ast_search(
             return Ok(());
         }
     };
-    let paths = match path {
+    let scope = match path {
         Some(paths) => match resolve_search_paths(app, &paths) {
-            Ok(resolved) => resolved.iter().map(|path| app.root().join(path)).collect(),
+            Ok(resolved) => FileFilter::for_paths(
+                app.root(),
+                resolved.iter().map(|path| app.root().join(path)).collect(),
+            ),
             Err(error) => {
                 ctx.print_error(error);
                 return Ok(());
             }
         },
-        None => vec![app.root().to_path_buf()],
+        None => FileFilter::new(app.root()),
     };
 
-    match app.ast.query(pattern, lang, &paths).await {
+    match app.ast.query(pattern, lang, &scope).await {
         Ok(answer) => {
             let total = answer.matches.len();
             let limited: Vec<_> = if limit == 0 {

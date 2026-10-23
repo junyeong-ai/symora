@@ -121,7 +121,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         "Tree-sitter query, e.g. \"(function_definition) @f\"",
                     ),
                     ("language", "string", "Language the grammar belongs to"),
-                    ("path", "string", "Optional project-relative path to search under"),
+                    (
+                        "path",
+                        "string",
+                        "Optional project-relative file or directory to search, including hidden paths",
+                    ),
                     ("limit", "integer", "Maximum results"),
                 ],
                 &["pattern", "language"],

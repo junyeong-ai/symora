@@ -22,7 +22,7 @@
 //!   project with one is trusted to declare its own ignores, so a tracked
 //!   `vendor/`/`build/` stays indexed;
 //! - hidden entries are excluded by default, independently of gitignore rules.
-//!   Explicit content-search roots include hidden paths within those roots;
+//!   Explicit search roots include hidden paths within those roots;
 //!   `.git` and `.symora` metadata remain excluded in every scope.
 //!
 //! Machine-local git state — the global `core.excludesFile` and

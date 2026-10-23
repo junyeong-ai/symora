@@ -862,28 +862,15 @@ fn is_within(ctx: &OutputContext, file: &Path, within: &[PathBuf]) -> bool {
 /// Why a confined symbol search cannot answer for a path it was given, if it
 /// cannot.
 ///
-/// Discovery skips hidden and ignored paths, so the index holds nothing under
-/// one and its zero would read as an answer about it. Content search takes a
-/// named hidden path as given and reads it; it skips an ignored one too, so
-/// there is no search to send the caller to.
+/// Discovery skips hidden paths, so the index holds nothing under one and its
+/// zero would read as an answer about it. Content search takes a named hidden
+/// path as given and reads it.
 fn uncovered_path(app: &App, within: &[PathBuf], query: &str) -> Option<OutputError> {
     let discovery = FileFilter::new(app.root());
     let path = within
         .iter()
         .find(|path| discovery.is_ignored(&app.root().join(path)))?;
-    let absolute = app.root().join(path);
     let shown = path.display().to_string();
-    if FileFilter::for_paths(app.root(), vec![absolute.clone()]).is_ignored(&absolute) {
-        return Some(
-            OutputError::unsupported(format!(
-                "Symbol search does not cover {shown}: the project's ignore rules exclude it"
-            ))
-            .with_hint(
-                "Ignore rules (`.gitignore`, `.symora/ignore`) keep it out of the index and out \
-                 of content search as well.",
-            ),
-        );
-    }
     Some(
         OutputError::unsupported(format!(
             "Symbol search does not cover {shown}: hidden paths are not indexed"

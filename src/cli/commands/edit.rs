@@ -20,6 +20,7 @@ use crate::cli::ParsedLocation;
 use crate::cli::declared_in;
 use crate::cli::response::{EditOutput, LineRange, Section};
 use crate::cli::utils::{declared_with, shell_arg};
+use crate::infra::file_filter::FileFilter;
 use crate::infra::file_lock::FileLock;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
@@ -1599,7 +1600,11 @@ async fn pattern_edit(
 
     let answer = app
         .ast
-        .query(pattern, language, std::slice::from_ref(&abs_path))
+        .query(
+            pattern,
+            language,
+            &FileFilter::for_paths(app.root(), vec![abs_path.clone()]),
+        )
         .await
         .map_err(|e| anyhow::anyhow!("AST query failed: {}", e))?;
     // The one file this edit names is the whole search domain, so a path the
