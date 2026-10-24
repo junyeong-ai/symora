@@ -24,6 +24,10 @@ pub struct Symbol {
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// What the declaration is written with ahead of its body, read where it
+    /// is written rather than out of its body alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Symbol>,
     /// The kind that tells this symbol apart from its same-named siblings,
@@ -82,6 +86,7 @@ impl Symbol {
             location,
             container: None,
             body: None,
+            signature: None,
             children: Vec::new(),
             discriminator: None,
         }

@@ -18,7 +18,7 @@ use crate::cli::symbol_discovery::{
     DetectedLanguages, Rankable, RankedSymbol, candidate_budget, no_languages_error, relevance_of,
     resolve_search_languages, sort_by_rank, symbol_rank,
 };
-use crate::cli::utils::{extract_signature, shell_arg};
+use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
@@ -901,7 +901,7 @@ async fn attach_source(
         row.line = declaration.location.line;
         row.column = declaration.location.column;
         row.degraded_column = declaration.location.degraded_column;
-        row.signature = extract_signature(declaration);
+        row.signature = declaration.signature.clone();
         if source == SymbolSource::Body {
             row.body = declaration.body.clone();
         }

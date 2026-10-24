@@ -3,7 +3,6 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::LocationOutput;
-use crate::cli::utils::extract_signature;
 use crate::models::symbol::Symbol;
 
 /// Symbol output for find symbol commands.
@@ -121,7 +120,7 @@ impl SymbolOutput {
             prod_refs: None,
             refs_status: None,
             signature: if signature_only {
-                extract_signature(symbol)
+                symbol.signature.clone()
             } else {
                 None
             },

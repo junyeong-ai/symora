@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node, Parser, Query, QueryCursor};
+use tree_sitter::{Node, Parser, Query, QueryCursor, Tree};
 
 use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
@@ -140,7 +140,7 @@ impl SymbolExtractor {
             .map(|(language, grammar, query)| {
                 let grammar = grammar();
                 format!(
-                    "{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}",
+                    "{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}\u{1}{}",
                     language.lsp_id(),
                     grammar.abi_version(),
                     grammar.metadata().map(|metadata| (
@@ -148,7 +148,8 @@ impl SymbolExtractor {
                         metadata.minor_version,
                         metadata.patch_version
                     )),
-                    transparent_statements(*language).join(",")
+                    transparent_statements(*language).join(","),
+                    body_opener(*language).map(String::from).unwrap_or_default()
                 )
             })
             .collect::<Vec<_>>()
@@ -232,48 +233,39 @@ impl SymbolExtractor {
         content: &str,
         language: Language,
     ) -> Vec<(Symbol, String)> {
-        self.with_declarations(path, content, language, |read| {
-            let declared = read.iter().map(|(node, _)| node.id()).collect();
-            read.into_iter()
-                .filter(|(node, _)| !is_local(*node, &declared))
-                .filter_map(|(node, symbol)| {
-                    let declaration = declaration_node(node, language);
-                    let body = node
-                        .child_by_field_name("body")
-                        .or_else(|| {
-                            if language == Language::Kotlin {
-                                child_of_kind(node, "function_body")
-                                    .or_else(|| type_body(node, language))
-                            } else if language == Language::Go {
-                                let literal = node.child_by_field_name("type")?;
-                                if !matches!(literal.kind(), "struct_type" | "interface_type") {
-                                    return None;
-                                }
-                                let mut cursor = literal.walk();
-                                literal.children(&mut cursor).find(|child| {
-                                    matches!(child.kind(), "{" | "field_declaration_list")
-                                })
-                            } else {
-                                type_body(node, language)
-                            }
-                        })
-                        .or_else(|| {
-                            node.child_by_field_name("value")
-                                .and_then(|value| value.child_by_field_name("body"))
-                        })
-                        .or_else(|| declaration.child_by_field_name("body"));
-                    let end = body.map_or(node.end_byte(), |body| body.start_byte());
-                    let text = content.get(declaration.start_byte()..end)?.trim();
-                    let text = if language == Language::Python {
-                        text.trim_end_matches(':')
-                    } else {
-                        text
-                    };
-                    (!text.is_empty()).then(|| (symbol, text.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        let Some(tree) = self.parse(content, language) else {
+            return Vec::new();
+        };
+        let lines = LineStarts::new(content);
+        let read = self.declarations_in(&tree, path, content, language);
+        let declared = read.iter().map(|(node, _)| node.id()).collect();
+        read.into_iter()
+            .filter(|(node, _)| !is_local(*node, &declared))
+            .filter_map(|(_, symbol)| {
+                self.signature_at(&tree, &lines, language, &symbol.location)
+                    .map(|text| (symbol, text))
+            })
+            .collect()
+    }
+
+    /// The declarations [`extract`](Self::extract) reads, each with its
+    /// signature ([`describe`](Self::describe)), from one parse.
+    pub fn extract_with_signatures(
+        &self,
+        path: &Path,
+        content: &str,
+        language: Language,
+    ) -> Vec<Symbol> {
+        let Some(tree) = self.parse(content, language) else {
+            return Vec::new();
+        };
+        let mut symbols: Vec<Symbol> = self
+            .declarations_in(&tree, path, content, language)
+            .into_iter()
+            .map(|(_, symbol)| symbol)
+            .collect();
+        self.describe(&mut symbols, &tree, &LineStarts::new(content), language);
+        symbols
     }
 
     /// Where each type's own declaration is written, outside the body that
@@ -318,21 +310,23 @@ impl SymbolExtractor {
 
     /// Give each of `symbols` — a language server's answer for `content` —
     /// the extent of the declaration this grammar reads at its name, where
-    /// that extent is wider. A server's range can leave out syntax that is
-    /// part of the declaration: clangd a `template` header, an attribute on
-    /// its own line and a class's closing `;`, tsserver the `const` and `;`
-    /// of a `const f = () => {}`, rust-analyzer a field's `,`. Every surface
-    /// that splices, slices or attributes lines by a symbol's range reads it
-    /// from the answer, so the answer carries the whole declaration whichever
-    /// server gave it. The two readings are joined by where the name starts
-    /// or, failing that, where it ends: a qualified C++ name (`Widget::set`)
-    /// starts at its qualifier in the grammar and at its last part in clangd,
-    /// and ends at the same place in both. Each is a position one token
-    /// occupies, so no server's names or kinds are compared with the
-    /// grammar's; a symbol with no grammar reading there keeps the server's
-    /// range, and so does each end of one the grammar read there only by
-    /// recovering from a syntax error ([`read_as_written`]).
-    pub fn widen_to_declarations(
+    /// that extent is wider, and the signature it is written with
+    /// ([`describe`](Self::describe)).
+    ///
+    /// A server's range can leave out syntax that is part of the declaration:
+    /// clangd a `template` header, an attribute on its own line and a class's
+    /// closing `;`, tsserver the `const` and `;` of a `const f = () => {}`,
+    /// rust-analyzer a field's `,`. Every surface that splices, slices or
+    /// attributes lines by a symbol's range reads it from the answer, so the
+    /// answer carries the whole declaration whichever server gave it. The two
+    /// readings are joined by where the name starts or, failing that, where it
+    /// ends: a qualified C++ name (`Widget::set`) starts at its qualifier in
+    /// the grammar and at its last part in clangd, and ends at the same place
+    /// in both. Each is a position one token occupies, so no server's names or
+    /// kinds are compared with the grammar's; a symbol with no grammar reading
+    /// there keeps the server's range, and so does each end of one the grammar
+    /// read there only by recovering from a syntax error ([`read_as_written`]).
+    pub fn complete_from_declarations(
         &self,
         symbols: &mut [Symbol],
         path: &Path,
@@ -376,18 +370,15 @@ impl SymbolExtractor {
             }
         }
 
+        let Some(tree) = self.parse(content, language) else {
+            return;
+        };
         let mut extents = Extents {
             by_start: HashMap::new(),
             by_end: HashMap::new(),
         };
-        let declarations = self
-            .with_declarations(path, content, language, |read| {
-                read.into_iter()
-                    .map(|(node, symbol)| (read_as_written(node, language), symbol))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for (written, declared) in declarations {
+        for (node, declared) in self.declarations_in(&tree, path, content, language) {
+            let written = read_as_written(node, language);
             let location = declared.location;
             let (Some(end_line), Some(end_column)) = (location.end_line, location.end_column)
             else {
@@ -405,6 +396,7 @@ impl SymbolExtractor {
             }
         }
         widen(symbols, &extents);
+        self.describe(symbols, &tree, &LineStarts::new(content), language);
     }
 
     /// The declarations `keep` accepts, given each one's node and the nodes
@@ -436,8 +428,88 @@ impl SymbolExtractor {
         language: Language,
         read: impl FnOnce(Vec<(Node, Symbol)>) -> R,
     ) -> Option<R> {
+        let tree = self.parse(content, language)?;
+        Some(read(self.declarations_in(&tree, path, content, language)))
+    }
+
+    /// Give each of `symbols`, and each symbol under them, the signature it is
+    /// written with in `tree` ([`signature_at`](Self::signature_at)).
+    fn describe(
+        &self,
+        symbols: &mut [Symbol],
+        tree: &Tree,
+        lines: &LineStarts,
+        language: Language,
+    ) {
+        for symbol in symbols {
+            symbol.signature = self.signature_at(tree, lines, language, &symbol.location);
+            self.describe(&mut symbol.children, tree, lines, language);
+        }
+    }
+
+    /// What the declaration at `location` is written with ahead of its body or
+    /// value: its name, parameters, type and modifiers.
+    ///
+    /// It is read where the declaration is written in the whole file, inside
+    /// whatever holds it — a method read out of its class is no declaration in
+    /// TypeScript, Java or C#, nor is PHP without its opening tag — and from the
+    /// declaration's own place rather than from what a query reads there, so a
+    /// declaration no query captures (a Python assignment under an `if`) and
+    /// one a server places by another token (clangd a destructor by its `~`)
+    /// have one too ([`read_signature`]).
+    ///
+    /// A recovered reading is not one of the text as written: where the whole
+    /// file reads the signature only by recovering from a syntax error — a
+    /// macro the grammar cannot expand, read as the type of what follows it —
+    /// the declaration's own text, as its range bounds it, is read alone, and
+    /// where that does not read as written either there is no signature.
+    fn signature_at(
+        &self,
+        tree: &Tree,
+        lines: &LineStarts,
+        language: Language,
+        location: &Location,
+    ) -> Option<String> {
+        let content = lines.content;
+        let name = lines.byte(location.line, location.column)?;
+        let (start_line, start_column) = location.effective_start();
+        let start = lines.byte(start_line, start_column)?.min(name);
+        let end = match (location.end_line, location.end_column) {
+            (Some(line), Some(column)) => lines.byte(line, column)?,
+            _ => name,
+        };
+        match read_signature(tree.root_node(), content, language, name, start, end)? {
+            Read::AsWritten(text) => Some(text),
+            Read::Recovered => {
+                let own = content.get(start..end.max(name))?;
+                let tree = self.parse(own, language)?;
+                match read_signature(tree.root_node(), own, language, name - start, 0, own.len())? {
+                    Read::AsWritten(text) => Some(text),
+                    Read::Recovered => None,
+                }
+            }
+        }
+    }
+
+    /// `content` read by this language's grammar, or `None` where it has no
+    /// grammar here or the parse failed.
+    fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
-        let tree = entry.parser.lock().ok()?.parse(content, None)?;
+        entry.parser.lock().ok()?.parse(content, None)
+    }
+
+    /// Every declaration the grammar reads in `tree`, with the node it was
+    /// read from.
+    fn declarations_in<'t>(
+        &self,
+        tree: &'t Tree,
+        path: &Path,
+        content: &str,
+        language: Language,
+    ) -> Vec<(Node<'t>, Symbol)> {
+        let Some(entry) = self.languages.get(&language) else {
+            return Vec::new();
+        };
         let mut cursor = QueryCursor::new();
         let mut declarations = Vec::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
@@ -448,7 +520,7 @@ impl SymbolExtractor {
                 }
             }
         }
-        Some(read(declarations))
+        declarations
     }
 }
 
@@ -495,6 +567,10 @@ fn type_body(node: Node, language: Language) -> Option<Node> {
             node.named_children(&mut cursor)
                 .find(|child| matches!(child.kind(), "class_body" | "enum_class_body"))
         }
+        // `declare global { … }` holds its block under no field.
+        Language::TypeScript if node.kind() == "ambient_declaration" => node
+            .child_by_field_name("body")
+            .or_else(|| child_of_kind(node, "statement_block")),
         _ => node.child_by_field_name("body"),
     }
 }
@@ -541,6 +617,163 @@ const ANONYMOUS_BODIES: &[&str] = &[
     "getter",
     "setter",
 ];
+
+/// A signature as [`read_signature`] found it: the text, or a reading the
+/// grammar made only by recovering from a syntax error.
+enum Read {
+    AsWritten(String),
+    Recovered,
+}
+
+/// The signature of the declaration named at byte `name` in the tree under
+/// `root`, whose range runs from `start` to `end`.
+///
+/// The declaration is the outermost node over its name that ends within the
+/// range, or past it only by a terminator (`;`, `,`) a server leaves out.
+/// Its signature starts where both it and the range have started, so an
+/// attribute or doc comment outside the node stays out, and ends where the
+/// first body or value above the name opens: a value is a variable's body,
+/// and an initializer can be any size.
+fn read_signature(
+    root: Node,
+    content: &str,
+    language: Language,
+    name: usize,
+    start: usize,
+    end: usize,
+) -> Option<Read> {
+    let first = name + content.get(name..)?.chars().next()?.len_utf8();
+    let named = root.named_descendant_for_byte_range(name, first)?;
+    let within = |node: Node| {
+        node.end_byte() <= end.max(first)
+            || content.get(end..node.end_byte()).is_some_and(|past| {
+                let past = past.trim();
+                !past.is_empty() && past.chars().all(|c| matches!(c, ';' | ','))
+            })
+    };
+    let mut declaration = named;
+    while let Some(parent) = declaration.parent()
+        && within(parent)
+    {
+        declaration = parent;
+    }
+    let mut node = named;
+    let opens = loop {
+        if let Some(body) = body_of(node, language).filter(|body| body.start_byte() > name) {
+            break body.start_byte();
+        }
+        if let Some(value) = value_opening(node).filter(|value| value.start_byte() > name) {
+            break value.start_byte();
+        }
+        if node.id() == declaration.id() {
+            break declaration.end_byte();
+        }
+        node = node.parent()?;
+    };
+    let from = start.max(declaration.start_byte());
+    if errs_within(declaration, from, opens) {
+        return Some(Read::Recovered);
+    }
+    let text = content.get(from..opens.max(from))?;
+    let opener = body_opener(language);
+    let text = text.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, ';' | ',') || Some(c) == opener
+    });
+    let text = text.trim_start();
+    (!text.is_empty()).then(|| Read::AsWritten(text.to_string()))
+}
+
+/// Whether `node` holds a syntax error or a missing token between bytes
+/// `from` and `to`.
+fn errs_within(node: Node, from: usize, to: usize) -> bool {
+    if !node.has_error() || node.end_byte() <= from || node.start_byte() >= to {
+        return false;
+    }
+    if node.is_error() || node.is_missing() {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| errs_within(child, from, to))
+}
+
+/// The node holding a declaration's body, if `node` declares one: its
+/// `body`, where a grammar names a type's or a function's body otherwise
+/// ([`type_body`]), a function value's body (`const f = () => {}`), or the
+/// body of the declaration a wrapper holds (`export`, a decorated definition).
+fn body_of(node: Node, language: Language) -> Option<Node> {
+    node.child_by_field_name("body")
+        .or_else(|| {
+            if language == Language::Kotlin {
+                child_of_kind(node, "function_body").or_else(|| type_body(node, language))
+            } else if language == Language::Go {
+                let literal = node.child_by_field_name("type")?;
+                if !matches!(literal.kind(), "struct_type" | "interface_type") {
+                    return None;
+                }
+                let mut cursor = literal.walk();
+                literal
+                    .children(&mut cursor)
+                    .find(|child| matches!(child.kind(), "{" | "field_declaration_list"))
+            } else {
+                type_body(node, language)
+            }
+        })
+        .or_else(|| {
+            ["value", "right"]
+                .into_iter()
+                .find_map(|field| node.child_by_field_name(field))
+                .and_then(|value| value.child_by_field_name("body"))
+        })
+        .or_else(|| {
+            ["declaration", "definition"]
+                .into_iter()
+                .find_map(|field| node.child_by_field_name(field))
+                .and_then(|held| body_of(held, language))
+        })
+}
+
+/// The `=` that opens a declaration's value, if `node` has one of its own: one
+/// a value follows, so the `=` that ends C++'s `operator=` opens none.
+fn value_opening(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    children.iter().enumerate().find_map(|(at, child)| {
+        (!child.is_named()
+            && matches!(child.kind(), "=" | ":=")
+            && children[at + 1..].iter().any(Node::is_named))
+        .then_some(*child)
+    })
+}
+
+/// Where each line of a file starts, to turn a 1-indexed line and
+/// Unicode-scalar column into the byte its syntax tree is addressed by.
+struct LineStarts<'a> {
+    content: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> LineStarts<'a> {
+    fn new(content: &'a str) -> Self {
+        let starts = std::iter::once(0)
+            .chain(content.match_indices('\n').map(|(newline, _)| newline + 1))
+            .collect();
+        Self { content, starts }
+    }
+
+    /// The byte at `column` of `line`, or the end of the line one past its
+    /// last character; `None` past that.
+    fn byte(&self, line: u32, column: u32) -> Option<usize> {
+        let start = *self.starts.get(line.checked_sub(1)? as usize)?;
+        let rest = &self.content[start..];
+        let text = &rest[..rest.find('\n').unwrap_or(rest.len())];
+        text.char_indices()
+            .map(|(byte, _)| byte)
+            .chain([text.len()])
+            .nth(column.checked_sub(1)? as usize)
+            .map(|byte| start + byte)
+    }
+}
 
 /// Whether a declaration belongs to a body rather than standing for itself:
 /// a function or method encloses it, or an [`ANONYMOUS_BODIES`] body does that
@@ -1177,6 +1410,19 @@ fn transparent_statements(language: Language) -> &'static [&'static str] {
             "case_clause",
         ],
         _ => &[],
+    }
+}
+
+/// The token that opens a declaration's body where the grammar leaves it
+/// outside the body node, so a signature ends before it: Python's `:`,
+/// Scala's `=` and an HCL block's `{`. Part of `extraction_digest`, so
+/// changing one retires the signatures a pack cache read otherwise.
+fn body_opener(language: Language) -> Option<char> {
+    match language {
+        Language::Python => Some(':'),
+        Language::Scala => Some('='),
+        Language::Terraform => Some('{'),
+        _ => None,
     }
 }
 
@@ -2908,7 +3154,12 @@ region     = "us-central1"
                 Location::full(path.to_path_buf(), 16, 14, 16, 1, 17, 2).with_name_end(16, 17),
             ),
         ];
-        SymbolExtractor::new().widen_to_declarations(&mut symbols, path, content, Language::Cpp);
+        SymbolExtractor::new().complete_from_declarations(
+            &mut symbols,
+            path,
+            content,
+            Language::Cpp,
+        );
 
         let extent = |symbol: &Symbol| {
             let location = &symbol.location;
@@ -2923,6 +3174,254 @@ region     = "us-central1"
         assert_eq!(extent(&symbols[2].children[0]), ((12, 5), (12, 11)));
         assert_eq!(extent(&symbols[3]), ((8, 5), (8, 13)));
         assert_eq!(extent(&symbols[4]), ((15, 1), (17, 2)));
+    }
+
+    /// A signature is read where its declaration is written: a method read
+    /// out of its class is no declaration in TypeScript, C# or Java, and PHP
+    /// without its opening tag is no code at all. It ends where a body or a
+    /// value opens, so an initializer of any size stays out.
+    #[test]
+    fn a_signature_is_read_where_its_declaration_is_written() {
+        let extractor = SymbolExtractor::new();
+        let signature = |file: &str, language, content: &str, name: &str| {
+            extractor
+                .extract_with_signatures(Path::new(file), content, language)
+                .into_iter()
+                .find(|symbol| symbol.name == name)
+                .unwrap_or_else(|| panic!("{file} declares {name}"))
+                .signature
+        };
+        let table = format!(
+            "class T {{\n  static readonly TABLE = {{\n{}  }};\n}}\n",
+            "    a: 1,\n".repeat(200)
+        );
+        let cases = [
+            (
+                "a.ts",
+                Language::TypeScript,
+                "class C {\n  run(a: number): number {\n    return a;\n  }\n}\n",
+                "run",
+                Some("run(a: number): number"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                table.as_str(),
+                "TABLE",
+                Some("static readonly TABLE"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "export const f = (a: number): number => a;\n",
+                "f",
+                Some("export const f = (a: number): number =>"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "export class Svc {\n  constructor(public n = 1) {}\n}\n",
+                "constructor",
+                Some("constructor(public n = 1)"),
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
+                "Run",
+                Some("public int Run(int a)"),
+            ),
+            (
+                "A.java",
+                Language::Java,
+                "class C {\n    @Override\n    public String toString() {\n        return \"s\";\n    }\n}\n",
+                "toString",
+                Some("@Override\n    public String toString()"),
+            ),
+            (
+                "A.java",
+                Language::Java,
+                "class C {\n    private static final int MAX = 3;\n}\n",
+                "MAX",
+                Some("private static final int MAX"),
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nclass C {\n    public function run($a) {\n        return $a;\n    }\n}\n",
+                "run",
+                Some("public function run($a)"),
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nclass C {\n}\n",
+                "C",
+                Some("class C"),
+            ),
+            (
+                "a.scala",
+                Language::Scala,
+                "class C {\n  def run(a: Int): Int = {\n    a\n  }\n}\n",
+                "run",
+                Some("def run(a: Int): Int"),
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "class C:\n    def run(self, a):\n        return a\n",
+                "run",
+                Some("def run(self, a)"),
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "def outer():\n    def inner():\n        return 1\n    return inner\n",
+                "inner",
+                Some("def inner()"),
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "X: int = {\n    \"a\": 1,\n}\n",
+                "X",
+                Some("X: int"),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                "/// Size.\n#[inline]\npub fn len() -> usize {\n    0\n}\n",
+                "len",
+                Some("pub fn len() -> usize"),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                "pub const MAX: usize = 3;\n",
+                "MAX",
+                Some("pub const MAX: usize"),
+            ),
+            (
+                "a.tf",
+                Language::Terraform,
+                "variable \"region\" {\n  default = \"x\"\n}\n",
+                "region",
+                Some("variable \"region\""),
+            ),
+        ];
+        for (file, language, content, name, expected) in cases {
+            assert_eq!(
+                signature(file, language, content, name).as_deref(),
+                expected,
+                "{file} {name}"
+            );
+        }
+    }
+
+    /// A server's symbol takes the signature written at its own place, however
+    /// the server marks its name and whether or not a query reads a
+    /// declaration there: tsserver marks an overload by its whole range, clangd
+    /// a destructor by its `~`, and pyright lists an assignment under an `if`.
+    /// clangd leaves a member declaration's `;` out of its range, and an `=`
+    /// that ends an operator's name opens no value. A declaration the whole
+    /// file reads only by recovering from an unknown macro is read alone,
+    /// within the server's range, and one that does not read as written alone
+    /// either — a namespace a macro opens — has no signature.
+    #[test]
+    fn a_server_symbol_takes_the_signature_written_at_its_place() {
+        let extractor = SymbolExtractor::new();
+        let cases = [
+            (
+                "o.ts",
+                Language::TypeScript,
+                "export function over(a: string): string;\nexport function over(a: any): any {\n  return a;\n}\n",
+                "over",
+                (2, 1, 2, 1, 4, 2),
+                Some("export function over(a: any): any"),
+            ),
+            (
+                "w.cpp",
+                Language::Cpp,
+                "struct Widget { ~Widget(); };\nWidget::~Widget() {}\n",
+                "~Widget",
+                (2, 9, 2, 1, 2, 21),
+                Some("Widget::~Widget()"),
+            ),
+            (
+                "m.cpp",
+                Language::Cpp,
+                "QT_BEGIN_NAMESPACE\nvoid first() {}\n",
+                "first",
+                (2, 6, 2, 1, 2, 16),
+                Some("void first()"),
+            ),
+            (
+                "n.cpp",
+                Language::Cpp,
+                "QT_BEGIN_NAMESPACE\nvoid first() {}\nQT_END_NAMESPACE\n",
+                "qt",
+                (1, 1, 1, 1, 3, 17),
+                None,
+            ),
+            (
+                "w.cpp",
+                Language::Cpp,
+                "struct Widget {\n  Widget& operator=(const Widget&);\n};\n",
+                "operator=",
+                (2, 11, 2, 3, 2, 35),
+                Some("Widget& operator=(const Widget&)"),
+            ),
+            (
+                "f.py",
+                Language::Python,
+                "if True:\n    FLAG = True\n",
+                "FLAG",
+                (2, 5, 2, 5, 2, 16),
+                Some("FLAG"),
+            ),
+            (
+                "g.ts",
+                Language::TypeScript,
+                "declare global {\n  interface Window {\n    x: number;\n  }\n}\n",
+                "global",
+                (1, 9, 1, 1, 5, 2),
+                Some("declare global"),
+            ),
+            (
+                "l.py",
+                Language::Python,
+                "twice = lambda x: x * 2\n",
+                "twice",
+                (1, 1, 1, 1, 1, 24),
+                Some("twice = lambda x"),
+            ),
+        ];
+        for (
+            file,
+            language,
+            content,
+            name,
+            (line, column, from_line, from_column, end_line, end_column),
+            expected,
+        ) in cases
+        {
+            let path = Path::new(file);
+            let mut symbols = vec![Symbol::new(
+                name.to_string(),
+                SymbolKind::Function,
+                Location::full(
+                    path.to_path_buf(),
+                    line,
+                    column,
+                    from_line,
+                    from_column,
+                    end_line,
+                    end_column,
+                ),
+            )];
+            extractor.complete_from_declarations(&mut symbols, path, content, language);
+            assert_eq!(symbols[0].signature.as_deref(), expected, "{file}");
+        }
     }
 
     #[test]
@@ -2966,7 +3465,7 @@ region     = "us-central1"
                     served.1.1,
                 ),
             )];
-            SymbolExtractor::new().widen_to_declarations(
+            SymbolExtractor::new().complete_from_declarations(
                 &mut symbols,
                 path,
                 content,

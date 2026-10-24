@@ -13,8 +13,7 @@ use crate::cli::response::{
     TestOutput, TypeInfoOutput,
 };
 use crate::cli::utils::{
-    enclosing_callable, extract_signature, find_named_at_position, find_symbol_at_position,
-    shell_arg,
+    enclosing_callable, find_named_at_position, find_symbol_at_position, shell_arg,
 };
 use crate::cli::{LocationArg, OutputError};
 
@@ -162,7 +161,7 @@ async fn fetch_context(
             analysis.anchor_resolution().as_status(),
         );
         if let Some(sym) = analysis.target() {
-            t = t.with_signature(extract_signature(sym));
+            t = t.with_signature(sym.signature.clone());
             if args.body || args.all || args.with_bodies {
                 t = t.with_body(sym.body.clone());
             }

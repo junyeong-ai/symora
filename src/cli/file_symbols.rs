@@ -72,7 +72,7 @@ pub async fn declared_in(
         Err(_) => return Err(error),
     };
 
-    let mut symbols = SymbolExtractor::shared().extract(file, &content, language);
+    let mut symbols = SymbolExtractor::shared().extract_with_signatures(file, &content, language);
     if options.include_body {
         Symbol::attach_bodies(&mut symbols, &content);
     }

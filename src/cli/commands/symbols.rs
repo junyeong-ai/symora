@@ -9,7 +9,6 @@ use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::resolve_project_file;
 use crate::cli::response::{Section, SymbolOutput, SymbolSource};
-use crate::cli::utils::extract_signature;
 use crate::constants::defaults::SYMBOL_REFS_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Symbol, SymbolFilter, SymbolKind};
@@ -114,8 +113,9 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
                 .map(|s| match source {
                     SymbolSource::Location => SymbolOutput::from_symbol(s, ctx.root()),
                     SymbolSource::Signature => SymbolOutput::from_symbol_signature(s, ctx.root()),
-                    SymbolSource::Body => SymbolOutput::from_symbol(s, ctx.root())
-                        .with_signature(extract_signature(s)),
+                    SymbolSource::Body => {
+                        SymbolOutput::from_symbol(s, ctx.root()).with_signature(s.signature.clone())
+                    }
                 })
                 .map(|item| match &counts {
                     Some(counts) => with_reference_counts(item, counts),
