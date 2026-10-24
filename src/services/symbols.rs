@@ -555,12 +555,23 @@ impl SymbolExtractor {
 /// statements, and declares where a class's, a namespace's or the file's
 /// does. A C or C++ declaration the grammar ended by supplying its missing
 /// `;` was cut short by a macro it cannot expand (`typedef Array(T) Ts;`
-/// reads `typedef Array(T)`), so what it would name is a guess.
+/// reads `typedef Array(T)`), so what it would name is a guess. A class,
+/// struct, union or enum without a body declares only standing alone, a
+/// forward declaration: as the type of another declaration it names a type
+/// that declaration uses (`struct stat st`, `struct item *it`).
 fn declares(node: Node, language: Language) -> bool {
     if language == Language::Cpp
-        && node
+        && (node
             .child(node.child_count().saturating_sub(1))
             .is_some_and(|last| last.kind() == ";" && last.is_missing())
+            || matches!(
+                node.kind(),
+                "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
+            ) && node.child_by_field_name("body").is_none()
+                && node.parent().is_some_and(|user| {
+                    user.child_by_field_name("type")
+                        .is_some_and(|used| used.id() == node.id())
+                }))
     {
         return false;
     }
@@ -3366,6 +3377,9 @@ int in_elifdef;
 
 int unguarded = 0;
 
+struct Forward;
+static int uses(struct Forward *f, enum Mode m) { struct stat st; return 0; }
+
 void g() {
 #ifdef Q
     int local = 1;
@@ -3413,6 +3427,8 @@ void g() {
                 "variable:in_ifdef",
                 "variable:in_elifdef",
                 "variable:unguarded",
+                "struct:Forward",
+                "function:uses",
                 "function:g",
             ],
         },
