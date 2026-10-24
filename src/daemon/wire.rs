@@ -830,15 +830,17 @@ mod tests {
     }
 
     #[test]
-    fn symbol_roundtrip_with_body() {
+    fn symbol_roundtrip_with_body_and_signature() {
         let loc = SymLocation::point(PathBuf::from("test.rs"), 1, 1);
-        let original = SymSymbol::new("greet".to_string(), SymbolKind::Function, loc)
+        let mut original = SymSymbol::new("greet".to_string(), SymbolKind::Function, loc)
             .with_body("fn greet() { println!(\"hello\"); }".to_string());
+        original.signature = Some("fn greet()".to_string());
 
         let wire = Symbol::from(&original);
         let back: SymSymbol = wire.into();
 
         assert_eq!(back.body, original.body);
+        assert_eq!(back.signature, original.signature);
     }
 
     /// A name crosses the wire as the direct path produced it, so a daemon
