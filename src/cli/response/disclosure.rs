@@ -21,7 +21,7 @@ use super::{CoverageGap, Section, SymbolSource};
 use crate::cli::OutputContext;
 use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
-use crate::models::symbol::Language;
+use crate::models::symbol::{Language, SymbolKind};
 use crate::services::store::{TreeCurrency, UnreadPath};
 
 /// Why a language is missing from an answer, as a stable marker an agent
@@ -477,11 +477,14 @@ pub fn literal_query(query: &str) -> Option<String> {
     (!candidate.is_empty()).then(|| candidate.to_string())
 }
 
-/// The symbol search a disclosure's follow-ups re-run: the same query over the
-/// same paths, reading the same source.
+/// The symbol search a disclosure's follow-ups re-run: the same query, in the
+/// same language and kind, over the same paths, reading the same source. A
+/// remedy changes only what it is about.
 #[derive(Clone, Copy)]
 pub struct SymbolRerun<'a> {
     pub query: &'a str,
+    pub language: Option<&'a str>,
+    pub kind: Option<SymbolKind>,
     pub within: &'a [PathBuf],
     pub source: SymbolSource,
 }
@@ -502,15 +505,23 @@ pub fn symbol_coverage_next_commands(
     };
     let SymbolRerun {
         query,
+        language,
+        kind,
         within,
         source,
     } = rerun;
     let lang = gap.language.lsp_id();
+    let asked_lang = language
+        .map(|language| format!(" --lang={}", shell_arg(language)))
+        .unwrap_or_default();
+    let kind = kind
+        .map(|kind| format!(" --kind={}", shell_arg(kind.as_str())))
+        .unwrap_or_default();
     let paths = path_flags(within);
     let source = source.flag();
     if gap.reason == CoverageReason::NotSearched {
         return vec![format!(
-            "symora search symbols --lang {lang}{paths}{source} -- {}",
+            "symora search symbols --lang {lang}{kind}{paths}{source} -- {}",
             shell_arg(query)
         )];
     }
@@ -527,7 +538,7 @@ pub fn symbol_coverage_next_commands(
                 .collect(),
             UnconsultedIndex::Skipped => {
                 vec![format!(
-                    "symora search symbols{paths}{source} -- {}",
+                    "symora search symbols{asked_lang}{kind}{paths}{source} -- {}",
                     shell_arg(query)
                 )]
             }
@@ -552,7 +563,7 @@ pub fn symbol_coverage_next_commands(
             .collect(),
         DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced) => vec![
             format!(
-                "symora search symbols{paths}{source} -- {}",
+                "symora search symbols{asked_lang}{kind}{paths}{source} -- {}",
                 shell_arg(query)
             ),
             format!("symora doctor {lang}"),
@@ -1058,6 +1069,8 @@ mod tests {
     fn rerun(query: &str) -> SymbolRerun<'_> {
         SymbolRerun {
             query,
+            language: None,
+            kind: None,
             within: &[],
             source: SymbolSource::Location,
         }
