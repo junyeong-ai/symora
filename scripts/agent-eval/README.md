@@ -9,7 +9,7 @@ SYMORA_BIN="$(pwd)/target/release/symora" \
   scripts/agent-eval/run-ab.sh /path/to/repo scripts/agent-eval/tasks/impact.txt 5
 ```
 
-The output directory records the repository revision, binary/agent versions, task, index build, transcripts, and metrics. Keep it outside the target repository. Freeze a concrete task and ground-truth answer before running; the sample prompt must be adapted to an unambiguous symbol in that revision.
+The output directory records the repository revision, binary/agent versions, the model ID and effort level (`EVAL_MODEL`, `EVAL_EFFORT`), task, index build, transcripts, and metrics. Keep it outside the target repository. Freeze a concrete task and ground-truth answer before running; the sample prompt must be adapted to an unambiguous symbol in that revision.
 
 Judge each completed answer against that ground truth and set `correct: true` or `correct: false` in its metrics JSON. Leave the field absent when unjudged. Re-run `node scripts/agent-eval/aggregate.mjs <output-dir> <runs>` after judging. Missing, failed, incorrect, and unjudged runs are counted separately. Only verified correct runs enter the comparison medians; `attempts` retains available metrics from every attempt, so failure cost stays visible. No correctness verdict means no cost-saving comparison.
 

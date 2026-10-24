@@ -12,6 +12,9 @@
 #   SYMORA_BIN=/abs/path/to/symora \
 #   scripts/agent-eval/run-ab.sh <repo-dir> <task-file> [runs] [out-dir]
 #
+# The model and effort level are pinned and recorded with the cell:
+# EVAL_MODEL (a model ID, not an alias) and EVAL_EFFORT override them.
+#
 # Requires: claude (CLI), node, and a built symora binary. Install the target
 # repo's language server first (`symora doctor <lang>`) or the WITH arm's
 # LSP-backed tools won't resolve. Runs that crash (no `result` event) or whose
@@ -24,6 +27,8 @@ TASK_FILE="${2:?missing task file}"
 RUNS="${3:-5}"
 OUT="${4:-/tmp/symora-agent-eval}"
 SYMORA_BIN="${SYMORA_BIN:?set SYMORA_BIN to the symora binary under test}"
+MODEL="${EVAL_MODEL:-claude-opus-5-5}"
+EFFORT="${EVAL_EFFORT:-high}"
 
 REPO="$(cd "$REPO" && pwd)"
 TASK="$(cat "$TASK_FILE")"
@@ -52,6 +57,7 @@ fi
 git -C "$REPO" rev-parse HEAD >"$OUT/revision.txt"
 "$SYMORA_BIN" --version >"$OUT/symora-version.txt"
 claude --version >"$OUT/claude-version.txt"
+printf 'model=%s\neffort=%s\n' "$MODEL" "$EFFORT" >"$OUT/model.txt"
 cp "$TASK_FILE" "$OUT/task.txt"
 
 run_arm() {
@@ -65,7 +71,7 @@ run_arm() {
     ( cd "$REPO" && claude -p "$TASK" \
         --output-format stream-json --verbose \
         --permission-mode plan \
-        --model opus \
+        --model "$MODEL" --effort "$EFFORT" \
         --strict-mcp-config --mcp-config "$cfg" ) >"$raw" 2>>"$OUT/${arm}-run${i}.err" || true
     node "$SCRIPT_DIR/parse-run.mjs" <"$raw" >"$metrics"
     if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
