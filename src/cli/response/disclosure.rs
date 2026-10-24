@@ -21,7 +21,7 @@ use super::{CoverageGap, Section, SymbolSource};
 use crate::cli::OutputContext;
 use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
-use crate::models::symbol::{Language, SymbolKind};
+use crate::models::symbol::{Language, PathPattern, SymbolKind};
 use crate::services::store::{TreeCurrency, UnreadPath};
 
 /// Why a language is missing from an answer, as a stable marker an agent
@@ -262,6 +262,14 @@ pub enum LowerBound {
         /// index answers the confined search exactly.
         indexable: bool,
     },
+    /// The query names a computed member (`[key]`) and nothing that encloses
+    /// it. No language server search lists one, so these languages were never
+    /// asked.
+    LiveNameUnasked {
+        languages: Vec<Language>,
+        /// Whether a build can answer for them, as for a narrowed answer.
+        indexable: bool,
+    },
 }
 
 impl LowerBound {
@@ -314,6 +322,24 @@ impl LowerBound {
                     ""
                 }
             ),
+            Self::LiveNameUnasked {
+                languages,
+                indexable,
+            } => format!(
+                "No language server search lists a computed member, and nothing in the query \
+                 encloses this one, so {} went unasked; name what encloses it, as in \
+                 `Class/[key]`, to search live{}",
+                languages
+                    .iter()
+                    .map(|language| language.lsp_id())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if *indexable {
+                    ", or build the index, which holds it by name"
+                } else {
+                    ""
+                }
+            ),
         }
     }
 
@@ -322,7 +348,8 @@ impl LowerBound {
             Self::IndexBuiltOverUnreadPaths { repairable, .. } => {
                 repairable.then(|| "symora search index build --force".to_string())
             }
-            Self::LiveAnswerNarrowed { indexable, .. } => {
+            Self::LiveAnswerNarrowed { indexable, .. }
+            | Self::LiveNameUnasked { indexable, .. } => {
                 indexable.then(|| "symora search index build".to_string())
             }
             Self::ScanCouldNotReadPaths(_)
@@ -463,17 +490,26 @@ impl UnconsultedIndex {
     }
 }
 
-/// The part of a symbol query a literal text search can look for.
+/// The part of a symbol query a literal text search can look for: the name
+/// its path ends in as source spells it, without type parameters or
+/// wildcards. A computed member (`[key]`) is spelled with its brackets.
 ///
 /// A path-like query carries structure a symbol lookup understands and a
 /// content search does not: `*` and `[` are matched literally there, and `/`
 /// separates a container from what it holds. Handing the raw query to
-/// `search content` offers a remedy that finds nothing.
+/// `search content` offers a remedy that finds nothing. A pattern read two
+/// ways ends in no one name, so it offers none.
 pub fn literal_query(query: &str) -> Option<String> {
-    let trimmed = query.trim().trim_start_matches('/');
-    let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let base = last.split('[').next().unwrap_or(last);
-    let candidate = base.trim_matches('*').trim();
+    let pattern = PathPattern::parse(query.trim());
+    if pattern.literal.is_some() {
+        return None;
+    }
+    let (_, name) = PathPattern::split_name(pattern.path);
+    let name = match name.starts_with('[') {
+        true => name,
+        false => name.split('[').next().unwrap_or(name),
+    };
+    let candidate = name.trim_matches('*').trim();
     (!candidate.is_empty()).then(|| candidate.to_string())
 }
 
@@ -1144,6 +1180,24 @@ mod tests {
     /// A server that is installed and fails is the gap to read first, in its
     /// own words: languages with no server at all sort ahead of it by name,
     /// and would otherwise fill the hints and pick the remedy.
+    /// A content search is offered the name a symbol path ends in, as source
+    /// spells it, and nothing where the path ends in no one name.
+    #[test]
+    fn a_content_search_is_offered_the_name_source_spells() {
+        assert_eq!(literal_query("Shape/area[method]").as_deref(), Some("area"));
+        assert_eq!(literal_query("*/area*").as_deref(), Some("area"));
+        assert_eq!(
+            literal_query("Derived/operator/").as_deref(),
+            Some("operator/")
+        );
+        assert_eq!(
+            literal_query("C/[Symbol.iterator]").as_deref(),
+            Some("[Symbol.iterator]")
+        );
+        assert_eq!(literal_query("C/[key]"), None);
+        assert_eq!(literal_query("*"), None);
+    }
+
     #[test]
     fn a_failed_server_leads_the_disclosure_and_says_why() {
         let failures = [
