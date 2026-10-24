@@ -1899,6 +1899,7 @@ const GO_QUERY: &str = r#"
 (type_spec (struct_type (field_declaration_list (field_declaration) @symbol)))
 (const_declaration (const_spec) @symbol)
 (var_declaration (var_spec) @symbol)
+(var_declaration (var_spec_list (var_spec) @symbol))
 "#;
 
 // A binding's node is the same at module scope, in a class body, and inside a
@@ -2313,6 +2314,10 @@ type I interface{ Do() }
 
 const CX = 1
 var VY = 2
+var (
+	VG = 1
+	VH, VI = 2, 3
+)
 
 func F() {}
 func (s *S) M() {}
@@ -2324,6 +2329,9 @@ func (s *S) M() {}
                 "interface:I",
                 "constant:CX",
                 "variable:VY",
+                "variable:VG",
+                "variable:VH",
+                "variable:VI",
                 "function:F",
                 "method:M",
             ],
