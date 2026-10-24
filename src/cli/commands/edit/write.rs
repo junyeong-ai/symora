@@ -53,7 +53,8 @@ pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<()> {
 }
 
 pub(crate) fn lock_edits(root: &Path) -> Result<FileLock> {
-    match FileLock::exclusive(&root.join(".symora/edit.lock"))? {
+    let state = crate::services::state_dir::create(root)?;
+    match FileLock::exclusive(&state.join("edit.lock"))? {
         Some(lock) => Ok(lock),
         None => Err(stale_revision(
             "Another edit is running in this project; retry when it finishes".to_string(),
@@ -115,6 +116,13 @@ pub(crate) async fn refresh_store_files(app: &App, files: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_lock_keeps_the_state_directory_out_of_history() {
+        let root = tempfile::tempdir().unwrap();
+        let _lock = lock_edits(root.path()).unwrap();
+        assert!(root.path().join(".symora/.gitignore").is_file());
+    }
 
     #[test]
     fn a_write_preserves_foreign_staging_files_and_refuses_changed_content() {
