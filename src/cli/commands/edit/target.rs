@@ -34,7 +34,8 @@ const AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT: usize = 5;
 /// A `--symbol` pattern matching several symbols — a bare name or wildcard
 /// hitting siblings, a class and its constructors, or same-named parents
 /// sharing a child path — is an under-specified target the agent fixes by
-/// re-addressing. Each candidate is listed at its name, a `file:line:col`
+/// re-addressing. Each candidate is listed at the position its source gives
+/// it (its name, or tsserver's start of an overload), a `file:line:col`
 /// target that addresses it alone.
 fn ambiguous_symbol_path(pattern: &str, candidates: &[&Symbol], file: &str) -> anyhow::Error {
     let mut listing = candidates
