@@ -190,12 +190,14 @@ pub fn holder_of(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> 
     over[..at].last().copied()
 }
 
-/// The members a line belongs to: the innermost symbol over it that code
+/// The members a line belongs to: the innermost symbols over it that code
 /// outside can name — a top-level item, or a member of a type or namespace
-/// ([`SymbolKind::holds_members`]) — with the others its declaration
-/// declares ([`declared_with`]). Any other symbol owns every line inside
-/// it, so a parameter or local listed inside a body (pyright and tsserver
-/// list them) hands the line to the declaration it sits in. A container owns
+/// ([`SymbolKind::holds_members`]) — with the others their declarations
+/// declare ([`declared_with`]). A line holding several members (`data class
+/// User(val id: Int, val name: String)`) is each of theirs, since a changed
+/// line does not say which of them changed. Any other symbol owns every line
+/// inside it, so a parameter or local listed inside a body (pyright and
+/// tsserver list them) hands the line to the declaration it sits in. A container owns
 /// each of its lines that no member covers — its decorators or attributes,
 /// its name, bases and clauses, and what lies between and after its members
 /// — since an answer need not list every member: a server can leave one
@@ -245,26 +247,33 @@ fn members_where<'a>(
             || !within(symbol)
     };
     let mut owners = Vec::new();
+    let mut members: Vec<&Symbol> = Vec::new();
     let mut container = None;
     for symbol in symbols_over(symbols, line, None) {
-        if skipped(symbol) {
+        let inside = |member: &&Symbol| {
+            let (outer, inner) = (span(member), span(symbol));
+            outer.0 <= inner.0 && inner.1 <= outer.1
+        };
+        if skipped(symbol) || members.iter().any(inside) {
             continue;
         }
         if !symbol.kind.holds_members() {
+            members.push(symbol);
             owners.push(symbol);
             owners.extend(
                 declared_with(symbols, symbol)
                     .into_iter()
                     .filter(|other| !skipped(other)),
             );
-            return owners;
+            continue;
         }
         if line == symbol.location.line {
             owners.push(symbol);
         }
         container = Some(symbol);
     }
-    if let Some(container) = container
+    if members.is_empty()
+        && let Some(container) = container
         && !owners.iter().any(|owner| std::ptr::eq(*owner, container))
     {
         owners.push(container);
@@ -843,6 +852,33 @@ mod tests {
         assert_eq!(owners(&tree, 1), ["Order", "id"]);
         let flat = vec![order, id];
         assert_eq!(owners(&flat, 1), ["Order", "id"]);
+    }
+
+    /// Members written side by side on one line each own it, in a server's
+    /// tree and in the grammar's flat answer alike.
+    #[test]
+    fn a_line_holding_several_members_is_each_of_theirs() {
+        let file = || std::path::PathBuf::from("a.kt");
+        let user = Symbol::new(
+            "User".to_string(),
+            SymbolKind::Class,
+            Location::full(file(), 1, 12, 1, 1, 1, 52),
+        );
+        let id = Symbol::new(
+            "id".to_string(),
+            SymbolKind::Property,
+            Location::full(file(), 1, 21, 1, 17, 1, 31),
+        );
+        let name = Symbol::new(
+            "name".to_string(),
+            SymbolKind::Property,
+            Location::full(file(), 1, 37, 1, 33, 1, 51),
+        );
+
+        let tree = vec![nest(user.clone(), vec![id.clone(), name.clone()])];
+        assert_eq!(owners(&tree, 1), ["User", "id", "name"]);
+        let flat = vec![user, id, name];
+        assert_eq!(owners(&flat, 1), ["User", "id", "name"]);
     }
 
     fn declared(name: &str, kind: SymbolKind, line: u32, end_line: u32) -> Symbol {
