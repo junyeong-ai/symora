@@ -2247,11 +2247,12 @@ fn node_kind(node: Node) -> SymbolKind {
     }
 }
 
-fn is_record_component(parameter: Node) -> bool {
-    parameter
-        .parent()
-        .and_then(|list| list.parent())
-        .is_some_and(|owner| owner.kind() == "record_declaration")
+fn is_record_component(node: Node) -> bool {
+    matches!(node.kind(), "parameter" | "formal_parameter")
+        && node
+            .parent()
+            .and_then(|list| list.parent())
+            .is_some_and(|owner| owner.kind() == "record_declaration")
 }
 
 /// Classify a Go `type_spec` by its underlying type: `struct` → Struct,
@@ -2723,6 +2724,24 @@ mod tests {
                 Language::Java,
                 "enum E { Value }",
                 &[("E/Value", Some(true))],
+            ),
+            (
+                Language::Java,
+                "public record R(int a) {\n    public int doubled() { return a * 2; }\n    private static int helper() { return 1; }\n}",
+                &[
+                    ("R/a", None),
+                    ("R/doubled", Some(true)),
+                    ("R/helper", Some(false)),
+                ],
+            ),
+            (
+                Language::CSharp,
+                "public record R(int A) {\n    private int _cache;\n    private static void Helper() {}\n}",
+                &[
+                    ("R/A", Some(true)),
+                    ("R/_cache", Some(false)),
+                    ("R/Helper", Some(false)),
+                ],
             ),
             (
                 Language::CSharp,
