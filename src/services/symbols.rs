@@ -2851,6 +2851,40 @@ mod tests {
 
     const DECLARATION_FIXTURES: &[DeclarationFixture] = &[
         DeclarationFixture {
+            language: Language::Cpp,
+            path: "opened.h",
+            source: r#"
+#ifdef __cplusplus
+extern "C" {
+#endif
+int opened_for_cpp(void);
+"#,
+            declares: &["function:opened_for_cpp"],
+        },
+        DeclarationFixture {
+            language: Language::CSharp,
+            path: "b.cs",
+            source: r#"
+namespace F;
+
+class K {
+    K() {}
+}
+"#,
+            declares: &["namespace:F", "class:K", "constructor:K/K"],
+        },
+        DeclarationFixture {
+            language: Language::PHP,
+            path: "b.php",
+            source: r#"
+<?php
+namespace B {
+    const IN_B = 1;
+}
+"#,
+            declares: &["namespace:B", "constant:IN_B"],
+        },
+        DeclarationFixture {
             language: Language::Rust,
             path: "a.rs",
             source: r#"
@@ -2999,6 +3033,13 @@ export function over(a: string): string;
 export function over(a: any): any { return a; }
 declare module "ext" { export function fromExt(): void; }
 namespace Inner { export const held = 1; }
+function* gen() {}
+var legacy = 1;
+export var exported = 2;
+declare const ambientConst: number;
+declare var ambientVar: number;
+namespace Plain { const inPlain = 1; }
+declare module "bare" { const inBare: number; }
 "#,
             declares: &[
                 "class:Abs",
@@ -3030,6 +3071,15 @@ namespace Inner { export const held = 1; }
                 "function:fromExt",
                 "module:Inner",
                 "constant:held",
+                "function:gen",
+                "variable:legacy",
+                "variable:exported",
+                "constant:ambientConst",
+                "variable:ambientVar",
+                "module:Plain",
+                "constant:inPlain",
+                "module:\"bare\"",
+                "constant:inBare",
             ],
         },
         DeclarationFixture {
@@ -3048,6 +3098,8 @@ function* gen() {}
 export const MAX = 3;
 let counter = 0;
 const { picked } = source;
+var legacy = 1;
+export var exported = 2;
 "#,
             declares: &[
                 "class:C",
@@ -3061,6 +3113,8 @@ const { picked } = source;
                 "constant:MAX",
                 "variable:counter",
                 "constant:picked",
+                "variable:legacy",
+                "variable:exported",
             ],
         },
         DeclarationFixture {
@@ -3079,6 +3133,7 @@ enum E { X, Y }
 
 class C {
     int field;
+    C() {}
     void m() {}
 }
 "#,
@@ -3094,6 +3149,7 @@ class C {
                 "enum_member:E/Y",
                 "class:C",
                 "field:C/field",
+                "constructor:C/C",
                 "method:C/m",
             ],
         },
@@ -3188,7 +3244,7 @@ object Registry {
     fun register() {}
 }
 
-enum class Color { RED, GREEN }
+enum class Color { RED, GREEN; val hex = 0 }
 
 data class User(val id: String, plain: Int)
 
@@ -3211,6 +3267,7 @@ typealias Name = String
                 "class:Color",
                 "enum_member:Color/RED",
                 "enum_member:Color/GREEN",
+                "property:Color/hex",
                 "class:User",
                 "property:User/id",
                 "class:Widget",
@@ -3265,6 +3322,20 @@ union U { int a; };
 extern "C" { int c_linked(void); }
 template <class T> T largest(T a, T b);
 typedef struct { int pa; } Pair;
+extern "C" int c_single(void);
+struct P { P(); };
+#if defined(X)
+int in_if;
+#elif defined(Y)
+int in_elif;
+#else
+int in_else;
+#endif
+#ifdef Z
+int in_ifdef;
+#elifdef W
+int in_elifdef;
+#endif
 #endif
 
 int unguarded = 0;
@@ -3307,6 +3378,14 @@ void g() {
                 "function:largest",
                 "class:Pair",
                 "field:pa",
+                "function:c_single",
+                "struct:P",
+                "constructor:P/P",
+                "variable:in_if",
+                "variable:in_elif",
+                "variable:in_else",
+                "variable:in_ifdef",
+                "variable:in_elifdef",
                 "variable:unguarded",
                 "function:g",
             ],
@@ -3372,6 +3451,7 @@ protocol P {
 class C {
     var p = 1
     typealias Pair = (Int, Int)
+    init() {}
     deinit {}
     func cm() {}
 }
@@ -3379,6 +3459,7 @@ class C {
 enum Dir {
     case up, down
     case left(Int)
+    var opposite: Dir { self }
 }
 
 struct Point {
@@ -3390,6 +3471,8 @@ extension Point {
 }
 
 func top() {}
+
+let global = 1
 "#,
             declares: &[
                 "interface:P",
@@ -3397,6 +3480,7 @@ func top() {}
                 "property:P/required",
                 "method:P/pm",
                 "class:C/Pair",
+                "constructor:C/init",
                 "constructor:C/deinit",
                 "struct:Point",
                 "property:Point/x",
@@ -3406,10 +3490,12 @@ func top() {}
                 "enum_member:Dir/up",
                 "enum_member:Dir/down",
                 "enum_member:Dir/left",
+                "property:Dir/opposite",
                 "class:C",
                 "property:C/p",
                 "method:C/cm",
                 "function:top",
+                "variable:global",
             ],
         },
         DeclarationFixture {
@@ -3486,6 +3572,10 @@ class C {
   void cm() {}
 }
 
+extension Ext on String {
+  void ext() {}
+}
+
 void top() {}
 
 typedef Callback = void Function();
@@ -3501,6 +3591,8 @@ typedef Callback = void Function();
                 "field:C/sc",
                 "constructor:C/C",
                 "method:C/cm",
+                "class:Ext",
+                "method:Ext/ext",
                 "function:top",
                 "class:Callback",
             ],
@@ -3643,6 +3735,47 @@ region     = "us-central1"
                 );
             }
         }
+    }
+
+    /// A pattern that matches nothing reads nothing, and passes every test
+    /// that checks only what was read: `([(a) (b)] body: …)` is two sibling
+    /// patterns, not a parent holding a body. Each pattern of a language's
+    /// query reads a form its fixtures write.
+    #[test]
+    fn every_query_pattern_reads_a_form_its_fixtures_write() {
+        let extractor = SymbolExtractor::new();
+        let mut unread = Vec::new();
+        for (language, _, query_src) in EXTRACTORS {
+            let query = &extractor.languages[language].query;
+            let mut matched = vec![false; query.pattern_count()];
+            for fixture in DECLARATION_FIXTURES
+                .iter()
+                .filter(|fixture| fixture.language == *language)
+            {
+                let tree = extractor.parse(fixture.source, *language).unwrap();
+                let mut cursor = QueryCursor::new();
+                let mut matches =
+                    cursor.matches(query, tree.root_node(), fixture.source.as_bytes());
+                while let Some(found) = matches.next() {
+                    matched[found.pattern_index] = true;
+                }
+            }
+            unread.extend(
+                (0..query.pattern_count())
+                    .filter(|&pattern| !matched[pattern])
+                    .map(|pattern| {
+                        let text = query_src[query.start_byte_for_pattern(pattern)..]
+                            .lines()
+                            .next()
+                            .unwrap_or_default();
+                        format!("{language:?}: {text}")
+                    }),
+            );
+        }
+        assert!(
+            unread.is_empty(),
+            "patterns no fixture form matches: {unread:#?}"
+        );
     }
 
     #[test]
