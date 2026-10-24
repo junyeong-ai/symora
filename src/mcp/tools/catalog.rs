@@ -229,8 +229,9 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             "List declarations in a known file, with optional bodies, signatures, or \
              reference counts. Reports backend: document for the language server's nested \
              tree, or ast for flat syntax-derived declarations with name_path. refs counts \
-             each listed declaration's references and those of a listed type's members; a \
-             zero is static and does not show that nothing reaches a declaration.",
+             each listed declaration's references, other than a function's parameters and \
+             locals; depth 1 lists a type's members. A zero is static and does not show that \
+             nothing reaches a declaration.",
             schema_object(
                 &[
                     ("file", "string", "Project-relative file path"),
@@ -240,7 +241,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "refs",
                         "boolean",
-                        "Add refs, test_refs and prod_refs to each declaration, with \
+                        "Add refs, test_refs and prod_refs to each counted declaration, with \
                          refs_status when a count is unavailable or a lower bound",
                     ),
                 ],
