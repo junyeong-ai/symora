@@ -16,14 +16,18 @@ pub struct Position {
 /// Surfaced on `refs` / `callers` / `callees` / `impact` so an agent can
 /// distinguish "few results" from "not everything was searched". Absence
 /// means no readiness degradation; source and coverage limits still apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Ordered by what a retry can still recover, so an answer drawn from several
+/// queries carries the greatest of their markers: a timed-out part may yet
+/// settle, which an unconfirmed one beside it does not change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexingDegradation {
+    /// Workspace readiness was not confirmed throughout the query.
+    Unconfirmed,
     /// The workspace-indexing wait hit its budget; results are a lower
     /// bound. Retrying after the server warms up may return more.
     TimedOut,
-    /// Workspace readiness was not confirmed throughout the query.
-    Unconfirmed,
 }
 
 impl IndexingDegradation {
@@ -365,6 +369,25 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The order is the merge rule, and derived from declaration order, so a
+    /// reshuffled enum would silently hide a timeout behind its neighbour.
+    #[test]
+    fn a_merged_answer_keeps_the_marker_a_retry_can_still_settle() {
+        let markers = [
+            None,
+            Some(IndexingDegradation::TimedOut),
+            Some(IndexingDegradation::Unconfirmed),
+        ];
+        assert_eq!(
+            markers.into_iter().flatten().max(),
+            Some(IndexingDegradation::TimedOut)
+        );
+        assert_eq!(
+            None.max(Some(IndexingDegradation::Unconfirmed)),
+            Some(IndexingDegradation::Unconfirmed)
+        );
+    }
 
     #[test]
     fn test_uri_roundtrip_simple() {

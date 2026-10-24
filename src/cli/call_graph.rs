@@ -173,9 +173,7 @@ pub async fn walk(
         for (parent, neighbors) in frontier.iter().zip(neighbors_per_node) {
             let mut items = match neighbors {
                 Ok(indexed) => {
-                    if indexing.is_none() {
-                        indexing = indexed.indexing;
-                    }
+                    indexing = indexing.max(indexed.indexing);
                     indexed.data
                 }
                 // A failed hop is treated as empty so the walk can continue, but
