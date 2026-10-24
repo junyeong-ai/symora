@@ -1429,7 +1429,7 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         {
             fields("name")
                 .into_iter()
-                .map(|name| name.child_by_field_name("bound_identifier").unwrap_or(name))
+                .flat_map(swift_bound_names)
                 .collect()
         }
         Language::Java => fields("declarator")
@@ -1485,6 +1485,29 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         .collect(),
         _ => Vec::new(),
     }
+}
+
+/// The names a Swift `name` binds: an enum case's own, a pattern's bound
+/// identifier (`let x`), or each a tuple pattern binds (`let (x, (y, _))`).
+fn swift_bound_names(name: Node) -> Vec<Node> {
+    if name.kind() != "pattern" {
+        return vec![name];
+    }
+    if let Some(bound) = name.child_by_field_name("bound_identifier") {
+        return vec![bound];
+    }
+    let mut cursor = name.walk();
+    let held: Vec<Node> = name.named_children(&mut cursor).collect();
+    if held.iter().any(|child| child.kind() == "pattern") {
+        return held
+            .into_iter()
+            .filter(|child| child.kind() == "pattern")
+            .flat_map(swift_bound_names)
+            .collect();
+    }
+    held.into_iter()
+        .filter(|child| child.kind() == "simple_identifier")
+        .collect()
 }
 
 /// The names a JavaScript, TypeScript or Scala destructuring pattern binds:
@@ -3610,6 +3633,7 @@ extension Point {
 func top() {}
 
 let global = 1
+let (gx, (gy, _)) = (1, (2, 3))
 "#,
             declares: &[
                 "interface:P",
@@ -3633,6 +3657,8 @@ let global = 1
                 "method:C/cm",
                 "function:top",
                 "variable:global",
+                "variable:gx",
+                "variable:gy",
             ],
         },
         DeclarationFixture {
