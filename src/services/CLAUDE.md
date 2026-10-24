@@ -34,7 +34,7 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 - A symbol's container is the nearest enclosing declaration the query captures, a namespace passed through. A declaration's parameters and type are its header and contain nothing, except a type's own, which hold its members; an alias only names its type.
 - A parameter declares a member only where its language says so: a modifier, `val`/`var`, a case class's first list, a promoted parameter, a record component.
 
-`DECLARATION_FIXTURES` is the contract per language: a form or a language joins it with the query that reads it. Where a language server is installed, its document symbols are the reference to compare a change against.
+`DECLARATION_FIXTURES` is the contract per language: a form or a language joins it with the query that reads it, and every pattern of a query matches a form its fixtures write. Where a language server is installed, its document symbols are the reference to compare a change against.
 
 ## Import edges come from the parse tree
 
