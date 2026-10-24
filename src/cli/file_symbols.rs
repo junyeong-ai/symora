@@ -6,7 +6,7 @@ use crate::app::App;
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
-use crate::services::store::SymbolExtractor;
+use crate::services::symbols::SymbolExtractor;
 
 /// What produced a file's declarations — the same word `search` uses for
 /// the producer of a row, over the two producers a file-scoped answer has.

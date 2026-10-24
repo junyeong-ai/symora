@@ -1,5 +1,5 @@
 use crate::models::symbol::{Language, Symbol};
-use crate::services::store::SymbolExtractor;
+use crate::services::symbols::SymbolExtractor;
 
 pub fn extract_signature(symbol: &Symbol) -> Option<String> {
     let content = symbol.body.as_deref()?;

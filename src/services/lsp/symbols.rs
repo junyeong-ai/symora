@@ -6,7 +6,7 @@ use crate::infra::lsp::IndexingState;
 use crate::infra::lsp::protocol::{DocumentSymbol, SymbolInformation};
 use crate::models::lsp::{FindSymbolsOptions, Indexed, path_to_uri};
 use crate::models::symbol::{Language, Symbol};
-use crate::services::store::SymbolExtractor;
+use crate::services::symbols::SymbolExtractor;
 
 use super::converters::*;
 use super::helpers::*;

@@ -61,7 +61,7 @@ impl PackCache {
             .unwrap_or(0);
         let extractor = format!(
             "{}:{}",
-            crate::services::store::SymbolExtractor::extraction_digest(),
+            crate::services::symbols::SymbolExtractor::extraction_digest(),
             crate::services::imports::ImportExtractor::extraction_digest(),
         );
         let recorded: Option<String> = conn
@@ -264,7 +264,7 @@ mod tests {
             .conn
             .execute(
                 "UPDATE pack_meta SET value = ?1 WHERE key = 'extractor'",
-                params![crate::services::store::SymbolExtractor::extraction_digest().to_string()],
+                params![crate::services::symbols::SymbolExtractor::extraction_digest().to_string()],
             )
             .unwrap();
         drop(cache);

@@ -7,12 +7,12 @@ use rusqlite::OptionalExtension;
 use super::db::SqliteDb;
 
 use super::schema::*;
-use super::symbols::SymbolExtractor;
 use super::types::*;
 use crate::error::StoreError;
 use crate::infra::file_filter::{Discovery, FileFilter};
 use crate::infra::file_lock::FileLock;
 use crate::models::symbol::{Language, SymbolKind};
+use crate::services::symbols::SymbolExtractor;
 
 /// The languages a full index pass covers when no language filter narrows
 /// it: every file of theirs — every extension the language declares — is

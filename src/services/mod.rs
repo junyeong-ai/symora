@@ -12,6 +12,7 @@ pub mod lsp;
 pub mod pack;
 mod pack_cache;
 pub mod store;
+pub mod symbols;
 pub mod test_scope;
 
 pub use ast_query::{AstQueryService, DefaultAstQueryService};
