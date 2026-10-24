@@ -6,7 +6,7 @@ use crate::cli::resolve_project_file;
 use crate::cli::response::{Section, SymbolOutput, SymbolSource};
 use crate::cli::utils::extract_signature;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{Symbol, SymbolKind};
+use crate::models::symbol::{SymbolFilter, SymbolKind};
 
 #[derive(Args, Debug)]
 #[command(
@@ -83,17 +83,17 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
 
     match crate::cli::declared_in(app, &abs_path, options).await {
         Ok(answer) => {
-            let filtered = Symbol::filter_advanced(
-                &answer.symbols,
-                args.symbol.as_deref(),
-                args.substring,
-                include_kinds.as_deref(),
-                exclude_kinds.as_deref(),
-                args.structural,
-            );
+            let declarations = SymbolFilter {
+                pattern: args.symbol.as_deref(),
+                substring: args.substring,
+                include_kinds: include_kinds.as_deref(),
+                exclude_kinds: exclude_kinds.as_deref(),
+                structural: args.structural,
+            }
+            .outermost(answer.symbols);
 
-            let total = filtered.len();
-            let items: Vec<SymbolOutput> = filtered
+            let total = declarations.len();
+            let items: Vec<SymbolOutput> = declarations
                 .iter()
                 .take(limit)
                 .map(|s| match source {
