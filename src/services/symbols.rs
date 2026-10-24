@@ -827,9 +827,10 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
 /// The `=` that opens the value `node` gives the name at byte `name`, if it
 /// gives one: the first after the name and before the next declarator (`int
 /// a, b = 2` gives `a` none), and never a type alias's, whose type is what it
-/// declares.
+/// declares, nor a default a destructuring pattern gives a name it binds
+/// (`const { c = 1 } = obj`), which is part of the pattern.
 fn value_opening(node: Node, name: usize) -> Option<Node> {
-    if TYPE_ALIASES.contains(&node.kind()) {
+    if TYPE_ALIASES.contains(&node.kind()) || is_pattern_default(node) {
         return None;
     }
     let mut cursor = node.walk();
@@ -923,6 +924,14 @@ fn declared_text(
     }
     text.push_str(content.get(at..to)?);
     Some(text)
+}
+
+/// Whether `node` gives a name a destructuring pattern binds its default.
+fn is_pattern_default(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "assignment_pattern" | "object_assignment_pattern"
+    )
 }
 
 /// Declarations that name a type by what follows their `=`, or by nothing
@@ -4773,6 +4782,20 @@ region     = "us-central1"
                 "fun f(a: Int = 1, b: Int = 2) {}\n",
                 "f",
                 Some("fun f(a: Int = 1, b: Int = 2)"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "export const { a, c = 1 } = obj;\n",
+                "c",
+                Some("export const { a, c = 1 }"),
+            ),
+            (
+                "a.js",
+                Language::JavaScript,
+                "const [first = 0, second] = arr;\n",
+                "first",
+                Some("const [first = 0, second]"),
             ),
             (
                 "a.scala",
