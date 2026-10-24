@@ -841,6 +841,13 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
             Language::Rust if node.kind() == "macro_definition" => {
                 node.child_by_field_name("name")?.next_sibling()
             }
+            Language::Lua => lua_function_value(node)
+                .and_then(|function| {
+                    function
+                        .child_by_field_name("body")
+                        .or_else(|| child_of_kind(function, "end"))
+                })
+                .or_else(|| type_body(node, language)),
             _ => type_body(node, language),
         })
         .or_else(|| {
@@ -1505,8 +1512,42 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         .flatten()
         .filter_map(|bound| child_of_kind(bound, "identifier"))
         .collect(),
+        Language::Lua => {
+            let statement = child_of_kind(node, "assignment_statement").unwrap_or(node);
+            let held = |list, field| {
+                child_of_kind(statement, list)
+                    .map_or_else(Vec::new, |list| children_of_field(list, field))
+            };
+            let names = held("variable_list", "name");
+            if node.kind() != "assignment_statement" {
+                return names;
+            }
+            names
+                .into_iter()
+                .zip(held("expression_list", "value"))
+                .filter(|(name, value)| {
+                    name.kind() == "dot_index_expression" && value.kind() == "function_definition"
+                })
+                .map(|(name, _)| name)
+                .collect()
+        }
         _ => Vec::new(),
     }
+}
+
+/// The function a Lua declaration or assignment gives its one name (`local
+/// f = function() end`, `M.f = function() end`), which declares that name as
+/// the function statement would.
+fn lua_function_value(node: Node) -> Option<Node> {
+    let statement = child_of_kind(node, "assignment_statement").unwrap_or(node);
+    let [_] = children_of_field(child_of_kind(statement, "variable_list")?, "name")[..] else {
+        return None;
+    };
+    let [value] = children_of_field(child_of_kind(statement, "expression_list")?, "value")[..]
+    else {
+        return None;
+    };
+    (value.kind() == "function_definition").then_some(value)
 }
 
 /// The name of the type a Go struct embeds, which names the field: the type
@@ -2057,6 +2098,12 @@ fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
     (0..node.child_count()).find_map(|i| node.child(i).filter(|c| c.kind() == kind))
 }
 
+/// Every child of `node` its grammar holds under `field`, in order.
+fn children_of_field<'a>(node: Node<'a>, field: &str) -> Vec<Node<'a>> {
+    let mut cursor = node.walk();
+    node.children_by_field_name(field, &mut cursor).collect()
+}
+
 /// Every child of `node` with the given grammar kind, in order.
 fn children_of_kind<'a>(node: Node<'a>, kind: &str) -> Vec<Node<'a>> {
     (0..node.child_count())
@@ -2234,7 +2281,7 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             .next()
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| node.child_by_field_name("property")),
-        Language::Swift => declared_names(node, language)
+        Language::Swift | Language::Lua => declared_names(node, language)
             .into_iter()
             .next()
             .or_else(|| node.child_by_field_name("name")),
@@ -2458,6 +2505,12 @@ fn node_kind(node: Node) -> SymbolKind {
         "top_level_variable_declaration" => SymbolKind::Variable,
         "getter_signature" | "setter_signature" => SymbolKind::Property,
         "operator_signature" => SymbolKind::Method,
+        "variable_declaration" | "assignment_statement" if lua_function_value(node).is_some() => {
+            SymbolKind::Function
+        }
+        "assignment_statement" if child_of_kind(node, "variable_list").is_some() => {
+            SymbolKind::Function
+        }
 
         _ => SymbolKind::Variable,
     }
@@ -2817,8 +2870,14 @@ const BASH_QUERY: &str = r#"
 (function_definition) @symbol
 "#;
 
+// Lua defines its function statement as the assignment of a function
+// (`function M.f() end` is `M.f = function() end`), so a chunk's field
+// assigned a function is declared as the statement declares it; a field
+// assigned any other value is a table entry, not a declaration.
 const LUA_QUERY: &str = r#"
 (function_declaration) @symbol
+(chunk (variable_declaration) @symbol)
+(chunk (assignment_statement (variable_list name: (dot_index_expression)) (expression_list value: (function_definition))) @symbol)
 "#;
 
 // A Swift `let`/`var` inside a function body parses as the same
@@ -3784,11 +3843,38 @@ function other { echo hi; }
             language: Language::Lua,
             path: "a.lua",
             source: r#"
+local M = {}
+M.version = 1
+
 function top() end
 
-local function helper() end
+local function helper()
+  local hidden = 1
+end
+
+local handler = function(event) end
+
+function M.run() end
+
+M.stop = function() end
+
+M.count, M.reset = 0, function() end
+
+if M then
+  local scoped = 1
+end
+
+return M
 "#,
-            declares: &["function:top", "function:helper"],
+            declares: &[
+                "variable:M",
+                "function:top",
+                "function:helper",
+                "function:handler",
+                "function:M.run",
+                "function:M.stop",
+                "function:M.reset",
+            ],
         },
         DeclarationFixture {
             language: Language::Swift,
@@ -4851,6 +4937,20 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.lua",
+                Language::Lua,
+                "local M = {}\nM.stop = function(reason)\n  return reason\nend\n",
+                "M.stop",
+                Some("M.stop = function(reason)"),
+            ),
+            (
+                "a.lua",
+                Language::Lua,
+                "local handler = function() end\n",
+                "handler",
+                Some("local handler = function()"),
             ),
             (
                 "a.rb",
