@@ -93,6 +93,9 @@ impl SymbolKind {
         matches!(self, Self::Function | Self::Method | Self::Constructor)
     }
 
+    /// A value rather than a structure. An object holds members (a Rust
+    /// impl, a Swift extension), so it is no value whatever a JSON document's
+    /// server means by it.
     pub fn is_low_level(&self) -> bool {
         matches!(
             self,
@@ -102,7 +105,6 @@ impl SymbolKind {
                 | Self::Number
                 | Self::Boolean
                 | Self::Array
-                | Self::Object
                 | Self::Key
                 | Self::Null
         )
@@ -190,6 +192,7 @@ mod tests {
         assert!(!SymbolKind::Function.is_low_level());
         assert!(!SymbolKind::Class.is_low_level());
         assert!(!SymbolKind::Method.is_low_level());
+        assert!(!SymbolKind::Object.is_low_level());
     }
 
     #[test]
