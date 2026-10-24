@@ -686,6 +686,17 @@ async fn check_dangling_references(
         total,
     )
     .with_indexing(indexing);
+    if total == 0 {
+        section = section.with_hints(Vec::from_iter(
+            crate::cli::analysis::member_reach_hint_of(
+                app.lsp.as_ref(),
+                file,
+                symbol,
+                app.output.root(),
+            )
+            .await,
+        ));
+    }
     if total > DELETE_REFS_DISPLAY_LIMIT {
         section = section.with_next_commands(vec![format!(
             "symora refs -- {}",

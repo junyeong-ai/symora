@@ -290,18 +290,7 @@ impl LocationAnalysis {
     pub fn member_reach_hint(&self) -> Option<String> {
         let declaring = self.declaring_type.as_ref()?;
         let name = self.anchor.symbol.as_ref().map(|s| s.name.as_str())?;
-        Some(match declaring.references {
-            0 => format!(
-                "Nothing names `{name}`, and nothing names `{}`, which declares it",
-                declaring.name
-            ),
-            n => format!(
-                "Nothing names `{name}`, but `{}`, which declares it, is used {n} time(s) — a \
-                 call through the type does not name the member, so this is not evidence that \
-                 `{name}` is unreachable",
-                declaring.name
-            ),
-        })
+        Some(member_reach(name, declaring))
     }
 
     /// How the anchor resolved — see [`AnchorResolution`]. Surfaces render
@@ -336,42 +325,82 @@ impl LocationAnalysis {
     }
 }
 
+/// What an empty reference set leaves unsaid for a member of a type.
+fn member_reach(name: &str, declaring: &DeclaringType) -> String {
+    match declaring.references {
+        0 => format!(
+            "Nothing names `{name}`, and nothing names `{}`, which declares it",
+            declaring.name
+        ),
+        n => format!(
+            "Nothing names `{name}`, but `{}`, which declares it, is used {n} time(s) — a call \
+             through the type does not name the member, so this is not evidence that `{name}` \
+             is unreachable",
+            declaring.name
+        ),
+    }
+}
+
+/// [`LocationAnalysis::member_reach_hint`] for a declaration whose references
+/// the caller counted itself and found none of.
+pub async fn member_reach_hint_of(
+    lsp: &dyn LspService,
+    file: &Path,
+    symbol: &Symbol,
+    root: &Path,
+) -> Option<String> {
+    let declaring = declaring_type_reach(
+        lsp,
+        file,
+        symbol.location.line,
+        symbol.location.column,
+        root,
+    )
+    .await?;
+    Some(member_reach(&symbol.name, &declaring))
+}
+
 /// The type a member is declared in, found by what holds it rather than by
 /// its name — an outer function declares a nested one, and a call there has to
-/// name it, so only a type weakens the member's zero.
-fn declaring_type_of(symbols: &[Symbol], anchor: &Anchor) -> Option<Symbol> {
-    holder_of(symbols, anchor.line, anchor.column)
+/// name it, so only a type weakens the member's zero. An `impl` block is
+/// where a Rust type's members are declared, and servers report it as an
+/// object.
+fn declaring_type_of(symbols: &[Symbol], line: u32, column: u32) -> Option<Symbol> {
+    holder_of(symbols, line, column)
         .filter(|holder| {
             matches!(
                 holder.kind,
-                SymbolKind::Class | SymbolKind::Struct | SymbolKind::Interface | SymbolKind::Enum
+                SymbolKind::Class
+                    | SymbolKind::Struct
+                    | SymbolKind::Interface
+                    | SymbolKind::Enum
+                    | SymbolKind::Object
             )
         })
         .cloned()
 }
 
-/// How often the type declaring the anchor is referenced, asked only when the
-/// member's own set is empty — the one answer a caller reads as absence.
+/// How often the type declaring the member at a position is referenced, asked
+/// only when the member's own set is empty — the one answer a caller reads as
+/// absence.
 async fn declaring_type_reach(
     lsp: &dyn LspService,
-    anchor: &Anchor,
+    file: &Path,
+    line: u32,
+    column: u32,
     root: &Path,
 ) -> Option<DeclaringType> {
     let symbols = lsp
-        .find_symbols(&anchor.file, FindSymbolsOptions::default().with_depth(10))
+        .find_symbols(file, FindSymbolsOptions::default().with_depth(10))
         .await
         .ok()?;
-    let declaring = declaring_type_of(&symbols, anchor)?;
+    let declaring = declaring_type_of(&symbols, line, column)?;
     let references = lsp
-        .find_references(
-            &anchor.file,
-            declaring.location.line,
-            declaring.location.column,
-        )
+        .find_references(file, declaring.location.line, declaring.location.column)
         .await
         .ok()?;
     let declaration = ParsedLocation {
-        file: anchor.file.clone(),
+        file: file.to_path_buf(),
         line: declaring.location.line,
         column: declaring.location.column,
         column_explicit: true,
@@ -415,7 +444,7 @@ impl LocationAnalysis {
             anchor.is_declaration().then_some(&declaration),
         );
         let declaring_type = match usages.is_empty() {
-            true => declaring_type_reach(lsp, &anchor, root).await,
+            true => declaring_type_reach(lsp, &anchor.file, anchor.line, anchor.column, root).await,
             false => None,
         };
         Ok(Self {
@@ -1073,6 +1102,28 @@ mod tests {
             references,
             indexing: None,
         }
+    }
+
+    /// A member's zero is weakened by the type that declares it, which a Rust
+    /// method finds in its `impl` block — reported as an object — and a
+    /// function nested in another never does: a call there names it.
+    #[test]
+    fn a_member_is_declared_by_its_type_or_impl_block_and_never_by_a_function() {
+        let holder = |kind: SymbolKind| {
+            Symbol::new(
+                "Widget".to_string(),
+                kind,
+                Location::full(PathBuf::from("lib.rs"), 1, 6, 1, 1, 5, 2),
+            )
+            .with_children(vec![func("lib.rs", "render", 2, 8, 4)])
+        };
+        for kind in [SymbolKind::Object, SymbolKind::Struct, SymbolKind::Class] {
+            assert_eq!(
+                declaring_type_of(&[holder(kind)], 2, 8).map(|symbol| symbol.kind),
+                Some(kind)
+            );
+        }
+        assert!(declaring_type_of(&[holder(SymbolKind::Function)], 2, 8).is_none());
     }
 
     #[test]
