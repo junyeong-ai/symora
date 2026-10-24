@@ -145,7 +145,7 @@ impl SymbolExtractor {
             .map(|(language, grammar, query)| {
                 let grammar = grammar();
                 format!(
-                    "{}\u{1}{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}\u{1}{}",
+                    "{}\u{1}{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}",
                     env!("CARGO_PKG_VERSION"),
                     language.lsp_id(),
                     grammar.abi_version(),
@@ -154,7 +154,6 @@ impl SymbolExtractor {
                         metadata.minor_version,
                         metadata.patch_version
                     )),
-                    transparent_statements(*language).join(","),
                     body_opener(*language).map(String::from).unwrap_or_default()
                 )
             })
@@ -517,18 +516,24 @@ impl SymbolExtractor {
             return Vec::new();
         };
         let mut cursor = QueryCursor::new();
-        let mut declarations = Vec::new();
+        let mut nodes = Vec::new();
+        let mut declared = HashSet::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
             for capture in m.captures() {
-                if capture.index == entry.declaration {
-                    for symbol in extract_declaration(capture.node, path, content, language) {
-                        declarations.push((capture.node, symbol));
-                    }
+                if capture.index == entry.declaration && declared.insert(capture.node.id()) {
+                    nodes.push(capture.node);
                 }
             }
         }
-        declarations
+        nodes
+            .into_iter()
+            .flat_map(|node| {
+                extract_declaration(node, &declared, path, content, language)
+                    .into_iter()
+                    .map(move |symbol| (node, symbol))
+            })
+            .collect()
     }
 }
 
@@ -853,7 +858,13 @@ fn register(
 /// often it binds it (`lo, hi = hi, top = …`), all over the statement's one
 /// range — or each over its name alone where the statement also assigns to
 /// something else ([`assigns_beyond_its_names`]).
-fn extract_declaration(node: Node, path: &Path, content: &str, language: Language) -> Vec<Symbol> {
+fn extract_declaration(
+    node: Node,
+    declared: &HashSet<usize>,
+    path: &Path,
+    content: &str,
+    language: Language,
+) -> Vec<Symbol> {
     let names = declared_names(node, language);
     let named: Vec<(String, SymbolKind, Node)> = if names.len() > 1 {
         let mut stated = HashSet::new();
@@ -884,7 +895,7 @@ fn extract_declaration(node: Node, path: &Path, content: &str, language: Languag
     if named.is_empty() {
         return Vec::new();
     }
-    let container = extract_container_path(node, content, language);
+    let container = extract_container_path(node, declared, content, language);
 
     // Anchor the symbol at its NAME, not the item start: `refs`/`def` on a
     // leading keyword (`pub`, `fn`, an attribute line) resolve to the wrong
@@ -1395,7 +1406,12 @@ fn name_position_node<'a>(node: Node<'a>, language: Language) -> Option<Node<'a>
     find_name_node(node, language)
 }
 
-fn extract_container_path(mut node: Node, content: &str, language: Language) -> Option<String> {
+fn extract_container_path(
+    node: Node,
+    declared: &HashSet<usize>,
+    content: &str,
+    language: Language,
+) -> Option<String> {
     // HCL qualifies a name with the type label written before it
     // (`google_storage_bucket.logs`), which is what tells two resources named
     // `this` apart. Nothing encloses a top-level block to walk up to.
@@ -1404,50 +1420,41 @@ fn extract_container_path(mut node: Node, content: &str, language: Language) -> 
     }
 
     // A symbol is keyed by its IMMEDIATE container only — the nearest enclosing
-    // type/impl — so a method reads `Type/method`, an enclosing outer type or
+    // declaration — so a method reads `Type/method`, an enclosing outer type or
     // module never widens it to `Outer/Inner/method`, and a module-level item
     // stays bare. This matches what the LSP workspace surface can report (a
     // method's container is its nearest type; outer types and namespaces are
     // flattened away there), so a name_path round-trips across the index,
     // documentSymbol, and workspace surfaces. Modules/namespaces/packages
     // qualify nothing and are skipped on the way up to that nearest type.
-    while let Some(parent) = node.parent() {
-        node = parent;
-        if transparent_statements(language).contains(&node.kind()) {
-            continue;
-        }
-        if let Some((name, kind)) = extract_name_and_kind(node, content, language)
+    //
+    // Only a declaration the query reads contains: a statement, a body or an
+    // expression holds names that declare nothing (the target of a `for`, an
+    // enum's bare members), and a callable is no container of what its
+    // parameters declare (a TypeScript constructor's parameter property).
+    let mut inner = node;
+    let mut ancestor = node.parent();
+    while let Some(outer) = ancestor {
+        if declared.contains(&outer.id())
+            && !is_parameter_list_of(inner, outer)
+            && let Some((name, kind)) = extract_name_and_kind(outer, content, language)
             && !name.is_empty()
             && !kind.is_namespace_like()
         {
             return Some(name);
         }
+        inner = outer;
+        ancestor = outer.parent();
     }
     None
 }
 
-/// Statements a grammar lets hold declarations without declaring anything,
-/// though an identifier can head one: a declaration under `if TYPE_CHECKING:`
-/// is keyed by what holds the `if`, as pyright keys it. Part of
-/// `extraction_digest`, so changing a list retires the builds it keyed
-/// otherwise.
-fn transparent_statements(language: Language) -> &'static [&'static str] {
-    match language {
-        Language::Python => &[
-            "if_statement",
-            "elif_clause",
-            "else_clause",
-            "for_statement",
-            "while_statement",
-            "try_statement",
-            "except_clause",
-            "finally_clause",
-            "with_statement",
-            "match_statement",
-            "case_clause",
-        ],
-        _ => &[],
-    }
+/// Whether `inner`, a child of `outer`, is the parameter list of the callable
+/// `outer` declares: its header, rather than its body.
+fn is_parameter_list_of(inner: Node, outer: Node) -> bool {
+    outer
+        .child_by_field_name("parameters")
+        .is_some_and(|parameters| parameters.id() == inner.id())
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
