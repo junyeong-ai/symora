@@ -208,6 +208,12 @@ impl Symbol {
         self.name_path.as_deref().unwrap_or(&self.name)
     }
 
+    /// The path without the kind that tells this symbol from same-named
+    /// siblings: the key an index or workspace row carries for it.
+    pub fn unqualified_path(&self) -> &str {
+        Self::split_qualifier(self.path()).0
+    }
+
     pub fn matches_path(&self, pattern: &str) -> bool {
         Self::path_matches(self.path(), pattern)
     }

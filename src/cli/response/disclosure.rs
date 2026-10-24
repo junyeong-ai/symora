@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use super::{CoverageGap, Section};
+use super::{CoverageGap, Section, SymbolSource};
 use crate::cli::OutputContext;
 use crate::cli::utils::shell_arg;
 use crate::error::{LspError, StoreError};
@@ -477,6 +477,15 @@ pub fn literal_query(query: &str) -> Option<String> {
     (!candidate.is_empty()).then(|| candidate.to_string())
 }
 
+/// The symbol search a disclosure's follow-ups re-run: the same query over the
+/// same paths, reading the same source.
+#[derive(Clone, Copy)]
+pub struct SymbolRerun<'a> {
+    pub query: &'a str,
+    pub within: &'a [PathBuf],
+    pub source: SymbolSource,
+}
+
 /// The remedy for the first gap. A language that was never searched is
 /// cured by asking for it, whatever the route; a language that could not
 /// answer is cured by the route's own escape — a forced live lookup by
@@ -484,19 +493,24 @@ pub fn literal_query(query: &str) -> Option<String> {
 /// extractor covers the language, since `search index build` can never
 /// help one it does not.
 pub fn symbol_coverage_next_commands(
-    query: &str,
-    within: &[PathBuf],
+    rerun: SymbolRerun<'_>,
     shortfall: &[Uncovered],
     route: DisclosureRoute,
 ) -> Vec<String> {
     let Some(gap) = by_consequence(shortfall).first().copied() else {
         return Vec::new();
     };
+    let SymbolRerun {
+        query,
+        within,
+        source,
+    } = rerun;
     let lang = gap.language.lsp_id();
     let paths = path_flags(within);
+    let source = source.flag();
     if gap.reason == CoverageReason::NotSearched {
         return vec![format!(
-            "symora search symbols --lang {lang}{paths} -- {}",
+            "symora search symbols --lang {lang}{paths}{source} -- {}",
             shell_arg(query)
         )];
     }
@@ -513,7 +527,7 @@ pub fn symbol_coverage_next_commands(
                 .collect(),
             UnconsultedIndex::Skipped => {
                 vec![format!(
-                    "symora search symbols{paths} -- {}",
+                    "symora search symbols{paths}{source} -- {}",
                     shell_arg(query)
                 )]
             }
@@ -537,7 +551,10 @@ pub fn symbol_coverage_next_commands(
             .chain(std::iter::once(format!("symora doctor {lang}")))
             .collect(),
         DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced) => vec![
-            format!("symora search symbols{paths} -- {}", shell_arg(query)),
+            format!(
+                "symora search symbols{paths}{source} -- {}",
+                shell_arg(query)
+            ),
             format!("symora doctor {lang}"),
         ],
         // The index cannot be asked to help yet, so the only remedy left is
@@ -640,8 +657,7 @@ pub fn ordered_bounds(scan: Option<LowerBound>, from_index: Vec<LowerBound>) -> 
 pub fn with_coverage_disclosure<T>(
     section: Section<T>,
     shortfall: &[Uncovered],
-    query: &str,
-    within: &[PathBuf],
+    rerun: SymbolRerun<'_>,
     route: DisclosureRoute,
     lower_bounds: &[LowerBound],
     route_facts: &[(String, String)],
@@ -667,7 +683,7 @@ pub fn with_coverage_disclosure<T>(
         // The remedies answer the first gap, so they travel with it.
         advice.push((
             first,
-            symbol_coverage_next_commands(query, within, shortfall, route),
+            symbol_coverage_next_commands(rerun, shortfall, route),
         ));
         advice.extend(gaps.map(|hint| (hint, Vec::new())));
     }
@@ -1039,6 +1055,14 @@ pub fn relative_paths(ctx: &OutputContext, paths: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn rerun(query: &str) -> SymbolRerun<'_> {
+        SymbolRerun {
+            query,
+            within: &[],
+            source: SymbolSource::Location,
+        }
+    }
+
     #[test]
     fn an_unconsulted_language_is_cured_by_the_index_only_where_it_can_hold_it() {
         use crate::services::symbols::SymbolExtractor;
@@ -1055,14 +1079,14 @@ mod tests {
 
         let not_built = route(WorkspaceSearchRoute::IndexNotBuilt);
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &[], &rust, not_built),
+            symbol_coverage_next_commands(rerun("alpha"), &rust, not_built),
             ["symora search index build"]
         );
         assert!(symbol_coverage_hints(&rust, not_built)[0].contains("the index does not hold it"));
 
         let forced = route(WorkspaceSearchRoute::Forced);
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &[], &rust, forced),
+            symbol_coverage_next_commands(rerun("alpha"), &rust, forced),
             ["symora search symbols -- 'alpha'"]
         );
         assert!(
@@ -1071,7 +1095,7 @@ mod tests {
         );
 
         let rebuilding = route(WorkspaceSearchRoute::IndexRebuilding);
-        assert!(symbol_coverage_next_commands("alpha", &[], &rust, rebuilding).is_empty());
+        assert!(symbol_coverage_next_commands(rerun("alpha"), &rust, rebuilding).is_empty());
 
         let unextracted = Language::all()
             .into_iter()
@@ -1079,7 +1103,7 @@ mod tests {
             .expect("a language the index does not extract");
         let other = gap(unextracted);
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &[], &other, not_built),
+            symbol_coverage_next_commands(rerun("alpha"), &other, not_built),
             [format!(
                 "symora search content --lang {} -- 'alpha'",
                 unextracted.lsp_id()
@@ -1097,7 +1121,7 @@ mod tests {
         assert!(!SymbolExtractor::is_supported(Language::Css));
         assert!(!SymbolExtractor::is_supported(Language::Html));
         assert_eq!(
-            symbol_coverage_next_commands("alpha", &[], &mixed, not_built),
+            symbol_coverage_next_commands(rerun("alpha"), &mixed, not_built),
             ["symora search index build"],
             "the build that cures the project's own language leads"
         );
@@ -1161,7 +1185,7 @@ mod tests {
             "{hints:?}"
         );
         assert!(
-            symbol_coverage_next_commands("q", &[], &shortfall, route)
+            symbol_coverage_next_commands(rerun("q"), &shortfall, route)
                 .contains(&"symora doctor javascript".to_string())
         );
     }
@@ -1178,8 +1202,7 @@ mod tests {
         )];
         let commands = |error: &StoreError| {
             symbol_coverage_next_commands(
-                "alpha",
-                &[],
+                rerun("alpha"),
                 &shortfall,
                 DisclosureRoute::WorkspaceOnly(
                     workspace_route_for(error).expect("a store state has a route"),
@@ -1205,8 +1228,7 @@ mod tests {
             assert_ne!(
                 commands(&out_of_reach),
                 symbol_coverage_next_commands(
-                    "alpha",
-                    &[],
+                    rerun("alpha"),
                     &shortfall,
                     DisclosureRoute::IndexConsulted
                 ),
@@ -1409,8 +1431,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<()>::new(), 0),
             &[],
-            "zzz*",
-            &[],
+            rerun("zzz*"),
             DisclosureRoute::IndexConsulted,
             &bounds,
             &wildcard,
@@ -1428,8 +1449,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<()>::new(), 0),
             &[],
-            "zzz*",
-            &[],
+            rerun("zzz*"),
             DisclosureRoute::IndexConsulted,
             &bounds[..1],
             &wildcard,

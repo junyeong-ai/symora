@@ -8,9 +8,9 @@ use crate::app::App;
 use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
-    DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
-    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, literal_query,
-    ordered_bounds, path_flags, relative_stale_files, unconfirmed_by_live_lookup,
+    DisclosureRoute, LiveLookup, LowerBound, SymbolRerun, Uncovered, WorkspaceSearchRoute,
+    coverage_shortfall, index_currency_disclosure, index_holes_bound, index_unavailable_disclosure,
+    literal_query, ordered_bounds, path_flags, relative_stale_files, unconfirmed_by_live_lookup,
     unindexed_live_disclosure, with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolSource};
@@ -89,7 +89,16 @@ struct SymbolSearch<'a> {
     limit: usize,
 }
 
-impl SymbolSearch<'_> {
+impl<'a> SymbolSearch<'a> {
+    /// The search a disclosure's follow-ups re-run.
+    fn rerun(&self) -> SymbolRerun<'a> {
+        SymbolRerun {
+            query: self.query,
+            within: self.within,
+            source: self.source,
+        }
+    }
+
     /// The languages whose index currency bears on this answer: every one it
     /// drew on, or, when confined, those with files inside its paths. A change
     /// to another language's files moves no row the paths hold.
@@ -313,8 +322,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                 )
                 .with_indexing(workspace_indexing),
                 &shortfall,
-                query,
-                &within,
+                search.rerun(),
                 DisclosureRoute::IndexConsulted,
                 &lower_bounds,
                 &route_facts,
@@ -446,8 +454,7 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
             &stale_files,
         ),
         &shortfall,
-        query,
-        within,
+        search.rerun(),
         DisclosureRoute::IndexConsulted,
         &lower_bounds,
         &currency_facts,
@@ -700,8 +707,7 @@ async fn execute_workspace_symbol_search(
         // list a lower bound — captured when each query ran.
         .with_indexing(indexing),
         &shortfall,
-        query,
-        within,
+        search.rerun(),
         disclosure_route,
         &lower_bounds,
         &route_facts,
@@ -743,7 +749,18 @@ async fn publish(
     search: &SymbolSearch<'_>,
     stale_files: &HashSet<String>,
 ) {
-    attach_source(app, &mut section.items, search.source, stale_files).await;
+    let unplaced = attach_source(app, &mut section.items, search.source, stale_files).await;
+    if unplaced > 0 {
+        section.hints.insert(
+            0,
+            format!(
+                "{unplaced} row(s) come from files changed since the last index build, where a \
+                 position read then no longer places a declaration, so they carry no source; run \
+                 `symora search index build`, or read the file with `symora symbols <file>{}`",
+                search.source.flag()
+            ),
+        );
+    }
     let body_paths: Vec<String> = section
         .items
         .iter()
@@ -758,22 +775,27 @@ async fn publish(
 /// reads them: an index or workspace row carries only where its name is. One
 /// read per file. A row takes its position from the declaration it takes its
 /// source from, so both describe the file as it is now. A row whose
-/// declaration that read does not surface carries no source rather than a
-/// neighbour's.
+/// declaration that read does not place carries no source rather than a
+/// neighbour's. Returns how many stale rows were left without it.
 async fn attach_source(
     app: &App,
     rows: &mut [SymbolResultOutput],
     source: SymbolSource,
     stale_files: &HashSet<String>,
-) {
+) -> usize {
     if source == SymbolSource::Location {
-        return;
+        return 0;
     }
     let options = FindSymbolsOptions::default()
         .with_depth(u32::MAX)
         .with_body();
     let mut declared: HashMap<String, Vec<Symbol>> = HashMap::new();
+    let mut unplaced = 0;
     for row in rows {
+        if is_stale_row(row, stale_files) {
+            unplaced += 1;
+            continue;
+        }
         if !declared.contains_key(&row.file) {
             let symbols =
                 crate::cli::declared_in(app, &app.root().join(&row.file), options.clone())
@@ -782,8 +804,7 @@ async fn attach_source(
                     .unwrap_or_default();
             declared.insert(row.file.clone(), symbols);
         }
-        let stale = is_stale_row(row, stale_files);
-        let Some(declaration) = declaration_of(&declared[&row.file], row, stale) else {
+        let Some(declaration) = declaration_of(&declared[&row.file], row) else {
             continue;
         };
         row.line = declaration.location.line;
@@ -794,38 +815,37 @@ async fn attach_source(
             row.body = declaration.body.clone();
         }
     }
+    unplaced
 }
 
-/// The declaration a row names among its file's declarations: the one with
-/// its path, and where the file declares that path more than once (overloads,
-/// one method in two impl blocks), the one whose span holds the row. A stale
-/// row's position no longer tells those declarations apart, so it takes none.
-fn declaration_of<'a>(
-    declared: &'a [Symbol],
-    row: &SymbolResultOutput,
-    stale: bool,
-) -> Option<&'a Symbol> {
-    fn collect<'a>(symbols: &'a [Symbol], path: &str, found: &mut Vec<&'a Symbol>) {
-        for symbol in symbols {
-            if symbol.path() == path {
-                found.push(symbol);
-            }
-            collect(&symbol.children, path, found);
-        }
+/// The declaration a row names among its file's declarations as read now: one
+/// with its path whose span holds the row, the innermost where such spans
+/// nest. A path can be declared more than once (overloads, one method in two
+/// impl blocks), and a server can list once what the index holds twice
+/// (pyright lists a property's setter alone), so the position decides rather
+/// than the count. A row's path carries no kind, so it names a declaration
+/// whose path does only to tell it from a same-named sibling.
+fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Option<&'a Symbol> {
+    fn holding<'a>(
+        symbols: &'a [Symbol],
+        path: &str,
+        line: u32,
+        column: u32,
+    ) -> Option<&'a Symbol> {
+        symbols.iter().find_map(|symbol| {
+            holding(&symbol.children, path, line, column).or_else(|| {
+                ((symbol.path() == path || symbol.unqualified_path() == path)
+                    && symbol.location.spans(line, column))
+                .then_some(symbol)
+            })
+        })
     }
-    let mut named = Vec::new();
-    collect(
+    holding(
         declared,
         row.name_path.as_deref().unwrap_or(&row.name),
-        &mut named,
-    );
-    match named.as_slice() {
-        [only] => Some(*only),
-        _ if stale => None,
-        _ => named
-            .into_iter()
-            .find(|symbol| symbol.location.spans(row.line, row.column)),
-    }
+        row.line,
+        row.column,
+    )
 }
 
 /// The single language to scope an index `search_symbols` query to: `Some` only
@@ -1391,10 +1411,11 @@ fn symbol_search_next_commands(
         ));
         if !looks_like_symbol_path(query) {
             commands.push(format!(
-                "symora search symbols{}{} --kind={} -- {}",
+                "symora search symbols{}{} --kind={}{} -- {}",
                 lang_flag,
                 path_flags(search.within),
                 shell_arg(&first.kind),
+                search.source.flag(),
                 shell_arg(query)
             ));
         }
@@ -1525,18 +1546,18 @@ mod tests {
         }
     }
 
-    /// A row names its declaration by path, and where its file declares that
-    /// path twice — one method in two impl blocks — by the span that holds
-    /// it, so neither row carries the other's source. A path declared once is
-    /// that declaration wherever the row's producer put its position. A stale
-    /// row's position is from before its file changed, so it settles only a
-    /// path declared once.
+    /// A row names the declaration with its path whose span holds the row, so
+    /// two declarations of one path never trade sources, and one a server
+    /// lists once where the index holds two goes only to the row it holds. A
+    /// kind qualifier the row's path lacks still names it, and where such
+    /// spans nest the innermost is the one.
     #[test]
     fn a_row_takes_the_source_of_the_declaration_that_holds_it() {
-        let declared = |path: &str, line: u32, end: u32| {
+        let declared = |path: &str, kind: SymbolKind, line: u32, end: u32| {
+            let name = path.rsplit('/').next().unwrap().split('[').next().unwrap();
             let mut symbol = Symbol::new(
-                "render".to_string(),
-                SymbolKind::Method,
+                name.to_string(),
+                kind,
                 crate::models::symbol::Location::full(
                     PathBuf::from("lib.rs"),
                     line,
@@ -1544,36 +1565,52 @@ mod tests {
                     line,
                     5,
                     end,
-                    6,
+                    40,
                 ),
             );
             symbol.name_path = Some(path.to_string());
             symbol
         };
+        let mut module = declared("config", SymbolKind::Module, 30, 40);
+        module.children = vec![declared("config", SymbolKind::Function, 35, 37)];
         let file = [
-            declared("Widget/render", 4, 6),
-            declared("Paint/render", 16, 16),
-            declared("Widget/render", 20, 22),
+            declared("Widget[struct]", SymbolKind::Struct, 2, 2),
+            declared("Widget[object]", SymbolKind::Object, 3, 13),
+            declared("Widget/render", SymbolKind::Method, 4, 6),
+            declared("Paint/render", SymbolKind::Method, 16, 16),
+            declared("Widget/render", SymbolKind::Method, 20, 22),
+            module,
         ];
-        let row = |path: &str, line: u32| SymbolResultOutput {
-            name: "render".to_string(),
-            name_path: Some(path.to_string()),
-            line,
-            column: 8,
-            ..result("render", "lib.rs")
+        let named = |path: &str, line: u32| {
+            let row = SymbolResultOutput {
+                name: path.rsplit('/').next().unwrap().to_string(),
+                name_path: Some(path.to_string()),
+                line,
+                column: 8,
+                ..result("render", "lib.rs")
+            };
+            declaration_of(&file, &row)
+                .map(|symbol| format!("{}@{}", symbol.path(), symbol.location.line))
         };
 
-        let lines = |row: SymbolResultOutput, stale: bool| {
-            declaration_of(&file, &row, stale).map(|symbol| symbol.location.line)
-        };
-        assert_eq!(lines(row("Widget/render", 4), false), Some(4));
-        assert_eq!(lines(row("Widget/render", 20), false), Some(20));
-        assert_eq!(lines(row("Widget/render", 10), false), None);
-        assert_eq!(lines(row("Paint/render", 15), false), Some(16));
-        assert_eq!(lines(row("Canvas/render", 4), false), None);
-
-        assert_eq!(lines(row("Widget/render", 4), true), None);
-        assert_eq!(lines(row("Paint/render", 15), true), Some(16));
+        assert_eq!(
+            named("Widget/render", 4).as_deref(),
+            Some("Widget/render@4")
+        );
+        assert_eq!(
+            named("Widget/render", 20).as_deref(),
+            Some("Widget/render@20")
+        );
+        assert_eq!(named("Widget/render", 10), None);
+        assert_eq!(
+            named("Paint/render", 16).as_deref(),
+            Some("Paint/render@16")
+        );
+        assert_eq!(named("Paint/render", 15), None);
+        assert_eq!(named("Canvas/render", 4), None);
+        assert_eq!(named("Widget", 2).as_deref(), Some("Widget[struct]@2"));
+        assert_eq!(named("Widget", 9).as_deref(), Some("Widget[object]@3"));
+        assert_eq!(named("config", 36).as_deref(), Some("config@35"));
     }
 
     #[test]
@@ -1728,6 +1765,39 @@ mod tests {
         )
     }
 
+    /// A follow-up re-runs the search it follows, so one that asked for
+    /// source still asks for it.
+    #[test]
+    fn a_follow_up_asks_for_the_source_its_search_asked_for() {
+        let search = SymbolSearch {
+            source: SymbolSource::Body,
+            ..search("alpha", 2)
+        };
+        let rows = [result("alpha", "src/a.rs"), result("alpha", "src/b.rs")];
+        let commands = symbol_search_next_commands(&rows, &search);
+        assert!(
+            commands
+                .contains(&"symora search symbols --kind='function' --body -- 'alpha'".to_string()),
+            "{commands:?}"
+        );
+
+        let shortfall = coverage_shortfall(
+            &[],
+            LiveLookup::Ran {
+                failures: &[],
+                skipped: &[Language::Go],
+            },
+        );
+        assert_eq!(
+            symbol_coverage_next_commands(
+                search.rerun(),
+                &shortfall,
+                DisclosureRoute::IndexConsulted
+            ),
+            ["symora search symbols --lang go --body -- 'alpha'"]
+        );
+    }
+
     /// A language the fan-out stopped before reaching is as unanswered as
     /// one whose server failed: the result says nothing about it, so it
     /// says so.
@@ -1753,8 +1823,7 @@ mod tests {
             let section = with_coverage_disclosure(
                 Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
                 &shortfall,
-                "common",
-                &[],
+                search("common", 10).rerun(),
                 route,
                 &[],
                 &[],
@@ -1788,7 +1857,11 @@ mod tests {
         assert!(hints[0].contains("lua"));
         assert!(hints[0].contains("server_not_installed"));
         assert_eq!(
-            symbol_coverage_next_commands("q", &[], &shortfall, DisclosureRoute::IndexConsulted),
+            symbol_coverage_next_commands(
+                search("q", 10).rerun(),
+                &shortfall,
+                DisclosureRoute::IndexConsulted
+            ),
             vec![
                 "symora search content --lang lua -- 'q'",
                 "symora doctor lua"
@@ -1811,8 +1884,12 @@ mod tests {
         assert!(shortfall.is_empty());
         assert!(symbol_coverage_hints(&shortfall, DisclosureRoute::IndexConsulted).is_empty());
         assert!(
-            symbol_coverage_next_commands("q", &[], &shortfall, DisclosureRoute::IndexConsulted)
-                .is_empty()
+            symbol_coverage_next_commands(
+                search("q", 10).rerun(),
+                &shortfall,
+                DisclosureRoute::IndexConsulted
+            )
+            .is_empty()
         );
     }
 
@@ -1831,7 +1908,11 @@ mod tests {
         assert_eq!(shortfall.len(), 1);
         assert_eq!(shortfall[0].language, Language::Go);
         assert_eq!(
-            symbol_coverage_next_commands("q", &[], &shortfall, DisclosureRoute::IndexConsulted),
+            symbol_coverage_next_commands(
+                search("q", 10).rerun(),
+                &shortfall,
+                DisclosureRoute::IndexConsulted
+            ),
             vec!["symora search content --lang go -- 'q'", "symora doctor go"]
         );
     }
@@ -1931,8 +2012,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &shortfall,
-            "Nonexistent/missing_xyz",
-            &[],
+            search("Nonexistent/missing_xyz", 10).rerun(),
             DisclosureRoute::IndexConsulted,
             &[],
             &[],
@@ -1951,8 +2031,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &shortfall,
-            "Mod/handler",
-            &[],
+            search("Mod/handler", 10).rerun(),
             DisclosureRoute::IndexConsulted,
             &[],
             &[],
@@ -1978,8 +2057,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
-            "alpha",
-            &[],
+            search("alpha", 10).rerun(),
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             &[],
             &[],
@@ -2055,8 +2133,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
-            "alpha",
-            &[],
+            search("alpha", 10).rerun(),
             unbuilt,
             &[],
             &[fact],
@@ -2079,8 +2156,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
-            "alpha",
-            &[],
+            search("alpha", 10).rerun(),
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             &[],
             &[],
@@ -2104,8 +2180,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(Vec::<SymbolResultOutput>::new(), 0),
             &gaps(&failures, &[]),
-            "alpha",
-            &[],
+            search("alpha", 10).rerun(),
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced),
             &[],
             &[],
@@ -2127,8 +2202,7 @@ mod tests {
         let section = with_coverage_disclosure(
             Section::with_total(vec![result("alpha", "src/a.rs")], 1),
             &gaps(&failures, &[]),
-            "alpha",
-            &[],
+            search("alpha", 10).rerun(),
             DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt),
             &[],
             &[],
