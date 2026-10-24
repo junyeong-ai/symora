@@ -946,9 +946,11 @@ pub(crate) mod tests {
     /// server, ignores stdin EOF — so a process that goes away was stopped
     /// by the client, never by its own shutdown logic. `exits` is the one
     /// exception, for a test about the pool rather than about stopping.
-    /// `deaf` stops reading before it answers `initialize`, so the client's
-    /// `initialized` meets a closed pipe. Any of them holds its answer while
-    /// the test holds the start ([`FakeServer::hold`]).
+    /// Each keeps its stdout open for as long as it runs (`3>&1`), since the
+    /// client takes a closed stdout for a server that exited. `deaf` stops
+    /// reading before it answers `initialize`, so the client's `initialized`
+    /// meets a closed pipe. Any of them holds its answer while the test
+    /// holds the start ([`FakeServer::hold`]).
     #[cfg(unix)]
     pub(crate) mod server_lifetime {
         use super::*;
@@ -983,9 +985,9 @@ printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
 if [ "$2" = watch ]; then
   body='{"jsonrpc":"2.0","id":"w1","method":"client/registerCapability","params":{"registrations":[{"id":"go-files","method":"workspace/didChangeWatchedFiles","registerOptions":{"watchers":[{"globPattern":"**/*.go"}]}}]}}'
   printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
-  exec cat > "$4"
+  exec cat 3>&1 >"$4"
 fi
-[ "$2" = exits ] && exec cat > /dev/null
+[ "$2" = exits ] && exec cat 3>&1 >/dev/null
 exec sleep 600
 "#;
 
