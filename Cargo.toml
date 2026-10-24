@@ -92,7 +92,7 @@ axum = { version = "0.8.9", default-features = false, features = ["json", "tokio
 # SQLite (symbol/content indexing). The async adapter is in-house
 # (services/store/db.rs: one owner thread + channel), so the driver is a
 # direct dependency and tracks upstream on our schedule.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 
 # jemalloc on Linux/macOS: cuts fragmentation across SQLite batches and the
 # LSP fan-out arena. cfg-gated because the upstream crate doesn't build on
