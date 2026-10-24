@@ -10,8 +10,8 @@ use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, SymbolRerun, Uncovered, WorkspaceSearchRoute,
     coverage_shortfall, index_currency_disclosure, index_holes_bound, index_unavailable_disclosure,
-    literal_query, ordered_bounds, path_flags, relative_stale_files, unconfirmed_by_live_lookup,
-    unindexed_live_disclosure, with_coverage_disclosure, workspace_route_for,
+    literal_query, ordered_bounds, path_flags, relative_stale_files, unindexed_live_disclosure,
+    with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolSource};
 use crate::cli::symbol_discovery::{
@@ -346,14 +346,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
             route_facts.extend(
                 index_currency_disclosure(
                     app.store.as_ref(),
-                    &search.currency_languages(
-                        if count > 0 {
-                            covered.clone()
-                        } else {
-                            unconfirmed_by_live_lookup(&covered, &failures, &skipped)
-                        },
-                        &detected,
-                    ),
+                    &search.currency_languages(covered.clone(), &detected),
                 )
                 .await,
             );
@@ -785,14 +778,7 @@ async fn execute_workspace_symbol_search(
     route_facts.extend(
         index_currency_disclosure(
             app.store.as_ref(),
-            &search.currency_languages(
-                if count > 0 {
-                    index_covered.clone()
-                } else {
-                    unconfirmed_by_live_lookup(&index_covered, &failures, &skipped)
-                },
-                detected,
-            ),
+            &search.currency_languages(index_covered.clone(), detected),
         )
         .await,
     );
@@ -2378,24 +2364,6 @@ mod tests {
         // A language the build does not cover is genuinely outside the
         // answer's domain, and stays a gap.
         assert_eq!(gaps(&failures, &[]).len(), 1);
-    }
-
-    /// What the live lookup left unsettled, which is one half of what decides
-    /// whether a zero can be published unqualified. A language it answered for
-    /// is settled whatever the index's currency.
-    #[test]
-    fn only_a_language_the_live_lookup_missed_is_left_unconfirmed() {
-        let failures = vec![(Language::Rust, LspError::Timeout("rust".to_string()))];
-        assert_eq!(
-            unconfirmed_by_live_lookup(&[Language::Rust, Language::Go], &failures, &[]),
-            vec![Language::Rust]
-        );
-        assert_eq!(
-            unconfirmed_by_live_lookup(&[Language::Rust], &[], &[Language::Rust]),
-            vec![Language::Rust]
-        );
-        assert!(unconfirmed_by_live_lookup(&[Language::Rust], &[], &[]).is_empty());
-        assert!(unconfirmed_by_live_lookup(&[], &failures, &[]).is_empty());
     }
 
     /// A route that never asks a language server discloses what the index

@@ -827,38 +827,22 @@ pub fn relative_unread_paths(ctx: &OutputContext, paths: &[UnreadPath]) -> Vec<U
         .collect()
 }
 
-/// The indexed languages whose zero no language server confirmed.
-///
-/// The live lookup is what settles a zero against the working tree. Where it
-/// answered, the zero is exact for the tree as it is; where it failed or never
-/// ran, the zero rests on the index alone.
-pub fn unconfirmed_by_live_lookup(
-    covered: &[Language],
-    failures: &[(Language, LspError)],
-    skipped: &[Language],
-) -> Vec<Language> {
-    covered
-        .iter()
-        .copied()
-        .filter(|language| {
-            failures.iter().any(|(failed, _)| failed == language) || skipped.contains(language)
-        })
-        .collect()
-}
-
-/// Qualify snapshot results for the unconfirmed languages whose files the
-/// index may no longer match.
+/// Qualify an answer the index took part in, for the languages whose files
+/// the index may no longer match. A zero the index joined is qualified too,
+/// whatever a language server answered beside it: a server's readiness
+/// covers the files its own project model holds, and a file the index has
+/// not read yet may be outside it.
 pub async fn index_currency_disclosure(
     store: &dyn crate::services::store::StoreService,
-    unconfirmed: &[Language],
+    languages: &[Language],
 ) -> Vec<(String, String)> {
-    if unconfirmed.is_empty() {
+    if languages.is_empty() {
         return Vec::new();
     }
     let (qualified, state) = match store.tree_currency().await {
         Ok(TreeCurrency::Current) => return Vec::new(),
         Ok(TreeCurrency::Behind(behind)) => (
-            unconfirmed
+            languages
                 .iter()
                 .copied()
                 .filter(|language| behind.contains(language))
@@ -866,7 +850,7 @@ pub async fn index_currency_disclosure(
             "is behind the working tree",
         ),
         Ok(TreeCurrency::Unknown) => (
-            unconfirmed.to_vec(),
+            languages.to_vec(),
             "cannot be compared with the working tree",
         ),
         Err(error) => {
