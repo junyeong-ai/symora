@@ -3,17 +3,14 @@
 //!     per-module statistics.
 //!   - `symbol_nav`: position-driven walks over a symbol tree.
 //!   - `io`: read line snippets from disk for `--snippet` output.
-//!   - `signature`: heuristic `fn xxx(...)` extraction from a body.
 
 mod io;
 mod refs;
-mod signature;
 mod symbol_nav;
 pub mod ui;
 
 pub use io::{read_line_at, read_lines_around};
 pub use refs::{RefsClassification, extract_module};
-pub use signature::extract_signature;
 pub use symbol_nav::{
     AnchorResolution, SymbolResolution, ambiguity_hint, column_addressed_symbol, declared_with,
     enclosing_callable, find_named_at_position, find_symbol_at_position, holder_of,

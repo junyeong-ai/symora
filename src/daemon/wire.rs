@@ -101,6 +101,8 @@ pub struct Symbol {
     pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<Symbol>>,
 }
@@ -122,6 +124,7 @@ impl From<&symbol::Symbol> for Symbol {
             degraded_column: s.location.degraded_column,
             container: s.container.clone(),
             body: s.body.clone(),
+            signature: s.signature.clone(),
             children: if s.children.is_empty() {
                 None
             } else {
@@ -159,6 +162,7 @@ impl From<Symbol> for symbol::Symbol {
         if let Some(body) = val.body {
             sym = sym.with_body(body);
         }
+        sym.signature = val.signature;
 
         if let Some(children) = val.children {
             sym = sym.with_children(children.into_iter().map(symbol::Symbol::from).collect());

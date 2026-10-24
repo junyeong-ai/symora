@@ -6,7 +6,7 @@ use crate::cli::LocationArg;
 use crate::cli::analysis::LocationAnalysis;
 use crate::cli::response::{LocationOutput, RefsOutput, Section, TargetOutput};
 use crate::cli::symbol_discovery::is_single_file_concentration;
-use crate::cli::utils::{extract_signature, read_line_at, read_lines_around, shell_arg};
+use crate::cli::utils::{read_line_at, read_lines_around, shell_arg};
 
 use super::common::lsp_error_at;
 
@@ -72,7 +72,11 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 root,
                 analysis.anchor_resolution().as_status(),
             )
-            .with_signature(analysis.target().and_then(extract_signature));
+            .with_signature(
+                analysis
+                    .target()
+                    .and_then(|target| target.signature.clone()),
+            );
 
             let anchor = format!(
                 "{}:{}:{}",

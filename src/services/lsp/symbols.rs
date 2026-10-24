@@ -67,7 +67,7 @@ pub(super) async fn find_symbols(
                     client.language(),
                     &mut conv,
                 )?;
-                SymbolExtractor::shared().widen_to_declarations(
+                SymbolExtractor::shared().complete_from_declarations(
                     &mut symbols,
                     &file_clone,
                     &content_clone,
