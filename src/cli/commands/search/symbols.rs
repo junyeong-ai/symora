@@ -25,6 +25,7 @@ use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
 use crate::services::store::SymbolSearchResult;
+use crate::services::symbols::SymbolExtractor;
 
 use super::common::{looks_like_symbol_path, resolve_search_paths};
 
@@ -749,18 +750,7 @@ async fn publish(
     search: &SymbolSearch<'_>,
     stale_files: &HashSet<String>,
 ) {
-    let unplaced = attach_source(app, &mut section.items, search.source, stale_files).await;
-    if unplaced > 0 {
-        section.hints.insert(
-            0,
-            format!(
-                "{unplaced} row(s) come from files changed since the last index build, where a \
-                 position read then no longer places a declaration, so they carry no source; run \
-                 `symora search index build`, or read the file with `symora symbols <file>{}`",
-                search.source.flag()
-            ),
-        );
-    }
+    attach_source(app, &mut section.items, search.source, stale_files).await;
     let body_paths: Vec<String> = section
         .items
         .iter()
@@ -776,25 +766,27 @@ async fn publish(
 /// read per file. A row takes its position from the declaration it takes its
 /// source from, so both describe the file as it is now. A row whose
 /// declaration that read does not place carries no source rather than a
-/// neighbour's. Returns how many stale rows were left without it.
+/// neighbour's.
 async fn attach_source(
     app: &App,
     rows: &mut [SymbolResultOutput],
     source: SymbolSource,
     stale_files: &HashSet<String>,
-) -> usize {
+) {
     if source == SymbolSource::Location {
-        return 0;
+        return;
     }
     let options = FindSymbolsOptions::default()
         .with_depth(u32::MAX)
         .with_body();
     let mut declared: HashMap<String, Vec<Symbol>> = HashMap::new();
-    let mut unplaced = 0;
     for row in rows {
         if is_stale_row(row, stale_files) {
-            unplaced += 1;
-            continue;
+            let Some((line, column)) = relocated(app, row).await else {
+                continue;
+            };
+            row.line = line;
+            row.column = column;
         }
         if !declared.contains_key(&row.file) {
             let symbols =
@@ -815,37 +807,81 @@ async fn attach_source(
             row.body = declaration.body.clone();
         }
     }
-    unplaced
+}
+
+/// Where a stale row's declaration is now. Its position is from before its
+/// file changed, so its path has to place it instead, and does only where it
+/// names one declaration both in the index's snapshot of the file and in the
+/// file as the grammar that built the snapshot reads it now. A path held
+/// twice, or held once where the snapshot held two, places nothing: either
+/// of the snapshot's could be the one that is gone.
+async fn relocated(app: &App, row: &SymbolResultOutput) -> Option<(u32, u32)> {
+    // A path names a handful of declarations in one file; a page cut short
+    // of its total counts nothing.
+    const SNAPSHOT_PAGE: usize = 32;
+    let path = row.name_path.as_deref().unwrap_or(&row.name);
+    let snapshot = app
+        .store
+        .search_symbols(path, SNAPSHOT_PAGE, None, None, &[PathBuf::from(&row.file)])
+        .await
+        .ok()?;
+    let indexed = snapshot
+        .rows
+        .iter()
+        .filter(|indexed| indexed.name_path.as_deref().unwrap_or(&indexed.name) == path)
+        .count();
+    if snapshot.rows.len() < snapshot.total || indexed != 1 {
+        return None;
+    }
+    let file = app.root().join(&row.file);
+    if tokio::fs::metadata(&file).await.ok()?.len() > app.config().search.max_file_size_bytes() {
+        return None;
+    }
+    let content = tokio::fs::read_to_string(&file).await.ok()?;
+    let declarations =
+        SymbolExtractor::shared().extract(&file, &content, Language::from_path(&file));
+    let mut held = declarations.iter().filter(|symbol| symbol.path() == path);
+    match (held.next(), held.next()) {
+        (Some(only), None) => Some((only.location.line, only.location.column)),
+        _ => None,
+    }
 }
 
 /// The declaration a row names among its file's declarations as read now: one
 /// with its path whose span holds the row, the innermost where such spans
-/// nest. A path can be declared more than once (overloads, one method in two
-/// impl blocks), and a server can list once what the index holds twice
-/// (pyright lists a property's setter alone), so the position decides rather
-/// than the count. A row's path carries no kind, so it names a declaration
-/// whose path does only to tell it from a same-named sibling.
+/// nest, whether the read nests them as children (a document tree) or lists
+/// them side by side (the grammar's flat list). A path can be declared more
+/// than once (overloads, one method in two impl blocks), and a server can list
+/// once what the index holds twice (pyright lists a property's setter alone),
+/// so the position decides rather than the count. A row's path carries no
+/// kind, so it names a declaration whose path does only to tell it from a
+/// same-named sibling.
 fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Option<&'a Symbol> {
     fn holding<'a>(
         symbols: &'a [Symbol],
         path: &str,
-        line: u32,
-        column: u32,
-    ) -> Option<&'a Symbol> {
-        symbols.iter().find_map(|symbol| {
-            holding(&symbol.children, path, line, column).or_else(|| {
-                ((symbol.path() == path || symbol.unqualified_path() == path)
-                    && symbol.location.spans(line, column))
-                .then_some(symbol)
-            })
-        })
+        position: (u32, u32),
+        found: &mut Vec<&'a Symbol>,
+    ) {
+        for symbol in symbols {
+            if (symbol.path() == path || symbol.unqualified_path() == path)
+                && symbol.location.spans(position.0, position.1)
+            {
+                found.push(symbol);
+            }
+            holding(&symbol.children, path, position, found);
+        }
     }
+    let mut found = Vec::new();
     holding(
         declared,
         row.name_path.as_deref().unwrap_or(&row.name),
-        row.line,
-        row.column,
-    )
+        (row.line, row.column),
+        &mut found,
+    );
+    found
+        .into_iter()
+        .max_by_key(|symbol| symbol.location.effective_start())
 }
 
 /// The single language to scope an index `search_symbols` query to: `Some` only
@@ -1550,7 +1586,7 @@ mod tests {
     /// two declarations of one path never trade sources, and one a server
     /// lists once where the index holds two goes only to the row it holds. A
     /// kind qualifier the row's path lacks still names it, and where such
-    /// spans nest the innermost is the one.
+    /// spans nest the innermost is the one, as children or side by side.
     #[test]
     fn a_row_takes_the_source_of_the_declaration_that_holds_it() {
         let declared = |path: &str, kind: SymbolKind, line: u32, end: u32| {
@@ -1580,6 +1616,8 @@ mod tests {
             declared("Paint/render", SymbolKind::Method, 16, 16),
             declared("Widget/render", SymbolKind::Method, 20, 22),
             module,
+            declared("util", SymbolKind::Namespace, 50, 60),
+            declared("util", SymbolKind::Function, 55, 57),
         ];
         let named = |path: &str, line: u32| {
             let row = SymbolResultOutput {
@@ -1611,6 +1649,8 @@ mod tests {
         assert_eq!(named("Widget", 2).as_deref(), Some("Widget[struct]@2"));
         assert_eq!(named("Widget", 9).as_deref(), Some("Widget[object]@3"));
         assert_eq!(named("config", 36).as_deref(), Some("config@35"));
+        assert_eq!(named("util", 56).as_deref(), Some("util@55"));
+        assert_eq!(named("util", 51).as_deref(), Some("util@50"));
     }
 
     #[test]
