@@ -549,16 +549,17 @@ impl SymbolExtractor {
     }
 }
 
-/// Whether a captured node declares anything: a Python assignment or type
-/// alias, or a C or C++ declaration a preprocessor conditional holds, binds
-/// a local where a function's scope holds it, however deep in the function's
-/// statements, and declares where a class's, a namespace's or the file's
-/// does. A C or C++ declaration the grammar ended by supplying its missing
-/// `;` was cut short by a macro it cannot expand (`typedef Array(T) Ts;`
-/// reads `typedef Array(T)`), so what it would name is a guess. A class,
-/// struct, union or enum without a body declares only standing alone, a
-/// forward declaration: as the type of another declaration it names a type
-/// that declaration uses (`struct stat st`, `struct item *it`).
+/// Whether a captured node declares anything: a Python assignment, or a C
+/// or C++ declaration a preprocessor conditional holds, binds a local where
+/// a function's scope holds it, however deep in the function's statements,
+/// and declares where a class's, a namespace's or the file's does; a type
+/// alias is a type, read wherever it is declared. A C or C++ declaration the
+/// grammar ended by supplying its missing `;` was cut short by a macro it
+/// cannot expand (`typedef Array(T) Ts;` reads `typedef Array(T)`), so what
+/// it would name is a guess. A class, struct, union or enum without a body
+/// declares only standing alone, a forward declaration: as the type of
+/// another declaration it names a type that declaration uses (`struct stat
+/// st`, `struct item *it`).
 fn declares(node: Node, language: Language) -> bool {
     if language == Language::Cpp
         && (node
@@ -576,7 +577,7 @@ fn declares(node: Node, language: Language) -> bool {
         return false;
     }
     let (local, declaring): (&[&str], &[&str]) = match (language, node.kind()) {
-        (Language::Python, "assignment" | "type_alias_statement") => (
+        (Language::Python, "assignment") => (
             &["function_definition", "lambda"],
             &["class_definition", "module"],
         ),
@@ -3075,6 +3076,9 @@ class A:
 def f(): pass
 
 async def af(): pass
+
+def scoped():
+    type LocalAlias = int
 "#,
             declares: &[
                 "variable:MODULE_CONST",
@@ -3090,6 +3094,8 @@ async def af(): pass
                 "method:A/m",
                 "function:f",
                 "function:af",
+                "function:scoped",
+                "class:scoped/LocalAlias",
             ],
         },
         DeclarationFixture {
