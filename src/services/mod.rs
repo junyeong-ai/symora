@@ -11,7 +11,7 @@ pub mod imports;
 pub mod lsp;
 pub mod pack;
 mod pack_cache;
-mod state_dir;
+pub(crate) mod state_dir;
 pub mod store;
 pub mod symbols;
 pub mod test_scope;
