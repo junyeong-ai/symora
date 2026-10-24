@@ -226,6 +226,10 @@ impl IsolatedDaemon {
         };
         if daemon.exe.exists() {
             daemon.stop();
+            // A copy written over one that has run is new code in a file the
+            // kernel already verified, and macOS kills whatever executes it:
+            // replace the file, not its contents.
+            std::fs::remove_file(&daemon.exe).unwrap();
         }
         // Copy in a child so this process never holds the executable open for
         // writing, which a concurrent fork could inherit (ETXTBSY on Linux).
