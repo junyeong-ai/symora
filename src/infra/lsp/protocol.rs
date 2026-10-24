@@ -106,6 +106,8 @@ impl std::error::Error for ResponseError {}
 pub mod error_codes {
     pub const PARSE_ERROR: i32 = -32700;
     pub const INVALID_REQUEST: i32 = -32600;
+    /// The server does not implement the requested method: a permanent
+    /// capability statement, not a transient failure.
     pub const METHOD_NOT_FOUND: i32 = -32601;
     pub const INVALID_PARAMS: i32 = -32602;
     pub const INTERNAL_ERROR: i32 = -32603;
@@ -113,6 +115,9 @@ pub mod error_codes {
     // LSP-specific error codes
     pub const SERVER_NOT_INITIALIZED: i32 = -32002;
     pub const REQUEST_CANCELLED: i32 = -32800;
+    /// The server's view of the document changed mid-request and the result
+    /// would be stale. The spec's contract is "re-issue the request" — the
+    /// canonical retryable error.
     pub const CONTENT_MODIFIED: i32 = -32801;
 
     // Symora-specific error codes

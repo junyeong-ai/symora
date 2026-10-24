@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use crate::error::LspError;
 use crate::infra::file_filter::{FileFilter, matches_default_pattern};
-use crate::infra::lsp::protocol::{LspLocation, LspSymbolKind, Position, PositionEncoding};
+use crate::infra::lsp::protocol::{
+    LspLocation, LspSymbolKind, Position, PositionEncoding, error_codes,
+};
 use crate::infra::lsp::{
     LspClient, LspFeature, SupportLevel, get_alternative_suggestion, get_support_level,
     language_server_name,
@@ -58,7 +60,7 @@ pub(super) fn verify_document_snapshot(
 ) -> Result<(), LspError> {
     if expected_hash.is_none_or(|expected| crate::infra::hash_content(content) != expected) {
         return Err(LspError::ServerError {
-            code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+            code: error_codes::CONTENT_MODIFIED,
             message: format!(
                 "Edit request document changed: {}. Request fresh edits.",
                 file.display()
@@ -507,7 +509,7 @@ mod tests {
 
         snapshots.insert(file.to_path_buf(), "prefixabc()\n".to_string());
         let error = verify_workspace_edit_target(&file, expected_hash, &snapshots).unwrap_err();
-        assert_eq!(error.error_code(), LspError::CONTENT_MODIFIED_ERROR_CODE);
+        assert_eq!(error.error_code(), error_codes::CONTENT_MODIFIED);
         assert!(error.to_string().contains("main.go"));
     }
 
@@ -528,7 +530,7 @@ mod tests {
             verify_workspace_edit_target(&file, expected, &snapshots)
                 .unwrap_err()
                 .error_code(),
-            LspError::CONTENT_MODIFIED_ERROR_CODE
+            error_codes::CONTENT_MODIFIED
         );
     }
 
@@ -547,7 +549,7 @@ mod tests {
             verify_workspace_edit_target(&file, expected, &snapshots)
                 .unwrap_err()
                 .error_code(),
-            LspError::CONTENT_MODIFIED_ERROR_CODE
+            error_codes::CONTENT_MODIFIED
         );
     }
 

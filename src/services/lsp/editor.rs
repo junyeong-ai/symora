@@ -220,6 +220,7 @@ fn workspace_edit_uris(edit: &serde_json::Value) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::lsp::protocol::error_codes;
 
     #[test]
     fn code_actions_reject_changed_or_missing_request_snapshots() {
@@ -230,7 +231,7 @@ mod tests {
             verify_document_snapshot(file, "prefixabc()\n", expected)
                 .unwrap_err()
                 .error_code(),
-            LspError::CONTENT_MODIFIED_ERROR_CODE
+            error_codes::CONTENT_MODIFIED
         );
         assert!(verify_document_snapshot(file, "abc()\n", None).is_err());
     }

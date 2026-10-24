@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, LspError, SearchError, StoreError};
+use crate::infra::lsp::protocol::error_codes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -160,30 +161,25 @@ impl From<LspError> for OutputError {
 
 /// Classify a JSON-RPC `ServerError` into the most useful `ErrorCode` we
 /// can derive from the standard code + the message body.
-///
-/// JSON-RPC reserved codes (per spec):
-///   -32700 parse, -32600 invalid req, -32601 method not found,
-///   -32602 invalid params, -32603 internal,
-///   -32800 cancelled, -32801 content modified.
 fn classify_server_error(code: i32, message: &str, full: String) -> OutputError {
     let lower = message.to_ascii_lowercase();
 
     // Standard JSON-RPC + LSP reserved codes win first.
     match code {
-        -32601 => {
+        error_codes::METHOD_NOT_FOUND => {
             return OutputError::new(ErrorCode::Unsupported, full).with_hint(
                 "Method not implemented by this language server. \
                  Run 'symora doctor' to check supported features.",
             );
         }
-        -32602 => {
+        error_codes::INVALID_PARAMS => {
             return OutputError::new(ErrorCode::InvalidArgument, full);
         }
-        -32700 => {
+        error_codes::PARSE_ERROR => {
             return OutputError::new(ErrorCode::ParseError, full);
         }
-        -32800 => return OutputError::new(ErrorCode::Cancelled, full),
-        -32801 => {
+        error_codes::REQUEST_CANCELLED => return OutputError::new(ErrorCode::Cancelled, full),
+        error_codes::CONTENT_MODIFIED => {
             return OutputError::new(ErrorCode::Cancelled, full)
                 .with_hint("File changed during the request. Re-read the source and resolve the target before retrying.");
         }
