@@ -24,7 +24,7 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
-use crate::services::store::{PATH_SUFFIX_SCORE, SymbolSearchResult};
+use crate::services::store::SymbolSearchResult;
 use crate::services::symbols::SymbolExtractor;
 
 use super::common::{looks_like_symbol_path, resolve_search_paths};
@@ -72,13 +72,33 @@ fn with_emitted_stale(
 }
 
 /// Whether an index page cut short of its total can hold path matches past
-/// its last row. Path matches rank at `PATH_SUFFIX_SCORE` or above, ahead of
-/// every other row, so a page that ends below that rank holds them all.
-fn holds_path_matches_past(rows: &[SymbolSearchResult], total: usize) -> bool {
+/// its last row. The store orders the rows a pattern matches, case aside,
+/// ahead of every row it does not, so a page whose last row the pattern does
+/// not match holds them all.
+fn holds_path_matches_past(rows: &[SymbolSearchResult], total: usize, pattern: &str) -> bool {
+    let pattern = Symbol::split_kind(pattern).0.to_ascii_lowercase();
     rows.len() < total
-        && rows
-            .last()
-            .is_some_and(|row| row.score >= PATH_SUFFIX_SCORE)
+        && rows.last().is_some_and(|row| {
+            let path = row.name_path.as_deref().unwrap_or(&row.name);
+            Symbol::path_matches(&path.to_ascii_lowercase(), &pattern)
+        })
+}
+
+/// What the store is asked for a path pattern: its path without the leading
+/// `/` of an absolute pattern, which its substring match cannot find at the
+/// top of a path, or a kind qualifier, which no index path carries.
+fn store_path_query(pattern: &str) -> &str {
+    let base = Symbol::split_kind(pattern).0;
+    base.strip_prefix('/').unwrap_or(base)
+}
+
+/// Whether an index row answers a path pattern. The index keys a row by its
+/// path alone and records its kind beside it, so the kind a pattern's
+/// qualifier names is read against that kind.
+fn index_row_matches(row: &SymbolSearchResult, pattern: &str) -> bool {
+    let (base, kind) = Symbol::split_kind(pattern);
+    Symbol::path_matches(row.name_path.as_deref().unwrap_or(&row.name), base)
+        && kind.is_none_or(|kind| row.kind == kind)
 }
 
 /// An index row read from a file that has changed since the build: its
@@ -451,7 +471,7 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
     let matches: Vec<SymbolResultOutput> = page
         .rows
         .into_iter()
-        .filter(|r| Symbol::path_matches(r.name_path.as_deref().unwrap_or(&r.name), query))
+        .filter(|r| index_row_matches(r, query))
         .map(|r| index_result_output(r, ctx))
         .collect();
     let count = matches.len();
@@ -618,7 +638,7 @@ async fn execute_workspace_symbol_search(
         true => Some(
             app.store
                 .search_symbols(
-                    query.strip_prefix('/').unwrap_or(query),
+                    store_path_query(query),
                     candidate_budget(limit),
                     kind,
                     explicit_index_language(language),
@@ -662,16 +682,14 @@ async fn execute_workspace_symbol_search(
         // `E/A` finds `Shape/area`; the live side reads it as a path, and the
         // index's rows are held to the same reading. Asked without the
         // leading `/` of an absolute path, the store finds its rows too.
-        let cut_short = holds_path_matches_past(&page.rows, page.total);
+        let cut_short = holds_path_matches_past(&page.rows, page.total, query);
         if cut_short {
             index_bounds.push(LowerBound::IndexPageCapped);
         }
         let matched: Vec<SymbolSearchResult> = page
             .rows
             .into_iter()
-            .filter(|row| {
-                Symbol::path_matches(row.name_path.as_deref().unwrap_or(&row.name), query)
-            })
+            .filter(|row| index_row_matches(row, query))
             .collect();
         lower_bounds.extend(unmerged_overlap(
             live,
@@ -1973,22 +1991,70 @@ mod tests {
     }
 
     /// A path query's page is short of path matches only while its last row
-    /// still ranks as one; past that every path match is already in hand.
+    /// is one, case aside: the store orders them ahead of every other row.
     #[test]
     fn a_page_is_short_of_path_matches_only_while_it_ends_among_them() {
-        let row = |score: f64| SymbolSearchResult {
-            name: "run".to_string(),
-            name_path: Some("A/run".to_string()),
-            kind: SymbolKind::Function,
+        let page = |paths: &[&str]| -> Vec<SymbolSearchResult> {
+            paths
+                .iter()
+                .map(|path| SymbolSearchResult {
+                    name: path.rsplit('/').next().unwrap().to_string(),
+                    name_path: Some(path.to_string()),
+                    kind: SymbolKind::Function,
+                    file: PathBuf::from("a.py"),
+                    line: 1,
+                    column: 1,
+                    container: None,
+                    score: 1.0,
+                })
+                .collect()
+        };
+        assert!(holds_path_matches_past(&page(&["E/a", "X/E/a"]), 5, "E/a"));
+        assert!(holds_path_matches_past(&page(&["E/a", "x/e/A"]), 5, "E/a"));
+        assert!(!holds_path_matches_past(
+            &page(&["E/a", "Shape/area"]),
+            5,
+            "E/a"
+        ));
+        assert!(!holds_path_matches_past(&page(&["a", "K1/a"]), 5, "/a"));
+        assert!(!holds_path_matches_past(&page(&["E/a", "X/E/a"]), 2, "E/a"));
+        assert!(holds_path_matches_past(
+            &page(&["E/a", "X/E/a"]),
+            5,
+            "E/a[function]"
+        ));
+    }
+
+    /// An index row answers a pattern by its path, and the kind a pattern's
+    /// qualifier names by the kind the index records beside it; the store is
+    /// asked for the path alone.
+    #[test]
+    fn an_index_row_answers_a_qualified_pattern_by_its_recorded_kind() {
+        let row = |kind: SymbolKind| SymbolSearchResult {
+            name: "x".to_string(),
+            name_path: Some("C/x".to_string()),
+            kind,
             file: PathBuf::from("a.py"),
             line: 1,
             column: 1,
             container: None,
-            score,
+            score: 1.0,
         };
-        assert!(holds_path_matches_past(&[row(1.0), row(0.9)], 5));
-        assert!(!holds_path_matches_past(&[row(1.0), row(0.6)], 5));
-        assert!(!holds_path_matches_past(&[row(1.0), row(0.9)], 2));
+        assert!(index_row_matches(&row(SymbolKind::Function), "C/x"));
+        assert!(index_row_matches(
+            &row(SymbolKind::Function),
+            "C/x[function]"
+        ));
+        assert!(!index_row_matches(
+            &row(SymbolKind::Variable),
+            "C/x[function]"
+        ));
+        assert!(index_row_matches(
+            &row(SymbolKind::Variable),
+            "/C/x[variable]"
+        ));
+        assert_eq!(store_path_query("/C/x[function]"), "C/x");
+        assert_eq!(store_path_query("C/x"), "C/x");
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and
