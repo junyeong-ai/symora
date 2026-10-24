@@ -1153,7 +1153,10 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .collect::<Vec<_>>()
     };
     match language {
-        Language::Go | Language::Swift => fields("name"),
+        Language::Go => fields("name"),
+        // A Swift function's return type carries the `name` field too, so
+        // only a property declaration states several names in it.
+        Language::Swift if node.kind() == "property_declaration" => fields("name"),
         Language::Java => fields("declarator")
             .into_iter()
             .filter_map(|declarator| declarator.child_by_field_name("name"))
@@ -1644,7 +1647,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "abstract_method_signature"
         | "protocol_function_declaration" => SymbolKind::Method,
 
-        "constructor_signature" => SymbolKind::Constructor,
+        "constructor_signature" | "init_declaration" => SymbolKind::Constructor,
 
         "class_declaration"
         | "abstract_class_declaration"
@@ -1903,6 +1906,7 @@ const SWIFT_QUERY: &str = r#"
 (protocol_declaration) @symbol
 (function_declaration) @symbol
 (protocol_function_declaration) @symbol
+(init_declaration) @symbol
 (class_body (property_declaration) @symbol)
 (source_file (property_declaration) @symbol)
 "#;
@@ -3619,6 +3623,33 @@ void topLevel() {}
         assert_eq!(found("Status"), Some(SymbolKind::Enum));
         assert_eq!(found("Loggable"), Some(SymbolKind::Interface));
         assert_eq!(found("topLevel"), Some(SymbolKind::Function));
+    }
+
+    /// A Swift function's return type carries the field its name does, and is
+    /// no declaration; an initializer is one.
+    #[test]
+    fn a_swift_function_declares_its_name_and_not_its_return_type() {
+        let declared: Vec<(String, SymbolKind)> = SymbolExtractor::new()
+            .extract(
+                Path::new("a.swift"),
+                "class D {\n    func a() {}\n    func b(x: String) -> [Int] { return [] }\n    \
+                 var c: Double = 0\n    init(v: Int) {}\n}\nfunc top() -> Bool { true }\n",
+                Language::Swift,
+            )
+            .into_iter()
+            .map(|symbol| (symbol.name_path.unwrap_or(symbol.name), symbol.kind))
+            .collect();
+        assert_eq!(
+            declared,
+            [
+                ("D".to_string(), SymbolKind::Class),
+                ("D/a".to_string(), SymbolKind::Function),
+                ("D/b".to_string(), SymbolKind::Function),
+                ("D/c".to_string(), SymbolKind::Property),
+                ("D/init".to_string(), SymbolKind::Constructor),
+                ("top".to_string(), SymbolKind::Function),
+            ]
+        );
     }
 
     /// Swift and Scala give a function-local binding the same node kind as a
