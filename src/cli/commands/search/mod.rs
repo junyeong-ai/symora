@@ -12,6 +12,7 @@ mod content;
 mod index;
 mod symbols;
 
+pub(crate) use ast::{ast_query_error, parse_ast_language};
 pub use ast::{execute_ast_search, execute_list_nodes};
 pub use content::execute_content_search;
 pub use index::execute_index_command;
