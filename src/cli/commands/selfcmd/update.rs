@@ -160,9 +160,9 @@ pub fn run_update(args: UpdateArgs, assume_yes: bool) -> Result<UpdateOutcome> {
         AttestationPolicy::BundleMissing => {
             return Err(anyhow!(
                 "release v{target_version} publishes no attestation bundle ({}), \
-                 so its provenance cannot be checked. Releases carry one from the \
-                 version that introduced it onward; install an earlier one with \
-                 scripts/install.sh if you mean to.",
+                 so its provenance cannot be checked. Releases carry one from \
+                 v0.21.0 onward; install an earlier one with scripts/install.sh if \
+                 you mean to.",
                 crate::services::dist::attestation_name(&target_version)
             ));
         }
