@@ -134,10 +134,11 @@ fn parse_document_symbols(
     Ok(symbols
         .into_iter()
         .map(|s| {
+            let location = convert_location(&s.location, conv);
             let mut sym = Symbol::new(
                 s.name,
-                convert_symbol_kind(s.kind),
-                convert_location(&s.location, conv),
+                convert_symbol_kind(s.kind, &location.file),
+                location,
             );
             if let Some(container) = s.container_name
                 && !container.is_empty()
@@ -207,7 +208,8 @@ pub(super) async fn workspace_symbols(
                     .into_iter()
                     .map(|s| {
                         let location = convert_location(&s.location, &mut conv);
-                        let mut sym = Symbol::new(s.name, convert_symbol_kind(s.kind), location);
+                        let kind = convert_symbol_kind(s.kind, &location.file);
+                        let mut sym = Symbol::new(s.name, kind, location);
                         if let Some(container) = s.container_name
                             && !container.is_empty()
                         {

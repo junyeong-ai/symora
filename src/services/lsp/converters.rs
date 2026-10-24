@@ -5,16 +5,22 @@ use crate::infra::lsp::protocol::{
     DocumentSymbol, HoverContents, LspLocation, LspSymbolKind, Range,
 };
 use crate::models::lsp::{FileChangeWithEdits, FindSymbolsOptions, uri_to_path};
-use crate::models::symbol::{Location, Symbol, SymbolKind};
+use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 
 use super::position::PositionConverter;
 use crate::infra::lsp::protocol::PositionEncoding;
 
-pub(super) fn convert_symbol_kind(kind: LspSymbolKind) -> SymbolKind {
+/// The kind of what a server reports for `file`. Swift declares no
+/// namespaces: sourcekit-lsp sends an extension with the namespace kind, and
+/// an extension is to its type what a Rust impl block is, which
+/// rust-analyzer sends as an object. Read as one, it keys its members by the
+/// type it extends rather than passing them through as a namespace does.
+pub(super) fn convert_symbol_kind(kind: LspSymbolKind, file: &Path) -> SymbolKind {
     use LspSymbolKind as LspKind;
     match kind {
         LspKind::File => SymbolKind::File,
         LspKind::Module => SymbolKind::Module,
+        LspKind::Namespace if Language::from_path(file) == Language::Swift => SymbolKind::Object,
         LspKind::Namespace => SymbolKind::Namespace,
         LspKind::Package => SymbolKind::Package,
         LspKind::Class => SymbolKind::Class,
@@ -149,7 +155,7 @@ pub(super) fn convert_document_symbols(
             let display_name = Symbol::normalize_symbol_name(&doc_sym.name);
             let mut symbol = Symbol::new(
                 display_name.clone(),
-                convert_symbol_kind(doc_sym.kind),
+                convert_symbol_kind(doc_sym.kind, file),
                 location,
             );
 
@@ -435,9 +441,19 @@ pub(super) fn parse_text_edits(
 #[cfg(test)]
 mod tests {
     use super::{
-        PositionEncoding, diagnostic_code_string, find_resource_operation, parse_workspace_edit,
-        parse_workspace_edit_snapshot,
+        PositionEncoding, convert_symbol_kind, diagnostic_code_string, find_resource_operation,
+        parse_workspace_edit, parse_workspace_edit_snapshot,
     };
+
+    #[test]
+    fn a_swift_namespace_is_the_extension_of_a_type() {
+        use crate::infra::lsp::protocol::LspSymbolKind;
+        use crate::models::symbol::SymbolKind;
+        let kind =
+            |file: &str| convert_symbol_kind(LspSymbolKind::Namespace, std::path::Path::new(file));
+        assert_eq!(kind("Point.swift"), SymbolKind::Object);
+        assert_eq!(kind("point.cpp"), SymbolKind::Namespace);
+    }
 
     /// An edit range's wire column is decoded to a native scalar offset against
     /// the target file BEFORE it reaches the edit applier, so a non-BMP line
