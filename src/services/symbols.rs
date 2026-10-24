@@ -2025,9 +2025,9 @@ const GO_QUERY: &str = r#"
 (type_declaration (type_spec) @symbol)
 (type_declaration (type_alias) @symbol)
 (type_spec (struct_type (field_declaration_list (field_declaration) @symbol)))
-(const_declaration (const_spec) @symbol)
-(var_declaration (var_spec) @symbol)
-(var_declaration (var_spec_list (var_spec) @symbol))
+(source_file (const_declaration (const_spec) @symbol))
+(source_file (var_declaration (var_spec) @symbol))
+(source_file (var_declaration (var_spec_list (var_spec) @symbol)))
 "#;
 
 // An assignment declares at module and class scope, under an `if`, a `try`
@@ -2108,12 +2108,16 @@ const JAVA_QUERY: &str = r#"
 (field_declaration) @symbol
 "#;
 
+// A local `val` is the same `property_declaration` a member is, so members
+// are matched where they are declared: in a type body or at file scope.
 const KOTLIN_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_class_body (enum_entry) @symbol)
 (object_declaration) @symbol
 (function_declaration) @symbol
-(property_declaration) @symbol
+(source_file (property_declaration) @symbol)
+(class_body (property_declaration) @symbol)
+(enum_class_body (property_declaration) @symbol)
 "#;
 
 // A member declared in a class body is a `field_declaration`, and one a
@@ -2267,7 +2271,7 @@ mod tests {
             ),
             (
                 Language::Go,
-                "package p\nvar Exported, hidden = 1, 2\nconst Number = 1\ntype T struct { Field int; private int }\nfunc(receiver *T) Method(){}\nfunc scope(){ var Local int; type local struct { InnerField int }; _ = Local }\nvar ᴬmodifier = 0\nvar Kelvin = 0\nvar 𝔄math = 0\n",
+                "package p\nvar Exported, hidden = 1, 2\nconst Number = 1\ntype T struct { Field int; private int }\nfunc(receiver *T) Method(){}\nfunc scope(){ type Local int; type local struct { InnerField int } }\nvar ᴬmodifier = 0\nvar Kelvin = 0\nvar 𝔄math = 0\n",
                 &[
                     ("Exported", Some(true)),
                     ("hidden", Some(false)),
@@ -2484,7 +2488,11 @@ var (
 	VH, VI = 2, 3
 )
 
-func F() {}
+func F() {
+	var local = 1
+	const limit = 2
+	_ = local + limit
+}
 func (s *S) M() {}
 "#,
             declares: &[
@@ -2756,7 +2764,9 @@ enum class Color { RED, GREEN }
 
 class Widget {
     val name = "w"
-    fun render() {}
+    fun render() {
+        val local = 1
+    }
 }
 
 fun top() {}
@@ -4672,9 +4682,9 @@ interface Shape {}
             (
                 Language::Kotlin,
                 "a.kt",
-                "class Svc(val id: Int) {\n    val size = 1\n    init {\n        val doubled = id * 2\n    }\n    constructor(n: String) : this(n.length) {\n        val parsed = n\n    }\n    val label: String\n        get() {\n            val prefix = \"x\"\n            return prefix\n        }\n    fun run(): Int {\n        val total = 1\n        val f = { val inner = 2; inner }\n        return total\n    }\n}\n\nfun top(): Int {\n    val local = 2\n    return local\n}\n",
+                "class Svc(val id: Int) {\n    val size = 1\n    init {\n        fun doubled() = id * 2\n    }\n    constructor(n: String) : this(n.length) {\n        fun parsed() = n\n    }\n    val label: String\n        get() {\n            fun prefix() = \"x\"\n            return prefix()\n        }\n    fun run(): Int {\n        fun total() = 1\n        val f = { fun inner() = 2; inner() }\n        return total()\n    }\n}\n\nfun top(): Int {\n    fun local() = 2\n    return local()\n}\n",
                 &["Svc", "size", "label", "run", "top"],
-                &["doubled", "parsed", "prefix", "total", "local"],
+                &["doubled", "parsed", "prefix", "total", "inner", "local"],
             ),
             (
                 Language::TypeScript,
@@ -4686,7 +4696,7 @@ interface Shape {}
             (
                 Language::Go,
                 "a.go",
-                "package main\n\nvar Top = 1\n\nfunc f() int {\n\tvar total = 1\n\treturn total\n}\n\nvar handler = func() int {\n\tvar x = 1\n\treturn x\n}\n",
+                "package main\n\nvar Top = 1\n\nfunc f() int {\n\ttype total struct{}\n\treturn 1\n}\n\nvar handler = func() int {\n\ttype x int\n\treturn 1\n}\n",
                 &["Top", "f", "handler"],
                 &["total", "x"],
             ),
