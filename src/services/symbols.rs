@@ -521,7 +521,10 @@ impl SymbolExtractor {
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
             for capture in m.captures() {
-                if capture.index == entry.declaration && declared.insert(capture.node.id()) {
+                if capture.index == entry.declaration
+                    && declares(capture.node, language)
+                    && declared.insert(capture.node.id())
+                {
                     nodes.push(capture.node);
                 }
             }
@@ -535,6 +538,26 @@ impl SymbolExtractor {
             })
             .collect()
     }
+}
+
+/// Whether a captured node declares anything: a Python assignment or type
+/// alias binds a local where a function's scope holds it, however deep in
+/// the function's statements, and declares where a class's or the module's
+/// does.
+fn declares(node: Node, language: Language) -> bool {
+    if language != Language::Python || !matches!(node.kind(), "assignment" | "type_alias_statement")
+    {
+        return true;
+    }
+    let mut ancestor = node.parent();
+    while let Some(scope) = ancestor {
+        match scope.kind() {
+            "function_definition" | "lambda" => return false,
+            "class_definition" | "module" => return true,
+            _ => ancestor = scope.parent(),
+        }
+    }
+    true
 }
 
 /// Where a file's types are declared outside their bodies
@@ -1689,6 +1712,18 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             .then(|| node.child_by_field_name("pattern"))
             .flatten();
     }
+    // An assignment declares the names its targets bind and nothing else:
+    // `obj.attr = value` declares neither `obj` nor `value`.
+    if matches!(language, Language::Python | Language::Ruby) && node.kind() == "assignment" {
+        return declared_names(node, language).into_iter().next();
+    }
+    if node.kind() == "type_alias_statement" {
+        let mut left = node.child_by_field_name("left")?;
+        while left.kind() != "identifier" {
+            left = left.named_child(0)?;
+        }
+        return Some(left);
+    }
 
     let name_field = match language {
         Language::Kotlin => node
@@ -1811,7 +1846,9 @@ fn node_kind(node: Node) -> SymbolKind {
         "type_spec" => go_type_kind(node),
 
         // A named type alias introduces a type, not a generic `<T>` param.
-        "type_item" | "type_alias_declaration" | "type_alias" => SymbolKind::Class,
+        "type_item" | "type_alias_declaration" | "type_alias" | "type_alias_statement" => {
+            SymbolKind::Class
+        }
 
         "const_item" | "const_spec" | "val_definition" | "const_declaration" => {
             SymbolKind::Constant
@@ -1971,16 +2008,17 @@ const GO_QUERY: &str = r#"
 (var_declaration (var_spec_list (var_spec) @symbol))
 "#;
 
-// A binding's node is the same at module scope, in a class body, and inside a
-// function, so members are matched where they are declared. The names are
-// the identifiers the assignment's `left` binds, through a chain and a
-// destructuring bind as well (`a = b = None`, `a, b = …`, see
-// `declared_names`).
+// An assignment declares at module and class scope, under an `if`, a `try`
+// or a `with` as much as directly, and binds a local inside a function (see
+// `declares`). The names are the identifiers the assignment's `left` binds,
+// through a chain and a destructuring bind as well (`a = b = None`, `a, b =
+// …`, see `declared_names`).
 const PYTHON_QUERY: &str = r#"
 (function_definition) @symbol
 (class_definition) @symbol
+(type_alias_statement) @symbol
 (module (expression_statement (assignment) @symbol))
-(class_definition (block (expression_statement (assignment) @symbol)))
+(block (expression_statement (assignment) @symbol))
 "#;
 
 // A module's variables are the declarators no body encloses: at the top of a
@@ -2436,12 +2474,22 @@ MODULE_CONST = 2
 annotated: int = 3
 bare_ann: int
 first, second = pair()
+obj.attr = value
+if TYPE_CHECKING:
+    GUARDED = 4
+type Alias = list[int]
 
 class A:
     attr: int = 1
+    try:
+        tried = 2
+    except ImportError:
+        pass
 
     def m(self):
         local = 5
+        if local:
+            nested = 6
         return local
 
 def f(): pass
@@ -2454,8 +2502,11 @@ async def af(): pass
                 "variable:bare_ann",
                 "variable:first",
                 "variable:second",
+                "variable:GUARDED",
+                "class:Alias",
                 "class:A",
                 "variable:A/attr",
+                "variable:A/tried",
                 "function:A/m",
                 "function:f",
                 "function:af",
@@ -2735,6 +2786,7 @@ void f() {}
             path: "a.rb",
             source: r#"
 TOP_CONST = 1
+obj.attr = value
 
 module M
   IN_MODULE = 2
