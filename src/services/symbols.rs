@@ -1077,11 +1077,28 @@ impl<'a> LineStarts<'a> {
 /// statements. A callable's parameters are its header rather than its body,
 /// so a property a TypeScript constructor parameter declares is its class's.
 fn is_local(node: Node, declared: &std::collections::HashSet<usize>) -> bool {
+    is_local_within(node, None, declared)
+}
+
+/// Whether a declaration belongs to a body below the declaration `scope`
+/// holding it, as [`is_local`] judges one: a method of a class a function
+/// declares belongs to its class, and only what a body inside the class
+/// holds is local to it.
+fn is_local_below(node: Node, scope: Node, declared: &std::collections::HashSet<usize>) -> bool {
+    is_local_within(node, Some(scope), declared)
+}
+
+fn is_local_within(
+    node: Node,
+    scope: Option<Node>,
+    declared: &std::collections::HashSet<usize>,
+) -> bool {
     let mut own = true;
     let mut in_body = false;
     let mut inner = node;
-    let mut ancestor = node.parent();
-    while let Some(outer) = ancestor {
+    for outer in std::iter::successors(node.parent(), Node::parent)
+        .take_while(|outer| scope.is_none_or(|scope| scope.id() != outer.id()))
+    {
         if node_kind(outer).is_callable() {
             if !own && !in_header_of(inner, outer) {
                 return true;
@@ -1095,9 +1112,20 @@ fn is_local(node: Node, declared: &std::collections::HashSet<usize>) -> bool {
             }
         }
         inner = outer;
-        ancestor = outer.parent();
     }
     false
+}
+
+/// Whether a Rust function's parameters take `self`, as `&self` or with its
+/// type written out (`self: Pin<&mut Self>`), which makes it a method.
+fn takes_self(parameters: Node) -> bool {
+    let mut cursor = parameters.walk();
+    parameters.named_children(&mut cursor).any(|parameter| {
+        parameter.kind() == "self_parameter"
+            || parameter
+                .child_by_field_name("pattern")
+                .is_some_and(|pattern| pattern.kind() == "self")
+    })
 }
 
 fn register(
@@ -1885,8 +1913,8 @@ fn enclosing_declaration<'t>(node: Node<'t>, declared: &HashSet<usize>) -> Optio
 
 /// The kind a declaration's place settles beyond its own node: a function a
 /// type declares as a member is a method, as language servers read one,
-/// except a Rust associated function, which is a method only where its first
-/// parameter is `self`; a JavaScript or TypeScript class's `constructor`,
+/// wherever the type itself is declared, except a Rust associated function,
+/// which is a method only where it takes `self` ([`takes_self`]); a JavaScript or TypeScript class's `constructor`,
 /// unless `static`, is its constructor; a Swift property no type holds is a
 /// global variable; a C++ member function defined in its class without a
 /// type is a constructor or destructor, as one declared there is
@@ -1903,14 +1931,15 @@ fn placed_kind(
     content: &str,
     language: Language,
 ) -> SymbolKind {
-    let enclosing = std::iter::successors(enclosing_declaration(node, declared), |outer| {
+    let container = std::iter::successors(enclosing_declaration(node, declared), |outer| {
         enclosing_declaration(*outer, declared)
     })
     .find_map(|outer| {
         extract_name_and_kind(outer, content, language)
             .filter(|(name, _)| !name.is_empty())
-            .map(|(_, kind)| kind)
+            .map(|(_, kind)| (outer, kind))
     });
+    let enclosing = container.map(|(_, kind)| kind);
     match kind {
         SymbolKind::Function
             if language == Language::Cpp
@@ -1926,15 +1955,14 @@ fn placed_kind(
             SymbolKind::Constructor
         }
         SymbolKind::Function
-            if enclosing.is_some_and(|container| {
-                container.holds_members() && !container.is_namespace_like()
-            }) && !is_local(node, declared)
-                && (language != Language::Rust
-                    || node
-                        .child_by_field_name("parameters")
-                        .is_some_and(|parameters| {
-                            child_of_kind(parameters, "self_parameter").is_some()
-                        })) =>
+            if container.is_some_and(|(outer, kind)| {
+                kind.holds_members()
+                    && !kind.is_namespace_like()
+                    && !is_local_below(node, outer, declared)
+            }) && (language != Language::Rust
+                || node
+                    .child_by_field_name("parameters")
+                    .is_some_and(takes_self)) =>
         {
             SymbolKind::Method
         }
@@ -3277,6 +3305,8 @@ pub enum E { A, B { b_field: u32 } }
 pub mod inner { pub fn nested() {} }
 pub struct S { pub inner_field: u32 }
 impl S { pub fn m(&self) { let local = 1; } pub fn new() -> Self { S { inner_field: 0 } } }
+impl S { fn boxed(self: Box<Self>) {} }
+fn factory() { struct Made; impl Made { fn made(&self) {} } }
 "#,
             declares: &[
                 "interface:T",
@@ -3299,6 +3329,12 @@ impl S { pub fn m(&self) { let local = 1; } pub fn new() -> Self { S { inner_fie
                 "object:S",
                 "method:S/m",
                 "function:S/new",
+                "object:S",
+                "method:S/boxed",
+                "function:factory",
+                "struct:factory/Made",
+                "object:factory/Made",
+                "method:Made/made",
             ],
         },
         DeclarationFixture {
@@ -3393,6 +3429,9 @@ except ImportError:
 
 def scoped():
     type LocalAlias = int
+    class Made:
+        def made(self):
+            def helper(): pass
 "#,
             declares: &[
                 "variable:MODULE_CONST",
@@ -3411,6 +3450,9 @@ def scoped():
                 "variable:HAS_JSON",
                 "function:scoped",
                 "class:scoped/LocalAlias",
+                "class:scoped/Made",
+                "method:Made/made",
+                "function:made/helper",
             ],
         },
         DeclarationFixture {
