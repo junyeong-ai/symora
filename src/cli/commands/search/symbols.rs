@@ -66,8 +66,14 @@ fn with_emitted_stale(
     let stale = section
         .items
         .iter()
-        .any(|item| item.backend.as_deref() == Some("index") && stale_files.contains(&item.file));
+        .any(|item| is_stale_row(item, stale_files));
     section.with_stale(stale)
+}
+
+/// An index row read from a file that has changed since the build: its
+/// position is where the declaration was then.
+fn is_stale_row(row: &SymbolResultOutput, stale_files: &HashSet<String>) -> bool {
+    row.backend.as_deref() == Some("index") && stale_files.contains(&row.file)
 }
 
 /// A symbol search as the caller asked for it. Every route answers the same
@@ -313,7 +319,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                 &lower_bounds,
                 &route_facts,
             );
-            publish(app, section, &search).await;
+            publish(app, section, &search, &stale_files).await;
         }
         // Nothing to read the index for: never built, a build owns it, or it
         // could not be opened at all. Live LSP workspace symbols answer in its
@@ -446,7 +452,7 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         &lower_bounds,
         &currency_facts,
     );
-    publish(app, section, search).await;
+    publish(app, section, search, &stale_files).await;
     Ok(())
 }
 
@@ -700,7 +706,7 @@ async fn execute_workspace_symbol_search(
         &lower_bounds,
         &route_facts,
     );
-    publish(app, section, search).await;
+    publish(app, section, search, &stale_files).await;
     Ok(())
 }
 
@@ -731,8 +737,13 @@ fn finish_symbol_search(
 
 /// Emit a finished answer with the source the search asked for attached to
 /// the rows it kept.
-async fn publish(app: &App, mut section: Section<SymbolResultOutput>, search: &SymbolSearch<'_>) {
-    attach_source(app, &mut section.items, search.source).await;
+async fn publish(
+    app: &App,
+    mut section: Section<SymbolResultOutput>,
+    search: &SymbolSearch<'_>,
+    stale_files: &HashSet<String>,
+) {
+    attach_source(app, &mut section.items, search.source, stale_files).await;
     let body_paths: Vec<String> = section
         .items
         .iter()
@@ -745,9 +756,16 @@ async fn publish(app: &App, mut section: Section<SymbolResultOutput>, search: &S
 
 /// Read each row's source from its file's declarations, as `symbols <file>`
 /// reads them: an index or workspace row carries only where its name is. One
-/// read per file. A row whose declaration that read does not surface carries
-/// no source rather than a neighbour's.
-async fn attach_source(app: &App, rows: &mut [SymbolResultOutput], source: SymbolSource) {
+/// read per file. A row takes its position from the declaration it takes its
+/// source from, so both describe the file as it is now. A row whose
+/// declaration that read does not surface carries no source rather than a
+/// neighbour's.
+async fn attach_source(
+    app: &App,
+    rows: &mut [SymbolResultOutput],
+    source: SymbolSource,
+    stale_files: &HashSet<String>,
+) {
     if source == SymbolSource::Location {
         return;
     }
@@ -764,9 +782,13 @@ async fn attach_source(app: &App, rows: &mut [SymbolResultOutput], source: Symbo
                     .unwrap_or_default();
             declared.insert(row.file.clone(), symbols);
         }
-        let Some(declaration) = declaration_of(&declared[&row.file], row) else {
+        let stale = is_stale_row(row, stale_files);
+        let Some(declaration) = declaration_of(&declared[&row.file], row, stale) else {
             continue;
         };
+        row.line = declaration.location.line;
+        row.column = declaration.location.column;
+        row.degraded_column = declaration.location.degraded_column;
         row.signature = extract_signature(declaration);
         if source == SymbolSource::Body {
             row.body = declaration.body.clone();
@@ -776,8 +798,13 @@ async fn attach_source(app: &App, rows: &mut [SymbolResultOutput], source: Symbo
 
 /// The declaration a row names among its file's declarations: the one with
 /// its path, and where the file declares that path more than once (overloads,
-/// one method in two impl blocks), the one whose span holds the row.
-fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Option<&'a Symbol> {
+/// one method in two impl blocks), the one whose span holds the row. A stale
+/// row's position no longer tells those declarations apart, so it takes none.
+fn declaration_of<'a>(
+    declared: &'a [Symbol],
+    row: &SymbolResultOutput,
+    stale: bool,
+) -> Option<&'a Symbol> {
     fn collect<'a>(symbols: &'a [Symbol], path: &str, found: &mut Vec<&'a Symbol>) {
         for symbol in symbols {
             if symbol.path() == path {
@@ -794,6 +821,7 @@ fn declaration_of<'a>(declared: &'a [Symbol], row: &SymbolResultOutput) -> Optio
     );
     match named.as_slice() {
         [only] => Some(*only),
+        _ if stale => None,
         _ => named
             .into_iter()
             .find(|symbol| symbol.location.spans(row.line, row.column)),
@@ -1500,7 +1528,9 @@ mod tests {
     /// A row names its declaration by path, and where its file declares that
     /// path twice — one method in two impl blocks — by the span that holds
     /// it, so neither row carries the other's source. A path declared once is
-    /// that declaration wherever the row's producer put its position.
+    /// that declaration wherever the row's producer put its position. A stale
+    /// row's position is from before its file changed, so it settles only a
+    /// path declared once.
     #[test]
     fn a_row_takes_the_source_of_the_declaration_that_holds_it() {
         let declared = |path: &str, line: u32, end: u32| {
@@ -1533,14 +1563,17 @@ mod tests {
             ..result("render", "lib.rs")
         };
 
-        let lines = |row: SymbolResultOutput| {
-            declaration_of(&file, &row).map(|symbol| symbol.location.line)
+        let lines = |row: SymbolResultOutput, stale: bool| {
+            declaration_of(&file, &row, stale).map(|symbol| symbol.location.line)
         };
-        assert_eq!(lines(row("Widget/render", 4)), Some(4));
-        assert_eq!(lines(row("Widget/render", 20)), Some(20));
-        assert_eq!(lines(row("Widget/render", 10)), None);
-        assert_eq!(lines(row("Paint/render", 15)), Some(16));
-        assert_eq!(lines(row("Canvas/render", 4)), None);
+        assert_eq!(lines(row("Widget/render", 4), false), Some(4));
+        assert_eq!(lines(row("Widget/render", 20), false), Some(20));
+        assert_eq!(lines(row("Widget/render", 10), false), None);
+        assert_eq!(lines(row("Paint/render", 15), false), Some(16));
+        assert_eq!(lines(row("Canvas/render", 4), false), None);
+
+        assert_eq!(lines(row("Widget/render", 4), true), None);
+        assert_eq!(lines(row("Paint/render", 15), true), Some(16));
     }
 
     #[test]

@@ -1447,13 +1447,19 @@ fn pattern_previews_and_metadata_preserve_original_eof_and_line_endings() {
 
 /// A symbol found across the workspace takes its source from the same read
 /// `symbols <file>` answers from, so it has one whether or not the file's
-/// server answers.
+/// server answers, and its position from that read too, so a row from a file
+/// changed since the index build locates the source it carries. That row's
+/// old position cannot tell apart two declarations of one path, a property's
+/// getter and setter, so neither takes the other's source.
 #[test]
 fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
     let dir = tempfile::tempdir().unwrap();
+    let svc = dir.path().join("svc.py");
     std::fs::write(
-        dir.path().join("svc.py"),
-        "class Service:\n    def start(self):\n        return 1\n",
+        &svc,
+        "class Service:\n    def start(self):\n        return 1\n\n    @property\n    \
+         def port(self):\n        return 1\n\n    @port.setter\n    def port(self, value):\n        \
+         pass\n",
     )
     .unwrap();
     let config_dir = dir.path().join(".symora");
@@ -1480,6 +1486,52 @@ fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
     assert_eq!(
         signed["items"][0]["signature"], "def start(self)",
         "{signed}"
+    );
+    let accessors = [
+        "search",
+        "symbols",
+        "Service/port",
+        "--lang",
+        "python",
+        "--body",
+    ];
+    let bodies = |answer: &serde_json::Value| -> Vec<serde_json::Value> {
+        answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["body"].clone())
+            .collect()
+    };
+    let paired = json_ok(dir.path(), &accessors);
+    assert_eq!(
+        bodies(&paired),
+        [
+            "    @property\n    def port(self):\n        return 1",
+            "    @port.setter\n    def port(self, value):\n        pass",
+        ],
+        "{paired}"
+    );
+
+    let source = std::fs::read_to_string(&svc).unwrap();
+    std::fs::write(
+        &svc,
+        format!("import os\n\n\n\n{source}").replace("return 1", "return 2"),
+    )
+    .unwrap();
+    let moved = json_ok(dir.path(), &[&query[..], &["--body"]].concat());
+    assert_eq!(moved["stale"], true, "{moved}");
+    assert_eq!(moved["items"][0]["line"], 6, "{moved}");
+    assert_eq!(
+        moved["items"][0]["body"], "    def start(self):\n        return 2",
+        "{moved}"
+    );
+    let unpaired = json_ok(dir.path(), &accessors);
+    assert_eq!(unpaired["showing"], 2, "{unpaired}");
+    assert_eq!(
+        bodies(&unpaired),
+        [serde_json::Value::Null, serde_json::Value::Null],
+        "{unpaired}"
     );
 }
 
