@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::infra::lsp::protocol::error_codes;
 use crate::models::symbol::Language;
 
 #[derive(Debug, Error)]
@@ -105,30 +106,20 @@ pub enum LspError {
 }
 
 impl LspError {
-    const CANCELLED_ERROR_CODE: i32 = -32800;
-    /// LSP `ContentModified`: the server's view of the document changed
-    /// mid-request and the result would be stale. The spec's contract is
-    /// "re-issue the request" — the canonical retryable error.
-    pub(crate) const CONTENT_MODIFIED_ERROR_CODE: i32 = -32801;
-    /// JSON-RPC `MethodNotFound`: the server does not implement the
-    /// requested method — a permanent capability statement, not a transient
-    /// failure.
-    const METHOD_NOT_FOUND_ERROR_CODE: i32 = -32601;
-
     pub fn error_code(&self) -> i32 {
         match self {
             Self::ServerError { code, .. } => *code,
-            Self::ServerTerminated { .. } => -32099,
+            Self::ServerTerminated { .. } => error_codes::SERVER_TERMINATED,
             Self::Timeout(_) => -32001,
             Self::NotConnected => -32003,
-            Self::RequestCancelled => Self::CANCELLED_ERROR_CODE,
+            Self::RequestCancelled => error_codes::REQUEST_CANCELLED,
             _ => -32000,
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::RequestCancelled)
-            || matches!(self, Self::ServerError { code, .. } if *code == Self::CANCELLED_ERROR_CODE)
+            || matches!(self, Self::ServerError { code, .. } if *code == error_codes::REQUEST_CANCELLED)
     }
 
     /// True when the failure is a permanent capability statement — the
@@ -138,7 +129,7 @@ impl LspError {
     /// `is_recoverable`: retrying can never succeed.
     pub fn is_unsupported(&self) -> bool {
         matches!(self, Self::FeatureNotSupported { .. })
-            || matches!(self, Self::ServerError { code, .. } if *code == Self::METHOD_NOT_FOUND_ERROR_CODE)
+            || matches!(self, Self::ServerError { code, .. } if *code == error_codes::METHOD_NOT_FOUND)
     }
 
     pub fn is_recoverable(&self) -> bool {
@@ -153,7 +144,7 @@ impl LspError {
             self,
             Self::ServerError { code, .. } if matches!(
                 *code,
-                Self::CANCELLED_ERROR_CODE | Self::CONTENT_MODIFIED_ERROR_CODE
+                error_codes::REQUEST_CANCELLED | error_codes::CONTENT_MODIFIED
             )
         )
     }
@@ -199,9 +190,13 @@ impl LspError {
             .unwrap_or(message);
 
         let friendly_message = match code {
-            -32601 => Self::format_method_not_found(&actual_message),
-            -32002 => "Server initializing. Try again in a moment.".to_string(),
-            -32603 | -32801 => Self::classify_internal_error(&actual_message),
+            error_codes::METHOD_NOT_FOUND => Self::format_method_not_found(&actual_message),
+            error_codes::SERVER_NOT_INITIALIZED => {
+                "Server initializing. Try again in a moment.".to_string()
+            }
+            error_codes::INTERNAL_ERROR | error_codes::CONTENT_MODIFIED => {
+                Self::classify_internal_error(&actual_message)
+            }
             _ => actual_message,
         };
 

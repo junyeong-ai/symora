@@ -994,7 +994,7 @@ impl LspClient {
                     .map(|document| u64::from(document.version));
                 if expected.is_none() || expected != current {
                     return Err(LspError::ServerError {
-                        code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+                        code: error_codes::CONTENT_MODIFIED,
                         message: format!("Document version changed for {uri}"),
                     });
                 }
@@ -1035,7 +1035,7 @@ impl LspClient {
                 && crate::infra::hash_content(&content) != document.content_hash
             {
                 return Err(LspError::ServerError {
-                    code: LspError::CONTENT_MODIFIED_ERROR_CODE,
+                    code: error_codes::CONTENT_MODIFIED,
                     message: format!("Document content changed for {uri}"),
                 });
             }
