@@ -798,10 +798,12 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 
 /// The node holding a declaration's body, if `node` declares one: its
 /// `body`, where a grammar names a type's or a function's body otherwise
-/// ([`type_body`]) or a property's accessors, observers or delegate, the
-/// token opening the rules of a `macro_rules!`, a function value's body
-/// (`const f = () => {}`), or the body of the declaration a wrapper holds
-/// (`export`, a decorated definition).
+/// ([`type_body`]), a property's accessors where they hold a body (C#'s
+/// `{ get; set; }` is the shape it declares), the expression it returns
+/// (`int P => 1`), its observers or delegate, the token opening the rules of
+/// a `macro_rules!`, a function value's body (`const f = () => {}`), or the
+/// body of the declaration a wrapper holds (`export`, a decorated
+/// definition).
 fn body_of(node: Node, language: Language) -> Option<Node> {
     let held_as = |kinds: &[&str]| kinds.iter().find_map(|kind| child_of_kind(node, kind));
     node.child_by_field_name("body")
@@ -811,6 +813,19 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
                     .or_else(|| type_body(node, language))
             }
             Language::Swift => held_as(&["computed_property", "willset_didset_block"])
+                .or_else(|| type_body(node, language)),
+            Language::CSharp => node
+                .child_by_field_name("accessors")
+                .filter(|accessors| {
+                    let mut cursor = accessors.walk();
+                    accessors
+                        .named_children(&mut cursor)
+                        .any(|accessor| accessor.child_by_field_name("body").is_some())
+                })
+                .or_else(|| {
+                    node.child_by_field_name("value")
+                        .filter(|value| value.kind() == "arrow_expression_clause")
+                })
                 .or_else(|| type_body(node, language)),
             Language::Go => {
                 let literal = node.child_by_field_name("type")?;
@@ -4706,6 +4721,34 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class C {\n    public int P { get; private set; } = 5;\n}\n",
+                "P",
+                Some("public int P { get; private set; }"),
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class C {\n    public int Q {\n        get { return 1; }\n    }\n}\n",
+                "Q",
+                Some("public int Q"),
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class C {\n    int E => 1;\n}\n",
+                "E",
+                Some("int E"),
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class C {\n    event System.Action A { add {} remove {} }\n}\n",
+                "A",
+                Some("event System.Action A"),
             ),
             (
                 "A.java",
