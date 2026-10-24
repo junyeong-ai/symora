@@ -708,6 +708,86 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
 }
 
+/// A path search over a file changed since the index build lists each
+/// declaration once and loses none. A path the index holds once is placed
+/// where the grammar finds it now, so it merges with pyright's row of it. A
+/// property's two accessors share a path pyright answers once, so neither
+/// snapshot row is known to be the live one, and both stay, even where a
+/// snapshot line is now where another declaration of the path sits.
+#[test]
+#[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
+fn a_path_search_over_a_changed_file_lists_each_declaration_once_and_loses_none() {
+    if !pyright_on_path() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let svc = root.path().join("svc.py");
+    let source = "class Service:\n    def start(self):\n        return 1\n\n    @property\n    \
+                  def port(self):\n        return 1\n\n    @port.setter\n    def port(self, value):\n        \
+                  pass\n";
+    std::fs::write(&svc, source).unwrap();
+    let shadow_root = tempfile::tempdir().unwrap();
+    let nested = shadow_root.path().join("nested.py");
+    let comments = "# one\n# two\n# three\n";
+    let shadowed = "class C:\n    def n(self):\n        return 1\n\n    class n:\n        pass\n";
+    std::fs::write(&nested, format!("{comments}{shadowed}")).unwrap();
+    for dir in [root.path(), shadow_root.path()] {
+        std::fs::write(dir.join("pyrightconfig.json"), r#"{"include":["."]}"#).unwrap();
+    }
+    let run_in = |dir: &Path, args: &[&str]| -> Value {
+        let output = symora()
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(dir)
+            .env("SYMORA_NO_DAEMON", "1")
+            .output()
+            .unwrap();
+        let result: Value = common::parse_response(&output.stdout).unwrap();
+        assert!(output.status.success(), "{args:?}: {result}");
+        result
+    };
+    let run = |args: &[&str]| run_in(root.path(), args);
+    run(&["search", "index", "build"]);
+    run_in(shadow_root.path(), &["search", "index", "build"]);
+    std::fs::write(&svc, format!("import os\n\n{source}")).unwrap();
+    std::fs::write(&nested, shadowed).unwrap();
+
+    let start = run(&["search", "symbols", "Service/start", "--body"]);
+    assert_eq!(start["count"], 1, "{start}");
+    assert_eq!(start["items"][0]["line"], 4, "{start}");
+    assert!(
+        start["items"][0]["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("def start")),
+        "{start}"
+    );
+
+    let port = run(&["search", "symbols", "Service/port"]);
+    let lines: Vec<u64> = port["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["backend"] == "index")
+        .map(|row| row["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, [6, 10], "{port}");
+    assert_eq!(port["count"], port["showing"], "{port}");
+
+    let shadow = run_in(shadow_root.path(), &["search", "symbols", "C/n"]);
+    let rows = shadow["items"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row["backend"] != "index" && row["line"] == 5),
+        "pyright lists the class now at the method's old line: {shadow}"
+    );
+    let lines: Vec<u64> = rows
+        .iter()
+        .filter(|row| row["backend"] == "index")
+        .map(|row| row["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, [5, 8], "{shadow}");
+}
+
 /// Pyright never confirms workspace readiness, so a symbol search that only
 /// pyright answers rests on an answer it cannot vouch for, and the index it
 /// extracts Python into is what to build — whether there is no index yet or

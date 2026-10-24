@@ -77,45 +77,6 @@ fn is_stale_row(row: &SymbolResultOutput, stale_files: &HashSet<String>) -> bool
     row.backend.as_deref() == Some("index") && stale_files.contains(&row.file)
 }
 
-/// The index rows a merge keeps beside a live answer. A row from a file
-/// changed since the build keeps its old position, so a merge keyed by
-/// position cannot see that a live row of its file and path is the same
-/// declaration; the row is left out where its path names that one
-/// declaration in the index. A path the index holds more than once in the
-/// file keeps its rows, since a live answer can list such declarations once
-/// (pyright lists one overload, one accessor) and none is known to be the
-/// one it kept. A page cut short of its total counts nothing, so it keeps
-/// them all.
-fn unsuperseded(
-    index: Vec<SymbolResultOutput>,
-    complete: bool,
-    live: &[SymbolResultOutput],
-    stale_files: &HashSet<String>,
-) -> Vec<SymbolResultOutput> {
-    fn key(row: &SymbolResultOutput) -> (&str, &str) {
-        let path = row.name_path.as_deref().unwrap_or(&row.name);
-        (row.file.as_str(), Symbol::unqualified(path))
-    }
-    if !complete {
-        return index;
-    }
-    let mut held: HashMap<(String, String), usize> = HashMap::new();
-    for row in &index {
-        let (file, path) = key(row);
-        *held
-            .entry((file.to_string(), path.to_string()))
-            .or_insert(0) += 1;
-    }
-    let live: HashSet<(&str, &str)> = live.iter().map(key).collect();
-    let superseded = |row: &SymbolResultOutput| {
-        let (file, path) = key(row);
-        is_stale_row(row, stale_files)
-            && held.get(&(file.to_string(), path.to_string())) == Some(&1)
-            && live.contains(&(file, path))
-    };
-    index.into_iter().filter(|row| !superseded(row)).collect()
-}
-
 /// A symbol search as the caller asked for it. Every route answers the same
 /// request, and the follow-ups it advises re-run it rather than a wider one.
 struct SymbolSearch<'a> {
@@ -369,7 +330,14 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                 &lower_bounds,
                 &route_facts,
             );
-            publish(app, section, &search, &stale_files).await;
+            publish(
+                app,
+                section,
+                &search,
+                &stale_files,
+                &mut ChangedFiles::default(),
+            )
+            .await;
         }
         // Nothing to read the index for: never built, a build owns it, or it
         // could not be opened at all. Live LSP workspace symbols answer in its
@@ -501,7 +469,14 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         &lower_bounds,
         &currency_facts,
     );
-    publish(app, section, search, &stale_files).await;
+    publish(
+        app,
+        section,
+        search,
+        &stale_files,
+        &mut ChangedFiles::default(),
+    )
+    .await;
     Ok(())
 }
 
@@ -575,6 +550,7 @@ async fn execute_workspace_symbol_search(
     let mut skipped = lookup.skipped;
     let mut count = lookup.total;
     let mut stale_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed = ChangedFiles::default();
     let mut index_consulted = false;
     let mut index_covered: Vec<Language> = Vec::new();
     let mut index_bounds: Vec<LowerBound> = Vec::new();
@@ -683,14 +659,29 @@ async fn execute_workspace_symbol_search(
         // The merged output contains index rows, so the page's staleness
         // applies to it; the live workspace results are current by nature.
         stale_files = relative_stale_files(ctx, &page.stale_files);
-        let complete = page.rows.len() == page.total;
-        let index_results: Vec<SymbolResultOutput> = page
-            .rows
-            .into_iter()
-            .map(|r| index_result_output(r, ctx))
-            .collect();
-        let index_results = unsuperseded(index_results, complete, &candidates, &stale_files);
-        candidates = merge_symbol_results(candidates, index_results);
+        let mut placed = Vec::new();
+        let mut unplaced = Vec::new();
+        for mut row in page.rows.into_iter().map(|r| index_result_output(r, ctx)) {
+            if is_stale_row(&row, &stale_files) {
+                // A stale row's position is from before its file changed, so
+                // the merge, which matches rows by position, may take it only
+                // once the grammar has placed it; an unplaced one is kept
+                // apart rather than matched to whatever now sits there.
+                match changed.place(app, &row).await {
+                    Some((line, column)) => {
+                        row.line = line;
+                        row.column = column;
+                    }
+                    None => {
+                        unplaced.push(row);
+                        continue;
+                    }
+                }
+            }
+            placed.push(row);
+        }
+        candidates = merge_symbol_results(candidates, placed);
+        candidates.extend(unplaced);
     }
 
     let mut lower_bounds = {
@@ -756,7 +747,7 @@ async fn execute_workspace_symbol_search(
         &lower_bounds,
         &route_facts,
     );
-    publish(app, section, search, &stale_files).await;
+    publish(app, section, search, &stale_files, &mut changed).await;
     Ok(())
 }
 
@@ -792,8 +783,9 @@ async fn publish(
     mut section: Section<SymbolResultOutput>,
     search: &SymbolSearch<'_>,
     stale_files: &HashSet<String>,
+    changed: &mut ChangedFiles,
 ) {
-    attach_source(app, &mut section.items, search.source, stale_files).await;
+    attach_source(app, &mut section.items, search.source, stale_files, changed).await;
     let body_paths: Vec<String> = section
         .items
         .iter()
@@ -815,6 +807,7 @@ async fn attach_source(
     rows: &mut [SymbolResultOutput],
     source: SymbolSource,
     stale_files: &HashSet<String>,
+    changed: &mut ChangedFiles,
 ) {
     if source == SymbolSource::Location {
         return;
@@ -823,15 +816,9 @@ async fn attach_source(
         .with_depth(u32::MAX)
         .with_body();
     let mut declared: HashMap<String, Vec<Symbol>> = HashMap::new();
-    let mut changed: HashMap<String, Option<ChangedFile>> = HashMap::new();
     for row in rows {
         if is_stale_row(row, stale_files) {
-            if !changed.contains_key(&row.file) {
-                let read = ChangedFile::read(app, &row.file).await;
-                changed.insert(row.file.clone(), read);
-            }
-            let Some((line, column)) = changed[&row.file].as_ref().and_then(|file| file.place(row))
-            else {
+            let Some((line, column)) = changed.place(app, row).await else {
                 continue;
             };
             row.line = line;
@@ -855,6 +842,21 @@ async fn attach_source(
         if source == SymbolSource::Body {
             row.body = declaration.body.clone();
         }
+    }
+}
+
+/// The files changed since the index build that this answer has read, each
+/// once however many of its stale rows the answer places.
+#[derive(Default)]
+struct ChangedFiles(HashMap<String, Option<ChangedFile>>);
+
+impl ChangedFiles {
+    async fn place(&mut self, app: &App, row: &SymbolResultOutput) -> Option<(u32, u32)> {
+        if !self.0.contains_key(&row.file) {
+            let read = ChangedFile::read(app, &row.file).await;
+            self.0.insert(row.file.clone(), read);
+        }
+        self.0[&row.file].as_ref()?.place(row)
     }
 }
 
@@ -1259,8 +1261,8 @@ fn merge_symbol_results(
     let mut merged = Vec::new();
 
     for result in primary.into_iter().chain(secondary) {
-        let symbol_key = result.name_path.as_deref().unwrap_or(&result.name);
-        let key = format!("{}:{}:{}", result.file, result.line, symbol_key,);
+        let symbol_key = Symbol::unqualified(result.name_path.as_deref().unwrap_or(&result.name));
+        let key = format!("{}:{}:{}", result.file, result.line, symbol_key);
         if seen.insert(key) {
             merged.push(result);
         }
@@ -1924,55 +1926,25 @@ mod tests {
         assert_eq!(file.place(&row("gone")), None);
     }
 
-    /// A live row supersedes the stale index row of its file and path, kind
-    /// qualifier aside, where the index holds that path once there. Rows of a
-    /// path held twice stay, as do current rows, rows of another file, and
-    /// every row of a page cut short.
+    /// The merge keeps one row per declaration, and a live row's kind
+    /// qualifier, which an index row never carries, does not make two.
     #[test]
-    fn a_live_row_supersedes_only_the_one_stale_index_row_of_its_path() {
-        let stale = HashSet::from(["lib.rs".to_string()]);
-        let indexed = |path: &str, file: &str, line: u32| SymbolResultOutput {
+    fn a_merge_keeps_one_row_of_a_declaration_whatever_its_qualifier() {
+        let row = |path: &str, line: u32, backend: &str| SymbolResultOutput {
             name_path: Some(path.to_string()),
             line,
-            ..result(path, file)
+            backend: Some(backend.to_string()),
+            ..result(path, "lib.rs")
         };
-        let live = [
-            SymbolResultOutput {
-                backend: Some("document".to_string()),
-                ..indexed("Widget[struct]", "lib.rs", 9)
-            },
-            SymbolResultOutput {
-                backend: Some("document".to_string()),
-                ..indexed("C/m", "lib.rs", 20)
-            },
-        ];
-        let kept = |rows: Vec<SymbolResultOutput>, complete: bool, stale: &HashSet<String>| {
-            unsuperseded(rows, complete, &live, stale)
-                .into_iter()
-                .map(|row| format!("{}:{}@{}", row.file, row.name_path.unwrap(), row.line))
-                .collect::<Vec<_>>()
-        };
-        let rows = || {
-            vec![
-                indexed("Widget", "lib.rs", 2),
-                indexed("C/m", "lib.rs", 6),
-                indexed("C/m", "lib.rs", 8),
-                indexed("Widget", "other.rs", 2),
-                indexed("Gadget", "lib.rs", 4),
-            ]
-        };
-
-        assert_eq!(
-            kept(rows(), true, &stale),
-            [
-                "lib.rs:C/m@6",
-                "lib.rs:C/m@8",
-                "other.rs:Widget@2",
-                "lib.rs:Gadget@4"
-            ]
+        let merged = merge_symbol_results(
+            vec![row("Widget[struct]", 5, "document")],
+            vec![row("Widget", 5, "index"), row("Widget", 7, "index")],
         );
-        assert_eq!(kept(rows(), false, &stale).len(), 5);
-        assert_eq!(kept(rows(), true, &HashSet::new()).len(), 5);
+        let kept: Vec<_> = merged
+            .iter()
+            .map(|row| format!("{}@{}", row.backend.as_deref().unwrap(), row.line))
+            .collect();
+        assert_eq!(kept, ["document@5", "index@7"]);
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and
