@@ -1062,7 +1062,7 @@ struct Value {
 /// declarator's value, nor is what follows the `=` ending C++'s `operator=`.
 fn given_value(node: Node) -> Option<Value> {
     let parent = node.parent()?;
-    if TYPE_ALIASES.contains(&parent.kind()) || is_pattern_default(parent) {
+    if ALIASES.contains(&parent.kind()) || is_pattern_default(parent) {
         return None;
     }
     let opening = |token: Node| !token.is_named() && matches!(token.kind(), "=" | ":=" | "||=");
@@ -1180,9 +1180,10 @@ fn is_pattern_default(node: Node) -> bool {
     )
 }
 
-/// Declarations that name a type by what follows their `=`, or by nothing
-/// where they only declare it (a trait's associated type).
-const TYPE_ALIASES: &[&str] = &[
+/// Declarations that name what they declare by what follows their `=` — a
+/// type, or a C++ namespace — or by nothing where they only declare it (a
+/// trait's associated type).
+const ALIASES: &[&str] = &[
     // Rust
     "type_item",
     "associated_type",
@@ -1199,6 +1200,8 @@ const TYPE_ALIASES: &[&str] = &[
     "alias_declaration",
     // Scala
     "type_definition",
+    // C++
+    "namespace_alias_definition",
 ];
 
 /// Where each line of a file starts, to turn a 1-indexed line and
@@ -1702,6 +1705,17 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         Language::Cpp => fields("declarator")
             .into_iter()
             .map(declarator_name)
+            .chain(
+                node.child_by_field_name("name")
+                    .filter(|name| name.kind() == "nested_namespace_specifier"),
+            )
+            .flat_map(|name| match name.kind() {
+                "structured_binding_declarator" | "nested_namespace_specifier" => {
+                    let mut cursor = name.walk();
+                    name.named_children(&mut cursor).collect()
+                }
+                _ => vec![name],
+            })
             .collect(),
         Language::CSharp => child_of_kind(node, "variable_declaration")
             .map(|list| children_of_kind(list, "variable_declarator"))
@@ -2193,7 +2207,7 @@ fn in_header_of(inner: Node, outer: Node) -> bool {
         return false;
     }
     (holds("parameters") || holds("type"))
-        && (TYPE_ALIASES.contains(&outer.kind()) || !node_kind(outer).holds_members())
+        && (ALIASES.contains(&outer.kind()) || !node_kind(outer).holds_members())
 }
 
 /// The tokens that open a declaration's body where the grammar leaves them
@@ -2677,16 +2691,19 @@ fn node_kind(node: Node) -> SymbolKind {
         // plus ambient `module "x"`), C# block- and file-scoped `namespace`, and
         // PHP `namespace`.
         "mod_item" | "internal_module" | "module" => SymbolKind::Module,
-        "namespace_definition" | "namespace_declaration" | "file_scoped_namespace_declaration" => {
-            SymbolKind::Namespace
-        }
+        "namespace_definition"
+        | "namespace_declaration"
+        | "file_scoped_namespace_declaration"
+        | "namespace_alias_definition" => SymbolKind::Namespace,
+        // A C++ concept names a predicate over types, as clangd lists it.
+        "concept_definition" => SymbolKind::Variable,
         "package_declaration" => SymbolKind::Package,
 
         // Go `type X = ...`: classify by the spec's underlying type.
         "type_spec" => go_type_kind(node),
 
         // A named type alias introduces a type, not a generic `<T>` param.
-        kind if TYPE_ALIASES.contains(&kind) => SymbolKind::Class,
+        kind if ALIASES.contains(&kind) => SymbolKind::Class,
 
         "const_item" | "const_spec" | "val_definition" | "val_declaration"
         | "const_declaration" => SymbolKind::Constant,
@@ -3056,16 +3073,16 @@ const CPP_QUERY: &str = r#"
 (struct_specifier) @symbol
 (union_specifier) @symbol
 (enum_specifier) @symbol
-(translation_unit [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(declaration_list [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(preproc_if [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(preproc_ifdef [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(preproc_elif [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(preproc_elifdef [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(preproc_else [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
-(ERROR [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(translation_unit [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(declaration_list [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(preproc_if [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(preproc_ifdef [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(preproc_elif [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(preproc_elifdef [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(preproc_else [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
+(ERROR [(declaration type: (_)) (type_definition) (alias_declaration) (namespace_alias_definition)] @symbol)
 (linkage_specification body: (declaration type: (_)) @symbol)
-(template_declaration [(declaration type: (_)) (alias_declaration)] @symbol)
+(template_declaration [(declaration type: (_)) (alias_declaration) (concept_definition)] @symbol)
 (field_declaration_list [(type_definition) (alias_declaration)] @symbol)
 (enumerator_list (enumerator) @symbol)
 (namespace_definition) @symbol
@@ -4010,7 +4027,14 @@ void g() {
 #ifdef Q
     int local = 1;
 #endif
+    auto [l1, l2] = pair_value;
+    namespace lf = N;
 }
+
+namespace fsys = N;
+namespace outer::inner { int nested_var; }
+template <class T> concept Small = sizeof(T) < 4;
+auto [first_of, second_of] = pair_value;
 "#,
             declares: &[
                 "namespace:N",
@@ -4060,6 +4084,13 @@ void g() {
                 "struct:Forward",
                 "function:uses",
                 "function:g",
+                "namespace:fsys",
+                "namespace:outer",
+                "namespace:inner",
+                "variable:nested_var",
+                "variable:Small",
+                "variable:first_of",
+                "variable:second_of",
             ],
         },
         DeclarationFixture {
@@ -5241,6 +5272,13 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "namespace n {}\nnamespace al = n;\n",
+                "al",
+                Some("namespace al = n"),
             ),
             (
                 "a.swift",
