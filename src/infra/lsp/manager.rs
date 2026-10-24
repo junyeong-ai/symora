@@ -947,7 +947,8 @@ pub(crate) mod tests {
     /// by the client, never by its own shutdown logic. `exits` is the one
     /// exception, for a test about the pool rather than about stopping.
     /// `deaf` stops reading before it answers `initialize`, so the client's
-    /// `initialized` meets a closed pipe.
+    /// `initialized` meets a closed pipe. Any of them holds its answer while
+    /// the test holds the start ([`FakeServer::hold`]).
     #[cfg(unix)]
     pub(crate) mod server_lifetime {
         use super::*;
@@ -976,6 +977,7 @@ case "$2" in
 esac
 IFS= read -r _
 sleep "$3"
+while [ -e "${1%/*}/hold" ]; do sleep 0.05; done
 [ "$2" = deaf ] && exec 0<&-
 printf 'Content-Length: %s\r\n\r\n%s' "${#body}" "$body"
 if [ "$2" = watch ]; then
@@ -1063,6 +1065,17 @@ exec sleep 600
                     env: None,
                     ..Default::default()
                 }
+            }
+
+            /// Keep every server started from now on from answering
+            /// `initialize` until [`Self::release`], so its start is in flight
+            /// for as long as the test needs it to be.
+            fn hold(&self) {
+                std::fs::write(self.dir.path().join("hold"), "").unwrap();
+            }
+
+            fn release(&self) {
+                std::fs::remove_file(self.dir.path().join("hold")).unwrap();
             }
 
             /// Everything the client wrote to a `watch` server after it
@@ -1387,11 +1400,12 @@ exec sleep 600
         #[tokio::test]
         async fn lost_events_restart_started_servers_but_not_one_still_starting() {
             let fake = FakeServer::new();
-            let manager = fake.manager("exits", 1);
+            let manager = fake.manager("exits", 0);
             let started = bounded(manager.get_client(Language::Go)).await.unwrap();
             manager.apply_file_changes(Batch::Rescan).await;
             assert!(!started.is_running().await, "a started server is stopped");
 
+            fake.hold();
             let starting = tokio::spawn({
                 let manager = Arc::clone(&manager);
                 async move { manager.get_client(Language::Go).await }
@@ -1403,6 +1417,7 @@ exec sleep 600
             })
             .await;
             manager.apply_file_changes(Batch::Rescan).await;
+            fake.release();
             let finished = bounded(starting).await.unwrap().unwrap();
 
             let next = bounded(manager.get_client(Language::Go)).await.unwrap();
