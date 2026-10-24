@@ -2260,8 +2260,18 @@ fn node_kind(node: Node) -> SymbolKind {
 
         "constructor_signature"
         | "constructor_declaration"
+        | "compact_constructor_declaration"
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
+
+        // A Java interface's fields, which the grammar names constants for
+        // being implicitly `static final`, are fields as a class's `static
+        // final` ones are; an annotation's elements are methods it declares.
+        "constant_declaration" => SymbolKind::Field,
+        "annotation_type_element_declaration" => SymbolKind::Method,
+
+        "event_field_declaration" | "event_declaration" => SymbolKind::Event,
+        "local_function_statement" => SymbolKind::Function,
 
         // Swift states a struct, an enum, an actor, a class and an extension
         // with one node, and its keyword says which.
@@ -2623,8 +2633,11 @@ const JAVA_QUERY: &str = r#"
 (enum_body (enum_constant) @symbol)
 (record_declaration parameters: (formal_parameters (formal_parameter) @symbol))
 (constructor_declaration) @symbol
+(compact_constructor_declaration) @symbol
 (method_declaration) @symbol
 (field_declaration) @symbol
+(interface_body (constant_declaration) @symbol)
+(annotation_type_body (annotation_type_element_declaration) @symbol)
 "#;
 
 // A local `val` is the same `property_declaration` a member is, so members
@@ -2704,6 +2717,9 @@ const CSHARP_QUERY: &str = r#"
 (method_declaration) @symbol
 (property_declaration) @symbol
 (field_declaration) @symbol
+(event_field_declaration) @symbol
+(event_declaration) @symbol
+(local_function_statement) @symbol
 "#;
 
 const RUBY_QUERY: &str = r#"
@@ -2898,9 +2914,11 @@ mod tests {
             ),
             (
                 Language::Java,
-                "public interface Api { void run(); private void hidden(){ String s = \"public \"; } }\nclass C { public\nvoid visible(){} void local(){} }",
+                "public interface Api { void run(); private void hidden(){ String s = \"public \"; } int LIMIT = 1; }\n@interface Tag { String value(); }\nclass C { public\nvoid visible(){} void local(){} }",
                 &[
                     ("run", Some(true)),
+                    ("LIMIT", Some(true)),
+                    ("value", Some(true)),
                     ("hidden", Some(false)),
                     ("visible", Some(true)),
                     ("local", Some(false)),
@@ -2908,12 +2926,15 @@ mod tests {
             ),
             (
                 Language::CSharp,
-                "interface Api { void Run(); void Default(){} } class C { private void Hidden(){ var s = \"public \"; } public\nvoid Visible(){} }",
+                "interface Api { void Run(); void Default(){} } class C { private void Hidden(){ var s = \"public \"; } public\nvoid Visible(){ int Local() => 1; } public event System.Action Changed; event System.Action Raised { add {} remove {} } }",
                 &[
                     ("Run", Some(true)),
                     ("Default", None),
                     ("Hidden", Some(false)),
                     ("Visible", Some(true)),
+                    ("Local", Some(false)),
+                    ("Changed", Some(true)),
+                    ("Raised", Some(false)),
                 ],
             ),
             (
@@ -3321,11 +3342,13 @@ export var exported = 2;
             source: r#"
 package p;
 
-record R(int a) {}
+record R(int a) {
+    R {}
+}
 
-@interface Ann {}
+@interface Ann { String value() default ""; }
 
-interface I { void im(); }
+interface I { void im(); int VERSION = 1; }
 
 enum E { X, Y }
 
@@ -3339,9 +3362,12 @@ class C {
                 "package:p",
                 "class:R",
                 "field:R/a",
+                "constructor:R/R",
                 "interface:Ann",
+                "method:Ann/value",
                 "interface:I",
                 "method:I/im",
+                "field:I/VERSION",
                 "enum:E",
                 "enum_member:E/X",
                 "enum_member:E/Y",
@@ -3363,7 +3389,9 @@ namespace N {
     public enum E { X }
     class C {
         public int P { get; set; }
-        void M() {}
+        public event System.EventHandler Changed;
+        event System.EventHandler Raised { add {} remove {} }
+        void M() { int Local(int x) { return x; } }
     }
 }
 "#,
@@ -3380,7 +3408,10 @@ namespace N {
                 "enum_member:E/X",
                 "class:C",
                 "property:C/P",
+                "event:C/Changed",
+                "event:C/Raised",
                 "method:C/M",
+                "function:M/Local",
             ],
         },
         DeclarationFixture {
