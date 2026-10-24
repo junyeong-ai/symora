@@ -674,11 +674,14 @@ enum Read {
 /// `root`, whose range runs from `start` to `end`.
 ///
 /// The declaration is the outermost node over its name that ends within the
-/// range, or past it only by a terminator (`;`, `,`) a server leaves out.
-/// Its signature starts where both it and the range have started, so an
-/// attribute or doc comment outside the node stays out, and ends where the
-/// first body or value above the name opens: a value is a variable's body,
-/// and an initializer can be any size.
+/// range, or past it only by a terminator (`;`, `,`) a server leaves out or
+/// by the other declarators of a statement the range starts (clangd ranges
+/// `int a = 1, b = 2;` for `a` as `int a = 1`). Its signature starts where
+/// both it and the range have started, so an attribute or doc comment
+/// outside the node stays out, and ends where the first body or value above
+/// the name opens: a value is a variable's body, and an initializer can be
+/// any size, so the values a statement gives its other declarators stay out
+/// as well ([`without_other_values`]).
 fn read_signature(
     root: Node,
     content: &str,
@@ -694,6 +697,7 @@ fn read_signature(
             || content.get(end..node.end_byte()).is_some_and(|past| {
                 let past = past.trim();
                 !past.is_empty() && past.chars().all(|c| matches!(c, ';' | ','))
+                    || node.start_byte() >= start && past.starts_with(',')
             })
     };
     let mut declaration = named;
@@ -707,7 +711,7 @@ fn read_signature(
         if let Some(body) = body_of(node, language).filter(|body| body.start_byte() > name) {
             break body.start_byte();
         }
-        if let Some(value) = value_opening(node).filter(|value| value.start_byte() > name) {
+        if let Some(value) = value_opening(node, name) {
             break value.start_byte();
         }
         if node.id() == declaration.id() {
@@ -719,7 +723,7 @@ fn read_signature(
     if errs_within(declaration, from, opens) {
         return Some(Read::Recovered);
     }
-    let text = content.get(from..opens.max(from))?;
+    let text = without_other_values(content, named, declaration, from, opens.max(from))?;
     let opener = body_opener(language);
     let text = text.trim_end_matches(|c: char| {
         c.is_whitespace() || matches!(c, ';' | ',') || Some(c) == opener
@@ -778,21 +782,83 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
         })
 }
 
-/// The `=` that opens a declaration's value, if `node` has one of its own: one
-/// a value follows, so the `=` that ends C++'s `operator=` opens none, and
-/// never a type alias's, whose type is what it declares.
-fn value_opening(node: Node) -> Option<Node> {
+/// The `=` that opens the value `node` gives the name at byte `name`, if it
+/// gives one: the first after the name and before the next declarator (`int
+/// a, b = 2` gives `a` none), and never a type alias's, whose type is what it
+/// declares.
+fn value_opening(node: Node, name: usize) -> Option<Node> {
     if TYPE_ALIASES.contains(&node.kind()) {
         return None;
     }
     let mut cursor = node.walk();
-    let children: Vec<Node> = node.children(&mut cursor).collect();
-    children.iter().enumerate().find_map(|(at, child)| {
-        (!child.is_named()
-            && matches!(child.kind(), "=" | ":=")
-            && children[at + 1..].iter().any(Node::is_named))
-        .then_some(*child)
-    })
+    node.children(&mut cursor)
+        .filter(|child| child.start_byte() > name)
+        .take_while(|child| child.kind() != ",")
+        .find(|child| given_value(*child).is_some())
+}
+
+/// The bytes an `=` gives a value over, from the end of what it follows to the
+/// end of the value, if `opening` is one a value follows: the `=` that ends
+/// C++'s `operator=` gives none.
+fn given_value(opening: Node) -> Option<(usize, usize)> {
+    if opening.is_named() || !matches!(opening.kind(), "=" | ":=") {
+        return None;
+    }
+    let value = std::iter::successors(opening.next_sibling(), Node::next_sibling)
+        .find(|next| next.is_named() && !next.is_extra())?;
+    let before = opening
+        .prev_sibling()
+        .map_or(opening.start_byte(), |before| before.end_byte());
+    Some((before, value.end_byte()))
+}
+
+/// The text of `declaration` from `from` to `to` without the values it gives
+/// declarators other than the one holding `named`: those beside it in a
+/// list (`int a = 1, b = 2`) and those written beside its name (Swift's
+/// `let a = 1, b = 2`, Go's `var a, b = 1, 2`), so `b` reads `int a, b`. A
+/// default inside a parameter list is no declarator's value and stays.
+fn without_other_values(
+    content: &str,
+    named: Node,
+    declaration: Node,
+    from: usize,
+    to: usize,
+) -> Option<String> {
+    let name = named.start_byte();
+    let mut given = Vec::new();
+    let mut held = named;
+    while held.id() != declaration.id()
+        && let Some(holder) = held.parent()
+    {
+        let mut cursor = holder.walk();
+        for sibling in holder.children(&mut cursor) {
+            if sibling.id() == held.id() {
+                continue;
+            }
+            if sibling.kind() == held.kind() {
+                let mut cursor = sibling.walk();
+                given.extend(sibling.children(&mut cursor).filter_map(given_value));
+            } else if std::iter::successors(sibling.prev_sibling(), Node::prev_sibling)
+                .find(|before| before.is_named() && !before.is_extra())
+                .is_some_and(|before| before.id() != held.id() && before.kind() == held.kind())
+            {
+                given.extend(given_value(sibling));
+            }
+        }
+        held = holder;
+    }
+    given.retain(|&(start, end)| from <= start && end <= to && !(start..end).contains(&name));
+    given.sort_unstable();
+    let mut text = String::new();
+    let mut at = from;
+    for (start, end) in given {
+        if start >= at {
+            text.push_str(content.get(at..start)?);
+            at = end;
+        }
+    }
+    text.push_str(content.get(at..to)?);
+    Some(text)
 }
 
 /// Declarations that name a type by what follows their `=`, or by nothing
@@ -4126,6 +4192,97 @@ region     = "us-central1"
                 "Pt",
                 Some("typealias Pt = Point"),
             ),
+            (
+                "A.java",
+                Language::Java,
+                "class C {\n    static final String A = \"BODY\", B = \"b\";\n}\n",
+                "A",
+                Some("static final String A"),
+            ),
+            (
+                "A.java",
+                Language::Java,
+                "class C {\n    static final String A = \"BODY\", B = \"b\";\n}\n",
+                "B",
+                Some("static final String A, B"),
+            ),
+            (
+                "A.java",
+                Language::Java,
+                "class C {\n    int x, y = 2, z;\n}\n",
+                "x",
+                Some("int x, y, z"),
+            ),
+            (
+                "a.cs",
+                Language::CSharp,
+                "class C { private readonly int f = 1, g = 2; }\n",
+                "g",
+                Some("private readonly int f, g"),
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nconst X = 1, Y = 2;\n",
+                "Y",
+                Some("const X, Y"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "let s1 = 1, s2 = 2\n",
+                "s2",
+                Some("let s1, s2"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "enum E { case a = 1, b = 2 }\n",
+                "b",
+                Some("case a, b"),
+            ),
+            (
+                "a.go",
+                Language::Go,
+                "package p\n\nvar a, b = 1, 2\n",
+                "a",
+                Some("var a, b"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class D {\n  int a = 1, b = 2;\n}\n",
+                "b",
+                Some("int a, b"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "struct W { int f = 1, g = 2; };\n",
+                "g",
+                Some("int f, g"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "struct W { int f, g = 2, h; };\n",
+                "f",
+                Some("int f, g, h"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "func f(a: Int = 1, b: Int = 2) {}\n",
+                "f",
+                Some("func f(a: Int = 1, b: Int = 2)"),
+            ),
+            (
+                "a.kt",
+                Language::Kotlin,
+                "fun f(a: Int = 1, b: Int = 2) {}\n",
+                "f",
+                Some("fun f(a: Int = 1, b: Int = 2)"),
+            ),
         ];
         for (file, language, content, name, expected) in cases {
             assert_eq!(
@@ -4220,6 +4377,22 @@ region     = "us-central1"
                 "Alias",
                 (1, 7, 1, 1, 1, 26),
                 Some("using Alias = Widget<int>"),
+            ),
+            (
+                "g.cpp",
+                Language::Cpp,
+                "int global_a = 1, global_b = 2;\n",
+                "global_a",
+                (1, 5, 1, 1, 1, 17),
+                Some("int global_a"),
+            ),
+            (
+                "g.cpp",
+                Language::Cpp,
+                "int global_a = 1, global_b = 2;\n",
+                "global_b",
+                (1, 19, 1, 1, 1, 31),
+                Some("int global_a, global_b"),
             ),
         ];
         for (
