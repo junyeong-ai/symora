@@ -40,8 +40,7 @@ pub struct PackCache {
 
 impl PackCache {
     pub fn open(project_root: &Path) -> Result<Self, StoreError> {
-        let dir = project_root.join(".symora");
-        std::fs::create_dir_all(&dir).map_err(StoreError::Io)?;
+        let dir = crate::services::state_dir::create(project_root).map_err(StoreError::Io)?;
         let db_path = dir.join("pack-cache.db");
 
         let conn = Connection::open(&db_path).map_err(|e| StoreError::Database(e.to_string()))?;
