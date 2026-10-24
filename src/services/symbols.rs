@@ -2316,7 +2316,9 @@ fn member_kind(name: Node) -> SymbolKind {
     let mut node = name;
     while let Some(parent) = node.parent() {
         match parent.kind() {
-            "parenthesized_declarator" | "attributed_declarator" => node = parent,
+            "parenthesized_declarator" | "attributed_declarator" | "qualified_identifier" => {
+                node = parent
+            }
             "function_declarator" => return SymbolKind::Method,
             _ => break,
         }
@@ -2327,12 +2329,20 @@ fn member_kind(name: Node) -> SymbolKind {
 /// The name a C or C++ declarator declares, inside whatever wraps it: `*`,
 /// `&`, `[3]`, `(int)`, parentheses, attributes or an initializer. Three of
 /// those hold the declarator they wrap under no field, and a conversion
-/// function's name holds the declarator of its own parameters.
+/// function's name holds the declarator of its own parameters. A qualified
+/// name the grammar made only by supplying a missing `::` is a macro read as
+/// the type and the type read as a scope (`EXPORT Code f()`), so its name is
+/// what follows.
 fn declarator_name(declarator: Node) -> Node {
     let mut node = declarator;
     loop {
         let inner = match node.kind() {
             "operator_cast" => None,
+            "qualified_identifier"
+                if child_of_kind(node, "::").is_some_and(|scope| scope.is_missing()) =>
+            {
+                node.child_by_field_name("name")
+            }
             "reference_declarator" | "parenthesized_declarator" | "attributed_declarator" => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor).find(|child| {
@@ -4158,6 +4168,22 @@ region     = "us-central1"
             !cut_short.iter().any(|d| d.ends_with(":StackSlice")),
             "a cut-short typedef names nothing: {cut_short:?}"
         );
+    }
+
+    /// An export macro before a declaration's type reads as its type, and
+    /// the type after it as the scope of a qualified name whose `::` the
+    /// grammar supplies: the name is what that qualifier qualifies, and the
+    /// declarator still makes it a function.
+    #[test]
+    fn a_macro_read_as_a_scope_leaves_the_name_it_qualifies() {
+        let content = "ZSTDLIB_API ZSTD_ErrorCode ZSTD_getErrorCode(size_t r);\n\
+                       MEM_STATIC ZSTD_ErrorCode def_err(int a) { return 0; }\n";
+        let symbols = SymbolExtractor::new().extract(Path::new("m.h"), content, Language::Cpp);
+        let declared: Vec<String> = symbols
+            .iter()
+            .map(|symbol| format!("{}:{}", symbol.kind, symbol.name))
+            .collect();
+        assert_eq!(declared, ["function:ZSTD_getErrorCode", "function:def_err"]);
     }
 
     #[test]
