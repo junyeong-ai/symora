@@ -708,12 +708,13 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
 }
 
-/// Pyright never confirms workspace readiness, so with no index a symbol
-/// search rests on an answer it cannot vouch for, and the index it extracts
-/// Python into is what to build.
+/// Pyright never confirms workspace readiness, so a symbol search that only
+/// pyright answers rests on an answer it cannot vouch for, and the index it
+/// extracts Python into is what to build — whether there is no index yet or
+/// the last build left Python out.
 #[test]
 #[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
-fn an_unbuilt_index_is_advised_when_pyright_answers_alone() {
+fn a_build_is_advised_where_pyright_answers_alone() {
     if !pyright_on_path() {
         return;
     }
@@ -728,23 +729,44 @@ fn an_unbuilt_index_is_advised_when_pyright_answers_alone() {
         r#"{"include":["."]}"#,
     )
     .unwrap();
-    let output = symora()
-        .args(["search", "symbols", "target", "--lang", "python"])
-        .args(["--format", "compact"])
-        .current_dir(root.path())
-        .env("SYMORA_NO_DAEMON", "1")
-        .output()
-        .unwrap();
-    let result: Value = common::parse_response(&output.stdout).unwrap();
-    assert!(output.status.success(), "{result}");
-    assert_eq!(result["indexing"], "unconfirmed", "{result}");
+    let run = |args: &[&str]| -> Value {
+        let output = symora()
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(root.path())
+            .env("SYMORA_NO_DAEMON", "1")
+            .output()
+            .unwrap();
+        let result: Value = common::parse_response(&output.stdout).unwrap();
+        assert!(output.status.success(), "{args:?}: {result}");
+        result
+    };
+    let search = ["search", "symbols", "target", "--lang", "python"];
+    let advised = |result: &Value| {
+        assert_eq!(result["indexing"], "unconfirmed", "{result}");
+        assert!(
+            result["next_commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "symora search index build"),
+            "{result}"
+        );
+    };
+
+    let unbuilt = run(&search);
+    advised(&unbuilt);
+
+    run(&["search", "index", "build", "--lang", "rust"]);
+    let narrowed = run(&search);
+    advised(&narrowed);
     assert!(
-        result["next_commands"]
+        narrowed["hints"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|command| command == "symora search index build"),
-        "{result}"
+            .any(|hint| hint.as_str().is_some_and(|h| h.contains("left out python"))),
+        "{narrowed}"
     );
 }
 
