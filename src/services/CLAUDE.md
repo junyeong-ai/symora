@@ -25,6 +25,17 @@ Pack cache rows identify both extractors by release, grammar, and query. Validat
 
 The position answer adds regions the LANGUAGE excludes from a production build (`infra/ast/test_regions.rs` — Rust's `#[cfg(test)]` and `#[test]`). That bound is deliberate: syntax-based classification has a narrower scope than framework naming conventions; it does not establish executed coverage. Paths are classified relative to the project root so a checkout under an ancestor named `tests` does not classify production files as tests. Adding a language means finding its conditional-compilation rule, not its test-framework vocabulary.
 
+## Declarations come from the parse tree
+
+`services/symbols.rs` reads a file's declarations through one query per language, and the index, the AST fallback, signatures, pack and diff-impact all read what it reads, so a form it misses answers as absent wherever the index answers alone. The same rules hold in every language:
+
+- A variable is a declaration where it names a module's or a member's value, never where a function's scope holds it; a local function or type is still read. Anchor the query where the language declares members rather than filtering its captures afterwards.
+- A name is what the grammar binds: an assignment declares only the names its targets bind, a destructuring pattern each name it binds, a C/C++ declarator its innermost name. The scan of a node's identifier children serves nodes named that way, never one whose own rule found no name.
+- A symbol's container is the nearest enclosing declaration the query captures, a namespace passed through. A declaration's parameters and type are its header and contain nothing, except a type's own, which hold its members.
+- A parameter declares a member only where its language says so: a modifier, `val`/`var`, a case class's first list, a promoted parameter, a record component.
+
+`DECLARATION_FIXTURES` is the contract per language: a form or a language joins it with the query that reads it. Where a language server is installed, its document symbols are the reference to compare a change against.
+
 ## Import edges come from the parse tree
 
 `services/imports.rs` reads a file's module references through a tree-sitter query per language, and `pack` builds its graph from those. A reference is only a reference where the grammar says one is: a Go constant holding a package path, an import written inside a comment, and a doc example are all text that scanning lines would have taken for structure, and PageRank amplifies whatever structure it is handed. Adding a language is one query plus the fixture that proves what it captures — never a new line rule.
