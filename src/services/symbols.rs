@@ -538,6 +538,7 @@ impl SymbolExtractor {
                 }
             }
         }
+        let mut bound = HashSet::new();
         nodes
             .into_iter()
             .flat_map(|node| {
@@ -545,8 +546,23 @@ impl SymbolExtractor {
                     .into_iter()
                     .map(move |symbol| (node, symbol))
             })
+            .filter(|(node, symbol)| {
+                language != Language::Python
+                    || node.kind() != "assignment"
+                    || bound.insert((binding_scope(*node), symbol.name.clone()))
+            })
             .collect()
     }
+}
+
+/// The class or module whose namespace a Python assignment binds a name in.
+/// A namespace holds one variable per name, so only the first assignment to
+/// it declares it and the rest rebind it (`HAS_JSON = True` under `try:`,
+/// `HAS_JSON = False` under `except`), as pyright lists one.
+fn binding_scope(assignment: Node) -> Option<usize> {
+    std::iter::successors(assignment.parent(), Node::parent)
+        .find(|scope| matches!(scope.kind(), "class_definition" | "module"))
+        .map(|scope| scope.id())
 }
 
 /// Whether a captured node declares anything: a Python assignment, or a C
@@ -3077,6 +3093,11 @@ def f(): pass
 
 async def af(): pass
 
+try:
+    HAS_JSON = True
+except ImportError:
+    HAS_JSON = False
+
 def scoped():
     type LocalAlias = int
 "#,
@@ -3094,6 +3115,7 @@ def scoped():
                 "method:A/m",
                 "function:f",
                 "function:af",
+                "variable:HAS_JSON",
                 "function:scoped",
                 "class:scoped/LocalAlias",
             ],
