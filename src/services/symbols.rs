@@ -1907,27 +1907,30 @@ fn in_header_of(inner: Node, outer: Node) -> bool {
         && (TYPE_ALIASES.contains(&outer.kind()) || !node_kind(outer).holds_members())
 }
 
-/// The token that opens a declaration's body where the grammar leaves it
-/// outside the body node: Python's `:`, Scala's and Ruby's `=` and an HCL
-/// block's `{`.
-fn body_opener(language: Language) -> Option<&'static str> {
+/// The tokens that open a declaration's body where the grammar leaves them
+/// outside the body node: Python's `:`, Scala's and Ruby's `=`, the `with`
+/// opening a Scala given's members, and an HCL block's `{`.
+fn body_openers(language: Language) -> &'static [&'static str] {
     match language {
-        Language::Python => Some(":"),
-        Language::Scala | Language::Ruby => Some("="),
-        Language::Terraform => Some("block_start"),
-        _ => None,
+        Language::Python => &[":"],
+        Language::Scala => &["=", "with"],
+        Language::Ruby => &["="],
+        Language::Terraform => &["block_start"],
+        _ => &[],
     }
 }
 
 /// Where the header written before `next`, a body or the token closing an
 /// empty one, ends: at the end of what precedes it, past a comment between
-/// them and the token that opens the body ([`body_opener`]), so `def === =
+/// them and the token that opens the body ([`body_openers`]), so `def === =
 /// true` keeps its name. A syntax error the grammar set aside there is part
 /// of the header, which then reads only by recovering.
 fn header_end(next: Node, language: Language) -> usize {
-    let opener = body_opener(language);
+    let openers = body_openers(language);
     std::iter::successors(next.prev_sibling(), Node::prev_sibling)
-        .find(|before| !(before.is_extra() && !before.has_error()) && Some(before.kind()) != opener)
+        .find(|before| {
+            !(before.is_extra() && !before.has_error()) && !openers.contains(&before.kind())
+        })
         .map_or(next.start_byte(), |before| before.end_byte())
 }
 
@@ -2365,11 +2368,29 @@ fn node_kind(node: Node) -> SymbolKind {
         // A named type alias introduces a type, not a generic `<T>` param.
         kind if TYPE_ALIASES.contains(&kind) => SymbolKind::Class,
 
-        "const_item" | "const_spec" | "val_definition" | "const_declaration" => {
-            SymbolKind::Constant
-        }
+        "const_item" | "const_spec" | "val_definition" | "val_declaration"
+        | "const_declaration" => SymbolKind::Constant,
 
-        "static_item" | "var_spec" | "var_definition" => SymbolKind::Variable,
+        "static_item" | "var_spec" | "var_definition" | "var_declaration" => SymbolKind::Variable,
+
+        // Scala reads a given as what it stands for: one defining members as
+        // an object, one taking parameters as a method, and an alias as a
+        // lazy `val`.
+        "given_definition" => {
+            if node
+                .child_by_field_name("body")
+                .is_some_and(|body| body.kind() == "with_template_body")
+            {
+                SymbolKind::Class
+            } else if ["parameters", "type_parameters"]
+                .into_iter()
+                .any(|field| node.child_by_field_name(field).is_some())
+            {
+                SymbolKind::Function
+            } else {
+                SymbolKind::Constant
+            }
+        }
 
         // JS/TS `const f = () => {}` is a callable; classify by the
         // initializer rather than always Variable (which is_low_level would
@@ -2792,9 +2813,11 @@ const SCALA_QUERY: &str = r#"
 (enum_case_definitions (full_enum_case) @symbol)
 (function_definition) @symbol
 (function_declaration) @symbol
-(compilation_unit [(val_definition) (var_definition) (type_definition)] @symbol)
-(template_body [(val_definition) (var_definition) (type_definition)] @symbol)
+(compilation_unit [(val_definition) (var_definition) (type_definition) (given_definition)] @symbol)
+(template_body [(val_definition) (var_definition) (val_declaration) (var_declaration) (type_definition) (given_definition)] @symbol)
+(with_template_body [(val_definition) (var_definition) (type_definition) (given_definition)] @symbol)
 (class_definition class_parameters: (class_parameters (class_parameter) @symbol))
+(enum_definition class_parameters: (class_parameters (class_parameter) @symbol))
 "#;
 
 // Dart names a function on its signature, not on the declaration that
@@ -3782,6 +3805,8 @@ let (gx, (gy, _)) = (1, (2, 3))
             source: r#"
 trait T {
   def tm(): Unit
+  val tv: Int
+  var tw: Int
 }
 
 object O {
@@ -3789,16 +3814,22 @@ object O {
   val (pa, pb: Int) = (1, 2)
   var m, n = 0
   type Id = Int
+  given ord: Ordering[Int] = Ordering.Int
+  given rank[A](using o: Ordering[A]): Ordering[List[A]] = ???
+  given shown: Show[Int] with {
+    val prefix = ""
+  }
 }
 
 type Top = Int
 val top = 1
+given topGiven: Int = 1
 
 class C {
   def cm(): Unit = {}
 }
 
-enum Color {
+enum Color(val rgb: Int) {
   case Red, Green
   case Mix(r: Int)
 }
@@ -3809,6 +3840,7 @@ class Q(val a: Int, b: Int)
 "#,
             declares: &[
                 "enum:Color",
+                "property:Color/rgb",
                 "enum_member:Color/Red",
                 "enum_member:Color/Green",
                 "enum_member:Color/Mix",
@@ -3818,7 +3850,13 @@ class Q(val a: Int, b: Int)
                 "property:Q/a",
                 "interface:T",
                 "method:T/tm",
+                "constant:T/tv",
+                "variable:T/tw",
                 "class:O",
+                "constant:O/ord",
+                "method:O/rank",
+                "class:O/shown",
+                "constant:shown/prefix",
                 "constant:O/v",
                 "constant:O/pa",
                 "constant:O/pb",
@@ -3827,6 +3865,7 @@ class Q(val a: Int, b: Int)
                 "class:O/Id",
                 "class:Top",
                 "constant:top",
+                "constant:topGiven",
                 "class:C",
                 "method:C/cm",
             ],
@@ -4730,6 +4769,20 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.scala",
+                Language::Scala,
+                "object O {\n  given shown: Show[Int] with {\n    def show(n: Int) = \"\"\n  }\n}\n",
+                "shown",
+                Some("given shown: Show[Int]"),
+            ),
+            (
+                "a.scala",
+                Language::Scala,
+                "object O {\n  given ord: Ordering[Int] = Ordering.Int\n}\n",
+                "ord",
+                Some("given ord: Ordering[Int]"),
             ),
             (
                 "a.kt",
