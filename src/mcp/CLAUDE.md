@@ -4,16 +4,19 @@
 
 ## Catalog and handlers must stay in lockstep
 
-Four things are co-versioned for every tool:
+Five things are co-versioned for every tool:
 
 1. An entry in `tools/catalog.rs` (the `tools/list` schema)
 2. An input struct in `tools/handlers.rs`
 3. A branch in the `dispatch` match
-4. Every field the input struct deserializes must be an advertised property in the catalog schema. `dispatch` rejects unknown argument keys against the catalog (`check_unknown_arguments`), so an undeclared-but-deserialized field is unreachable at runtime — adding a tool option means touching the catalog entry and the input struct in the same change.
+4. An entry in the test-only `input_fields` registry in `tools/handlers.rs`
+5. An entry in the test-only `deserialize_input` registry beside it
+
+Every field the input struct deserializes must be an advertised property in the catalog schema. `dispatch` rejects unknown argument keys against the catalog (`check_unknown_arguments`), so an undeclared-but-deserialized field is unreachable at runtime — adding a tool option means touching the catalog entry and the input struct in the same change.
 
 `symora mcp tools` prints the visible catalog for a profile as CLI JSON. It is a pure view over `visible_catalog` — never a second tool list — so it tracks every catalog change for free.
 
-Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep in both directions through the test-only registries kept beside the input structs in `tools/handlers.rs`: the `input_fields` registry must equal the advertised catalog property set exactly (an advertised property no struct consumes would be silently dropped by serde), and an args object covering every advertised property must deserialize into the input struct (`deserialize_input`). Adding a tool means touching all four; removing one means removing all four. The tests will fail if the registries drift. Property names mirror the backing command's field (`path` on get_file_overview vs `file` on get_diagnostics and list_file_symbols is intentional, not drift).
+Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep in both directions through the test-only registries kept beside the input structs in `tools/handlers.rs`: the `input_fields` registry must equal the advertised catalog property set exactly (an advertised property no struct consumes would be silently dropped by serde), and an args object covering every advertised property must deserialize into the input struct (`deserialize_input`). Adding a tool means touching all five; removing one means removing all five. The tests will fail if the registries drift. Property names mirror the backing command's field (`path` on get_file_overview vs `file` on get_diagnostics and list_file_symbols is intentional, not drift).
 
 ## Mutating tools advertise themselves — twice, in lockstep
 
@@ -33,7 +36,7 @@ Handlers run the underlying command against a `BufferedSink` and return whatever
 
 ## Lifecycle commands are CLI-only
 
-`setup`, `setup skill`, `setup deps`, `setup mcp`, `self update`, `self uninstall` are deliberately not exposed as MCP tools. They mutate the user's machine outside the project boundary — installing skills under `~/.claude`, writing MCP entries into agent-host configs, running package managers, replacing the running binary, removing config — and an AI agent should never drive those flows. The 1:1 CLI↔MCP mapping rule above does not apply to commands under `cli::commands::setup` or `cli::commands::selfcmd`. Keep them out of the catalog.
+`setup`, `setup skill`, `setup deps`, `setup mcp`, `self update`, `self uninstall` are deliberately not exposed as MCP tools. They mutate the user's machine outside the project boundary — installing skills under `~/.claude`, writing MCP entries into agent-host configs, running package managers, replacing the running binary, removing config — and an AI agent should never drive those flows. Keep them out of the catalog.
 
 ## Transport ownership
 

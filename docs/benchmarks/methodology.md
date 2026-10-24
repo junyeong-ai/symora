@@ -2,6 +2,8 @@
 
 Measure whether Symora helps an agent answer structural code questions correctly at useful cost and latency. A cheaper incorrect answer is a failure. No performance claim follows from the existence of the harness or its unit tests.
 
+The harness is in [`scripts/agent-eval/`](../../scripts/agent-eval/README.md): `run-ab.sh` is the convenience runner, `parse-run.mjs` the transcript parser, `aggregate.mjs` the comparison of judged runs, and `tasks/impact.txt` the sample task.
+
 ## Freeze a cell before running
 
 Record a repository revision, a concrete task, its ground truth, the model ID, the effort level, the tool versions, and the target's dependency/language-server environment. Effort levels do not mean the same amount of reasoning across models, so a comparison holds the level fixed and states it. Choose tasks that exercise different capabilities: exact references with shadowed names, caller reach, a package boundary, and a documentation/configuration control. Include a dynamic or structurally typed case and a serverless case when evaluating general applicability. The sample task is a template, not a frozen ground-truth question.

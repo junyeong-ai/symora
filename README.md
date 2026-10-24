@@ -21,9 +21,9 @@
 코드 탐색과 수정을 위해 네 가지 엔진을 결합합니다.
 
 - **LSP 의미 분석** — 에디터가 쓰는 바로 그 language server(rust-analyzer, pyright, typescript-language-server, gopls 등)에서 실제 정의·참조·호출 계층을 가져옵니다.
-- **SQLite 심볼/콘텐츠 인덱스** — 저장소의 심볼과 콘텐츠를 검색하며, 디스크에 지속됩니다.
+- **SQLite 심볼/콘텐츠 인덱스** — 이름·경로와 콘텐츠를 검색해 순위를 매긴 결과를 주며, 디스크에 유지됩니다.
 - **tree-sitter AST 검색** — language server 없이 구조적 패턴 매칭.
-- **재사용 daemon** — language server 세션을 따뜻하게 유지해 반복 호출을 빠르게.
+- **재사용 daemon** — 띄워 둔 language server 세션을 재사용해 반복 호출을 빠르게.
 
 모든 명령은 기본적으로 JSON을 출력하므로, 에이전트나 셸 스크립트가 파일을 다시 읽는 대신 답을 바로 파싱할 수 있습니다.
 
@@ -78,15 +78,15 @@ flowchart TD
     A["symora CLI"] --> C["공유 명령 레이어<br/>(단일 구현)"]
     B["symora mcp serve<br/>(에이전트용 MCP 도구)"] --> C
     C --> D{"daemon 실행 중?"}
-    D -->|"예 (Unix 기본)"| E["symora daemon<br/>따뜻한 LSP 세션 재사용"]
+    D -->|"예 (Unix 기본)"| E["symora daemon<br/>띄워 둔 LSP 세션 재사용"]
     D -->|"아니오 — SYMORA_NO_DAEMON=1"| F["in-process"]
     E --> G
     F --> G["LSP 서버 · SQLite 인덱스 · tree-sitter"]
     G --> H[("구조화 JSON")]
 ```
 
-- **두 백엔드, 다른 요구.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 서빙하면 서버의 트리로, 아니면 컴파일된 문법으로 답하고 `backend`(`document`|`ast`)로 어느 쪽인지 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요하며, 서버가 어떤 기능을 지원하지 않으면 구조화된 `unsupported` 응답이나 근사임을 밝힌 대체 답(call hierarchy가 없을 때 `callers`의 `callers_status: "references_derived"`)으로 *정직하게* 격하되며, 정적 분석과 서버별 기능의 한계를 명시합니다.
-- **daemon은 자동.** Unix에서는 호출 간에 language server 세션을 따뜻하게 유지해 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스에서는 자동으로 in-process로 실행합니다. 어느 쪽이든 답은 같습니다.
+- **두 백엔드, 다른 요구.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 서빙하면 서버의 트리로, 아니면 컴파일된 문법으로 답하고 `backend`(`document`|`ast`)로 어느 쪽인지 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요하며, 서버가 어떤 기능을 지원하지 않으면 구조화된 `unsupported` 응답이나 대체 답임을 밝힌 답(call hierarchy가 없을 때 `callers`의 `callers_status: "references_derived"`)으로 기능을 줄여 *정직하게* 답하며, 조용히 틀린 답을 내놓지 않습니다.
+- **daemon은 자동.** Unix에서는 띄워 둔 language server 세션을 호출 사이에 재사용하므로 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스에서는 자동으로 in-process로 실행합니다. 어느 쪽이든 답은 같습니다.
 
 ---
 
@@ -96,7 +96,7 @@ Symora는 저장소의 구조에서 개별 선언과 관계로 탐색 범위를 
 
 ```mermaid
 flowchart LR
-    O["구조를 모를 때: 선택적 방향 잡기<br/>pack · map summary"] --> D["이름·문구 탐색<br/>search symbols / content / ast"]
+    O["선택적 방향 잡기<br/>pack · map summary"] --> D["이름·문구 탐색<br/>search symbols / content / ast"]
     D --> I["파일·선언 확인<br/>symbols · map file"]
     K["알고 있는 파일·심볼"] --> I
     I --> X["의미 분석<br/>refs · callers · callees<br/>context · impact"]
@@ -201,7 +201,7 @@ symora context src/services/checkout.ts:48 --all
   "tests":   { "count": 2, "showing": 2, "items": [ /* processesAnOrder, processesTwice */ ] }
 }
 ```
-> 이제 구현, 3개 파일에 걸친 참조 5곳(테스트 3곳), 이 메서드를 호출하는 테스트 2개를 — 파일을 한 개도 열지 않고 — 파악했습니다. `is_exported`는 TypeScript에서 선언의 `export`를 읽으므로, 클래스 메서드는 `false`입니다. 상위 타입·모듈·재수출을 통한 접근 가능성을 보장하지 않으며, 판정할 수 없으면 생략합니다. `"indexing": "unconfirmed"`는 Symora가 언어 서버의 작업 공간 분석 완료를 확인하기 전에 그 서버가 답한 구간에 붙습니다. typescript-language-server는 이런 준비 상태를 알리지 않으므로, 이 수치는 최솟값입니다.
+> 이제 구현, 3개 파일에 걸친 참조 5곳(테스트 3곳), 이 메서드를 호출하는 테스트 2개를 — 파일을 한 개도 열지 않고 — 파악했습니다. `is_exported`는 TypeScript에서 선언의 `export`를 읽으므로, 클래스 메서드는 `false`입니다. 상위 타입·모듈·재수출을 통한 접근 가능성을 보장하지 않으며, 판정할 수 없으면 생략합니다. `"indexing": "unconfirmed"`는 Symora가 언어 서버의 작업 공간 분석 완료를 확인하기 전에 그 서버가 답한 섹션에 붙습니다. typescript-language-server는 이런 준비 상태를 알리지 않으므로, 이 수치는 최솟값입니다.
 
 ### ④ 누가 호출하지?
 
@@ -253,8 +253,9 @@ symora impact src/services/checkout.ts:48 --depth 2
     "direct_callers": 4,
     "transitive_callers": 7,
     "depth": 2,
-    "indexing": "unconfirmed",
     "max_depth_reached": true,
+    "indexing": "unconfirmed",
+    "dynamic_dispatch": { "status": "unavailable", "implementations": 0 },
     "callers_by_depth": [
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
       { "depth": 2, "count": 3, "test": 1, "prod": 2 }
@@ -269,9 +270,7 @@ symora impact src/services/checkout.ts:48 --depth 2
   ]
 }
 ```
-> `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. 정적 참조·호출 그래프는 런타임 디스패치, 외부 소비자, 설정 기반 연결을 모두 증명하지 못합니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
-
-소스 편집은 프로젝트 내 쓰기를 직렬화하고, 읽은 내용이 달라졌으면 적용을 거부합니다. 언어 서버가 열지 않은 파일에 대해서는, 서버가 현재 내용을 기준으로 편집을 계산했는지 Symora가 검증할 수 없습니다. 파일 교체는 원자적이지만 여러 파일 전체가 하나의 트랜잭션은 아닙니다. 외부 편집기와의 동시 변경을 피하고 오류가 지목한 적용 파일을 검토하세요.
+> `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. `dynamic_dispatch`는 구현 조회가 메서드의 오버라이드를 확정하지 못했다는 뜻이며, 그 오버라이드를 거쳐 닿는 호출자는 빠져 있을 수 있습니다. 정적 참조·호출 그래프는 런타임 디스패치, 외부 소비자, 설정 기반 연결을 모두 증명하지 못합니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
 
 ### ⑥ 변경 — 쓰기 전에 미리보기
 
@@ -292,6 +291,8 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 }
 ```
 > `--dry-run`은 바뀔 범위 전체(옛 줄은 `-`, 새 줄은 `+`)와 바이트 증감을 보여주고 아무것도 쓰지 않습니다. 이 범위는 `symbols --body`가 돌려주는 범위와 같아서 데코레이터, 속성, 문서 주석 줄까지 포함하므로, 그렇게 읽은 본문을 고쳐 넘기면 그 줄들이 그대로 남습니다. 적용하려면 `--dry-run`을 빼면 되고, `--verify-callers`를 붙이면 변경 후 이 심볼을 참조하는 파일들의 진단까지 가져옵니다. 라인 번호보다 `--symbol`을 권장합니다 — 라이브 파일에 다시 해석되므로 연속 편집에도 좌표가 어긋나지 않습니다.
+
+소스 편집은 프로젝트 내 쓰기를 직렬화하고, 읽은 내용이 달라졌으면 적용을 거부합니다. 언어 서버가 열지 않은 파일에 대해서는, 서버가 현재 내용을 기준으로 편집을 계산했는지 Symora가 검증할 수 없습니다. 파일 교체는 원자적이지만 여러 파일 전체가 하나의 트랜잭션은 아닙니다. 외부 편집기와의 동시 변경을 피하고 오류가 지목한 적용 파일을 검토하세요.
 
 > **주소 지정은 유연하지만 안전합니다.** `--symbol`은 단순 이름, `Class/method` suffix, `*/method` 와일드카드, 또는 정확한 `name_path`로 매칭되고, 끝에 붙인 `[kind]`는 같은 이름의 선언 가운데 그 종류만 고릅니다(생성자가 아닌 클래스를 고르는 `Svc[class]`). 전체가 대괄호인 세그먼트는 계산된 멤버의 이름처럼 이름 자체입니다(`Cache/[key]`). 이름이 모호하면 `edit`은 추측하지 않고 거부하며, 후보마다 선언된 위치를 알려 줍니다.
 > ```json
@@ -319,7 +320,7 @@ symora map summary                          # 저장소 형태
 symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련 파일
 
 # 심볼 & 들여다보기 (LSP 또는 AST 선언; 의미 분석은 LSP 필요)
-symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
+symora symbols src/services/checkout.ts --depth 2   # 두 단계까지의 선언
 symora symbols src/services/checkout.ts --body      # 트리 + 소스 본문
 symora symbols src/services/checkout.ts --depth 1 --refs   # 선언·멤버별 참조 수
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
@@ -336,7 +337,7 @@ symora typedef … / implementations … / supertypes … / subtypes …
 
 # 컨텍스트 & 영향 (LSP)
 symora context src/services/checkout.ts:48 --all    # 본문 + 참조 + 호출자/피호출자 + 타입 + 테스트
-symora context src/services/checkout.ts:48 --with-bodies   # 피호출자/타입 본문도 첨부
+symora context src/services/checkout.ts:48 --callees --types --with-bodies   # 피호출자·타입 본문 포함
 symora impact src/services/checkout.ts:48           # 변경 영향 범위
 symora diff-impact                                  # HEAD 대비 작업 트리 변경(스테이징 여부 무관)의 영향
 symora diff-impact $(git merge-base main HEAD)      # 이 브랜치가 바꾼 것의 영향 (범위 A..B는 받지 않음)
@@ -364,15 +365,15 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 모든 명령은 기계 파싱을 위해 설계됐고, 규칙은 안정적입니다.
 
-- **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `incomplete`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, `error`. 목록을 한정하는 필드는 그 목록보다 앞에 오므로, 응답의 앞부분만 읽어도 한정자를 놓치지 않습니다.
+- **리스트 응답**은 하나의 형태를 공유합니다: `count`(전체 발견), `showing`(출력), `items`, 그리고 — 관련될 때만 — `truncated`, `stale`, `incomplete`, `indexing`, `coverage_gaps`, `unread_paths`, `hints`, `next_commands` 같은 한정자. 목록을 한정하는 필드는 그 목록보다 앞에 오므로, 응답의 앞부분만 읽어도 한정자를 놓치지 않습니다.
 - **명령 실패**는 구조화 JSON이고 0이 아닌 코드로 종료합니다.
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
-  `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 잘못된 CLI 인자도 같은 봉투로 나옵니다 — `invalid_argument` 코드에 clap의 산문이 아닌 JSON이라, 어떤 실패든 stdout 한 스트림만 파싱하면 됩니다. 예외는 하나뿐입니다: "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
-- **위치는 1-indexed** — 입력과 출력 모두이며, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `def`·`hover`·`typedef`는 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 좌표로 file과 line을 담으며 column은 없습니다.
-- **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 언어 서버의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
-- **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 이후 필요한 경우 목록 항목을 줄이고 `truncated`와 설정 키를 지목하는 hint를 반환합니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
+  `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. 잘못된 CLI 인자도 같은 봉투로 나옵니다 — `invalid_argument` 코드에 clap의 산문이 아닌 JSON이라, 어떤 실패든 stdout 한 스트림만 파싱하면 됩니다. 예외는 하나뿐입니다: "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
+- **위치는 1-indexed** — 입력과 출력 모두이며, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 좌표로 file과 line을 담으며 column은 없습니다.
+- **기능 축소는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 언어 서버의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
+- **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 그래도 넘치면 목록 항목을 줄이되 `count`는 그대로 두고, `truncated`와 `output.max_response_chars`를 지목하는 hint를 붙입니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
 `pack --tokens`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수나 전체 JSON 봉투 크기의 상한은 아닙니다.
 
@@ -380,13 +381,15 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 `lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 소스 적용 도중의 강제 취소에 사용하지 않습니다.
 
-요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 상태에서 실제 적용을 거부하며, `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 검토한 `unconfirmed` 편집 집합은 `--accept-unconfirmed`로 적용하며, 응답에는 그 표지가 그대로 남습니다. `timed_out`은 재시도로 준비 완료가 확인될 수 있으므로 계속 거부합니다. 현재 Symora는 rust-analyzer의 정상 상태와 작업 완료를 함께 나타내는 알림을 인식합니다. 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
+요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 상태에서 실제 적용을 거부하며, `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 검토한 `unconfirmed` 편집 집합은 `--accept-unconfirmed`로 적용하며, 응답에는 그 표지가 그대로 남습니다. `timed_out`은 재시도로 준비 완료가 확인될 수 있으므로 계속 거부합니다. 지원하는 서버 가운데 Symora가 인식하는 준비 완료 신호를 보내는 서버는 rust-analyzer뿐입니다(정상 상태와 작업 완료를 함께 나타내는 알림). 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
 
 ---
 
 ## 검색 인덱스
 
 Symora는 각 프로젝트의 `.symora/store.db`에 지속성 SQLite 인덱스를 둡니다. Symora가 `.symora/`에 쓰는 `.gitignore`는 인덱스와 캐시, 잠금 파일을 커밋에서 빼고, 그 안에 둔 `config.toml`과 `ignore`는 커밋할 수 있게 남깁니다.
+
+인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 파일 크기 정책과 경로·크기·수정 시각을 비교하므로, 이를 보존한 변경은 재빌드해서 반영해야 합니다. 목록의 `stale` 플래그는 빌드 이후 바뀐 파일에서 읽은 행이 있다는 뜻이며, 빌드가 보지 못한 새 파일은 어떤 행으로도 드러나지 않습니다. 빌드 이후 파일이 바뀐 언어에는 그 언어를 지목하는 최신성 `hints`가 붙고, `next_commands`에 `symora search index build`가 담깁니다. 빈 결과에도 붙으며, 준비 상태를 확인한 language server가 그 언어에 답한 경우만 예외입니다.
 
 ```bash
 symora search index build               # 증분: 변경된 파일만, 삭제된 파일 정리
@@ -395,9 +398,7 @@ symora search index status              # languages(커버 언어), 심볼/파�
 symora search index clear
 ```
 
-인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 파일 크기 정책과 경로·크기·수정 시각을 비교하므로, 이를 보존한 변경은 재빌드해서 반영해야 합니다. 목록의 `stale` 플래그는 빌드 이후 바뀐 파일에서 읽은 행이 있다는 뜻이며, 빌드가 보지 못한 새 파일은 어떤 행으로도 드러나지 않습니다. 검색 결과가 있어도, 빌드 이후 파일이 바뀐 언어에는 그 언어를 지목하는 최신성 `hints`와 갱신 명령이 붙습니다.
-
-인덱스가 없어도 검색은 우아하게 격하됩니다(파일시스템 스캔 또는 라이브 LSP로 폴백). 다만 반복 사용에는 빌드된 인덱스가 가장 빠르고 안정적입니다. `--force`는 전체 재빌드에만 사용하세요.
+인덱스가 없어도 검색은 파일시스템 스캔이나 라이브 LSP로 대신 답합니다. 다만 반복 사용에는 빌드된 인덱스가 가장 빠르고 안정적입니다. `--force`는 전체 재빌드에만 사용하세요.
 
 ---
 
@@ -423,7 +424,7 @@ tier = "slow"        # 생략 가능; fast | standard | slow 중 하나
 env = { NODE_OPTIONS = "--max-old-space-size=2048" } # 생략 가능; 서버 환경 변수
 ```
 
-`env`의 항목은 서버가 상속한 환경 변수에 더해집니다. 예를 들어 pyright 같은 Node 기반 서버는 `NODE_OPTIONS = "--max-old-space-size=2048"`로 힙 상한을 낮출 수 있습니다.
+`env`의 항목은 서버가 상속한 환경 변수에 더해집니다. 예를 들어 pyright 같은 Node 기반 서버는 `NODE_OPTIONS = "--max-old-space-size=2048"`로 힙 상한을 지정할 수 있습니다.
 
 서버별 `initialization_options`는 LSP 초기화 옵션, `settings`는 실행 중 설정입니다. 두 객체는 각 기본값에 재귀적으로 병합하며 배열과 개별 값은 교체합니다. `settings`는 초기화 직후 알림과 `workspace/configuration` 응답으로 전달합니다. 하위 키의 의미는 해당 언어 서버의 설정을 따릅니다.
 
@@ -486,7 +487,7 @@ symora self update --verify-attestations   # gh 없으면 설치하지 않음
 symora self uninstall                 # 바이너리 + 스킬 + 설정 + daemon 데이터 제거 (MCP 연결은 남으므로 먼저 `symora setup mcp --uninstall`)
 ```
 
-업데이트는 항상 SHA-256을 검증하고, `gh`가 설치돼 있으면 릴리스와 함께 게시된 attestation 번들로 빌드 출처까지 검증합니다. 번들을 파일에서 읽으므로 `gh` 로그인이 필요 없습니다. `gh`가 있는데 번들이 없는 릴리스는 설치를 거부합니다 — 체크섬은 아카이브를 올린 쪽이 함께 만들 수 있어 출처를 증명하지 않습니다. 번들은 이를 도입한 버전부터 게시되므로, 그 이전 릴리스를 지정하려면 `scripts/install.sh`를 쓰세요.
+업데이트는 항상 SHA-256을 검증하고, `gh`가 설치돼 있으면 릴리스와 함께 게시된 attestation 번들로 빌드 출처까지 검증합니다. 번들을 파일에서 읽으므로 `gh` 로그인이 필요 없습니다. `gh`가 있는데 번들이 없는 릴리스는 설치를 거부합니다 — 체크섬은 아카이브를 올린 쪽이 함께 만들 수 있어 출처를 증명하지 않습니다. 번들은 v0.21.0부터 게시되므로, 그 이전 릴리스를 설치하려면 `scripts/install.sh`를 쓰세요.
 
 ---
 
@@ -516,7 +517,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 에이전트용 플레이북은 이 README가 아니라 *도구와 함께* 배포되어 바이너리와 항상 일치합니다.
 
 - `symora setup skill`은 바이너리에 내장된 스킬을 네트워크 없이 설치합니다. 명시적인 `--git-ref`는 지정한 소스만 사용하며 실패하면 다른 버전으로 대체하지 않습니다.
-- `symora mcp serve`는 MCP 도구 순서와 한계를 설명하는 instructions를 제공합니다. 연결 클라이언트가 지원하는 프로토콜에 따라 이를 조회합니다.
+- `symora mcp serve`는 MCP 도구의 사용 순서, 결과의 한계, 오류 대응을 설명하는 instructions를 제공합니다. 연결 클라이언트가 지원하는 프로토콜에 따라 이를 조회합니다.
 
 파일·선언을 알고 있다면 `symbols`, `context`, `refs`, `impact`로 바로 조사하세요. 저장소 방향 파악에는 `map summary`와 `pack`을 선택적으로 사용합니다. 리스트 응답은 공통 형태를 쓰고, 위치는 1-indexed이며, 잘못된 CLI 인자를 포함한 명령 실패는 구조화된 `{code, message, hint}`와 0이 아닌 종료 코드로 전달됩니다.
 
@@ -545,8 +546,8 @@ symora daemon start | stop | restart | status
 
 | 증상 | 해결 |
 | --- | --- |
-| `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 경로 질의(`Class/method`, `Name[kind]`)와 인덱스가 다루지 않는 언어는 language server를 조회하고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
-| `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart --project`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. daemon이 상속한 환경을 바꿨다면 전체 `symora daemon restart`가 필요합니다. |
+| `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 경로 질의(`Class/method`, `Name[kind]`), 인덱스에 일치하는 항목이 없는 이름, 인덱스가 다루지 않는 언어는 language server를 조회하고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
+| `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart --project`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 심(shim)) — 직접 실행해 원인을 보세요. daemon이 상속한 환경을 바꿨다면 전체 `symora daemon restart`가 필요합니다. |
 | 검색 결과의 `coverage_gaps` | 그 언어는 답에 들어 있지 않습니다. `reason: "unavailable"`이면 `message`에 실패 원인의 첫 줄(서버가 `initialize`를 거부했다면 그 이유)이 실리고, hint와 `next_commands`는 조회가 실패한 언어부터 다룹니다. |
 | `indexing: "timed_out"` / `"unconfirmed"` | 해당 요청에서 워크스페이스 준비 상태를 확인하지 못했습니다. 목록은 일부 결과일 수 있으며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 서버 작업이 끝난 뒤 재시도할 수 있지만, 지원하는 준비 완료 신호가 없는 서버는 계속 미확인 상태입니다. `rename`은 적용을 거부합니다. `--dry-run`으로 편집 집합을 확인한 뒤, `unconfirmed` 상태라면 `--accept-unconfirmed`로 적용할 수 있습니다. |
 | `incomplete: true` | count가 하한 — 답이 자기 소스가 가진 전부를 담지 못했습니다. 원인은 `hints`가 이름을 대고, 고칠 방법이 있으면 `next_commands`에 담깁니다. `unread_paths`가 함께 오면 그 경로들의 권한부터 확인하세요 — 읽히지 않는 경로에는 재빌드도 닿지 않습니다. |
