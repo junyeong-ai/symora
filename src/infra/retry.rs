@@ -23,13 +23,6 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    pub fn no_retry() -> Self {
-        Self {
-            max_attempts: 1,
-            ..Default::default()
-        }
-    }
-
     fn delay_for_attempt(&self, attempt: u32) -> Duration {
         if attempt == 0 {
             return Duration::ZERO;

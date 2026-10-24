@@ -108,16 +108,6 @@ impl SymbolKind {
         )
     }
 
-    /// Declared inside a type, so a call reaches it through that type — by
-    /// construction, dispatch, or a protocol satisfied structurally — and
-    /// never has to name it.
-    pub fn is_member(&self) -> bool {
-        matches!(
-            self,
-            Self::Method | Self::Constructor | Self::Property | Self::Field | Self::EnumMember
-        )
-    }
-
     /// A kind whose children are its members, each one code outside it can
     /// name. The children of any other kind — a function's parameters and
     /// locals, the bindings inside a variable's value — are internal to it.

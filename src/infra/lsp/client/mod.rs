@@ -12,9 +12,8 @@ use tokio::time::timeout;
 
 use super::protocol::{
     ClientInfo, DidChangeWatchedFilesParams, InitializeParams, InitializeResult, LspDiagnostic,
-    Message, Notification, Position, PositionEncoding, RegistrationParams, Request, RequestId,
-    Response, ResponseError, TextDocumentIdentifier, TextDocumentPositionParams,
-    UnregistrationParams, error_codes,
+    Message, Notification, PositionEncoding, RegistrationParams, Request, RequestId, Response,
+    ResponseError, UnregistrationParams, error_codes,
 };
 use super::transport::{Transport, write_notification, write_request, write_response};
 use super::watch::{FileChange, WATCHED_FILES_METHOD, WatchRegistry};
@@ -1461,13 +1460,6 @@ impl LspClient {
             .expect("watched-file events serialize");
         if let Err(e) = self.notify(WATCHED_FILES_METHOD, Some(params)).await {
             tracing::debug!("{} missed watched-file changes: {e}", self.language);
-        }
-    }
-
-    pub fn position_params(uri: &str, line: u32, column: u32) -> TextDocumentPositionParams {
-        TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier::new(uri),
-            position: Position::new(line, column),
         }
     }
 
