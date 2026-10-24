@@ -1416,6 +1416,11 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .filter(|name| matches!(name.kind(), "object_pattern" | "array_pattern"))
             .map(bound_names)
             .unwrap_or_default(),
+        Language::Scala => node
+            .child_by_field_name("pattern")
+            .filter(|pattern| pattern.kind() != "identifier")
+            .map(bound_names)
+            .unwrap_or_default(),
         Language::Python | Language::Ruby => assignment_targets(node)
             .filter(|target| binds_a_name(*target, language))
             .collect(),
@@ -1443,16 +1448,18 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
     }
 }
 
-/// The names a JavaScript or TypeScript destructuring pattern binds:
+/// The names a JavaScript, TypeScript or Scala destructuring pattern binds:
 /// `{ a, b: renamed, c = 1, ...rest }` binds `a`, `renamed`, `c` and `rest`,
-/// and `[x, [y]]` binds `x` and `y`. A key it reads from is no binding.
+/// `[x, [y]]` binds `x` and `y`, and Scala's `val a, b` and `val (c, d: Int)`
+/// each name they list. A key it reads from is no binding.
 fn bound_names(pattern: Node) -> Vec<Node> {
     let held = |field| pattern.child_by_field_name(field).map(bound_names);
     match pattern.kind() {
         "identifier" | "shorthand_property_identifier_pattern" => vec![pattern],
         "pair_pattern" => held("value").unwrap_or_default(),
         "assignment_pattern" | "object_assignment_pattern" => held("left").unwrap_or_default(),
-        "object_pattern" | "array_pattern" | "rest_pattern" => {
+        "typed_pattern" => held("pattern").unwrap_or_default(),
+        "object_pattern" | "array_pattern" | "rest_pattern" | "identifiers" | "tuple_pattern" => {
             let mut cursor = pattern.walk();
             pattern
                 .named_children(&mut cursor)
@@ -2598,7 +2605,7 @@ const SCALA_QUERY: &str = r#"
 (enum_case_definitions (full_enum_case) @symbol)
 (function_definition) @symbol
 (function_declaration) @symbol
-(compilation_unit (type_definition) @symbol)
+(compilation_unit [(val_definition) (var_definition) (type_definition)] @symbol)
 (template_body [(val_definition) (var_definition) (type_definition)] @symbol)
 (class_definition class_parameters: (class_parameters (class_parameter) @symbol))
 "#;
@@ -3405,10 +3412,13 @@ trait T {
 
 object O {
   val v = 1
+  val (pa, pb: Int) = (1, 2)
+  var m, n = 0
   type Id = Int
 }
 
 type Top = Int
+val top = 1
 
 class C {
   def cm(): Unit = {}
@@ -3436,8 +3446,13 @@ class Q(val a: Int, b: Int)
                 "method:T/tm",
                 "class:O",
                 "constant:O/v",
+                "constant:O/pa",
+                "constant:O/pb",
+                "variable:O/m",
+                "variable:O/n",
                 "class:O/Id",
                 "class:Top",
+                "constant:top",
                 "class:C",
                 "method:C/cm",
             ],
