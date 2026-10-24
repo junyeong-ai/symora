@@ -1167,8 +1167,10 @@ fn declaration_visibility(
             ) {
                 return None;
             }
+            // A trait's items, a trait impl's and a variant's fields carry no
+            // visibility of their own.
             if let Some(parent) = node.parent().and_then(|body| body.parent())
-                && (parent.kind() == "trait_item"
+                && (matches!(parent.kind(), "trait_item" | "enum_variant")
                     || (parent.kind() == "impl_item"
                         && parent.child_by_field_name("trait").is_some()))
             {
@@ -2742,6 +2744,11 @@ mod tests {
                     ("R/_cache", Some(false)),
                     ("R/Helper", Some(false)),
                 ],
+            ),
+            (
+                Language::Rust,
+                "pub enum Shape {\n    Circle { radius: f64 },\n    Square(f64),\n}",
+                &[("Circle/radius", None)],
             ),
             (
                 Language::CSharp,
