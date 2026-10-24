@@ -2052,6 +2052,15 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if language == Language::Terraform {
         return hcl_declared_name(node);
     }
+    // A destructuring pattern is named by the names it binds alone, so one
+    // binding none (`const {} = obj`) names nothing.
+    if matches!(language, Language::TypeScript | Language::JavaScript)
+        && let Some(pattern) = node
+            .child_by_field_name("name")
+            .filter(|name| matches!(name.kind(), "object_pattern" | "array_pattern"))
+    {
+        return bound_names(pattern).into_iter().next();
+    }
     if matches!(
         node.kind(),
         "required_parameter" | "optional_parameter" | "class_parameter"
@@ -3106,6 +3115,7 @@ export const arrow = () => 1;
 export const MAX = 3;
 let counter = 0;
 const { picked, renamed: alias, ...others } = source;
+const {} = unused;
 export function over(a: string): string;
 export function over(a: any): any { return a; }
 declare module "ext" { export function fromExt(): void; }
