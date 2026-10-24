@@ -12,7 +12,7 @@ use crate::app::App;
 use crate::cli::errors::ErrorCode;
 use crate::cli::response::disclosure::{LowerBound, as_paths, name_some, relative_paths};
 use crate::cli::{OutputContext, OutputError};
-use crate::models::symbol::{Language, Symbol};
+use crate::models::symbol::{Language, PathPattern, Symbol};
 use crate::services::test_scope::TestScope;
 
 /// Candidate window for ranking before emission. Exhausting this window
@@ -80,10 +80,18 @@ pub fn relevance_of(rank: i32) -> f64 {
 /// question is free to drift, and the two that preceded this one had — they
 /// demoted different kinds, so the same symbol led one answer and trailed the
 /// other.
-/// Textual match tiers dominate test and declaration-kind tie breaks.
+/// Textual match tiers dominate test and declaration-kind tie breaks. A kind
+/// qualifier selects rather than names, so the query is read as the path it
+/// names (`Svc[class]` as `Svc`), and as written too where that can also name
+/// a computed member.
 pub fn symbol_rank(query: &str, symbol: RankedSymbol<'_>, test_scope: &TestScope) -> i32 {
-    let priority =
-        symbol_match_priority(query, symbol.name, symbol.name_path.unwrap_or(symbol.name));
+    let pattern = PathPattern::parse(query);
+    let path = symbol.name_path.unwrap_or(symbol.name);
+    let priority = std::iter::once(pattern.path)
+        .chain(pattern.literal)
+        .map(|reading| symbol_match_priority(reading, symbol.name, path))
+        .max()
+        .unwrap_or(0);
     if priority == 0 {
         return 0;
     }
@@ -323,6 +331,28 @@ mod tests {
             exact > substring,
             "the declaration spelled exactly as asked outranks a name that merely contains it: \
              {exact} vs {substring}"
+        );
+    }
+
+    #[test]
+    fn a_kind_qualifier_ranks_by_the_path_it_qualifies() {
+        let scope = TestScope::new();
+        let class = ranked("Svc", "class", "src/svc.py");
+        assert_eq!(
+            symbol_rank("Svc[class]", class, &scope),
+            symbol_rank("Svc", class, &scope)
+        );
+        assert_eq!(
+            symbol_rank("Svc[class]", class, &scope),
+            EXACT_MATCH_PRIORITY
+        );
+        let computed = RankedSymbol {
+            name_path: Some("Cache/[method]"),
+            ..ranked("[method]", "method", "src/cache.ts")
+        };
+        assert_eq!(
+            symbol_rank("Cache/[method]", computed, &scope),
+            EXACT_MATCH_PRIORITY
         );
     }
 
