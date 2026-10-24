@@ -779,8 +779,12 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
 }
 
 /// The `=` that opens a declaration's value, if `node` has one of its own: one
-/// a value follows, so the `=` that ends C++'s `operator=` opens none.
+/// a value follows, so the `=` that ends C++'s `operator=` opens none, and
+/// never a type alias's, whose type is what it declares.
 fn value_opening(node: Node) -> Option<Node> {
+    if TYPE_ALIASES.contains(&node.kind()) {
+        return None;
+    }
     let mut cursor = node.walk();
     let children: Vec<Node> = node.children(&mut cursor).collect();
     children.iter().enumerate().find_map(|(at, child)| {
@@ -790,6 +794,27 @@ fn value_opening(node: Node) -> Option<Node> {
         .then_some(*child)
     })
 }
+
+/// Declarations that name a type by what follows their `=`, or by nothing
+/// where they only declare it (a trait's associated type).
+const TYPE_ALIASES: &[&str] = &[
+    // Rust
+    "type_item",
+    "associated_type",
+    // TypeScript
+    "type_alias_declaration",
+    // Go, Kotlin, Dart
+    "type_alias",
+    // Python
+    "type_alias_statement",
+    // Swift
+    "typealias_declaration",
+    "associatedtype_declaration",
+    // C++
+    "alias_declaration",
+    // Scala
+    "type_definition",
+];
 
 /// Where each line of a file starts, to turn a 1-indexed line and
 /// Unicode-scalar column into the byte its syntax tree is addressed by.
@@ -2017,13 +2042,7 @@ fn node_kind(node: Node) -> SymbolKind {
         "type_spec" => go_type_kind(node),
 
         // A named type alias introduces a type, not a generic `<T>` param.
-        "type_item"
-        | "type_alias_declaration"
-        | "type_alias"
-        | "type_alias_statement"
-        | "typealias_declaration"
-        | "associated_type"
-        | "associatedtype_declaration" => SymbolKind::Class,
+        kind if TYPE_ALIASES.contains(&kind) => SymbolKind::Class,
 
         "const_item" | "const_spec" | "val_definition" | "const_declaration" => {
             SymbolKind::Constant
@@ -3928,7 +3947,8 @@ region     = "us-central1"
     /// A signature is read where its declaration is written: a method read
     /// out of its class is no declaration in TypeScript, C# or Java, and PHP
     /// without its opening tag is no code at all. It ends where a body or a
-    /// value opens, so an initializer of any size stays out.
+    /// value opens, so an initializer of any size stays out, while the type
+    /// an alias names is what it declares.
     #[test]
     fn a_signature_is_read_where_its_declaration_is_written() {
         let extractor = SymbolExtractor::new();
@@ -4071,6 +4091,41 @@ region     = "us-central1"
                 "region",
                 Some("variable \"region\""),
             ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "export type Handler = (a: number) => void;\n",
+                "Handler",
+                Some("export type Handler = (a: number) => void"),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                "pub type Res<T> = Result<T, String>;\n",
+                "Res",
+                Some("pub type Res<T> = Result<T, String>"),
+            ),
+            (
+                "a.go",
+                Language::Go,
+                "package p\n\ntype Alias = map[string]int\n",
+                "Alias",
+                Some("type Alias = map[string]int"),
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "type Pair = tuple[int, int]\n",
+                "Pair",
+                Some("type Pair = tuple[int, int]"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "typealias Pt = Point\n",
+                "Pt",
+                Some("typealias Pt = Point"),
+            ),
         ];
         for (file, language, content, name, expected) in cases {
             assert_eq!(
@@ -4157,6 +4212,14 @@ region     = "us-central1"
                 "twice",
                 (1, 1, 1, 1, 1, 24),
                 Some("twice = lambda x"),
+            ),
+            (
+                "u.cpp",
+                Language::Cpp,
+                "using Alias = Widget<int>;\n",
+                "Alias",
+                (1, 7, 1, 1, 1, 26),
+                Some("using Alias = Widget<int>"),
             ),
         ];
         for (
