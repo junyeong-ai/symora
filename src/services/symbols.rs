@@ -2483,7 +2483,7 @@ const KOTLIN_QUERY: &str = r#"
 (primary_constructor (class_parameter) @symbol)
 (object_declaration) @symbol
 (function_declaration) @symbol
-(source_file (property_declaration) @symbol)
+(source_file [(property_declaration) (type_alias)] @symbol)
 (class_body (property_declaration) @symbol)
 (enum_class_body (property_declaration) @symbol)
 "#;
@@ -2598,8 +2598,8 @@ const SCALA_QUERY: &str = r#"
 (enum_case_definitions (full_enum_case) @symbol)
 (function_definition) @symbol
 (function_declaration) @symbol
-(template_body (val_definition) @symbol)
-(template_body (var_definition) @symbol)
+(compilation_unit (type_definition) @symbol)
+(template_body [(val_definition) (var_definition) (type_definition)] @symbol)
 (class_definition class_parameters: (class_parameters (class_parameter) @symbol))
 "#;
 
@@ -2611,6 +2611,7 @@ const DART_QUERY: &str = r#"
 (enum_body (enum_constant) @symbol)
 (mixin_declaration) @symbol
 (extension_declaration) @symbol
+(source_file (type_alias) @symbol)
 (function_signature) @symbol
 (constructor_signature) @symbol
 (class_body (_ (declaration) @symbol))
@@ -3182,6 +3183,8 @@ class Widget {
 }
 
 fun top() {}
+
+typealias Name = String
 "#,
             declares: &[
                 "class:I",
@@ -3197,6 +3200,7 @@ fun top() {}
                 "property:Widget/name",
                 "method:Widget/render",
                 "function:top",
+                "class:Name",
             ],
         },
         DeclarationFixture {
@@ -3401,7 +3405,10 @@ trait T {
 
 object O {
   val v = 1
+  type Id = Int
 }
+
+type Top = Int
 
 class C {
   def cm(): Unit = {}
@@ -3429,6 +3436,8 @@ class Q(val a: Int, b: Int)
                 "method:T/tm",
                 "class:O",
                 "constant:O/v",
+                "class:O/Id",
+                "class:Top",
                 "class:C",
                 "method:C/cm",
             ],
@@ -3453,6 +3462,8 @@ class C {
 }
 
 void top() {}
+
+typedef Callback = void Function();
 "#,
             declares: &[
                 "interface:M",
@@ -3466,6 +3477,7 @@ void top() {}
                 "constructor:C/C",
                 "method:C/cm",
                 "function:top",
+                "class:Callback",
             ],
         },
         DeclarationFixture {
