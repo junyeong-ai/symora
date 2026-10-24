@@ -830,14 +830,14 @@ async fn diagnostics_for(app: &App, file: &Path) -> crate::cli::response::EditDi
                 DiagnosticsStatus::Unconfirmed => "unconfirmed",
                 DiagnosticsStatus::Unsupported => "unsupported",
             },
-            count: report.items.len(),
+            count: Some(report.items.len()),
             items: report.items.iter().map(DiagnosticOutput::from).collect(),
         },
         Err(e) => {
             tracing::warn!("Diagnostics pull failed for {}: {e}", file.display());
             EditDiagnostics {
                 status: "unavailable",
-                count: 0,
+                count: None,
                 items: Vec::new(),
             }
         }

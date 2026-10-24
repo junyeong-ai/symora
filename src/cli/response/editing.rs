@@ -80,11 +80,13 @@ pub struct CallerFileDiagnostics {
 /// `ok` (server confirmed analyzing the written content),
 /// `unconfirmed` (no confirmation within the wait window),
 /// `unsupported` (language server doesn't publish diagnostics),
-/// `unavailable` (the pull itself failed).
+/// `unavailable` (the pull itself failed, so nothing was counted and `count`
+/// is absent).
 #[derive(Debug, Serialize)]
 pub struct EditDiagnostics {
     pub status: &'static str,
-    pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<DiagnosticOutput>,
 }
