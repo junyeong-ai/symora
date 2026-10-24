@@ -415,11 +415,7 @@ impl Store {
 
     pub async fn open(project_root: &Path, config: StoreConfig) -> Result<Self, StoreError> {
         let db_path = Self::db_path(project_root);
-        if let Some(parent) = db_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(StoreError::Io)?;
-        }
+        crate::services::state_dir::create(project_root).map_err(StoreError::Io)?;
 
         let db = match Self::try_open_db(&db_path).await {
             Ok(db) => db,
