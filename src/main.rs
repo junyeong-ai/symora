@@ -272,7 +272,6 @@ async fn execute_scoped(command: Commands, app: &App) -> anyhow::Result<()> {
         // Analysis
         Commands::Impact(args) => commands::impact::execute(args, app).await,
         Commands::DiffImpact(args) => commands::diff_impact::execute(args, app).await,
-        Commands::Usage(args) => commands::usage::execute(args, app).await,
         Commands::Diagnostics(args) => commands::diagnostics::execute(args, app).await,
 
         // Search

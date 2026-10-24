@@ -33,9 +33,8 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
     let cfg = app.config();
     let limit = args.limit.unwrap_or(cfg.lsp.refs_limit);
     let loc = args.loc.parse()?.to_absolute()?;
-    // Kept for the error path: `at` consumes the anchor, and the hint reads
-    // best against the position the agent actually typed.
-    let (err_file, err_line, err_column) = (loc.file.clone(), loc.line, loc.column);
+    // Kept for the error path: `at` consumes the anchor.
+    let err_file = loc.file.clone();
 
     match LocationAnalysis::at(app.lsp.as_ref(), loc, ctx.root()).await {
         Ok(analysis) => {
@@ -81,13 +80,11 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                 analysis.anchor().line,
                 analysis.anchor().column,
             );
-            let next_commands = refs_next_commands(
-                &items,
-                total,
-                limit,
-                &anchor,
-                analysis.anchor().is_resolved(),
-            );
+            let declared = analysis
+                .target()
+                .filter(|_| analysis.anchor().is_resolved())
+                .map(|symbol| symbol.name.as_str());
+            let next_commands = refs_next_commands(&items, total, limit, &anchor, declared);
             // Captured when the reference query ran (LocationAnalysis),
             // not re-read here — quiescence landing mid-request must not
             // strip the marker from a lower-bound answer.
@@ -118,22 +115,17 @@ pub async fn execute(args: RefsArgs, app: &App) -> Result<()> {
                     .with_incomplete(incomplete),
             });
         }
-        Err(e) => ctx.print_error(lsp_error_at(
-            e,
-            &ctx.relative_path(&err_file),
-            err_line,
-            err_column,
-        )),
+        Err(e) => ctx.print_error(lsp_error_at(e, &ctx.relative_path(&err_file))),
     }
 
     Ok(())
 }
 
 /// Gated follow-up commands for a reference list, in fixed priority order:
-/// no usages at all is what `usage` can still answer for a listed symbol,
-/// since it searches by name across the workspace rather than from one
-/// resolved position (a binding or a position that resolved to nothing has
-/// no name for it to take); a truncated multi-file spread is summarized
+/// no usages at all of a declaration leaves what a text search for its name
+/// can still find — a name registered by string, reached by reflection, or
+/// serialized, none of which a reference names (a binding or a position that
+/// resolved to nothing has no declared name); a truncated multi-file spread is summarized
 /// whole by one `impact` call (cheaper than re-paying the reference query
 /// with a raised limit); a multi-reference set concentrated in one file —
 /// whether complete or truncated — reads best through `context --all`
@@ -145,7 +137,7 @@ fn refs_next_commands(
     total: usize,
     limit: usize,
     anchor: &str,
-    anchored: bool,
+    declared: Option<&str>,
 ) -> Vec<String> {
     let anchor = shell_arg(anchor);
     let unique_files = items
@@ -155,8 +147,10 @@ fn refs_next_commands(
         .len();
 
     let mut commands = Vec::new();
-    if total == 0 && anchored {
-        commands.push(format!("symora usage -- {anchor}"));
+    if total == 0
+        && let Some(name) = declared
+    {
+        commands.push(format!("symora search content -- {}", shell_arg(name)));
     }
     if total > limit && unique_files > 1 {
         commands.push(format!("symora impact -- {anchor}"));
@@ -183,18 +177,18 @@ mod tests {
     }
 
     #[test]
-    fn no_usages_steers_to_usage() {
+    fn no_usages_steers_to_a_text_search_for_the_name() {
         assert_eq!(
-            refs_next_commands(&[], 0, 20, "src/main.rs:10:5", true),
-            vec!["symora usage -- 'src/main.rs:10:5'"]
+            refs_next_commands(&[], 0, 20, "src/main.rs:10:5", Some("main")),
+            vec!["symora search content -- 'main'"]
         );
     }
 
-    /// A zero from a position that resolved to no declaration is not steered
-    /// to `usage`: that command would search for the position string itself.
+    /// A zero from a position that resolved to no declaration has no name to
+    /// search for.
     #[test]
-    fn an_unanchored_zero_is_not_steered_to_usage() {
-        assert!(refs_next_commands(&[], 0, 20, "src/main.rs:10:900", false).is_empty());
+    fn an_unanchored_zero_is_not_steered_to_a_text_search() {
+        assert!(refs_next_commands(&[], 0, 20, "src/main.rs:10:900", None).is_empty());
     }
 
     /// One genuine usage is an answer, not a dead end — the list already
@@ -202,14 +196,14 @@ mod tests {
     #[test]
     fn a_single_usage_emits_nothing() {
         let items = vec![item("src/main.rs", 10)];
-        assert!(refs_next_commands(&items, 1, 20, "src/main.rs:10:5", true).is_empty());
+        assert!(refs_next_commands(&items, 1, 20, "src/main.rs:10:5", Some("main")).is_empty());
     }
 
     #[test]
     fn multi_file_truncation_steers_to_impact() {
         let items = vec![item("src/a.rs", 1), item("src/b.rs", 2)];
         assert_eq!(
-            refs_next_commands(&items, 30, 20, "src/main.rs:10:5", true),
+            refs_next_commands(&items, 30, 20, "src/main.rs:10:5", Some("main")),
             vec!["symora impact -- 'src/main.rs:10:5'"]
         );
     }
@@ -218,7 +212,7 @@ mod tests {
     fn single_file_truncation_steers_to_context_not_impact() {
         let items = vec![item("src/a.rs", 1), item("src/a.rs", 2)];
         assert_eq!(
-            refs_next_commands(&items, 30, 20, "src/main.rs:10:5", true),
+            refs_next_commands(&items, 30, 20, "src/main.rs:10:5", Some("main")),
             vec!["symora context --all -- 'src/main.rs:10:5'"]
         );
     }
@@ -231,7 +225,7 @@ mod tests {
             item("src/a.rs", 3),
         ];
         assert_eq!(
-            refs_next_commands(&items, 3, 20, "src/main.rs:10:5", true),
+            refs_next_commands(&items, 3, 20, "src/main.rs:10:5", Some("main")),
             vec!["symora context --all -- 'src/main.rs:10:5'"]
         );
     }
@@ -243,6 +237,6 @@ mod tests {
             item("src/b.rs", 2),
             item("src/a.rs", 3),
         ];
-        assert!(refs_next_commands(&items, 3, 20, "src/main.rs:10:5", true).is_empty());
+        assert!(refs_next_commands(&items, 3, 20, "src/main.rs:10:5", Some("main")).is_empty());
     }
 }

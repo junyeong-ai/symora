@@ -31,7 +31,6 @@ use commands::{
     implementations::ImplementationsArgs, map::MapArgs, mcp::McpArgs, pack::PackArgs,
     refs::RefsArgs, rename::RenameArgs, search::SearchArgs, selfcmd::SelfcmdArgs, setup::SetupArgs,
     subtypes::SubtypesArgs, supertypes::SupertypesArgs, symbols::SymbolsArgs, typedef::TypedefArgs,
-    usage::UsageArgs,
 };
 
 const LONG_ABOUT: &str = r#"
@@ -155,8 +154,6 @@ pub enum Commands {
     Impact(ImpactArgs),
     /// Impact analysis for git diff
     DiffImpact(DiffImpactArgs),
-    /// Usage patterns and metrics
-    Usage(UsageArgs),
     /// LSP diagnostics
     Diagnostics(DiagnosticsArgs),
 

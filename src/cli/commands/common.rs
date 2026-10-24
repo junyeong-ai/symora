@@ -19,7 +19,8 @@ use crate::services::lsp::LspService;
 ///
 /// Which route depends on whether the session can come back. A dropped or
 /// timed-out request leaves the server able to serve this workspace, so the
-/// advice is to retry and meanwhile fall back to lighter LSP-backed queries.
+/// advice is to retry and meanwhile read the file's declarations, which the
+/// grammar answers if the server still cannot.
 /// A session that never established cannot serve it at all, and pointing at
 /// another LSP-backed command would send the agent into the same wall — the
 /// route there runs through the surfaces that need no language server.
@@ -28,7 +29,7 @@ use crate::services::lsp::LspService;
 /// message would mean matching prose, which cannot tell the two apart and
 /// leaves every unrecognised shape as an `internal` error with no move
 /// against it.
-pub(crate) fn lsp_error_at(err: LspError, file: &str, line: u32, column: u32) -> OutputError {
+pub(crate) fn lsp_error_at(err: LspError, file: &str) -> OutputError {
     let recoverable = err.is_recoverable();
     let mapped: OutputError = err.into();
     if !matches!(mapped.code, ErrorCode::Timeout | ErrorCode::LspUnavailable) {
@@ -36,10 +37,9 @@ pub(crate) fn lsp_error_at(err: LspError, file: &str, line: u32, column: u32) ->
     }
     if recoverable {
         return mapped.with_hint(format!(
-            "Retry, or use `symora symbols -- {}` and `symora usage -- {}` \
-             to continue from file-level analysis.",
+            "Retry, or read the file's declarations with `symora symbols -- {}`, which \
+             answers from the grammar when the server cannot.",
             shell_arg(file),
-            shell_arg(&format!("{file}:{line}:{column}")),
         ));
     }
     mapped.with_hint(format!(
@@ -496,8 +496,6 @@ mod tests {
                 established: false,
             },
             path,
-            10,
-            5,
         );
         assert!(matches!(dropped.code, ErrorCode::LspUnavailable));
         let hint = dropped.hint.expect("a dropped session has a retry route");
@@ -506,8 +504,6 @@ mod tests {
         let never_started = lsp_error_at(
             LspError::ServerStart("rust language server: bad workspace".into()),
             path,
-            10,
-            5,
         );
         assert!(matches!(never_started.code, ErrorCode::LspUnavailable));
         let hint = never_started
@@ -529,8 +525,6 @@ mod tests {
                 suggestion: "use refs".into(),
             },
             "src/main.rs",
-            1,
-            1,
         );
         assert!(matches!(unsupported.code, ErrorCode::Unsupported));
         assert_eq!(unsupported.hint.as_deref(), Some("use refs"));

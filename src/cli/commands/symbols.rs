@@ -1,12 +1,18 @@
+use std::collections::HashMap;
+use std::path::Path;
+
 use anyhow::Result;
 use clap::Args;
+use futures::StreamExt;
 
 use crate::app::App;
+use crate::cli::analysis::LocationAnalysis;
 use crate::cli::resolve_project_file;
 use crate::cli::response::{Section, SymbolOutput, SymbolSource};
 use crate::cli::utils::extract_signature;
+use crate::constants::defaults::SYMBOL_REFS_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{SymbolFilter, SymbolKind};
+use crate::models::symbol::{Symbol, SymbolFilter, SymbolKind};
 
 #[derive(Args, Debug)]
 #[command(
@@ -47,6 +53,11 @@ pub struct SymbolsArgs {
     /// Exclude low-level symbols (variables, constants)
     #[arg(long)]
     pub structural: bool,
+
+    /// Count each listed declaration's references, and those of the members
+    /// a listed type holds
+    #[arg(long)]
+    pub refs: bool,
 
     /// Maximum results
     #[arg(long)]
@@ -93,22 +104,31 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
             .outermost(answer.symbols);
 
             let total = declarations.len();
-            let items: Vec<SymbolOutput> = declarations
+            let listed = &declarations[..total.min(limit)];
+            let counts = match args.refs {
+                true => Some(count_references(app, &abs_path, listed).await),
+                false => None,
+            };
+            let items: Vec<SymbolOutput> = listed
                 .iter()
-                .take(limit)
                 .map(|s| match source {
                     SymbolSource::Location => SymbolOutput::from_symbol(s, ctx.root()),
                     SymbolSource::Signature => SymbolOutput::from_symbol_signature(s, ctx.root()),
                     SymbolSource::Body => SymbolOutput::from_symbol(s, ctx.root())
                         .with_signature(extract_signature(s)),
                 })
+                .map(|item| match &counts {
+                    Some(counts) => with_reference_counts(item, counts),
+                    None => item,
+                })
                 .collect();
 
+            let hints = Vec::from_iter(unreferenced_hint(&items));
             let body_paths = SymbolOutput::body_paths(&items);
             ctx.print_source(
                 FileSymbolsOutput {
                     backend: answer.backend,
-                    symbols: Section::with_total(items, total),
+                    symbols: Section::with_total(items, total).with_hints(hints),
                 },
                 &body_paths,
             );
@@ -117,6 +137,106 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// What a reference query said about one declaration.
+enum Counted {
+    Measured {
+        total: usize,
+        test: usize,
+        prod: usize,
+        degraded: bool,
+    },
+    Unavailable,
+}
+
+/// Each counted declaration, keyed by where its name is: two declarations of
+/// one file never share that position.
+type ReferenceCounts = HashMap<(u32, u32), Counted>;
+
+/// The declarations a listing counts references for: every listed one, and
+/// beneath one that holds members, those members. What a function holds — its
+/// parameters and locals — is internal to it and is not counted.
+fn countable<'a>(symbols: &'a [Symbol], out: &mut Vec<&'a Symbol>) {
+    for symbol in symbols {
+        out.push(symbol);
+        if symbol.kind.holds_members() {
+            countable(&symbol.children, out);
+        }
+    }
+}
+
+async fn count_references(app: &App, file: &Path, listed: &[Symbol]) -> ReferenceCounts {
+    let mut targets = Vec::new();
+    countable(listed, &mut targets);
+    futures::stream::iter(targets.into_iter().cloned())
+        .map(|symbol: Symbol| async move {
+            let key = (symbol.location.line, symbol.location.column);
+            let analysis =
+                LocationAnalysis::for_symbol(app.lsp.as_ref(), file, symbol, app.root()).await;
+            let counted = match analysis {
+                Ok(analysis) => {
+                    let classified = analysis.classify(app.test_scope());
+                    Counted::Measured {
+                        total: classified.total,
+                        test: classified.test,
+                        prod: classified.prod,
+                        degraded: analysis.indexing().is_some(),
+                    }
+                }
+                Err(_) => Counted::Unavailable,
+            };
+            (key, counted)
+        })
+        .buffered(SYMBOL_REFS_CONCURRENCY)
+        .collect()
+        .await
+}
+
+fn with_reference_counts(mut item: SymbolOutput, counts: &ReferenceCounts) -> SymbolOutput {
+    match counts.get(&(item.location.line, item.location.column)) {
+        Some(Counted::Measured {
+            total,
+            test,
+            prod,
+            degraded,
+        }) => {
+            item.refs = Some(*total);
+            item.test_refs = Some(*test);
+            item.prod_refs = Some(*prod);
+            item.refs_status = degraded.then_some("indexing_degraded");
+        }
+        Some(Counted::Unavailable) => item.refs_status = Some("unavailable"),
+        None => {}
+    }
+    item.children = item.children.map(|children| {
+        children
+            .into_iter()
+            .map(|child| with_reference_counts(child, counts))
+            .collect()
+    });
+    item
+}
+
+/// What a listed zero leaves unsaid. It is a list an agent deletes from, and a
+/// declaration can be reached without a reference naming it.
+fn unreferenced_hint(items: &[SymbolOutput]) -> Option<String> {
+    fn zeros(items: &[SymbolOutput]) -> usize {
+        items
+            .iter()
+            .map(|item| {
+                usize::from(item.refs == Some(0)) + item.children.as_deref().map_or(0, zeros)
+            })
+            .sum()
+    }
+    let unreferenced = zeros(items);
+    (unreferenced > 0).then(|| {
+        format!(
+            "{unreferenced} declaration(s) have refs 0. A call through a type, interface or \
+             trait, a registration, reflection and serialization reach a declaration without \
+             naming it, so a zero is not evidence that nothing does"
+        )
+    })
 }
 
 /// A file's symbol list beside what produced it: an AST answer is flat and

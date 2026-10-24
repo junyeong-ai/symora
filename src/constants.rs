@@ -42,6 +42,11 @@ pub mod defaults {
     /// + open file descriptors trade off here).
     pub const STORE_INDEX_CONCURRENCY: usize = 16;
 
+    /// Reference queries `symbols --refs` keeps in flight against one server.
+    /// Enough to overlap round-trips on a file of methods without queueing a
+    /// file's worth of work inside a server that answers one at a time.
+    pub const SYMBOL_REFS_CONCURRENCY: usize = 8;
+
     /// Hard cap on simultaneously running language servers.
     /// Keeps memory-bound monorepos from exhausting RAM / FDs.
     pub const LSP_MAX_CONCURRENT_SERVERS: usize = 12;

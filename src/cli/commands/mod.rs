@@ -26,4 +26,3 @@ pub mod subtypes;
 pub mod supertypes;
 pub mod symbols;
 pub mod typedef;
-pub mod usage;

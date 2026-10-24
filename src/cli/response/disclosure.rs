@@ -247,10 +247,6 @@ pub enum LowerBound {
     /// server, so whatever it holds is missing from the answer. Kept apart
     /// from the cap because raising a limit does not make a server answer.
     LiveFileNotDescribed,
-    /// This many symbols could not be analysed at all, so they answered none
-    /// of the filters the result was narrowed by and are missing from it
-    /// rather than having failed them.
-    SymbolsNotAnalysed(usize),
     /// Analysis stopped at this many symbols before running out of candidates,
     /// so the ones past the cap are absent from every count. Kept apart from
     /// a failed analysis because raising the cap reaches them, where a failure
@@ -286,10 +282,6 @@ impl LowerBound {
             Self::UnmergedOverlap => "Live and indexed results overlap and one of them was not \
                  read whole, so the count is a lower bound on their union"
                 .to_string(),
-            Self::SymbolsNotAnalysed(symbols) => format!(
-                "{symbols} symbol(s) could not be analysed, so they answered none of the filters \
-                 applied and are missing from the count rather than failing them"
-            ),
             Self::LiveFileNotDescribed => "A file the search widened into could not be described \
                  by its language server, so what it holds is missing from the count"
                 .to_string(),
@@ -338,7 +330,6 @@ impl LowerBound {
             | Self::LiveWideningCapped
             | Self::IndexPageCapped
             | Self::LiveFileNotDescribed
-            | Self::SymbolsNotAnalysed(_)
             | Self::AnalysisCapped(_) => None,
         }
     }

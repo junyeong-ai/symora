@@ -99,7 +99,7 @@ flowchart LR
     O["구조를 모를 때: 선택적 방향 잡기<br/>pack · map summary"] --> D["이름·문구 탐색<br/>search symbols / content / ast"]
     D --> I["파일·선언 확인<br/>symbols · map file"]
     K["알고 있는 파일·심볼"] --> I
-    I --> X["의미 분석<br/>refs · callers · callees<br/>context · impact · usage"]
+    I --> X["의미 분석<br/>refs · callers · callees<br/>context · impact"]
 ```
 
 아래 워크스루가 정확히 이 경로를 따릅니다.
@@ -319,6 +319,7 @@ symora map file src/services/checkout.ts    # 한 파일: 심볼·형제·관련
 # 심볼 & 들여다보기 (LSP 또는 AST 선언; 의미 분석은 LSP 필요)
 symora symbols src/services/checkout.ts --depth 2   # 전체 심볼 트리
 symora symbols src/services/checkout.ts --body      # 트리 + 소스 본문
+symora symbols src/services/checkout.ts --depth 1 --refs   # 선언·멤버별 참조 수
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
 symora def src/services/checkout.ts:48:9            # 정의로 이동
 symora hover src/services/checkout.ts:48:9          # 타입 / 시그니처
@@ -334,7 +335,6 @@ symora typedef … / implementations … / supertypes … / subtypes …
 # 컨텍스트 & 영향 (LSP)
 symora context src/services/checkout.ts:48 --all    # 본문 + 참조 + 호출자/피호출자 + 타입 + 테스트
 symora context src/services/checkout.ts:48 --with-bodies   # 피호출자/타입 본문도 첨부
-symora usage processOrder --lang typescript         # 이름 또는 위치로 사용처
 symora impact src/services/checkout.ts:48           # 변경 영향 범위
 symora diff-impact                                  # HEAD 대비 작업 트리 변경(스테이징 여부 무관)의 영향
 symora diff-impact $(git merge-base main HEAD)      # 이 브랜치가 바꾼 것의 영향 (범위 A..B는 받지 않음)
@@ -368,7 +368,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. 잘못된 CLI 인자도 같은 봉투로 나옵니다 — `invalid_argument` 코드에 clap의 산문이 아닌 JSON이라, 어떤 실패든 stdout 한 스트림만 파싱하면 됩니다. 예외는 하나뿐입니다: "찾지 못함"의 정상 결과(예: 정의 없는 위치의 `def`)는 `{ "message": … }` + exit 0으로 — 부재는 에러가 아닙니다.
-- **위치는 1-indexed** — 입력과 출력 모두이며, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`, `usage`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `def`·`hover`·`typedef`는 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 좌표로 file과 line을 담으며 column은 없습니다.
+- **위치는 1-indexed** — 입력과 출력 모두이며, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼 생략 `file:line`(그 줄에 선언된 심볼을 지정하고, 본문 줄이면 감싸는 심볼로 귀결) 또는 `file:line:column`을 받습니다. 컬럼이 있으면 정밀합니다: 심볼의 이름 위에 있으면 그 심볼을, 그 밖에서는 그 자리의 토큰을 뜻합니다 — 호출 지점은 정의를 통해 호출된 심볼로 귀결되며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 것과 정확히 같습니다. `def`·`hover`·`typedef`는 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정합니다: 컬럼은 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 좌표로 file과 line을 담으며 column은 없습니다.
 - **격하는 숨기지 않고 공개됩니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다 — 답이 자기 소스가 가진 전부를 담지 못했고, 원인은 `hints`가 이름을 대며 고칠 방법이 있으면 `next_commands`가 담습니다. 원인이 읽지 못한 경로일 때 `map`·`pack`·`search index status`는 `unread_paths`로 그 경로를 직접 지목합니다 — 아무것도 읽지 못하는 경로에는 어떤 재빌드도 닿지 않으니 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 언어 서버의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 에러는 빠진 기능 — 서버의 기능이든, Symora가 적용하지 않는 편집 형태든 — 을 지목하고 대안을 알려줍니다.
 - **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 이후 필요한 경우 목록 항목을 줄이고 `truncated`와 설정 키를 지목하는 hint를 반환합니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
@@ -541,7 +541,7 @@ symora daemon start | stop | restart | status
 | **맵** | `map summary`, `map file` |
 | **들여다보기** | `symbols`, `def`, `hover` |
 | **네비게이션** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
-| **분석** | `context`, `usage`, `impact`, `diff-impact` |
+| **분석** | `context`, `impact`, `diff-impact` |
 | **편집** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
 | **진단** | `diagnostics` |
 | **관리** | `search index`, `doctor`, `config`, `daemon`, `setup`, `self`, `mcp` |

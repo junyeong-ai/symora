@@ -18,6 +18,19 @@ pub struct SymbolOutput {
     pub end_location: Option<LocationOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
+    /// With `--refs`: references that name the declaration, all of them and
+    /// split by test and production code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refs: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_refs: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prod_refs: Option<usize>,
+    /// Present when the counts are not authoritative: `unavailable` (the
+    /// reference query failed, so they are absent rather than zero) or
+    /// `indexing_degraded` (they are a lower bound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refs_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +107,10 @@ impl SymbolOutput {
                 )
             }),
             container: symbol.container.clone(),
+            refs: None,
+            test_refs: None,
+            prod_refs: None,
+            refs_status: None,
             signature: if signature_only {
                 extract_signature(symbol)
             } else {
