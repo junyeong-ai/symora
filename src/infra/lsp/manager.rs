@@ -953,6 +953,13 @@ pub(crate) mod tests {
         use super::*;
         use std::time::Duration;
 
+        /// The start budget the fakes run under. Generous enough for a shell
+        /// script to start on a loaded machine; only a test that waits out a
+        /// hanging start pays it in full. Every wait for the pool to make
+        /// progress, or for its processes to go, allows twice that: a start
+        /// outlives the caller that launched it by up to a budget.
+        const START_BUDGET_SECS: u64 = 10;
+
         const FAKE_SERVER: &str = r#"#!/bin/sh
 case "$1" in
   version|--version) echo "${NODE_OPTIONS:-fake-ls 1.0}"; exit 0 ;;
@@ -1007,7 +1014,7 @@ exec sleep 600
                 file_watch: FileWatch,
             ) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
-                config.lsp.timeout_secs = 3 + u64::from(delay_secs);
+                config.lsp.timeout_secs = START_BUDGET_SECS + u64::from(delay_secs);
                 config
                     .lsp
                     .servers
@@ -1023,7 +1030,7 @@ exec sleep 600
             /// served by the fake.
             fn capped(&self, languages: &[&str], cap: usize, behavior: &str) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
-                config.lsp.timeout_secs = 5;
+                config.lsp.timeout_secs = START_BUDGET_SECS;
                 for language in languages {
                     config
                         .lsp
@@ -1110,7 +1117,8 @@ exec sleep 600
             pub(crate) async fn assert_all_gone(&self) {
                 let pids = self.pids();
                 assert!(!pids.is_empty(), "the fake server never started");
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let deadline =
+                    tokio::time::Instant::now() + Duration::from_secs(2 * START_BUDGET_SECS);
                 while pids.iter().any(|pid| Self::alive(*pid)) {
                     assert!(
                         tokio::time::Instant::now() < deadline,
@@ -1125,7 +1133,7 @@ exec sleep 600
         }
 
         async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
-            tokio::time::timeout(Duration::from_secs(15), future)
+            tokio::time::timeout(Duration::from_secs(2 * START_BUDGET_SECS), future)
                 .await
                 .expect("the pool stopped making progress")
         }
@@ -1164,7 +1172,7 @@ exec sleep 600
                     &launch,
                     fake.dir.path(),
                     runtime,
-                    Duration::from_secs(2),
+                    Duration::from_secs(START_BUDGET_SECS),
                 )
                 .await
             );
@@ -1534,7 +1542,7 @@ exec sleep 600
         async fn a_tsx_file_is_opened_as_typescriptreact() {
             let fake = FakeServer::new();
             let mut config = crate::models::config::SymoraConfig::default();
-            config.lsp.timeout_secs = 1;
+            config.lsp.timeout_secs = START_BUDGET_SECS;
             config
                 .lsp
                 .servers
