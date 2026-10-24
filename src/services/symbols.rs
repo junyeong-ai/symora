@@ -1836,8 +1836,10 @@ fn swift_bound_names(name: Node) -> Vec<Node> {
 
 /// The names a JavaScript, TypeScript or Scala destructuring pattern binds:
 /// `{ a, b: renamed, c = 1, ...rest }` binds `a`, `renamed`, `c` and `rest`,
-/// `[x, [y]]` binds `x` and `y`, and Scala's `val a, b` and `val (c, d: Int)`
-/// each name they list. A key it reads from is no binding.
+/// `[x, [y]]` binds `x` and `y`, Scala's `val a, b` and `val (c, d: Int)`
+/// each name they list, and `val c @ Some(x)`, `val head :: tail` the names
+/// their patterns hold. A key it reads from, a type it matches and an
+/// operator are no binding, and `_` binds nothing.
 fn bound_names(pattern: Node) -> Vec<Node> {
     let held = |field| pattern.child_by_field_name(field).map(bound_names);
     match pattern.kind() {
@@ -1845,6 +1847,19 @@ fn bound_names(pattern: Node) -> Vec<Node> {
         "pair_pattern" => held("value").unwrap_or_default(),
         "assignment_pattern" | "object_assignment_pattern" => held("left").unwrap_or_default(),
         "typed_pattern" => held("pattern").unwrap_or_default(),
+        "infix_pattern" => [held("left"), held("right")]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect(),
+        "case_class_pattern" | "capture_pattern" => {
+            let mut cursor = pattern.walk();
+            pattern
+                .children_by_field_name("pattern", &mut cursor)
+                .chain(pattern.child_by_field_name("name"))
+                .flat_map(bound_names)
+                .collect()
+        }
         "object_pattern" | "array_pattern" | "rest_pattern" | "identifiers" | "tuple_pattern" => {
             let mut cursor = pattern.walk();
             pattern
@@ -2539,6 +2554,10 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             .into_iter()
             .next()
             .or_else(|| node.child_by_field_name("name")),
+        Language::Scala => match node.child_by_field_name("pattern") {
+            Some(pattern) => return bound_names(pattern).into_iter().next(),
+            None => node.child_by_field_name("name"),
+        },
         _ => node
             .child_by_field_name("name")
             .or_else(|| declared_names(node, language).into_iter().next()),
@@ -4250,6 +4269,10 @@ trait T {
 object O {
   val v = 1
   val (pa, pb: Int) = (1, 2)
+  val Some(inner) = opt
+  val whole @ Some(_) = opt
+  val head :: tail = items
+  val _ = sideEffect
   var m, n = 0
   type Id = Int
   given ord: Ordering[Int] = Ordering.Int
@@ -4298,6 +4321,10 @@ class Q(val a: Int, b: Int)
                 "constant:O/v",
                 "constant:O/pa",
                 "constant:O/pb",
+                "constant:O/inner",
+                "constant:O/whole",
+                "constant:O/head",
+                "constant:O/tail",
                 "variable:O/m",
                 "variable:O/n",
                 "class:O/Id",
