@@ -2313,11 +2313,22 @@ fn extract_name_and_kind(
 }
 
 /// The node a declared name ends with: its own, the name a Dart named
-/// constructor gives itself after its class's (`Widget.named`), or the token
-/// before the parameters a C++ conversion function's name holds, so
-/// `operator bool() const` is named `operator bool` and `operator const
-/// char*()` `operator const char*`.
+/// constructor gives itself after its class's (`Widget.named`), the class a
+/// C# destructor names after its `~`, the type a C# conversion operator names
+/// after `operator`, or the token before the parameters a C++ conversion
+/// function's name holds, so `operator bool() const` is named `operator bool`
+/// and `operator const char*()` `operator const char*`.
 fn name_end_node(name: Node) -> Node {
+    match (name.kind(), name.parent().map(|parent| parent.kind())) {
+        ("~", Some("destructor_declaration")) => return name.next_sibling().unwrap_or(name),
+        ("operator", Some("conversion_operator_declaration")) => {
+            return name
+                .parent()
+                .and_then(|operator| operator.child_by_field_name("type"))
+                .unwrap_or(name);
+        }
+        _ => {}
+    }
     if let Some(signature) = name.parent().filter(|signature| {
         matches!(
             signature.kind(),
@@ -2515,8 +2526,18 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if node.kind() == "secondary_constructor" {
         return child_of_kind(node, "constructor");
     }
-    if node.kind() == "operator_signature" {
-        return node.child_by_field_name("operator");
+    // An operator is named by its symbol (Dart's `operator ==`, C#'s
+    // `operator +`), a C# conversion operator by its keyword through the
+    // type it converts to (`operator int`), an indexer by `this` and a
+    // destructor through its class (`~C`).
+    match node.kind() {
+        "operator_signature" | "operator_declaration" => {
+            return node.child_by_field_name("operator");
+        }
+        "conversion_operator_declaration" => return child_of_kind(node, "operator"),
+        "indexer_declaration" => return child_of_kind(node, "this"),
+        "destructor_declaration" => return child_of_kind(node, "~"),
+        _ => {}
     }
     // An assignment declares the names its targets bind and nothing else:
     // `obj.attr = value` declares neither `obj` nor `value`.
@@ -2634,6 +2655,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "constructor_declaration"
         | "compact_constructor_declaration"
         | "secondary_constructor"
+        | "destructor_declaration"
         | "constant_constructor_signature"
         | "factory_constructor_signature"
         | "redirecting_factory_constructor_signature"
@@ -2647,6 +2669,8 @@ fn node_kind(node: Node) -> SymbolKind {
         "annotation_type_element_declaration" => SymbolKind::Method,
 
         "event_field_declaration" | "event_declaration" => SymbolKind::Event,
+        "operator_declaration" | "conversion_operator_declaration" => SymbolKind::Method,
+        "indexer_declaration" => SymbolKind::Property,
         "local_function_statement" => SymbolKind::Function,
 
         // Swift states a struct, an enum, an actor, a class and an extension
@@ -2671,6 +2695,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "class_definition"
         | "class_specifier"
         | "object_declaration"
+        | "companion_object"
         | "object_definition"
         | "extension_declaration"
         | "extension_type_declaration"
@@ -3069,6 +3094,7 @@ const KOTLIN_QUERY: &str = r#"
 (primary_constructor (class_parameter) @symbol)
 (secondary_constructor) @symbol
 (object_declaration) @symbol
+(companion_object) @symbol
 (function_declaration) @symbol
 (source_file [(property_declaration) (type_alias)] @symbol)
 (class_body (property_declaration) @symbol)
@@ -3140,6 +3166,10 @@ const CSHARP_QUERY: &str = r#"
 (event_field_declaration) @symbol
 (event_declaration) @symbol
 (local_function_statement) @symbol
+(operator_declaration) @symbol
+(conversion_operator_declaration) @symbol
+(indexer_declaration) @symbol
+(destructor_declaration) @symbol
 "#;
 
 const RUBY_QUERY: &str = r#"
@@ -3847,6 +3877,10 @@ namespace N {
         public event System.EventHandler Changed;
         event System.EventHandler Raised { add {} remove {} }
         void M() { int Local(int x) { return x; } }
+        public static C operator +(C a, C b) => a;
+        public static implicit operator int(C c) => 0;
+        public int this[int i] => i;
+        ~C() {}
     }
 }
 "#,
@@ -3867,6 +3901,10 @@ namespace N {
                 "event:C/Raised",
                 "method:C/M",
                 "function:M/Local",
+                "method:C/+",
+                "method:C/operator int",
+                "property:C/this",
+                "constructor:C/~C",
             ],
         },
         DeclarationFixture {
@@ -3938,6 +3976,15 @@ class Widget {
     fun render() {
         val local = 1
     }
+    companion object Factory {
+        fun create() = Widget()
+    }
+}
+
+class Plain {
+    companion object {
+        fun make() = Plain()
+    }
 }
 
 fun top() {}
@@ -3963,6 +4010,10 @@ enum class Flag { ON; val z = 1 }
                 "property:Widget/name",
                 "constructor:Widget/constructor",
                 "method:Widget/render",
+                "class:Widget/Factory",
+                "method:Factory/create",
+                "class:Plain",
+                "method:Plain/make",
                 "function:top",
                 "class:Name",
                 "class:OneLine",
