@@ -219,6 +219,12 @@ impl Symbol {
         Self::split_qualifier(path).0
     }
 
+    /// A path and the kind its last segment's qualifier names, if it has one.
+    pub fn split_kind(path: &str) -> (&str, Option<SymbolKind>) {
+        let (base, qualifier) = Self::split_qualifier(path);
+        (base, qualifier.and_then(|kind| kind.parse().ok()))
+    }
+
     pub fn matches_path(&self, pattern: &str) -> bool {
         Self::path_matches(self.path(), pattern)
     }
