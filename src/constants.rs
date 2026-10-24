@@ -30,8 +30,22 @@ pub mod defaults {
     /// ranking blast radius.
     pub const IMPACT_DEFAULT_DEPTH: u32 = 1;
 
-    /// Hard cap on impact's BFS depth, regardless of user input.
-    pub const IMPACT_MAX_DEPTH: u32 = 3;
+    /// Hard cap on the depth of any call-graph walk — impact's callers,
+    /// callees' reachable set, and the call path — regardless of user input.
+    pub const CALL_GRAPH_MAX_DEPTH: u32 = 3;
+
+    /// Changed declarations `diff-impact` analyses before it stops and says
+    /// so. Each costs a reference query, and another with `--callers`; a
+    /// review-sized diff stays under it.
+    pub const DIFF_IMPACT_MAX_SYMBOLS: usize = 50;
+
+    /// Top-level directories and entrypoints `map summary` lists.
+    pub const MAP_SUMMARY_LIMIT: usize = 10;
+
+    /// Symbol depth and related-file count `map file` shows: one level of
+    /// members, and enough neighbours to find a file's tests and siblings.
+    pub const MAP_FILE_DEPTH: u32 = 1;
+    pub const MAP_FILE_RELATED_LIMIT: usize = 8;
 
     /// Cap on neighbours (callers or callees) fanned out per BFS frontier node,
     /// shared by the incoming (impact/blast-radius) and outgoing (callees)

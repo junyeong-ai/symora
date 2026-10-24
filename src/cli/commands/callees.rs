@@ -24,7 +24,7 @@ use crate::cli::call_graph::{self, Direction, NodeKey, WalkConfig, key_of};
 use crate::cli::commands::common::{Reach, anchor_of, execute_list};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput, Section};
 use crate::cli::{LocationArg, ParsedLocation};
-use crate::constants::defaults::IMPACT_MAX_DEPTH;
+use crate::constants::defaults::CALL_GRAPH_MAX_DEPTH;
 use crate::models::lsp::{CallHierarchyItem, IndexingDegradation};
 
 #[derive(Args, Debug)]
@@ -148,14 +148,14 @@ pub async fn execute(args: CalleesArgs, app: &App) -> Result<()> {
     if let Some(to) = args.to {
         let depth = args
             .depth
-            .unwrap_or(IMPACT_MAX_DEPTH)
-            .clamp(1, IMPACT_MAX_DEPTH);
+            .unwrap_or(CALL_GRAPH_MAX_DEPTH)
+            .clamp(1, CALL_GRAPH_MAX_DEPTH);
         return execute_path(app, args.loc, &to, depth).await;
     }
 
     match args.depth {
         Some(depth) if depth > 1 => {
-            execute_reach(app, args.loc, depth.clamp(1, IMPACT_MAX_DEPTH), limit).await
+            execute_reach(app, args.loc, depth.clamp(1, CALL_GRAPH_MAX_DEPTH), limit).await
         }
         // Direct callees — the original single-hop behaviour, unchanged.
         _ => {

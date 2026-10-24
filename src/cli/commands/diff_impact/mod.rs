@@ -38,7 +38,7 @@ pub struct DiffImpactArgs {
     pub callers: bool,
 
     /// Maximum changed symbols to analyze (0 = unlimited)
-    #[arg(long, default_value = "50")]
+    #[arg(long, default_value_t = crate::constants::defaults::DIFF_IMPACT_MAX_SYMBOLS)]
     pub max_symbols: usize,
 }
 
