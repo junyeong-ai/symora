@@ -399,16 +399,45 @@ async fn declaring_type_reach(
         .find_references(file, declaring.location.line, declaring.location.column)
         .await
         .ok()?;
-    let declaration = ParsedLocation {
+    let name = ParsedLocation {
         file: file.to_path_buf(),
         line: declaring.location.line,
         column: declaring.location.column,
         column_explicit: true,
     };
+    let declared = declared_at(lsp, name, Some(declaring.kind)).await;
     Some(DeclaringType {
         name: declaring.name,
-        references: usages_of(references.data, root, Some(&declaration)).len(),
+        references: usages_of(references.data, root, &declared).len(),
     })
+}
+
+/// Where what a reference query at a declaration's name answers for is
+/// declared, so its references can leave the declaration out: at that name,
+/// except for an `impl` block, whose name is the type it implements, declared
+/// elsewhere. Servers report an `impl` block as an object.
+async fn declared_at(
+    lsp: &dyn LspService,
+    name: ParsedLocation,
+    kind: Option<SymbolKind>,
+) -> Vec<ParsedLocation> {
+    let mut declared = Vec::new();
+    if kind == Some(SymbolKind::Object)
+        && let Ok(found) = lsp
+            .goto_definition(&name.file, name.line, name.column)
+            .await
+        && let Some(definition) = found.data
+        && !definition.is_self
+    {
+        declared.push(ParsedLocation {
+            file: definition.location.file,
+            line: definition.location.line,
+            column: definition.location.column,
+            column_explicit: true,
+        });
+    }
+    declared.push(name);
+    declared
 }
 
 impl LocationAnalysis {
@@ -437,12 +466,14 @@ impl LocationAnalysis {
         let references = lsp
             .find_references(&anchor.file, anchor.line, anchor.column)
             .await?;
-        let declaration = anchor.location();
-        let usages = usages_of(
-            references.data,
-            root,
-            anchor.is_declaration().then_some(&declaration),
-        );
+        let declared = match anchor.is_declaration() {
+            true => {
+                let kind = anchor.symbol.as_ref().map(|symbol| symbol.kind);
+                declared_at(lsp, anchor.location(), kind).await
+            }
+            false => Vec::new(),
+        };
+        let usages = usages_of(references.data, root, &declared);
         let declaring_type = match usages.is_empty() {
             true => declaring_type_reach(lsp, &anchor.file, anchor.line, anchor.column, root).await,
             false => None,
@@ -471,12 +502,14 @@ impl LocationAnalysis {
             column: symbol.location.column,
             column_explicit: true,
         };
+        let kind = symbol.kind;
         let anchor = Anchor::declared(&input, file, symbol, None);
         let language = Language::from_path(file);
         let references = lsp
             .find_references(&anchor.file, anchor.line, anchor.column)
             .await?;
-        let usages = usages_of(references.data, root, Some(&input));
+        let declared = declared_at(lsp, input, Some(kind)).await;
+        let usages = usages_of(references.data, root, &declared);
         Ok(Self {
             anchor,
             language,
@@ -528,17 +561,14 @@ impl LocationAnalysis {
 /// `declaration` is `None` when the anchor resolved to no symbol — there is
 /// then no declaration to recognise, and dropping the anchor position anyway
 /// would remove a genuine usage.
-fn usages_of(
-    references: Vec<Location>,
-    root: &Path,
-    declaration: Option<&ParsedLocation>,
-) -> Vec<Location> {
+fn usages_of(references: Vec<Location>, root: &Path, declared: &[ParsedLocation]) -> Vec<Location> {
     let mut usages: Vec<Location> = references
         .into_iter()
         .filter(|r| r.file.starts_with(root))
         .filter(|r| {
-            !declaration
-                .is_some_and(|d| r.file == d.file && r.line == d.line && r.column == d.column)
+            !declared
+                .iter()
+                .any(|d| r.file == d.file && r.line == d.line && r.column == d.column)
         })
         .collect();
     usages.sort_by(|a, b| {
@@ -571,6 +601,7 @@ mod tests {
     struct AnchorStub {
         symbols_by_file: HashMap<PathBuf, Vec<Symbol>>,
         definitions: HashMap<(PathBuf, u32, u32), Definition>,
+        references: HashMap<(PathBuf, u32, u32), Vec<Location>>,
     }
 
     fn func(file: &str, name: &str, line: u32, name_col: u32, end_line: u32) -> Symbol {
@@ -632,11 +663,15 @@ mod tests {
         }
         async fn find_references(
             &self,
-            _file: &Path,
-            _line: u32,
-            _column: u32,
+            file: &Path,
+            line: u32,
+            column: u32,
         ) -> Result<Indexed<Vec<Location>>, LspError> {
-            unreachable!()
+            let references = self
+                .references
+                .get(&(file.to_path_buf(), line, column))
+                .unwrap_or_else(|| unreachable!("no references at {line}:{column}"));
+            Ok(Indexed::complete(references.clone()))
         }
         async fn goto_type_definition(
             &self,
@@ -875,6 +910,7 @@ mod tests {
         AnchorStub {
             symbols_by_file,
             definitions,
+            references: HashMap::new(),
         }
     }
 
@@ -1124,6 +1160,48 @@ mod tests {
             );
         }
         assert!(declaring_type_of(&[holder(SymbolKind::Function)], 2, 8).is_none());
+    }
+
+    /// An `impl` block's name is the type it implements, so a reference query
+    /// there answers for that type, declared elsewhere. Its declaration is
+    /// left out with the block's own name: in the block's count, and in the
+    /// reach a member's empty set reports for the type that declares it.
+    #[tokio::test]
+    async fn an_impl_block_leaves_out_the_declaration_of_the_type_it_implements() {
+        let lib = PathBuf::from("lib.rs");
+        let declared = Location::point(lib.clone(), 1, 12);
+        let render = func("lib.rs", "render", 4, 12, 6);
+        let block = Symbol::new(
+            "Widget".to_string(),
+            SymbolKind::Object,
+            Location::full(lib.clone(), 3, 6, 3, 1, 7, 2),
+        )
+        .with_children(vec![render.clone()]);
+        let stub = AnchorStub {
+            symbols_by_file: HashMap::from([(lib.clone(), vec![block.clone()])]),
+            definitions: HashMap::from([(
+                (lib.clone(), 3, 6),
+                Definition {
+                    location: declared.clone(),
+                    is_self: false,
+                },
+            )]),
+            references: HashMap::from([(
+                (lib.clone(), 3, 6),
+                vec![declared, Location::point(lib.clone(), 3, 6)],
+            )]),
+        };
+
+        let analysis = LocationAnalysis::for_symbol(&stub, &lib, block, Path::new(""))
+            .await
+            .unwrap();
+        assert!(analysis.references.is_empty(), "{:?}", analysis.references);
+        assert_eq!(
+            member_reach_hint_of(&stub, &lib, &render, Path::new(""))
+                .await
+                .as_deref(),
+            Some("Nothing names `render`, and nothing names `Widget`, which declares it")
+        );
     }
 
     #[test]
