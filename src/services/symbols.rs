@@ -1062,6 +1062,11 @@ fn declaration_visibility(
             if matches!(node.kind(), "enum_constant" | "enum_member_declaration") {
                 return Some(true);
             }
+            // A C# record's component is a public property; a Java record's is
+            // a private field read through a public accessor.
+            if is_record_component(node) {
+                return (language == Language::CSharp).then_some(true);
+            }
             if modifier("public") {
                 return Some(true);
             }
@@ -1516,15 +1521,16 @@ fn extract_container_path(
 
 /// Whether `inner`, a child of `outer`, is the header the declaration
 /// `outer` is written with rather than its body: its parameter list, or the
-/// type of what it declares. A type's own declaration holds its definition
-/// there (Go's `type S struct { … }`), which is its body.
+/// type of what it declares. A type's own declaration holds its members
+/// there instead: its definition (Go's `type S struct { … }`) or its
+/// components (Java's `record R(int a)`).
 fn in_header_of(inner: Node, outer: Node) -> bool {
     let holds = |field| {
         outer
             .child_by_field_name(field)
             .is_some_and(|held| held.id() == inner.id())
     };
-    holds("parameters") || (holds("type") && !node_kind(outer).holds_members())
+    (holds("parameters") || holds("type")) && !node_kind(outer).holds_members()
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
@@ -1722,10 +1728,20 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if language == Language::Terraform {
         return hcl_declared_name(node);
     }
-    if matches!(node.kind(), "required_parameter" | "optional_parameter") {
-        return declares_property(node)
-            .then(|| node.child_by_field_name("pattern"))
-            .flatten();
+    if matches!(
+        node.kind(),
+        "required_parameter" | "optional_parameter" | "class_parameter"
+    ) {
+        if !declares_property(node) {
+            return None;
+        }
+        return node
+            .child_by_field_name("pattern")
+            .or_else(|| node.child_by_field_name("name"))
+            .or_else(|| child_of_kind(node, "simple_identifier"));
+    }
+    if node.kind() == "property_promotion_parameter" {
+        return child_of_kind(node.child_by_field_name("name")?, "name");
     }
     // An assignment declares the names its targets bind and nothing else:
     // `obj.attr = value` declares neither `obj` nor `value`.
@@ -1777,16 +1793,33 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         .or_else(|| is_name(&node).then_some(node))
 }
 
-/// Whether a TypeScript constructor parameter declares a property of its
-/// class as well: an accessibility, `readonly` or `override` modifier says so.
+/// Whether a constructor parameter declares a property of its class as well:
+/// a TypeScript accessibility, `readonly` or `override` modifier says so, as
+/// does a Kotlin or Scala `val` or `var`. Every parameter in the first list of
+/// a Scala case class is one.
 fn declares_property(parameter: Node) -> bool {
     let mut cursor = parameter.walk();
-    parameter.children(&mut cursor).any(|child| {
+    let marked = parameter.children(&mut cursor).any(|child| {
         matches!(
             child.kind(),
-            "accessibility_modifier" | "override_modifier" | "readonly"
+            "accessibility_modifier"
+                | "override_modifier"
+                | "readonly"
+                | "binding_pattern_kind"
+                | "val"
+                | "var"
         )
-    })
+    });
+    marked
+        || parameter.parent().is_some_and(|list| {
+            list.parent().is_some_and(|class| {
+                class.kind() == "class_definition"
+                    && child_of_kind(class, "case").is_some()
+                    && class
+                        .child_by_field_name("class_parameters")
+                        .is_some_and(|first| first.id() == list.id())
+            })
+        })
 }
 
 /// Map a captured declaration node to a [`SymbolKind`]. Every node kind the
@@ -1892,7 +1925,13 @@ fn node_kind(node: Node) -> SymbolKind {
         | "field_definition"
         | "property_signature"
         | "required_parameter"
-        | "optional_parameter" => SymbolKind::Property,
+        | "optional_parameter"
+        | "class_parameter"
+        | "property_promotion_parameter" => SymbolKind::Property,
+        // A record's components: C# declares a property for each, Java a
+        // field.
+        "parameter" if is_record_component(node) => SymbolKind::Property,
+        "formal_parameter" if is_record_component(node) => SymbolKind::Field,
 
         "enum_assignment" => SymbolKind::EnumMember,
         "property_identifier" if node.parent().is_some_and(|body| body.kind() == "enum_body") => {
@@ -1902,6 +1941,13 @@ fn node_kind(node: Node) -> SymbolKind {
 
         _ => SymbolKind::Variable,
     }
+}
+
+fn is_record_component(parameter: Node) -> bool {
+    parameter
+        .parent()
+        .and_then(|list| list.parent())
+        .is_some_and(|owner| owner.kind() == "record_declaration")
 }
 
 /// Classify a Go `type_spec` by its underlying type: `struct` → Struct,
@@ -2103,6 +2149,7 @@ const JAVA_QUERY: &str = r#"
 (annotation_type_declaration) @symbol
 (enum_declaration) @symbol
 (enum_body (enum_constant) @symbol)
+(record_declaration parameters: (formal_parameters (formal_parameter) @symbol))
 (constructor_declaration) @symbol
 (method_declaration) @symbol
 (field_declaration) @symbol
@@ -2113,6 +2160,7 @@ const JAVA_QUERY: &str = r#"
 const KOTLIN_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_class_body (enum_entry) @symbol)
+(primary_constructor (class_parameter) @symbol)
 (object_declaration) @symbol
 (function_declaration) @symbol
 (source_file (property_declaration) @symbol)
@@ -2159,6 +2207,7 @@ const CSHARP_QUERY: &str = r#"
 (struct_declaration) @symbol
 (enum_declaration) @symbol
 (enum_member_declaration_list (enum_member_declaration) @symbol)
+(record_declaration (parameter_list (parameter) @symbol))
 (constructor_declaration) @symbol
 (method_declaration) @symbol
 (property_declaration) @symbol
@@ -2210,6 +2259,7 @@ const SCALA_QUERY: &str = r#"
 (function_declaration) @symbol
 (template_body (val_definition) @symbol)
 (template_body (var_definition) @symbol)
+(class_definition class_parameters: (class_parameters (class_parameter) @symbol))
 "#;
 
 // Dart names a function on its signature, not on the declaration that
@@ -2245,6 +2295,7 @@ const PHP_QUERY: &str = r#"
 (trait_declaration) @symbol
 (method_declaration) @symbol
 (property_declaration) @symbol
+(formal_parameters (property_promotion_parameter) @symbol)
 "#;
 
 #[cfg(test)]
@@ -2668,6 +2719,7 @@ class C {
             declares: &[
                 "module:p",
                 "class:R",
+                "field:R/a",
                 "interface:Ann",
                 "interface:I",
                 "method:I/im",
@@ -2698,6 +2750,7 @@ namespace N {
             declares: &[
                 "module:N",
                 "class:Rec",
+                "property:Rec/A",
                 "class:D",
                 "interface:I",
                 "method:I/M",
@@ -2727,6 +2780,7 @@ abstract class A {
     const AX = 1;
     public $prop;
     abstract public function am();
+    public function __construct(private int $promoted, $plain) {}
 }
 
 function f() {}
@@ -2743,6 +2797,8 @@ function f() {}
                 "constant:A/AX",
                 "property:A/prop",
                 "method:A/am",
+                "method:A/__construct",
+                "property:A/promoted",
                 "function:f",
             ],
         },
@@ -2762,6 +2818,8 @@ object Registry {
 
 enum class Color { RED, GREEN }
 
+data class User(val id: String, plain: Int)
+
 class Widget {
     val name = "w"
     fun render() {
@@ -2779,6 +2837,8 @@ fun top() {}
                 "class:Color",
                 "enum_member:Color/RED",
                 "enum_member:Color/GREEN",
+                "class:User",
+                "property:User/id",
                 "class:Widget",
                 "property:Widget/name",
                 "function:Widget/render",
@@ -2939,12 +2999,20 @@ enum Color {
   case Red, Green
   case Mix(r: Int)
 }
+
+case class P(x: Int)(z: Int)
+
+class Q(val a: Int, b: Int)
 "#,
             declares: &[
                 "enum:Color",
                 "enum_member:Color/Red",
                 "enum_member:Color/Green",
                 "enum_member:Color/Mix",
+                "class:P",
+                "property:P/x",
+                "class:Q",
+                "property:Q/a",
                 "interface:T",
                 "function:T/tm",
                 "class:O",
@@ -4683,7 +4751,7 @@ interface Shape {}
                 Language::Kotlin,
                 "a.kt",
                 "class Svc(val id: Int) {\n    val size = 1\n    init {\n        fun doubled() = id * 2\n    }\n    constructor(n: String) : this(n.length) {\n        fun parsed() = n\n    }\n    val label: String\n        get() {\n            fun prefix() = \"x\"\n            return prefix()\n        }\n    fun run(): Int {\n        fun total() = 1\n        val f = { fun inner() = 2; inner() }\n        return total()\n    }\n}\n\nfun top(): Int {\n    fun local() = 2\n    return local()\n}\n",
-                &["Svc", "size", "label", "run", "top"],
+                &["Svc", "id", "size", "label", "run", "top"],
                 &["doubled", "parsed", "prefix", "total", "inner", "local"],
             ),
             (
