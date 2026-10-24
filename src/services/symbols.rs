@@ -1720,7 +1720,9 @@ fn enclosing_declaration<'t>(node: Node<'t>, declared: &HashSet<usize>) -> Optio
 /// except a Rust associated function, which is a method only where its first
 /// parameter is `self`; a JavaScript or TypeScript class's `constructor`,
 /// unless `static`, is its constructor; a Swift property no type holds is a
-/// global variable; and a C++ declaration outside a class body
+/// global variable; a C++ member function defined in its class without a
+/// type is a constructor or destructor, as one declared there is
+/// ([`declared_as`]); and a C++ declaration outside a class body
 /// ([`in_class_body`]) states a function or a variable.
 /// What holds a declaration is the nearest enclosing one with a name, as for
 /// its path ([`extract_container_path`]): a Dart member's signature sits in a
@@ -1742,6 +1744,19 @@ fn placed_kind(
             .map(|(_, kind)| kind)
     });
     match kind {
+        SymbolKind::Function
+            if language == Language::Cpp
+                && node.kind() == "function_definition"
+                && in_class_body(node)
+                && node.child_by_field_name("type").is_none()
+                && node
+                    .child_by_field_name("declarator")
+                    .is_some_and(|declarator| {
+                        declarator_name(declarator).kind() != "operator_cast"
+                    }) =>
+        {
+            SymbolKind::Constructor
+        }
         SymbolKind::Function
             if enclosing.is_some_and(|container| {
                 container.holds_members() && !container.is_namespace_like()
@@ -3357,6 +3372,9 @@ public:
     U make();
     friend void befriended();
     typedef int Id;
+    C(const C&) = default;
+    virtual ~C() = default;
+    void inline_method() {}
 };
 
 C::operator bool() const { return true; }
@@ -3416,6 +3434,9 @@ void g() {
                 "constructor:C/C",
                 "constructor:C/C",
                 "constructor:C/~C",
+                "constructor:C/C",
+                "constructor:C/~C",
+                "method:C/inline_method",
                 "method:C/m",
                 "method:C/at",
                 "method:C/name",
