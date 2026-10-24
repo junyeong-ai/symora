@@ -2360,10 +2360,12 @@ const TYPESCRIPT_QUERY: &str = r#"
 (export_statement (variable_declaration (variable_declarator) @symbol))
 (ambient_declaration (lexical_declaration (variable_declarator) @symbol))
 (ambient_declaration (variable_declaration (variable_declarator) @symbol))
-([(internal_module) (module)]
-  body: (statement_block (lexical_declaration (variable_declarator) @symbol)))
-([(internal_module) (module)]
-  body: (statement_block (variable_declaration (variable_declarator) @symbol)))
+(internal_module body: (statement_block
+  [(lexical_declaration (variable_declarator) @symbol)
+   (variable_declaration (variable_declarator) @symbol)]))
+(module body: (statement_block
+  [(lexical_declaration (variable_declarator) @symbol)
+   (variable_declaration (variable_declarator) @symbol)]))
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
@@ -5199,6 +5201,19 @@ function outer() {
     for (let i = 0; i < 10; i++) {}
 }
 "#;
+        let namespaced = "namespace N {\n  const inN = 1;\n  let mutN = 2;\n}\n\
+                          declare module \"m\" {\n  const inM: number;\n}\n";
+        let symbols = extractor.extract(Path::new("a.ts"), namespaced, Language::TypeScript);
+        let paths: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}:{}", s.kind, s.name_path.as_deref().unwrap_or(&s.name)))
+            .collect();
+        for declared in ["constant:inN", "variable:mutN", "constant:inM"] {
+            assert!(
+                paths.iter().any(|path| path == declared),
+                "{declared} in {paths:?}"
+            );
+        }
         for language in [Language::TypeScript, Language::JavaScript] {
             let symbols = extractor.extract(Path::new("a"), content, language);
             let kind = |name: &str| {
