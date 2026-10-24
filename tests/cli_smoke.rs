@@ -1561,6 +1561,39 @@ fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
     );
 }
 
+/// A path query reads the index as a path, as it reads the live answer: the
+/// store's substring match finds `Shape/area` for `E/a`, and neither the
+/// rows nor the count may keep it.
+#[test]
+fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("shapes.py"),
+        "class Shape:\n    def area(self):\n        return 1\n\n\
+         class E:\n    def a(self):\n        return 2\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.python]\ncommand = \"/nonexistent/pyright\"\n",
+    )
+    .unwrap();
+    let build = run_in(dir.path(), &["search", "index", "build"]);
+    assert!(build.status.success());
+
+    let answer = json_ok(dir.path(), &["search", "symbols", "E/a"]);
+    let paths: Vec<_> = answer["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name_path"].clone())
+        .collect();
+    assert_eq!(paths, ["E/a"], "{answer}");
+    assert_eq!(answer["count"], 1, "{answer}");
+}
+
 /// A decorator, an attribute, a Rust doc comment or a C++ template header is
 /// part of the declaration it heads, so deleting the declaration without a
 /// server takes those lines with it rather than leaving them on whatever
