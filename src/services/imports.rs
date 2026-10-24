@@ -38,6 +38,9 @@ enum Dialect {
     /// A path wrapped in quotes.
     Quoted,
     Dart,
+    /// A Scala import, which spells each path as its segments and can list
+    /// several paths and select several names under one.
+    ScalaImport,
 }
 
 pub struct ImportExtractor {
@@ -170,6 +173,7 @@ fn references_of(
     };
     match entry.dialect {
         Dialect::RustUse => use_tree_targets(path, source),
+        Dialect::ScalaImport => scala_import_targets(path, source),
         Dialect::Plain => vec![text_of(path, source).to_string()],
         Dialect::Quoted | Dialect::Dart => {
             if has_unhandled_string_syntax(path)
@@ -189,6 +193,45 @@ fn references_of(
             vec![unquote(text_of(path, source)).to_string()]
         }
     }
+}
+
+/// The modules a Scala import names: each path it lists (`import a.b, c.d`),
+/// each name its braces select under a path (`import a.b.{C, D => E}`), and
+/// the path itself where a wildcard or `given` takes what is in it.
+fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut path: Vec<&str> = Vec::new();
+    let mut cursor = import.walk();
+    for (at, child) in import.children(&mut cursor).enumerate() {
+        if child.is_named() && import.field_name_for_child(at as u32) == Some("path") {
+            path.push(text_of(child, source));
+            continue;
+        }
+        match child.kind() {
+            "," if !path.is_empty() => targets.push(path.join(".")),
+            "namespace_wildcard" => targets.push(path.join(".")),
+            "namespace_selectors" => {
+                let mut cursor = child.walk();
+                for selector in child.named_children(&mut cursor) {
+                    let name = match selector.kind() {
+                        "identifier" => Some(selector),
+                        "arrow_renamed_identifier" => selector.child_by_field_name("name"),
+                        _ => None,
+                    };
+                    targets.push(match name {
+                        Some(name) => format!("{}.{}", path.join("."), text_of(name, source)),
+                        None => path.join("."),
+                    });
+                }
+            }
+            _ => continue,
+        }
+        path.clear();
+    }
+    if !path.is_empty() {
+        targets.push(path.join("."));
+    }
+    targets
 }
 
 fn use_tree_targets(node: Node<'_>, source: &[u8]) -> Vec<String> {
@@ -360,8 +403,7 @@ const KOTLIN_QUERY: &str = r#"
 "#;
 
 const SCALA_QUERY: &str = r#"
-(import_declaration (stable_identifier) @path)
-(import_declaration (identifier) @path)
+(import_declaration) @path
 "#;
 
 const SWIFT_QUERY: &str = r#"
@@ -441,7 +483,7 @@ const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
         Language::Scala,
         || tree_sitter_scala::LANGUAGE.into(),
         SCALA_QUERY,
-        Dialect::Plain,
+        Dialect::ScalaImport,
     ),
     (
         Language::Swift,
@@ -595,6 +637,13 @@ mod tests {
         assert_eq!(
             extract("import com.acme.core.Thing\n", Language::Kotlin),
             vec!["com.acme.core.Thing"]
+        );
+        assert_eq!(
+            extract(
+                "import com.acme.core.Thing\nimport a.b.{C, D => E, given}, x.y._\n",
+                Language::Scala
+            ),
+            vec!["com.acme.core.Thing", "a.b.C", "a.b.D", "a.b", "x.y"]
         );
     }
 
