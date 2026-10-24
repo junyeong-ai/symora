@@ -2928,7 +2928,7 @@ fn lines_between_members_go_with_a_declaration_the_hunk_changes() {
         ),
         (
             java("\n    Svc() {\n    }\n", "// keep going"),
-            vec![("Svc", "modified")],
+            vec![("Svc", "added")],
         ),
         (
             java("\n    // no member here\n", "// keep going"),
