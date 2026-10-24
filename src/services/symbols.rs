@@ -1487,6 +1487,19 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
     }
 }
 
+/// The name of the type a Go struct embeds, which names the field: the type
+/// itself, the type a package qualifies, or the type a generic instantiates.
+fn embedded_type_name(embedded: Node) -> Option<Node> {
+    match embedded.kind() {
+        "type_identifier" => Some(embedded),
+        "qualified_type" => embedded.child_by_field_name("name"),
+        "generic_type" => embedded
+            .child_by_field_name("type")
+            .and_then(embedded_type_name),
+        _ => None,
+    }
+}
+
 /// The names a Swift `name` binds: an enum case's own, a pattern's bound
 /// identifier (`let x`), or each a tuple pattern binds (`let (x, (y, _))`).
 fn swift_bound_names(name: Node) -> Vec<Node> {
@@ -1849,24 +1862,33 @@ fn placed_kind(
 /// `outer` is written with rather than its body: its parameter list, or the
 /// type of what it declares. A type's own declaration holds its members
 /// there instead: its definition (Go's `type S struct { … }`) or its
-/// components (Java's `record R(int a)`). An alias names its type and holds
-/// only one it defines without a name of its own, which takes the alias's:
-/// C's `typedef struct S { … } T` holds neither `S` nor its members, and
-/// `typedef struct { … } T` holds the members of `T`.
+/// components (Java's `record R(int a)`). A record type a declaration
+/// defines in its type without a name of its own is the declaration's, so
+/// its members are too: `typedef struct { … } T` holds the members of `T`,
+/// and Go's `inner struct{ Z int }` holds `Z`. An unscoped enum's
+/// enumerators belong to the scope around it, and an alias only names any
+/// other type, so C's `typedef struct S { … } T` holds neither `S` nor its
+/// members.
 fn in_header_of(inner: Node, outer: Node) -> bool {
     let holds = |field| {
         outer
             .child_by_field_name(field)
             .is_some_and(|held| held.id() == inner.id())
     };
-    if !(holds("parameters") || holds("type")) {
+    if holds("type")
+        && inner.child_by_field_name("name").is_none()
+        && match inner.kind() {
+            "class_specifier" | "struct_specifier" | "union_specifier" => {
+                inner.child_by_field_name("body").is_some()
+            }
+            "struct_type" | "interface_type" => true,
+            _ => false,
+        }
+    {
         return false;
     }
-    if TYPE_ALIASES.contains(&outer.kind()) {
-        return inner.child_by_field_name("name").is_some()
-            || inner.child_by_field_name("body").is_none();
-    }
-    !node_kind(outer).holds_members()
+    (holds("parameters") || holds("type"))
+        && (TYPE_ALIASES.contains(&outer.kind()) || !node_kind(outer).holds_members())
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
@@ -2092,6 +2114,16 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if language == Language::Terraform {
         return hcl_declared_name(node);
     }
+    // An embedded Go field is named by its type, without the package that
+    // qualifies it (`pkg.Embedded` is field `Embedded`).
+    if language == Language::Go
+        && node.kind() == "field_declaration"
+        && node.child_by_field_name("name").is_none()
+    {
+        return node
+            .child_by_field_name("type")
+            .and_then(embedded_type_name);
+    }
     // A destructuring pattern is named by the names it binds alone, so one
     // binding none (`const {} = obj`) names nothing.
     if matches!(language, Language::TypeScript | Language::JavaScript)
@@ -2223,7 +2255,8 @@ fn node_kind(node: Node) -> SymbolKind {
         | "singleton_method"
         | "method_signature"
         | "abstract_method_signature"
-        | "protocol_function_declaration" => SymbolKind::Method,
+        | "protocol_function_declaration"
+        | "method_elem" => SymbolKind::Method,
 
         "constructor_signature"
         | "constructor_declaration"
@@ -2505,6 +2538,8 @@ const GO_QUERY: &str = r#"
 (type_declaration (type_spec) @symbol)
 (type_declaration (type_alias) @symbol)
 (type_spec (struct_type (field_declaration_list (field_declaration) @symbol)))
+(field_declaration type: (struct_type (field_declaration_list (field_declaration) @symbol)))
+(type_spec (interface_type (method_elem) @symbol))
 (source_file (const_declaration (const_spec) @symbol))
 (source_file (var_declaration (var_spec) @symbol))
 (source_file (var_declaration (var_spec_list (var_spec) @symbol)))
@@ -3057,6 +3092,15 @@ package m
 type Al = int
 type S struct{ F int }
 type I interface{ Do() }
+type J interface {
+	Run() error
+	io.Reader
+}
+type E struct {
+	pkg.Embedded
+	*Ptr
+	inner struct{ Z int }
+}
 
 const CX = 1
 var VY = 2
@@ -3077,6 +3121,14 @@ func (s *S) M() {}
                 "struct:S",
                 "field:S/F",
                 "interface:I",
+                "method:I/Do",
+                "interface:J",
+                "method:J/Run",
+                "struct:E",
+                "field:E/Embedded",
+                "field:E/Ptr",
+                "field:E/inner",
+                "field:inner/Z",
                 "constant:CX",
                 "variable:VY",
                 "variable:VG",
