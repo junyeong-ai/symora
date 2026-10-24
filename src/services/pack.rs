@@ -145,7 +145,7 @@ pub fn build_pack(
         }
     }
 
-    let graph = build_import_graph(&nodes, &declared_module_prefix(root));
+    let graph = build_import_graph(&nodes, &Manifests::read(root, &nodes));
     let personalization = personalization_vector(&nodes, focus);
     let ranks = page_rank(&graph.edges, &personalization, cfg);
     let fitted = fit_to_budget(
@@ -415,7 +415,7 @@ struct ImportGraph {
     rust_relative_imports_omitted: bool,
 }
 
-fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> ImportGraph {
+fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
     let mut exact = PathIndex::default();
     let mut suffixes = PathIndex::default();
     for node in nodes {
@@ -448,7 +448,7 @@ fn build_import_graph(nodes: &[Node], module_prefix: &[String]) -> ImportGraph {
         nodes,
         exact,
         suffixes,
-        module_prefix,
+        manifests,
     };
 
     let mut graph: Graph = BTreeMap::new();
@@ -484,6 +484,11 @@ enum Reference {
     Relative { up: usize, components: Vec<String> },
     /// An absolute module name, possibly qualified by its crate or package.
     Absolute(Vec<String>),
+    /// A Dart `package:` URI: a file under the named package's `lib`.
+    Package {
+        package: String,
+        components: Vec<String>,
+    },
 }
 
 impl Reference {
@@ -520,6 +525,22 @@ impl Reference {
                 }
             } else {
                 Self::Absolute(components)
+            };
+        }
+        if language == Language::Dart
+            && let Some((package, path)) = raw
+                .strip_prefix("package:")
+                .and_then(|uri| uri.split_once('/'))
+        {
+            let mut components = split_components(path);
+            if let Some(last) = components.last_mut()
+                && let Some(stem) = last.strip_suffix(".dart")
+            {
+                *last = stem.to_string();
+            }
+            return Self::Package {
+                package: package.to_string(),
+                components,
             };
         }
         let mut rest = raw;
@@ -602,7 +623,7 @@ struct ProjectIndex<'a> {
     nodes: &'a [Node],
     exact: PathIndex<'a>,
     suffixes: PathIndex<'a>,
-    module_prefix: &'a [String],
+    manifests: &'a Manifests,
 }
 
 impl ProjectIndex<'_> {
@@ -617,14 +638,31 @@ impl ProjectIndex<'_> {
                 };
                 let mut path = from.directory[..base].to_vec();
                 path.extend_from_slice(components);
-                self.at(&self.exact, &path, from.language)
+                self.at(
+                    &self.exact,
+                    &path,
+                    from.language,
+                    package_is_directory(from.language),
+                )
+            }
+            Reference::Package {
+                package,
+                components,
+            } => {
+                let Some(directory) = self.manifests.dart_packages.get(package) else {
+                    return Vec::new();
+                };
+                let mut path = directory.clone();
+                path.push("lib".to_string());
+                path.extend_from_slice(components);
+                self.at(&self.exact, &path, from.language, false)
             }
             Reference::Absolute(components) => {
                 // A declared module prefix is part of the reference but not
                 // part of the tree, so it is removed before matching rather
                 // than hunted for on disk.
                 let components = components
-                    .strip_prefix(self.module_prefix)
+                    .strip_prefix(self.manifests.go_module.as_slice())
                     .unwrap_or(components);
                 // `use a::b::Item` names a module and an item in one path;
                 // read it whole, then without the item.
@@ -633,11 +671,13 @@ impl ProjectIndex<'_> {
                     Language::Rust | Language::Java | Language::Kotlin | Language::Scala
                 )
                 .then(|| components.split_last().map_or(&[][..], |parts| parts.1));
-                for candidate in std::iter::once(components).chain(parent) {
+                for (attempt, candidate) in std::iter::once(components).chain(parent).enumerate() {
                     if candidate.is_empty() {
                         continue;
                     }
-                    let hit = self.at(&self.suffixes, candidate, from.language);
+                    let directories = package_is_directory(from.language)
+                        || (attempt == 0 && imports_a_package_by_its_directory(from.language));
+                    let hit = self.at(&self.suffixes, candidate, from.language, directories);
                     if !hit.is_empty() {
                         return hit;
                     }
@@ -647,8 +687,15 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// A module candidate, or every compatible file when the package is a directory.
-    fn at(&self, index: &PathIndex<'_>, path: &[String], language: Language) -> Vec<usize> {
+    /// A module candidate, or every compatible file in the directory it
+    /// names where `directories` lets a package be one.
+    fn at(
+        &self,
+        index: &PathIndex<'_>,
+        path: &[String],
+        language: Language,
+        directories: bool,
+    ) -> Vec<usize> {
         let compatible = |id: &&usize| {
             let target = self.nodes[**id].language;
             target == language
@@ -668,9 +715,7 @@ impl ProjectIndex<'_> {
                 _ => return Vec::new(),
             }
         }
-        if package_is_directory(language)
-            && let Some(files) = index.by_directory.get(path)
-        {
+        if directories && let Some(files) = index.by_directory.get(path) {
             return files.iter().filter(compatible).copied().collect();
         }
         Vec::new()
@@ -685,23 +730,85 @@ fn package_is_directory(language: Language) -> bool {
     matches!(language, Language::Go | Language::Terraform)
 }
 
-/// The module path a project's own imports are written against, when the
-/// language's build manifest declares one that does not exist on disk.
-///
-/// Go names its module in `go.mod`, and every intra-project import repeats
-/// that name in full because Go has no relative import form. Reading it is
-/// how the language itself resolves those imports; inferring it from the
-/// tree would be a guess about which leading components are real
-/// directories.
-fn declared_module_prefix(root: &Path) -> Vec<String> {
-    let Ok(go_mod) = std::fs::read_to_string(root.join("go.mod")) else {
-        return Vec::new();
-    };
-    go_mod
+/// Whether a language's import of a whole package (`import com.acme.util.*`)
+/// names the files under the directory the package path spells, as its
+/// import of a class names the file the class path spells. Only the
+/// reference as written can name a package: a class's import read without
+/// its class (`java.util` of `java.util.List`) is a guess at a module, not
+/// at a directory.
+fn imports_a_package_by_its_directory(language: Language) -> bool {
+    matches!(
+        language,
+        Language::Java | Language::Kotlin | Language::Scala
+    )
+}
+
+/// What a project's build manifests declare about the names its own imports
+/// are written against, where those names are not paths on disk. Reading them
+/// is how the languages themselves resolve such imports; inferring the names
+/// from the tree would be a guess about which components are real.
+#[derive(Default)]
+struct Manifests {
+    /// The module path `go.mod` declares. Go has no relative import form, so
+    /// every intra-project import repeats it in full.
+    go_module: Vec<String>,
+    /// The directory of each Dart package a `pubspec.yaml` names, by name: a
+    /// `package:name/x.dart` URI is that directory's `lib/x.dart`.
+    dart_packages: HashMap<String, Vec<String>>,
+}
+
+impl Manifests {
+    fn read(root: &Path, nodes: &[Node]) -> Self {
+        let go_module = std::fs::read_to_string(root.join("go.mod"))
+            .ok()
+            .and_then(|go_mod| {
+                go_mod
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("module "))
+                    .map(|path| split_components(path.trim()))
+            })
+            .unwrap_or_default();
+        let mut dart_packages = HashMap::new();
+        let mut seen = HashSet::new();
+        for node in nodes.iter().filter(|node| node.language == Language::Dart) {
+            for depth in (0..=node.directory.len()).rev() {
+                let directory = &node.directory[..depth];
+                if !seen.insert(directory.to_vec()) {
+                    break;
+                }
+                let pubspec = directory
+                    .iter()
+                    .fold(root.to_path_buf(), |path, part| path.join(part))
+                    .join("pubspec.yaml");
+                if let Some(name) = std::fs::read_to_string(pubspec)
+                    .ok()
+                    .and_then(|pubspec| dart_package_name(&pubspec))
+                {
+                    dart_packages.insert(name, directory.to_vec());
+                }
+            }
+        }
+        Self {
+            go_module,
+            dart_packages,
+        }
+    }
+}
+
+/// The package name a `pubspec.yaml` declares in its top-level `name` key.
+fn dart_package_name(pubspec: &str) -> Option<String> {
+    pubspec
         .lines()
-        .find_map(|line| line.trim().strip_prefix("module "))
-        .map(|path| split_components(path.trim()))
-        .unwrap_or_default()
+        .find_map(|line| line.strip_prefix("name:"))
+        .map(|name| {
+            name.split(" #")
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .trim_matches(['"', '\''])
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
 }
 
 // --- PageRank --------------------------------------------------------------
@@ -970,7 +1077,15 @@ mod tests {
     }
 
     fn edges_with(nodes: &[Node], id: usize, prefix: &[String]) -> Vec<String> {
-        build_import_graph(nodes, prefix)
+        let manifests = Manifests {
+            go_module: prefix.to_vec(),
+            ..Manifests::default()
+        };
+        edges_under(nodes, id, &manifests)
+    }
+
+    fn edges_under(nodes: &[Node], id: usize, manifests: &Manifests) -> Vec<String> {
+        build_import_graph(nodes, manifests)
             .edges
             .get(&id)
             .map(|dsts| {
@@ -1164,10 +1279,90 @@ mod tests {
         )
         .expect("write go.mod");
         assert_eq!(
-            declared_module_prefix(dir.path()),
+            Manifests::read(dir.path(), &[]).go_module,
             vec!["github.com", "acme", "widget"]
         );
-        assert!(declared_module_prefix(Path::new("/nonexistent")).is_empty());
+        assert!(
+            Manifests::read(Path::new("/nonexistent"), &[])
+                .go_module
+                .is_empty()
+        );
+    }
+
+    /// A Dart file imports its own package's files as `package:name/…`, which
+    /// names the `lib` directory of the package whose `pubspec.yaml` declares
+    /// that name, wherever in the project it sits.
+    #[test]
+    fn a_dart_package_uri_resolves_under_the_lib_of_the_package_its_pubspec_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (pubspec, name) in [
+            ("pubspec.yaml", "app"),
+            ("packages/core/pubspec.yaml", "core"),
+        ] {
+            let path = dir.path().join(pubspec);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+            std::fs::write(
+                path,
+                format!("name: {name} # the package\nversion: 1.0.0\n"),
+            )
+            .expect("write pubspec");
+        }
+        let nodes = vec![
+            node_in(
+                0,
+                "lib/main.dart",
+                "import 'package:app/src/a.dart';\nimport 'package:core/model.dart';\n\
+                 import 'package:flutter/material.dart';\n",
+                Language::Dart,
+            ),
+            node_in(1, "lib/src/a.dart", "", Language::Dart),
+            node_in(2, "packages/core/lib/model.dart", "", Language::Dart),
+            node_in(3, "packages/core/lib/src/a.dart", "", Language::Dart),
+        ];
+        let manifests = Manifests::read(dir.path(), &nodes);
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            vec!["lib/src/a.dart", "packages/core/lib/model.dart"]
+        );
+        assert_eq!(
+            dart_package_name("  name: nested\nname: \"quoted\"\n"),
+            Some("quoted".into())
+        );
+    }
+
+    /// A Java package is the directory its path spells, so importing all of
+    /// one names each file there; a class's import read without its class
+    /// names no directory.
+    #[test]
+    fn a_jvm_wildcard_import_names_the_files_of_its_package() {
+        let nodes = vec![
+            node_in(
+                0,
+                "src/main/java/com/acme/app/Main.java",
+                "package com.acme.app;\nimport com.acme.util.*;\nimport java.util.List;\n",
+                Language::Java,
+            ),
+            node_in(
+                1,
+                "src/main/java/com/acme/util/Strings.java",
+                "",
+                Language::Java,
+            ),
+            node_in(
+                2,
+                "src/main/java/com/acme/util/Numbers.java",
+                "",
+                Language::Java,
+            ),
+            node_in(3, "src/main/java/util/Local.java", "", Language::Java),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 0),
+            vec![
+                "src/main/java/com/acme/util/Strings.java",
+                "src/main/java/com/acme/util/Numbers.java"
+            ]
+        );
     }
 
     #[test]
@@ -1292,7 +1487,7 @@ mod tests {
                 node(3, "src/known.rs", ""),
                 node(4, "src/crate.rs", ""),
             ];
-            let graph = build_import_graph(&nodes, &[]);
+            let graph = build_import_graph(&nodes, &Manifests::default());
             assert!(graph.rust_relative_imports_omitted, "{file}");
             assert_eq!(graph.edges[&0], vec![3], "{file}");
         }
@@ -1561,7 +1756,7 @@ mod tests {
     fn import_graph_links_use_to_target() {
         let a = node(0, "src/a.rs", "use crate::b;\npub fn a() {}\n");
         let b = node(1, "src/b.rs", "pub fn b() {}\n");
-        let graph = build_import_graph(&[a, b], &[]);
+        let graph = build_import_graph(&[a, b], &Manifests::default());
         assert!(graph.edges[&0].contains(&1));
         assert!(graph.edges[&1].is_empty());
         assert!(!graph.rust_relative_imports_omitted);

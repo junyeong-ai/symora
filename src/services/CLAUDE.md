@@ -40,7 +40,7 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 
 `services/imports.rs` reads a file's module references through a tree-sitter query per language, and `pack` builds its graph from those. A reference is only a reference where the grammar says one is: a Go constant holding a package path, an import written inside a comment, and a doc example are all text that scanning lines would have taken for structure, and PageRank amplifies whatever structure it is handed. Adding a language is one query plus the fixture that proves what it captures, every pattern matching a form the fixture writes — never a new line rule.
 
-Filesystem-relative references resolve against exact project paths. Rust module-relative references require ownership information and are omitted with a coverage hint. Preserve literal quote characters and whitespace after removing the syntax delimiter once; omit string forms whose semantic value is not implemented rather than treating their spelling as a file name.
+Filesystem-relative references resolve against exact project paths. A name a build manifest declares (`go.mod`'s module, a `pubspec.yaml`'s package) resolves through that manifest (`Manifests` in `pack.rs`), never through a guess at which tree components are real. Rust module-relative references require ownership information and are omitted with a coverage hint. Preserve literal quote characters and whitespace after removing the syntax delimiter once; omit string forms whose semantic value is not implemented rather than treating their spelling as a file name.
 
 ## Service abstractions: LSP and Store
 
