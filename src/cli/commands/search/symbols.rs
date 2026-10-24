@@ -95,6 +95,8 @@ impl<'a> SymbolSearch<'a> {
     fn rerun(&self) -> SymbolRerun<'a> {
         SymbolRerun {
             query: self.query,
+            language: self.language,
+            kind: self.kind,
             within: self.within,
             source: self.source,
         }
@@ -1805,11 +1807,13 @@ mod tests {
         )
     }
 
-    /// A follow-up re-runs the search it follows, so one that asked for
-    /// source still asks for it.
+    /// A follow-up re-runs the search it follows: the same kind, language and
+    /// source, changed only where its remedy is about one of them, as a
+    /// never-searched language is about the language.
     #[test]
-    fn a_follow_up_asks_for_the_source_its_search_asked_for() {
+    fn a_follow_up_reruns_the_search_it_follows() {
         let search = SymbolSearch {
+            kind: Some(SymbolKind::Function),
             source: SymbolSource::Body,
             ..search("alpha", 2)
         };
@@ -1821,7 +1825,7 @@ mod tests {
             "{commands:?}"
         );
 
-        let shortfall = coverage_shortfall(
+        let unreached = coverage_shortfall(
             &[],
             LiveLookup::Ran {
                 failures: &[],
@@ -1831,10 +1835,27 @@ mod tests {
         assert_eq!(
             symbol_coverage_next_commands(
                 search.rerun(),
-                &shortfall,
+                &unreached,
                 DisclosureRoute::IndexConsulted
             ),
-            ["symora search symbols --lang go --body -- 'alpha'"]
+            ["symora search symbols --lang go --kind='function' --body -- 'alpha'"]
+        );
+
+        let search = SymbolSearch {
+            language: Some("rust"),
+            ..search
+        };
+        let failures = vec![server_failure(Language::Rust)];
+        assert_eq!(
+            symbol_coverage_next_commands(
+                search.rerun(),
+                &gaps(&failures, &[]),
+                DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced)
+            ),
+            [
+                "symora search symbols --lang='rust' --kind='function' --body -- 'alpha'",
+                "symora doctor rust"
+            ]
         );
     }
 
