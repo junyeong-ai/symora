@@ -1447,10 +1447,10 @@ fn pattern_previews_and_metadata_preserve_original_eof_and_line_endings() {
 
 /// A symbol found across the workspace takes its source from the same read
 /// `symbols <file>` answers from, so it has one whether or not the file's
-/// server answers, and its position from that read too, so a row from a file
-/// changed since the index build locates the source it carries. That row's
-/// old position cannot tell apart two declarations of one path, a property's
-/// getter and setter, so neither takes the other's source.
+/// server answers: the declaration of its path that holds its position, so a
+/// property's getter and setter each keep their own. A row from a file
+/// changed since the index build holds a position that no longer places a
+/// declaration, so it carries none and says why.
 #[test]
 fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1521,9 +1521,17 @@ fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
     .unwrap();
     let moved = json_ok(dir.path(), &[&query[..], &["--body"]].concat());
     assert_eq!(moved["stale"], true, "{moved}");
-    assert_eq!(moved["items"][0]["line"], 6, "{moved}");
+    assert_eq!(moved["items"][0]["line"], 2, "{moved}");
     assert_eq!(
-        moved["items"][0]["body"], "    def start(self):\n        return 2",
+        moved["items"][0]["body"],
+        serde_json::Value::Null,
+        "{moved}"
+    );
+    assert!(
+        moved["hints"][0]
+            .as_str()
+            .is_some_and(|hint| hint.starts_with("1 row(s) come from files changed")
+                && hint.contains("symora symbols <file> --body")),
         "{moved}"
     );
     let unpaired = json_ok(dir.path(), &accessors);

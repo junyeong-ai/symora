@@ -61,6 +61,15 @@ impl SymbolSource {
             (false, false) => Self::Location,
         }
     }
+
+    /// The option that asks a command for this source, with its leading space.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Self::Location => "",
+            Self::Signature => " --signature",
+            Self::Body => " --body",
+        }
+    }
 }
 
 impl SymbolOutput {
