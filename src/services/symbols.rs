@@ -140,14 +140,15 @@ impl SymbolExtractor {
             .map(|(language, grammar, query)| {
                 let grammar = grammar();
                 format!(
-                    "{}\u{1}{}\u{1}{:?}\u{1}{query}",
+                    "{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}",
                     language.lsp_id(),
                     grammar.abi_version(),
                     grammar.metadata().map(|metadata| (
                         metadata.major_version,
                         metadata.minor_version,
                         metadata.patch_version
-                    ))
+                    )),
+                    transparent_statements(*language).join(",")
                 )
             })
             .collect::<Vec<_>>()
@@ -1142,6 +1143,9 @@ fn extract_container_path(mut node: Node, content: &str, language: Language) -> 
     // qualify nothing and are skipped on the way up to that nearest type.
     while let Some(parent) = node.parent() {
         node = parent;
+        if transparent_statements(language).contains(&node.kind()) {
+            continue;
+        }
         if let Some((name, kind)) = extract_name_and_kind(node, content, language)
             && !name.is_empty()
             && !kind.is_namespace_like()
@@ -1150,6 +1154,30 @@ fn extract_container_path(mut node: Node, content: &str, language: Language) -> 
         }
     }
     None
+}
+
+/// Statements a grammar lets hold declarations without declaring anything,
+/// though an identifier can head one: a declaration under `if TYPE_CHECKING:`
+/// is keyed by what holds the `if`, as pyright keys it. Part of
+/// `extraction_digest`, so changing a list retires the builds it keyed
+/// otherwise.
+fn transparent_statements(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::Python => &[
+            "if_statement",
+            "elif_clause",
+            "else_clause",
+            "for_statement",
+            "while_statement",
+            "try_statement",
+            "except_clause",
+            "finally_clause",
+            "with_statement",
+            "match_statement",
+            "case_clause",
+        ],
+        _ => &[],
+    }
 }
 
 fn extract_name_and_kind(
@@ -3296,6 +3324,35 @@ type Alias = Foo;
                 "module leaked into name_path: {np:?}"
             );
         }
+    }
+
+    /// A statement that holds declarations without declaring anything keys
+    /// none of them, even where an identifier heads it: a definition under
+    /// `if TYPE_CHECKING:`, in a loop, a `with`, an `except` or a `case` body
+    /// is keyed by the class or function around it, as pyright keys it.
+    #[test]
+    fn a_python_statement_that_holds_a_declaration_does_not_key_it() {
+        let extractor = SymbolExtractor::new();
+        let src = "if TYPE_CHECKING:\n    def helper(): ...\n\nfor item in []:\n    def looped(): ...\n\n\
+                   class C:\n    if TYPE_CHECKING:\n        def m(self): ...\n\n\
+                   def outer():\n    with open('f') as handle:\n        def inner(): ...\n    \
+                   try:\n        pass\n    except ValueError as error:\n        def caught(): ...\n\n\
+                   match command:\n    case point:\n        def matched(): ...\n";
+        let symbols = extractor.extract(Path::new("m.py"), src, Language::Python);
+        let path = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} not extracted from {src:?}"))
+                .name_path
+                .clone()
+        };
+        assert_eq!(path("helper").as_deref(), Some("helper"));
+        assert_eq!(path("looped").as_deref(), Some("looped"));
+        assert_eq!(path("m").as_deref(), Some("C/m"));
+        assert_eq!(path("inner").as_deref(), Some("outer/inner"));
+        assert_eq!(path("caught").as_deref(), Some("outer/caught"));
+        assert_eq!(path("matched").as_deref(), Some("matched"));
     }
 
     /// A member of a type nested inside another type (and a namespace) is keyed
