@@ -181,7 +181,11 @@ fn references_of(
             {
                 return Vec::new();
             }
-            vec![unquote(text_of(path, source)).to_string()]
+            let text = text_of(path, source);
+            let raw = text
+                .strip_prefix('r')
+                .filter(|_| entry.dialect == Dialect::Dart);
+            vec![unquote(raw.unwrap_or(text)).to_string()]
         }
         Dialect::Terraform => {
             if captured("block_type").is_none_or(|block| text_of(block, source) != "module")
@@ -196,30 +200,44 @@ fn references_of(
 }
 
 /// The modules a Scala import names: each path it lists (`import a.b, c.d`),
-/// each name its braces select under a path (`import a.b.{C, D => E}`), and
-/// the path itself where a wildcard or `given` takes what is in it.
+/// each name its braces select under a path (`import a.b.{C, D => E}`), the
+/// name it renames (`import a.b.C as D`), and the path itself where a
+/// wildcard or `given` takes what is in it. A leading `_root_` names the root
+/// package rather than a package in it.
 fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut targets = Vec::new();
     let mut path: Vec<&str> = Vec::new();
     let mut cursor = import.walk();
     for (at, child) in import.children(&mut cursor).enumerate() {
         if child.is_named() && import.field_name_for_child(at as u32) == Some("path") {
-            path.push(text_of(child, source));
+            let segment = scala_name(child, source);
+            if !(path.is_empty() && segment == "_root_") {
+                path.push(segment);
+            }
             continue;
         }
         match child.kind() {
             "," if !path.is_empty() => targets.push(path.join(".")),
             "namespace_wildcard" => targets.push(path.join(".")),
+            "as_renamed_identifier" => {
+                targets.extend(
+                    child
+                        .child_by_field_name("name")
+                        .map(|name| format!("{}.{}", path.join("."), scala_name(name, source))),
+                );
+            }
             "namespace_selectors" => {
                 let mut cursor = child.walk();
                 for selector in child.named_children(&mut cursor) {
                     let name = match selector.kind() {
                         "identifier" => Some(selector),
-                        "arrow_renamed_identifier" => selector.child_by_field_name("name"),
+                        "arrow_renamed_identifier" | "as_renamed_identifier" => {
+                            selector.child_by_field_name("name")
+                        }
                         _ => None,
                     };
                     targets.push(match name {
-                        Some(name) => format!("{}.{}", path.join("."), text_of(name, source)),
+                        Some(name) => format!("{}.{}", path.join("."), scala_name(name, source)),
                         None => path.join("."),
                     });
                 }
@@ -232,6 +250,15 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
         targets.push(path.join("."));
     }
     targets
+}
+
+/// The name a Scala identifier spells: backticks quote a name, so `` `type` ``
+/// is `type`.
+fn scala_name<'a>(identifier: Node<'_>, source: &'a [u8]) -> &'a str {
+    let text = text_of(identifier, source);
+    text.strip_prefix('`')
+        .and_then(|name| name.strip_suffix('`'))
+        .unwrap_or(text)
 }
 
 fn use_tree_targets(node: Node<'_>, source: &[u8]) -> Vec<String> {
@@ -349,7 +376,10 @@ fn is_plain_dart_string(node: Node<'_>) -> bool {
     parts.next().is_none()
         && matches!(
             part.kind(),
-            "string_literal_single_quotes" | "string_literal_double_quotes"
+            "string_literal_single_quotes"
+                | "string_literal_double_quotes"
+                | "raw_string_literal_single_quotes"
+                | "raw_string_literal_double_quotes"
         )
 }
 
@@ -394,6 +424,13 @@ const JAVASCRIPT_QUERY: &str = r#"
 (export_statement source: (string) @path)
 "#;
 
+/// TypeScript also imports a CommonJS module by name: `import x = require("./m")`.
+const TYPESCRIPT_QUERY: &str = r#"
+(import_statement source: (string) @path)
+(import_statement (import_require_clause source: (string) @path))
+(export_statement source: (string) @path)
+"#;
+
 const JAVA_QUERY: &str = r#"
 (import_declaration (scoped_identifier) @path)
 "#;
@@ -418,7 +455,9 @@ const ELIXIR_QUERY: &str = r#"
 /// and the library a part belongs to through `part` and `part of`.
 const DART_QUERY: &str = r#"
 (import_specification uri: (configurable_uri (uri (string_literal) @path)))
+(import_specification uri: (configurable_uri (configuration_uri (uri (string_literal) @path))))
 (library_export uri: (configurable_uri (uri (string_literal) @path)))
+(library_export uri: (configurable_uri (configuration_uri (uri (string_literal) @path))))
 (part_directive uri: (uri (string_literal) @path))
 (part_of_directive (uri (string_literal) @path))
 "#;
@@ -468,7 +507,7 @@ const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
     (
         Language::TypeScript,
         || tree_sitter_typescript::LANGUAGE_TSX.into(),
-        JAVASCRIPT_QUERY,
+        TYPESCRIPT_QUERY,
         Dialect::Quoted,
     ),
     (
@@ -630,6 +669,13 @@ mod tests {
                 "{language:?}",
             );
         }
+        assert_eq!(
+            extract(
+                "import legacy = require(\"./legacy\");\n",
+                Language::TypeScript
+            ),
+            vec!["./legacy"]
+        );
     }
 
     #[test]
@@ -649,6 +695,14 @@ mod tests {
             ),
             vec!["com.acme.core.Thing", "a.b.C", "a.b.D", "a.b", "x.y"]
         );
+        assert_eq!(
+            extract(
+                "import a.b.C as D\nimport a.b.{E as F, G}\nimport _root_.scala.util\n\
+                 import a.`type`.H\n",
+                Language::Scala
+            ),
+            vec!["a.b.C", "a.b.E", "a.b.G", "scala.util", "a.type.H"]
+        );
     }
 
     #[test]
@@ -659,7 +713,11 @@ mod tests {
                  export 'e.dart' show X;\npart 'p.dart';\n",
                 Language::Dart
             ),
-            vec!["a.dart", "b.dart", "e.dart", "p.dart"]
+            vec!["a.dart", "b.dart", "c.dart", "e.dart", "p.dart"]
+        );
+        assert_eq!(
+            extract("import r'raw.dart';\n", Language::Dart),
+            vec!["raw.dart"]
         );
         assert_eq!(
             extract("part of 'lib.dart';\n", Language::Dart),
@@ -760,7 +818,6 @@ module "ordinary-percent" { source = "./100%" }
         for source in [
             "import './he\\u006cper.dart';\n",
             "import './${name}.dart';\n",
-            "import r'./helper.dart';\n",
             "import './he' 'lper.dart';\n",
             "import '''./helper.dart''';\n",
         ] {
@@ -800,7 +857,7 @@ module "ordinary-percent" { source = "./100%" }
         ),
         (
             Language::TypeScript,
-            "import a from \"./a\";\nexport * from \"./b\";\n",
+            "import a from \"./a\";\nimport r = require(\"./r\");\nexport * from \"./b\";\n",
         ),
         (Language::Java, "import java.util.List;\n"),
         (Language::Kotlin, "import kotlin.collections.List\n"),
@@ -809,7 +866,8 @@ module "ordinary-percent" { source = "./100%" }
         (Language::Elixir, "alias Foo.Bar\n"),
         (
             Language::Dart,
-            "import 'package:a/a.dart';\nexport 'e.dart' show X;\npart 'p.dart';\npart of 'lib.dart';\n",
+            "import 'package:a/a.dart' if (dart.library.io) 'io.dart';\n\
+             export 'e.dart' if (x) 'f.dart';\npart 'p.dart';\npart of 'lib.dart';\n",
         ),
         (
             Language::Terraform,
