@@ -466,8 +466,9 @@ impl SymbolExtractor {
     /// A recovered reading is not one of the text as written: where the whole
     /// file reads the signature only by recovering from a syntax error — a
     /// macro the grammar cannot expand, read as the type of what follows it —
-    /// the declaration's own text, as its range bounds it, is read alone, and
-    /// where that does not read as written either there is no signature.
+    /// the declaration's own text, as its range bounds it, is read alone
+    /// ([`code_opening`]), and where that does not read as written either
+    /// there is no signature.
     fn signature_at(
         &self,
         tree: &Tree,
@@ -486,9 +487,18 @@ impl SymbolExtractor {
         match read_signature(tree.root_node(), content, language, name, start, end)? {
             Read::AsWritten(text) => Some(text),
             Read::Recovered => {
-                let own = content.get(start..end.max(name))?;
-                let tree = self.parse(own, language)?;
-                match read_signature(tree.root_node(), own, language, name - start, 0, own.len())? {
+                let opening = code_opening(language);
+                let own = format!("{opening}{}", content.get(start..end.max(name))?);
+                let tree = self.parse(&own, language)?;
+                let at = opening.len();
+                match read_signature(
+                    tree.root_node(),
+                    &own,
+                    language,
+                    name - start + at,
+                    at,
+                    own.len(),
+                )? {
                     Read::AsWritten(text) => Some(text),
                     Read::Recovered => None,
                 }
@@ -1614,6 +1624,15 @@ fn body_opener(language: Language) -> Option<char> {
         Language::Scala => Some('='),
         Language::Terraform => Some('{'),
         _ => None,
+    }
+}
+
+/// What a file opens with before its grammar reads code: PHP's opening tag,
+/// without which a declaration's text reads as inline HTML.
+fn code_opening(language: Language) -> &'static str {
+    match language {
+        Language::PHP => "<?php ",
+        _ => "",
     }
 }
 
@@ -3969,6 +3988,20 @@ region     = "us-central1"
                 "<?php\nclass C {\n}\n",
                 "C",
                 Some("class C"),
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nclass C {\n    public function run(int $a = ) {\n        return $a;\n    }\n}\n",
+                "run",
+                None,
+            ),
+            (
+                "a.php",
+                Language::PHP,
+                "<?php\nclass Big extends Base implements {\n    public function a() {}\n}\n",
+                "Big",
+                None,
             ),
             (
                 "a.scala",
