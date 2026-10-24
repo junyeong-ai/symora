@@ -648,20 +648,35 @@ async fn execute_workspace_symbol_search(
         // the index is its authority here exactly as on the plain route — a
         // path-like query does not change what the index's holes cost.
         index_bounds = index_holes_bound(ctx, &page.unread_paths, &index_covered);
+        // The store matches a query as a substring of a name or path, so
+        // `E/A` finds `Shape/area`; the live side reads it as a path, and the
+        // index's rows are held to the same reading. A page cut short of its
+        // total can hold path matches past it, so what it counts is a floor.
+        let cut_short = page.rows.len() < page.total;
+        if cut_short {
+            index_bounds.push(LowerBound::IndexPageCapped);
+        }
+        let matched: Vec<SymbolSearchResult> = page
+            .rows
+            .into_iter()
+            .filter(|row| {
+                Symbol::path_matches(row.name_path.as_deref().unwrap_or(&row.name), query)
+            })
+            .collect();
         lower_bounds.extend(unmerged_overlap(
             live,
             Contribution {
-                found: page.total > 0,
-                cut_short: page.rows.len() < page.total,
+                found: !matched.is_empty(),
+                cut_short,
             },
         ));
-        count = count.max(page.total);
+        count = count.max(matched.len());
         // The merged output contains index rows, so the page's staleness
         // applies to it; the live workspace results are current by nature.
         stale_files = relative_stale_files(ctx, &page.stale_files);
         let mut placed = Vec::new();
         let mut unplaced = Vec::new();
-        for mut row in page.rows.into_iter().map(|r| index_result_output(r, ctx)) {
+        for mut row in matched.into_iter().map(|r| index_result_output(r, ctx)) {
             if is_stale_row(&row, &stale_files) {
                 // A stale row's position is from before its file changed, so
                 // the merge, which matches rows by position, may take it only
