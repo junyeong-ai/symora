@@ -1268,9 +1268,9 @@ fn syntax_keyword(node: Node, keyword: &str) -> bool {
 /// `export` statement (decorators on it included), a TypeScript `declare`, a
 /// `const`, `let` or `var` statement declaring it alone, a Python
 /// `decorated_definition`, a C++ `template` header or `extern "C"`, a Go
-/// `type`, `const` or `var` declaring it alone, and a Dart function, method
-/// or class member, which holds its annotations and body beside the
-/// signature the query reads.
+/// `type`, `const` or `var` declaring it alone outside a parenthesized
+/// group, and a Dart function, method or class member, which holds its
+/// annotations and body beside the signature the query reads.
 fn declaration_node(mut node: Node, language: Language) -> Node {
     while let Some(parent) = node.parent() {
         let holds = |field| {
@@ -1298,7 +1298,9 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
             (Language::Python, "decorated_definition") => holds("definition"),
             (Language::Cpp, "template_declaration") => true,
             (Language::Cpp, "linkage_specification") => holds("body"),
-            (Language::Go, "type_declaration" | "const_declaration" | "var_declaration") => alone(),
+            (Language::Go, "type_declaration" | "const_declaration" | "var_declaration") => {
+                alone() && child_of_kind(parent, "(").is_none()
+            }
             (Language::Dart, "function_declaration" | "method_declaration") => holds("signature"),
             (Language::Dart, "method_signature" | "class_member") => true,
             _ => false,
@@ -3674,13 +3676,14 @@ region     = "us-central1"
         let go = spans(
             "a.go",
             "package p\n\ntype Foo struct {\n\tA int\n}\n\ntype (\n\tB int\n\tC int\n)\n\
-             const X = 1\nvar y = 2\n",
+             const X = 1\nvar y = 2\nconst (\n\tZ = 3\n)\n",
             Language::Go,
         );
         assert_eq!(span(&go, "Foo"), ((3, 1), (5, 2)));
         assert_eq!(span(&go, "B"), ((8, 2), (8, 7)));
         assert_eq!(span(&go, "X"), ((11, 1), (11, 12)));
         assert_eq!(span(&go, "y"), ((12, 1), (12, 10)));
+        assert_eq!(span(&go, "Z"), ((14, 2), (14, 7)));
     }
 
     /// A constructor is a declaration of the type it constructs.
