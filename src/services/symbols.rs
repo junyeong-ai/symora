@@ -145,7 +145,7 @@ impl SymbolExtractor {
             .map(|(language, grammar, query)| {
                 let grammar = grammar();
                 format!(
-                    "{}\u{1}{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}",
+                    "{}\u{1}{}\u{1}{}\u{1}{:?}\u{1}{query}",
                     env!("CARGO_PKG_VERSION"),
                     language.lsp_id(),
                     grammar.abi_version(),
@@ -154,7 +154,6 @@ impl SymbolExtractor {
                         metadata.minor_version,
                         metadata.patch_version
                     )),
-                    body_opener(*language).map(String::from).unwrap_or_default()
                 )
             })
             .collect::<Vec<_>>()
@@ -709,10 +708,13 @@ fn read_signature(
     let mut node = named;
     let opens = loop {
         if let Some(body) = body_of(node, language).filter(|body| body.start_byte() > name) {
-            break body.start_byte();
+            break header_end(body, language);
         }
         if let Some(value) = value_opening(node, name) {
             break value.start_byte();
+        }
+        if let Some(close) = empty_body_close(node).filter(|close| close.start_byte() > name) {
+            break header_end(close, language);
         }
         if node.id() == declaration.id() {
             break declaration.end_byte();
@@ -724,10 +726,7 @@ fn read_signature(
         return Some(Read::Recovered);
     }
     let text = without_other_values(content, named, declaration, from, opens.max(from))?;
-    let opener = body_opener(language);
-    let text = text.trim_end_matches(|c: char| {
-        c.is_whitespace() || matches!(c, ';' | ',') || Some(c) == opener
-    });
+    let text = text.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ';' | ','));
     let text = text.trim_start();
     (!text.is_empty()).then(|| Read::AsWritten(text.to_string()))
 }
@@ -1707,16 +1706,35 @@ fn in_header_of(inner: Node, outer: Node) -> bool {
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
-/// outside the body node, so a signature ends before it: Python's `:`,
-/// Scala's `=` and an HCL block's `{`. Part of `extraction_digest`, so
-/// changing one retires the signatures a pack cache read otherwise.
-fn body_opener(language: Language) -> Option<char> {
+/// outside the body node: Python's `:`, Scala's and Ruby's `=` and an HCL
+/// block's `{`.
+fn body_opener(language: Language) -> Option<&'static str> {
     match language {
-        Language::Python => Some(':'),
-        Language::Scala => Some('='),
-        Language::Terraform => Some('{'),
+        Language::Python => Some(":"),
+        Language::Scala | Language::Ruby => Some("="),
+        Language::Terraform => Some("block_start"),
         _ => None,
     }
+}
+
+/// Where the header written before `next`, a body or the token closing an
+/// empty one, ends: at the end of what precedes it, past a comment between
+/// them and the token that opens the body ([`body_opener`]), so `def === =
+/// true` keeps its name. A syntax error the grammar set aside there is part
+/// of the header, which then reads only by recovering.
+fn header_end(next: Node, language: Language) -> usize {
+    let opener = body_opener(language);
+    std::iter::successors(next.prev_sibling(), Node::prev_sibling)
+        .find(|before| !(before.is_extra() && !before.has_error()) && Some(before.kind()) != opener)
+        .map_or(next.start_byte(), |before| before.end_byte())
+}
+
+/// The token closing the body of `node` where it declares one with nothing
+/// in it and the grammar leaves no node for it: the `end` of a Ruby or Lua
+/// definition (`def h; end`) and an HCL block's `}`.
+fn empty_body_close(node: Node) -> Option<Node> {
+    let last = node.child(node.child_count().checked_sub(1)?)?;
+    matches!(last.kind(), "end" | "block_end").then_some(last)
 }
 
 /// What a file opens with before its grammar reads code: PHP's opening tag,
@@ -4282,6 +4300,62 @@ region     = "us-central1"
                 "fun f(a: Int = 1, b: Int = 2) {}\n",
                 "f",
                 Some("fun f(a: Int = 1, b: Int = 2)"),
+            ),
+            (
+                "a.scala",
+                Language::Scala,
+                "object O {\n  def === = true\n}\n",
+                "===",
+                Some("def ==="),
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "class C\n  def self.make = new\nend\n",
+                "make",
+                Some("def self.make"),
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "class C\n  def ==(other) = true\nend\n",
+                "==",
+                Some("def ==(other)"),
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "class C\n  def h; end\nend\n",
+                "h",
+                Some("def h"),
+            ),
+            (
+                "a.lua",
+                Language::Lua,
+                "function M.noop() end\n",
+                "M.noop",
+                Some("function M.noop()"),
+            ),
+            (
+                "a.tf",
+                Language::Terraform,
+                "variable \"x\" {}\n",
+                "x",
+                Some("variable \"x\""),
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "def f(a):  # noqa: E501\n    pass\n",
+                "f",
+                Some("def f(a)"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "int f(int a) // does x\n{\n  return a;\n}\n",
+                "f",
+                Some("int f(int a)"),
             ),
         ];
         for (file, language, content, name, expected) in cases {
