@@ -61,6 +61,8 @@ File-scoped symbols carry a response-level `backend`: `document` is the language
 
 For JavaScript/TypeScript, an AST export wrapper establishes `true`; without one, only declaration forms that cannot themselves be exported establish `false`. Other declarations omit the field rather than treating the absence of a parsed wrapper as proof.
 
+Reference counts on `symbols --refs` and `diff-impact` rows (`refs`, `test_refs`, `prod_refs`) carry `refs_status`: `unavailable` when the query failed, so the counts are absent rather than zero, and `indexing_degraded` when it ran under degraded analysis, so they are lower bounds.
+
 Navigation location objects carry file, line, and column. Location analysis echoes a summary `target` with file and line, without a column. A local or parameter may be a `binding` even when the document-symbol tree omits it. `not_a_symbol` and `unavailable` are not resolved declarations. A member's zero references may still permit construction, dispatch, or structural conformance through its declaring type; a free function can also be reached through registration or reflection. Never label either unused from a static zero alone.
 
 `declared_symbols` on a packed file counts its AST-derived signatures and is present when the per-file cap or token budget omitted some. `context` shares `body_tokens` across target, callees, and types in that order. `body_omitted` names `token_budget` or `response_size` when that budget omitted a requested body. `bodies_included` counts complete attached bodies; an omitted body can mean exhausted budget, an unresolvable location, or a declaration without a body.

@@ -54,8 +54,8 @@ pub struct SymbolsArgs {
     #[arg(long)]
     pub structural: bool,
 
-    /// Count each listed declaration's references, and those of the members
-    /// a listed type holds
+    /// Count each listed declaration's references, other than a function's
+    /// parameters and locals; --depth 1 lists a type's members
     #[arg(long)]
     pub refs: bool,
 
