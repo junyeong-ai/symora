@@ -52,10 +52,11 @@ while True:
             "textDocumentSync": 1,
             "codeActionProvider": {"resolveProvider": True},
             "hoverProvider": True,
-            "renameProvider": {"prepareProvider": True}
+            "renameProvider": {"prepareProvider": True},
+            "workspaceSymbolProvider": mode == "ranked-symbols"
         }}
     elif method == "initialized":
-        if mode in ("unrelated-hover", "busy-rename"):
+        if mode in ("unrelated-hover", "busy-rename", "ranked-symbols"):
             server_status()
         elif mode in ("warning-rename", "error-rename"):
             server_status(health=mode.split("-")[0])
@@ -66,6 +67,15 @@ while True:
         }}
     elif method == "textDocument/documentSymbol":
         result = []
+    elif method == "workspace/symbol" and mode == "ranked-symbols":
+        # The test file's declaration first, as a server may list it.
+        result = [{
+            "name": "Go", "kind": 6, "containerName": "Svc",
+            "location": {"uri": path.as_uri(), "range": {
+                "start": {"line": 1, "character": 13},
+                "end": {"line": 1, "character": 15}
+            }}
+        } for path in (source.with_name("svc_test.go"), source)]
     elif method == "textDocument/hover" and mode == "unrelated-hover":
         result = {"contents": "Renamed helper documentation."}
     elif method == "textDocument/rename" and mode in (

@@ -3914,6 +3914,51 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
     }
 }
 
+/// A path query's live answer is cut to its limit after the ranking every
+/// symbol surface shares has ordered it, so the cut keeps the match the
+/// answer leads with, not the one the server happened to list first.
+#[test]
+#[cfg(unix)]
+fn a_live_path_query_cut_to_its_limit_keeps_the_match_the_ranking_leads_with() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("workspace-symbol protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let declaration = "package main\nfunc (s Svc) Go() {}\n";
+    std::fs::write(root.path().join("svc.go"), declaration).unwrap();
+    std::fs::write(root.path().join("svc_test.go"), declaration).unwrap();
+    std::fs::write(root.path().join("go.mod"), "module example.com/fixture\n").unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"go": {
+        "command": "python3",
+        "args": [server, root.path().canonicalize().unwrap().join("svc.go"), "ranked-symbols"]
+    }}}});
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let output = symora()
+        .args(["search", "symbols", "Svc/Go", "--workspace-symbols"])
+        .args(["--limit", "1", "--format", "compact"])
+        .current_dir(root.path())
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    let answer: serde_json::Value = common::parse_response(&output.stdout).unwrap();
+    assert!(output.status.success(), "{answer}");
+    assert_eq!(answer["count"], 2, "{answer}");
+    assert_eq!(answer["items"][0]["file"], "svc.go", "{answer}");
+}
+
 /// A Go project served by the scripted rename server in `mode`, which never
 /// confirms workspace readiness: `main.go` declares and calls `abc`, and
 /// `other.go` calls it too.
