@@ -747,14 +747,21 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 
 /// The node holding a declaration's body, if `node` declares one: its
 /// `body`, where a grammar names a type's or a function's body otherwise
-/// ([`type_body`]), a function value's body (`const f = () => {}`), or the
-/// body of the declaration a wrapper holds (`export`, a decorated definition).
+/// ([`type_body`]) or a property's accessors, observers or delegate, the
+/// token opening the rules of a `macro_rules!`, a function value's body
+/// (`const f = () => {}`), or the body of the declaration a wrapper holds
+/// (`export`, a decorated definition).
 fn body_of(node: Node, language: Language) -> Option<Node> {
+    let held_as = |kinds: &[&str]| kinds.iter().find_map(|kind| child_of_kind(node, kind));
     node.child_by_field_name("body")
-        .or_else(|| {
-            if language == Language::Kotlin {
-                child_of_kind(node, "function_body").or_else(|| type_body(node, language))
-            } else if language == Language::Go {
+        .or_else(|| match language {
+            Language::Kotlin => {
+                held_as(&["function_body", "getter", "setter", "property_delegate"])
+                    .or_else(|| type_body(node, language))
+            }
+            Language::Swift => held_as(&["computed_property", "willset_didset_block"])
+                .or_else(|| type_body(node, language)),
+            Language::Go => {
                 let literal = node.child_by_field_name("type")?;
                 if !matches!(literal.kind(), "struct_type" | "interface_type") {
                     return None;
@@ -763,9 +770,11 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
                 literal
                     .children(&mut cursor)
                     .find(|child| matches!(child.kind(), "{" | "field_declaration_list"))
-            } else {
-                type_body(node, language)
             }
+            Language::Rust if node.kind() == "macro_definition" => {
+                node.child_by_field_name("name")?.next_sibling()
+            }
+            _ => type_body(node, language),
         })
         .or_else(|| {
             ["value", "right"]
@@ -4357,6 +4366,41 @@ region     = "us-central1"
                 "f",
                 Some("int f(int a)"),
             ),
+            (
+                "a.swift",
+                Language::Swift,
+                "struct V {\n  var body: String {\n    \"BODY\"\n  }\n}\n",
+                "body",
+                Some("var body: String"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "struct V {\n  var o: Int {\n    didSet {}\n  }\n}\n",
+                "o",
+                Some("var o: Int"),
+            ),
+            (
+                "a.kt",
+                Language::Kotlin,
+                "class K {\n  val q: Int get() = 6\n}\n",
+                "q",
+                Some("val q: Int"),
+            ),
+            (
+                "a.kt",
+                Language::Kotlin,
+                "class K {\n  val x: Int by lazy { 1 }\n}\n",
+                "x",
+                Some("val x: Int"),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                "macro_rules! m {\n    () => {};\n}\n",
+                "m",
+                Some("macro_rules! m"),
+            ),
         ];
         for (file, language, content, name, expected) in cases {
             assert_eq!(
@@ -4467,6 +4511,14 @@ region     = "us-central1"
                 "global_b",
                 (1, 19, 1, 1, 1, 31),
                 Some("int global_a, global_b"),
+            ),
+            (
+                "s.swift",
+                Language::Swift,
+                "struct V {\n  subscript(i: Int) -> Int {\n    return i\n  }\n}\n",
+                "subscript(_:)",
+                (2, 3, 2, 3, 4, 4),
+                Some("subscript(i: Int) -> Int"),
             ),
         ];
         for (
