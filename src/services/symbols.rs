@@ -875,9 +875,9 @@ fn value_opening(node: Node, name: usize) -> Option<Node> {
 
 /// The bytes an `=` gives a value over, from the end of what it follows to the
 /// end of the value, if `opening` is one a value follows: the `=` that ends
-/// C++'s `operator=` gives none.
+/// C++'s `operator=` gives none. Go's `:=` and Ruby's `||=` give one too.
 fn given_value(opening: Node) -> Option<(usize, usize)> {
-    if opening.is_named() || !matches!(opening.kind(), "=" | ":=") {
+    if opening.is_named() || !matches!(opening.kind(), "=" | ":=" | "||=") {
         return None;
     }
     let value = std::iter::successors(opening.next_sibling(), Node::next_sibling)
@@ -1602,11 +1602,13 @@ fn destructured(target: Node) -> Vec<Node> {
 }
 
 /// Whether an assignment's target is a name it declares, rather than an
-/// attribute, a subscript or a Ruby instance variable it assigns to.
+/// attribute, a subscript or a Ruby instance variable it assigns to: an
+/// instance variable belongs to whichever object runs the assignment, while
+/// a class variable belongs to the class whose body binds it.
 fn binds_a_name(target: Node, language: Language) -> bool {
     match language {
         Language::Python => target.kind() == "identifier",
-        Language::Ruby => matches!(target.kind(), "constant" | "identifier"),
+        Language::Ruby => matches!(target.kind(), "constant" | "identifier" | "class_variable"),
         _ => false,
     }
 }
@@ -2202,7 +2204,9 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     }
     // An assignment declares the names its targets bind and nothing else:
     // `obj.attr = value` declares neither `obj` nor `value`.
-    if matches!(language, Language::Python | Language::Ruby) && node.kind() == "assignment" {
+    if matches!(language, Language::Python | Language::Ruby)
+        && matches!(node.kind(), "assignment" | "operator_assignment")
+    {
         return declared_names(node, language).into_iter().next();
     }
     if node.kind() == "type_alias_statement" {
@@ -2427,8 +2431,9 @@ fn node_kind(node: Node) -> SymbolKind {
         "variable_declarator" => declarator_kind(node),
 
         // Python states a named value with a bare binding: no keyword separates
-        // a constant from a variable, so nothing structural does either.
-        "assignment" => SymbolKind::Variable,
+        // a constant from a variable, so nothing structural does either. Ruby's
+        // `||=` binds a name that is not yet bound.
+        "assignment" | "operator_assignment" => SymbolKind::Variable,
 
         "property_declaration"
         | "public_field_definition"
@@ -2803,9 +2808,9 @@ const RUBY_QUERY: &str = r#"
 (class) @symbol
 (method) @symbol
 (singleton_method) @symbol
-(program (assignment) @symbol)
-(module (body_statement (assignment) @symbol))
-(class (body_statement (assignment) @symbol))
+(program [(assignment) (operator_assignment operator: "||=")] @symbol)
+(module (body_statement [(assignment) (operator_assignment operator: "||=")] @symbol))
+(class (body_statement [(assignment) (operator_assignment operator: "||=")] @symbol))
 "#;
 
 const BASH_QUERY: &str = r#"
@@ -3740,9 +3745,13 @@ obj.attr = value
 
 module M
   IN_MODULE = 2
+  CACHE ||= {}
 
   class C
     IN_CLASS = 3
+    @@count = 0
+    @@count += 1
+    @registry = {}
 
     def m; end
     def self.cm; end
@@ -3753,8 +3762,10 @@ end
                 "variable:TOP_CONST",
                 "module:M",
                 "variable:IN_MODULE",
+                "variable:CACHE",
                 "class:C",
                 "variable:C/IN_CLASS",
+                "variable:C/@@count",
                 "method:C/m",
                 "method:C/cm",
             ],
@@ -4840,6 +4851,13 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "class C\n  LIMIT ||= compute(10)\nend\n",
+                "LIMIT",
+                Some("LIMIT"),
             ),
             (
                 "a.dart",
