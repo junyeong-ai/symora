@@ -160,7 +160,7 @@ pub fn build_pack(
     let mut unsupported_languages: Vec<Language> = nodes
         .iter()
         .map(|node| node.language)
-        .filter(|language| !crate::services::store::SymbolExtractor::is_supported(*language))
+        .filter(|language| !crate::services::symbols::SymbolExtractor::is_supported(*language))
         .collect();
     unsupported_languages.sort_by_key(|language| language.lsp_id());
     unsupported_languages.dedup();
@@ -913,7 +913,7 @@ fn node_signatures(
 /// holding a capped list would answer a later request with an earlier one's
 /// shape.
 fn signatures_from(source: &str, language: Language) -> Vec<PackedSymbol> {
-    crate::services::store::SymbolExtractor::shared()
+    crate::services::symbols::SymbolExtractor::shared()
         .extract_signatures(Path::new(""), source, language)
         .into_iter()
         .filter(|(symbol, _)| {

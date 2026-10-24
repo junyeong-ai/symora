@@ -139,7 +139,7 @@ fn by_consequence(shortfall: &[Uncovered]) -> Vec<&Uncovered> {
     let mut ordered: Vec<&Uncovered> = shortfall.iter().collect();
     ordered.sort_by_key(|gap| {
         let index_cures = gap.reason == CoverageReason::NotConsulted
-            && crate::services::store::SymbolExtractor::is_supported(gap.language);
+            && crate::services::symbols::SymbolExtractor::is_supported(gap.language);
         (!gap.lookup_failed(), !index_cures)
     });
     ordered
@@ -450,7 +450,7 @@ enum UnconsultedIndex {
 
 impl UnconsultedIndex {
     fn of(language: Language, route: DisclosureRoute) -> Self {
-        if !crate::services::store::SymbolExtractor::is_supported(language) {
+        if !crate::services::symbols::SymbolExtractor::is_supported(language) {
             Self::NoExtractor
         } else if matches!(
             route,
@@ -552,7 +552,7 @@ pub fn symbol_coverage_next_commands(
         DisclosureRoute::WorkspaceOnly(
             WorkspaceSearchRoute::IndexNotBuilt | WorkspaceSearchRoute::PathQuery,
         ) => {
-            if crate::services::store::SymbolExtractor::is_supported(gap.language) {
+            if crate::services::symbols::SymbolExtractor::is_supported(gap.language) {
                 vec![
                     "symora search index build".to_string(),
                     format!("symora doctor {lang}"),
@@ -862,7 +862,7 @@ pub fn unindexed_live_disclosure(
         .iter()
         .filter(|language| {
             !covered.contains(language)
-                && crate::services::store::SymbolExtractor::is_supported(**language)
+                && crate::services::symbols::SymbolExtractor::is_supported(**language)
         })
         .map(|language| language.lsp_id())
         .collect();
@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn an_unconsulted_language_is_cured_by_the_index_only_where_it_can_hold_it() {
-        use crate::services::store::SymbolExtractor;
+        use crate::services::symbols::SymbolExtractor;
 
         let gap = |language| {
             [Uncovered::not_reached(

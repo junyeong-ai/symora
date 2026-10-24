@@ -13,7 +13,7 @@ use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{SymbolBackend, declared_in};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol, SymbolKind};
-use crate::services::store::{SymbolExtractor, TypeHeaders};
+use crate::services::symbols::{SymbolExtractor, TypeHeaders};
 
 mod git;
 

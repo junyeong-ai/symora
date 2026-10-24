@@ -15,9 +15,10 @@ struct LanguageEntry {
     query: Query,
 }
 
-/// Tree-sitter symbol extraction for the indexed store. One registry maps
-/// each supported language to its parser and compiled query; adding a
-/// language is a single `register` call.
+/// Tree-sitter declaration extraction: the index's symbol rows, and the
+/// grammar's answer wherever a language server does not read a file. One
+/// registry maps each supported language to its parser and compiled query;
+/// adding a language is a single `register` call.
 pub struct SymbolExtractor {
     languages: HashMap<Language, LanguageEntry>,
 }

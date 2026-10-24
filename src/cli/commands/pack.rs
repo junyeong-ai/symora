@@ -249,7 +249,7 @@ fn render_markdown(
             ));
         }
         if file.symbols.is_empty() {
-            if crate::services::store::SymbolExtractor::is_supported(file.language) {
+            if crate::services::symbols::SymbolExtractor::is_supported(file.language) {
                 out.push_str("_(no extractable symbols)_\n\n");
             } else {
                 out.push_str(

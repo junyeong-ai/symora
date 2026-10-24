@@ -2,7 +2,7 @@
 //! as a flat answer (see [`symbols_over`]).
 
 use crate::models::symbol::{Symbol, SymbolKind};
-use crate::services::store::TypeHeaders;
+use crate::services::symbols::TypeHeaders;
 
 /// Whether a symbol's declared range covers a position. The one reading of
 /// containment every navigator here shares, so two of them can never disagree
@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn a_type_parameter_owns_no_line_of_its_types_header() {
         use crate::models::symbol::Language;
-        use crate::services::store::SymbolExtractor;
+        use crate::services::symbols::SymbolExtractor;
         use std::path::{Path, PathBuf};
 
         let at = |name: &str, kind, line, column, end| {

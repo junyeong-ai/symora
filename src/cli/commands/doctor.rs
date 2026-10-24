@@ -15,7 +15,7 @@ use crate::infra::lsp::configuration::ServerConfiguration;
 use crate::infra::lsp::health::serves_workspace;
 use crate::infra::lsp::servers::{self, Platform, ServerSource, check_all_servers};
 use crate::models::symbol::Language;
-use crate::services::store::SymbolExtractor;
+use crate::services::symbols::SymbolExtractor;
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {

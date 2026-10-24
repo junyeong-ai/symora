@@ -505,7 +505,7 @@ impl LocationAnalysis {
         }
         let target = self.target()?;
         let content = std::fs::read_to_string(&self.anchor.file).ok()?;
-        crate::services::store::SymbolExtractor::shared().declaration_visibility(
+        crate::services::symbols::SymbolExtractor::shared().declaration_visibility(
             &self.anchor.file,
             &content,
             self.language,

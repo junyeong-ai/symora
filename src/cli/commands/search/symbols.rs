@@ -1015,7 +1015,7 @@ fn narrowed_live_answer(
     let indexable = buildable
         && languages
             .iter()
-            .all(|language| crate::services::store::SymbolExtractor::is_supported(*language));
+            .all(|language| crate::services::symbols::SymbolExtractor::is_supported(*language));
     (!languages.is_empty()).then_some(LowerBound::LiveAnswerNarrowed {
         languages,
         indexable,
@@ -2013,7 +2013,7 @@ mod tests {
             .into_iter()
             .find(|language| {
                 language.is_code()
-                    && !crate::services::store::SymbolExtractor::is_supported(*language)
+                    && !crate::services::symbols::SymbolExtractor::is_supported(*language)
             })
             .expect("some code language has no extractor");
         assert!(unindexed_live_disclosure(unbuilt, &[extractorless], &[]).is_none());
@@ -2040,7 +2040,7 @@ mod tests {
     fn index_not_built_route_never_suggests_index_build_for_extractor_less_language() {
         let language = Language::all()
             .into_iter()
-            .find(|language| !crate::services::store::SymbolExtractor::is_supported(*language))
+            .find(|language| !crate::services::symbols::SymbolExtractor::is_supported(*language))
             .expect("a language with no extraction query");
         let failures = vec![server_failure(language)];
         let section = with_coverage_disclosure(
