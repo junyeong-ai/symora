@@ -505,9 +505,9 @@ pub fn literal_query(query: &str) -> Option<String> {
         return None;
     }
     let (_, name) = PathPattern::split_name(pattern.path);
-    let name = match name.starts_with('[') {
+    let name = match PathPattern::is_computed(name) {
         true => name,
-        false => name.split('[').next().unwrap_or(name),
+        false => PathPattern::bare_name(name),
     };
     let candidate = name.trim_matches('*').trim();
     (!candidate.is_empty()).then(|| candidate.to_string())
@@ -1177,9 +1177,6 @@ mod tests {
         assert!(symbol_coverage_hints(&mixed, not_built)[0].contains("for rust"));
     }
 
-    /// A server that is installed and fails is the gap to read first, in its
-    /// own words: languages with no server at all sort ahead of it by name,
-    /// and would otherwise fill the hints and pick the remedy.
     /// A content search is offered the name a symbol path ends in, as source
     /// spells it, and nothing where the path ends in no one name.
     #[test]
@@ -1194,10 +1191,14 @@ mod tests {
             literal_query("C/[Symbol.iterator]").as_deref(),
             Some("[Symbol.iterator]")
         );
+        assert_eq!(literal_query("Grid/[]=").as_deref(), Some("[]="));
         assert_eq!(literal_query("C/[key]"), None);
         assert_eq!(literal_query("*"), None);
     }
 
+    /// A server that is installed and fails is the gap to read first, in its
+    /// own words: languages with no server at all sort ahead of it by name,
+    /// and would otherwise fill the hints and pick the remedy.
     #[test]
     fn a_failed_server_leads_the_disclosure_and_says_why() {
         let failures = [

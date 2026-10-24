@@ -4134,6 +4134,57 @@ fn a_live_path_query_cut_to_its_limit_keeps_the_match_the_ranking_leads_with() {
     assert_eq!(answer["items"][0]["file"], "svc.go", "{answer}");
 }
 
+/// A computed member is listed by no workspace search, so a live search finds
+/// it through what encloses it, whatever kind the member is asked for as.
+#[cfg(unix)]
+#[test]
+fn a_computed_member_is_found_live_through_what_encloses_it() {
+    if !std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("computed-member protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("c.ts"),
+        "const key = \"k\";\nexport class C {\n  [key](): number {\n    return 1;\n  }\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"typescript": {
+        "command": "python3",
+        "args": [server, root.path().canonicalize().unwrap().join("c.ts"), "computed-members"]
+    }}}});
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    for kind in [None, Some("method")] {
+        let mut command = symora();
+        command.args(["search", "symbols", "--format", "compact"]);
+        if let Some(kind) = kind {
+            command.arg(format!("--kind={kind}"));
+        }
+        let output = command
+            .args(["--", "C/[key]"])
+            .current_dir(root.path())
+            .env("SYMORA_NO_DAEMON", "1")
+            .output()
+            .unwrap();
+        let answer: serde_json::Value = common::parse_response(&output.stdout).unwrap();
+        assert!(output.status.success(), "{answer}");
+        assert_eq!(answer["count"], 1, "{kind:?}: {answer}");
+        assert_eq!(answer["items"][0]["name_path"], "C/[key]", "{answer}");
+    }
+}
+
 /// A Go project served by the scripted rename server in `mode`, which never
 /// confirms workspace readiness: `main.go` declares and calls `abc`, and
 /// `other.go` calls it too.
