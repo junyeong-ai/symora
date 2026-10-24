@@ -2514,7 +2514,9 @@ const JAVA_QUERY: &str = r#"
 "#;
 
 // A local `val` is the same `property_declaration` a member is, so members
-// are matched where they are declared: in a type body or at file scope.
+// are matched where they are declared: in a type body or at file scope. A
+// body written on one line leaves its last member inside a syntax error, for
+// want of the separator the grammar expects before `}`.
 const KOTLIN_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_class_body (enum_entry) @symbol)
@@ -2524,6 +2526,8 @@ const KOTLIN_QUERY: &str = r#"
 (source_file [(property_declaration) (type_alias)] @symbol)
 (class_body (property_declaration) @symbol)
 (enum_class_body (property_declaration) @symbol)
+(class_body (ERROR (property_declaration) @symbol))
+(enum_class_body (ERROR (property_declaration) @symbol))
 "#;
 
 // A member declared in a class body is a `field_declaration`, and one a
@@ -3302,6 +3306,10 @@ class Widget {
 fun top() {}
 
 typealias Name = String
+
+class OneLine { val x = 1 }
+
+enum class Flag { ON; val z = 1 }
 "#,
             declares: &[
                 "class:I",
@@ -3319,6 +3327,11 @@ typealias Name = String
                 "method:Widget/render",
                 "function:top",
                 "class:Name",
+                "class:OneLine",
+                "property:OneLine/x",
+                "class:Flag",
+                "enum_member:Flag/ON",
+                "property:Flag/z",
             ],
         },
         DeclarationFixture {
