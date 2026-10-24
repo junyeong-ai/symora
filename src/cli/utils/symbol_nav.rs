@@ -195,12 +195,11 @@ pub fn holder_of(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> 
 /// ([`SymbolKind::holds_members`]) — with the others its declaration
 /// declares ([`declared_with`]). Any other symbol owns every line inside
 /// it, so a parameter or local listed inside a body (pyright and tsserver
-/// list them, and the grammar reads a Go `var` or a Kotlin `val` there) hands
-/// the line to the declaration it sits in. A container owns each of its lines
-/// that no member covers — its decorators or attributes, its name, bases and
-/// clauses, and what lies between and after its members — since an answer
-/// need not list every member: the grammar reads no Java constructor, and a
-/// Dart method's range ends with its signature. A line holding a container's
+/// list them) hands the line to the declaration it sits in. A container owns
+/// each of its lines that no member covers — its decorators or attributes,
+/// its name, bases and clauses, and what lies between and after its members
+/// — since an answer need not list every member: a server can leave one
+/// out, and a Dart method's range ends with its signature. A line holding a container's
 /// declaration and a member (a container written on one line) belongs to
 /// both. `headers` are where the file's types are declared outside their
 /// bodies, which tells a type's parameter from a type declared of its own.

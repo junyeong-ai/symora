@@ -906,8 +906,8 @@ mod tests {
     use std::path::PathBuf;
 
     /// A line a hunk adds between a type's members goes with the member the
-    /// hunk adds there, whether or not the built-in grammar reads the type's
-    /// members: it reads no TypeScript enum member, which a server lists.
+    /// hunk adds there, whichever members the answer lists: these are a
+    /// server's, whatever the built-in grammar reads.
     #[test]
     fn an_added_member_takes_the_lines_added_with_it_whatever_the_grammar_reads() {
         use crate::models::symbol::Location;

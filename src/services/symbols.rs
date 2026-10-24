@@ -590,9 +590,8 @@ impl TypeHeaders {
 }
 
 /// The child of a type's node that holds its members, whether or not the
-/// grammar reads any of them (it reads no TypeScript enum member and no Rust
-/// associated type): the grammar's `body`, or where a grammar gives it no
-/// field, a Go type's literal (`struct {…}`, `interface {…}`), a Kotlin
+/// grammar reads any of them: the grammar's `body`, or where a grammar gives
+/// it no field, a Go type's literal (`struct {…}`, `interface {…}`), a Kotlin
 /// class's or object's body and an HCL block's.
 fn type_body(node: Node, language: Language) -> Option<Node> {
     match language {
@@ -1222,9 +1221,18 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         Language::Go => fields("name"),
         // A Swift function's return type carries the `name` field too, so
         // only a property declaration or an enum case states several names
-        // in it (`case up, down`).
-        Language::Swift if matches!(node.kind(), "property_declaration" | "enum_entry") => {
+        // in it (`case up, down`). A property names a pattern, which binds
+        // its identifier after any `var` it is written with.
+        Language::Swift
+            if matches!(
+                node.kind(),
+                "property_declaration" | "protocol_property_declaration" | "enum_entry"
+            ) =>
+        {
             fields("name")
+                .into_iter()
+                .map(|name| name.child_by_field_name("bound_identifier").unwrap_or(name))
+                .collect()
         }
         Language::Java => fields("declarator")
             .into_iter()
@@ -1743,6 +1751,10 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if node.kind() == "property_promotion_parameter" {
         return child_of_kind(node.child_by_field_name("name")?, "name");
     }
+    // A Swift deinitializer is named by its keyword alone.
+    if node.kind() == "deinit_declaration" {
+        return child_of_kind(node, "deinit");
+    }
     // An assignment declares the names its targets bind and nothing else:
     // `obj.attr = value` declares neither `obj` nor `value`.
     if matches!(language, Language::Python | Language::Ruby) && node.kind() == "assignment" {
@@ -1773,6 +1785,10 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             .next()
             .or_else(|| node.child_by_field_name("name"))
             .or_else(|| node.child_by_field_name("property")),
+        Language::Swift => declared_names(node, language)
+            .into_iter()
+            .next()
+            .or_else(|| node.child_by_field_name("name")),
         _ => node
             .child_by_field_name("name")
             .or_else(|| declared_names(node, language).into_iter().next()),
@@ -1844,9 +1860,10 @@ fn node_kind(node: Node) -> SymbolKind {
         | "abstract_method_signature"
         | "protocol_function_declaration" => SymbolKind::Method,
 
-        "constructor_signature" | "constructor_declaration" | "init_declaration" => {
-            SymbolKind::Constructor
-        }
+        "constructor_signature"
+        | "constructor_declaration"
+        | "init_declaration"
+        | "deinit_declaration" => SymbolKind::Constructor,
 
         // Swift states a struct, an enum, an actor, a class and an extension
         // with one node, and its keyword says which.
@@ -1916,9 +1933,13 @@ fn node_kind(node: Node) -> SymbolKind {
         "type_spec" => go_type_kind(node),
 
         // A named type alias introduces a type, not a generic `<T>` param.
-        "type_item" | "type_alias_declaration" | "type_alias" | "type_alias_statement" => {
-            SymbolKind::Class
-        }
+        "type_item"
+        | "type_alias_declaration"
+        | "type_alias"
+        | "type_alias_statement"
+        | "typealias_declaration"
+        | "associated_type"
+        | "associatedtype_declaration" => SymbolKind::Class,
 
         "const_item" | "const_spec" | "val_definition" | "const_declaration" => {
             SymbolKind::Constant
@@ -1942,7 +1963,8 @@ fn node_kind(node: Node) -> SymbolKind {
         | "required_parameter"
         | "optional_parameter"
         | "class_parameter"
-        | "property_promotion_parameter" => SymbolKind::Property,
+        | "property_promotion_parameter"
+        | "protocol_property_declaration" => SymbolKind::Property,
         // A record's components: C# declares a property for each, Java a
         // field.
         "parameter" if is_record_component(node) => SymbolKind::Property,
@@ -2071,8 +2093,10 @@ const RUST_QUERY: &str = r#"
 (struct_item (field_declaration_list (field_declaration) @symbol))
 (union_item (field_declaration_list (field_declaration) @symbol))
 (enum_item (enum_variant_list (enum_variant) @symbol))
+(enum_variant (field_declaration_list (field_declaration) @symbol))
 (enum_item) @symbol
 (trait_item) @symbol
+(associated_type) @symbol
 (impl_item) @symbol
 (mod_item) @symbol
 (type_item) @symbol
@@ -2256,8 +2280,13 @@ const SWIFT_QUERY: &str = r#"
 (function_declaration) @symbol
 (protocol_function_declaration) @symbol
 (init_declaration) @symbol
+(deinit_declaration) @symbol
+(typealias_declaration) @symbol
+(associatedtype_declaration) @symbol
 (enum_class_body (enum_entry) @symbol)
 (class_body (property_declaration) @symbol)
+(enum_class_body (property_declaration) @symbol)
+(protocol_body (protocol_property_declaration) @symbol)
 (source_file (property_declaration) @symbol)
 "#;
 
@@ -2303,7 +2332,10 @@ const PHP_QUERY: &str = r#"
 (namespace_definition) @symbol
 (function_definition) @symbol
 (class_declaration) @symbol
-(class_declaration (declaration_list (const_declaration) @symbol))
+(program (const_declaration) @symbol)
+(namespace_definition body: (compound_statement (const_declaration) @symbol))
+(declaration_list (const_declaration) @symbol)
+(enum_declaration_list (const_declaration) @symbol)
 (enum_declaration) @symbol
 (enum_declaration_list (enum_case) @symbol)
 (interface_declaration) @symbol
@@ -2507,19 +2539,20 @@ mod tests {
             language: Language::Rust,
             path: "a.rs",
             source: r#"
-pub trait T { fn tm(&self); }
+pub trait T { type Out; fn tm(&self); }
 pub union U { a: u32 }
 macro_rules! mac { () => {} }
 pub type Al = u32;
 pub const CX: u32 = 1;
 pub static ST: u32 = 2;
-pub enum E { A }
+pub enum E { A, B { b_field: u32 } }
 pub mod inner { pub fn nested() {} }
 pub struct S { pub inner_field: u32 }
 impl S { pub fn m(&self) { let local = 1; } }
 "#,
             declares: &[
                 "interface:T",
+                "class:T/Out",
                 "function:T/tm",
                 "struct:U",
                 "function:mac",
@@ -2528,6 +2561,8 @@ impl S { pub fn m(&self) { let local = 1; } }
                 "variable:ST",
                 "enum:E",
                 "enum_member:E/A",
+                "enum_member:E/B",
+                "field:B/b_field",
                 "field:U/a",
                 "module:inner",
                 "function:nested",
@@ -2785,11 +2820,13 @@ namespace N {
 <?php
 namespace N;
 
-enum E { case X; }
+const TOP = 0;
 
-trait T { public function tm() {} }
+enum E { case X; const EX = 1; }
 
-interface I { public function im(); }
+trait T { const TX = 2; public function tm() {} }
+
+interface I { const IX = 3; public function im(); }
 
 abstract class A {
     const AX = 1;
@@ -2802,11 +2839,15 @@ function f() {}
 "#,
             declares: &[
                 "module:N",
+                "constant:TOP",
                 "enum:E",
                 "enum_member:E/X",
+                "constant:E/EX",
                 "interface:T",
+                "constant:T/TX",
                 "method:T/tm",
                 "interface:I",
+                "constant:I/IX",
                 "method:I/im",
                 "class:A",
                 "constant:A/AX",
@@ -2966,11 +3007,15 @@ local function helper() end
             path: "a.swift",
             source: r#"
 protocol P {
+    associatedtype Item
+    var required: Int { get }
     func pm()
 }
 
 class C {
     var p = 1
+    typealias Pair = (Int, Int)
+    deinit {}
     func cm() {}
 }
 
@@ -2991,7 +3036,11 @@ func top() {}
 "#,
             declares: &[
                 "interface:P",
+                "class:P/Item",
+                "property:P/required",
                 "method:P/pm",
+                "class:C/Pair",
+                "constructor:C/deinit",
                 "struct:Point",
                 "property:Point/x",
                 "object:Point",
@@ -4108,7 +4157,6 @@ region     = "us-central1"
         assert_eq!(headers("a.rs", rust, Language::Rust), [1, 2, 3]);
 
         for (path, content, language) in [
-            ("a.rs", "pub trait Tr {\n    type Out;\n}\n", Language::Rust),
             (
                 "a.ts",
                 "export enum Mode {\n  Fast,\n\n  Slow,\n}\n",
@@ -4118,11 +4166,6 @@ region     = "us-central1"
                 "a.cpp",
                 "enum class Mode {\n    Fast,\n    Slow,\n};\n",
                 Language::Cpp,
-            ),
-            (
-                "a.swift",
-                "protocol Keyed {\n    associatedtype Key: Hashable\n    var key: Key { get }\n}\n",
-                Language::Swift,
             ),
             (
                 "a.go",
@@ -4135,6 +4178,13 @@ region     = "us-central1"
         }
         let alias = "pub type Alias =\n    Vec<u32>;\n";
         assert_eq!(headers("a.rs", alias, Language::Rust), [1, 2]);
+        // An associated type is a type of its own, all header as an alias is,
+        // and a requirement beside it is a member of the body.
+        let associated = "pub trait Tr {\n    type Out;\n    fn run(&self);\n}\n";
+        assert_eq!(headers("a.rs", associated, Language::Rust), [1, 2]);
+        let keyed =
+            "protocol Keyed {\n    associatedtype Key: Hashable\n    var key: Key { get }\n}\n";
+        assert_eq!(headers("a.swift", keyed, Language::Swift), [1, 2]);
     }
 
     #[test]
