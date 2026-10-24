@@ -128,19 +128,22 @@ impl SymbolExtractor {
 
     /// What this binary's extraction would make of a file, as one value.
     ///
-    /// The index records it, because rows are only as good as the queries that
-    /// produced them: a file whose bytes have not changed is skipped by a
-    /// rebuild, so an index built by an earlier extractor would keep serving
-    /// its rows — an answer short by exactly the declaration forms the new one
-    /// was written to reach, with nothing to say so. Changing a query is
-    /// therefore enough to retire a build, and no version has to be remembered.
+    /// The index records it, because rows are only as good as the extractor
+    /// that produced them: a file whose bytes have not changed is skipped by a
+    /// rebuild, so an index built by another extractor would keep serving its
+    /// rows — an answer short by exactly the declaration forms the new one was
+    /// written to reach, with nothing to say so. The extractor is its grammars,
+    /// its queries and the code that reads their matches, which the release
+    /// stands for, so a build made by another release or under another query
+    /// is retired.
     pub fn extraction_digest() -> u64 {
         let described = EXTRACTORS
             .iter()
             .map(|(language, grammar, query)| {
                 let grammar = grammar();
                 format!(
-                    "{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}\u{1}{}",
+                    "{}\u{1}{}\u{1}{}\u{1}{:?}\u{1}{query}\u{1}{}\u{1}{}",
+                    env!("CARGO_PKG_VERSION"),
                     language.lsp_id(),
                     grammar.abi_version(),
                     grammar.metadata().map(|metadata| (

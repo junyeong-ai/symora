@@ -17,7 +17,7 @@ Whether the index may be answered from is the durable completion marker, read in
 
 The build scope recorded at index time is load-bearing, not bookkeeping: `content_languages` (the languages whose files the build indexed) and `indexed_languages` (those of them with a symbol extractor) derive from it, and search routes on those sets — a covered language is answered from the index alone, an uncovered one is the only reason to pay for a live workspace query or a scan of the tree. The unrestricted scope is every code language (`Language::is_code`), and a language's coverage is every extension it declares, never a hand-kept extension list that can drift from `Language::extensions`. Widening what a build claims to cover silently widens what search treats as authoritative.
 
-Pack cache rows identify both extractors, including the import algorithm/query version. Validate the producer on each read so overlapping binary versions cannot replay incompatible rows. A missing cached signature list means extraction was deferred; an empty list means extraction completed and found none. Preserve complete cached declarations across per-request caps.
+Pack cache rows identify both extractors by release, grammar, and query. Validate the producer on each read so overlapping binary versions cannot replay incompatible rows. A missing cached signature list means extraction was deferred; an empty list means extraction completed and found none. Preserve complete cached declarations across per-request caps.
 
 ## Test-versus-production classification
 
