@@ -9,9 +9,9 @@ use crate::cli::OutputContext;
 use crate::cli::OutputError;
 use crate::cli::response::disclosure::{
     DisclosureRoute, LiveLookup, LowerBound, Uncovered, WorkspaceSearchRoute, coverage_shortfall,
-    index_currency_disclosure, index_holes_bound, index_not_built_disclosure,
-    index_unavailable_disclosure, literal_query, ordered_bounds, path_flags, relative_stale_files,
-    unconfirmed_by_live_lookup, with_coverage_disclosure, workspace_route_for,
+    index_currency_disclosure, index_holes_bound, index_unavailable_disclosure, literal_query,
+    ordered_bounds, path_flags, relative_stale_files, unconfirmed_by_live_lookup,
+    unindexed_live_disclosure, with_coverage_disclosure, workspace_route_for,
 };
 use crate::cli::response::{CoverageGap, Section, SymbolSource};
 use crate::cli::symbol_discovery::{
@@ -21,7 +21,7 @@ use crate::cli::symbol_discovery::{
 use crate::cli::utils::{extract_signature, shell_arg};
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
 use crate::services::store::SymbolSearchResult;
@@ -245,6 +245,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
             let mut failures = Vec::new();
             let mut skipped = Vec::new();
             let mut workspace_indexing = None;
+            let mut degraded = Vec::new();
             let covered = page.covered.clone();
             let mut lower_bounds = ordered_bounds(
                 detected.shortfall(ctx),
@@ -260,7 +261,8 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                     collect_workspace_symbol_results(app, query, kind, limit, &uncovered, &within)
                         .await;
                 lower_bounds.extend(narrowed_live_answer(&lookup.narrowed, &covered, true));
-                workspace_indexing = lookup.indexing;
+                workspace_indexing = lookup.indexing();
+                degraded = lookup.degraded_languages();
                 let live_total = lookup.total;
                 candidates = merge_symbol_results(candidates, lookup.results);
                 failures = lookup.failures;
@@ -279,18 +281,25 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                     skipped: &skipped,
                 },
             );
-            let currency_facts = index_currency_disclosure(
-                app.store.as_ref(),
-                &search.currency_languages(
-                    if count > 0 {
-                        covered.clone()
-                    } else {
-                        unconfirmed_by_live_lookup(&covered, &failures, &skipped)
-                    },
-                    &detected,
-                ),
-            )
-            .await;
+            let mut route_facts = Vec::from_iter(unindexed_live_disclosure(
+                DisclosureRoute::IndexConsulted,
+                &degraded,
+                &covered,
+            ));
+            route_facts.extend(
+                index_currency_disclosure(
+                    app.store.as_ref(),
+                    &search.currency_languages(
+                        if count > 0 {
+                            covered.clone()
+                        } else {
+                            unconfirmed_by_live_lookup(&covered, &failures, &skipped)
+                        },
+                        &detected,
+                    ),
+                )
+                .await,
+            );
             let section = with_coverage_disclosure(
                 with_emitted_stale(
                     finish_symbol_search(candidates, count, &search, app.test_scope(), &shortfall),
@@ -302,7 +311,7 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
                 &within,
                 DisclosureRoute::IndexConsulted,
                 &lower_bounds,
-                &currency_facts,
+                &route_facts,
             );
             publish(app, section, &search).await;
         }
@@ -497,6 +506,8 @@ async fn execute_workspace_symbol_search(
     }
 
     let lookup = collect_workspace_symbol_results(app, query, kind, limit, languages, within).await;
+    let indexing = lookup.indexing();
+    let degraded = lookup.degraded_languages();
     let mut narrowed = lookup.narrowed;
     // The fan-out overfetches and then cuts, so its rows are the whole live
     // answer only when nothing was cut. Read before the rows are moved.
@@ -507,7 +518,6 @@ async fn execute_workspace_symbol_search(
     let mut candidates = lookup.results;
     let mut failures = lookup.failures;
     let mut skipped = lookup.skipped;
-    let indexing = lookup.indexing;
     let mut count = lookup.total;
     let mut stale_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut index_consulted = false;
@@ -651,8 +661,16 @@ async fn execute_workspace_symbol_search(
             skipped: &skipped,
         },
     );
+    let disclosure_route = match index_consulted {
+        true => DisclosureRoute::IndexConsulted,
+        false => DisclosureRoute::WorkspaceOnly(route),
+    };
     let mut route_facts = Vec::from_iter(supplement_unavailable.or(index_unavailable));
-    route_facts.extend(index_not_built_disclosure(route, indexing, languages));
+    route_facts.extend(unindexed_live_disclosure(
+        disclosure_route,
+        &degraded,
+        &index_covered,
+    ));
     route_facts.extend(
         index_currency_disclosure(
             app.store.as_ref(),
@@ -678,11 +696,7 @@ async fn execute_workspace_symbol_search(
         &shortfall,
         query,
         within,
-        if index_consulted {
-            DisclosureRoute::IndexConsulted
-        } else {
-            DisclosureRoute::WorkspaceOnly(route)
-        },
+        disclosure_route,
         &lower_bounds,
         &route_facts,
     );
@@ -798,8 +812,6 @@ fn explicit_index_language(language: Option<&str>) -> Option<Language> {
 /// Workspace-symbol fan-out outcome: the ranked results plus each failed
 /// language with its error, so an empty result can disclose which
 /// languages it does not actually cover instead of swallowing them.
-/// `indexing` is present when any answering language's query ran under
-/// degraded indexing — the combined result is then a lower bound.
 struct WorkspaceSymbolLookup {
     results: Vec<SymbolResultOutput>,
     /// Distinct matches the fan-out found, before the emission cap. The
@@ -812,16 +824,29 @@ struct WorkspaceSymbolLookup {
     /// already been collected. Their absence from the result says nothing
     /// about them, so they are disclosed exactly as a failure is.
     skipped: Vec<Language>,
-    /// Degradation merged across the queried languages. Every caller reaches
-    /// the fan-out only for languages the index does not answer, so the
-    /// server is the sole source for all of them and this is a genuine
-    /// lower-bound marker rather than warm-up noise.
-    indexing: Option<crate::models::lsp::IndexingDegradation>,
+    /// The languages whose server answered under degraded workspace
+    /// analysis, each with its marker.
+    degraded: Vec<(Language, IndexingDegradation)>,
     /// Languages whose server answer reached outside `within`. A server
     /// answers for the whole workspace, so those rows took places in an answer
     /// it may have capped, and matches inside `within` it held back are not
     /// in `total`.
     narrowed: Vec<Language>,
+}
+
+impl WorkspaceSymbolLookup {
+    /// The marker the combined rows carry: any degraded language makes them a
+    /// lower bound.
+    fn indexing(&self) -> Option<IndexingDegradation> {
+        self.degraded.iter().map(|(_, marker)| *marker).max()
+    }
+
+    fn degraded_languages(&self) -> Vec<Language> {
+        self.degraded
+            .iter()
+            .map(|(language, _)| *language)
+            .collect()
+    }
 }
 
 async fn collect_workspace_symbol_results(
@@ -840,16 +865,11 @@ async fn collect_workspace_symbol_results(
             total: 0,
             failures,
             skipped: Vec::new(),
-            indexing: None,
+            degraded: Vec::new(),
             narrowed: Vec::new(),
         };
     }
-    // Per-language LSP degradation, recorded as the fan-out runs. The two
-    // disclosure markers are derived from it once below — per-language, never a
-    // single global authoritativeness flag (which would miss an unindexed
-    // language's timeout in a bare query that also spans an indexed one).
-    let mut lsp_degradation: Vec<(Language, Option<crate::models::lsp::IndexingDegradation>)> =
-        Vec::new();
+    let mut degraded = Vec::new();
 
     let workspace_query = workspace_query_from_pattern(query);
     let overfetch_limit = if looks_like_symbol_path(query) {
@@ -869,7 +889,7 @@ async fn collect_workspace_symbol_results(
         }
         let mut symbols = match app.lsp.workspace_symbols(&workspace_query, *language).await {
             Ok(symbols) => {
-                lsp_degradation.push((*language, symbols.indexing));
+                degraded.extend(symbols.indexing.map(|marker| (*language, marker)));
                 symbols.data
             }
             Err(e) => {
@@ -934,7 +954,7 @@ async fn collect_workspace_symbol_results(
         total,
         failures,
         skipped,
-        indexing: lsp_degradation.iter().filter_map(|(_, d)| *d).max(),
+        degraded,
         narrowed,
     }
 }
@@ -1941,25 +1961,50 @@ mod tests {
         );
     }
 
-    /// An unbuilt index is advised where a build would change the answer: the
-    /// server did not confirm readiness, and the index extracts the language.
-    /// Beside a gap prescribing the same build, the build is offered once.
+    /// Where the index did not answer a language a server answered alone
+    /// without confirming readiness, a build is advised, whether the index
+    /// was never built or its last build left the language out; nowhere a
+    /// build changes nothing. Beside a gap that prescribes the same build, it
+    /// is offered once.
     #[test]
-    fn an_unbuilt_index_is_advised_only_where_a_build_would_answer() {
-        let unconfirmed = Some(crate::models::lsp::IndexingDegradation::Unconfirmed);
-        let unbuilt = WorkspaceSearchRoute::IndexNotBuilt;
-        let fact = index_not_built_disclosure(unbuilt, unconfirmed, &[Language::Rust])
+    fn a_build_is_advised_only_where_it_would_answer() {
+        let unbuilt = DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt);
+        let fact = unindexed_live_disclosure(unbuilt, &[Language::Rust], &[])
             .expect("a build answers rust");
-        assert!(fact.0.contains("rust"), "{}", fact.0);
         assert!(
-            index_not_built_disclosure(unbuilt, None, &[Language::Rust]).is_none(),
+            fact.0.contains("not built") && fact.0.contains("rust"),
+            "{}",
+            fact.0
+        );
+        let narrowed = unindexed_live_disclosure(
+            DisclosureRoute::IndexConsulted,
+            &[Language::Python],
+            &[Language::Rust],
+        )
+        .expect("a build without --lang adds python");
+        assert!(narrowed.0.contains("left out python"), "{}", narrowed.0);
+        let confined =
+            unindexed_live_disclosure(DisclosureRoute::IndexConsulted, &[Language::Python], &[])
+                .expect("a build answers a language confined away from the built ones");
+        assert!(confined.0.contains("left out python"), "{}", confined.0);
+        assert!(
+            unindexed_live_disclosure(unbuilt, &[], &[]).is_none(),
             "a server that confirmed readiness answered in full"
         );
         assert!(
-            index_not_built_disclosure(
-                WorkspaceSearchRoute::Forced,
-                unconfirmed,
+            unindexed_live_disclosure(
+                DisclosureRoute::IndexConsulted,
+                &[Language::Rust],
                 &[Language::Rust]
+            )
+            .is_none(),
+            "the index already answers rust"
+        );
+        assert!(
+            unindexed_live_disclosure(
+                DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::Forced),
+                &[Language::Rust],
+                &[]
             )
             .is_none(),
             "a search that bypasses the index gains nothing from one"
@@ -1971,7 +2016,7 @@ mod tests {
                     && !crate::services::store::SymbolExtractor::is_supported(*language)
             })
             .expect("some code language has no extractor");
-        assert!(index_not_built_disclosure(unbuilt, unconfirmed, &[extractorless]).is_none());
+        assert!(unindexed_live_disclosure(unbuilt, &[extractorless], &[]).is_none());
 
         let failures = vec![server_failure(Language::Rust)];
         let section = with_coverage_disclosure(
@@ -1979,7 +2024,7 @@ mod tests {
             &gaps(&failures, &[]),
             "alpha",
             &[],
-            DisclosureRoute::WorkspaceOnly(unbuilt),
+            unbuilt,
             &[],
             &[fact],
         );

@@ -841,36 +841,48 @@ pub async fn index_currency_disclosure(
     )]
 }
 
-/// What an unbuilt index costs a symbol answer a language server gave alone
-/// without confirming workspace readiness: the answer may be short, and a
-/// build answers the languages the index extracts without waiting on the
-/// server. Nothing to say where the index was built, the server confirmed
-/// readiness, or the index extracts none of the languages, since a build
-/// changes nothing there.
-pub fn index_not_built_disclosure(
-    route: WorkspaceSearchRoute,
-    indexing: Option<crate::models::lsp::IndexingDegradation>,
-    languages: &[Language],
+/// What an index that did not answer a language costs a symbol answer a
+/// language server gave for it alone without confirming workspace readiness:
+/// the answer may be short, and a build that takes the language in answers it
+/// without waiting on the server, whether the index was never built or its
+/// last build left the language out. Nothing to say for a language whose
+/// server confirmed readiness or that the index cannot extract, nor on a
+/// route that would not consult a built index.
+pub fn unindexed_live_disclosure(
+    route: DisclosureRoute,
+    degraded: &[Language],
+    covered: &[Language],
 ) -> Option<(String, String)> {
-    if route != WorkspaceSearchRoute::IndexNotBuilt || indexing.is_none() {
-        return None;
-    }
-    let extracted: Vec<&str> = languages
+    let buildable = matches!(
+        route,
+        DisclosureRoute::IndexConsulted
+            | DisclosureRoute::WorkspaceOnly(WorkspaceSearchRoute::IndexNotBuilt)
+    );
+    let unindexed: Vec<&str> = degraded
         .iter()
-        .filter(|language| crate::services::store::SymbolExtractor::is_supported(**language))
+        .filter(|language| {
+            !covered.contains(language)
+                && crate::services::store::SymbolExtractor::is_supported(**language)
+        })
         .map(|language| language.lsp_id())
         .collect();
-    (!extracted.is_empty()).then(|| {
-        (
-            format!(
-                "The search index is not built, so this answer rests on a language server that \
-                 did not confirm workspace readiness; a built index answers {} without waiting \
-                 for it",
-                extracted.join(", ")
-            ),
-            "symora search index build".to_string(),
-        )
-    })
+    if !buildable || unindexed.is_empty() {
+        return None;
+    }
+    let languages = unindexed.join(", ");
+    let fact = match route {
+        DisclosureRoute::WorkspaceOnly(_) => format!(
+            "The search index is not built, so this answer rests on a language server that \
+             did not confirm workspace readiness; a built index answers {languages} without \
+             waiting for it"
+        ),
+        DisclosureRoute::IndexConsulted => format!(
+            "The last index build left out {languages}, so this answer rests on a language \
+             server that did not confirm workspace readiness for it; a build without --lang \
+             indexes {languages} and answers without waiting for it"
+        ),
+    };
+    Some((fact, "symora search index build".to_string()))
 }
 
 /// What a rebuilding index costs an answer that could not consult it. Its
