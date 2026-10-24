@@ -104,12 +104,7 @@ pub async fn execute(args: ContextArgs, app: &App) -> Result<()> {
     let analysis = match LocationAnalysis::at(app.lsp.as_ref(), loc.clone(), ctx.root()).await {
         Ok(a) => a,
         Err(e) => {
-            ctx.print_error(lsp_error_at(
-                e,
-                &ctx.relative_path(&loc.file),
-                loc.line,
-                loc.column,
-            ));
+            ctx.print_error(lsp_error_at(e, &ctx.relative_path(&loc.file)));
             return Ok(());
         }
     };
@@ -535,11 +530,8 @@ async fn fetch_types(
 fn format_call_hierarchy_error(error: &str, file: &Path, line: u32, column: u32) -> OutputError {
     if is_unsupported_lsp_feature(error) {
         let anchor = shell_arg(&format!("{}:{line}:{column}", file.display()));
-        OutputError::unsupported("Call hierarchy is not supported at this position").with_hint(
-            format!(
-                "Use `symora refs -- {anchor}` for usages or `symora usage -- {anchor}` for broader symbol analysis.",
-            ),
-        )
+        OutputError::unsupported("Call hierarchy is not supported at this position")
+            .with_hint(format!("Use `symora refs -- {anchor}` for usages.",))
     } else {
         OutputError::internal(error.to_string())
     }

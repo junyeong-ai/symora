@@ -356,6 +356,8 @@ struct ListFileSymbolsInput {
     body: bool,
     #[serde(default)]
     signature: bool,
+    #[serde(default)]
+    refs: bool,
 }
 
 async fn run_list_file_symbols(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -372,6 +374,7 @@ async fn run_list_file_symbols(args: Value, app: &App) -> Result<CapturedOutput>
                 exclude: None,
                 substring: false,
                 structural: false,
+                refs: input.refs,
                 limit: None,
             },
             &a,
@@ -920,7 +923,7 @@ pub(super) fn input_fields(tool: &str) -> Option<&'static [&'static str]> {
         "search_ast" => &["pattern", "language", "path", "limit"],
         "get_index_status" => &[],
         "build_index" => &["force", "languages"],
-        "list_file_symbols" => &["file", "depth", "body", "signature"],
+        "list_file_symbols" => &["file", "depth", "body", "signature", "refs"],
         "find_definition" | "get_hover" => &["file", "line", "column"],
         "find_references" => &["file", "line", "column", "snippet", "limit"],
         "find_callers" => &["file", "line", "column", "limit", "no_fallback"],

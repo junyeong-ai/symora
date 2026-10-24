@@ -271,6 +271,56 @@ fn pyright_resolves_across_package_boundaries() {
         "{tree}"
     );
 
+    // Counting references takes each listed declaration and a class's members,
+    // never what a function holds.
+    let counted = run_in_fixture(&[
+        "symbols".into(),
+        geometry_rel.into(),
+        "--depth".into(),
+        "2".into(),
+        "--refs".into(),
+    ]);
+    // Each row with whether it is internal to something it is inside: what a
+    // type or module holds are its members, what anything else holds is not.
+    fn flatten<'a>(items: &'a Value, internal: bool, out: &mut Vec<(&'a Value, bool)>) {
+        for item in items.as_array().into_iter().flatten() {
+            out.push((item, internal));
+            let holds_members = matches!(
+                item["kind"].as_str(),
+                Some(
+                    "file"
+                        | "module"
+                        | "namespace"
+                        | "package"
+                        | "class"
+                        | "interface"
+                        | "struct"
+                        | "enum"
+                        | "object"
+                )
+            );
+            flatten(&item["children"], internal || !holds_members, out);
+        }
+    }
+    let mut rows = Vec::new();
+    flatten(&counted["items"], false, &mut rows);
+    let row = |path: &str| {
+        rows.iter()
+            .map(|(row, _)| row)
+            .find(|row| row["name_path"] == path)
+            .unwrap_or_else(|| panic!("{path} is listed: {counted}"))
+    };
+    assert!(row("area")["prod_refs"].as_u64() >= Some(1), "{counted}");
+    assert!(
+        row("Circle/perimeter")["refs"].as_u64() >= Some(1),
+        "{counted}"
+    );
+    assert!(rows.iter().any(|(_, internal)| *internal), "{counted}");
+    for (row, internal) in &rows {
+        let measured = row.get("refs").is_some() || row.get("refs_status").is_some();
+        assert_eq!(measured, !internal, "{row}");
+    }
+
     // diagnostics on the importing file are clean: a broken venv or
     // wiped settings surface as phantom missing-import diagnostics.
     let diagnostics = run_in_fixture(&["diagnostics".into(), report_rel.into()]);

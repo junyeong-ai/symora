@@ -21,7 +21,7 @@ symora diff-impact
 ```
 
 - Use `search symbols` for names, `search ast` for syntax, and `search content` for strings, each confined to named files or directories with `--path`. `search symbols` takes `--body` or `--signature` to read a known declaration whose file is unknown. Content search defaults to code; name a format with `--lang markdown`. Every search refuses a `--path` the project's ignore rules exclude and skips ignored files beneath one it accepts. Content and AST search read hidden files inside the paths they are given; symbol search refuses a hidden path, since the index does not hold it. Size limits apply; `.git` and `.symora` remain excluded.
-- `symbols` and `map file` use the language server when available, otherwise AST declarations; `backend` identifies the producer. `--deterministic` permits only index/grammar sources and returns `unsupported` for semantic operations.
+- `symbols` and `map file` use the language server when available, otherwise AST declarations; `backend` identifies the producer. `symbols <file> --refs` counts references for each listed declaration and a listed type's members; `refs_status` marks a count that is unavailable or a lower bound. `--deterministic` permits only index/grammar sources and returns `unsupported` for semantic operations.
 - For repeated workspace queries, inspect `search index status` and build incrementally with `search index build` when coverage is absent or the response requests refresh. Wait for an existing build. `--force` rebuilds everything.
 - `map summary` and `pack --tokens 4000` are optional orientation tools. `map file` adds a file's name-matched counterparts, such as its tests, and nearby files; these are path suggestions, not dependency evidence. Pack uses syntax-derived import paths, not a complete dependency graph or task-relevance model. Rust relative module paths require unresolved crate/module ownership and are omitted with a hint. Use `--focus` for a known area; an unmatched focus is refused. Check coverage hints and `declared_symbols` before treating excerpts as complete.
 - `diff-impact [REV]` compares tracked working-tree changes with one revision, not a revision range; for a branch, pass `$(git merge-base main HEAD)`. `--staged` uses the index. Read `unmeasured_files` and `incomplete`.
@@ -30,7 +30,7 @@ symora diff-impact
 
 Lines and Unicode-scalar columns are 1-indexed.
 
-- For `refs`, callers/callees, implementations, type hierarchy, context, impact, and location-based usage: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
+- For `refs`, callers/callees, implementations, type hierarchy, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
 - `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.
 - Read the echoed target and `anchor_status`. A binding is a local or parameter absent from the document-symbol tree. Source edits address declarations, not body tokens.
 

@@ -218,15 +218,23 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ).with_output_schema(section_output_schema("Content-line matches: file, line, content, score")),
         ToolDefinition::read_only(
             "list_file_symbols",
-            "List declarations in a known file, with optional bodies or signatures. \
-             Reports backend: document for the language server's nested tree, \
-             or ast for flat syntax-derived declarations with name_path.",
+            "List declarations in a known file, with optional bodies, signatures, or \
+             reference counts. Reports backend: document for the language server's nested \
+             tree, or ast for flat syntax-derived declarations with name_path. refs counts \
+             each listed declaration's references and those of a listed type's members; a \
+             zero is static and does not show that nothing reaches a declaration.",
             schema_object(
                 &[
                     ("file", "string", "Project-relative file path"),
                     ("depth", "integer", "Nested-symbol depth (0 = top level)"),
                     ("body", "boolean", "Include source bodies"),
                     ("signature", "boolean", "Include signatures only"),
+                    (
+                        "refs",
+                        "boolean",
+                        "Add refs, test_refs and prod_refs to each declaration, with \
+                         refs_status when a count is unavailable or a lower bound",
+                    ),
                 ],
                 &["file"],
             ),

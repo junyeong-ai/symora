@@ -29,7 +29,6 @@ const ALL_SUBCOMMANDS: &[&str] = &[
     "context",
     "impact",
     "diff-impact",
-    "usage",
     "diagnostics",
     "search",
     "map",
@@ -465,7 +464,6 @@ fn an_unreadable_subtree_is_reported_as_io_rather_than_as_absence() {
     }
     // Every language this project has is behind the blocked directory, so
     // "no languages" would be a claim the walk never got to make.
-    assert_eq!(code_of(&["--format", "compact", "usage", "beta"]), "io");
     assert_eq!(
         code_of(&["--format", "compact", "search", "symbols", "beta"]),
         "io"
@@ -1062,6 +1060,19 @@ impl Widget {
         refused["error"]["code"], "unsupported",
         "references have no source that derives from the tree alone: {refused}"
     );
+
+    // A count that could not be taken is absent and says so, never a zero.
+    let counted = json_ok(
+        dir.path(),
+        &["symbols", "main.rs", "--refs", "--deterministic"],
+    );
+    let items = counted["items"].as_array().expect("items");
+    assert!(!items.is_empty(), "{counted}");
+    for item in items {
+        assert_eq!(item["refs_status"], "unavailable", "{counted}");
+        assert!(item.get("refs").is_none(), "{counted}");
+    }
+    assert!(counted.get("hints").is_none(), "{counted}");
 }
 
 #[test]
