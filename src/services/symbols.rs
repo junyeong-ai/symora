@@ -2364,8 +2364,10 @@ fn member_kind(name: Node) -> SymbolKind {
 
 /// The name a C or C++ declarator declares, inside whatever wraps it: `*`,
 /// `&`, `[3]`, `(int)`, parentheses, attributes or an initializer. Three of
-/// those hold the declarator they wrap under no field, and a conversion
-/// function's name holds the declarator of its own parameters. A qualified
+/// those hold the declarator they wrap under no field, beside whatever the
+/// grammar set aside as an error (the `Repo::` of `(Repo::*member_fn)()`),
+/// and a conversion function's name holds the declarator of its own
+/// parameters. A qualified
 /// name the grammar made only by supplying a missing `::` is a macro read as
 /// the type and the type read as a scope (`EXPORT Code f()`), so its name is
 /// what follows.
@@ -2382,7 +2384,10 @@ fn declarator_name(declarator: Node) -> Node {
             "reference_declarator" | "parenthesized_declarator" | "attributed_declarator" => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor).find(|child| {
-                    !matches!(child.kind(), "attribute_declaration" | "ms_call_modifier")
+                    !matches!(
+                        child.kind(),
+                        "attribute_declaration" | "ms_call_modifier" | "ERROR"
+                    )
                 })
             }
             _ => node.child_by_field_name("declarator"),
@@ -3371,6 +3376,7 @@ public:
     template <typename U>
     U make();
     friend void befriended();
+    void (C::*handler)();
     typedef int Id;
     C(const C&) = default;
     virtual ~C() = default;
@@ -3441,6 +3447,7 @@ void g() {
                 "method:C/at",
                 "method:C/name",
                 "field:C/callback",
+                "field:C/handler",
                 "method:C/operator bool",
                 "method:C/make",
                 "function:C::operator bool",
