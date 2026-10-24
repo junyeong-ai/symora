@@ -77,22 +77,43 @@ fn is_stale_row(row: &SymbolResultOutput, stale_files: &HashSet<String>) -> bool
     row.backend.as_deref() == Some("index") && stale_files.contains(&row.file)
 }
 
-/// Whether a live answer already holds the current form of an index row: the
-/// row comes from a file changed since the build, and a live row in that file
-/// names its path. They are one declaration that a merge keyed by position
-/// cannot match, since the index row keeps its old one.
-fn superseded(
-    row: &SymbolResultOutput,
+/// The index rows a merge keeps beside a live answer. A row from a file
+/// changed since the build keeps its old position, so a merge keyed by
+/// position cannot see that a live row of its file and path is the same
+/// declaration; the row is left out where its path names that one
+/// declaration in the index. A path the index holds more than once in the
+/// file keeps its rows, since a live answer can list such declarations once
+/// (pyright lists one overload, one accessor) and none is known to be the
+/// one it kept. A page cut short of its total counts nothing, so it keeps
+/// them all.
+fn unsuperseded(
+    index: Vec<SymbolResultOutput>,
+    complete: bool,
     live: &[SymbolResultOutput],
     stale_files: &HashSet<String>,
-) -> bool {
-    fn path(row: &SymbolResultOutput) -> &str {
-        Symbol::unqualified(row.name_path.as_deref().unwrap_or(&row.name))
+) -> Vec<SymbolResultOutput> {
+    fn key(row: &SymbolResultOutput) -> (&str, &str) {
+        let path = row.name_path.as_deref().unwrap_or(&row.name);
+        (row.file.as_str(), Symbol::unqualified(path))
     }
-    is_stale_row(row, stale_files)
-        && live
-            .iter()
-            .any(|current| current.file == row.file && path(current) == path(row))
+    if !complete {
+        return index;
+    }
+    let mut held: HashMap<(String, String), usize> = HashMap::new();
+    for row in &index {
+        let (file, path) = key(row);
+        *held
+            .entry((file.to_string(), path.to_string()))
+            .or_insert(0) += 1;
+    }
+    let live: HashSet<(&str, &str)> = live.iter().map(key).collect();
+    let superseded = |row: &SymbolResultOutput| {
+        let (file, path) = key(row);
+        is_stale_row(row, stale_files)
+            && held.get(&(file.to_string(), path.to_string())) == Some(&1)
+            && live.contains(&(file, path))
+    };
+    index.into_iter().filter(|row| !superseded(row)).collect()
 }
 
 /// A symbol search as the caller asked for it. Every route answers the same
@@ -662,12 +683,13 @@ async fn execute_workspace_symbol_search(
         // The merged output contains index rows, so the page's staleness
         // applies to it; the live workspace results are current by nature.
         stale_files = relative_stale_files(ctx, &page.stale_files);
+        let complete = page.rows.len() == page.total;
         let index_results: Vec<SymbolResultOutput> = page
             .rows
             .into_iter()
             .map(|r| index_result_output(r, ctx))
-            .filter(|row| !superseded(row, &candidates, &stale_files))
             .collect();
+        let index_results = unsuperseded(index_results, complete, &candidates, &stale_files);
         candidates = merge_symbol_results(candidates, index_results);
     }
 
@@ -1902,29 +1924,55 @@ mod tests {
         assert_eq!(file.place(&row("gone")), None);
     }
 
-    /// A live answer supersedes an index row from a changed file that it
-    /// holds under the same path, kind qualifier aside; a current index row,
-    /// or one from another file, it does not.
+    /// A live row supersedes the stale index row of its file and path, kind
+    /// qualifier aside, where the index holds that path once there. Rows of a
+    /// path held twice stay, as do current rows, rows of another file, and
+    /// every row of a page cut short.
     #[test]
-    fn a_live_row_supersedes_the_stale_index_row_of_its_declaration() {
+    fn a_live_row_supersedes_only_the_one_stale_index_row_of_its_path() {
         let stale = HashSet::from(["lib.rs".to_string()]);
-        let indexed = |path: &str, file: &str| SymbolResultOutput {
+        let indexed = |path: &str, file: &str, line: u32| SymbolResultOutput {
             name_path: Some(path.to_string()),
+            line,
             ..result(path, file)
         };
-        let live = [SymbolResultOutput {
-            backend: Some("document".to_string()),
-            ..indexed("Widget[struct]", "lib.rs")
-        }];
+        let live = [
+            SymbolResultOutput {
+                backend: Some("document".to_string()),
+                ..indexed("Widget[struct]", "lib.rs", 9)
+            },
+            SymbolResultOutput {
+                backend: Some("document".to_string()),
+                ..indexed("C/m", "lib.rs", 20)
+            },
+        ];
+        let kept = |rows: Vec<SymbolResultOutput>, complete: bool, stale: &HashSet<String>| {
+            unsuperseded(rows, complete, &live, stale)
+                .into_iter()
+                .map(|row| format!("{}:{}@{}", row.file, row.name_path.unwrap(), row.line))
+                .collect::<Vec<_>>()
+        };
+        let rows = || {
+            vec![
+                indexed("Widget", "lib.rs", 2),
+                indexed("C/m", "lib.rs", 6),
+                indexed("C/m", "lib.rs", 8),
+                indexed("Widget", "other.rs", 2),
+                indexed("Gadget", "lib.rs", 4),
+            ]
+        };
 
-        assert!(superseded(&indexed("Widget", "lib.rs"), &live, &stale));
-        assert!(!superseded(
-            &indexed("Widget", "lib.rs"),
-            &live,
-            &HashSet::new()
-        ));
-        assert!(!superseded(&indexed("Widget", "other.rs"), &live, &stale));
-        assert!(!superseded(&indexed("Gadget", "lib.rs"), &live, &stale));
+        assert_eq!(
+            kept(rows(), true, &stale),
+            [
+                "lib.rs:C/m@6",
+                "lib.rs:C/m@8",
+                "other.rs:Widget@2",
+                "lib.rs:Gadget@4"
+            ]
+        );
+        assert_eq!(kept(rows(), false, &stale).len(), 5);
+        assert_eq!(kept(rows(), true, &HashSet::new()).len(), 5);
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and
