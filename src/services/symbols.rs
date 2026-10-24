@@ -837,9 +837,10 @@ fn register(
 }
 
 /// The symbols a query match declares: its one name, or each name a
-/// statement declaring several states ([`declared_names`]), all over the
-/// statement's one range — or each over its name alone where the statement
-/// also assigns to something else ([`assigns_beyond_its_names`]).
+/// statement declaring several states ([`declared_names`]) once, however
+/// often it binds it (`lo, hi = hi, top = …`), all over the statement's one
+/// range — or each over its name alone where the statement also assigns to
+/// something else ([`assigns_beyond_its_names`]).
 fn extract_from_match(
     m: &tree_sitter::QueryMatch,
     path: &Path,
@@ -851,11 +852,13 @@ fn extract_from_match(
     };
     let names = declared_names(node, language);
     let named: Vec<(String, SymbolKind, Node)> = if names.len() > 1 {
+        let mut stated = HashSet::new();
         names
             .into_iter()
             .filter_map(|name| {
                 let text = content.get(name.start_byte()..name.end_byte())?;
-                (!names_nothing(text)).then(|| (text.to_string(), node_kind(node), name))
+                (!names_nothing(text) && stated.insert(text))
+                    .then(|| (text.to_string(), node_kind(node), name))
             })
             .collect()
     } else {
@@ -1222,14 +1225,17 @@ fn assignment_targets(node: Node) -> impl Iterator<Item = Node> {
 }
 
 /// The targets one assignment target lists: itself, or each target a
-/// destructuring bind holds (`a, b = …`, `(a, [b, c]) = …`, Ruby's `a, b = …`).
+/// destructuring bind holds (`a, b = …`, `(a, [b, c]) = …`, `a, *rest = …`,
+/// Ruby's `a, *b = …`).
 fn destructured(target: Node) -> Vec<Node> {
     match target.kind() {
         "pattern_list"
         | "tuple_pattern"
         | "list_pattern"
+        | "list_splat_pattern"
         | "left_assignment_list"
-        | "destructured_left_assignment" => {
+        | "destructured_left_assignment"
+        | "rest_assignment" => {
             let mut cursor = target.walk();
             target
                 .named_children(&mut cursor)
@@ -3069,6 +3075,20 @@ region     = "us-central1"
                 "one",
             ),
             (
+                "a.py",
+                Language::Python,
+                "unused, *shared = items\none = 1\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "unused, shared = shared, other = 1, 2\none = 1\n",
+                &["unused", "shared", "other"],
+                "one",
+            ),
+            (
                 "a.rb",
                 Language::Ruby,
                 "UNUSED = SHARED = 1\nONE = 1\n",
@@ -3080,6 +3100,13 @@ region     = "us-central1"
                 Language::Ruby,
                 "UNUSED, (SHARED, OTHER) = 1, [2, 3]\nONE = 1\n",
                 &["UNUSED", "SHARED", "OTHER"],
+                "ONE",
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "UNUSED, *SHARED = 1, 2\nONE = 1\n",
+                &["UNUSED", "SHARED"],
                 "ONE",
             ),
             (
