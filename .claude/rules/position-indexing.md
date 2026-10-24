@@ -4,6 +4,8 @@ paths:
   - "src/cli/commands/**/*.rs"
   - "src/services/lsp/**/*.rs"
   - "src/services/ast_query.rs"
+  - "src/services/symbols.rs"
+  - "src/services/store/**/*.rs"
   - "src/services/daemon_lsp.rs"
   - "src/infra/lsp/**/*.rs"
   - "src/models/lsp.rs"
@@ -12,7 +14,7 @@ paths:
 
 # Position Indexing — Asymmetric and Encoding-Aware
 
-CLI inputs and JSON outputs use **1-indexed lines** and **1-indexed Unicode-scalar columns** (one column per `char`). LSP wire values are **0-indexed**, and their columns are measured in the server's **negotiated `positionEncoding`** — UTF-8 bytes or UTF-16 code units. A column is therefore *transcoded*, not merely shifted by one. Every conversion is deliberate and lives at the LSP boundary.
+CLI inputs and JSON outputs use **1-indexed lines** and **1-indexed Unicode-scalar columns** (one column per `char`). LSP wire values are **0-indexed**, and their columns are measured in the server's **negotiated `positionEncoding`** — UTF-8 bytes or UTF-16 code units. A column is therefore *transcoded*, not merely shifted by one. Every conversion is deliberate: a wire column is transcoded at the LSP boundary, and a tree-sitter byte column where a grammar reader builds a position (`scalar_position` in `services/symbols.rs`, `char_column` in `services/ast_query.rs`).
 
 ## Two axes, converted differently
 

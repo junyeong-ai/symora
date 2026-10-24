@@ -33,6 +33,6 @@ All source writes go through `commands/edit/`: project-boundary validation, revi
 
 LSP edits from rename and code actions use `apply_text_edits` / `apply_workspace_edits`. Source writes use `write_file` with observed content and retain the edit lock through resolution/application. Preserve revision hashes and check them again before replacement. `atomic_write` without a source precondition is for host configuration. Dry runs hold no write lock; multi-file application preflights and reports earlier applied files on failure.
 
-LSP work shares the command deadline across initialization, requests, retries, and daemon RPCs. Do not reset the budget per step or abort source application midway to enforce it. Unsupported capabilities produce structured errors or explicitly qualified alternatives, never synthetic semantic results.
+Unsupported capabilities produce structured errors or explicitly qualified alternatives, never synthetic semantic results.
 
 Extend existing commands rather than adding parallel surfaces. Agent-facing options must stay aligned with the curated MCP catalog and handlers; lifecycle/config/doctor remain CLI-only. Remove obsolete paths cleanly.
