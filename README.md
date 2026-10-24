@@ -295,7 +295,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 > ```json
 > { "error": { "code": "invalid_argument",
 >   "message": "Symbol path 'reserve' matches 2 symbols in src/services/inventory.ts",
->   "hint": "Candidates: InventoryService/reserve (method) line 34, ReservationPool/reserve (method) line 88. Target one by file:line[:col] instead." } }
+>   "hint": "Candidates: InventoryService/reserve (method) at src/services/inventory.ts:34:3, ReservationPool/reserve (method) at src/services/inventory.ts:88:3. Target one by its location instead." } }
 > ```
 
 ---

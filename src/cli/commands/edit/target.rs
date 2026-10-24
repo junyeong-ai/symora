@@ -32,15 +32,23 @@ fn symbol_not_found(pattern: &str, file: &str) -> anyhow::Error {
 const AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT: usize = 5;
 
 /// A `--symbol` pattern matching several symbols — a bare name or wildcard
-/// hitting siblings, or same-named parents sharing a child path — is an
-/// under-specified target the agent fixes by re-addressing; a
-/// `file:line[:col]` target is the honest disambiguator, so the hint routes
-/// there.
+/// hitting siblings, a class and its constructors, or same-named parents
+/// sharing a child path — is an under-specified target the agent fixes by
+/// re-addressing. Each candidate is listed at its name, a `file:line:col`
+/// target that addresses it alone.
 fn ambiguous_symbol_path(pattern: &str, candidates: &[&Symbol], file: &str) -> anyhow::Error {
     let mut listing = candidates
         .iter()
         .take(AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT)
-        .map(|s| format!("{} ({}) line {}", s.path(), s.kind, s.location.line))
+        .map(|s| {
+            format!(
+                "{} ({}) at {file}:{}:{}",
+                s.path(),
+                s.kind,
+                s.location.line,
+                s.location.column
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     if candidates.len() > AMBIGUOUS_CANDIDATE_DISPLAY_LIMIT {
@@ -55,7 +63,7 @@ fn ambiguous_symbol_path(pattern: &str, candidates: &[&Symbol], file: &str) -> a
             candidates.len()
         ))
         .with_hint(format!(
-            "Candidates: {listing}. Target one by file:line[:col] instead."
+            "Candidates: {listing}. Target one by its location instead."
         )),
     )
 }
@@ -389,8 +397,7 @@ mod tests {
         assert!(matches!(out.code, ErrorCode::InvalidArgument));
         assert!(out.message.contains("matches 2 symbols"));
         let hint = out.hint.unwrap();
-        assert!(hint.contains("line 10") && hint.contains("line 40"));
-        assert!(hint.contains("file:line"));
+        assert!(hint.contains("a.rs:10:5") && hint.contains("a.rs:40:5"));
     }
 
     #[test]
@@ -402,7 +409,7 @@ mod tests {
         assert!(out.message.contains("matches 7 symbols"));
         let hint = out.hint.unwrap();
         assert!(hint.contains("+2 more"));
-        assert!(hint.contains("line 50") && !hint.contains("line 60"));
+        assert!(hint.contains("a.rs:50:5") && !hint.contains("a.rs:60:5"));
     }
 
     #[test]
