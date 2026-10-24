@@ -2577,6 +2577,7 @@ const TYPESCRIPT_QUERY: &str = r#"
 (interface_declaration (interface_body (method_signature) @symbol))
 (interface_declaration (interface_body (property_signature) @symbol))
 (class_body (abstract_method_signature) @symbol)
+(class_body (method_signature) @symbol)
 (class_body (public_field_definition) @symbol)
 (method_definition
   name: (property_identifier) @constructor
@@ -3230,6 +3231,10 @@ declare const ambientConst: number;
 declare var ambientVar: number;
 namespace Plain { const inPlain = 1; }
 declare module "bare" { const inBare: number; }
+export declare class Decl {
+    method(a: string): void;
+    static create(): Decl;
+}
 "#,
             declares: &[
                 "class:Abs",
@@ -3270,6 +3275,9 @@ declare module "bare" { const inBare: number; }
                 "constant:inPlain",
                 "module:\"bare\"",
                 "constant:inBare",
+                "class:Decl",
+                "method:Decl/method",
+                "method:Decl/create",
             ],
         },
         DeclarationFixture {
