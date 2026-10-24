@@ -211,7 +211,12 @@ impl Symbol {
     /// The path without the kind that tells this symbol from same-named
     /// siblings: the key an index or workspace row carries for it.
     pub fn unqualified_path(&self) -> &str {
-        Self::split_qualifier(self.path()).0
+        Self::unqualified(self.path())
+    }
+
+    /// A path without the kind qualifier its last segment may carry.
+    pub fn unqualified(path: &str) -> &str {
+        Self::split_qualifier(path).0
     }
 
     pub fn matches_path(&self, pattern: &str) -> bool {

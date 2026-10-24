@@ -77,6 +77,24 @@ fn is_stale_row(row: &SymbolResultOutput, stale_files: &HashSet<String>) -> bool
     row.backend.as_deref() == Some("index") && stale_files.contains(&row.file)
 }
 
+/// Whether a live answer already holds the current form of an index row: the
+/// row comes from a file changed since the build, and a live row in that file
+/// names its path. They are one declaration that a merge keyed by position
+/// cannot match, since the index row keeps its old one.
+fn superseded(
+    row: &SymbolResultOutput,
+    live: &[SymbolResultOutput],
+    stale_files: &HashSet<String>,
+) -> bool {
+    fn path(row: &SymbolResultOutput) -> &str {
+        Symbol::unqualified(row.name_path.as_deref().unwrap_or(&row.name))
+    }
+    is_stale_row(row, stale_files)
+        && live
+            .iter()
+            .any(|current| current.file == row.file && path(current) == path(row))
+}
+
 /// A symbol search as the caller asked for it. Every route answers the same
 /// request, and the follow-ups it advises re-run it rather than a wider one.
 struct SymbolSearch<'a> {
@@ -648,6 +666,7 @@ async fn execute_workspace_symbol_search(
             .rows
             .into_iter()
             .map(|r| index_result_output(r, ctx))
+            .filter(|row| !superseded(row, &candidates, &stale_files))
             .collect();
         candidates = merge_symbol_results(candidates, index_results);
     }
@@ -782,9 +801,15 @@ async fn attach_source(
         .with_depth(u32::MAX)
         .with_body();
     let mut declared: HashMap<String, Vec<Symbol>> = HashMap::new();
+    let mut changed: HashMap<String, Option<ChangedFile>> = HashMap::new();
     for row in rows {
         if is_stale_row(row, stale_files) {
-            let Some((line, column)) = relocated(app, row).await else {
+            if !changed.contains_key(&row.file) {
+                let read = ChangedFile::read(app, &row.file).await;
+                changed.insert(row.file.clone(), read);
+            }
+            let Some((line, column)) = changed[&row.file].as_ref().and_then(|file| file.place(row))
+            else {
                 continue;
             };
             row.line = line;
@@ -811,41 +836,67 @@ async fn attach_source(
     }
 }
 
-/// Where a stale row's declaration is now. Its position is from before its
-/// file changed, so its path has to place it instead, and does only where it
-/// names one declaration both in the index's snapshot of the file and in the
-/// file as the grammar that built the snapshot reads it now. A path held
-/// twice, or held once where the snapshot held two, places nothing: either
-/// of the snapshot's could be the one that is gone.
-async fn relocated(app: &App, row: &SymbolResultOutput) -> Option<(u32, u32)> {
-    // A path names a handful of declarations in one file; a page cut short
-    // of its total counts nothing.
-    const SNAPSHOT_PAGE: usize = 32;
-    let path = row.name_path.as_deref().unwrap_or(&row.name);
-    let snapshot = app
-        .store
-        .search_symbols(path, SNAPSHOT_PAGE, None, None, &[PathBuf::from(&row.file)])
-        .await
-        .ok()?;
-    let indexed = snapshot
-        .rows
-        .iter()
-        .filter(|indexed| indexed.name_path.as_deref().unwrap_or(&indexed.name) == path)
-        .count();
-    if snapshot.rows.len() < snapshot.total || indexed != 1 {
-        return None;
+/// A file changed since the index build, as the index's snapshot holds it
+/// and as the grammar that built that snapshot reads it now: read once for
+/// every stale row it backs.
+struct ChangedFile {
+    /// How many snapshot rows each path names.
+    indexed: HashMap<String, usize>,
+    declared: Vec<Symbol>,
+}
+
+impl ChangedFile {
+    async fn read(app: &App, file: &str) -> Option<Self> {
+        // An empty query names every row the file holds; the first read
+        // learns how many, so the second counts them all.
+        let within = [PathBuf::from(file)];
+        let probe = app
+            .store
+            .search_symbols("", 1, None, None, &within)
+            .await
+            .ok()?;
+        let snapshot = app
+            .store
+            .search_symbols("", probe.total.max(1), None, None, &within)
+            .await
+            .ok()?;
+        if snapshot.rows.len() < snapshot.total {
+            return None;
+        }
+        let mut indexed = HashMap::new();
+        for row in snapshot.rows {
+            *indexed
+                .entry(row.name_path.unwrap_or(row.name))
+                .or_insert(0) += 1;
+        }
+        let path = app.root().join(file);
+        if tokio::fs::metadata(&path).await.ok()?.len() > app.config().search.max_file_size_bytes()
+        {
+            return None;
+        }
+        let content = tokio::fs::read_to_string(&path).await.ok()?;
+        let declared =
+            SymbolExtractor::shared().extract(&path, &content, Language::from_path(&path));
+        Some(Self { indexed, declared })
     }
-    let file = app.root().join(&row.file);
-    if tokio::fs::metadata(&file).await.ok()?.len() > app.config().search.max_file_size_bytes() {
-        return None;
-    }
-    let content = tokio::fs::read_to_string(&file).await.ok()?;
-    let declarations =
-        SymbolExtractor::shared().extract(&file, &content, Language::from_path(&file));
-    let mut held = declarations.iter().filter(|symbol| symbol.path() == path);
-    match (held.next(), held.next()) {
-        (Some(only), None) => Some((only.location.line, only.location.column)),
-        _ => None,
+
+    /// Where a stale row's declaration is now. Its position is from before
+    /// the change, so its path has to place it instead, and does only where
+    /// it names one declaration of the row's kind both in the snapshot and in
+    /// the file now. A path held twice, or once where the snapshot held two,
+    /// places nothing: either of the snapshot's could be the one that is gone.
+    fn place(&self, row: &SymbolResultOutput) -> Option<(u32, u32)> {
+        let path = row.name_path.as_deref().unwrap_or(&row.name);
+        if self.indexed.get(path) != Some(&1) {
+            return None;
+        }
+        let mut held = self.declared.iter().filter(|symbol| symbol.path() == path);
+        match (held.next(), held.next()) {
+            (Some(only), None) if only.kind.as_str() == row.kind => {
+                Some((only.location.line, only.location.column))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1805,6 +1856,75 @@ mod tests {
                 skipped: &[],
             },
         )
+    }
+
+    /// A stale row is placed by its path only where the path names one
+    /// declaration of the row's kind in the snapshot and in the file now: a
+    /// function turned class, a path held twice on either side, or one gone,
+    /// places nothing.
+    #[test]
+    fn a_stale_row_is_placed_only_by_a_path_that_names_one_declaration_then_and_now() {
+        let declared = |path: &str, kind: SymbolKind, line: u32| {
+            let mut symbol = Symbol::new(
+                path.rsplit('/').next().unwrap().to_string(),
+                kind,
+                crate::models::symbol::Location::point(PathBuf::from("m.py"), line, 5),
+            );
+            symbol.name_path = Some(path.to_string());
+            symbol
+        };
+        let file = ChangedFile {
+            indexed: HashMap::from([
+                ("start".to_string(), 1),
+                ("config".to_string(), 1),
+                ("port".to_string(), 2),
+                ("stop".to_string(), 1),
+                ("gone".to_string(), 1),
+            ]),
+            declared: vec![
+                declared("start", SymbolKind::Function, 6),
+                declared("config", SymbolKind::Class, 9),
+                declared("port", SymbolKind::Function, 12),
+                declared("stop", SymbolKind::Function, 15),
+                declared("stop", SymbolKind::Function, 18),
+            ],
+        };
+        let row = |path: &str| SymbolResultOutput {
+            name: path.to_string(),
+            name_path: Some(path.to_string()),
+            ..result(path, "m.py")
+        };
+
+        assert_eq!(file.place(&row("start")), Some((6, 5)));
+        assert_eq!(file.place(&row("config")), None);
+        assert_eq!(file.place(&row("port")), None);
+        assert_eq!(file.place(&row("stop")), None);
+        assert_eq!(file.place(&row("gone")), None);
+    }
+
+    /// A live answer supersedes an index row from a changed file that it
+    /// holds under the same path, kind qualifier aside; a current index row,
+    /// or one from another file, it does not.
+    #[test]
+    fn a_live_row_supersedes_the_stale_index_row_of_its_declaration() {
+        let stale = HashSet::from(["lib.rs".to_string()]);
+        let indexed = |path: &str, file: &str| SymbolResultOutput {
+            name_path: Some(path.to_string()),
+            ..result(path, file)
+        };
+        let live = [SymbolResultOutput {
+            backend: Some("document".to_string()),
+            ..indexed("Widget[struct]", "lib.rs")
+        }];
+
+        assert!(superseded(&indexed("Widget", "lib.rs"), &live, &stale));
+        assert!(!superseded(
+            &indexed("Widget", "lib.rs"),
+            &live,
+            &HashSet::new()
+        ));
+        assert!(!superseded(&indexed("Widget", "other.rs"), &live, &stale));
+        assert!(!superseded(&indexed("Gadget", "lib.rs"), &live, &stale));
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and
