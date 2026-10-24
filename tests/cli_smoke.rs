@@ -1563,7 +1563,8 @@ fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
 
 /// A path query reads the index as a path, as it reads the live answer: the
 /// store's substring match finds `Shape/area` for `E/a`, and neither the
-/// rows nor the count may keep it.
+/// rows nor the count may keep it, while the absolute `/E/a` still finds
+/// what `E/a` names at the top.
 #[test]
 fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
     let dir = tempfile::tempdir().unwrap();
@@ -1592,6 +1593,10 @@ fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
         .collect();
     assert_eq!(paths, ["E/a"], "{answer}");
     assert_eq!(answer["count"], 1, "{answer}");
+
+    let absolute = json_ok(dir.path(), &["search", "symbols", "/E/a"]);
+    assert_eq!(absolute["count"], 1, "{absolute}");
+    assert_eq!(absolute["items"][0]["name_path"], "E/a", "{absolute}");
 }
 
 /// A decorator, an attribute, a Rust doc comment or a C++ template header is

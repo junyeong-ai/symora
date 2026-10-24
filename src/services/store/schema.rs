@@ -1,5 +1,10 @@
 pub const SCHEMA_VERSION: i32 = 7;
 
+/// The rank a symbol search gives a row whose path ends in the query. Only an
+/// exact name or path ranks above it, and every other match below, so the
+/// rows a query matches as a path lead every page.
+pub const PATH_SUFFIX_SCORE: f64 = 0.9;
+
 pub const INIT_SCHEMA: &str = r#"
 -- Incremental auto-vacuum, set before the file is a WAL database and before
 -- it holds a table, which are the only moments SQLite lets it be chosen. It
@@ -170,7 +175,7 @@ pub fn build_symbol_search_query(with_kind: bool, lang_count: usize, path_count:
     CASE
         WHEN LOWER(s.name) = LOWER(?1) THEN 1.0
         WHEN s.name_path IS NOT NULL AND LOWER(s.name_path) = LOWER(?1) THEN 1.0
-        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || {like_q} ESCAPE '\' COLLATE NOCASE THEN 0.9
+        WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%/' || {like_q} ESCAPE '\' COLLATE NOCASE THEN {PATH_SUFFIX_SCORE}
         WHEN s.name LIKE {like_q} || '%' ESCAPE '\' COLLATE NOCASE THEN 0.8
         WHEN s.name LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE THEN 0.6
         WHEN s.name_path IS NOT NULL AND s.name_path LIKE '%' || {like_q} || '%' ESCAPE '\' COLLATE NOCASE THEN 0.6
