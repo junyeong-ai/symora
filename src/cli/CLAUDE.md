@@ -35,4 +35,4 @@ LSP edits from rename and code actions use `apply_text_edits` / `apply_workspace
 
 Unsupported capabilities produce structured errors or explicitly qualified alternatives, never synthetic semantic results.
 
-Extend existing commands rather than adding parallel surfaces. Agent-facing options must stay aligned with the curated MCP catalog and handlers; lifecycle/config/doctor remain CLI-only. Remove obsolete paths cleanly.
+Extend existing commands rather than adding parallel surfaces. Agent-facing options must stay aligned with the curated MCP catalog and handlers; lifecycle and config commands remain CLI-only, and `doctor` reaches MCP only as the read-only `check_language_support`. Remove obsolete paths cleanly.

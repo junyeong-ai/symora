@@ -55,7 +55,7 @@ Use `response::disclosure` to assemble facts and remedies. A failed read names i
 
 ## Symbols and analysis
 
-File-scoped symbols carry a response-level `backend`: `document` is the language server's nested tree; `ast` is flat with containment in `name_path`. Workspace resolution carries provenance per row. A map overview omits `focus_symbols` and `backend` together when no producer could read its declarations.
+File-scoped symbols carry a response-level `backend`: `document` is the language server's nested tree; `ast` is flat with containment in `name_path`. A `document` row's `name_path` appends `[kind]` where siblings share a name; an AST row's does not, so two AST rows can share one. Workspace resolution carries provenance per row. A map overview omits `focus_symbols` and `backend` together when no producer could read its declarations.
 
 `score` is ranking relevance, not a probability. `is_exported` describes the target declaration's own export/public visibility, not accessibility through enclosing types, modules, re-exports, or build configuration. Read it from the exact AST declaration; omit it when syntax or context does not determine the answer. Call-graph output reports observed counts, depth/fan-out limits, indexing degradation, failed hops, and implementation-lookup limits. It does not publish a calibrated risk or confidence verdict. Test-reference counts and `test_caller_ratio` describe static references/callers, not execution coverage or change safety.
 
@@ -67,7 +67,7 @@ Navigation location objects carry file, line, and column. Location analysis echo
 
 `declared_symbols` on a packed file counts its AST-derived signatures and is present when the per-file cap or token budget omitted some. `context` shares `body_tokens` across target, callees, and types in that order. `body_omitted` names `token_budget` or `response_size` when that budget omitted a requested body. `bodies_included` counts complete attached bodies; an omitted body can mean exhausted budget, an unresolvable location, or a declaration without a body.
 
-`diff-impact` discloses unmeasured files and candidate caps. Deletions read declarations from the base revision; changed body lines belong to their enclosing declaration. A staged analysis cannot use working-tree symbols over unstaged line changes as though they described the index.
+`diff-impact` discloses unmeasured files and candidate caps. Deletions read declarations from the base revision; changed body lines belong to their enclosing declaration. A staged analysis cannot use working-tree symbols over unstaged line changes as though they described the git staging area.
 
 ## Index state
 

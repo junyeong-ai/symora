@@ -253,8 +253,9 @@ symora impact src/services/checkout.ts:48 --depth 2
     "direct_callers": 4,
     "transitive_callers": 7,
     "depth": 2,
-    "indexing": "unconfirmed",
     "max_depth_reached": true,
+    "indexing": "unconfirmed",
+    "dynamic_dispatch": { "status": "unavailable", "implementations": 0 },
     "callers_by_depth": [
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
       { "depth": 2, "count": 3, "test": 1, "prod": 2 }
@@ -269,9 +270,7 @@ symora impact src/services/checkout.ts:48 --depth 2
   ]
 }
 ```
-> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
-
-Source edits serialize project writers and reject changes to the content they read. For a file the language server has not opened, Symora cannot verify that the server computed its edit against the current text. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
+> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. `dynamic_dispatch` marks a method whose overrides the implementation lookup could not establish, so callers reached through them may be missing. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
 
 ### ⑥ Make the change — preview before you write
 
@@ -292,6 +291,8 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 }
 ```
 > `--dry-run` shows the whole span it would replace (every old line `-`, every new line `+`) and the net byte change, and writes nothing. The span is the one `symbols --body` returns, decorator, attribute and doc-comment lines included, so a body read there, changed and passed back keeps them. Drop `--dry-run` to apply, or add `--verify-callers` to pull diagnostics on the files that reference the symbol afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
+
+Source edits serialize project writers and reject changes to the content they read. For a file the language server has not opened, Symora cannot verify that the server computed its edit against the current text. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
 
 > **Addressing is forgiving but safe.** `--symbol` matches a bare name, a `Class/method` suffix, a `*/method` wildcard, or the exact `name_path`, and a trailing `[kind]` selects one kind among same-named declarations (`Svc[class]` rather than its constructors). A segment written wholly in brackets is a name, as a computed member's is (`Cache/[key]`). When a name is ambiguous, `edit` refuses rather than guess, and lists where each candidate is declared:
 > ```json
@@ -319,7 +320,7 @@ symora map summary                          # repo shape
 symora map file src/services/checkout.ts    # one file: symbols, siblings, related files
 
 # Symbols & inspection (LSP or AST declarations; semantic queries require LSP)
-symora symbols src/services/checkout.ts --depth 2   # full symbol tree
+symora symbols src/services/checkout.ts --depth 2   # declarations two levels deep
 symora symbols src/services/checkout.ts --body      # tree + source bodies
 symora symbols src/services/checkout.ts --depth 1 --refs   # reference counts per declaration and member
 symora symbols src/services/checkout.ts --symbol 'CheckoutService/processOrder'
@@ -336,7 +337,7 @@ symora typedef … / implementations … / supertypes … / subtypes …
 
 # Context & impact (LSP)
 symora context src/services/checkout.ts:48 --all    # body + refs + callers + callees + types + tests
-symora context src/services/checkout.ts:48 --with-bodies   # also attach callee/type bodies
+symora context src/services/checkout.ts:48 --callees --types --with-bodies   # with callee and type bodies
 symora impact src/services/checkout.ts:48           # change blast radius
 symora diff-impact                                  # impact of the working tree's changes against HEAD, staged or not
 symora diff-impact $(git merge-base main HEAD)      # impact of what this branch changed (a range A..B is refused)
@@ -364,15 +365,15 @@ Global flags work before or after the subcommand: `symora --format pretty search
 
 Every command is built for machine parsing, and the rules are stable:
 
-- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — `truncated`, `stale`, `incomplete`, `hints`, `next_commands`, `indexing`, `bodies_included`, `coverage_gaps`, and `error`. Fields that qualify a list come before the lists they qualify, so a reader that keeps only the head of a response still has them.
+- **List responses** share one shape: `count` (total found), `showing` (emitted), `items`, plus — only when relevant — qualifiers such as `truncated`, `stale`, `incomplete`, `indexing`, `coverage_gaps`, `unread_paths`, `hints`, and `next_commands`. Fields that qualify a list come before the lists they qualify, so a reader that keeps only the head of a response still has them.
 - **Command failures** are structured JSON and exit non-zero:
   ```json
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
-  `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, and `typedef` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
+  `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
+- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
-- **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. List reductions retain totals and disclose `truncated` and a size-limit hint. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
+- **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. A list cut to fit keeps its `count`, sets `truncated`, and adds a hint naming `output.max_response_chars`. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 
 `pack --tokens` uses a character-based approximation. It does not bound model-specific token counts or the entire JSON envelope.
 
@@ -380,7 +381,7 @@ Requested `context` bodies share `--body-tokens` in target/callee/type order, wh
 
 `lsp.timeout_secs` is the shared LSP work budget for one command. Startup, requests, and retries consume it together, and daemon RPCs carry the remaining allowance. It does not interrupt source application midway.
 
-Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed throughout the query. Log text, ended progress tasks, and elapsed time do not prove completion. A zero in this state does not prove absence. Rename refuses application under `unconfirmed` and `timed_out`, and `--dry-run` previews the current edit set. `--accept-unconfirmed` applies a reviewed `unconfirmed` set and keeps the marker in the response; `timed_out` stays refused, since a retry may still confirm readiness. Symora currently recognizes rust-analyzer's healthy quiescent status. Servers without a supported readiness signal, including default Pyright, remain unconfirmed even when their previews look complete.
+Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed throughout the query. Log text, ended progress tasks, and elapsed time do not prove completion. A zero in this state does not prove absence. Rename refuses application under `unconfirmed` and `timed_out`, and `--dry-run` previews the current edit set. `--accept-unconfirmed` applies a reviewed `unconfirmed` set and keeps the marker in the response; `timed_out` stays refused, since a retry may still confirm readiness. Of the supported servers, only rust-analyzer sends a readiness signal Symora recognizes (its healthy quiescent status). Servers without a supported readiness signal, including default Pyright, remain unconfirmed even when their previews look complete.
 
 ---
 
@@ -388,7 +389,7 @@ Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed 
 
 Symora keeps a persistent SQLite index at `.symora/store.db` in each project. The `.gitignore` it writes in `.symora/` keeps the index, its caches and locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
 
-The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Positive results also carry currency hints naming the languages whose files changed since the build.
+The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Results also carry currency hints naming the languages whose files changed since the build, with `symora search index build` in `next_commands`; an empty result carries them unless a language server with confirmed readiness answered for that language.
 
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted
@@ -423,7 +424,7 @@ tier = "slow"        # optional; one of fast | standard | slow
 env = { NODE_OPTIONS = "--max-old-space-size=2048" } # optional; server environment variables
 ```
 
-Entries in `env` are added to the server's inherited environment. For example, you can lower the heap limit of a Node-based server such as pyright with `NODE_OPTIONS = "--max-old-space-size=2048"`.
+Entries in `env` are added to the server's inherited environment. For example, you can set the heap limit of a Node-based server such as pyright with `NODE_OPTIONS = "--max-old-space-size=2048"`.
 
 Per-server `initialization_options` supplies LSP initialization options; `settings` supplies runtime configuration. Each object merges recursively into its respective defaults; arrays and scalar values replace defaults. Settings are sent immediately after initialization and returned through `workspace/configuration`. Nested keys follow the language server's own configuration schema.
 
@@ -486,13 +487,7 @@ symora self update --verify-attestations   # refuse to install without gh
 symora self uninstall                 # remove binary + skill + config + daemon data (MCP entries stay — run `symora setup mcp --uninstall` first)
 ```
 
-An update always verifies the SHA-256, and when `gh` is installed it also
-verifies build provenance against the attestation bundle published with the
-release. Reading the bundle from a file means `gh` needs no login. With `gh`
-installed, a release that publishes no bundle is refused — the checksum is
-produced by whoever produced the archive, so it says nothing about origin.
-Bundles are published from the version that introduced them onward; use
-`scripts/install.sh` to install an earlier release.
+An update always verifies the SHA-256, and when `gh` is installed it also verifies build provenance against the attestation bundle published with the release. Reading the bundle from a file means `gh` needs no login. With `gh` installed, a release that publishes no bundle is refused — the checksum is produced by whoever produced the archive, so it says nothing about origin. Releases from v0.21.0 onward publish a bundle; use `scripts/install.sh` to install an earlier release.
 
 ---
 
@@ -522,7 +517,7 @@ symora mcp tools --profile read-only             # what a read-only server would
 The agent-facing playbook ships *with the tool*, not in this README, so it stays in lockstep with the binary:
 
 - `symora setup skill` installs the skill bundled into the binary without network access. An explicit `--git-ref` uses only that source and never falls back to another version on failure.
-- `symora mcp serve` exposes instructions for tool sequencing and recovery through the metadata flow supported by the connected client.
+- `symora mcp serve` exposes instructions for tool sequencing, result limits and error recovery through the metadata flow supported by the connected client.
 
 For a known file or declaration, go directly to `symbols`, `context`, `refs`, or `impact`. Use `map summary` and `pack` when repository orientation helps. List responses share one shape; positions are 1-indexed; command failures, including bad CLI arguments, are structured `{code, message, hint}` at non-zero exit.
 
@@ -551,7 +546,7 @@ Run `symora <command> --help` for any command's flags. Output fields are describ
 
 | Symptom | Fix |
 | --- | --- |
-| `count: 0` from `search …` | Check `symora search index status` and the response's hints and `coverage_gaps`. An empty `languages` means no symbol build has completed — run `symora search index build`. A path query (`Class/method`, `Name[kind]`) and a language the index does not cover consult a language server; content search scans files. `--deterministic` never consults a language server. |
+| `count: 0` from `search …` | Check `symora search index status` and the response's hints and `coverage_gaps`. An empty `languages` means no symbol build has completed — run `symora search index build`. A path query (`Class/method`, `Name[kind]`), a name the index does not match, and a language the index does not cover consult a language server; content search scans files. `--deterministic` never consults a language server. |
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart --project`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. Changes to the daemon's inherited environment require a full `symora daemon restart`. |
 | `coverage_gaps` on a search | That language is missing from the answer. With `reason: "unavailable"`, `message` carries the failure's first line (for a server that rejected `initialize`, its reason), and the hints and `next_commands` lead with the languages whose lookup failed. |
 | `indexing: "timed_out"` / `"unconfirmed"` | Workspace readiness was not confirmed for the query. List counts may be partial; an empty `def` or `hover` result does not prove absence. Retry after pending server work finishes, but a server without a supported readiness signal stays unconfirmed. `rename` refuses application; inspect the edit set with `--dry-run`, then apply an `unconfirmed` one with `--accept-unconfirmed`. |
