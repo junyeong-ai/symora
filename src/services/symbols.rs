@@ -1367,6 +1367,7 @@ fn binds_a_name(target: Node, language: Language) -> bool {
 /// of it is refused rather than taking the other assignment with it.
 fn assigns_beyond_its_names(node: Node, language: Language) -> bool {
     matches!(language, Language::Python | Language::Ruby)
+        && node.kind() == "assignment"
         && assignment_targets(node).any(|target| !binds_a_name(target, language))
 }
 
@@ -3844,6 +3845,24 @@ region     = "us-central1"
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_python_type_alias_spans_its_statement() {
+        let symbols = SymbolExtractor::new().extract(
+            Path::new("a.py"),
+            "type Pair = tuple[int, int]\n",
+            Language::Python,
+        );
+        let location = &symbols[0].location;
+        assert_eq!(
+            (
+                location.effective_start(),
+                location.end_line,
+                location.end_column
+            ),
+            ((1, 1), Some(1), Some(28))
+        );
     }
 
     #[test]
