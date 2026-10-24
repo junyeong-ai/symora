@@ -275,8 +275,14 @@ impl Symbol {
     ///
     /// An unqualified pattern matches a qualified path, so an agent that
     /// knows only the name still reaches every candidate.
+    ///
+    /// A qualifier follows the name it qualifies, so a segment that opens
+    /// with a bracket is a name: a TypeScript computed member `[key]` names
+    /// itself, whatever kind its text spells.
     fn split_qualifier(s: &str) -> (&str, Option<&str>) {
         if let Some(bracket) = s.rfind('[')
+            && bracket > 0
+            && !s[..bracket].ends_with('/')
             && let Some(qualifier) = s[bracket..]
                 .strip_prefix('[')
                 .and_then(|q| q.strip_suffix(']'))
@@ -1260,6 +1266,12 @@ mod tests {
         );
         assert_eq!(Symbol::split_qualifier("method[]"), ("method[]", None));
         assert_eq!(Symbol::split_qualifier("method["), ("method[", None));
+        assert_eq!(Symbol::split_qualifier("[key]"), ("[key]", None));
+        assert_eq!(Symbol::split_qualifier("C/[key]"), ("C/[key]", None));
+        assert_eq!(
+            Symbol::split_qualifier("C/[key][method]"),
+            ("C/[key]", Some("method"))
+        );
     }
 
     /// Brackets carry type parameters in several languages. Reading one as
