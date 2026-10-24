@@ -1564,7 +1564,7 @@ fn a_searched_symbol_takes_its_source_from_whatever_reads_its_file() {
 /// A path query reads the index as a path, as it reads the live answer: the
 /// store's substring match finds `Shape/area` for `E/a`, and neither the
 /// rows nor the count may keep it, while the absolute `/E/a` still finds
-/// what `E/a` names at the top, and `E/a[function]` the function among them,
+/// what `E/a` names at the top, and `E/a[method]` the method among them,
 /// as a qualified glob does without asking the store for its qualifier.
 #[test]
 fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
@@ -1599,12 +1599,12 @@ fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
     assert_eq!(absolute["count"], 1, "{absolute}");
     assert_eq!(absolute["items"][0]["name_path"], "E/a", "{absolute}");
 
-    let qualified = json_ok(dir.path(), &["search", "symbols", "E/a[function]"]);
+    let qualified = json_ok(dir.path(), &["search", "symbols", "E/a[method]"]);
     assert_eq!(qualified["count"], 1, "{qualified}");
     let other_kind = json_ok(dir.path(), &["search", "symbols", "E/a[class]"]);
     assert_eq!(other_kind["count"], 0, "{other_kind}");
 
-    for glob in ["*/area[function]", "Shape/*[function]"] {
+    for glob in ["*/area[method]", "Shape/*[method]"] {
         let answer = json_ok(dir.path(), &["search", "symbols", glob]);
         assert_eq!(answer["count"], 1, "{glob}: {answer}");
         assert_eq!(answer["items"][0]["name_path"], "Shape/area", "{answer}");

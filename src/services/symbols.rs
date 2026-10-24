@@ -966,6 +966,7 @@ fn extract_declaration(
                 Some(container) => format!("{container}/{name}"),
                 None => name.clone(),
             });
+            let kind = placed_kind(kind, node, &name, declared, content, language);
             let mut symbol = Symbol::new(name, kind, location);
             symbol.name_path = name_path;
             symbol.container = container.clone();
@@ -1510,21 +1511,83 @@ fn extract_container_path(
     // declares: a TypeScript constructor's parameter property is its class's,
     // and the members of an unnamed C++ enum a field is typed with are what
     // encloses the field's.
+    std::iter::successors(enclosing_declaration(node, declared), |outer| {
+        enclosing_declaration(*outer, declared)
+    })
+    .find_map(|outer| {
+        extract_name_and_kind(outer, content, language)
+            .filter(|(name, kind)| !name.is_empty() && !kind.is_namespace_like())
+            .map(|(name, _)| name)
+    })
+}
+
+/// The nearest declaration the query read that encloses `node`, other than
+/// through its header ([`in_header_of`]).
+fn enclosing_declaration<'t>(node: Node<'t>, declared: &HashSet<usize>) -> Option<Node<'t>> {
     let mut inner = node;
     let mut ancestor = node.parent();
     while let Some(outer) = ancestor {
-        if declared.contains(&outer.id())
-            && !in_header_of(inner, outer)
-            && let Some((name, kind)) = extract_name_and_kind(outer, content, language)
-            && !name.is_empty()
-            && !kind.is_namespace_like()
-        {
-            return Some(name);
+        if declared.contains(&outer.id()) && !in_header_of(inner, outer) {
+            return Some(outer);
         }
         inner = outer;
         ancestor = outer.parent();
     }
     None
+}
+
+/// The kind a declaration's place settles beyond its own node: a function a
+/// type declares as a member is a method, as language servers read one,
+/// except a Rust associated function, which is a method only where its first
+/// parameter is `self`; a
+/// JavaScript or TypeScript class's `constructor`, unless `static`, is its
+/// constructor; and a Swift property no type holds is a global variable.
+/// What holds a declaration is the nearest enclosing one with a name, as for
+/// its path ([`extract_container_path`]): a Dart member's signature sits in a
+/// nameless declaration of the same member.
+fn placed_kind(
+    kind: SymbolKind,
+    node: Node,
+    name: &str,
+    declared: &HashSet<usize>,
+    content: &str,
+    language: Language,
+) -> SymbolKind {
+    let enclosing = std::iter::successors(enclosing_declaration(node, declared), |outer| {
+        enclosing_declaration(*outer, declared)
+    })
+    .find_map(|outer| {
+        extract_name_and_kind(outer, content, language)
+            .filter(|(name, _)| !name.is_empty())
+            .map(|(_, kind)| kind)
+    });
+    match kind {
+        SymbolKind::Function
+            if enclosing.is_some_and(|container| {
+                container.holds_members() && !container.is_namespace_like()
+            }) && !is_local(node, declared)
+                && (language != Language::Rust
+                    || node
+                        .child_by_field_name("parameters")
+                        .is_some_and(|parameters| {
+                            child_of_kind(parameters, "self_parameter").is_some()
+                        })) =>
+        {
+            SymbolKind::Method
+        }
+        SymbolKind::Method
+            if matches!(language, Language::TypeScript | Language::JavaScript)
+                && node.kind() == "method_definition"
+                && name == "constructor"
+                && child_of_kind(node, "static").is_none() =>
+        {
+            SymbolKind::Constructor
+        }
+        SymbolKind::Property if language == Language::Swift && enclosing.is_none() => {
+            SymbolKind::Variable
+        }
+        kind => kind,
+    }
 }
 
 /// Whether `inner`, a child of `outer`, is the header the declaration
@@ -1889,8 +1952,11 @@ fn node_kind(node: Node) -> SymbolKind {
         | "object_declaration"
         | "object_definition"
         | "extension_declaration"
-        | "class"
-        | "impl_item" => SymbolKind::Class,
+        | "class" => SymbolKind::Class,
+
+        // An impl block adds members to a type declared elsewhere, as
+        // rust-analyzer reads it.
+        "impl_item" => SymbolKind::Object,
 
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
         | "union_item" => SymbolKind::Struct,
@@ -1921,13 +1987,11 @@ fn node_kind(node: Node) -> SymbolKind {
         // `package`, TS/JS `namespace`/`module` (both parse as `internal_module`,
         // plus ambient `module "x"`), C# block- and file-scoped `namespace`, and
         // PHP `namespace`.
-        "mod_item"
-        | "namespace_definition"
-        | "package_declaration"
-        | "internal_module"
-        | "module"
-        | "namespace_declaration"
-        | "file_scoped_namespace_declaration" => SymbolKind::Module,
+        "mod_item" | "internal_module" | "module" => SymbolKind::Module,
+        "namespace_definition" | "namespace_declaration" | "file_scoped_namespace_declaration" => {
+            SymbolKind::Namespace
+        }
+        "package_declaration" => SymbolKind::Package,
 
         // Go `type X = ...`: classify by the spec's underlying type.
         "type_spec" => go_type_kind(node),
@@ -2548,12 +2612,12 @@ pub static ST: u32 = 2;
 pub enum E { A, B { b_field: u32 } }
 pub mod inner { pub fn nested() {} }
 pub struct S { pub inner_field: u32 }
-impl S { pub fn m(&self) { let local = 1; } }
+impl S { pub fn m(&self) { let local = 1; } pub fn new() -> Self { S { inner_field: 0 } } }
 "#,
             declares: &[
                 "interface:T",
                 "class:T/Out",
-                "function:T/tm",
+                "method:T/tm",
                 "struct:U",
                 "function:mac",
                 "class:Al",
@@ -2568,8 +2632,9 @@ impl S { pub fn m(&self) { let local = 1; } }
                 "function:nested",
                 "struct:S",
                 "field:S/inner_field",
-                "class:S",
-                "function:S/m",
+                "object:S",
+                "method:S/m",
+                "function:S/new",
             ],
         },
         DeclarationFixture {
@@ -2651,7 +2716,7 @@ async def af(): pass
                 "class:A",
                 "variable:A/attr",
                 "variable:A/tried",
-                "function:A/m",
+                "method:A/m",
                 "function:f",
                 "function:af",
             ],
@@ -2698,7 +2763,7 @@ namespace Inner { export const held = 1; }
                 "class:C",
                 "property:C/SC",
                 "property:C/priv",
-                "method:C/constructor",
+                "constructor:C/constructor",
                 "property:C/dep",
                 "method:C/m",
                 "function:f",
@@ -2767,7 +2832,7 @@ class C {
 }
 "#,
             declares: &[
-                "module:p",
+                "package:p",
                 "class:R",
                 "field:R/a",
                 "interface:Ann",
@@ -2798,7 +2863,7 @@ namespace N {
 }
 "#,
             declares: &[
-                "module:N",
+                "namespace:N",
                 "class:Rec",
                 "property:Rec/A",
                 "class:D",
@@ -2838,7 +2903,7 @@ abstract class A {
 function f() {}
 "#,
             declares: &[
-                "module:N",
+                "namespace:N",
                 "constant:TOP",
                 "enum:E",
                 "enum_member:E/X",
@@ -2887,9 +2952,9 @@ fun top() {}
 "#,
             declares: &[
                 "class:I",
-                "function:I/im",
+                "method:I/im",
                 "class:Registry",
-                "function:Registry/register",
+                "method:Registry/register",
                 "class:Color",
                 "enum_member:Color/RED",
                 "enum_member:Color/GREEN",
@@ -2897,7 +2962,7 @@ fun top() {}
                 "property:User/id",
                 "class:Widget",
                 "property:Widget/name",
-                "function:Widget/render",
+                "method:Widget/render",
                 "function:top",
             ],
         },
@@ -2933,7 +2998,7 @@ void f() {}
 }
 "#,
             declares: &[
-                "module:N",
+                "namespace:N",
                 "struct:S",
                 "field:S/f",
                 "field:S/kind",
@@ -3044,14 +3109,14 @@ func top() {}
                 "struct:Point",
                 "property:Point/x",
                 "object:Point",
-                "function:Point/moved",
+                "method:Point/moved",
                 "enum:Dir",
                 "enum_member:Dir/up",
                 "enum_member:Dir/down",
                 "enum_member:Dir/left",
                 "class:C",
                 "property:C/p",
-                "function:C/cm",
+                "method:C/cm",
                 "function:top",
             ],
         },
@@ -3090,11 +3155,11 @@ class Q(val a: Int, b: Int)
                 "class:Q",
                 "property:Q/a",
                 "interface:T",
-                "function:T/tm",
+                "method:T/tm",
                 "class:O",
                 "constant:O/v",
                 "class:C",
-                "function:C/cm",
+                "method:C/cm",
             ],
         },
         DeclarationFixture {
@@ -3123,12 +3188,12 @@ void top() {}
                 "enum:E",
                 "enum_member:E/x",
                 "class:A",
-                "function:A/am",
+                "method:A/am",
                 "class:C",
                 "field:C/field",
                 "field:C/sc",
                 "constructor:C/C",
-                "function:C/cm",
+                "method:C/cm",
                 "function:top",
             ],
         },
@@ -4262,7 +4327,7 @@ void topLevel() {}
         };
         assert_eq!(found("Order"), Some(SymbolKind::Class));
         assert_eq!(found("Order/Order"), Some(SymbolKind::Constructor));
-        assert_eq!(found("Order/pay"), Some(SymbolKind::Function));
+        assert_eq!(found("Order/pay"), Some(SymbolKind::Method));
         assert_eq!(found("Status"), Some(SymbolKind::Enum));
         assert_eq!(found("Loggable"), Some(SymbolKind::Interface));
         assert_eq!(found("topLevel"), Some(SymbolKind::Function));
@@ -4286,8 +4351,8 @@ void topLevel() {}
             declared,
             [
                 ("D".to_string(), SymbolKind::Class),
-                ("D/a".to_string(), SymbolKind::Function),
-                ("D/b".to_string(), SymbolKind::Function),
+                ("D/a".to_string(), SymbolKind::Method),
+                ("D/b".to_string(), SymbolKind::Method),
                 ("D/c".to_string(), SymbolKind::Property),
                 ("D/init".to_string(), SymbolKind::Constructor),
                 ("top".to_string(), SymbolKind::Function),
