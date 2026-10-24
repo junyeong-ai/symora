@@ -245,10 +245,6 @@ impl ServerTier {
             Self::Slow => Duration::from_secs(90),
         }
     }
-
-    pub fn shutdown_timeout(&self) -> Duration {
-        Duration::from_secs(5)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
