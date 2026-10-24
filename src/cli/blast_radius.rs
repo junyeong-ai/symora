@@ -77,8 +77,10 @@ pub enum DispatchStatus {
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct DynamicDispatch {
     pub status: DispatchStatus,
-    /// Implementations/overrides discovered (0 when `unavailable`).
-    pub implementations: usize,
+    /// Implementations/overrides the lookup found; absent when it failed, so
+    /// nothing was counted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implementations: Option<usize>,
 }
 
 pub async fn compute(
@@ -188,7 +190,7 @@ async fn detect_dynamic_dispatch(
                 } else {
                     DispatchStatus::Unavailable
                 },
-                implementations,
+                implementations: Some(implementations),
             })
         }
         // Unsupported and failed lookups cannot establish implementation completeness.
@@ -198,12 +200,12 @@ async fn detect_dynamic_dispatch(
         {
             Some(DynamicDispatch {
                 status: DispatchStatus::Unavailable,
-                implementations: 0,
+                implementations: None,
             })
         }
         Err(_) => Some(DynamicDispatch {
             status: DispatchStatus::Unavailable,
-            implementations: 0,
+            implementations: None,
         }),
     }
 }
@@ -379,7 +381,7 @@ mod tests {
             .dynamic_dispatch
             .expect("marker present for a method with impls");
         assert_eq!(dispatch.status, DispatchStatus::Incomplete);
-        assert_eq!(dispatch.implementations, 2);
+        assert_eq!(dispatch.implementations, Some(2));
         // The verified caller count is untouched — widening is not done.
         assert_eq!(radius.direct_callers, 1);
     }
@@ -420,7 +422,10 @@ mod tests {
             Some(SymbolKind::Method),
             WalkConfig::default(),
         );
-        assert_eq!(overridden.dynamic_dispatch.unwrap().implementations, 2);
+        assert_eq!(
+            overridden.dynamic_dispatch.unwrap().implementations,
+            Some(2)
+        );
     }
 
     #[test]
@@ -460,7 +465,7 @@ mod tests {
             .dynamic_dispatch
             .expect("interface + runtime -32601 must disclose unavailability");
         assert_eq!(dispatch.status, DispatchStatus::Unavailable);
-        assert_eq!(dispatch.implementations, 0);
+        assert_eq!(dispatch.implementations, None);
 
         let radius = compute_for(
             HashMap::new(),

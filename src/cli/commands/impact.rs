@@ -233,11 +233,7 @@ mod tests {
             incomplete: false,
             dynamic_dispatch: dispatch.map(|status| DynamicDispatch {
                 status,
-                implementations: if status == DispatchStatus::Incomplete {
-                    2
-                } else {
-                    0
-                },
+                implementations: (status == DispatchStatus::Incomplete).then_some(2),
             }),
             callers_by_depth: vec![],
             test_caller_ratio: None,
