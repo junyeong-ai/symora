@@ -1147,9 +1147,12 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
 /// [`extract_from_match`] reads each as a symbol of its own over that one
 /// range. Listed per language, as each grammar holds the names differently.
 fn declared_names(node: Node, language: Language) -> Vec<Node> {
+    // A name is a named node; a field can also hold the punctuation between
+    // names, as Go's `const A, B = 1, 2` holds its comma.
     let fields = |field| {
         let mut cursor = node.walk();
         node.children_by_field_name(field, &mut cursor)
+            .filter(Node::is_named)
             .collect::<Vec<_>>()
     };
     match language {
@@ -1215,6 +1218,26 @@ fn assignment_targets(node: Node) -> impl Iterator<Item = Node> {
             .filter(|right| right.kind() == "assignment")
     })
     .filter_map(|assignment| assignment.child_by_field_name("left"))
+    .flat_map(destructured)
+}
+
+/// The targets one assignment target lists: itself, or each target a
+/// destructuring bind holds (`a, b = …`, `(a, [b, c]) = …`, Ruby's `a, b = …`).
+fn destructured(target: Node) -> Vec<Node> {
+    match target.kind() {
+        "pattern_list"
+        | "tuple_pattern"
+        | "list_pattern"
+        | "left_assignment_list"
+        | "destructured_left_assignment" => {
+            let mut cursor = target.walk();
+            target
+                .named_children(&mut cursor)
+                .flat_map(destructured)
+                .collect()
+        }
+        _ => vec![target],
+    }
 }
 
 /// Whether an assignment's target is a name it declares, rather than an
@@ -1647,7 +1670,9 @@ fn node_kind(node: Node) -> SymbolKind {
         | "abstract_method_signature"
         | "protocol_function_declaration" => SymbolKind::Method,
 
-        "constructor_signature" | "init_declaration" => SymbolKind::Constructor,
+        "constructor_signature" | "constructor_declaration" | "init_declaration" => {
+            SymbolKind::Constructor
+        }
 
         "class_declaration"
         | "abstract_class_declaration"
@@ -1788,9 +1813,9 @@ const GO_QUERY: &str = r#"
 
 // A binding's node is the same at module scope, in a class body, and inside a
 // function, so members are matched where they are declared. The names are
-// the identifiers the assignment's `left` binds, through a chain as well
-// (`a = b = None`, see `declared_names`); a destructuring bind states its names
-// in one pattern (`a, b = …`), which is not read.
+// the identifiers the assignment's `left` binds, through a chain and a
+// destructuring bind as well (`a = b = None`, `a, b = …`, see
+// `declared_names`).
 const PYTHON_QUERY: &str = r#"
 (function_definition) @symbol
 (class_definition) @symbol
@@ -1843,6 +1868,7 @@ const JAVA_QUERY: &str = r#"
 (interface_declaration) @symbol
 (annotation_type_declaration) @symbol
 (enum_declaration) @symbol
+(constructor_declaration) @symbol
 (method_declaration) @symbol
 (field_declaration) @symbol
 "#;
@@ -1875,6 +1901,7 @@ const CSHARP_QUERY: &str = r#"
 (interface_declaration) @symbol
 (struct_declaration) @symbol
 (enum_declaration) @symbol
+(constructor_declaration) @symbol
 (method_declaration) @symbol
 (property_declaration) @symbol
 (field_declaration) @symbol
@@ -2219,6 +2246,8 @@ async def af(): pass
                 "variable:MODULE_CONST",
                 "variable:annotated",
                 "variable:bare_ann",
+                "variable:first",
+                "variable:second",
                 "class:A",
                 "variable:A/attr",
                 "function:A/m",
@@ -2930,6 +2959,41 @@ region     = "us-central1"
         assert_eq!(span(&go, "y"), ((12, 1), (12, 10)));
     }
 
+    /// A constructor is a declaration of the type it constructs.
+    #[test]
+    fn a_constructor_is_declared_by_its_type() {
+        let extractor = SymbolExtractor::new();
+        for (path, language, content) in [
+            (
+                "J.java",
+                Language::Java,
+                "class J {\n  J() {}\n  J(int a) {}\n}\n",
+            ),
+            (
+                "k.cs",
+                Language::CSharp,
+                "class J {\n  public J() {}\n  static J() {}\n}\n",
+            ),
+        ] {
+            let constructors: Vec<(String, u32)> = extractor
+                .extract(Path::new(path), content, language)
+                .into_iter()
+                .filter(|symbol| symbol.kind == SymbolKind::Constructor)
+                .map(|symbol| {
+                    (
+                        symbol.name_path.unwrap_or(symbol.name),
+                        symbol.location.line,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                constructors,
+                [("J/J".to_string(), 2), ("J/J".to_string(), 3)],
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn a_statement_declaring_several_names_is_the_whole_declaration_of_each() {
         let extractor = SymbolExtractor::new();
@@ -2991,10 +3055,31 @@ region     = "us-central1"
                 "one",
             ),
             (
+                "a.py",
+                Language::Python,
+                "unused, shared = 1, 2\none = 1\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.py",
+                Language::Python,
+                "class A:\n    (unused, [shared, other]) = (1, [2, 3])\n    one = 1\n",
+                &["unused", "shared", "other"],
+                "one",
+            ),
+            (
                 "a.rb",
                 Language::Ruby,
                 "UNUSED = SHARED = 1\nONE = 1\n",
                 &["UNUSED", "SHARED"],
+                "ONE",
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "UNUSED, (SHARED, OTHER) = 1, [2, 3]\nONE = 1\n",
+                &["UNUSED", "SHARED", "OTHER"],
                 "ONE",
             ),
             (
@@ -3034,6 +3119,15 @@ region     = "us-central1"
             ),
         ] {
             let symbols = extractor.extract(Path::new(path), content, language);
+            let mut declared: Vec<&str> = symbols
+                .iter()
+                .filter(|symbol| !symbol.kind.holds_members())
+                .map(|symbol| symbol.name.as_str())
+                .collect();
+            let mut expected: Vec<&str> = several.iter().copied().chain([one]).collect();
+            declared.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(declared, expected, "{path}: {content:?}");
             let located = |name: &str| {
                 let location = &symbols
                     .iter()
