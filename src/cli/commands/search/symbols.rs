@@ -24,7 +24,7 @@ use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
-use crate::services::store::SymbolSearchResult;
+use crate::services::store::{PATH_SUFFIX_SCORE, SymbolSearchResult};
 use crate::services::symbols::SymbolExtractor;
 
 use super::common::{looks_like_symbol_path, resolve_search_paths};
@@ -69,6 +69,16 @@ fn with_emitted_stale(
         .iter()
         .any(|item| is_stale_row(item, stale_files));
     section.with_stale(stale)
+}
+
+/// Whether an index page cut short of its total can hold path matches past
+/// its last row. Path matches rank at `PATH_SUFFIX_SCORE` or above, ahead of
+/// every other row, so a page that ends below that rank holds them all.
+fn holds_path_matches_past(rows: &[SymbolSearchResult], total: usize) -> bool {
+    rows.len() < total
+        && rows
+            .last()
+            .is_some_and(|row| row.score >= PATH_SUFFIX_SCORE)
 }
 
 /// An index row read from a file that has changed since the build: its
@@ -608,7 +618,7 @@ async fn execute_workspace_symbol_search(
         true => Some(
             app.store
                 .search_symbols(
-                    query,
+                    query.strip_prefix('/').unwrap_or(query),
                     candidate_budget(limit),
                     kind,
                     explicit_index_language(language),
@@ -650,9 +660,9 @@ async fn execute_workspace_symbol_search(
         index_bounds = index_holes_bound(ctx, &page.unread_paths, &index_covered);
         // The store matches a query as a substring of a name or path, so
         // `E/A` finds `Shape/area`; the live side reads it as a path, and the
-        // index's rows are held to the same reading. A page cut short of its
-        // total can hold path matches past it, so what it counts is a floor.
-        let cut_short = page.rows.len() < page.total;
+        // index's rows are held to the same reading. Asked without the
+        // leading `/` of an absolute path, the store finds its rows too.
+        let cut_short = holds_path_matches_past(&page.rows, page.total);
         if cut_short {
             index_bounds.push(LowerBound::IndexPageCapped);
         }
@@ -1960,6 +1970,25 @@ mod tests {
             .map(|row| format!("{}@{}", row.backend.as_deref().unwrap(), row.line))
             .collect();
         assert_eq!(kept, ["document@5", "index@7"]);
+    }
+
+    /// A path query's page is short of path matches only while its last row
+    /// still ranks as one; past that every path match is already in hand.
+    #[test]
+    fn a_page_is_short_of_path_matches_only_while_it_ends_among_them() {
+        let row = |score: f64| SymbolSearchResult {
+            name: "run".to_string(),
+            name_path: Some("A/run".to_string()),
+            kind: SymbolKind::Function,
+            file: PathBuf::from("a.py"),
+            line: 1,
+            column: 1,
+            container: None,
+            score,
+        };
+        assert!(holds_path_matches_past(&[row(1.0), row(0.9)], 5));
+        assert!(!holds_path_matches_past(&[row(1.0), row(0.6)], 5));
+        assert!(!holds_path_matches_past(&[row(1.0), row(0.9)], 2));
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and
