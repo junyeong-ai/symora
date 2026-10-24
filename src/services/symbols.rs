@@ -2942,11 +2942,14 @@ const DART_QUERY: &str = r#"
 "#;
 
 // HCL states a declaration as a block carrying quoted labels — `variable "x"`,
-// `resource "type" "name"` — at any depth. A block with no label configures its
-// parent rather than declaring anything. Which attributes declare is not a
-// shape (see `hcl_attribute_declares`), so they are all offered and read there.
+// `resource "type" "name"` — at a file's top level, where Terraform addresses
+// it by them. A nested block configures the block holding it, labeled or not:
+// `dynamic "ingress"` and `provisioner "local-exec"` name the kind of block
+// they make, as `backend "gcs"` names a backend's type. Which attributes
+// declare is not a shape (see `hcl_attribute_declares`), so they are all
+// offered and read there.
 const TERRAFORM_QUERY: &str = r#"
-(block (string_lit)) @symbol
+(config_file (body (block (string_lit)) @symbol))
 (body (attribute) @symbol)
 "#;
 
@@ -4109,6 +4112,15 @@ resource "google_storage_bucket" "logs" {
   lifecycle {
     prevent_destroy = true
   }
+  dynamic "cors" {
+    for_each = var.origins
+    content {
+      origin = [cors.value]
+    }
+  }
+  provisioner "local-exec" {
+    command = "echo created"
+  }
 }
 
 module "network" {
@@ -4120,7 +4132,6 @@ output "bucket_url" {
 }
 "#,
             declares: &[
-                "struct:gcs",
                 "struct:google",
                 "property:project_id",
                 "property:name_prefix",
