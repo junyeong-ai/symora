@@ -53,7 +53,11 @@ if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
   echo "Benchmark requires a clean, committed target repository" >&2
   exit 1
 fi
-( cd "$REPO" && "$SYMORA_BIN" search index build ) >"$OUT/index-build.json"
+# `time` reports the build's wall-clock seconds; the build's own stderr goes
+# to the terminal through fd 3 so only the timing reaches the file.
+TIMEFORMAT=%R
+{ time (cd "$REPO" && "$SYMORA_BIN" search index build >"$OUT/index-build.json" 2>&3); } \
+  3>&2 2>"$OUT/index-build-seconds.txt"
 git -C "$REPO" rev-parse HEAD >"$OUT/revision.txt"
 "$SYMORA_BIN" --version >"$OUT/symora-version.txt"
 claude --version >"$OUT/claude-version.txt"
