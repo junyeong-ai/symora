@@ -829,7 +829,7 @@ fn is_local(node: Node, declared: &std::collections::HashSet<usize>) -> bool {
     let mut ancestor = node.parent();
     while let Some(outer) = ancestor {
         if node_kind(outer).is_callable() {
-            if !own && !is_parameter_list_of(inner, outer) {
+            if !own && !in_header_of(inner, outer) {
                 return true;
             }
         } else {
@@ -1057,6 +1057,11 @@ fn declaration_visibility(
             ) {
                 return None;
             }
+            // Java declares an enum's constants `public static final`, and C#
+            // lets an enum member carry no modifier: both are the enum's API.
+            if matches!(node.kind(), "enum_constant" | "enum_member_declaration") {
+                return Some(true);
+            }
             if modifier("public") {
                 return Some(true);
             }
@@ -1211,8 +1216,11 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
     match language {
         Language::Go => fields("name"),
         // A Swift function's return type carries the `name` field too, so
-        // only a property declaration states several names in it.
-        Language::Swift if node.kind() == "property_declaration" => fields("name"),
+        // only a property declaration or an enum case states several names
+        // in it (`case up, down`).
+        Language::Swift if matches!(node.kind(), "property_declaration" | "enum_entry") => {
+            fields("name")
+        }
         Language::Java => fields("declarator")
             .into_iter()
             .filter_map(|declarator| declarator.child_by_field_name("name"))
@@ -1485,13 +1493,15 @@ fn extract_container_path(
     //
     // Only a declaration the query reads contains: a statement, a body or an
     // expression holds names that declare nothing (the target of a `for`, an
-    // enum's bare members), and a callable is no container of what its
-    // parameters declare (a TypeScript constructor's parameter property).
+    // enum's bare members), and a declaration contains nothing its header
+    // declares: a TypeScript constructor's parameter property is its class's,
+    // and the members of an unnamed C++ enum a field is typed with are what
+    // encloses the field's.
     let mut inner = node;
     let mut ancestor = node.parent();
     while let Some(outer) = ancestor {
         if declared.contains(&outer.id())
-            && !is_parameter_list_of(inner, outer)
+            && !in_header_of(inner, outer)
             && let Some((name, kind)) = extract_name_and_kind(outer, content, language)
             && !name.is_empty()
             && !kind.is_namespace_like()
@@ -1504,12 +1514,17 @@ fn extract_container_path(
     None
 }
 
-/// Whether `inner`, a child of `outer`, is the parameter list of the callable
-/// `outer` declares: its header, rather than its body.
-fn is_parameter_list_of(inner: Node, outer: Node) -> bool {
-    outer
-        .child_by_field_name("parameters")
-        .is_some_and(|parameters| parameters.id() == inner.id())
+/// Whether `inner`, a child of `outer`, is the header the declaration
+/// `outer` is written with rather than its body: its parameter list, or the
+/// type of what it declares. A type's own declaration holds its definition
+/// there (Go's `type S struct { … }`), which is its body.
+fn in_header_of(inner: Node, outer: Node) -> bool {
+    let holds = |field| {
+        outer
+            .child_by_field_name(field)
+            .is_some_and(|held| held.id() == inner.id())
+    };
+    holds("parameters") || (holds("type") && !node_kind(outer).holds_members())
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
@@ -1815,9 +1830,16 @@ fn node_kind(node: Node) -> SymbolKind {
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
         | "union_item" => SymbolKind::Struct,
 
-        "enum_item" | "enum_declaration" | "enum_specifier" => SymbolKind::Enum,
+        "enum_item" | "enum_declaration" | "enum_specifier" | "enum_definition" => SymbolKind::Enum,
 
-        "enum_variant" => SymbolKind::EnumMember,
+        "enum_variant"
+        | "enumerator"
+        | "enum_constant"
+        | "enum_member_declaration"
+        | "enum_entry"
+        | "enum_case"
+        | "simple_enum_case"
+        | "full_enum_case" => SymbolKind::EnumMember,
 
         "interface_declaration"
         | "interface_type"
@@ -2080,6 +2102,7 @@ const JAVA_QUERY: &str = r#"
 (interface_declaration) @symbol
 (annotation_type_declaration) @symbol
 (enum_declaration) @symbol
+(enum_body (enum_constant) @symbol)
 (constructor_declaration) @symbol
 (method_declaration) @symbol
 (field_declaration) @symbol
@@ -2087,6 +2110,7 @@ const JAVA_QUERY: &str = r#"
 
 const KOTLIN_QUERY: &str = r#"
 (class_declaration) @symbol
+(enum_class_body (enum_entry) @symbol)
 (object_declaration) @symbol
 (function_declaration) @symbol
 (property_declaration) @symbol
@@ -2102,6 +2126,7 @@ const CPP_QUERY: &str = r#"
 (class_specifier) @symbol
 (struct_specifier) @symbol
 (enum_specifier) @symbol
+(enumerator_list (enumerator) @symbol)
 (namespace_definition) @symbol
 (field_declaration) @symbol
 (field_declaration_list (template_declaration (declaration) @symbol))
@@ -2129,6 +2154,7 @@ const CSHARP_QUERY: &str = r#"
 (interface_declaration) @symbol
 (struct_declaration) @symbol
 (enum_declaration) @symbol
+(enum_member_declaration_list (enum_member_declaration) @symbol)
 (constructor_declaration) @symbol
 (method_declaration) @symbol
 (property_declaration) @symbol
@@ -2162,6 +2188,7 @@ const SWIFT_QUERY: &str = r#"
 (function_declaration) @symbol
 (protocol_function_declaration) @symbol
 (init_declaration) @symbol
+(enum_class_body (enum_entry) @symbol)
 (class_body (property_declaration) @symbol)
 (source_file (property_declaration) @symbol)
 "#;
@@ -2172,6 +2199,9 @@ const SCALA_QUERY: &str = r#"
 (class_definition) @symbol
 (object_definition) @symbol
 (trait_definition) @symbol
+(enum_definition) @symbol
+(enum_case_definitions (simple_enum_case) @symbol)
+(enum_case_definitions (full_enum_case) @symbol)
 (function_definition) @symbol
 (function_declaration) @symbol
 (template_body (val_definition) @symbol)
@@ -2183,6 +2213,7 @@ const SCALA_QUERY: &str = r#"
 const DART_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_declaration) @symbol
+(enum_body (enum_constant) @symbol)
 (mixin_declaration) @symbol
 (extension_declaration) @symbol
 (function_signature) @symbol
@@ -2205,6 +2236,7 @@ const PHP_QUERY: &str = r#"
 (class_declaration) @symbol
 (class_declaration (declaration_list (const_declaration) @symbol))
 (enum_declaration) @symbol
+(enum_declaration_list (enum_case) @symbol)
 (interface_declaration) @symbol
 (trait_declaration) @symbol
 (method_declaration) @symbol
@@ -2269,6 +2301,16 @@ mod tests {
                     ("Color/Red", Some(false)),
                     ("Color/Green", Some(false)),
                 ],
+            ),
+            (
+                Language::Java,
+                "enum E { Value }",
+                &[("E/Value", Some(true))],
+            ),
+            (
+                Language::CSharp,
+                "enum E { Value }",
+                &[("E/Value", Some(true))],
             ),
             (
                 Language::JavaScript,
@@ -2356,23 +2398,16 @@ mod tests {
             extractor.declaration_visibility(path, "pub fn visible( {", Language::Rust, &target),
             None
         );
-        for (language, source, name) in [
-            (Language::Java, "enum E { Value }", "Value"),
-            (Language::CSharp, "enum E { Value }", "Value"),
-            (Language::Go, "package Upper\n", "Upper"),
-        ] {
-            let column = source[..source.find(name).unwrap()].chars().count() as u32 + 1;
-            let target = Symbol::new(
-                name.to_string(),
-                SymbolKind::EnumMember,
-                Location::point(path.to_path_buf(), 1, column),
-            );
-            assert_eq!(
-                extractor.declaration_visibility(path, source, language, &target),
-                None,
-                "{language:?} {name} has no visibility declaration in this registry"
-            );
-        }
+        let package = Symbol::new(
+            "Upper".to_string(),
+            SymbolKind::Module,
+            Location::point(path.to_path_buf(), 1, 9),
+        );
+        assert_eq!(
+            extractor.declaration_visibility(path, "package Upper\n", Language::Go, &package),
+            None,
+            "a Go package has no visibility declaration in this registry"
+        );
     }
 
     /// What a language declares, written from the LANGUAGE rather than from
@@ -2615,7 +2650,7 @@ record R(int a) {}
 
 interface I { void im(); }
 
-enum E { X }
+enum E { X, Y }
 
 class C {
     int field;
@@ -2629,6 +2664,8 @@ class C {
                 "interface:I",
                 "method:I/im",
                 "enum:E",
+                "enum_member:E/X",
+                "enum_member:E/Y",
                 "class:C",
                 "field:C/field",
                 "method:C/m",
@@ -2659,6 +2696,7 @@ namespace N {
                 "struct:St",
                 "field:St/F",
                 "enum:E",
+                "enum_member:E/X",
                 "class:C",
                 "property:C/P",
                 "method:C/M",
@@ -2688,6 +2726,7 @@ function f() {}
             declares: &[
                 "module:N",
                 "enum:E",
+                "enum_member:E/X",
                 "interface:T",
                 "method:T/tm",
                 "interface:I",
@@ -2713,6 +2752,8 @@ object Registry {
     fun register() {}
 }
 
+enum class Color { RED, GREEN }
+
 class Widget {
     val name = "w"
     fun render() {}
@@ -2725,6 +2766,9 @@ fun top() {}
                 "function:I/im",
                 "class:Registry",
                 "function:Registry/register",
+                "class:Color",
+                "enum_member:Color/RED",
+                "enum_member:Color/GREEN",
                 "class:Widget",
                 "property:Widget/name",
                 "function:Widget/render",
@@ -2737,7 +2781,7 @@ fun top() {}
             source: r#"
 namespace N {
 
-struct S { int f; };
+struct S { int f; enum { Anon } kind; };
 
 class C {
 public:
@@ -2766,6 +2810,8 @@ void f() {}
                 "module:N",
                 "struct:S",
                 "field:S/f",
+                "field:S/kind",
+                "enum_member:S/Anon",
                 "class:C",
                 "constructor:C/C",
                 "constructor:C/C",
@@ -2778,6 +2824,7 @@ void f() {}
                 "method:C/make",
                 "function:C::operator bool",
                 "enum:E",
+                "enum_member:E/X",
                 "function:f",
             ],
         },
@@ -2842,11 +2889,20 @@ class C {
     func cm() {}
 }
 
+enum Dir {
+    case up, down
+    case left(Int)
+}
+
 func top() {}
 "#,
             declares: &[
                 "interface:P",
                 "method:P/pm",
+                "class:Dir",
+                "enum_member:Dir/up",
+                "enum_member:Dir/down",
+                "enum_member:Dir/left",
                 "class:C",
                 "property:C/p",
                 "function:C/cm",
@@ -2868,8 +2924,17 @@ object O {
 class C {
   def cm(): Unit = {}
 }
+
+enum Color {
+  case Red, Green
+  case Mix(r: Int)
+}
 "#,
             declares: &[
+                "enum:Color",
+                "enum_member:Color/Red",
+                "enum_member:Color/Green",
+                "enum_member:Color/Mix",
                 "interface:T",
                 "function:T/tm",
                 "class:O",
@@ -2902,6 +2967,7 @@ void top() {}
             declares: &[
                 "interface:M",
                 "enum:E",
+                "enum_member:E/x",
                 "class:A",
                 "function:A/am",
                 "class:C",
