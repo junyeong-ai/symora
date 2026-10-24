@@ -22,7 +22,7 @@ use crate::cli::utils::{extract_signature, shell_arg};
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
-use crate::models::symbol::{Language, Symbol, SymbolFilter, SymbolKind};
+use crate::models::symbol::{Language, PathPattern, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
 use crate::services::store::SymbolSearchResult;
 use crate::services::symbols::SymbolExtractor;
@@ -72,33 +72,45 @@ fn with_emitted_stale(
 }
 
 /// Whether an index page cut short of its total can hold path matches past
-/// its last row. The store orders the rows a pattern matches, case aside,
-/// ahead of every row it does not, so a page whose last row the pattern does
-/// not match holds them all.
-fn holds_path_matches_past(rows: &[SymbolSearchResult], total: usize, pattern: &str) -> bool {
-    let pattern = Symbol::split_kind(pattern).0.to_ascii_lowercase();
+/// its last row. The store orders the rows its text names as a path, case
+/// aside, ahead of every row it does not, so a page whose last row that path
+/// does not name holds them all.
+fn holds_path_matches_past(
+    rows: &[SymbolSearchResult],
+    total: usize,
+    pattern: &PathPattern,
+) -> bool {
+    let named = pattern.path.to_ascii_lowercase();
     rows.len() < total
         && rows.last().is_some_and(|row| {
             let path = row.name_path.as_deref().unwrap_or(&row.name);
-            Symbol::path_matches(&path.to_ascii_lowercase(), &pattern)
+            PathPattern::names(&named, &path.to_ascii_lowercase())
         })
 }
 
-/// What the store is asked for a path pattern: its path without the leading
-/// `/` of an absolute pattern, which its substring match cannot find at the
-/// top of a path, or a kind qualifier, which no index path carries.
-fn store_path_query(pattern: &str) -> &str {
-    let base = Symbol::split_kind(pattern).0;
-    base.strip_prefix('/').unwrap_or(base)
+/// What the store is asked for a path pattern, and for how many rows: the
+/// path every reading of it begins with, without the leading `/` of an
+/// absolute pattern, which its substring match cannot find at the top of a
+/// path, or a kind qualifier, which no index path carries. The order that
+/// bounds the matches of one reading to the head of a page says nothing about
+/// a longer one, so a pattern read two ways is read in full.
+fn store_path_query<'a>(pattern: &PathPattern<'a>, limit: usize) -> (&'a str, usize) {
+    let path = pattern.path;
+    let rows = match pattern.literal {
+        Some(_) => usize::MAX,
+        None => candidate_budget(limit),
+    };
+    (path.strip_prefix('/').unwrap_or(path), rows)
 }
 
 /// Whether an index row answers a path pattern. The index keys a row by its
 /// path alone and records its kind beside it, so the kind a pattern's
 /// qualifier names is read against that kind.
-fn index_row_matches(row: &SymbolSearchResult, pattern: &str) -> bool {
-    let (base, kind) = Symbol::split_kind(pattern);
-    Symbol::path_matches(row.name_path.as_deref().unwrap_or(&row.name), base)
-        && kind.is_none_or(|kind| row.kind == kind)
+fn index_row_matches(row: &SymbolSearchResult, pattern: &PathPattern) -> bool {
+    pattern.matches(
+        row.name_path.as_deref().unwrap_or(&row.name),
+        Some(row.kind),
+    )
 }
 
 /// An index row read from a file that has changed since the build: its
@@ -411,8 +423,9 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         ..
     } = search;
 
-    let seed = Symbol::split_kind(query)
-        .0
+    let pattern = PathPattern::parse(query);
+    let seed = pattern
+        .path
         .split(['*', '/', '[', ']'])
         .filter(|s| !s.is_empty())
         .max_by_key(|s| s.len())
@@ -472,7 +485,7 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
     let matches: Vec<SymbolResultOutput> = page
         .rows
         .into_iter()
-        .filter(|r| index_row_matches(r, query))
+        .filter(|r| index_row_matches(r, &pattern))
         .map(|r| index_result_output(r, ctx))
         .collect();
     let count = matches.len();
@@ -635,18 +648,20 @@ async fn execute_workspace_symbol_search(
     // never asks: a route that skipped the index has no store outcome, and
     // standing in a failure for it would let the route the caller chose be
     // overwritten by one it never met.
+    let pattern = PathPattern::parse(query);
     let supplement = match route.supplements_from_index() {
-        true => Some(
+        true => Some({
+            let (searched, rows) = store_path_query(&pattern, limit);
             app.store
                 .search_symbols(
-                    store_path_query(query),
-                    candidate_budget(limit),
+                    searched,
+                    rows,
                     kind,
                     explicit_index_language(language),
                     within,
                 )
-                .await,
-        ),
+                .await
+        }),
         false => None,
     };
     let mut route = route;
@@ -683,14 +698,14 @@ async fn execute_workspace_symbol_search(
         // `E/A` finds `Shape/area`; the live side reads it as a path, and the
         // index's rows are held to the same reading. Asked without the
         // leading `/` of an absolute path, the store finds its rows too.
-        let cut_short = holds_path_matches_past(&page.rows, page.total, query);
+        let cut_short = holds_path_matches_past(&page.rows, page.total, &pattern);
         if cut_short {
             index_bounds.push(LowerBound::IndexPageCapped);
         }
         let matched: Vec<SymbolSearchResult> = page
             .rows
             .into_iter()
-            .filter(|row| index_row_matches(row, query))
+            .filter(|row| index_row_matches(row, &pattern))
             .collect();
         lower_bounds.extend(unmerged_overlap(
             live,
@@ -731,16 +746,21 @@ async fn execute_workspace_symbol_search(
     let mut lower_bounds = {
         let mut bounds = ordered_bounds(detected.shortfall(ctx), index_bounds);
         bounds.extend(lower_bounds);
-        bounds.extend(narrowed_live_answer(
-            &narrowed,
-            &index_covered,
-            !matches!(
-                route,
-                WorkspaceSearchRoute::Forced
-                    | WorkspaceSearchRoute::IndexRebuilding
-                    | WorkspaceSearchRoute::IndexUnreadable
-            ),
-        ));
+        let buildable = !matches!(
+            route,
+            WorkspaceSearchRoute::Forced
+                | WorkspaceSearchRoute::IndexRebuilding
+                | WorkspaceSearchRoute::IndexUnreadable
+        );
+        bounds.extend(narrowed_live_answer(&narrowed, &index_covered, buildable));
+        if workspace_names(query).is_empty() {
+            bounds.extend(live_only(languages, &index_covered, buildable).map(
+                |(languages, indexable)| LowerBound::LiveNameUnasked {
+                    languages,
+                    indexable,
+                },
+            ));
+        }
         bounds
     };
     lower_bounds.dedup();
@@ -1076,7 +1096,7 @@ async fn collect_workspace_symbol_results(
     }
     let mut degraded = Vec::new();
 
-    let workspace_query = workspace_query_from_pattern(query);
+    let names = workspace_names(query);
     let overfetch_limit = if looks_like_symbol_path(query) {
         limit
     } else {
@@ -1087,21 +1107,26 @@ async fn collect_workspace_symbol_results(
     let mut skipped: Vec<Language> = Vec::new();
     let mut narrowed: Vec<Language> = Vec::new();
 
-    for (queried, language) in languages.iter().enumerate() {
+    'languages: for (queried, language) in languages.iter().enumerate() {
         if results.len() >= overfetch_limit.saturating_mul(2) {
             skipped.extend_from_slice(&languages[queried..]);
             break;
         }
-        let mut symbols = match app.lsp.workspace_symbols(&workspace_query, *language).await {
-            Ok(symbols) => {
-                degraded.extend(symbols.indexing.map(|marker| (*language, marker)));
-                symbols.data
+        let mut symbols = Vec::new();
+        let mut indexing = None;
+        for name in &names {
+            match app.lsp.workspace_symbols(name, *language).await {
+                Ok(answer) => {
+                    indexing = indexing.max(answer.indexing);
+                    symbols.extend(answer.data);
+                }
+                Err(e) => {
+                    failures.push((*language, e));
+                    continue 'languages;
+                }
             }
-            Err(e) => {
-                failures.push((*language, e));
-                continue;
-            }
-        };
+        }
+        degraded.extend(indexing.map(|marker| (*language, marker)));
 
         Symbol::assign_workspace_paths(&mut symbols);
         let before = symbols.len();
@@ -1200,17 +1225,32 @@ fn uncovered_path(app: &App, within: &[PathBuf], query: &str) -> Option<OutputEr
 }
 
 /// The bound a path-confined live answer is, for the languages it alone
-/// answered. Where the index answered a language, its rows already hold every
-/// match inside the paths as of the build, so a server's narrowed answer
-/// costs that language nothing. `buildable` is whether building the index
-/// would answer the search again: not while it is rebuilding or unreadable,
-/// nor for a search that bypasses it.
+/// answered.
 fn narrowed_live_answer(
     narrowed: &[Language],
     answered_by_index: &[Language],
     buildable: bool,
 ) -> Option<LowerBound> {
-    let mut languages: Vec<Language> = narrowed
+    live_only(narrowed, answered_by_index, buildable).map(|(languages, indexable)| {
+        LowerBound::LiveAnswerNarrowed {
+            languages,
+            indexable,
+        }
+    })
+}
+
+/// The languages a shortfall of the live answer bounds, and whether a build
+/// can take the server's place for them. Where the index answered a language,
+/// its rows already hold every match as of the build, so what the server left
+/// out costs that language nothing. `buildable` is whether building the index
+/// would answer the search again: not while it is rebuilding or unreadable,
+/// nor for a search that bypasses it.
+fn live_only(
+    languages: &[Language],
+    answered_by_index: &[Language],
+    buildable: bool,
+) -> Option<(Vec<Language>, bool)> {
+    let mut languages: Vec<Language> = languages
         .iter()
         .copied()
         .filter(|language| !answered_by_index.contains(language))
@@ -1221,10 +1261,7 @@ fn narrowed_live_answer(
         && languages
             .iter()
             .all(|language| crate::services::symbols::SymbolExtractor::is_supported(*language));
-    (!languages.is_empty()).then_some(LowerBound::LiveAnswerNarrowed {
-        languages,
-        indexable,
-    })
+    (!languages.is_empty()).then_some((languages, indexable))
 }
 
 /// What one source of an answer brought, in the only two terms the union
@@ -1305,7 +1342,11 @@ fn merge_symbol_results(
     let mut merged = Vec::new();
 
     for result in primary.into_iter().chain(secondary) {
-        let symbol_key = Symbol::unqualified(result.name_path.as_deref().unwrap_or(&result.name));
+        let symbol_key = Symbol::unqualified(
+            result.name_path.as_deref().unwrap_or(&result.name),
+            &result.name,
+            &result.kind,
+        );
         let key = format!("{}:{}:{}", result.file, result.line, symbol_key);
         if seen.insert(key) {
             merged.push(result);
@@ -1324,8 +1365,8 @@ async fn collect_document_path_results(
     within: &[PathBuf],
     seed_results: &[SymbolResultOutput],
 ) -> DocumentExpansion {
-    let leaf = workspace_query_from_pattern(query);
-    if leaf.is_empty() {
+    let names = workspace_names(query);
+    if names.is_empty() {
         return DocumentExpansion::default();
     }
 
@@ -1345,31 +1386,36 @@ async fn collect_document_path_results(
     let mut skipped = Vec::new();
     let mut narrowed = Vec::new();
     if candidate_files.len() < limit {
-        let seeds =
-            collect_workspace_symbol_results(app, &leaf, kind, limit * 2, languages, within).await;
-        narrowed = seeds.narrowed;
-        // The leaf requery is a fan-out like any other, and what it could not
-        // ask about is a coverage fact — discarding it here would leave the
-        // caller publishing a set of languages it never actually covered.
-        failures = seeds.failures;
-        skipped = seeds.skipped;
-        // The fan-out returns its rows already cut to its own overfetch limit
-        // while reporting the total it saw, so seeds can run out here while
-        // more existed upstream.
-        capped |= seeds.total > seeds.results.len();
-        let mut seeds = seeds.results.into_iter();
-        for result in seeds.by_ref() {
-            let file = app.root().join(&result.file);
-            if seen_files.insert(file.clone()) {
-                candidate_files.push(file);
+        for name in &names {
+            let seeds =
+                collect_workspace_symbol_results(app, name, kind, limit * 2, languages, within)
+                    .await;
+            // The leaf requery is a fan-out like any other, and what it could
+            // not ask about is a coverage fact — discarding it here would leave
+            // the caller publishing a set of languages it never actually
+            // covered.
+            narrowed.extend(seeds.narrowed);
+            failures.extend(seeds.failures);
+            skipped.extend(seeds.skipped);
+            // The fan-out returns its rows already cut to its own overfetch
+            // limit while reporting the total it saw, so seeds can run out here
+            // while more existed upstream.
+            capped |= seeds.total > seeds.results.len();
+            // Reaching the cap on the last seed omitted nothing. Only a seed
+            // in a file left unread does.
+            for result in seeds.results {
+                let file = app.root().join(&result.file);
+                if seen_files.contains(&file) {
+                    continue;
+                }
                 if candidate_files.len() >= limit * 2 {
+                    capped = true;
                     break;
                 }
+                seen_files.insert(file.clone());
+                candidate_files.push(file);
             }
         }
-        // Reaching the cap on the last seed omitted nothing. Only a seed left
-        // unread does.
-        capped |= seeds.next().is_some();
     }
 
     let mut expanded = Vec::new();
@@ -1494,11 +1540,27 @@ fn live_result_output(symbol: Symbol, backend: &str, query: &str, app: &App) -> 
     }
 }
 
-fn workspace_query_from_pattern(pattern: &str) -> String {
-    let trimmed = pattern.trim().trim_start_matches('/');
-    let last = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let base = last.split('[').next().unwrap_or(last);
-    base.trim_matches('*').to_string()
+/// The names a server's workspace search is asked for to find a pattern's
+/// matches: for each way the pattern reads, the name its path ends in, without
+/// type parameters or wildcards. A computed member (`[key]`) has no name a
+/// query can spell — tsserver's navigation search lists none — so the name of
+/// what encloses it is asked instead, and its document lists the member.
+fn workspace_names(pattern: &str) -> Vec<String> {
+    let pattern = PathPattern::parse(pattern.trim());
+    let mut names: Vec<String> = Vec::new();
+    for path in std::iter::once(pattern.path).chain(pattern.literal) {
+        let name = match PathPattern::split_name(path) {
+            (Some(enclosing), name) if name.starts_with('[') => {
+                PathPattern::split_name(enclosing).1
+            }
+            (_, name) => name,
+        };
+        let name = name.split('[').next().unwrap_or(name).trim_matches('*');
+        if !name.is_empty() && !names.iter().any(|asked| asked == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 fn kind_matches(
@@ -1976,9 +2038,10 @@ mod tests {
     fn a_merge_keeps_one_row_of_a_declaration_whatever_its_qualifier() {
         let row = |path: &str, line: u32, backend: &str| SymbolResultOutput {
             name_path: Some(path.to_string()),
+            kind: "struct".to_string(),
             line,
             backend: Some(backend.to_string()),
-            ..result(path, "lib.rs")
+            ..result("Widget", "lib.rs")
         };
         let merged = merge_symbol_results(
             vec![row("Widget[struct]", 5, "document")],
@@ -2010,20 +2073,15 @@ mod tests {
                 })
                 .collect()
         };
-        assert!(holds_path_matches_past(&page(&["E/a", "X/E/a"]), 5, "E/a"));
-        assert!(holds_path_matches_past(&page(&["E/a", "x/e/A"]), 5, "E/a"));
-        assert!(!holds_path_matches_past(
-            &page(&["E/a", "Shape/area"]),
-            5,
-            "E/a"
-        ));
-        assert!(!holds_path_matches_past(&page(&["a", "K1/a"]), 5, "/a"));
-        assert!(!holds_path_matches_past(&page(&["E/a", "X/E/a"]), 2, "E/a"));
-        assert!(holds_path_matches_past(
-            &page(&["E/a", "X/E/a"]),
-            5,
-            "E/a[function]"
-        ));
+        let past = |paths: &[&str], total: usize, pattern: &str| {
+            holds_path_matches_past(&page(paths), total, &PathPattern::parse(pattern))
+        };
+        assert!(past(&["E/a", "X/E/a"], 5, "E/a"));
+        assert!(past(&["E/a", "x/e/A"], 5, "E/a"));
+        assert!(!past(&["E/a", "Shape/area"], 5, "E/a"));
+        assert!(!past(&["a", "K1/a"], 5, "/a"));
+        assert!(!past(&["E/a", "X/E/a"], 2, "E/a"));
+        assert!(past(&["E/a", "X/E/a"], 5, "E/a[function]"));
     }
 
     /// An index row answers a pattern by its path, and the kind a pattern's
@@ -2031,9 +2089,9 @@ mod tests {
     /// asked for the path alone.
     #[test]
     fn an_index_row_answers_a_qualified_pattern_by_its_recorded_kind() {
-        let row = |kind: SymbolKind| SymbolSearchResult {
-            name: "x".to_string(),
-            name_path: Some("C/x".to_string()),
+        let row = |path: &str, kind: SymbolKind| SymbolSearchResult {
+            name: PathPattern::split_name(path).1.to_string(),
+            name_path: Some(path.to_string()),
             kind,
             file: PathBuf::from("a.py"),
             line: 1,
@@ -2041,21 +2099,48 @@ mod tests {
             container: None,
             score: 1.0,
         };
-        assert!(index_row_matches(&row(SymbolKind::Function), "C/x"));
-        assert!(index_row_matches(
-            &row(SymbolKind::Function),
-            "C/x[function]"
-        ));
-        assert!(!index_row_matches(
-            &row(SymbolKind::Variable),
-            "C/x[function]"
-        ));
-        assert!(index_row_matches(
-            &row(SymbolKind::Variable),
-            "/C/x[variable]"
-        ));
-        assert_eq!(store_path_query("/C/x[function]"), "C/x");
-        assert_eq!(store_path_query("C/x"), "C/x");
+        let answers = |row: &SymbolSearchResult, pattern: &str| {
+            index_row_matches(row, &PathPattern::parse(pattern))
+        };
+        assert!(answers(&row("C/x", SymbolKind::Function), "C/x"));
+        assert!(answers(&row("C/x", SymbolKind::Function), "C/x[function]"));
+        assert!(!answers(&row("C/x", SymbolKind::Variable), "C/x[function]"));
+        assert!(answers(&row("C/x", SymbolKind::Variable), "/C/x[variable]"));
+
+        let operator = row("Derived/operator/", SymbolKind::Function);
+        assert!(answers(&operator, "Derived/operator/[function]"));
+        assert!(answers(&operator, "operator/[function]"));
+        assert!(!answers(&operator, "operator/[method]"));
+        let computed = row("C/[key]", SymbolKind::Method);
+        assert!(answers(&computed, "C/[key]"));
+        assert!(!answers(&computed, "C/[method]"));
+
+        let budget = candidate_budget(10);
+        fn query(pattern: &str) -> (&str, usize) {
+            store_path_query(&PathPattern::parse(pattern), 10)
+        }
+        assert_eq!(query("/C/x[function]"), ("C/x", budget));
+        assert_eq!(query("C/x"), ("C/x", budget));
+        assert_eq!(query("C/[key]"), ("C/", usize::MAX));
+    }
+
+    /// A server is asked for the name each reading of a pattern ends in, and
+    /// for what encloses a computed member, which no server search lists.
+    #[test]
+    fn a_server_is_asked_for_names_it_can_list() {
+        let asked = |pattern| workspace_names(pattern);
+        assert_eq!(asked("Shape/area"), ["area"]);
+        assert_eq!(asked("*/area[method]"), ["area"]);
+        assert_eq!(asked("Foo[A]"), ["Foo"]);
+        assert_eq!(asked("C/[Symbol.iterator]"), ["C"]);
+        assert_eq!(asked("C/[key][method]"), ["C"]);
+        assert_eq!(asked("C/[key]"), ["C/", "C"]);
+        assert_eq!(asked("Derived/operator/"), ["operator/"]);
+        assert_eq!(
+            asked("Derived/operator/[method]"),
+            ["operator/", "operator"]
+        );
+        assert!(asked("[key]").is_empty());
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and

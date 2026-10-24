@@ -1611,6 +1611,53 @@ fn a_path_query_answers_from_the_index_by_path_not_by_substring() {
     }
 }
 
+/// A computed member is named by its brackets, whatever kind their text
+/// spells, and no server search lists one. Alone, it is answered by the index
+/// or disclosed as unasked; under what encloses it, by its path.
+#[test]
+fn a_computed_member_is_found_by_its_brackets() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("c.ts"),
+        "const key = \"k\";\nconst method = \"m\";\n\
+         export class C {\n  [key](): number {\n    return 1;\n  }\n  \
+         [method](): number {\n    return 2;\n  }\n}\n",
+    )
+    .unwrap();
+    let config_dir = dir.path().join(".symora");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[lsp.servers.typescript]\ncommand = \"/nonexistent/typescript-language-server\"\n",
+    )
+    .unwrap();
+
+    let unasked = json_ok(dir.path(), &["search", "symbols", "[key]"]);
+    assert_eq!(unasked["count"], 0, "{unasked}");
+    assert_eq!(unasked["incomplete"], true, "{unasked}");
+    assert_eq!(
+        unasked["next_commands"][0], "symora search index build",
+        "{unasked}"
+    );
+
+    let build = run_in(dir.path(), &["search", "index", "build"]);
+    assert!(build.status.success());
+    let paths = |query: &str| -> Vec<serde_json::Value> {
+        let answer = json_ok(dir.path(), &["search", "symbols", query]);
+        assert!(answer.get("incomplete").is_none(), "{query}: {answer}");
+        answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name_path"].clone())
+            .collect()
+    };
+    assert_eq!(paths("[key]"), ["C/[key]"]);
+    assert_eq!(paths("C/[key]"), ["C/[key]"]);
+    assert_eq!(paths("C/[method]"), ["C/[method]"]);
+    assert_eq!(paths("C/[key][method]"), ["C/[key]"]);
+}
+
 /// A decorator, an attribute, a Rust doc comment or a C++ template header is
 /// part of the declaration it heads, so deleting the declaration without a
 /// server takes those lines with it rather than leaving them on whatever

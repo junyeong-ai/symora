@@ -211,86 +211,25 @@ impl Symbol {
     /// The path without the kind that tells this symbol from same-named
     /// siblings: the key an index or workspace row carries for it.
     pub fn unqualified_path(&self) -> &str {
-        Self::unqualified(self.path())
+        Self::unqualified(self.path(), &self.name, self.kind.as_str())
     }
 
-    /// A path without the kind qualifier its last segment may carry.
-    pub fn unqualified(path: &str) -> &str {
-        Self::split_qualifier(path).0
-    }
-
-    /// A path and the kind its last segment's qualifier names, if it has one.
-    pub fn split_kind(path: &str) -> (&str, Option<SymbolKind>) {
-        let (base, qualifier) = Self::split_qualifier(path);
-        (base, qualifier.and_then(|kind| kind.parse().ok()))
+    /// A declaration's path without the qualifier its last segment may carry.
+    ///
+    /// A qualifier is the declaration's own kind written after its name, so
+    /// the name and kind say whether a path ends in one. The text alone
+    /// cannot: a bracket also opens a TypeScript computed name (`C/[key]`),
+    /// and a name can end in `/` (C++'s `Derived/operator/`).
+    pub fn unqualified<'a>(path: &'a str, name: &str, kind: &str) -> &'a str {
+        path.strip_suffix(']')
+            .and_then(|rest| rest.strip_suffix(kind))
+            .and_then(|rest| rest.strip_suffix('['))
+            .filter(|base| base.ends_with(name))
+            .unwrap_or(path)
     }
 
     pub fn matches_path(&self, pattern: &str) -> bool {
-        Self::path_matches(self.path(), pattern)
-    }
-
-    /// Match a precomputed path string against a `--symbol`-style pattern: a
-    /// leading `/` forces a full-path exact match, otherwise bare
-    /// last-component / `/`-anchored suffix / `*` wildcard matching. Shared by
-    /// the symbol method and the index-row glob filter so every surface
-    /// resolves a pattern the same way.
-    pub fn path_matches(path: &str, pattern: &str) -> bool {
-        if let Some(abs_pattern) = pattern.strip_prefix('/') {
-            return Self::matches_pattern(path, abs_pattern, true);
-        }
-        Self::matches_pattern(path, pattern, false)
-    }
-
-    fn matches_pattern(path: &str, pattern: &str, exact: bool) -> bool {
-        let (pattern_base, pattern_qualifier) = Self::split_qualifier(pattern);
-        let (path_base, path_qualifier) = Self::split_qualifier(path);
-
-        if let Some(qualifier) = pattern_qualifier
-            && path_qualifier != Some(qualifier)
-        {
-            return false;
-        }
-
-        let pattern = pattern_base;
-        let path = path_base;
-
-        if pattern.contains('*') {
-            Self::matches_wildcard(path, pattern, exact)
-        } else if exact {
-            path == pattern
-        } else if pattern.contains('/') {
-            path == pattern || path.ends_with(&format!("/{}", pattern))
-        } else {
-            let name = path.rsplit('/').next().unwrap_or(path);
-            name == pattern
-        }
-    }
-
-    /// Split a path into its base and its trailing `[kind]`, if any.
-    ///
-    /// Only a real kind counts. Brackets are ordinary name syntax in
-    /// several languages — a Scala or Kotlin `Foo[A]` is one name, not a
-    /// qualified one — and reading those as qualifiers would make a pattern
-    /// match nothing while a bare `Foo` started matching them.
-    ///
-    /// An unqualified pattern matches a qualified path, so an agent that
-    /// knows only the name still reaches every candidate.
-    ///
-    /// A qualifier follows the name it qualifies, so a segment that opens
-    /// with a bracket is a name: a TypeScript computed member `[key]` names
-    /// itself, whatever kind its text spells.
-    fn split_qualifier(s: &str) -> (&str, Option<&str>) {
-        if let Some(bracket) = s.rfind('[')
-            && bracket > 0
-            && !s[..bracket].ends_with('/')
-            && let Some(qualifier) = s[bracket..]
-                .strip_prefix('[')
-                .and_then(|q| q.strip_suffix(']'))
-            && qualifier.parse::<SymbolKind>().is_ok()
-        {
-            return (&s[..bracket], Some(qualifier));
-        }
-        (s, None)
+        PathPattern::parse(pattern).matches(self.unqualified_path(), self.discriminator)
     }
 
     fn matches_wildcard(path: &str, pattern: &str, exact: bool) -> bool {
@@ -607,6 +546,104 @@ impl Symbol {
             }
         }
         label.len()
+    }
+}
+
+/// A `--symbol` pattern, read for the declarations it names.
+///
+/// A trailing `[kind]` qualifies the name before it. Only a real kind counts:
+/// brackets are ordinary name syntax in several languages — a Scala or Kotlin
+/// `Foo[A]` is one name — and reading those as qualifiers would make a pattern
+/// match nothing while a bare `Foo` started matching them. A qualifier follows
+/// a name, so a pattern that opens with a bracket is one, whatever kind its
+/// text spells.
+///
+/// Where the name before the bracket ends in `/`, the text cannot say whether
+/// the bracket qualifies a name that ends in `/` (C++'s `operator/`) or opens a
+/// computed member named by its brackets (TypeScript's `[key]`), so the
+/// pattern names what either reading names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathPattern<'a> {
+    /// The path the pattern names, without its qualifier. Every reading of the
+    /// pattern begins with it, so text that finds it finds them all.
+    pub path: &'a str,
+    /// The kind the qualifier requires.
+    pub kind: Option<SymbolKind>,
+    /// The pattern as written, where it can also name a computed member.
+    pub literal: Option<&'a str>,
+}
+
+impl<'a> PathPattern<'a> {
+    pub fn parse(pattern: &'a str) -> Self {
+        if let Some(bracket) = pattern.rfind('[')
+            && let Some(kind) = pattern[bracket..]
+                .strip_prefix('[')
+                .and_then(|qualifier| qualifier.strip_suffix(']'))
+                .and_then(|qualifier| qualifier.parse::<SymbolKind>().ok())
+        {
+            let path = &pattern[..bracket];
+            if !path.strip_prefix('/').unwrap_or(path).is_empty() {
+                return Self {
+                    path,
+                    kind: Some(kind),
+                    literal: path.ends_with('/').then_some(pattern),
+                };
+            }
+        }
+        Self {
+            path: pattern,
+            kind: None,
+            literal: None,
+        }
+    }
+
+    /// Whether the pattern names a declaration, given its unqualified path and
+    /// the kind that path is qualified by. A qualifier requires that kind, so
+    /// a qualified path a listing printed names the declaration it was printed
+    /// for and not an unqualified one of the same kind elsewhere; an
+    /// unqualified pattern names every kind, so an agent that knows only the
+    /// name still reaches every candidate.
+    pub fn matches(&self, path: &str, qualified_by: Option<SymbolKind>) -> bool {
+        (self
+            .kind
+            .is_none_or(|qualifier| qualified_by == Some(qualifier))
+            && Self::names(self.path, path))
+            || self
+                .literal
+                .is_some_and(|literal| Self::names(literal, path))
+    }
+
+    /// Whether a pattern's path names an unqualified path: a leading `/`
+    /// forces a full-path exact match, otherwise bare last-component,
+    /// `/`-anchored suffix, or `*` wildcard matching. Every surface reads a
+    /// pattern through this, so each resolves it the same way.
+    pub fn names(pattern: &str, path: &str) -> bool {
+        let (pattern, exact) = match pattern.strip_prefix('/') {
+            Some(absolute) => (absolute, true),
+            None => (pattern, false),
+        };
+        if pattern.contains('*') {
+            Symbol::matches_wildcard(path, pattern, exact)
+        } else if exact {
+            path == pattern
+        } else if pattern.contains('/') {
+            path == pattern || path.ends_with(&format!("/{pattern}"))
+        } else {
+            path.rsplit('/').next().unwrap_or(path) == pattern
+        }
+    }
+
+    /// The last segment of a path — what its declaration is called — after
+    /// the path of what encloses it, if anything does. A segment is never
+    /// empty, so a trailing `/` ends a name (`operator/`) rather than opening
+    /// another segment.
+    pub fn split_name(path: &str) -> (Option<&str>, &str) {
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let named = path.strip_suffix('/').unwrap_or(path);
+        match named.rfind('/') {
+            Some(slash) => (Some(&path[..slash]), &path[slash + 1..]),
+            None => (None, path),
+        }
     }
 }
 
@@ -1254,24 +1291,142 @@ mod tests {
     }
 
     #[test]
-    fn split_qualifier_separates_a_trailing_bracketed_token() {
-        assert_eq!(Symbol::split_qualifier("method"), ("method", None));
+    fn a_pattern_reads_a_trailing_kind_as_a_qualifier() {
+        let read = |pattern| {
+            let read = PathPattern::parse(pattern);
+            (read.path, read.kind, read.literal)
+        };
+        assert_eq!(read("method"), ("method", None, None));
         assert_eq!(
-            Symbol::split_qualifier("method[field]"),
-            ("method", Some("field"))
+            read("method[field]"),
+            ("method", Some(SymbolKind::Field), None)
         );
         assert_eq!(
-            Symbol::split_qualifier("Class/method[method]"),
-            ("Class/method", Some("method"))
+            read("Class/method[method]"),
+            ("Class/method", Some(SymbolKind::Method), None)
         );
-        assert_eq!(Symbol::split_qualifier("method[]"), ("method[]", None));
-        assert_eq!(Symbol::split_qualifier("method["), ("method[", None));
-        assert_eq!(Symbol::split_qualifier("[key]"), ("[key]", None));
-        assert_eq!(Symbol::split_qualifier("C/[key]"), ("C/[key]", None));
+        assert_eq!(read("method[]"), ("method[]", None, None));
+        assert_eq!(read("method["), ("method[", None, None));
+        assert_eq!(read("[key]"), ("[key]", None, None));
+        assert_eq!(read("/[key]"), ("/[key]", None, None));
         assert_eq!(
-            Symbol::split_qualifier("C/[key][method]"),
-            ("C/[key]", Some("method"))
+            read("C/[key][method]"),
+            ("C/[key]", Some(SymbolKind::Method), None)
         );
+        assert_eq!(
+            read("C/[key]"),
+            ("C/", Some(SymbolKind::Key), Some("C/[key]"))
+        );
+    }
+
+    /// A bracket after a `/` qualifies a name that ends in `/` or opens a
+    /// computed name, and the text cannot say which, so a pattern names both.
+    /// The path a symbol is matched by comes from its own name and kind,
+    /// never from reparsing its text.
+    #[test]
+    fn a_bracket_after_a_slash_names_an_operator_or_a_computed_member() {
+        let mut derived = build_symbol("Derived", SymbolKind::Struct);
+        derived.children = vec![
+            build_symbol("operator/", SymbolKind::Namespace),
+            build_symbol("operator/", SymbolKind::Method),
+        ];
+        let mut symbols = vec![derived];
+        Symbol::compute_paths_for_all(&mut symbols);
+        let method = &symbols[0].children[1];
+        assert_eq!(method.path(), "Derived/operator/[method]");
+        assert_eq!(method.unqualified_path(), "Derived/operator/");
+
+        let found = |pattern| {
+            Symbol::filter_by_path(&symbols, pattern)
+                .iter()
+                .map(|symbol| symbol.path().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found("Derived/operator/[method]"),
+            ["Derived/operator/[method]"]
+        );
+        assert_eq!(
+            found("operator/[namespace]"),
+            ["Derived/operator/[namespace]"]
+        );
+        assert_eq!(found("Derived/operator/").len(), 2);
+
+        let mut class = build_symbol("C", SymbolKind::Class);
+        class.children = vec![
+            build_symbol("[key]", SymbolKind::Method),
+            build_symbol("[key]", SymbolKind::Property),
+            build_symbol("[method]", SymbolKind::Method),
+        ];
+        let mut symbols = vec![class];
+        Symbol::compute_paths_for_all(&mut symbols);
+        assert_eq!(symbols[0].children[0].path(), "C/[key][method]");
+        let found = |pattern| Symbol::filter_by_path(&symbols, pattern).len();
+        assert_eq!(found("C/[key]"), 2);
+        assert_eq!(found("C/[key][method]"), 1);
+        assert_eq!(found("C/[method]"), 1);
+        assert_eq!(found("C/[key][field]"), 0);
+    }
+
+    /// A qualifier is the declaration's own kind written after its name, so
+    /// only that suffix comes off; brackets that are the name stay.
+    #[test]
+    fn a_path_sheds_only_the_qualifier_its_name_and_kind_spell() {
+        assert_eq!(
+            Symbol::unqualified("C/[method][method]", "[method]", "method"),
+            "C/[method]"
+        );
+        assert_eq!(
+            Symbol::unqualified("C/[method]", "[method]", "method"),
+            "C/[method]"
+        );
+        assert_eq!(
+            Symbol::unqualified("Derived/operator/[method]", "operator/", "method"),
+            "Derived/operator/"
+        );
+        assert_eq!(Symbol::unqualified("Foo[A]", "Foo[A]", "class"), "Foo[A]");
+        assert_eq!(
+            Symbol::unqualified("C/x[field]", "x", "method"),
+            "C/x[field]"
+        );
+    }
+
+    /// A qualified path names the declaration it was printed for. A namespace
+    /// adds no segment, so a function in one shares its path with a
+    /// same-named one beside the namespace; only the second is qualified.
+    #[test]
+    fn a_qualified_path_names_only_the_declaration_it_qualifies() {
+        let mut ns = build_symbol("ns", SymbolKind::Namespace);
+        ns.children = vec![build_symbol("operator/", SymbolKind::Function)];
+        let mut symbols = vec![
+            ns,
+            build_symbol("operator/", SymbolKind::Namespace),
+            build_symbol("operator/", SymbolKind::Function),
+        ];
+        Symbol::compute_paths_for_all(&mut symbols);
+        assert_eq!(symbols[0].children[0].path(), "operator/");
+        assert_eq!(symbols[2].path(), "operator/[function]");
+
+        let qualified = &symbols[2];
+        for pattern in ["/operator/[function]", "operator/[function]"] {
+            let found = Symbol::filter_by_path(&symbols, pattern);
+            assert!(matches!(found[..], [only] if std::ptr::eq(only, qualified)));
+        }
+        assert_eq!(Symbol::filter_by_path(&symbols, "/operator/").len(), 3);
+    }
+
+    /// The last segment of a path is what its declaration is called, and a
+    /// segment is never empty, so a trailing `/` belongs to the name.
+    #[test]
+    fn a_path_ends_in_the_name_of_its_declaration() {
+        assert_eq!(PathPattern::split_name("A/B/c"), (Some("A/B"), "c"));
+        assert_eq!(PathPattern::split_name("/c"), (None, "c"));
+        assert_eq!(
+            PathPattern::split_name("Derived/operator/"),
+            (Some("Derived"), "operator/")
+        );
+        assert_eq!(PathPattern::split_name("operator/"), (None, "operator/"));
+        assert_eq!(PathPattern::split_name("C/[key]"), (Some("C"), "[key]"));
     }
 
     /// Brackets carry type parameters in several languages. Reading one as
@@ -1279,8 +1434,8 @@ mod tests {
     /// `Foo` match it, neither of which the caller asked for.
     #[test]
     fn a_bracketed_type_parameter_is_part_of_the_name() {
-        assert_eq!(Symbol::split_qualifier("Foo[A]"), ("Foo[A]", None));
-        assert_eq!(Symbol::split_qualifier("Map[K, V]"), ("Map[K, V]", None));
+        assert_eq!(PathPattern::parse("Foo[A]").path, "Foo[A]");
+        assert_eq!(PathPattern::parse("Map[K, V]").path, "Map[K, V]");
 
         let mut generic = build_symbol("Foo[A]", SymbolKind::Class);
         generic.name_path = Some("Foo[A]".to_string());
