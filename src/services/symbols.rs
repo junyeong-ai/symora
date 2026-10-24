@@ -1785,17 +1785,24 @@ fn placed_kind(
 /// `outer` is written with rather than its body: its parameter list, or the
 /// type of what it declares. A type's own declaration holds its members
 /// there instead: its definition (Go's `type S struct { … }`) or its
-/// components (Java's `record R(int a)`). An alias only names its type, so
-/// C's `typedef struct S { … } T` holds neither `S` nor its members, as
-/// clangd reads them.
+/// components (Java's `record R(int a)`). An alias names its type and holds
+/// only one it defines without a name of its own, which takes the alias's:
+/// C's `typedef struct S { … } T` holds neither `S` nor its members, and
+/// `typedef struct { … } T` holds the members of `T`.
 fn in_header_of(inner: Node, outer: Node) -> bool {
     let holds = |field| {
         outer
             .child_by_field_name(field)
             .is_some_and(|held| held.id() == inner.id())
     };
-    (holds("parameters") || holds("type"))
-        && (TYPE_ALIASES.contains(&outer.kind()) || !node_kind(outer).holds_members())
+    if !(holds("parameters") || holds("type")) {
+        return false;
+    }
+    if TYPE_ALIASES.contains(&outer.kind()) {
+        return inner.child_by_field_name("name").is_some()
+            || inner.child_by_field_name("body").is_none();
+    }
+    !node_kind(outer).holds_members()
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
@@ -3417,7 +3424,7 @@ void g() {
                 "function:c_linked",
                 "function:largest",
                 "class:Pair",
-                "field:pa",
+                "field:Pair/pa",
                 "function:c_single",
                 "struct:P",
                 "constructor:P/P",
