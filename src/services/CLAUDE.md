@@ -29,9 +29,9 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 
 `services/symbols.rs` reads a file's declarations through one query per language, and the index, the AST fallback, signatures, pack and diff-impact all read what it reads, so a form it misses answers as absent wherever the index answers alone. The same rules hold in every language:
 
-- A variable is a declaration where it names a module's or a member's value, never where a function's scope holds it; a local function or type is still read. Anchor the query where the language declares members rather than filtering its captures afterwards.
+- A variable is a declaration where it names a module's or a member's value, never where a function's scope holds it; a local function or type is still read. Anchor the query where the language declares members rather than filtering its captures afterwards; a construct both a module and a function body can hold (Python's `if`, a C preprocessor conditional) is anchored, then judged by its nearest scope (`declares`).
 - A name is what the grammar binds: an assignment declares only the names its targets bind, a destructuring pattern each name it binds, a C/C++ declarator its innermost name. The scan of a node's identifier children serves nodes named that way, never one whose own rule found no name.
-- A symbol's container is the nearest enclosing declaration the query captures, a namespace passed through. A declaration's parameters and type are its header and contain nothing, except a type's own, which hold its members.
+- A symbol's container is the nearest enclosing declaration the query captures, a namespace passed through. A declaration's parameters and type are its header and contain nothing, except a type's own, which hold its members; an alias only names its type.
 - A parameter declares a member only where its language says so: a modifier, `val`/`var`, a case class's first list, a promoted parameter, a record component.
 
 `DECLARATION_FIXTURES` is the contract per language: a form or a language joins it with the query that reads it. Where a language server is installed, its document symbols are the reference to compare a change against.

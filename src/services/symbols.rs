@@ -550,21 +550,44 @@ impl SymbolExtractor {
 }
 
 /// Whether a captured node declares anything: a Python assignment or type
-/// alias binds a local where a function's scope holds it, however deep in
-/// the function's statements, and declares where a class's or the module's
-/// does.
+/// alias, or a C or C++ declaration a preprocessor conditional holds, binds
+/// a local where a function's scope holds it, however deep in the function's
+/// statements, and declares where a class's, a namespace's or the file's
+/// does. A C or C++ declaration the grammar ended by supplying its missing
+/// `;` was cut short by a macro it cannot expand (`typedef Array(T) Ts;`
+/// reads `typedef Array(T)`), so what it would name is a guess.
 fn declares(node: Node, language: Language) -> bool {
-    if language != Language::Python || !matches!(node.kind(), "assignment" | "type_alias_statement")
+    if language == Language::Cpp
+        && node
+            .child(node.child_count().saturating_sub(1))
+            .is_some_and(|last| last.kind() == ";" && last.is_missing())
     {
-        return true;
+        return false;
     }
+    let (local, declaring): (&[&str], &[&str]) = match (language, node.kind()) {
+        (Language::Python, "assignment" | "type_alias_statement") => (
+            &["function_definition", "lambda"],
+            &["class_definition", "module"],
+        ),
+        (Language::Cpp, "declaration" | "type_definition" | "alias_declaration") => (
+            &["compound_statement"],
+            &[
+                "translation_unit",
+                "declaration_list",
+                "field_declaration_list",
+            ],
+        ),
+        _ => return true,
+    };
     let mut ancestor = node.parent();
     while let Some(scope) = ancestor {
-        match scope.kind() {
-            "function_definition" | "lambda" => return false,
-            "class_definition" | "module" => return true,
-            _ => ancestor = scope.parent(),
+        if local.contains(&scope.kind()) {
+            return false;
         }
+        if declaring.contains(&scope.kind()) {
+            return true;
+        }
+        ancestor = scope.parent();
     }
     true
 }
@@ -680,7 +703,7 @@ enum Read {
 /// outside the node stays out, and ends where the first body or value above
 /// the name opens: a value is a variable's body, and an initializer can be
 /// any size, so the values a statement gives its other declarators stay out
-/// as well ([`without_other_values`]).
+/// as well ([`declared_text`]).
 fn read_signature(
     root: Node,
     content: &str,
@@ -725,7 +748,7 @@ fn read_signature(
     if errs_within(declaration, from, opens) {
         return Some(Read::Recovered);
     }
-    let text = without_other_values(content, named, declaration, from, opens.max(from))?;
+    let text = declared_text(content, named, declaration, from, opens.max(from))?;
     let text = text.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ';' | ','));
     let text = text.trim_start();
     (!text.is_empty()).then(|| Read::AsWritten(text.to_string()))
@@ -820,12 +843,14 @@ fn given_value(opening: Node) -> Option<(usize, usize)> {
     Some((before, value.end_byte()))
 }
 
-/// The text of `declaration` from `from` to `to` without the values it gives
-/// declarators other than the one holding `named`: those beside it in a
-/// list (`int a = 1, b = 2`) and those written beside its name (Swift's
-/// `let a = 1, b = 2`, Go's `var a, b = 1, 2`), so `b` reads `int a, b`. A
+/// The text `declaration` declares `named` with, from `from` to `to`:
+/// without the values it gives declarators other than the one holding
+/// `named` — those beside it in a list (`int a = 1, b = 2`) and those written
+/// beside its name (Swift's `let a = 1, b = 2`, Go's `var a, b = 1, 2`), so
+/// `b` reads `int a, b` — and without the body of a type it defines in
+/// passing (`typedef struct { … } Foo` reads `typedef struct Foo`). A
 /// default inside a parameter list is no declarator's value and stays.
-fn without_other_values(
+fn declared_text(
     content: &str,
     named: Node,
     declaration: Node,
@@ -853,6 +878,26 @@ fn without_other_values(
                 given.extend(given_value(sibling));
             }
         }
+        given.extend(
+            holder
+                .child_by_field_name("type")
+                .filter(|defined| {
+                    matches!(
+                        defined.kind(),
+                        "class_specifier"
+                            | "struct_specifier"
+                            | "union_specifier"
+                            | "enum_specifier"
+                    )
+                })
+                .and_then(|defined| defined.child_by_field_name("body"))
+                .map(|body| {
+                    let before = body
+                        .prev_sibling()
+                        .map_or(body.start_byte(), |before| before.end_byte());
+                    (before, body.end_byte())
+                }),
+        );
         held = holder;
     }
     given.retain(|&(start, end)| from <= start && end <= to && !(start..end).contains(&name));
@@ -1007,7 +1052,9 @@ fn extract_declaration(
             .filter_map(|name| {
                 let text = content.get(name.start_byte()..name_end_node(name).end_byte())?;
                 let kind = match language {
-                    Language::Cpp => member_kind(name),
+                    Language::Cpp if matches!(node.kind(), "field_declaration" | "declaration") => {
+                        declared_as(node, name)
+                    }
                     _ => node_kind(node),
                 };
                 (!names_nothing(text) && stated.insert(text))
@@ -1651,9 +1698,10 @@ fn enclosing_declaration<'t>(node: Node<'t>, declared: &HashSet<usize>) -> Optio
 /// The kind a declaration's place settles beyond its own node: a function a
 /// type declares as a member is a method, as language servers read one,
 /// except a Rust associated function, which is a method only where its first
-/// parameter is `self`; a
-/// JavaScript or TypeScript class's `constructor`, unless `static`, is its
-/// constructor; and a Swift property no type holds is a global variable.
+/// parameter is `self`; a JavaScript or TypeScript class's `constructor`,
+/// unless `static`, is its constructor; a Swift property no type holds is a
+/// global variable; and a C++ declaration outside a class body
+/// ([`in_class_body`]) states a function or a variable.
 /// What holds a declaration is the nearest enclosing one with a name, as for
 /// its path ([`extract_container_path`]): a Dart member's signature sits in a
 /// nameless declaration of the same member.
@@ -1698,6 +1746,17 @@ fn placed_kind(
         SymbolKind::Property if language == Language::Swift && enclosing.is_none() => {
             SymbolKind::Variable
         }
+        SymbolKind::Method | SymbolKind::Constructor | SymbolKind::Field
+            if language == Language::Cpp
+                && matches!(node.kind(), "field_declaration" | "declaration")
+                && !in_class_body(node) =>
+        {
+            if kind == SymbolKind::Field {
+                SymbolKind::Variable
+            } else {
+                SymbolKind::Function
+            }
+        }
         kind => kind,
     }
 }
@@ -1706,14 +1765,17 @@ fn placed_kind(
 /// `outer` is written with rather than its body: its parameter list, or the
 /// type of what it declares. A type's own declaration holds its members
 /// there instead: its definition (Go's `type S struct { … }`) or its
-/// components (Java's `record R(int a)`).
+/// components (Java's `record R(int a)`). An alias only names its type, so
+/// C's `typedef struct S { … } T` holds neither `S` nor its members, as
+/// clangd reads them.
 fn in_header_of(inner: Node, outer: Node) -> bool {
     let holds = |field| {
         outer
             .child_by_field_name(field)
             .is_some_and(|held| held.id() == inner.id())
     };
-    (holds("parameters") || holds("type")) && !node_kind(outer).holds_members()
+    (holds("parameters") || holds("type"))
+        && (TYPE_ALIASES.contains(&outer.kind()) || !node_kind(outer).holds_members())
 }
 
 /// The token that opens a declaration's body where the grammar leaves it
@@ -2099,7 +2161,7 @@ fn node_kind(node: Node) -> SymbolKind {
         "impl_item" => SymbolKind::Object,
 
         "struct_item" | "struct_specifier" | "struct_type" | "struct_declaration"
-        | "union_item" => SymbolKind::Struct,
+        | "union_item" | "union_specifier" => SymbolKind::Struct,
 
         "enum_item" | "enum_declaration" | "enum_specifier" | "enum_definition" => SymbolKind::Enum,
 
@@ -2195,24 +2257,43 @@ fn go_type_kind(node: Node) -> SymbolKind {
     }
 }
 
-/// Classify a member declaration by its declarator: C++ states a method
-/// declaration with the same `field_declaration` node it states a data member
-/// with, and only the declarator separates them ([`member_kind`]). A member
-/// function declared without a type is a constructor or a destructor, unless
-/// its name states the type it converts to (`operator bool()`). Java, whose
-/// fields use the same node kind, declares methods elsewhere and is unaffected.
+/// Classify a member declaration by its declarator ([`declared_as`]). Java,
+/// whose fields use the same node kind, declares methods elsewhere and is
+/// unaffected.
 fn field_kind(node: Node) -> SymbolKind {
-    let Some(name) = node.child_by_field_name("declarator").map(declarator_name) else {
-        return SymbolKind::Field;
-    };
+    node.child_by_field_name("declarator")
+        .map(declarator_name)
+        .map_or(SymbolKind::Field, |name| declared_as(node, name))
+}
+
+/// What the C or C++ member declaration `statement` declares `name` as. C++
+/// states a method with the same node it states a data member with, and only
+/// the declarator separates them ([`member_kind`]); a member function
+/// declared without a type is a constructor or a destructor, unless its name
+/// states the type it converts to (`operator bool()`). Outside a class the
+/// same declarations state functions and variables ([`placed_kind`]).
+fn declared_as(statement: Node, name: Node) -> SymbolKind {
     match member_kind(name) {
         SymbolKind::Method
-            if node.child_by_field_name("type").is_none() && name.kind() != "operator_cast" =>
+            if statement.child_by_field_name("type").is_none()
+                && name.kind() != "operator_cast" =>
         {
             SymbolKind::Constructor
         }
         kind => kind,
     }
+}
+
+/// Whether a C++ declaration is written in a class body, through a member
+/// template's header, a preprocessor conditional or the syntax error the
+/// grammar recovered from around it.
+fn in_class_body(statement: Node) -> bool {
+    std::iter::successors(statement.parent(), Node::parent)
+        .find(|holder| {
+            !matches!(holder.kind(), "template_declaration" | "ERROR")
+                && !holder.kind().starts_with("preproc_")
+        })
+        .is_some_and(|holder| holder.kind() == "field_declaration_list")
 }
 
 /// Whether the C or C++ declarator around `name` declares a method or a data
@@ -2412,11 +2493,27 @@ const KOTLIN_QUERY: &str = r#"
 // declared without a type is a plain `declaration` too: a destructor, a
 // conversion function, or a constructor, which is named for its class. A
 // macro invoked in a class body reads as one of those with another name.
+// Outside a class, a `declaration` states a function or a variable where the
+// file, a namespace, `extern "C"` or a template holds it, and under a
+// preprocessor conditional — a header's include guard — wherever no function
+// body does (see `declares`).
 const CPP_QUERY: &str = r#"
 (function_definition) @symbol
 (class_specifier) @symbol
 (struct_specifier) @symbol
+(union_specifier) @symbol
 (enum_specifier) @symbol
+(translation_unit [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(declaration_list [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(preproc_if [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(preproc_ifdef [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(preproc_elif [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(preproc_elifdef [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(preproc_else [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(ERROR [(declaration type: (_)) (type_definition) (alias_declaration)] @symbol)
+(linkage_specification body: (declaration type: (_)) @symbol)
+(template_declaration [(declaration type: (_)) (alias_declaration)] @symbol)
+(field_declaration_list [(type_definition) (alias_declaration)] @symbol)
 (enumerator_list (enumerator) @symbol)
 (namespace_definition) @symbol
 (field_declaration) @symbol
@@ -3123,6 +3220,8 @@ public:
     operator bool() const;
     template <typename U>
     U make();
+    friend void befriended();
+    typedef int Id;
 };
 
 C::operator bool() const { return true; }
@@ -3131,6 +3230,28 @@ enum E { X };
 
 void f() {}
 
+int in_namespace = 0;
+
+}
+
+#ifndef A_H
+#define A_H
+int parse(const char *s);
+extern int counter;
+typedef unsigned long size_type;
+using Handle = int;
+union U { int a; };
+extern "C" { int c_linked(void); }
+template <class T> T largest(T a, T b);
+typedef struct { int pa; } Pair;
+#endif
+
+int unguarded = 0;
+
+void g() {
+#ifdef Q
+    int local = 1;
+#endif
 }
 "#,
             declares: &[
@@ -3150,9 +3271,23 @@ void f() {}
                 "method:C/operator bool",
                 "method:C/make",
                 "function:C::operator bool",
+                "class:C/Id",
                 "enum:E",
                 "enum_member:E/X",
                 "function:f",
+                "variable:in_namespace",
+                "function:parse",
+                "variable:counter",
+                "class:size_type",
+                "class:Handle",
+                "struct:U",
+                "field:U/a",
+                "function:c_linked",
+                "function:largest",
+                "class:Pair",
+                "field:pa",
+                "variable:unguarded",
+                "function:g",
             ],
         },
         DeclarationFixture {
@@ -3964,6 +4099,40 @@ region     = "us-central1"
         }
     }
 
+    /// A C header's macros can leave the grammar recovering around its
+    /// declarations: a struct holding a macro member puts what follows inside
+    /// a syntax error, where a prototype reads as a member, and a macro type
+    /// cuts a typedef short of its name. What the grammar read whole is read
+    /// where it stands, as a function and a type; what it cut short names
+    /// nothing.
+    #[test]
+    fn a_recovered_header_declares_only_what_the_grammar_read_whole() {
+        let extractor = SymbolExtractor::new();
+        let declared = |content: &str| -> Vec<String> {
+            extractor
+                .extract(Path::new("e.h"), content, Language::Cpp)
+                .iter()
+                .map(|symbol| format!("{}:{}", symbol.kind, symbol.name))
+                .collect()
+        };
+        let recovered = declared(
+            "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n#if A\nstruct S {\n  int x;\n  BITS\n};\n\
+             #endif\n\ntypedef struct { int y; } T;\nint after(void);\n\n\
+             #ifdef __cplusplus\n}\n#endif\n",
+        );
+        for expected in ["class:T", "function:after"] {
+            assert!(
+                recovered.iter().any(|d| d == expected),
+                "{expected} in {recovered:?}"
+            );
+        }
+        let cut_short = declared("typedef Array(StackSlice) StackSliceArray;\n");
+        assert!(
+            !cut_short.iter().any(|d| d.ends_with(":StackSlice")),
+            "a cut-short typedef names nothing: {cut_short:?}"
+        );
+    }
+
     #[test]
     fn a_python_type_alias_spans_its_statement() {
         let symbols = SymbolExtractor::new().extract(
@@ -4300,6 +4469,20 @@ region     = "us-central1"
                 "struct W { int f, g = 2, h; };\n",
                 "f",
                 Some("int f, g, h"),
+            ),
+            (
+                "a.c",
+                Language::Cpp,
+                "typedef struct {\n  int a;\n} Pair, *PairPtr;\n",
+                "PairPtr",
+                Some("typedef struct Pair, *PairPtr"),
+            ),
+            (
+                "a.c",
+                Language::Cpp,
+                "static struct Cfg { int v; } config = { 1 };\n",
+                "config",
+                Some("static struct Cfg config"),
             ),
             (
                 "a.swift",
