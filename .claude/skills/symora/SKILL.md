@@ -2,8 +2,8 @@
 name: symora
 metadata:
   version: 0.34.1
-description: Provides symbol discovery, semantic navigation, static impact analysis, and symbol-aware edits through the symora CLI. Use when locating code, tracing references or callers, reviewing changes, or editing a known declaration.
-allowed-tools: Bash(symora *)
+description: Provides symbol discovery, semantic navigation, static impact analysis, and symbol-aware edits through the symora CLI. Use when locating code, tracing references or callers, reviewing changes, or editing or renaming a known declaration.
+allowed-tools: Bash(symora search *), Bash(symora symbols *), Bash(symora map *), Bash(symora pack *), Bash(symora def *), Bash(symora refs *), Bash(symora typedef *), Bash(symora implementations *), Bash(symora callers *), Bash(symora callees *), Bash(symora supertypes *), Bash(symora subtypes *), Bash(symora hover *), Bash(symora context *), Bash(symora impact *), Bash(symora diff-impact *), Bash(symora diagnostics *), Bash(symora edit *), Bash(symora rename *), Bash(symora actions *), Bash(symora doctor *)
 ---
 
 # Symora
@@ -20,10 +20,10 @@ symora context src/auth.py:42 --with-bodies --body-tokens 2000
 symora diff-impact
 ```
 
-- Use `search symbols` for names, `search ast` for syntax, and `search content` for strings, each confined to named files or directories with `--path`. `search symbols` takes `--body` or `--signature` to read a known declaration whose file is unknown. Content search defaults to code; name a format with `--lang markdown`. Every search refuses a `--path` the project's ignore rules exclude and skips ignored files beneath one it accepts. Content and AST search read hidden files inside the paths they are given; symbol search refuses a hidden path, since the index does not hold it. Size limits apply; `.git` and `.symora` remain excluded.
+- Use `search symbols` for names, `search ast` for syntax, and `search content` for strings, each confined to named files or directories with `--path`. `search symbols` answers a bare name from a built index; a path (`Class/method`, `Name[kind]`) also asks language servers and can carry `indexing`. It takes `--body` or `--signature` to read a known declaration whose file is unknown. Content search defaults to code; name a format with `--lang markdown`. Every search refuses a `--path` the project's ignore rules exclude and skips ignored files beneath one it accepts. Content and AST search read hidden files inside the paths they are given; symbol search refuses a hidden path, since the index does not hold it. Size limits apply; `.git` and `.symora` remain excluded.
 - `symbols` and `map file` use the language server when available, otherwise AST declarations; `backend` identifies the producer. `symbols <file> --depth 1 --refs` counts references for each listed declaration, a type's members included and a function's parameters and locals excluded; `refs_status` marks a count that is unavailable or a lower bound. `--deterministic` permits only index/grammar sources and returns `unsupported` for semantic operations.
 - For repeated workspace queries, inspect `search index status` and build incrementally with `search index build` when coverage is absent or the response requests refresh. Wait for an existing build. `--force` rebuilds everything.
-- `map summary` and `pack --tokens 4000` are optional orientation tools. `map file` adds a file's name-matched counterparts, such as its tests, and nearby files; these are path suggestions, not dependency evidence. Pack uses syntax-derived import paths, not a complete dependency graph or task-relevance model. Rust relative module paths require unresolved crate/module ownership and are omitted with a hint. Use `--focus` for a known area; an unmatched focus is refused. Check coverage hints and `declared_symbols` before treating excerpts as complete.
+- `map summary` and `pack --tokens 4000` are optional orientation tools. `map file` adds a file's name-matched counterparts, such as its tests, and nearby files; these are path suggestions, not dependency evidence. Pack uses syntax-derived import paths, not a complete dependency graph or task-relevance model. Rust relative module paths need crate and module ownership, which pack does not resolve, so they are omitted with a hint. Use `--focus` for a known area; an unmatched focus is refused. Check coverage hints and `declared_symbols` before treating excerpts as complete.
 - `diff-impact [REV]` compares tracked working-tree changes with one revision, not a revision range; for a branch, pass `$(git merge-base main HEAD)`. `--staged` uses the index. Read `unmeasured_files` and `incomplete`.
 
 ## Address the intended symbol
@@ -32,7 +32,8 @@ Lines and Unicode-scalar columns are 1-indexed.
 
 - For `refs`, callers/callees, implementations, type hierarchy, context, and impact: `file:line` addresses the declaration on that line or its enclosing symbol. An explicit column addresses the exact token and resolves usages through their definitions. Header keywords/whitespace may address that declaration; empty body positions address nothing.
 - `def`, hover, typedef, and rename are position-exact; an omitted column means 1. Take name positions from actual results.
-- Read the echoed target and `anchor_status`. A binding is a local or parameter absent from the document-symbol tree. Source edits address declarations, not body tokens.
+- A `--symbol` path is a bare name, a `Class/method` suffix, a `*/method` wildcard, or an exact `name_path`. A trailing `[kind]` selects one kind among same-named declarations (`Svc[class]`, not its constructors); a segment written wholly in brackets is a name (`Cache/[key]`). Kinds are the answering source's: the index gives a member function, an impl block, a constructor and a namespace the kind servers do, but servers name type aliases, capitalized constants and TypeScript enum members by their own conventions. Take a kind from `symbols <file>` for the file you act on, and treat a zero under `--kind` as unverified.
+- Read the echoed target. `anchor_status` is absent when a declaration resolved; `binding` is a local or parameter absent from the document-symbol tree; `not_a_symbol` and `unavailable` resolved nothing, so the counts are about no declaration. Source edits address declarations, not body tokens.
 
 ## Interpret limits
 
@@ -44,7 +45,7 @@ Lists carry `count`, `showing`, and `items`. These markers qualify the answer:
 | `incomplete` / `unread_paths` | Counts are lower bounds within the consulted sources; inspect the cause. |
 | `coverage_gaps` | Named languages were not fully searched; use the indicated source or remedy. |
 | `stale` / currency hints | The index is a snapshot; refresh before current enumeration. New files can require refresh even without stale returned rows. |
-| `indexing` | `unconfirmed` means workspace readiness was not confirmed throughout the query; `timed_out` exceeded the readiness wait. Neither proves absence. Retry cannot add a missing completion channel. |
+| `indexing` | `unconfirmed`: the server's workspace readiness was not confirmed throughout the query. Only a server that reports workspace status (rust-analyzer) confirms it, so other servers' answers carry `unconfirmed` and retrying does not clear it. `timed_out`: the readiness wait ended before the server reported status; retry once it is warm. Neither proves absence. |
 | `degraded_column` | Verify the source position before editing. |
 | `body_omitted` | `token_budget` or `response_size`: read the complete source at the returned location, or adjust that budget. |
 
@@ -61,12 +62,15 @@ symora rename src/auth.py:42:9 new_name --dry-run
 symora diagnostics src/auth.py --with-context
 ```
 
-- `replace-body` takes the entire definition, including signature and decorators. Obtain complete source before replacing it; an omitted body is not replacement text.
+1. Read the complete definition: `symbols <file> --symbol P --body`, or `search symbols P --body` when the file is unknown. `replace-body` takes the entire definition, signature and decorators included; an omitted body is not replacement text.
+2. Run the edit with `--dry-run` and check `target_symbol`, `lines`, and `preview`.
+3. Apply it. `replace-body`, `insert-before`/`insert-after`, `delete`, and range `replace` accept `--with-diagnostics`, and symbol replacement and insertion `--verify-callers`; after `edit pattern` or `rename`, run `diagnostics`.
+4. If diagnostics or the project's checks fail, fix and repeat from step 2. Unknown diagnostics are not clean.
+
 - Prefer a returned symbol path over line numbers for sequential edits. `insert-before`/`insert-after` take `--code`; range replace and AST pattern take `--text`. Range `--expect` checks the live text.
-- Preview first. Applied edits can request `--with-diagnostics`; symbol replacement/insertion can also use `--verify-callers`. Unknown diagnostics are not clean; run relevant project checks.
-- Delete's `--expect-no-references` requires verified static reference freedom. A static zero alone does not establish that code is unused.
-- Rename applies under confirmed workspace readiness. Under `unconfirmed`, review `--dry-run`, then apply with `--accept-unconfirmed`; the response keeps the marker, so check that no reference kept the old name. `timed_out` permits previews only. Retrying cannot add a missing completion channel.
-- Source edits resolve within the project and are checked against observed content under a shared lock. AST batch replacements require non-overlapping matches. Multi-file application is not atomic; inspect already-applied files before retrying an error.
+- Delete's `--expect-no-references` requires verified static reference freedom, so under `unconfirmed` it refuses: check `refs` yourself and delete without it. A static zero alone does not establish that code is unused.
+- Rename applies under confirmed workspace readiness. Under `unconfirmed`, compare each file's `edit_count` in the `--dry-run` with `refs` for the target, then apply with `--accept-unconfirmed`; the response keeps the marker, so check that no reference kept the old name. `timed_out` permits previews only.
+- AST batch replacements require non-overlapping matches. Multi-file application is not atomic; inspect already-applied files before retrying an error.
 
 ## Recover
 
@@ -75,6 +79,6 @@ Failures emit `{ "error": { "code", "message", "hint" } }` on stdout and exit no
 - On `server_not_installed` / `lsp_unavailable`, run `doctor <lang>` and read `serves`, not only `installed`. A configured absolute server command avoids a broken version-manager shim. After project config changes, `daemon restart --project` unloads only this project's sessions; its next request starts fresh servers. Active requests or pending server startup return `conflict`. Changes to the daemon's own configuration or inherited environment require a full `daemon restart`.
 - For persistent cross-package omissions, verify the project's environment and native server configuration. `doctor python` reports the supplied selection in `python_interpreter`; `serves` confirms only the handshake. Waiting does not prepare an environment, and a missing `.venv` alone does not prove a fault.
 - On `unsupported`, choose an index/AST/source alternative. On `conflict`, wait as directed and re-read. On `cancelled` with a content-change hint, resolve the target again. Repair `precondition_failed` and `config_errors` before depending on the result.
-- `lsp.timeout_secs` is the shared LSP work budget: startup, requests, and retries consume it together. Narrow expensive queries or explicitly configure a suitable budget; repeated calls do not resolve a missing capability.
+- `lsp.timeout_secs` is the shared LSP work budget: startup, requests, and retries consume it together. Narrow expensive queries or configure a larger budget; it does not lengthen the readiness wait, and repeated calls do not add a missing capability.
 
-Output is one-line JSON when stdout is not a terminal; `--format pretty` indents it. `--check-version '<requirement>'` enforces a binary contract. `setup skill` installs the playbook bundled with that binary; `--git-ref` explicitly selects another source.
+Output is one-line JSON when stdout is not a terminal; `--format pretty` indents it. `--check-version '<requirement>'` enforces a binary contract.

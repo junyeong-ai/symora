@@ -12,7 +12,7 @@ use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 
 #[derive(Args, Debug)]
 pub struct RenameArgs {
-    /// File path with position (file:line:column)
+    /// File path with position (file:line[:column])
     pub location: String,
 
     /// New name for the symbol
