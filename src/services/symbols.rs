@@ -1848,6 +1848,21 @@ fn node_kind(node: Node) -> SymbolKind {
             SymbolKind::Constructor
         }
 
+        // Swift states a struct, an enum, an actor, a class and an extension
+        // with one node, and its keyword says which.
+        "class_declaration" if node.child_by_field_name("declaration_kind").is_some() => {
+            match node
+                .child_by_field_name("declaration_kind")
+                .map(|keyword| keyword.kind())
+            {
+                Some("struct") => SymbolKind::Struct,
+                Some("enum") => SymbolKind::Enum,
+                // As sourcekit-lsp's answer reads (see `convert_symbol_kind`).
+                Some("extension") => SymbolKind::Object,
+                _ => SymbolKind::Class,
+            }
+        }
+
         "class_declaration"
         | "abstract_class_declaration"
         | "record_declaration"
@@ -2964,12 +2979,24 @@ enum Dir {
     case left(Int)
 }
 
+struct Point {
+    var x = 0
+}
+
+extension Point {
+    func moved() {}
+}
+
 func top() {}
 "#,
             declares: &[
                 "interface:P",
                 "method:P/pm",
-                "class:Dir",
+                "struct:Point",
+                "property:Point/x",
+                "object:Point",
+                "function:Point/moved",
+                "enum:Dir",
                 "enum_member:Dir/up",
                 "enum_member:Dir/down",
                 "enum_member:Dir/left",

@@ -339,11 +339,11 @@ pub(super) fn parse_type_hierarchy_item(
     // One LSP-taxonomy decoder for the whole crate: the numeric code becomes
     // a typed `LspSymbolKind`, then `convert_symbol_kind` maps it like every
     // other LSP path. An out-of-range code degrades to Variable.
-    let kind = serde_json::from_value::<LspSymbolKind>(item.get("kind")?.clone())
-        .map(convert_symbol_kind)
-        .unwrap_or(SymbolKind::Variable);
     let uri = item.get("uri")?.as_str()?;
     let path = uri_to_path(uri);
+    let kind = serde_json::from_value::<LspSymbolKind>(item.get("kind")?.clone())
+        .map(|kind| convert_symbol_kind(kind, &path))
+        .unwrap_or(SymbolKind::Variable);
     let range = item.get("selectionRange")?;
     let start = range.get("start")?;
     let line0 = start.get("line")?.as_u64()? as u32;

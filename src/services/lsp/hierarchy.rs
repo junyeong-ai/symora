@@ -102,18 +102,21 @@ async fn call_hierarchy(
                         calls
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|c| CallHierarchyItem {
-                                name: c.from.name,
-                                kind: convert_symbol_kind(c.from.kind),
-                                location: uri_range_to_location(
+                            .map(|c| {
+                                let location = uri_range_to_location(
                                     &c.from.uri,
                                     &c.from.selection_range,
                                     &mut conv,
-                                ),
+                                );
+                                CallHierarchyItem {
+                                name: c.from.name,
+                                kind: convert_symbol_kind(c.from.kind, &location.file),
+                                location,
                                 call_site: c
                                     .from_ranges
                                     .first()
                                     .map(|r| uri_range_to_location(&c.from.uri, r, &mut conv)),
+                                }
                             })
                             .collect()
                     ))
@@ -126,18 +129,21 @@ async fn call_hierarchy(
                         calls
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|c| CallHierarchyItem {
-                                name: c.to.name,
-                                kind: convert_symbol_kind(c.to.kind),
-                                location: uri_range_to_location(
+                            .map(|c| {
+                                let location = uri_range_to_location(
                                     &c.to.uri,
                                     &c.to.selection_range,
                                     &mut conv,
-                                ),
+                                );
+                                CallHierarchyItem {
+                                name: c.to.name,
+                                kind: convert_symbol_kind(c.to.kind, &location.file),
+                                location,
                                 call_site: c
                                     .from_ranges
                                     .first()
                                     .map(|r| uri_range_to_location(&uri, r, &mut conv)),
+                                }
                             })
                             .collect()
                     ))
