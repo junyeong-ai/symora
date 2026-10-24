@@ -1403,7 +1403,13 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
             (Language::Go, "type_declaration" | "const_declaration" | "var_declaration") => {
                 alone() && child_of_kind(parent, "(").is_none()
             }
-            (Language::Dart, "function_declaration" | "method_declaration") => holds("signature"),
+            (
+                Language::Dart,
+                "function_declaration"
+                | "method_declaration"
+                | "getter_declaration"
+                | "setter_declaration",
+            ) => holds("signature"),
             (Language::Dart, "method_signature" | "class_member") => true,
             _ => false,
         };
@@ -1994,11 +2000,27 @@ fn extract_name_and_kind(
     Some((name, node_kind(node)))
 }
 
-/// The node a declared name ends with: its own, or the token before the
-/// parameters a C++ conversion function's name holds, so `operator bool()
-/// const` is named `operator bool` and `operator const char*()` `operator
-/// const char*`.
+/// The node a declared name ends with: its own, the name a Dart named
+/// constructor gives itself after its class's (`Widget.named`), or the token
+/// before the parameters a C++ conversion function's name holds, so
+/// `operator bool() const` is named `operator bool` and `operator const
+/// char*()` `operator const char*`.
 fn name_end_node(name: Node) -> Node {
+    if let Some(signature) = name.parent().filter(|signature| {
+        matches!(
+            signature.kind(),
+            "constructor_signature"
+                | "constant_constructor_signature"
+                | "factory_constructor_signature"
+                | "redirecting_factory_constructor_signature"
+        )
+    }) {
+        let mut cursor = signature.walk();
+        return signature
+            .children_by_field_name("name", &mut cursor)
+            .last()
+            .unwrap_or(name);
+    }
     let mut conversion = name;
     while conversion.kind() == "qualified_identifier" {
         match conversion.child_by_field_name("name") {
@@ -2175,6 +2197,9 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if node.kind() == "secondary_constructor" {
         return child_of_kind(node, "constructor");
     }
+    if node.kind() == "operator_signature" {
+        return node.child_by_field_name("operator");
+    }
     // An assignment declares the names its targets bind and nothing else:
     // `obj.attr = value` declares neither `obj` nor `value`.
     if matches!(language, Language::Python | Language::Ruby) && node.kind() == "assignment" {
@@ -2285,6 +2310,9 @@ fn node_kind(node: Node) -> SymbolKind {
         | "constructor_declaration"
         | "compact_constructor_declaration"
         | "secondary_constructor"
+        | "constant_constructor_signature"
+        | "factory_constructor_signature"
+        | "redirecting_factory_constructor_signature"
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
 
@@ -2321,6 +2349,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "object_declaration"
         | "object_definition"
         | "extension_declaration"
+        | "extension_type_declaration"
         | "class" => SymbolKind::Class,
 
         // An impl block adds members to a type declared elsewhere, as
@@ -2420,6 +2449,10 @@ fn node_kind(node: Node) -> SymbolKind {
             SymbolKind::EnumMember
         }
         "field_declaration" | "declaration" => field_kind(node),
+        "extension_type_representation" => SymbolKind::Field,
+        "top_level_variable_declaration" => SymbolKind::Variable,
+        "getter_signature" | "setter_signature" => SymbolKind::Property,
+        "operator_signature" => SymbolKind::Method,
 
         _ => SymbolKind::Variable,
     }
@@ -2828,10 +2861,20 @@ const DART_QUERY: &str = r#"
 (enum_body (enum_constant) @symbol)
 (mixin_declaration) @symbol
 (extension_declaration) @symbol
-(source_file (type_alias) @symbol)
+(extension_type_declaration) @symbol
+(extension_type_representation) @symbol
+(source_file [(type_alias) (top_level_variable_declaration)] @symbol)
 (function_signature) @symbol
+(getter_signature) @symbol
+(setter_signature) @symbol
+(operator_signature) @symbol
 (constructor_signature) @symbol
+(constant_constructor_signature) @symbol
+(factory_constructor_signature) @symbol
+(redirecting_factory_constructor_signature) @symbol
 (class_body (_ (declaration) @symbol))
+(enum_body (_ (declaration) @symbol))
+(extension_body (_ (declaration) @symbol))
 "#;
 
 // HCL states a declaration as a block carrying quoted labels — `variable "x"`,
@@ -3876,7 +3919,11 @@ class Q(val a: Int, b: Int)
             source: r#"
 mixin M {}
 
-enum E { x }
+enum E {
+  x(1);
+  final int weight;
+  const E(this.weight);
+}
 
 abstract class A {
   void am();
@@ -3886,14 +3933,25 @@ class C {
   int field = 1;
   static const sc = 2;
   C();
+  C.named();
+  factory C.make() => C();
+  factory C.alias() = C.named;
   void cm() {}
+  int get size => 1;
+  set size(int v) {}
+  bool operator ==(Object o) => true;
 }
 
 extension Ext on String {
+  static const limit = 1;
   void ext() {}
 }
 
+extension type Meters(int value) {}
+
 void top() {}
+
+final topLevel = 1;
 
 typedef Callback = void Function();
 "#,
@@ -3901,16 +3959,28 @@ typedef Callback = void Function();
                 "interface:M",
                 "enum:E",
                 "enum_member:E/x",
+                "field:E/weight",
+                "constructor:E/E",
                 "class:A",
                 "method:A/am",
                 "class:C",
                 "field:C/field",
                 "field:C/sc",
                 "constructor:C/C",
+                "constructor:C/C.named",
+                "constructor:C/C.make",
+                "constructor:C/C.alias",
                 "method:C/cm",
+                "property:C/size",
+                "property:C/size",
+                "method:C/==",
                 "class:Ext",
+                "field:Ext/limit",
                 "method:Ext/ext",
+                "class:Meters",
+                "field:Meters/value",
                 "function:top",
+                "variable:topLevel",
                 "class:Callback",
             ],
         },
@@ -4210,7 +4280,7 @@ region     = "us-central1"
         );
 
         let dart = "class Shape {\n  @override\n  String toString() {\n    return \"s\";\n  }\n}\n\n\
-                    int top() {\n  return 2;\n}\n";
+                    int top() {\n  return 2;\n}\n\nint get answer {\n  return 42;\n}\n";
         let spans = |name: &str| {
             extractor
                 .extract(Path::new("a.dart"), dart, Language::Dart)
@@ -4221,6 +4291,7 @@ region     = "us-central1"
         };
         assert_eq!(spans("toString"), ((2, 3), Some(5)));
         assert_eq!(spans("top"), ((8, 1), Some(10)));
+        assert_eq!(spans("answer"), ((12, 1), Some(14)));
     }
 
     #[test]
@@ -4769,6 +4840,20 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class C {\n  C.named();\n  factory C.alias() = C.named;\n}\n",
+                "C.alias",
+                Some("factory C.alias()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "int get answer {\n  return 42;\n}\n",
+                "answer",
+                Some("int get answer"),
             ),
             (
                 "a.scala",
