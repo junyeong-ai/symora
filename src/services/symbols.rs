@@ -727,8 +727,8 @@ enum Read {
 /// both it and the range have started, so an attribute or doc comment
 /// outside the node stays out, and ends where the first body or value above
 /// the name opens: a value is a variable's body, and an initializer can be
-/// any size, so the values a statement gives its other declarators stay out
-/// as well ([`declared_text`]).
+/// any size, so every value the statement writes before that stays out as
+/// well ([`declared_text`]).
 fn read_signature(
     root: Node,
     content: &str,
@@ -759,7 +759,7 @@ fn read_signature(
             break header_end(body, language);
         }
         if let Some(value) = value_opening(node, name) {
-            break value.start_byte();
+            break value.opens;
         }
         if let Some(close) = empty_body_close(node).filter(|close| close.start_byte() > name) {
             break header_end(close, language);
@@ -864,44 +864,87 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
         })
 }
 
-/// The `=` that opens the value `node` gives the name at byte `name`, if it
-/// gives one: the first after the name and before the next declarator (`int
-/// a, b = 2` gives `a` none), and never a type alias's, whose type is what it
-/// declares, nor a default a destructuring pattern gives a name it binds
-/// (`const { c = 1 } = obj`), which is part of the pattern.
-fn value_opening(node: Node, name: usize) -> Option<Node> {
-    if TYPE_ALIASES.contains(&node.kind()) || is_pattern_default(node) {
-        return None;
-    }
+/// The value `node` gives the name at byte `name`, if it gives one: the
+/// first value ([`given_value`]) after the name and before the next
+/// declarator, so `int a, b = 2` gives `a` none and a Go spec's names before
+/// the last share its one.
+fn value_opening(node: Node, name: usize) -> Option<Value> {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .filter(|child| child.start_byte() > name)
         .take_while(|child| child.kind() != ",")
-        .find(|child| given_value(*child).is_some())
+        .find_map(given_value)
 }
 
-/// The bytes an `=` gives a value over, from the end of what it follows to the
-/// end of the value, if `opening` is one a value follows: the `=` that ends
-/// C++'s `operator=` gives none. Go's `:=` and Ruby's `||=` give one too.
-fn given_value(opening: Node) -> Option<(usize, usize)> {
-    if opening.is_named() || !matches!(opening.kind(), "=" | ":=" | "||=") {
+/// A declarator's value as a statement writes it.
+struct Value {
+    /// Where the value opens: its `=`, or where a value written without one
+    /// starts.
+    opens: usize,
+    /// The bytes the value takes from the statement, from the end of what it
+    /// follows to its own end.
+    taken: std::ops::Range<usize>,
+}
+
+/// The declarator's value `node` opens, if it opens one: an `=`, Go's `:=` or
+/// Ruby's `||=` and the value after it, or a value a grammar writes without
+/// one — C++'s `int h{3}`, a JavaScript object's `key: value`, `export default
+/// value`. A parenthesized C++ initializer is none, since the grammar reads a
+/// function whose parameters it cannot parse (`void f(STACK_OF(T) *sk)`) as
+/// one. A parameter's default (Swift lists it beside its parameter, and an
+/// enum case's associated value beside its type), a destructuring pattern's
+/// default (`const { c = 1 } = obj`) and what an alias names are no
+/// declarator's value, nor is what follows the `=` ending C++'s `operator=`.
+fn given_value(node: Node) -> Option<Value> {
+    let parent = node.parent()?;
+    if TYPE_ALIASES.contains(&parent.kind()) || is_pattern_default(parent) {
         return None;
     }
-    let value = std::iter::successors(opening.next_sibling(), Node::next_sibling)
-        .find(|next| next.is_named() && !next.is_extra())?;
-    let before = opening
-        .prev_sibling()
-        .map_or(opening.start_byte(), |before| before.end_byte());
-    Some((before, value.end_byte()))
+    let opening = |token: Node| !token.is_named() && matches!(token.kind(), "=" | ":=" | "||=");
+    if opening(node) {
+        let follows = std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+            .find(|before| !before.is_extra())?;
+        if follows.kind() == "parameter" || parent.kind() == "enum_type_parameters" {
+            return None;
+        }
+        let value = std::iter::successors(node.next_sibling(), Node::next_sibling)
+            .find(|next| next.is_named() && !next.is_extra())?;
+        let from = node
+            .prev_sibling()
+            .map_or(node.start_byte(), |before| before.end_byte());
+        return Some(Value {
+            opens: node.start_byte(),
+            taken: from..value.end_byte(),
+        });
+    }
+    let unwritten = match parent.kind() {
+        "init_declarator" | "field_declaration" => node.kind() == "initializer_list",
+        "pair" | "export_statement" => children_of_field(parent, "value").contains(&node),
+        _ => false,
+    };
+    let before = node.prev_sibling()?;
+    if !unwritten || opening(before) {
+        return None;
+    }
+    let follows = std::iter::successors(Some(before), Node::prev_sibling)
+        .find(|before| before.is_named() && !before.is_extra())
+        .unwrap_or(before);
+    Some(Value {
+        opens: follows
+            .next_sibling()
+            .map_or(node.start_byte(), |next| next.start_byte()),
+        taken: follows.end_byte()..node.end_byte(),
+    })
 }
 
 /// The text `declaration` declares `named` with, from `from` to `to`:
-/// without the values it gives declarators other than the one holding
-/// `named` — those beside it in a list (`int a = 1, b = 2`) and those written
-/// beside its name (Swift's `let a = 1, b = 2`, Go's `var a, b = 1, 2`), so
-/// `b` reads `int a, b` — and without the body of a type it defines in
-/// passing (`typedef struct { … } Foo` reads `typedef struct Foo`). A
-/// default inside a parameter list is no declarator's value and stays.
+/// without the values it gives its declarators — those beside it in a list
+/// (`int c = 1, *p`), those written beside its name (Swift's `let a: Int = 1,
+/// b: Int = 2`, Go's `var a, b int = 1, 2`), so `p` reads `int c, *p`, and a
+/// property's own before the observers that end its header — and without the
+/// body of a type it defines in passing (`typedef struct { … } Foo` reads
+/// `typedef struct Foo`). A parameter's default is no declarator's value and
+/// stays.
 fn declared_text(
     content: &str,
     named: Node,
@@ -920,15 +963,13 @@ fn declared_text(
             if sibling.id() == held.id() {
                 continue;
             }
-            if sibling.kind() == held.kind() {
-                let mut cursor = sibling.walk();
-                given.extend(sibling.children(&mut cursor).filter_map(given_value));
-            } else if std::iter::successors(sibling.prev_sibling(), Node::prev_sibling)
-                .find(|before| before.is_named() && !before.is_extra())
-                .is_some_and(|before| before.id() != held.id() && before.kind() == held.kind())
-            {
-                given.extend(given_value(sibling));
-            }
+            let mut cursor = sibling.walk();
+            given.extend(
+                std::iter::once(sibling)
+                    .chain(sibling.children(&mut cursor))
+                    .filter_map(given_value)
+                    .map(|value| (value.taken.start, value.taken.end)),
+            );
         }
         given.extend(
             holder
@@ -4950,6 +4991,69 @@ region     = "us-central1"
                 Some("public int Run(int a)"),
             ),
             (
+                "a.swift",
+                Language::Swift,
+                "struct V {\n    var o: Int = 42 {\n        didSet { print(o) }\n    }\n}\n",
+                "o",
+                Some("var o: Int"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "let a: Int = 1, b: Int = 2\n",
+                "b",
+                Some("let a: Int, b: Int"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "func f(a: Int = 1, b: Int) {}\n",
+                "f",
+                Some("func f(a: Int = 1, b: Int)"),
+            ),
+            (
+                "a.kt",
+                Language::Kotlin,
+                "class K {\n    val x: Int = 5 get() = field + 1\n}\n",
+                "x",
+                Some("val x: Int"),
+            ),
+            (
+                "v.go",
+                Language::Go,
+                "package p\n\nvar x, y int = 1, 2\n",
+                "x",
+                Some("var x, y int"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "int c = 1, *p;\n",
+                "p",
+                Some("int c, *p"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "int a, b = 2;\n",
+                "a",
+                Some("int a, b"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "struct W { int x{5}, y{6}; };\n",
+                "y",
+                Some("int x, y"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "void sk_zero(STACK_OF(SAMPLE) *sk);\n",
+                "sk_zero",
+                Some("void sk_zero(STACK_OF(SAMPLE) *sk)"),
+            ),
+            (
                 "a.lua",
                 Language::Lua,
                 "local M = {}\nM.stop = function(reason)\n  return reason\nend\n",
@@ -5258,6 +5362,13 @@ region     = "us-central1"
                 Some("func f(a: Int = 1, b: Int = 2)"),
             ),
             (
+                "a.swift",
+                Language::Swift,
+                "enum E {\n    case c(x: Int = 1, Int = 2)\n}\n",
+                "c",
+                Some("case c(x: Int = 1, Int = 2)"),
+            ),
+            (
                 "a.kt",
                 Language::Kotlin,
                 "fun f(a: Int = 1, b: Int = 2) {}\n",
@@ -5399,6 +5510,22 @@ region     = "us-central1"
                 "over",
                 (2, 1, 2, 1, 4, 2),
                 Some("export function over(a: any): any"),
+            ),
+            (
+                "c.ts",
+                Language::TypeScript,
+                "export default {\n  methods: {\n    save() { return 1; },\n  },\n};\n",
+                "methods",
+                (2, 3, 2, 3, 4, 4),
+                Some("methods"),
+            ),
+            (
+                "c.ts",
+                Language::TypeScript,
+                "export default {\n  methods: {\n    save() { return 1; },\n  },\n};\n",
+                "default",
+                (1, 1, 1, 1, 5, 3),
+                Some("export default"),
             ),
             (
                 "w.cpp",
