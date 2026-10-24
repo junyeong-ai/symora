@@ -13,6 +13,9 @@ use crate::models::symbol::{Language, Location, Symbol, SymbolKind};
 struct LanguageEntry {
     parser: Mutex<Parser>,
     query: Query,
+    /// The query's `@symbol` capture, the declaration a match reads; a
+    /// pattern can capture more to compare in a predicate.
+    declaration: u32,
 }
 
 /// Tree-sitter declaration extraction: the index's symbol rows, and the
@@ -517,9 +520,11 @@ impl SymbolExtractor {
         let mut declarations = Vec::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
-            if let Some(capture) = m.captures().first() {
-                for symbol in extract_from_match(m, path, content, language) {
-                    declarations.push((capture.node, symbol));
+            for capture in m.captures() {
+                if capture.index == entry.declaration {
+                    for symbol in extract_declaration(capture.node, path, content, language) {
+                        declarations.push((capture.node, symbol));
+                    }
                 }
             }
         }
@@ -830,38 +835,38 @@ fn register(
     let Ok(query) = Query::new(&ts_language, query_src) else {
         return;
     };
+    let Some(declaration) = query.capture_index_for_name("symbol") else {
+        return;
+    };
     languages.insert(
         language,
         LanguageEntry {
             parser: Mutex::new(parser),
             query,
+            declaration,
         },
     );
 }
 
-/// The symbols a query match declares: its one name, or each name a
+/// The symbols the declaration `node` declares: its one name, or each name a
 /// statement declaring several states ([`declared_names`]) once, however
 /// often it binds it (`lo, hi = hi, top = …`), all over the statement's one
 /// range — or each over its name alone where the statement also assigns to
 /// something else ([`assigns_beyond_its_names`]).
-fn extract_from_match(
-    m: &tree_sitter::QueryMatch,
-    path: &Path,
-    content: &str,
-    language: Language,
-) -> Vec<Symbol> {
-    let Some(node) = m.captures().first().map(|capture| capture.node) else {
-        return Vec::new();
-    };
+fn extract_declaration(node: Node, path: &Path, content: &str, language: Language) -> Vec<Symbol> {
     let names = declared_names(node, language);
     let named: Vec<(String, SymbolKind, Node)> = if names.len() > 1 {
         let mut stated = HashSet::new();
         names
             .into_iter()
             .filter_map(|name| {
-                let text = content.get(name.start_byte()..name.end_byte())?;
+                let text = content.get(name.start_byte()..name_end_node(name).end_byte())?;
+                let kind = match language {
+                    Language::Cpp => member_kind(name),
+                    _ => node_kind(node),
+                };
                 (!names_nothing(text) && stated.insert(text))
-                    .then(|| (text.to_string(), node_kind(node), name))
+                    .then(|| (text.to_string(), kind, name))
             })
             .collect()
     } else {
@@ -899,8 +904,9 @@ fn extract_from_match(
         .map(|(name, kind, anchor)| {
             let (line, column) =
                 scalar_position(content, anchor.start_byte(), anchor.start_position());
+            let name_end = name_end_node(anchor);
             let (name_end_line, name_end_column) =
-                scalar_position(content, anchor.end_byte(), anchor.end_position());
+                scalar_position(content, name_end.end_byte(), name_end.end_position());
             let (start, end) = if own_name {
                 (anchor, anchor)
             } else {
@@ -1150,7 +1156,7 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
 /// `a = b = None`, `public $a, $b;`, Swift's `let a = 1, b = 2`. The first
 /// is the name [`find_name_node`] reads. A statement that declares several
 /// names, and assigns to nothing else, is the whole declaration of each, so
-/// [`extract_from_match`] reads each as a symbol of its own over that one
+/// [`extract_declaration`] reads each as a symbol of its own over that one
 /// range. Listed per language, as each grammar holds the names differently.
 fn declared_names(node: Node, language: Language) -> Vec<Node> {
     // A name is a named node; a field can also hold the punctuation between
@@ -1172,11 +1178,7 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .collect(),
         Language::Cpp => fields("declarator")
             .into_iter()
-            .map(|declarator| {
-                declarator
-                    .child_by_field_name("declarator")
-                    .unwrap_or(declarator)
-            })
+            .map(declarator_name)
             .collect(),
         Language::CSharp => child_of_kind(node, "variable_declaration")
             .map(|list| children_of_kind(list, "variable_declarator"))
@@ -1496,12 +1498,37 @@ fn extract_name_and_kind(
     // before a kind is ever assigned to them.
     let name_node = find_name_node(node, language)?;
     let name = content
-        .get(name_node.start_byte()..name_node.end_byte())?
+        .get(name_node.start_byte()..name_end_node(name_node).end_byte())?
         .to_string();
     if names_nothing(&name) {
         return None;
     }
     Some((name, node_kind(node)))
+}
+
+/// The node a declared name ends with: its own, or the token before the
+/// parameters a C++ conversion function's name holds, so `operator bool()
+/// const` is named `operator bool` and `operator const char*()` `operator
+/// const char*`.
+fn name_end_node(name: Node) -> Node {
+    let mut conversion = name;
+    while conversion.kind() == "qualified_identifier" {
+        match conversion.child_by_field_name("name") {
+            Some(inner) => conversion = inner,
+            None => return name,
+        }
+    }
+    if conversion.kind() != "operator_cast" {
+        return name;
+    }
+    let mut declarator = conversion;
+    while let Some(inner) = declarator.child_by_field_name("declarator") {
+        if inner.kind() == "abstract_function_declarator" {
+            return inner.prev_sibling().unwrap_or(name);
+        }
+        declarator = inner;
+    }
+    name
 }
 
 /// Whether a declared name is no name at all: empty, or the blank `_` that
@@ -1768,12 +1795,66 @@ fn go_type_kind(node: Node) -> SymbolKind {
 
 /// Classify a member declaration by its declarator: C++ states a method
 /// declaration with the same `field_declaration` node it states a data member
-/// with, and only the declarator separates them. Java, whose fields use the
-/// same node kind, declares methods elsewhere and is unaffected.
+/// with, and only the declarator separates them ([`member_kind`]). A member
+/// function declared without a type is a constructor or a destructor, unless
+/// its name states the type it converts to (`operator bool()`). Java, whose
+/// fields use the same node kind, declares methods elsewhere and is unaffected.
 fn field_kind(node: Node) -> SymbolKind {
-    match node.child_by_field_name("declarator").map(|d| d.kind()) {
-        Some("function_declarator") => SymbolKind::Method,
-        _ => SymbolKind::Field,
+    let Some(name) = node.child_by_field_name("declarator").map(declarator_name) else {
+        return SymbolKind::Field;
+    };
+    match member_kind(name) {
+        SymbolKind::Method
+            if node.child_by_field_name("type").is_none() && name.kind() != "operator_cast" =>
+        {
+            SymbolKind::Constructor
+        }
+        kind => kind,
+    }
+}
+
+/// Whether the C or C++ declarator around `name` declares a method or a data
+/// member. A declarator wraps its name in what makes its type and is read
+/// inside out, so a name declares a function where a function declarator is
+/// the first to enclose it: `int& at(int)` is a method returning a reference,
+/// and `int (*fp)(int)` a member pointing to a function. A conversion
+/// function's name holds its function declarator itself.
+fn member_kind(name: Node) -> SymbolKind {
+    if name.kind() == "operator_cast" {
+        return SymbolKind::Method;
+    }
+    let mut node = name;
+    while let Some(parent) = node.parent() {
+        match parent.kind() {
+            "parenthesized_declarator" | "attributed_declarator" => node = parent,
+            "function_declarator" => return SymbolKind::Method,
+            _ => break,
+        }
+    }
+    SymbolKind::Field
+}
+
+/// The name a C or C++ declarator declares, inside whatever wraps it: `*`,
+/// `&`, `[3]`, `(int)`, parentheses, attributes or an initializer. Three of
+/// those hold the declarator they wrap under no field, and a conversion
+/// function's name holds the declarator of its own parameters.
+fn declarator_name(declarator: Node) -> Node {
+    let mut node = declarator;
+    loop {
+        let inner = match node.kind() {
+            "operator_cast" => None,
+            "reference_declarator" | "parenthesized_declarator" | "attributed_declarator" => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor).find(|child| {
+                    !matches!(child.kind(), "attribute_declaration" | "ms_call_modifier")
+                })
+            }
+            _ => node.child_by_field_name("declarator"),
+        };
+        match inner {
+            Some(inner) => node = inner,
+            None => return node,
+        }
     }
 }
 
@@ -1890,7 +1971,10 @@ const KOTLIN_QUERY: &str = r#"
 "#;
 
 // A member declared in a class body is a `field_declaration`, and one a
-// `template` header heads is a plain `declaration` inside the template.
+// `template` header heads is a plain `declaration` inside the template. One
+// declared without a type is a plain `declaration` too: a destructor, a
+// conversion function, or a constructor, which is named for its class. A
+// macro invoked in a class body reads as one of those with another name.
 const CPP_QUERY: &str = r#"
 (function_definition) @symbol
 (class_specifier) @symbol
@@ -1899,6 +1983,19 @@ const CPP_QUERY: &str = r#"
 (namespace_definition) @symbol
 (field_declaration) @symbol
 (field_declaration_list (template_declaration (declaration) @symbol))
+(field_declaration_list
+  (declaration declarator: (function_declarator declarator: (destructor_name))) @symbol)
+(field_declaration_list (declaration declarator: (operator_cast)) @symbol)
+(class_specifier
+  name: (type_identifier) @class
+  body: (field_declaration_list
+    (declaration declarator: (function_declarator declarator: (identifier) @name)) @symbol)
+  (#eq? @class @name))
+(struct_specifier
+  name: (type_identifier) @class
+  body: (field_declaration_list
+    (declaration declarator: (function_declarator declarator: (identifier) @name)) @symbol)
+  (#eq? @class @name))
 "#;
 
 const CSHARP_QUERY: &str = r#"
@@ -2462,10 +2559,20 @@ struct S { int f; };
 
 class C {
 public:
+    C();
+    explicit C(int n);
+    ~C();
+    DISALLOW_COPY(C);
     void m();
+    int& at(int i);
+    const char* name() const;
+    int (*callback)(int);
+    operator bool() const;
     template <typename U>
     U make();
 };
+
+C::operator bool() const { return true; }
 
 enum E { X };
 
@@ -2478,8 +2585,16 @@ void f() {}
                 "struct:S",
                 "field:S/f",
                 "class:C",
+                "constructor:C/C",
+                "constructor:C/C",
+                "constructor:C/~C",
                 "method:C/m",
+                "method:C/at",
+                "method:C/name",
+                "field:C/callback",
+                "method:C/operator bool",
                 "method:C/make",
+                "function:C::operator bool",
                 "enum:E",
                 "function:f",
             ],
