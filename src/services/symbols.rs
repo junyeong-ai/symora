@@ -683,7 +683,7 @@ fn line_span(start: tree_sitter::Point, end: tree_sitter::Point) -> std::ops::Ra
 
 /// Node kinds that open a body of code without being a declaration the
 /// grammars read as callable: closures, lambdas, function expressions,
-/// constructors, accessors and initializer blocks. A kind is listed once for
+/// accessors and initializer blocks. A kind is listed once for
 /// every grammar that names a body by it; a kind some grammar uses for
 /// anything else (`block`, a Python class body too) is not, and neither is a
 /// Ruby block, whose `def` defines a method on the class that runs it.
@@ -698,16 +698,13 @@ const ANONYMOUS_BODIES: &[&str] = &[
     // Java, C++, C#
     "lambda_expression",
     "anonymous_method_expression",
-    "local_function_statement",
     // Go, Rust
     "func_literal",
     "closure_expression",
     // Java, C#, Kotlin
-    "constructor_declaration",
     "static_initializer",
     "accessor_declaration",
     "anonymous_initializer",
-    "secondary_constructor",
     "lambda_literal",
     "getter",
     "setter",
@@ -801,17 +798,21 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 /// ([`type_body`]), a property's accessors where they hold a body (C#'s
 /// `{ get; set; }` is the shape it declares), the expression it returns
 /// (`int P => 1`), its observers or delegate, the token opening the rules of
-/// a `macro_rules!`, a function value's body (`const f = () => {}`), or the
-/// body of the declaration a wrapper holds (`export`, a decorated
-/// definition).
+/// a `macro_rules!` or the statements of a Kotlin secondary constructor, a
+/// function value's body (`const f = () => {}`), or the body of the
+/// declaration a wrapper holds (`export`, a decorated definition).
 fn body_of(node: Node, language: Language) -> Option<Node> {
     let held_as = |kinds: &[&str]| kinds.iter().find_map(|kind| child_of_kind(node, kind));
     node.child_by_field_name("body")
         .or_else(|| match language {
-            Language::Kotlin => {
-                held_as(&["function_body", "getter", "setter", "property_delegate"])
-                    .or_else(|| type_body(node, language))
-            }
+            Language::Kotlin => held_as(&[
+                "function_body",
+                "getter",
+                "setter",
+                "property_delegate",
+                "{",
+            ])
+            .or_else(|| type_body(node, language)),
             Language::Swift => held_as(&["computed_property", "willset_didset_block"])
                 .or_else(|| type_body(node, language)),
             Language::CSharp => node
@@ -2163,9 +2164,13 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if node.kind() == "property_promotion_parameter" {
         return child_of_kind(node.child_by_field_name("name")?, "name");
     }
-    // A Swift deinitializer is named by its keyword alone.
+    // A Swift deinitializer and a Kotlin secondary constructor are named by
+    // their keyword alone.
     if node.kind() == "deinit_declaration" {
         return child_of_kind(node, "deinit");
+    }
+    if node.kind() == "secondary_constructor" {
+        return child_of_kind(node, "constructor");
     }
     // An assignment declares the names its targets bind and nothing else:
     // `obj.attr = value` declares neither `obj` nor `value`.
@@ -2276,6 +2281,7 @@ fn node_kind(node: Node) -> SymbolKind {
         "constructor_signature"
         | "constructor_declaration"
         | "compact_constructor_declaration"
+        | "secondary_constructor"
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
 
@@ -2663,6 +2669,7 @@ const KOTLIN_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_class_body (enum_entry) @symbol)
 (primary_constructor (class_parameter) @symbol)
+(secondary_constructor) @symbol
 (object_declaration) @symbol
 (function_declaration) @symbol
 (source_file [(property_declaration) (type_alias)] @symbol)
@@ -3494,6 +3501,7 @@ data class User(val id: String, plain: Int)
 
 class Widget {
     val name = "w"
+    constructor(name: String) : this()
     fun render() {
         val local = 1
     }
@@ -3520,6 +3528,7 @@ enum class Flag { ON; val z = 1 }
                 "property:User/id",
                 "class:Widget",
                 "property:Widget/name",
+                "constructor:Widget/constructor",
                 "method:Widget/render",
                 "function:top",
                 "class:Name",
@@ -4721,6 +4730,13 @@ region     = "us-central1"
                 "class C {\n    public int Run(int a) {\n        return a;\n    }\n}\n",
                 "Run",
                 Some("public int Run(int a)"),
+            ),
+            (
+                "a.kt",
+                Language::Kotlin,
+                "class K(val a: Int) {\n    constructor(s: String) : this(s.length) {\n        println(s)\n    }\n}\n",
+                "constructor",
+                Some("constructor(s: String) : this(s.length)"),
             ),
             (
                 "a.cs",
@@ -6005,7 +6021,7 @@ interface Shape {}
                 Language::Kotlin,
                 "a.kt",
                 "class Svc(val id: Int) {\n    val size = 1\n    init {\n        fun doubled() = id * 2\n    }\n    constructor(n: String) : this(n.length) {\n        fun parsed() = n\n    }\n    val label: String\n        get() {\n            fun prefix() = \"x\"\n            return prefix()\n        }\n    fun run(): Int {\n        fun total() = 1\n        val f = { fun inner() = 2; inner() }\n        return total()\n    }\n}\n\nfun top(): Int {\n    fun local() = 2\n    return local()\n}\n",
-                &["Svc", "id", "size", "label", "run", "top"],
+                &["Svc", "id", "size", "constructor", "label", "run", "top"],
                 &["doubled", "parsed", "prefix", "total", "inner", "local"],
             ),
             (
