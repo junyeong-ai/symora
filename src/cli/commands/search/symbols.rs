@@ -411,7 +411,8 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
         ..
     } = search;
 
-    let seed = query
+    let seed = Symbol::split_kind(query)
+        .0
         .split(['*', '/', '[', ']'])
         .filter(|s| !s.is_empty())
         .max_by_key(|s| s.len())
