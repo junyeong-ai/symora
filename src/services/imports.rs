@@ -781,6 +781,77 @@ module "ordinary-percent" { source = "./100%" }
         );
     }
 
+    /// A pattern that matches nothing reads no edge and passes every test of
+    /// the edges read, so each pattern of each query matches a form its
+    /// language's fixture writes.
+    const IMPORT_FIXTURES: &[(Language, &str)] = &[
+        (Language::Rust, "use crate::a::b;\nmod auth;\n"),
+        (
+            Language::Python,
+            "import os.path\nimport numpy.linalg as la\nfrom . import x\n",
+        ),
+        (
+            Language::Go,
+            "package p\n\nimport (\n\t\"fmt\"\n\t`raw/path`\n)\n",
+        ),
+        (
+            Language::JavaScript,
+            "import a from \"./a\";\nexport * from \"./b\";\n",
+        ),
+        (
+            Language::TypeScript,
+            "import a from \"./a\";\nexport * from \"./b\";\n",
+        ),
+        (Language::Java, "import java.util.List;\n"),
+        (Language::Kotlin, "import kotlin.collections.List\n"),
+        (Language::Scala, "import scala.collection.mutable\n"),
+        (Language::Swift, "import Foundation\n"),
+        (Language::Elixir, "alias Foo.Bar\n"),
+        (
+            Language::Dart,
+            "import 'package:a/a.dart';\nexport 'e.dart' show X;\npart 'p.dart';\npart of 'lib.dart';\n",
+        ),
+        (
+            Language::Terraform,
+            "module \"m\" {\n  source = \"./m\"\n}\n",
+        ),
+    ];
+
+    #[test]
+    fn every_import_pattern_reads_a_form_its_fixture_writes() {
+        let extractor = ImportExtractor::new();
+        let mut unread = Vec::new();
+        for (language, _, query_src, _) in IMPORT_EXTRACTORS {
+            let entry = &extractor.languages[language];
+            let (_, source) = IMPORT_FIXTURES
+                .iter()
+                .find(|(fixture, _)| fixture == language)
+                .unwrap_or_else(|| panic!("{language:?} has no import fixture"));
+            let tree = entry.parser.lock().unwrap().parse(source, None).unwrap();
+            let mut matched = vec![false; entry.query.pattern_count()];
+            let mut cursor = QueryCursor::new();
+            let mut matches = cursor.matches(&entry.query, tree.root_node(), source.as_bytes());
+            while let Some(found) = matches.next() {
+                matched[found.pattern_index] = true;
+            }
+            unread.extend(
+                (0..entry.query.pattern_count())
+                    .filter(|&p| !matched[p])
+                    .map(|p| {
+                        let text = query_src[entry.query.start_byte_for_pattern(p)..]
+                            .lines()
+                            .next()
+                            .unwrap_or_default();
+                        format!("{language:?}: {text}")
+                    }),
+            );
+        }
+        assert!(
+            unread.is_empty(),
+            "patterns no fixture form matches: {unread:#?}"
+        );
+    }
+
     #[test]
     fn every_language_pack_extracts_for_is_registered() {
         let extractor = ImportExtractor::new();
