@@ -62,9 +62,21 @@ pub struct Cli {
     #[arg(long, value_enum, global = true, help_heading = GLOBAL)]
     pub format: Option<OutputFormat>,
 
-    /// Refuse to run unless this binary satisfies the SemVer requirement,
-    /// e.g. `0.34` or `>=0.34,<0.35`
-    #[arg(long, global = true, value_name = "REQ", help_heading = GLOBAL)]
+    #[arg(
+        long,
+        global = true,
+        value_name = "REQ",
+        help_heading = GLOBAL,
+        help = concat!(
+            "Refuse to run unless this binary satisfies the SemVer requirement, e.g. `",
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            ".",
+            env!("CARGO_PKG_VERSION_MINOR"),
+            "` or `=",
+            env!("CARGO_PKG_VERSION"),
+            "`"
+        )
+    )]
     pub check_version: Option<String>,
 
     /// Answer only from the index and compiled-in grammars, never a language
@@ -91,12 +103,6 @@ const GLOBAL: &str = "Global Options";
 /// exactly and the failure is one typed error rather than a parsed
 /// `--version` string.
 pub fn check_version(requirement: &str) -> Result<(), OutputError> {
-    let parsed = semver::VersionReq::parse(requirement).map_err(|e| {
-        OutputError::invalid(format!(
-            "--check-version `{requirement}` is not a SemVer requirement: {e}"
-        ))
-        .with_hint("Write a requirement such as `0.21`, `=0.21.0`, or `>=0.21,<0.22`.")
-    })?;
     let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| {
         OutputError::new(
             ErrorCode::Internal,
@@ -105,6 +111,17 @@ pub fn check_version(requirement: &str) -> Result<(), OutputError> {
                 env!("CARGO_PKG_VERSION")
             ),
         )
+    })?;
+    let parsed = semver::VersionReq::parse(requirement).map_err(|e| {
+        let (major, minor) = (running.major, running.minor);
+        OutputError::invalid(format!(
+            "--check-version `{requirement}` is not a SemVer requirement: {e}"
+        ))
+        .with_hint(format!(
+            "Write a requirement such as `{major}.{minor}`, `={running}`, or \
+             `>={major}.{minor},<{major}.{}`.",
+            minor + 1
+        ))
     })?;
     if parsed.matches(&running) {
         return Ok(());
