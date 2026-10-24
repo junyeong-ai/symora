@@ -797,14 +797,16 @@ impl<'a> LineStarts<'a> {
 /// declaration through callable nodes alone are the declaration itself —
 /// Dart's query reads a method's signature, which its method signature and
 /// declaration wrap — while a body holds a declaration in a block of
-/// statements.
+/// statements. A callable's parameters are its header rather than its body,
+/// so a property a TypeScript constructor parameter declares is its class's.
 fn is_local(node: Node, declared: &std::collections::HashSet<usize>) -> bool {
     let mut own = true;
     let mut in_body = false;
+    let mut inner = node;
     let mut ancestor = node.parent();
     while let Some(outer) = ancestor {
         if node_kind(outer).is_callable() {
-            if !own {
+            if !own && !is_parameter_list_of(inner, outer) {
                 return true;
             }
         } else {
@@ -815,6 +817,7 @@ fn is_local(node: Node, declared: &std::collections::HashSet<usize>) -> bool {
                 return true;
             }
         }
+        inner = outer;
         ancestor = outer.parent();
     }
     false
@@ -1095,6 +1098,10 @@ fn declaration_visibility(
                     | "public_field_definition"
                     | "field_definition"
                     | "abstract_method_signature"
+                    | "required_parameter"
+                    | "optional_parameter"
+                    | "enum_assignment"
+                    | "property_identifier"
             ) {
                 Some(false)
             } else {
@@ -1201,6 +1208,11 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
                     .or_else(|| child_of_kind(declarator, "identifier"))
             })
             .collect(),
+        Language::TypeScript | Language::JavaScript => node
+            .child_by_field_name("name")
+            .filter(|name| matches!(name.kind(), "object_pattern" | "array_pattern"))
+            .map(bound_names)
+            .unwrap_or_default(),
         Language::Python | Language::Ruby => assignment_targets(node)
             .filter(|target| binds_a_name(*target, language))
             .collect(),
@@ -1224,6 +1236,26 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         .flatten()
         .filter_map(|bound| child_of_kind(bound, "identifier"))
         .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The names a JavaScript or TypeScript destructuring pattern binds:
+/// `{ a, b: renamed, c = 1, ...rest }` binds `a`, `renamed`, `c` and `rest`,
+/// and `[x, [y]]` binds `x` and `y`. A key it reads from is no binding.
+fn bound_names(pattern: Node) -> Vec<Node> {
+    let held = |field| pattern.child_by_field_name(field).map(bound_names);
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => vec![pattern],
+        "pair_pattern" => held("value").unwrap_or_default(),
+        "assignment_pattern" | "object_assignment_pattern" => held("left").unwrap_or_default(),
+        "object_pattern" | "array_pattern" | "rest_pattern" => {
+            let mut cursor = pattern.walk();
+            pattern
+                .named_children(&mut cursor)
+                .flat_map(bound_names)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -1652,6 +1684,11 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if language == Language::Terraform {
         return hcl_declared_name(node);
     }
+    if matches!(node.kind(), "required_parameter" | "optional_parameter") {
+        return declares_property(node)
+            .then(|| node.child_by_field_name("pattern"))
+            .flatten();
+    }
 
     let name_field = match language {
         Language::Kotlin => node
@@ -1665,29 +1702,40 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             .into_iter()
             .next()
             .or_else(|| node.child_by_field_name("name")),
+        Language::TypeScript | Language::JavaScript => declared_names(node, language)
+            .into_iter()
+            .next()
+            .or_else(|| node.child_by_field_name("name"))
+            .or_else(|| node.child_by_field_name("property")),
         _ => node
             .child_by_field_name("name")
             .or_else(|| declared_names(node, language).into_iter().next()),
     };
 
-    name_field.or_else(|| {
-        let count = node.child_count();
-        for i in 0..count {
-            if let Some(child) = node.child(i) {
-                let kind = child.kind();
-                if matches!(
-                    kind,
-                    "identifier"
-                        | "name"
-                        | "simple_identifier"
-                        | "type_identifier"
-                        | "property_identifier"
-                ) {
-                    return Some(child);
-                }
-            }
-        }
-        None
+    let is_name = |node: &Node| {
+        matches!(
+            node.kind(),
+            "identifier" | "name" | "simple_identifier" | "type_identifier" | "property_identifier"
+        )
+    };
+    name_field
+        .or_else(|| {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).find(is_name)
+        })
+        // A TypeScript enum member without a value is its name alone.
+        .or_else(|| is_name(&node).then_some(node))
+}
+
+/// Whether a TypeScript constructor parameter declares a property of its
+/// class as well: an accessibility, `readonly` or `override` modifier says so.
+fn declares_property(parameter: Node) -> bool {
+    let mut cursor = parameter.walk();
+    parameter.children(&mut cursor).any(|child| {
+        matches!(
+            child.kind(),
+            "accessibility_modifier" | "override_modifier" | "readonly"
+        )
     })
 }
 
@@ -1783,7 +1831,14 @@ fn node_kind(node: Node) -> SymbolKind {
         "property_declaration"
         | "public_field_definition"
         | "field_definition"
-        | "property_signature" => SymbolKind::Property,
+        | "property_signature"
+        | "required_parameter"
+        | "optional_parameter" => SymbolKind::Property,
+
+        "enum_assignment" => SymbolKind::EnumMember,
+        "property_identifier" if node.parent().is_some_and(|body| body.kind() == "enum_body") => {
+            SymbolKind::EnumMember
+        }
         "field_declaration" | "declaration" => field_kind(node),
 
         _ => SymbolKind::Variable,
@@ -1865,14 +1920,21 @@ fn declarator_name(declarator: Node) -> Node {
     }
 }
 
-/// Classify a JS/TS `variable_declarator` by its initializer: a function value
-/// (arrow function, function expression, or generator function) is a callable
-/// Function; anything else is a plain Variable. Mirrors `go_type_kind`'s
-/// value-field dispatch and keeps the decision structural — no name heuristics.
+/// Classify a JS/TS `variable_declarator` by its initializer and keyword: a
+/// function value (arrow function, function expression, or generator
+/// function) is a callable Function, and any other value a Constant where
+/// `const` declares it and a Variable where `let` or `var` does.
 fn declarator_kind(node: Node) -> SymbolKind {
     match node.child_by_field_name("value").map(|v| v.kind()) {
         Some("arrow_function") | Some("function_expression") | Some("generator_function") => {
             SymbolKind::Function
+        }
+        _ if node
+            .parent()
+            .and_then(|declaration| declaration.child_by_field_name("kind"))
+            .is_some_and(|keyword| keyword.kind() == "const") =>
+        {
+            SymbolKind::Constant
         }
         _ => SymbolKind::Variable,
     }
@@ -1921,12 +1983,12 @@ const PYTHON_QUERY: &str = r#"
 (class_definition (block (expression_statement (assignment) @symbol)))
 "#;
 
-// Module-scope `const f = () => {}` / `export const f = function () {}` is the
-// dominant TS/JS function form, but it parses as a variable_declarator, not a
-// function_declaration. Capture it — anchored to module scope and filtered to a
-// function-valued initializer — so it is indexed without dragging in nested
-// locals, loop counters, or destructuring patterns. Both lexical_declaration
-// (const/let) and variable_declaration (var), bare and export-wrapped.
+// A module's variables are the declarators no body encloses: at the top of a
+// file, exported, ambient, or in a namespace. Anchoring there keeps a
+// function's locals and loop counters out, and a destructuring declarator
+// declares each name its pattern binds (see `declared_names`). A constructor
+// parameter declares a property where a modifier says so (see
+// `find_name_node`).
 const TYPESCRIPT_QUERY: &str = r#"
 (function_declaration) @symbol
 (generator_function_declaration) @symbol
@@ -1941,10 +2003,24 @@ const TYPESCRIPT_QUERY: &str = r#"
 (interface_declaration (interface_body (property_signature) @symbol))
 (class_body (abstract_method_signature) @symbol)
 (class_body (public_field_definition) @symbol)
-(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
-(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
-(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
-(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
+(method_definition
+  name: (property_identifier) @constructor
+  parameters: (formal_parameters [(required_parameter) (optional_parameter)] @symbol)
+  (#eq? @constructor "constructor"))
+(function_signature) @symbol
+(module) @symbol
+(enum_body name: (property_identifier) @symbol)
+(enum_body (enum_assignment) @symbol)
+(program (lexical_declaration (variable_declarator) @symbol))
+(program (variable_declaration (variable_declarator) @symbol))
+(export_statement (lexical_declaration (variable_declarator) @symbol))
+(export_statement (variable_declaration (variable_declarator) @symbol))
+(ambient_declaration (lexical_declaration (variable_declarator) @symbol))
+(ambient_declaration (variable_declaration (variable_declarator) @symbol))
+([(internal_module) (module)]
+  body: (statement_block (lexical_declaration (variable_declarator) @symbol)))
+([(internal_module) (module)]
+  body: (statement_block (variable_declaration (variable_declarator) @symbol)))
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
@@ -1953,10 +2029,10 @@ const JAVASCRIPT_QUERY: &str = r#"
 (class_declaration) @symbol
 (method_definition) @symbol
 (class_body (field_definition) @symbol)
-(program (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
-(program (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol))
-(program (export_statement (lexical_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
-(program (export_statement (variable_declaration (variable_declarator value: [(arrow_function) (function_expression) (generator_function)]) @symbol)))
+(program (lexical_declaration (variable_declarator) @symbol))
+(program (variable_declaration (variable_declarator) @symbol))
+(export_statement (lexical_declaration (variable_declarator) @symbol))
+(export_statement (variable_declaration (variable_declarator) @symbol))
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -2145,6 +2221,15 @@ mod tests {
                     ("method", Some(false)),
                     ("hidden", None),
                     ("visible", Some(true)),
+                ],
+            ),
+            (
+                Language::TypeScript,
+                "export class C { constructor(private dep: string) {} }\nexport enum Color { Red, Green = 2 }",
+                &[
+                    ("C/dep", Some(false)),
+                    ("Color/Red", Some(false)),
+                    ("Color/Green", Some(false)),
                 ],
             ),
             (
@@ -2387,14 +2472,22 @@ export interface Shape {
     readonly id: string;
 }
 export type Alias = string;
-export enum Color { Red }
+export enum Color { Red, Green = 2 }
 export class C {
     static SC = 1;
     private priv: number = 2;
+    constructor(private readonly dep: string, plain: number) {}
     m(): void {}
 }
 export function f(): void {}
 export const arrow = () => 1;
+export const MAX = 3;
+let counter = 0;
+const { picked, renamed: alias, ...others } = source;
+export function over(a: string): string;
+export function over(a: any): any { return a; }
+declare module "ext" { export function fromExt(): void; }
+namespace Inner { export const held = 1; }
 "#,
             declares: &[
                 "class:Abs",
@@ -2405,12 +2498,27 @@ export const arrow = () => 1;
                 "property:Shape/id",
                 "class:Alias",
                 "enum:Color",
+                "enum_member:Color/Red",
+                "enum_member:Color/Green",
                 "class:C",
                 "property:C/SC",
                 "property:C/priv",
+                "method:C/constructor",
+                "property:C/dep",
                 "method:C/m",
                 "function:f",
                 "function:arrow",
+                "constant:MAX",
+                "variable:counter",
+                "constant:picked",
+                "constant:alias",
+                "constant:others",
+                "function:over",
+                "function:over",
+                "module:\"ext\"",
+                "function:fromExt",
+                "module:Inner",
+                "constant:held",
             ],
         },
         DeclarationFixture {
@@ -2420,20 +2528,28 @@ export const arrow = () => 1;
 export class C {
     static SC = 1;
     inst = 2;
+    #hidden = 3;
     m() {}
 }
 export function f() {}
 export const arrow = () => 1;
 function* gen() {}
+export const MAX = 3;
+let counter = 0;
+const { picked } = source;
 "#,
             declares: &[
                 "class:C",
                 "property:C/SC",
                 "property:C/inst",
+                "property:C/#hidden",
                 "method:C/m",
                 "function:f",
                 "function:arrow",
                 "function:gen",
+                "constant:MAX",
+                "variable:counter",
+                "constant:picked",
             ],
         },
         DeclarationFixture {
@@ -4309,74 +4425,45 @@ enum Color { Red, Blue }
     }
 
     #[test]
-    fn typescript_module_scope_function_declarators_are_functions() {
+    fn a_module_declares_each_variable_no_body_encloses() {
         let extractor = SymbolExtractor::new();
         let content = r#"
-const greet = (x: number) => x;
+const greet = (x) => x;
 export const handler = async () => {};
 const fexpr = function named() {};
 var legacy = () => {};
 const gen = function* () {};
 function* topgen() {}
 const config = makeConfig();
-const VERSION = "1.0";
-const klass = class {};
-const { a, b } = obj;
-const [c, d] = arr;
+export const VERSION = "1.0";
+let counter = 0, total = 1;
+const { a, b: renamed, c = 1, ...rest } = obj;
+const [d, [e]] = arr;
 function outer() {
     const inner = () => {};
     for (let i = 0; i < 10; i++) {}
 }
 "#;
-        let symbols = extractor.extract(Path::new("a"), content, Language::TypeScript);
-        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
-        // Module-scope function-valued declarators are Functions (callable),
-        // not low-level Variables.
-        assert_eq!(kind("greet"), Some(SymbolKind::Function));
-        assert_eq!(kind("handler"), Some(SymbolKind::Function));
-        assert_eq!(kind("fexpr"), Some(SymbolKind::Function));
-        assert_eq!(kind("legacy"), Some(SymbolKind::Function));
-        // A generator expression is a callable function value, indexed like the
-        // arrow and function-expression forms.
-        assert_eq!(kind("gen"), Some(SymbolKind::Function));
-        // A top-level generator declaration (`function* g(){}`) is a distinct
-        // node kind from `function_declaration` — indexed as a Function too.
-        assert_eq!(kind("topgen"), Some(SymbolKind::Function));
-        // Non-function initializers are never captured by the value-filtered
-        // query (they would only ever be Variables, which are not indexed here).
-        assert_eq!(kind("config"), None);
-        assert_eq!(kind("VERSION"), None);
-        assert_eq!(kind("klass"), None);
-        // Destructuring patterns never emit a brace-named symbol.
-        assert_eq!(kind("a"), None);
-        assert_eq!(kind("b"), None);
-        // Nested locals and loop counters are excluded by the module-scope
-        // anchor, so JS/TS indexing stays free of per-statement noise.
-        assert_eq!(kind("inner"), None);
-        assert_eq!(kind("i"), None);
-        // A function-valued declarator is classified Function, which is callable
-        // (not is_low_level), so it survives exclude_low_level — a plain Variable
-        // would not.
-        assert!(!SymbolKind::Function.is_low_level());
-        assert!(kind("greet").is_some_and(|k| !k.is_low_level()));
-    }
-
-    #[test]
-    fn javascript_module_scope_const_arrows_match_typescript() {
-        let extractor = SymbolExtractor::new();
-        let content = r#"
-const greet = () => {};
-export const handler = function () {};
-function outer() {
-    const inner = () => {};
-}
-"#;
-        let symbols = extractor.extract(Path::new("a"), content, Language::JavaScript);
-        let kind = |name: &str| symbols.iter().find(|s| s.name == name).map(|s| s.kind);
-        assert_eq!(kind("greet"), Some(SymbolKind::Function));
-        assert_eq!(kind("handler"), Some(SymbolKind::Function));
-        // The bare (variable_declarator) capture is gone: no nested-local noise.
-        assert_eq!(kind("inner"), None);
+        for language in [Language::TypeScript, Language::JavaScript] {
+            let symbols = extractor.extract(Path::new("a"), content, language);
+            let kind = |name: &str| {
+                let found: Vec<_> = symbols.iter().filter(|s| s.name == name).collect();
+                assert!(found.len() <= 1, "{language:?} reads {name} twice");
+                found.first().map(|s| s.kind)
+            };
+            for function in ["greet", "handler", "fexpr", "legacy", "gen", "topgen"] {
+                assert_eq!(kind(function), Some(SymbolKind::Function), "{function}");
+            }
+            for constant in ["config", "VERSION", "a", "renamed", "c", "rest", "d", "e"] {
+                assert_eq!(kind(constant), Some(SymbolKind::Constant), "{constant}");
+            }
+            for variable in ["counter", "total"] {
+                assert_eq!(kind(variable), Some(SymbolKind::Variable), "{variable}");
+            }
+            for unbound in ["b", "obj", "arr", "inner", "i"] {
+                assert_eq!(kind(unbound), None, "{language:?} declares {unbound}");
+            }
+        }
     }
 
     #[test]
