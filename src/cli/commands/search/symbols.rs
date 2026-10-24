@@ -934,9 +934,7 @@ async fn collect_workspace_symbol_results(
         total,
         failures,
         skipped,
-        // First marker wins — a single IndexingDegradation variant, so order
-        // is immaterial.
-        indexing: lsp_degradation.iter().find_map(|(_, d)| *d),
+        indexing: lsp_degradation.iter().filter_map(|(_, d)| *d).max(),
         narrowed,
     }
 }
