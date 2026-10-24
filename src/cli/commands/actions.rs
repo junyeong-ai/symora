@@ -24,7 +24,7 @@ pub enum ActionsCommand {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    /// File path with position (file:line:column)
+    /// File path with position (file:line[:column])
     pub location: String,
 
     /// Filter by action kind (quickfix, refactor, source)
@@ -38,7 +38,7 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct ApplyArgs {
-    /// File path with position (file:line:column)
+    /// File path with position (file:line[:column])
     pub location: String,
 
     /// Exact, unique action title to apply (use 'list' to see available actions)

@@ -194,14 +194,14 @@ symora context src/services/checkout.ts:48 --all
     "signature": "async processOrder(cart: Cart, user: User): Promise<Order>",
     "body": "  async processOrder(cart: Cart, user: User): Promise<Order> {\n    const reserved = await this.inventory.reserve(cart.items);\n    const order = await this.payment.charge(user, cart.total);\n    return this.orders.create(order, reserved);\n  }"
   },
-  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
-  "callers": { "count": 4, "showing": 4, "items": [ /* handleCheckout, runOrderQueue, two test functions */ ] },
-  "callees": { "count": 3, "showing": 3, "items": [ /* reserve, charge, create */ ] },
-  "types":   { "count": 1, "showing": 1, "items": [ /* Order */ ] },
+  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
+  "callers": { "count": 4, "showing": 4, "indexing": "unconfirmed", "items": [ /* handleCheckout, runOrderQueue, two test functions */ ] },
+  "callees": { "count": 3, "showing": 3, "indexing": "unconfirmed", "items": [ /* reserve, charge, create */ ] },
+  "types":   { "count": 1, "showing": 1, "indexing": "unconfirmed", "items": [ /* Order */ ] },
   "tests":   { "count": 2, "showing": 2, "items": [ /* processesAnOrder, processesTwice */ ] }
 }
 ```
-> You now see the implementation, its 5 references across 3 files (3 of them in tests), and the 2 tests that call it — without opening a single file. `is_exported` reads a TypeScript declaration's own `export`, so a class method is `false`. It does not establish accessibility through enclosing types, modules, or re-exports; an undetermined value is omitted.
+> You now see the implementation, its 5 references across 3 files (3 of them in tests), and the 2 tests that call it — without opening a single file. `is_exported` reads a TypeScript declaration's own `export`, so a class method is `false`. It does not establish accessibility through enclosing types, modules, or re-exports; an undetermined value is omitted. `"indexing": "unconfirmed"` marks each section a language server answered before Symora could confirm its workspace analysis had finished; typescript-language-server reports no such readiness, so its counts are lower bounds.
 
 ### ④ Who calls it?
 
@@ -212,6 +212,7 @@ symora callers src/services/checkout.ts:48
 {
   "count": 4,
   "showing": 4,
+  "indexing": "unconfirmed",
   "items": [
     {
       "name": "handleCheckout",
@@ -246,12 +247,13 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```json
 {
   "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48 },
-  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
+  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
   "coverage": { "count": 3, "files": ["tests/checkout.test.ts"] },
   "blast_radius": {
     "direct_callers": 4,
     "transitive_callers": 7,
     "depth": 2,
+    "indexing": "unconfirmed",
     "max_depth_reached": true,
     "callers_by_depth": [
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
@@ -269,7 +271,7 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```
 > `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
 
-Source edits serialize project writers and reject changes to the content they read. An unversioned edit to another project file not open in the language server has no verifiable server-time source baseline. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
+Source edits serialize project writers and reject changes to the content they read. For a file the language server has not opened, Symora cannot verify that the server computed its edit against the current text. File replacement is atomic; a multi-file operation is not a transaction across files. Avoid concurrent external editing and review any applied files named in an error.
 
 ### ⑥ Make the change — preview before you write
 
@@ -291,11 +293,11 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 ```
 > `--dry-run` shows the whole span it would replace (every old line `-`, every new line `+`) and the net byte change, and writes nothing. The span is the one `symbols --body` returns, decorator, attribute and doc-comment lines included, so a body read there, changed and passed back keeps them. Drop `--dry-run` to apply, or add `--verify-callers` to pull diagnostics on the files that reference the symbol afterward. Prefer `--symbol` over a line number — it re-resolves against the live file, so sequential edits don't go stale.
 
-> **Addressing is forgiving but safe.** `--symbol` matches a bare name, a `Class/method` suffix, a `*/method` wildcard, or the exact `name_path`. When a name is ambiguous, `edit` refuses rather than guess:
+> **Addressing is forgiving but safe.** `--symbol` matches a bare name, a `Class/method` suffix, a `*/method` wildcard, or the exact `name_path`, and a trailing `[kind]` selects one kind among same-named declarations (`Svc[class]` rather than its constructors). A segment written wholly in brackets is a name, as a computed member's is (`Cache/[key]`). When a name is ambiguous, `edit` refuses rather than guess, and lists where each candidate is declared:
 > ```json
 > { "error": { "code": "invalid_argument",
 >   "message": "Symbol path 'reserve' matches 2 symbols in src/services/inventory.ts",
->   "hint": "Candidates: InventoryService/reserve (method) line 34, ReservationPool/reserve (method) line 88. Target one by file:line[:col] instead." } }
+>   "hint": "Candidates: InventoryService/reserve (method) at src/services/inventory.ts:34:3, ReservationPool/reserve (method) at src/services/inventory.ts:88:3. Target one by its location instead." } }
 > ```
 
 ---
@@ -354,7 +356,7 @@ symora doctor                # language servers: verified serving / missing + in
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 ```
 
-Global flags work before or after the subcommand: `symora --format pretty search symbols X` (indented JSON), `symora -q rename …` (errors only), `symora -v doctor` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.21`, `>=0.21,<0.22`), so a caller that parses the output never has to compare `--version` strings itself.
+Global flags work before or after the subcommand: `symora --format pretty search symbols X` (indented JSON), `symora -q rename …` (errors only), `symora -v doctor` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.35`, `>=0.35,<0.36`), so a caller that parses the output never has to compare `--version` strings itself.
 
 ---
 
@@ -384,9 +386,9 @@ Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed 
 
 ## Search index
 
-Symora keeps a persistent SQLite index at `.symora/store.db` in each project.
+Symora keeps a persistent SQLite index at `.symora/store.db` in each project. The `.gitignore` it writes in `.symora/` keeps the index, its caches and locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
 
-The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. Row-level `stale` markers cannot detect omitted new files. Positive results also carry currency hints naming the languages whose files changed since the build.
+The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Positive results also carry currency hints naming the languages whose files changed since the build.
 
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted
@@ -541,17 +543,6 @@ symora daemon start | stop | restart | status
 
 ## Command reference
 
-| Group | Commands |
-| --- | --- |
-| **Discover** | `search symbols`, `search content`, `search ast`, `search nodes`, `pack` |
-| **Map** | `map summary`, `map file` |
-| **Inspect** | `symbols`, `def`, `hover` |
-| **Navigate** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
-| **Analyze** | `context`, `impact`, `diff-impact` |
-| **Edit** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
-| **Diagnose** | `diagnostics` |
-| **Manage** | `search index`, `doctor`, `config`, `daemon`, `setup`, `self`, `mcp` |
-
 Run `symora <command> --help` for any command's flags. Output fields are described in [the output contract](#the-output-contract) and in the output schemas `symora mcp tools` prints.
 
 ---
@@ -560,14 +551,14 @@ Run `symora <command> --help` for any command's flags. Output fields are describ
 
 | Symptom | Fix |
 | --- | --- |
-| `count: 0` from `search …` | Check `symora search index status` and the response's hints and `coverage_gaps`. An empty `languages` means no symbol build has completed — run `symora search index build`. Outside indexed coverage, symbol search may consult a language server; content search scans files. `--deterministic` never consults a language server. |
+| `count: 0` from `search …` | Check `symora search index status` and the response's hints and `coverage_gaps`. An empty `languages` means no symbol build has completed — run `symora search index build`. A path query (`Class/method`, `Name[kind]`) and a language the index does not cover consult a language server; content search scans files. `--deterministic` never consults a language server. |
 | `server_not_installed` | `symora doctor <lang>` and install per its `install` field, or point `[lsp.servers.<lang>]` at an existing binary, then `symora daemon restart --project`. `installed: true` with `serves: false` means the binary resolves but does not run — usually a version-manager shim; run it directly to see why. Changes to the daemon's inherited environment require a full `symora daemon restart`. |
 | `coverage_gaps` on a search | That language is missing from the answer. With `reason: "unavailable"`, `message` carries the failure's first line (for a server that rejected `initialize`, its reason), and the hints and `next_commands` lead with the languages whose lookup failed. |
 | `indexing: "timed_out"` / `"unconfirmed"` | Workspace readiness was not confirmed for the query. List counts may be partial; an empty `def` or `hover` result does not prove absence. Retry after pending server work finishes, but a server without a supported readiness signal stays unconfirmed. `rename` refuses application; inspect the edit set with `--dry-run`, then apply an `unconfirmed` one with `--accept-unconfirmed`. |
 | `incomplete: true` | The count is a lower bound — the answer does not hold everything its own sources held. The leading `hints` name the cause; `next_commands` carries the fix where one exists. If `unread_paths` came with it, check those paths' permissions — no rebuild reaches a path nothing can read. |
 | `conflict` from `edit`/`rename` | The file changed since it was analyzed — re-read it and retry with fresh coordinates. Recoverable. |
 | `conflict` from `search index` | Another process is rebuilding the index — retry as-is; nothing is left half-applied. |
-| Stale results after edits | Rows from the index (`backend: "index"`, `stale: true`) are a snapshot of the last build — `symora search index build` (incremental). LSP-backed answers follow edits: the daemon and `mcp serve` watch the project and pass on-disk changes to the language servers. On Linux a directory the watch cannot cover (unreadable, or past `fs.inotify.max_user_watches`) is skipped, and changes under it show once its watch restarts: `symora daemon restart --project`, or the `mcp serve` process itself under `SYMORA_NO_DAEMON=1`. |
+| Stale results after edits | Index rows (`backend: "index"`) in a list marked `stale: true` are a snapshot of the last build — `symora search index build` (incremental). LSP-backed answers follow edits: the daemon and `mcp serve` watch the project and pass on-disk changes to the language servers. On Linux a directory the watch cannot cover (unreadable, or past `fs.inotify.max_user_watches`) is skipped, and changes under it show once its watch restarts: `symora daemon restart --project`, or the `mcp serve` process itself under `SYMORA_NO_DAEMON=1`. |
 | Debugging | `symora -v <command>` for verbose logs. |
 
 ---

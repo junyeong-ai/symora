@@ -194,14 +194,14 @@ symora context src/services/checkout.ts:48 --all
     "signature": "async processOrder(cart: Cart, user: User): Promise<Order>",
     "body": "  async processOrder(cart: Cart, user: User): Promise<Order> {\n    const reserved = await this.inventory.reserve(cart.items);\n    const order = await this.payment.charge(user, cart.total);\n    return this.orders.create(order, reserved);\n  }"
   },
-  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
-  "callers": { "count": 4, "showing": 4, "items": [ /* handleCheckout, runOrderQueue, 테스트 함수 2개 */ ] },
-  "callees": { "count": 3, "showing": 3, "items": [ /* reserve, charge, create */ ] },
-  "types":   { "count": 1, "showing": 1, "items": [ /* Order */ ] },
+  "refs":    { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
+  "callers": { "count": 4, "showing": 4, "indexing": "unconfirmed", "items": [ /* handleCheckout, runOrderQueue, 테스트 함수 2개 */ ] },
+  "callees": { "count": 3, "showing": 3, "indexing": "unconfirmed", "items": [ /* reserve, charge, create */ ] },
+  "types":   { "count": 1, "showing": 1, "indexing": "unconfirmed", "items": [ /* Order */ ] },
   "tests":   { "count": 2, "showing": 2, "items": [ /* processesAnOrder, processesTwice */ ] }
 }
 ```
-> 이제 구현, 3개 파일에 걸친 참조 5곳(테스트 3곳), 이 메서드를 호출하는 테스트 2개를 — 파일을 한 개도 열지 않고 — 파악했습니다. `is_exported`는 TypeScript에서 선언의 `export`를 읽으므로, 클래스 메서드는 `false`입니다. 상위 타입·모듈·재수출을 통한 접근 가능성을 보장하지 않으며, 판정할 수 없으면 생략합니다.
+> 이제 구현, 3개 파일에 걸친 참조 5곳(테스트 3곳), 이 메서드를 호출하는 테스트 2개를 — 파일을 한 개도 열지 않고 — 파악했습니다. `is_exported`는 TypeScript에서 선언의 `export`를 읽으므로, 클래스 메서드는 `false`입니다. 상위 타입·모듈·재수출을 통한 접근 가능성을 보장하지 않으며, 판정할 수 없으면 생략합니다. `"indexing": "unconfirmed"`는 Symora가 언어 서버의 작업 공간 분석 완료를 확인하기 전에 그 서버가 답한 구간에 붙습니다. typescript-language-server는 이런 준비 상태를 알리지 않으므로, 이 수치는 최솟값입니다.
 
 ### ④ 누가 호출하지?
 
@@ -212,6 +212,7 @@ symora callers src/services/checkout.ts:48
 {
   "count": 4,
   "showing": 4,
+  "indexing": "unconfirmed",
   "items": [
     {
       "name": "handleCheckout",
@@ -246,12 +247,13 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```json
 {
   "target": { "name": "processOrder", "kind": "method", "file": "src/services/checkout.ts", "line": 48 },
-  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false },
+  "refs": { "total": 5, "test": 3, "prod": 2, "files": 3, "modules": 3, "is_exported": false, "indexing": "unconfirmed" },
   "coverage": { "count": 3, "files": ["tests/checkout.test.ts"] },
   "blast_radius": {
     "direct_callers": 4,
     "transitive_callers": 7,
     "depth": 2,
+    "indexing": "unconfirmed",
     "max_depth_reached": true,
     "callers_by_depth": [
       { "depth": 1, "count": 4, "test": 2, "prod": 2 },
@@ -269,7 +271,7 @@ symora impact src/services/checkout.ts:48 --depth 2
 ```
 > `test_caller_ratio`는 발견한 호출자 중 테스트 코드의 비율이며 테스트 실행·커버리지 측정이 아닙니다. `max_depth_reached: true`이면 전이 호출자 수는 하한입니다. 정적 참조·호출 그래프는 런타임 디스패치, 외부 소비자, 설정 기반 연결을 모두 증명하지 못합니다. 임의의 위험 등급이나 신뢰 점수 대신 이 근거와 한계를 검토하세요. `--depth 3`은 그래프를 한 단계 확장합니다.
 
-소스 편집은 프로젝트 내 쓰기를 직렬화하고, 읽은 내용이 달라졌으면 적용을 거부합니다. 언어 서버에 열려 있지 않은 다른 프로젝트 파일의 버전 없는 편집은 서버가 계산에 사용한 원본까지 검증할 수 없습니다. 파일 교체는 원자적이지만 여러 파일 전체가 하나의 트랜잭션은 아닙니다. 외부 편집기와의 동시 변경을 피하고 오류가 지목한 적용 파일을 검토하세요.
+소스 편집은 프로젝트 내 쓰기를 직렬화하고, 읽은 내용이 달라졌으면 적용을 거부합니다. 언어 서버가 열지 않은 파일에 대해서는, 서버가 현재 내용을 기준으로 편집을 계산했는지 Symora가 검증할 수 없습니다. 파일 교체는 원자적이지만 여러 파일 전체가 하나의 트랜잭션은 아닙니다. 외부 편집기와의 동시 변경을 피하고 오류가 지목한 적용 파일을 검토하세요.
 
 ### ⑥ 변경 — 쓰기 전에 미리보기
 
@@ -291,7 +293,7 @@ symora edit replace-body src/services/checkout.ts --symbol 'CheckoutService/proc
 ```
 > `--dry-run`은 바뀔 범위 전체(옛 줄은 `-`, 새 줄은 `+`)와 바이트 증감을 보여주고 아무것도 쓰지 않습니다. 이 범위는 `symbols --body`가 돌려주는 범위와 같아서 데코레이터, 속성, 문서 주석 줄까지 포함하므로, 그렇게 읽은 본문을 고쳐 넘기면 그 줄들이 그대로 남습니다. 적용하려면 `--dry-run`을 빼면 되고, `--verify-callers`를 붙이면 변경 후 이 심볼을 참조하는 파일들의 진단까지 가져옵니다. 라인 번호보다 `--symbol`을 권장합니다 — 라이브 파일에 다시 해석되므로 연속 편집에도 좌표가 어긋나지 않습니다.
 
-> **주소 지정은 유연하지만 안전합니다.** `--symbol`은 단순 이름, `Class/method` suffix, `*/method` 와일드카드, 또는 정확한 `name_path`로 매칭됩니다. 이름이 모호하면 `edit`은 추측하지 않고 거부합니다.
+> **주소 지정은 유연하지만 안전합니다.** `--symbol`은 단순 이름, `Class/method` suffix, `*/method` 와일드카드, 또는 정확한 `name_path`로 매칭되고, 끝에 붙인 `[kind]`는 같은 이름의 선언 가운데 그 종류만 고릅니다(생성자가 아닌 클래스를 고르는 `Svc[class]`). 전체가 대괄호인 세그먼트는 계산된 멤버의 이름처럼 이름 자체입니다(`Cache/[key]`). 이름이 모호하면 `edit`은 추측하지 않고 거부하며, 후보마다 선언된 위치를 알려 줍니다.
 > ```json
 > { "error": { "code": "invalid_argument",
 >   "message": "Symbol path 'reserve' matches 2 symbols in src/services/inventory.ts",
@@ -354,7 +356,7 @@ symora doctor                # language server: 실제 동작 여부(serves) / �
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 ```
 
-전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format pretty search symbols X`(들여쓴 JSON), `symora -q rename …`(에러만), `symora -v doctor`(verbose). `--deterministic`과 `--check-version <REQ>`도 전역입니다. `--deterministic`은 인덱스와 내장 문법으로만 답하게 해 language server 설치 여부와 무관하게 같은 답을 내며, 그런 소스가 없는 명령은 `unsupported`로 실패합니다. `--check-version`은 이 바이너리가 요구 버전(`0.21`, `>=0.21,<0.22`)을 만족하지 않으면 실행을 거부하므로, 출력을 파싱하는 호출자가 `--version` 문자열을 직접 비교할 필요가 없습니다.
+전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format pretty search symbols X`(들여쓴 JSON), `symora -q rename …`(에러만), `symora -v doctor`(verbose). `--deterministic`과 `--check-version <REQ>`도 전역입니다. `--deterministic`은 인덱스와 내장 문법으로만 답하게 해 language server 설치 여부와 무관하게 같은 답을 내며, 그런 소스가 없는 명령은 `unsupported`로 실패합니다. `--check-version`은 이 바이너리가 요구 버전(`0.35`, `>=0.35,<0.36`)을 만족하지 않으면 실행을 거부하므로, 출력을 파싱하는 호출자가 `--version` 문자열을 직접 비교할 필요가 없습니다.
 
 ---
 
@@ -384,7 +386,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 ## 검색 인덱스
 
-Symora는 각 프로젝트의 `.symora/store.db`에 지속성 SQLite 인덱스를 둡니다.
+Symora는 각 프로젝트의 `.symora/store.db`에 지속성 SQLite 인덱스를 둡니다. Symora가 `.symora/`에 쓰는 `.gitignore`는 인덱스와 캐시, 잠금 파일을 커밋에서 빼고, 그 안에 둔 `config.toml`과 `ignore`는 커밋할 수 있게 남깁니다.
 
 ```bash
 symora search index build               # 증분: 변경된 파일만, 삭제된 파일 정리
@@ -393,7 +395,7 @@ symora search index status              # languages(커버 언어), 심볼/파�
 symora search index clear
 ```
 
-인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 파일 크기 정책과 경로·크기·수정 시각을 비교하므로, 이를 보존한 변경은 재빌드해서 반영해야 합니다. 기존 행의 `stale` 표시만으로 새 파일의 누락을 판단할 수 없습니다. 검색 결과가 있어도, 빌드 이후 파일이 바뀐 언어에는 그 언어를 지목하는 최신성 `hints`와 갱신 명령이 붙습니다.
+인덱스는 마지막 빌드의 스냅샷입니다. 최신성 검사는 파일 크기 정책과 경로·크기·수정 시각을 비교하므로, 이를 보존한 변경은 재빌드해서 반영해야 합니다. 목록의 `stale` 플래그는 빌드 이후 바뀐 파일에서 읽은 행이 있다는 뜻이며, 빌드가 보지 못한 새 파일은 어떤 행으로도 드러나지 않습니다. 검색 결과가 있어도, 빌드 이후 파일이 바뀐 언어에는 그 언어를 지목하는 최신성 `hints`와 갱신 명령이 붙습니다.
 
 인덱스가 없어도 검색은 우아하게 격하됩니다(파일시스템 스캔 또는 라이브 LSP로 폴백). 다만 반복 사용에는 빌드된 인덱스가 가장 빠르고 안정적입니다. `--force`는 전체 재빌드에만 사용하세요.
 
@@ -535,17 +537,6 @@ symora daemon start | stop | restart | status
 
 ## 명령어 참조
 
-| 그룹 | 명령 |
-| --- | --- |
-| **탐색** | `search symbols`, `search content`, `search ast`, `search nodes`, `pack` |
-| **맵** | `map summary`, `map file` |
-| **들여다보기** | `symbols`, `def`, `hover` |
-| **네비게이션** | `refs`, `callers`, `callees`, `typedef`, `implementations`, `supertypes`, `subtypes` |
-| **분석** | `context`, `impact`, `diff-impact` |
-| **편집** | `edit {replace-body,insert-before,insert-after,delete,replace,pattern}`, `rename`, `actions` |
-| **진단** | `diagnostics` |
-| **관리** | `search index`, `doctor`, `config`, `daemon`, `setup`, `self`, `mcp` |
-
 어떤 명령이든 `symora <command> --help`로 플래그를 볼 수 있습니다. 출력 필드는 [출력 계약](#출력-계약)과 `symora mcp tools`의 출력 스키마에 있습니다.
 
 ---
@@ -554,14 +545,14 @@ symora daemon start | stop | restart | status
 
 | 증상 | 해결 |
 | --- | --- |
-| `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 인덱스 범위 밖에서 심볼 검색은 language server를 조회할 수 있고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
+| `search …`가 `count: 0` | `symora search index status`와 응답의 hints·`coverage_gaps`를 확인하세요. `languages`가 비었으면 완료된 심볼 빌드가 없다는 뜻 — `symora search index build`. 경로 질의(`Class/method`, `Name[kind]`)와 인덱스가 다루지 않는 언어는 language server를 조회하고, 내용 검색은 파일을 스캔합니다. `--deterministic`은 language server를 조회하지 않습니다. |
 | `server_not_installed` | `symora doctor <lang>` 후 `install` 필드대로 설치, 또는 `[lsp.servers.<lang>]`를 기존 바이너리로 지정 후 `symora daemon restart --project`. `installed: true`인데 `serves: false`면 바이너리는 있으나 실행되지 않는 것(대개 버전 매니저 샴) — 직접 실행해 원인을 보세요. daemon이 상속한 환경을 바꿨다면 전체 `symora daemon restart`가 필요합니다. |
 | 검색 결과의 `coverage_gaps` | 그 언어는 답에 들어 있지 않습니다. `reason: "unavailable"`이면 `message`에 실패 원인의 첫 줄(서버가 `initialize`를 거부했다면 그 이유)이 실리고, hint와 `next_commands`는 조회가 실패한 언어부터 다룹니다. |
 | `indexing: "timed_out"` / `"unconfirmed"` | 해당 요청에서 워크스페이스 준비 상태를 확인하지 못했습니다. 목록은 일부 결과일 수 있으며, 빈 `def`·`hover` 결과는 부재의 증거가 아닙니다. 서버 작업이 끝난 뒤 재시도할 수 있지만, 지원하는 준비 완료 신호가 없는 서버는 계속 미확인 상태입니다. `rename`은 적용을 거부합니다. `--dry-run`으로 편집 집합을 확인한 뒤, `unconfirmed` 상태라면 `--accept-unconfirmed`로 적용할 수 있습니다. |
 | `incomplete: true` | count가 하한 — 답이 자기 소스가 가진 전부를 담지 못했습니다. 원인은 `hints`가 이름을 대고, 고칠 방법이 있으면 `next_commands`에 담깁니다. `unread_paths`가 함께 오면 그 경로들의 권한부터 확인하세요 — 읽히지 않는 경로에는 재빌드도 닿지 않습니다. |
 | `edit`/`rename`의 `conflict` | 분석 이후 파일이 변경됨 — 다시 읽고 새 좌표로 재시도. 복구 가능. |
 | `search index`의 `conflict` | 다른 프로세스가 인덱스를 다시 만드는 중 — 그대로 재시도. 절반만 적용된 상태는 남지 않습니다. |
-| 편집 후 결과가 stale | 인덱스에서 온 행(`backend: "index"`, `stale: true`)은 마지막 빌드의 스냅샷입니다 — `symora search index build`(증분). LSP 기반 답은 편집을 따라갑니다: daemon과 `mcp serve`가 프로젝트를 감시해 디스크 변경을 language server에 전달합니다. Linux에서 감시할 수 없는 디렉터리(읽기 권한이 없거나 `fs.inotify.max_user_watches`를 넘는 곳)는 건너뛰므로, 그 아래의 변경은 해당 프로젝트의 감시를 재시작한 뒤에 반영됩니다(`symora daemon restart --project`, `SYMORA_NO_DAEMON=1`이면 `mcp serve` 프로세스 자체). |
+| 편집 후 결과가 stale | `stale: true`가 붙은 목록의 인덱스 행(`backend: "index"`)은 마지막 빌드의 스냅샷입니다 — `symora search index build`(증분). LSP 기반 답은 편집을 따라갑니다: daemon과 `mcp serve`가 프로젝트를 감시해 디스크 변경을 language server에 전달합니다. Linux에서 감시할 수 없는 디렉터리(읽기 권한이 없거나 `fs.inotify.max_user_watches`를 넘는 곳)는 건너뛰므로, 그 아래의 변경은 해당 프로젝트의 감시를 재시작한 뒤에 반영됩니다(`symora daemon restart --project`, `SYMORA_NO_DAEMON=1`이면 `mcp serve` 프로세스 자체). |
 | 디버깅 | `symora -v <command>`로 verbose 로그. |
 
 ---
