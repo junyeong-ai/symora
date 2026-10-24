@@ -10,6 +10,7 @@ use crate::cli::OutputError;
 use crate::cli::response::disclosure::{as_paths, relative_paths};
 use crate::cli::response::{Section, SymbolOutput};
 use crate::cli::utils::{extract_signature, shell_arg};
+use crate::constants::defaults;
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Symbol};
@@ -28,7 +29,7 @@ pub enum MapCommand {
     /// High-level project map
     Summary {
         /// Maximum top-level directories and entrypoints to show
-        #[arg(long, default_value = "10")]
+        #[arg(long, default_value_t = defaults::MAP_SUMMARY_LIMIT)]
         limit: usize,
     },
     /// Show map for a single file
@@ -37,11 +38,11 @@ pub enum MapCommand {
         path: String,
 
         /// Symbol depth to include
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value_t = defaults::MAP_FILE_DEPTH)]
         depth: u32,
 
         /// Maximum related files to show
-        #[arg(long, default_value = "8")]
+        #[arg(long, default_value_t = defaults::MAP_FILE_RELATED_LIMIT)]
         related_limit: usize,
     },
 }

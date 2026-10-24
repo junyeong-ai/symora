@@ -11,7 +11,7 @@ use crate::cli::response::{
 };
 use crate::cli::symbol_discovery::is_single_file_concentration;
 use crate::cli::utils::shell_arg;
-use crate::constants::defaults::{IMPACT_DEFAULT_DEPTH, IMPACT_FILES_LIMIT, IMPACT_MAX_DEPTH};
+use crate::constants::defaults::{CALL_GRAPH_MAX_DEPTH, IMPACT_DEFAULT_DEPTH, IMPACT_FILES_LIMIT};
 
 #[derive(Args, Debug)]
 pub struct ImpactArgs {
@@ -34,7 +34,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
     let loc = args.loc.parse()?.to_absolute()?;
     let test_scope = app.test_scope();
     let root = ctx.root();
-    let depth = args.depth.clamp(1, IMPACT_MAX_DEPTH);
+    let depth = args.depth.clamp(1, CALL_GRAPH_MAX_DEPTH);
     let limit = normalize_limit(args.limit);
 
     match LocationAnalysis::at(app.lsp.as_ref(), loc, root).await {
@@ -144,7 +144,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 /// Gated follow-up commands, in fixed priority order. Every gate keys off
 /// a disclosure the output already carries: `max_depth_reached` means the
 /// walk did not look past its final level, so one more depth widens a graph
-/// not known to be complete (silent at `IMPACT_MAX_DEPTH`); an `incomplete`
+/// not known to be complete (silent at `CALL_GRAPH_MAX_DEPTH`); an `incomplete`
 /// dynamic dispatch means `find_implementations` returned a non-empty set,
 /// so the steered command enumerates exactly the unfolded implementations
 /// (`unavailable` is excluded — that lookup already failed, steering to it
@@ -154,7 +154,7 @@ pub async fn execute(args: ImpactArgs, app: &App) -> Result<()> {
 /// An `impact` re-run carries the call's other flag whenever it differs
 /// from its default, so following one suggestion never silently resets
 /// the other dimension and re-fires its gate. Both flags arrive
-/// normalized (`depth` clamped to 1..=`IMPACT_MAX_DEPTH`, `limit`
+/// normalized (`depth` clamped to 1..=`CALL_GRAPH_MAX_DEPTH`, `limit`
 /// floored at 1 where args are read), so a carried flag is always a
 /// value worth re-running with.
 /// `--limit 0` would empty the file list and make every re-run
@@ -193,7 +193,7 @@ fn impact_next_commands(
     };
 
     let mut commands = Vec::new();
-    if blast_radius.is_some_and(|b| b.max_depth_reached) && depth < IMPACT_MAX_DEPTH {
+    if blast_radius.is_some_and(|b| b.max_depth_reached) && depth < CALL_GRAPH_MAX_DEPTH {
         commands.push(format!(
             "symora impact --depth {}{limit_flag} -- {anchor}",
             depth + 1
@@ -262,7 +262,7 @@ mod tests {
             3,
             50,
             8,
-            IMPACT_MAX_DEPTH,
+            CALL_GRAPH_MAX_DEPTH,
             Some(&radius),
         );
         assert!(commands.is_empty());

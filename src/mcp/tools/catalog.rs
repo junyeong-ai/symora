@@ -1,3 +1,7 @@
+use crate::constants::defaults::{
+    CALL_GRAPH_MAX_DEPTH, CONTEXT_BODY_TOKENS, DIFF_IMPACT_MAX_SYMBOLS, IMPACT_DEFAULT_DEPTH,
+    MAP_FILE_DEPTH, MAP_FILE_RELATED_LIMIT, PACK_SYMBOLS_PER_FILE, PACK_TOKENS,
+};
 use crate::mcp::protocol::ToolDefinition;
 
 use super::schema::{
@@ -23,11 +27,15 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
             schema_object(
                 &[
                     ("path", "string", "Project-relative file path"),
-                    ("depth", "integer", "Nested-symbol depth (default 1)"),
+                    (
+                        "depth",
+                        "integer",
+                        &format!("Nested-symbol depth (default {MAP_FILE_DEPTH})"),
+                    ),
                     (
                         "related_limit",
                         "integer",
-                        "Maximum related files to show (default 8)",
+                        &format!("Maximum related files to show (default {MAP_FILE_RELATED_LIMIT})"),
                     ),
                 ],
                 &["path"],
@@ -323,8 +331,11 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "depth",
                         "integer",
-                        "Transitive callee depth, 1-3 (default 1; >1 returns the downward \
-                         reachable set instead of direct callees, with honest lower-bound markers)",
+                        &format!(
+                            "Transitive callee depth, 1-{CALL_GRAPH_MAX_DEPTH} (default 1; >1 \
+                             returns the downward reachable set instead of direct callees, with \
+                             honest lower-bound markers)"
+                        ),
                     ),
                 ],
             ),
@@ -382,7 +393,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                             "string",
                             "Target location (file:line[:column]) the call chain is sought to",
                         ),
-                        ("depth", "integer", "Max search depth, 1-3 (default 3)"),
+                        (
+                            "depth",
+                            "integer",
+                            &format!(
+                                "Max search depth, 1-{CALL_GRAPH_MAX_DEPTH} (default \
+                                 {CALL_GRAPH_MAX_DEPTH})"
+                            ),
+                        ),
                     ],
                 ),
                 &["to"],
@@ -504,7 +522,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "body_tokens",
                         "integer",
-                        "Shared approximate token budget for requested target, callee, and type bodies (default 2000)",
+                        &format!(
+                            "Shared approximate token budget for requested target, callee, and \
+                             type bodies (default {CONTEXT_BODY_TOKENS})"
+                        ),
                     ),
                 ],
             ),
@@ -516,7 +537,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                           explicit traversal limits (`blast_radius`). `is_exported` appears only for \
                           languages whose compiler decides visibility, and is absent \
                           elsewhere rather than read off a naming convention. Use depth=1 \
-                          for quick surveys, depth=2-3 when tracing wider caller reach.",
+                          for quick surveys, a greater depth when tracing wider caller reach.",
             with_extra(
                 location_schema(),
                 &[
@@ -524,7 +545,10 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "depth",
                         "integer",
-                        "Transitive caller depth, 1-3 (default 1)",
+                        &format!(
+                            "Transitive caller depth, 1-{CALL_GRAPH_MAX_DEPTH} (default \
+                             {IMPACT_DEFAULT_DEPTH})"
+                        ),
                     ),
                 ],
             ),
@@ -536,7 +560,14 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                 ("revision", "string", "One base revision, not a revision range; default HEAD"),
                 ("staged", "boolean", "Compare staged changes instead of the working tree"),
                 ("callers", "boolean", "Include caller analysis"),
-                ("max_symbols", "integer", "Maximum changed symbols to analyze; default 50, 0 means unlimited"),
+                (
+                    "max_symbols",
+                    "integer",
+                    &format!(
+                        "Maximum changed symbols to analyze; default {DIFF_IMPACT_MAX_SYMBOLS}, \
+                         0 means unlimited"
+                    ),
+                ),
             ], &[]),
         ),
         ToolDefinition::read_only(
@@ -613,7 +644,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "tokens",
                         "integer",
-                        "Approximate token budget (default 4000)",
+                        &format!("Approximate token budget (default {PACK_TOKENS})"),
                     ),
                     (
                         "focus",
@@ -623,7 +654,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                     (
                         "per_file",
                         "integer",
-                        "Cap on top-level symbols per file (default 12)",
+                        &format!("Cap on top-level symbols per file (default {PACK_SYMBOLS_PER_FILE})"),
                     ),
                     (
                         "shape",

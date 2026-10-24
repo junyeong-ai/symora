@@ -123,7 +123,7 @@ fn default_revision() -> String {
     "HEAD".to_string()
 }
 fn default_max_symbols() -> usize {
-    50
+    defaults::DIFF_IMPACT_MAX_SYMBOLS
 }
 
 async fn run_diff_impact(args: Value, app: &App) -> Result<CapturedOutput> {
@@ -149,7 +149,9 @@ async fn run_project_overview(_args: Value, app: &App) -> Result<CapturedOutput>
     capture(app, |a| async move {
         crate::cli::commands::map::execute(
             MapArgs {
-                command: MapCommand::Summary { limit: 10 },
+                command: MapCommand::Summary {
+                    limit: defaults::MAP_SUMMARY_LIMIT,
+                },
             },
             &a,
         )
@@ -168,11 +170,11 @@ struct FileOverviewInput {
 }
 
 fn default_file_overview_depth() -> u32 {
-    1
+    defaults::MAP_FILE_DEPTH
 }
 
 fn default_related_limit() -> usize {
-    8
+    defaults::MAP_FILE_RELATED_LIMIT
 }
 
 async fn run_file_overview(args: Value, app: &App) -> Result<CapturedOutput> {
