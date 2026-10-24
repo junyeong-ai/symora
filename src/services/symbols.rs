@@ -527,11 +527,17 @@ impl SymbolExtractor {
         let mut cursor = QueryCursor::new();
         let mut nodes = Vec::new();
         let mut declared = HashSet::new();
+        let fragments = match language {
+            Language::Cpp => opened_by_an_error(tree.root_node()),
+            _ => HashSet::new(),
+        };
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
         while let Some(m) = matches.next() {
             for capture in m.captures() {
                 if capture.index == entry.declaration
-                    && declares(capture.node, language)
+                    && declares(capture.node, content, language)
+                    && !std::iter::successors(Some(capture.node), Node::parent)
+                        .any(|node| fragments.contains(&node.id()))
                     && declared.insert(capture.node.id())
                 {
                     nodes.push(capture.node);
@@ -552,6 +558,164 @@ impl SymbolExtractor {
                     || bound.insert((binding_scope(*node), symbol.name.clone()))
             })
             .collect()
+    }
+}
+
+/// The nodes of C or C++ source the grammar read as fragments of a construct
+/// a syntax error began rather than as declarations of their own, by the
+/// brackets the error left loose:
+///
+/// - what an error holds after a function's header and the `{` opening its
+///   body (a local of a function whose body the grammar lost), up to a `}`
+///   it holds loose or a function definition the grammar read whole, which
+///   C cannot nest, so the body has ended before it;
+/// - the node right after one that leaves a bracket open, which closes it
+///   (the parameters a function-pointer return type writes after the
+///   function's own, read as a declaration ending in a stray `)`).
+///
+/// No other loose bracket opens anything: the grammar strands brackets whose
+/// partners it absorbed elsewhere (a macro body it failed to read as one),
+/// and counting those would unread the rest of the file. The brace of
+/// `extern "C" {` or `namespace n {` encloses declarations of the file's
+/// scope. A body each preprocessor branch opens leaves what follows in the
+/// same error unread up to the next function definition, rather than misread.
+fn opened_by_an_error(root: Node) -> HashSet<usize> {
+    /// What a bracket a syntax error holds does to the brackets open before
+    /// it: opens one that holds fragments, opens one that holds the file's
+    /// declarations, or closes the last.
+    enum Bracket {
+        Opaque,
+        Transparent,
+        Close,
+    }
+    fn loose(token: Node) -> Option<Bracket> {
+        if token.is_named() || token.is_missing() {
+            return None;
+        }
+        let before = || {
+            std::iter::successors(token.prev_sibling(), Node::prev_sibling)
+                .filter(|before| !before.is_extra())
+        };
+        match token.kind() {
+            "{" if before().next().is_some_and(|linkage| {
+                linkage.kind() == "string_literal"
+                    && linkage
+                        .prev_sibling()
+                        .is_some_and(|keyword| keyword.kind() == "extern")
+            }) || before()
+                .take(2)
+                .any(|keyword| keyword.kind() == "namespace") =>
+            {
+                Some(Bracket::Transparent)
+            }
+            "(" | "{" => Some(Bracket::Opaque),
+            ")" | "}" => Some(Bracket::Close),
+            _ => None,
+        }
+    }
+    /// Applies to `open` what the brackets `node` holds loose do: its own
+    /// where an error holds it, and those of every error it holds.
+    fn apply(open: &mut Vec<bool>, node: Node, held_by_an_error: bool) {
+        if held_by_an_error {
+            match loose(node) {
+                Some(Bracket::Opaque) => open.push(true),
+                Some(Bracket::Transparent) => open.push(false),
+                Some(Bracket::Close) => {
+                    open.pop();
+                }
+                None => {}
+            }
+        }
+        if node.has_error() {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                apply(open, child, node.is_error());
+            }
+        }
+    }
+    let opens_a_body = |token: Node| {
+        token.kind() == "{"
+            && !token.is_missing()
+            && std::iter::successors(token.prev_sibling(), Node::prev_sibling)
+                .find(|before| !before.is_extra())
+                .is_some_and(|header| header.kind() == "function_declarator")
+    };
+    let mut inside = HashSet::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if !node.has_error() {
+            continue;
+        }
+        let mut in_lost_body = false;
+        let mut left_open = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_extra() && !child.is_error() {
+                pending.push(child);
+                continue;
+            }
+            let mut closed = left_open.clone();
+            apply(&mut closed, child, node.is_error());
+            if left_open.contains(&true) && closed.len() < left_open.len() {
+                inside.insert(child.id());
+            }
+            if node.is_error() {
+                match child.kind() {
+                    "function_definition" => in_lost_body = false,
+                    "}" if !child.is_missing() => in_lost_body = false,
+                    _ if in_lost_body => {
+                        inside.insert(child.id());
+                    }
+                    _ => in_lost_body = opens_a_body(child),
+                }
+            }
+            left_open.clear();
+            apply(&mut left_open, child, node.is_error());
+            pending.push(child);
+        }
+    }
+    inside
+}
+
+/// The class key of a C or C++ declaration, as the source writes it, where
+/// a macro read as the type strands it: set aside as an error before the
+/// declarator (`QT_BEGIN_NAMESPACE` before `class QWidget;`), or read as the
+/// declarator itself (`EXPORT struct stat st;` declares `struct`).
+fn stranded_class_key<'a>(node: Node, content: &'a str) -> Option<(&'a str, bool)> {
+    let class_key = |node: Node| {
+        content
+            .get(node.start_byte()..node.end_byte())
+            .and_then(|text| text.split_whitespace().last())
+            .filter(|word| matches!(*word, "class" | "struct" | "union" | "enum"))
+    };
+    let declarator = node.child_by_field_name("declarator")?;
+    class_key(declarator_name(declarator))
+        .map(|key| (key, true))
+        .or_else(|| {
+            std::iter::successors(declarator.prev_sibling(), Node::prev_sibling)
+                .take_while(|before| before.is_error() || before.is_extra())
+                .filter(|before| before.is_error())
+                .find_map(class_key)
+                .map(|key| (key, false))
+        })
+}
+
+/// Whether the grammar read a C or C++ declaration's class key as its
+/// declarator, which leaves the name it declares a guess.
+fn misreads_a_class_key(node: Node, content: &str) -> bool {
+    stranded_class_key(node, content).is_some_and(|(_, as_name)| as_name)
+}
+
+/// The kind of type a C or C++ declaration whose class key a macro set aside
+/// declares: the declarator names that type, with or without its members
+/// (`struct ssl_cipher_st { … }` read as a function), not a variable or a
+/// function.
+fn set_aside_class_kind(node: Node, content: &str) -> Option<SymbolKind> {
+    match stranded_class_key(node, content)? {
+        (_, true) => None,
+        ("class", _) => Some(SymbolKind::Class),
+        ("enum", _) => Some(SymbolKind::Enum),
+        _ => Some(SymbolKind::Struct),
     }
 }
 
@@ -576,11 +740,12 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// declares only standing alone, a forward declaration: as the type of
 /// another declaration it names a type that declaration uses (`struct stat
 /// st`, `struct item *it`).
-fn declares(node: Node, language: Language) -> bool {
+fn declares(node: Node, content: &str, language: Language) -> bool {
     if language == Language::Cpp
         && (node
             .child(node.child_count().saturating_sub(1))
             .is_some_and(|last| last.kind() == ";" && last.is_missing())
+            || misreads_a_class_key(node, content)
             || matches!(
                 node.kind(),
                 "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
@@ -1918,8 +2083,9 @@ fn enclosing_declaration<'t>(node: Node<'t>, declared: &HashSet<usize>) -> Optio
 /// unless `static`, is its constructor; a Swift property no type holds is a
 /// global variable; a C++ member function defined in its class without a
 /// type is a constructor or destructor, as one declared there is
-/// ([`declared_as`]); and a C++ declaration outside a class body
-/// ([`in_class_body`]) states a function or a variable.
+/// ([`declared_as`]); a C++ declaration outside a class body
+/// ([`in_class_body`]) states a function or a variable; and one whose class
+/// key a macro set aside declares that type ([`set_aside_class_kind`]).
 /// What holds a declaration is the nearest enclosing one with a name, as for
 /// its path ([`extract_container_path`]): a Dart member's signature sits in a
 /// nameless declaration of the same member.
@@ -1940,6 +2106,11 @@ fn placed_kind(
             .map(|(_, kind)| (outer, kind))
     });
     let enclosing = container.map(|(_, kind)| kind);
+    if language == Language::Cpp
+        && let Some(kind) = set_aside_class_kind(node, content)
+    {
+        return kind;
+    }
     match kind {
         SymbolKind::Function
             if language == Language::Cpp
@@ -2665,25 +2836,35 @@ fn member_kind(name: Node) -> SymbolKind {
     SymbolKind::Field
 }
 
+/// What a qualified C++ name declares under the scope the grammar made by
+/// supplying a missing `::`, at whatever depth: a macro read as the type and
+/// the type read as a scope (`EXPORT Code f()`, `EXPORT std::string f()`),
+/// so the name is what follows it. A name every `::` of which is written is
+/// the qualified name itself (`Widget::~Widget`), and this gives none.
+fn supplied_scope(name: Node) -> Option<Node> {
+    let mut level = name;
+    loop {
+        if child_of_kind(level, "::").is_some_and(|scope| scope.is_missing()) {
+            return level.child_by_field_name("name");
+        }
+        level = level
+            .child_by_field_name("name")
+            .filter(|inner| inner.kind() == "qualified_identifier")?;
+    }
+}
+
 /// The name a C or C++ declarator declares, inside whatever wraps it: `*`,
 /// `&`, `[3]`, `(int)`, parentheses, attributes or an initializer. Three of
 /// those hold the declarator they wrap under no field, beside whatever the
 /// grammar set aside as an error (the `Repo::` of `(Repo::*member_fn)()`),
 /// and a conversion function's name holds the declarator of its own
-/// parameters. A qualified
-/// name the grammar made only by supplying a missing `::` is a macro read as
-/// the type and the type read as a scope (`EXPORT Code f()`), so its name is
-/// what follows.
+/// parameters. A qualified name is the name ([`supplied_scope`]).
 fn declarator_name(declarator: Node) -> Node {
     let mut node = declarator;
     loop {
         let inner = match node.kind() {
             "operator_cast" => None,
-            "qualified_identifier"
-                if child_of_kind(node, "::").is_some_and(|scope| scope.is_missing()) =>
-            {
-                node.child_by_field_name("name")
-            }
+            "qualified_identifier" => supplied_scope(node),
             "reference_declarator" | "parenthesized_declarator" | "attributed_declarator" => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor).find(|child| {
@@ -4880,6 +5061,27 @@ region     = "us-central1"
             !cut_short.iter().any(|d| d.ends_with(":StackSlice")),
             "a cut-short typedef names nothing: {cut_short:?}"
         );
+        let lost_body = declared(
+            "int f(int x)\n{\n    int local = x;\n#if A\n    if (x) {\n#else\n    {\n#endif\n\
+             \x20       return local;\n    }\n}\n",
+        );
+        assert!(
+            !lost_body.iter().any(|d| d.ends_with(":local")),
+            "a lost body's local is no declaration: {lost_body:?}"
+        );
+        assert_eq!(
+            declared(
+                "EXPORT int (*verify_callback(const SSL *ssl))(\n    int ok, X509_STORE_CTX *ctx);\n\
+                 int kept(void);\n"
+            ),
+            ["function:kept"]
+        );
+        assert_eq!(
+            declared(
+                "QT_BEGIN_NAMESPACE\n\nclass QWidget;\nEXPORT struct stat st;\nAPI struct item *items;\n"
+            ),
+            ["class:QWidget", "variable:items"]
+        );
     }
 
     /// An export macro before a declaration's type reads as its type, and
@@ -4889,13 +5091,21 @@ region     = "us-central1"
     #[test]
     fn a_macro_read_as_a_scope_leaves_the_name_it_qualifies() {
         let content = "ZSTDLIB_API ZSTD_ErrorCode ZSTD_getErrorCode(size_t r);\n\
-                       MEM_STATIC ZSTD_ErrorCode def_err(int a) { return 0; }\n";
+                       MEM_STATIC ZSTD_ErrorCode def_err(int a) { return 0; }\n\
+                       EXPORT std::string name_s();\n";
         let symbols = SymbolExtractor::new().extract(Path::new("m.h"), content, Language::Cpp);
         let declared: Vec<String> = symbols
             .iter()
             .map(|symbol| format!("{}:{}", symbol.kind, symbol.name))
             .collect();
-        assert_eq!(declared, ["function:ZSTD_getErrorCode", "function:def_err"]);
+        assert_eq!(
+            declared,
+            [
+                "function:ZSTD_getErrorCode",
+                "function:def_err",
+                "function:name_s"
+            ]
+        );
     }
 
     #[test]
