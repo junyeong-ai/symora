@@ -53,10 +53,11 @@ while True:
             "codeActionProvider": {"resolveProvider": True},
             "hoverProvider": True,
             "renameProvider": {"prepareProvider": True},
-            "workspaceSymbolProvider": mode == "ranked-symbols"
+            "workspaceSymbolProvider": mode in ("ranked-symbols", "computed-members"),
+            "documentSymbolProvider": mode == "computed-members"
         }}
     elif method == "initialized":
-        if mode in ("unrelated-hover", "busy-rename", "ranked-symbols"):
+        if mode in ("unrelated-hover", "busy-rename", "ranked-symbols", "computed-members"):
             server_status()
         elif mode in ("warning-rename", "error-rename"):
             server_status(health=mode.split("-")[0])
@@ -65,8 +66,25 @@ while True:
             "start": {"line": 1, "character": 5},
             "end": {"line": 1, "character": 8}
         }}
+    elif method == "textDocument/documentSymbol" and mode == "computed-members":
+        # A class holding a computed member, which no workspace search lists.
+        def span(start, end):
+            return {"start": {"line": start[0], "character": start[1]},
+                    "end": {"line": end[0], "character": end[1]}}
+        result = [{
+            "name": "C", "kind": 5, "range": span((1, 0), (5, 1)),
+            "selectionRange": span((1, 13), (1, 14)),
+            "children": [{
+                "name": "[key]", "kind": 6, "range": span((2, 2), (4, 3)),
+                "selectionRange": span((2, 2), (2, 7))
+            }]
+        }]
     elif method == "textDocument/documentSymbol":
         result = []
+    elif method == "workspace/symbol" and mode == "computed-members":
+        result = [{"name": "C", "kind": 5, "location": {"uri": source.as_uri(), "range": {
+            "start": {"line": 1, "character": 13}, "end": {"line": 1, "character": 14}
+        }}}]
     elif method == "workspace/symbol" and mode == "ranked-symbols":
         # The test file's declaration first, as a server may list it.
         result = [{

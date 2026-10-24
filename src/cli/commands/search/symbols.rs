@@ -107,10 +107,7 @@ fn store_path_query<'a>(pattern: &PathPattern<'a>, limit: usize) -> (&'a str, us
 /// path alone and records its kind beside it, so the kind a pattern's
 /// qualifier names is read against that kind.
 fn index_row_matches(row: &SymbolSearchResult, pattern: &PathPattern) -> bool {
-    pattern.matches(
-        row.name_path.as_deref().unwrap_or(&row.name),
-        Some(row.kind),
-    )
+    pattern.matches(row.name_path.as_deref().unwrap_or(&row.name), row.kind)
 }
 
 /// An index row read from a file that has changed since the build: its
@@ -433,9 +430,11 @@ async fn execute_glob_symbol_search(app: &App, search: &SymbolSearch<'_>) -> Res
 
     // Scan every seed match — `usize::MAX` lands as SQLite `LIMIT -1`
     // (unlimited) — so the glob `count` is the exact total rather than a
-    // page-capped lower bound. A literal seed keeps the set small; only a bare
-    // `*` (empty seed) walks the whole index, which is exactly what `*` asks
-    // for. `finish_symbol_search` caps the emitted page at the display `limit`.
+    // page-capped lower bound. A literal seed keeps the set small; a pattern
+    // that spells none walks the whole index, which is what it asks for: a
+    // bare `*`, or `*/[key]`, whose reading as a name ending in `/` holds no
+    // literal run. `finish_symbol_search` caps the emitted page at the display
+    // `limit`.
     let page = match app
         .store
         .search_symbols(
@@ -753,7 +752,7 @@ async fn execute_workspace_symbol_search(
                 | WorkspaceSearchRoute::IndexUnreadable
         );
         bounds.extend(narrowed_live_answer(&narrowed, &index_covered, buildable));
-        if workspace_names(query).is_empty() {
+        if names_an_unenclosed_computed_member(query) {
             bounds.extend(live_only(languages, &index_covered, buildable).map(
                 |(languages, indexable)| LowerBound::LiveNameUnasked {
                     languages,
@@ -1114,8 +1113,8 @@ async fn collect_workspace_symbol_results(
         }
         let mut symbols = Vec::new();
         let mut indexing = None;
-        for name in &names {
-            match app.lsp.workspace_symbols(name, *language).await {
+        for asked in &names {
+            match app.lsp.workspace_symbols(&asked.name, *language).await {
                 Ok(answer) => {
                     indexing = indexing.max(answer.indexing);
                     symbols.extend(answer.data);
@@ -1386,10 +1385,18 @@ async fn collect_document_path_results(
     let mut skipped = Vec::new();
     let mut narrowed = Vec::new();
     if candidate_files.len() < limit {
-        for name in &names {
-            let seeds =
-                collect_workspace_symbol_results(app, name, kind, limit * 2, languages, within)
-                    .await;
+        for asked in &names {
+            // What encloses a computed member is not of the member's kind.
+            let kind = kind.filter(|_| !asked.enclosing);
+            let seeds = collect_workspace_symbol_results(
+                app,
+                &asked.name,
+                kind,
+                limit * 2,
+                languages,
+                within,
+            )
+            .await;
             // The leaf requery is a fan-out like any other, and what it could
             // not ask about is a coverage fact — discarding it here would leave
             // the caller publishing a set of languages it never actually
@@ -1540,27 +1547,51 @@ fn live_result_output(symbol: Symbol, backend: &str, query: &str, app: &App) -> 
     }
 }
 
+/// A name a server's workspace search is asked for, and whether it is the
+/// name of what encloses the declaration a pattern names rather than its own.
+#[derive(Debug, PartialEq)]
+struct ServerName {
+    name: String,
+    enclosing: bool,
+}
+
 /// The names a server's workspace search is asked for to find a pattern's
 /// matches: for each way the pattern reads, the name its path ends in, without
 /// type parameters or wildcards. A computed member (`[key]`) has no name a
 /// query can spell — tsserver's navigation search lists none — so the name of
-/// what encloses it is asked instead, and its document lists the member.
-fn workspace_names(pattern: &str) -> Vec<String> {
+/// what encloses it is asked instead, and its document lists the member; one
+/// that nothing encloses is asked for nowhere.
+fn workspace_names(pattern: &str) -> Vec<ServerName> {
     let pattern = PathPattern::parse(pattern.trim());
-    let mut names: Vec<String> = Vec::new();
+    let mut names: Vec<ServerName> = Vec::new();
     for path in std::iter::once(pattern.path).chain(pattern.literal) {
-        let name = match PathPattern::split_name(path) {
-            (Some(enclosing), name) if name.starts_with('[') => {
-                PathPattern::split_name(enclosing).1
+        let (name, enclosing) = match PathPattern::split_name(path) {
+            (Some(enclosing), name) if PathPattern::is_computed(name) => {
+                (PathPattern::split_name(enclosing).1, true)
             }
-            (_, name) => name,
+            (None, name) if PathPattern::is_computed(name) => continue,
+            (_, name) => (name, false),
         };
-        let name = name.split('[').next().unwrap_or(name).trim_matches('*');
-        if !name.is_empty() && !names.iter().any(|asked| asked == name) {
-            names.push(name.to_string());
+        let name = PathPattern::bare_name(name).trim_matches('*');
+        if name.is_empty() {
+            continue;
+        }
+        match names.iter_mut().find(|asked| asked.name == name) {
+            Some(asked) => asked.enclosing |= enclosing,
+            None => names.push(ServerName {
+                name: name.to_string(),
+                enclosing,
+            }),
         }
     }
     names
+}
+
+/// Whether a pattern names a computed member that nothing in it encloses,
+/// which no server search can be asked for.
+fn names_an_unenclosed_computed_member(pattern: &str) -> bool {
+    let pattern = PathPattern::parse(pattern.trim());
+    matches!(PathPattern::split_name(pattern.path), (None, name) if PathPattern::is_computed(name))
 }
 
 fn kind_matches(
@@ -2125,22 +2156,37 @@ mod tests {
     }
 
     /// A server is asked for the name each reading of a pattern ends in, and
-    /// for what encloses a computed member, which no server search lists.
+    /// for what encloses a computed member, which no server search lists. A
+    /// name that only begins with a bracket is asked for as it is spelled.
     #[test]
     fn a_server_is_asked_for_names_it_can_list() {
-        let asked = |pattern| workspace_names(pattern);
-        assert_eq!(asked("Shape/area"), ["area"]);
-        assert_eq!(asked("*/area[method]"), ["area"]);
-        assert_eq!(asked("Foo[A]"), ["Foo"]);
-        assert_eq!(asked("C/[Symbol.iterator]"), ["C"]);
-        assert_eq!(asked("C/[key][method]"), ["C"]);
-        assert_eq!(asked("C/[key]"), ["C/", "C"]);
-        assert_eq!(asked("Derived/operator/"), ["operator/"]);
+        let asked = |pattern| -> Vec<(String, bool)> {
+            workspace_names(pattern)
+                .into_iter()
+                .map(|asked| (asked.name, asked.enclosing))
+                .collect()
+        };
+        let own = |name: &str| (name.to_string(), false);
+        let enclosing = |name: &str| (name.to_string(), true);
+        assert_eq!(asked("Shape/area"), [own("area")]);
+        assert_eq!(asked("*/area[method]"), [own("area")]);
+        assert_eq!(asked("Foo[A]"), [own("Foo")]);
+        assert_eq!(asked("C/[Symbol.iterator]"), [enclosing("C")]);
+        assert_eq!(asked("C/[key][method]"), [enclosing("C")]);
+        assert_eq!(asked("C/[key]"), [own("C/"), enclosing("C")]);
+        assert_eq!(asked("Derived/operator/"), [own("operator/")]);
         assert_eq!(
             asked("Derived/operator/[method]"),
-            ["operator/", "operator"]
+            [own("operator/"), enclosing("operator")]
         );
+        assert_eq!(asked("Grid/[]"), [own("[]")]);
+        assert_eq!(asked("[]="), [own("[]=")]);
         assert!(asked("[key]").is_empty());
+
+        assert!(names_an_unenclosed_computed_member("[key]"));
+        assert!(names_an_unenclosed_computed_member("/[key]"));
+        assert!(!names_an_unenclosed_computed_member("C/[key]"));
+        assert!(!names_an_unenclosed_computed_member("[]"));
     }
 
     /// A follow-up re-runs the search it follows: the same kind, language and
