@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::app::App;
 use crate::cli::OutputError;
 use crate::cli::response::Section;
+use crate::error::SearchError;
 use crate::infra::ast::{format_query_error, get_node_types, supported_languages};
 use crate::infra::file_filter::FileFilter;
 use crate::models::symbol::Language;
@@ -84,7 +85,7 @@ pub async fn execute_ast_search(
     let normalized_pattern = normalize_ast_pattern(pattern);
     let pattern = &normalized_pattern;
 
-    let lang = match parse_language(language) {
+    let lang = match parse_ast_language(language) {
         Ok(lang) => lang,
         Err(e) => {
             ctx.print_error(e);
@@ -134,25 +135,28 @@ pub async fn execute_ast_search(
                 &bounds,
             ));
         }
-        Err(crate::error::SearchError::InvalidPattern(e)) => {
-            ctx.print_error(OutputError::invalid(format_query_error(lang, &e)));
-        }
-        Err(crate::error::SearchError::UnsupportedLanguage(l)) => {
-            let supported: Vec<_> = supported_languages().iter().map(|l| l.lsp_id()).collect();
-            ctx.print_error(
-                OutputError::unsupported(format!("AST search not supported for {l:?}"))
-                    .with_hint(format!("Supported languages: {}", supported.join(", "))),
-            );
-        }
-        Err(e) => ctx.print_error(e),
+        Err(error) => ctx.print_error(ast_query_error(lang, error)),
     }
 
     Ok(())
 }
 
+/// What a failed query says to whoever wrote its pattern.
+pub(crate) fn ast_query_error(language: Language, error: SearchError) -> OutputError {
+    match error {
+        SearchError::InvalidPattern(e) => OutputError::invalid(format_query_error(language, &e)),
+        SearchError::UnsupportedLanguage(l) => {
+            let supported: Vec<_> = supported_languages().iter().map(|l| l.lsp_id()).collect();
+            OutputError::unsupported(format!("AST search not supported for {l:?}"))
+                .with_hint(format!("Supported languages: {}", supported.join(", ")))
+        }
+        error => error.into(),
+    }
+}
+
 pub fn execute_list_nodes(app: &App, language: &str) -> Result<()> {
     let ctx = &app.output;
-    let lang = match parse_language(language) {
+    let lang = match parse_ast_language(language) {
         Ok(lang) => lang,
         Err(e) => {
             ctx.print_error(e);
@@ -194,7 +198,7 @@ pub fn execute_list_nodes(app: &App, language: &str) -> Result<()> {
 /// an internal failure: `internal` means the tool broke and an agent branches
 /// on it as unretryable, while this clears the moment the name is corrected.
 /// The same code every other `--lang` refusal gives.
-fn parse_language(lang: &str) -> std::result::Result<Language, OutputError> {
+pub(crate) fn parse_ast_language(lang: &str) -> std::result::Result<Language, OutputError> {
     lang.parse::<Language>().map_err(|_| {
         let supported: Vec<_> = supported_languages().iter().map(|l| l.lsp_id()).collect();
         OutputError::invalid(format!("Unknown language: {lang}")).with_hint(format!(

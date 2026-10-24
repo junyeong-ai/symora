@@ -1312,7 +1312,13 @@ fn pattern_batches_refuse_overlapping_original_ranges_before_preview_or_write() 
             let out = run_in(dir.path(), &args);
             assert!(!out.status.success(), "{args:?} unexpectedly succeeded");
             let response: serde_json::Value = common::parse_response(&out.stdout).unwrap();
-            assert_eq!(response["error"]["code"], "conflict", "{response}");
+            assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
+            assert!(
+                response["error"]["hint"]
+                    .as_str()
+                    .is_some_and(|hint| hint.contains("--index")),
+                "{response}"
+            );
             assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
         }
     }
