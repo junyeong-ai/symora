@@ -414,9 +414,13 @@ const ELIXIR_QUERY: &str = r#"
 (alias) @path
 "#;
 
+/// A library names another through its imports and exports, and its parts
+/// and the library a part belongs to through `part` and `part of`.
 const DART_QUERY: &str = r#"
-(import_specification uri: (uri (string_literal) @path))
 (import_specification uri: (configurable_uri (uri (string_literal) @path)))
+(library_export uri: (configurable_uri (uri (string_literal) @path)))
+(part_directive uri: (uri (string_literal) @path))
+(part_of_directive (uri (string_literal) @path))
 "#;
 
 /// Terraform addresses another module through a block's `source`.
@@ -644,6 +648,22 @@ mod tests {
                 Language::Scala
             ),
             vec!["com.acme.core.Thing", "a.b.C", "a.b.D", "a.b", "x.y"]
+        );
+    }
+
+    #[test]
+    fn a_dart_library_names_its_imports_exports_and_parts() {
+        assert_eq!(
+            extract(
+                "import 'a.dart';\nimport 'b.dart' if (dart.library.io) 'c.dart';\n\
+                 export 'e.dart' show X;\npart 'p.dart';\n",
+                Language::Dart
+            ),
+            vec!["a.dart", "b.dart", "e.dart", "p.dart"]
+        );
+        assert_eq!(
+            extract("part of 'lib.dart';\n", Language::Dart),
+            vec!["lib.dart"]
         );
     }
 
