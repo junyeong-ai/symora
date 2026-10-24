@@ -251,8 +251,9 @@ fn parse_workspace_edit_inner(
     };
     // Each edit's range arrives in the negotiated wire encoding; it is decoded
     // to a native scalar column HERE (against the edit's own target file) so the
-    // edit applier in edit.rs receives native coordinates and never has to know
-    // an encoding exists. One converter caches every target file's lines.
+    // workspace-edit applier (`commands/edit/workspace_edit.rs`) receives native
+    // coordinates and never has to know an encoding exists. One converter
+    // caches every target file's lines.
     let mut conv = PositionConverter::new(encoding);
     // `documentChanges` and `changes` are two representations of the same
     // edit. A server that emits `documentChanges` (which Symora advertises
