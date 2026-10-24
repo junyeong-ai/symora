@@ -20,6 +20,6 @@ Project restart unloads only the addressed project's retained services and prese
 
 ## Request timeouts
 
-LSP operations use the project's retained `lsp.timeout_secs` budget. CLI/MCP establish a shared deadline, and daemon requests carry remaining milliseconds. Admission waits and dispatch preparation consume that allowance; expired queued requests do not start project work. The server also clamps it to the project's retained configuration. Initialization and retries consume the same budget; language/operation multipliers do not extend it. Timeout errors retain their typed wire identity. Non-LSP store/lifecycle operations keep their separate bounds.
+LSP operations use the project's retained `lsp.timeout_secs` budget. CLI/MCP establish a shared deadline, and daemon requests carry remaining milliseconds. Admission waits and dispatch preparation consume that allowance; expired queued requests do not start project work. The server also clamps it to the project's retained configuration. Language and operation multipliers do not extend it. Timeout errors retain their typed wire identity. Non-LSP store/lifecycle operations keep their separate bounds.
 
-A caller can stop waiting for a pooled server start without cancelling other waiters. The start has its own bounded lifetime and must release its pool claim on failure. Pending LSP requests send cancellation and remove pending state when dropped. Source application is not aborted midway to enforce an LSP deadline.
+A caller can stop waiting for a pooled server start without cancelling other waiters. The start has its own bounded lifetime and must release its pool claim on failure. Pending LSP requests send cancellation and remove pending state when dropped.

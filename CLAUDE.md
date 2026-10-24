@@ -38,7 +38,7 @@ PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
   cargo test --test lang_fixtures --test parity -- --include-ignored
 ```
 
-Daemon parity uses an isolated dependency-free Rust project. A direct MCP session keeps its language server alive while checking quiescence, then its command output is compared with daemon-backed CLI output. This measures the transport boundary without repeatedly starting the direct server or indexing this entire workspace. A test that reaches a daemon runs its own copy of the binary: a daemon is per installation, so one a manual run of the same build left behind, started under another environment, would otherwise answer it.
+A test that reaches a daemon runs its own copy of the binary: a daemon is per installation, so one a manual run of the same build left behind, started under another environment, would otherwise answer it.
 
 For behavior changes, also exercise the affected commands against this repo (`cargo build` then `./target/debug/symora …`) and at least one external repo. Don't bake local-only repository assumptions into tests or docs.
 
