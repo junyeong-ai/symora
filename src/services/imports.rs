@@ -71,8 +71,12 @@ impl ImportExtractor {
             .any(|definition| definition.0 == language)
     }
 
+    /// What this binary's import extraction would make of a file, as one
+    /// value, as [`SymbolExtractor::extraction_digest`] describes it.
+    ///
+    /// [`SymbolExtractor::extraction_digest`]: crate::services::symbols::SymbolExtractor::extraction_digest
     pub fn extraction_digest() -> u64 {
-        let mut described = String::from("imports:5");
+        let mut described = String::from(env!("CARGO_PKG_VERSION"));
         for &(language, grammar, query, dialect) in IMPORT_EXTRACTORS {
             let grammar = grammar();
             described.push_str(&format!(
