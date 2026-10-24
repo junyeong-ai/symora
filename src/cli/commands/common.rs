@@ -120,12 +120,12 @@ impl Anchor {
             AnchorResolution::NotASymbol => Some(format!(
                 "{at} declares no symbol and none encloses it; any {subject} shown are for the \
                  raw position and an empty result is not authoritative — anchor at a \
-                 declaration (e.g. a search_symbols result)"
+                 declaration (e.g. a `symora search symbols` result)"
             )),
             AnchorResolution::Unavailable => Some(format!(
                 "{at} could not be read to resolve a symbol; any {subject} shown are for the raw \
                  position and may be incomplete — retry, or anchor at a declaration (e.g. a \
-                 search_symbols result)"
+                 `symora search symbols` result)"
             )),
         }
     }

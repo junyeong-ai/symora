@@ -323,12 +323,12 @@ async fn execute_path(app: &App, loc: LocationArg, to: &str, depth: u32) -> Resu
     let mut hints = anchor.verdict_hints(
         "from-position",
         ctx.root(),
-        "anchor at a declaration (e.g. a search_symbols result)",
+        "anchor at a declaration (e.g. a `symora search symbols` result)",
     );
     hints.extend(target.verdict_hints(
         "--to target",
         ctx.root(),
-        "point --to at a declaration (e.g. a search_symbols result)",
+        "point --to at a declaration (e.g. a `symora search symbols` result)",
     ));
 
     let dynamic_dispatch_possible = reachability == Reachability::NoStaticPath;
