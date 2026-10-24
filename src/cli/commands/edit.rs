@@ -22,7 +22,7 @@ use crate::cli::response::{EditOutput, LineRange, Section};
 use crate::cli::utils::{declared_with, shell_arg};
 use crate::infra::file_filter::FileFilter;
 use crate::infra::file_lock::FileLock;
-use crate::models::lsp::FindSymbolsOptions;
+use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
 use crate::models::symbol::{Language, Symbol};
 use crate::utils::char_to_byte_index;
 
@@ -776,10 +776,18 @@ fn ensure_no_dangling_references(
                      not verify the no-references precondition",
                     degradation.as_str(),
                 ),
-                "Wait for the language server to finish indexing (check 'symora \
-                 status'), then retry; or verify manually and rerun without \
-                 --expect-no-references."
-                    .to_string(),
+                match degradation {
+                    IndexingDegradation::TimedOut => format!(
+                        "The readiness wait exhausted its budget; retrying may help once the \
+                         language server confirms readiness. Otherwise check `{refs_command}` \
+                         yourself and rerun without --expect-no-references."
+                    ),
+                    IndexingDegradation::Unconfirmed => format!(
+                        "The language server has not confirmed workspace readiness, and \
+                         retrying alone does not establish completeness. Check \
+                         `{refs_command}` yourself and rerun without --expect-no-references."
+                    ),
+                },
             )),
             None => Ok(()),
         },
@@ -839,7 +847,7 @@ const VERIFY_CALLERS_FILE_LIMIT: usize = 10;
 struct CallerFiles {
     files: Vec<PathBuf>,
     total: usize,
-    indexing: Option<crate::models::lsp::IndexingDegradation>,
+    indexing: Option<IndexingDegradation>,
     status: Option<&'static str>,
 }
 
@@ -2508,6 +2516,18 @@ mod tests {
         assert!(matches!(out.code, ErrorCode::PreconditionFailed));
         assert!(out.message.contains("lower bound"));
         assert!(out.message.contains("timed_out"));
+        assert!(out.hint.unwrap().contains("retrying may help"));
+
+        let check = ReferenceCheck::Checked(
+            Section::new(vec![]).with_indexing(Some(IndexingDegradation::Unconfirmed)),
+        );
+        let out: OutputError =
+            ensure_no_dangling_references("process", "symora refs src/foo.rs:2:1", &check)
+                .unwrap_err()
+                .into();
+        let hint = out.hint.unwrap();
+        assert!(hint.contains("retrying alone does not"), "{hint}");
+        assert!(hint.contains("symora refs src/foo.rs:2:1"), "{hint}");
     }
 
     /// A non-zero count under degradation is stated as "at least" so the
