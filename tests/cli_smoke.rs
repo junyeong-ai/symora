@@ -1806,6 +1806,56 @@ fn a_capped_diff_analysis_says_its_counts_are_a_lower_bound() {
     );
 }
 
+/// Rows for removed declarations come first and can fill the cap on their
+/// own, which leaves the declarations a rename replaced and the ones it
+/// added unanalysed, so the answer is a lower bound there too.
+#[test]
+fn a_cap_reached_on_removed_declarations_says_its_counts_are_a_lower_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "t@example.com"]);
+    git(repo, &["config", "user.name", "t"]);
+    std::fs::write(
+        repo.join("a.py"),
+        "def gone():\n    pass\n\n\ndef keep():\n    pass\n\n\ndef old_name():\n    pass\n",
+    )
+    .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "init"]);
+    std::fs::write(
+        repo.join("a.py"),
+        "def keep():\n    pass\n\n\ndef new_name():\n    pass\n",
+    )
+    .unwrap();
+
+    let analyse = |max: &str| {
+        json_ok(
+            repo,
+            &["--deterministic", "diff-impact", "--max-symbols", max],
+        )
+    };
+    let capped = analyse("1");
+    assert_eq!(capped["changed_symbols_count"], 1, "{capped}");
+    assert_eq!(capped["changes"][0]["change_type"], "deleted", "{capped}");
+    assert_eq!(capped["incomplete"].as_bool(), Some(true), "{capped}");
+
+    let whole = analyse("0");
+    let names: Vec<&str> = whole["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect();
+    assert!(
+        ["gone", "old_name", "new_name"]
+            .iter()
+            .all(|name| names.contains(name)),
+        "{whole}"
+    );
+    assert_eq!(whole["incomplete"].as_bool(), None, "{whole}");
+}
+
 /// A diff's changed symbols are read through the same reader every other
 /// surface uses, so a language with no server still reports WHAT changed.
 /// Reference counts stay absent and say so — a count no server can supply is
