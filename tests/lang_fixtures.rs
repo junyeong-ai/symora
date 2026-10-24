@@ -773,13 +773,21 @@ fn a_path_search_over_a_changed_file_lists_each_declaration_once_and_loses_none(
     assert_eq!(lines, [6, 10], "{port}");
     assert_eq!(port["count"], port["showing"], "{port}");
 
-    let shadow = run_in(shadow_root.path(), &["search", "symbols", "C/n"]);
+    // Each run starts pyright cold, and a cold pyright can answer before it
+    // has read the file. The live row is what the merge is tested against,
+    // so the search is asked again until pyright gives it, and fails if it
+    // never does.
+    let shadow = (0..5)
+        .map(|_| run_in(shadow_root.path(), &["search", "symbols", "C/n"]))
+        .find(|shadow| {
+            shadow["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["backend"] != "index" && row["line"] == 5)
+        })
+        .expect("pyright lists the class now at the method's old line");
     let rows = shadow["items"].as_array().unwrap();
-    assert!(
-        rows.iter()
-            .any(|row| row["backend"] != "index" && row["line"] == 5),
-        "pyright lists the class now at the method's old line: {shadow}"
-    );
     let lines: Vec<u64> = rows
         .iter()
         .filter(|row| row["backend"] == "index")
