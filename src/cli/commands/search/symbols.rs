@@ -22,7 +22,7 @@ use crate::cli::utils::{extract_signature, shell_arg};
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::FindSymbolsOptions;
-use crate::models::symbol::{Language, Symbol, SymbolKind};
+use crate::models::symbol::{Language, Symbol, SymbolFilter, SymbolKind};
 use crate::services::TestScope;
 use crate::services::store::SymbolSearchResult;
 
@@ -886,14 +886,12 @@ async fn collect_workspace_symbol_results(
         }
 
         let filtered = if looks_like_symbol_path(query) {
-            crate::models::symbol::Symbol::filter_advanced(
-                &symbols,
-                Some(query),
-                false,
-                kind.as_ref().map(std::slice::from_ref),
-                None,
-                false,
-            )
+            SymbolFilter {
+                pattern: Some(query),
+                include_kinds: kind.as_ref().map(std::slice::from_ref),
+                ..SymbolFilter::default()
+            }
+            .matches(&symbols)
         } else {
             symbols
                 .into_iter()
@@ -1178,14 +1176,12 @@ async fn collect_document_path_results(
         };
 
         crate::models::symbol::Symbol::compute_paths_for_all(&mut symbols);
-        let matched = crate::models::symbol::Symbol::filter_advanced(
-            &symbols,
-            Some(query),
-            false,
-            kind.as_ref().map(std::slice::from_ref),
-            None,
-            false,
-        );
+        let matched = SymbolFilter {
+            pattern: Some(query),
+            include_kinds: kind.as_ref().map(std::slice::from_ref),
+            ..SymbolFilter::default()
+        }
+        .matches(&symbols);
 
         for symbol in matched {
             let key = format!(

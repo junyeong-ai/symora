@@ -242,6 +242,35 @@ fn pyright_resolves_across_package_boundaries() {
         "signature output contains source bodies: {signed}"
     );
 
+    // A nested tree lists each declaration once: a method is under its class,
+    // not beside it as well.
+    let tree = run_in_fixture(&[
+        "symbols".into(),
+        geometry_rel.into(),
+        "--depth".into(),
+        "1".into(),
+    ]);
+    assert_eq!(tree["backend"], "document", "{tree}");
+    fn declarations(items: &Value, out: &mut Vec<String>) {
+        for item in items.as_array().into_iter().flatten() {
+            out.push(item["name_path"].as_str().unwrap_or_default().to_string());
+            declarations(&item["children"], out);
+        }
+    }
+    let mut listed = Vec::new();
+    declarations(&tree["items"], &mut listed);
+    let distinct: std::collections::HashSet<_> = listed.iter().collect();
+    assert!(
+        listed.iter().any(|path| path == "Circle/perimeter"),
+        "{tree}"
+    );
+    assert_eq!(distinct.len(), listed.len(), "{tree}");
+    assert_eq!(
+        tree["count"],
+        tree["items"].as_array().unwrap().len(),
+        "{tree}"
+    );
+
     // diagnostics on the importing file are clean: a broken venv or
     // wiped settings surface as phantom missing-import diagnostics.
     let diagnostics = run_in_fixture(&["diagnostics".into(), report_rel.into()]);

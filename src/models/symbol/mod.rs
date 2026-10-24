@@ -360,35 +360,6 @@ impl Symbol {
         self.name.to_lowercase().contains(&substring.to_lowercase())
     }
 
-    pub fn filter_advanced(
-        symbols: &[Symbol],
-        pattern: Option<&str>,
-        substring: bool,
-        include_kinds: Option<&[SymbolKind]>,
-        exclude_kinds: Option<&[SymbolKind]>,
-        exclude_low_level: bool,
-    ) -> Vec<Symbol> {
-        let mut out = Vec::new();
-        Self::collect_by(
-            symbols,
-            &|symbol| {
-                let excluded = exclude_kinds.is_some_and(|k| k.contains(&symbol.kind))
-                    || include_kinds.is_some_and(|k| !k.contains(&symbol.kind))
-                    || (exclude_low_level && symbol.kind.is_low_level());
-                if excluded {
-                    return false;
-                }
-                match pattern {
-                    None => true,
-                    Some(p) if substring => symbol.matches_substring(p),
-                    Some(p) => symbol.matches_path(p),
-                }
-            },
-            &mut out,
-        );
-        out.into_iter().cloned().collect()
-    }
-
     /// Normalize a raw LSP documentSymbol name into the segment used for
     /// symbol paths, the name the index extractor reads for the same
     /// declaration (`declared_name`); an `impl` block
@@ -613,6 +584,79 @@ impl Symbol {
             }
         }
         label.len()
+    }
+}
+
+/// Which declarations a symbol listing keeps.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SymbolFilter<'a> {
+    /// A path pattern, or with `substring` a fragment of the name.
+    pub pattern: Option<&'a str>,
+    pub substring: bool,
+    pub include_kinds: Option<&'a [SymbolKind]>,
+    pub exclude_kinds: Option<&'a [SymbolKind]>,
+    /// Leave out variables, constants and other value-level declarations.
+    pub structural: bool,
+}
+
+impl SymbolFilter<'_> {
+    /// Every declaration the filter keeps, at any depth, in tree order.
+    pub fn matches(&self, symbols: &[Symbol]) -> Vec<Symbol> {
+        let mut out = Vec::new();
+        Symbol::collect_by(
+            symbols,
+            &|symbol| !self.excludes(symbol) && self.selects(symbol),
+            &mut out,
+        );
+        out.into_iter().cloned().collect()
+    }
+
+    /// The declarations a nested listing answers with: each kept one at its
+    /// outermost position, holding what is beneath it, so no declaration is
+    /// listed twice. An excluded declaration is left out and what it holds
+    /// takes its place. Without a selecting filter that is the whole tree.
+    pub fn outermost(&self, symbols: Vec<Symbol>) -> Vec<Symbol> {
+        let mut out = Vec::new();
+        for mut symbol in symbols {
+            let children = std::mem::take(&mut symbol.children);
+            if !self.excludes(&symbol) && self.selects(&symbol) {
+                symbol.children = self.pruned(children);
+                out.push(symbol);
+            } else {
+                out.extend(self.outermost(children));
+            }
+        }
+        out
+    }
+
+    fn pruned(&self, symbols: Vec<Symbol>) -> Vec<Symbol> {
+        let mut out = Vec::new();
+        for mut symbol in symbols {
+            let children = self.pruned(std::mem::take(&mut symbol.children));
+            if self.excludes(&symbol) {
+                out.extend(children);
+            } else {
+                symbol.children = children;
+                out.push(symbol);
+            }
+        }
+        out
+    }
+
+    fn excludes(&self, symbol: &Symbol) -> bool {
+        self.exclude_kinds
+            .is_some_and(|kinds| kinds.contains(&symbol.kind))
+            || (self.structural && symbol.kind.is_low_level())
+    }
+
+    fn selects(&self, symbol: &Symbol) -> bool {
+        self.include_kinds
+            .is_none_or(|kinds| kinds.contains(&symbol.kind))
+            && match self.pattern {
+                None => true,
+                Some(fragment) if self.substring => symbol.matches_substring(fragment),
+                Some(pattern) => symbol.matches_path(pattern),
+            }
     }
 }
 
@@ -948,27 +992,19 @@ mod tests {
         ];
         class.compute_paths(None);
 
-        let include_kinds = vec![SymbolKind::Method];
-        let results = Symbol::filter_advanced(
-            &[class.clone()],
-            None,
-            false,
-            Some(&include_kinds),
-            None,
-            false,
-        );
+        let results = SymbolFilter {
+            include_kinds: Some(&[SymbolKind::Method]),
+            ..SymbolFilter::default()
+        }
+        .matches(std::slice::from_ref(&class));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "update");
 
-        let exclude_kinds = vec![SymbolKind::Variable];
-        let results = Symbol::filter_advanced(
-            &[class.clone()],
-            None,
-            false,
-            None,
-            Some(&exclude_kinds),
-            false,
-        );
+        let results = SymbolFilter {
+            exclude_kinds: Some(&[SymbolKind::Variable]),
+            ..SymbolFilter::default()
+        }
+        .matches(std::slice::from_ref(&class));
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|s| s.kind != SymbolKind::Variable));
     }
@@ -982,7 +1018,11 @@ mod tests {
         ];
         class.compute_paths(None);
 
-        let results = Symbol::filter_advanced(&[class], None, false, None, None, true);
+        let results = SymbolFilter {
+            structural: true,
+            ..SymbolFilter::default()
+        }
+        .matches(&[class]);
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|s| !s.kind.is_low_level()));
     }
@@ -997,8 +1037,92 @@ mod tests {
         ];
         class.compute_paths(None);
 
-        let results = Symbol::filter_advanced(&[class], Some("User"), true, None, None, false);
+        let results = SymbolFilter {
+            pattern: Some("User"),
+            substring: true,
+            ..SymbolFilter::default()
+        }
+        .matches(&[class]);
         assert_eq!(results.len(), 3);
+    }
+
+    /// A nested listing names each declaration once: a kept declaration holds
+    /// what is beneath it, a filter that keeps none of the outer ones reaches
+    /// the inner ones, and an excluded one gives its place to what it holds.
+    #[test]
+    fn a_nested_listing_keeps_each_declaration_once_at_its_outermost_place() {
+        let mut class = build_symbol("Service", SymbolKind::Class);
+        class.children = vec![
+            build_symbol("start", SymbolKind::Method),
+            build_symbol("count", SymbolKind::Variable),
+        ];
+        class.compute_paths(None);
+        let tree = vec![class, build_symbol("main", SymbolKind::Function)];
+        let shape = |symbols: Vec<Symbol>| -> Vec<(String, Vec<String>)> {
+            symbols
+                .into_iter()
+                .map(|s| (s.name, s.children.into_iter().map(|c| c.name).collect()))
+                .collect()
+        };
+        let named = |pairs: &[(&str, &[&str])]| -> Vec<(String, Vec<String>)> {
+            pairs
+                .iter()
+                .map(|(name, children)| {
+                    (
+                        name.to_string(),
+                        children.iter().map(|c| c.to_string()).collect(),
+                    )
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            shape(SymbolFilter::default().outermost(tree.clone())),
+            named(&[("Service", &["start", "count"]), ("main", &[])])
+        );
+        let methods = [SymbolKind::Method];
+        assert_eq!(
+            shape(
+                SymbolFilter {
+                    include_kinds: Some(&methods),
+                    ..SymbolFilter::default()
+                }
+                .outermost(tree.clone())
+            ),
+            named(&[("start", &[])])
+        );
+        assert_eq!(
+            shape(
+                SymbolFilter {
+                    structural: true,
+                    ..SymbolFilter::default()
+                }
+                .outermost(tree.clone())
+            ),
+            named(&[("Service", &["start"]), ("main", &[])])
+        );
+        assert_eq!(
+            shape(
+                SymbolFilter {
+                    pattern: Some("s"),
+                    substring: true,
+                    ..SymbolFilter::default()
+                }
+                .outermost(tree.clone())
+            ),
+            named(&[("Service", &["start", "count"])])
+        );
+        let classes = [SymbolKind::Class];
+        assert_eq!(
+            shape(
+                SymbolFilter {
+                    exclude_kinds: Some(&classes),
+                    ..SymbolFilter::default()
+                }
+                .outermost(tree)
+            ),
+            named(&[("start", &[]), ("count", &[]), ("main", &[])])
+        );
     }
 
     /// Kind qualifies a name only where it identifies. Overloads share a
