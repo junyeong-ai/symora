@@ -377,7 +377,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 `pack --tokens`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수도 아니고, JSON 응답 전체 크기의 상한도 아닙니다.
 
-`context`가 요청받은 본문들은 `--body-tokens`를 대상·피호출자·타입 순서로 나눠 쓰며, 각 본문은 통째로 넣거나 통째로 뺍니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. escape 변환 등 지원하지 않는 문자열 해석이 필요한 모듈 경로는 연결을 생략합니다. Rust 상대 모듈 경로는 crate/module 소유권을 확인할 수 없어 연결을 생략하고, 실제 제외 시 hint로 알립니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
+`context`가 요청받은 본문들은 `--body-tokens`를 대상·피호출자·타입 순서로 나눠 쓰며, 각 본문은 통째로 넣거나 통째로 뺍니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. escape 변환 등 지원하지 않는 문자열 해석이 필요한 모듈 경로는 연결을 생략합니다. 모듈 기준 Rust 경로(`self::`, `super::`, 파일이 선언한 모듈을 거치는 경로)와 Cargo 구성으로 crate 루트가 정해지지 않는 파일의 `crate::` 경로는 모듈 소유권을 확인할 수 없어 연결을 생략하고, 실제 제외 시 hint로 알립니다. 프로젝트 라이브러리 이름은 `Cargo.toml`로 해석하고, 외부 crate는 프로젝트 파일로 연결하지 않습니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
 
 `lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 소스 적용 도중의 강제 취소에 사용하지 않습니다.
 
