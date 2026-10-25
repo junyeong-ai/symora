@@ -3123,6 +3123,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "object_declaration"
         | "companion_object"
         | "object_definition"
+        | "package_object"
         | "extension_declaration"
         | "extension_type_declaration"
         | "class" => SymbolKind::Class,
@@ -3737,6 +3738,7 @@ const SWIFT_QUERY: &str = r#"
 const SCALA_QUERY: &str = r#"
 (class_definition) @symbol
 (object_definition) @symbol
+(package_object) @symbol
 (trait_definition) @symbol
 (enum_definition) @symbol
 (enum_case_definitions (simple_enum_case) @symbol)
@@ -4879,6 +4881,11 @@ enum Color(val rgb: Int) {
 case class P(x: Int)(z: Int)
 
 class Q(val a: Int, b: Int)
+
+package object pkg {
+  val pv = 1
+  def pf(): Int = 1
+}
 "#,
             declares: &[
                 "enum:Color",
@@ -4914,6 +4921,9 @@ class Q(val a: Int, b: Int)
                 "constant:topGiven",
                 "class:C",
                 "method:C/cm",
+                "class:pkg",
+                "constant:pkg/pv",
+                "method:pkg/pf",
             ],
         },
         DeclarationFixture {
