@@ -7,8 +7,8 @@ use std::path::Path;
 use super::Node;
 use super::manifests::{
     Basedir, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution, PackageType,
-    Pytest, PythonProject, TsConfig, TsOwner, TypeScript, nearest, own_or_only, project_path,
-    python_packages, python_project, split_package_name,
+    Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, nearest, own_or_only,
+    project_path, python_packages, python_project, split_package_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -1022,8 +1022,12 @@ struct PythonPath<'a> {
     projects: HashMap<Vec<String>, PythonProject>,
     /// How pytest runs from each directory whose files configure it.
     pytest: &'a HashMap<Vec<String>, Pytest>,
+    /// Where pytest roots a run no configuration file configures.
+    rootdirs: &'a HashMap<Vec<String>, Rootdir>,
     /// How pytest runs where no configuration file says.
     default_pytest: Pytest,
+    /// The directories holding a `conftest.py`.
+    conftests: HashSet<&'a [String]>,
 }
 
 impl<'a> PythonPath<'a> {
@@ -1032,11 +1036,23 @@ impl<'a> PythonPath<'a> {
         projects
             .entry(Vec::new())
             .or_insert_with(|| python_project(&[], None));
+        let conftests = nodes
+            .iter()
+            .filter(|node| {
+                node.language == Language::Python
+                    && Path::new(&node.rel_path)
+                        .file_name()
+                        .is_some_and(|name| name == "conftest.py")
+            })
+            .map(|node| node.directory.as_slice())
+            .collect();
         Self {
             packages: python_packages(nodes),
             projects,
             pytest: &manifests.pytest_configurations,
+            rootdirs: &manifests.pytest_rootdirs,
             default_pytest: Pytest::default(),
+            conftests,
         }
     }
 
@@ -1054,11 +1070,31 @@ impl<'a> PythonPath<'a> {
     }
 
     /// The pytest configuration a file in `directory` runs under: the
-    /// nearest above it, as pytest looks for one upward from where it runs.
-    fn pytest_of(&self, directory: &[String]) -> &Pytest {
-        nearest(self.pytest, directory)
-            .map(|(_, pytest)| pytest)
-            .unwrap_or(&self.default_pytest)
+    /// nearest above it, as pytest looks for one upward from where it runs,
+    /// with the depth of the directory conftests load from — that
+    /// configuration's, else the root pytest falls back to (`Rootdir`), else
+    /// the project root, where pack stands for the directory pytest is run
+    /// from.
+    fn pytest_of(&self, directory: &[String]) -> (&Pytest, usize) {
+        if let Some((at, pytest)) = nearest(self.pytest, directory) {
+            return (pytest, at.len());
+        }
+        let fallback = |kind| {
+            (0..=directory.len())
+                .rev()
+                .find(|depth| self.rootdirs.get(&directory[..*depth]) == Some(&kind))
+        };
+        let cut = fallback(Rootdir::Pyproject)
+            .or_else(|| fallback(Rootdir::SetupPy))
+            .unwrap_or_default();
+        (&self.default_pytest, cut)
+    }
+
+    /// The directory pytest's import modes put on `sys.path` for a test
+    /// module or `conftest.py` in `directory`: the first upward without
+    /// `__init__.py`.
+    fn basedir_of<'d>(&self, directory: &'d [String]) -> &'d [String] {
+        self.package_root_of(directory).unwrap_or(directory)
     }
 
     /// The directories on a Python file's `sys.path` that its own project
@@ -1067,16 +1103,26 @@ impl<'a> PythonPath<'a> {
     /// installs, its dependencies' dependencies included; the `pythonpath`
     /// of the pytest configuration it runs under; and, for a test module or
     /// `conftest.py` that configuration imports by inserting its basedir,
-    /// that basedir — the first directory upward without `__init__.py`. They
-    /// come in the tiers a lookup tries in turn: the basedir alone first
-    /// where pytest prepends it, as it does by default, or last where it
-    /// appends it, and the rest as one.
+    /// that basedir — the first directory upward without `__init__.py` —
+    /// and the basedir of each `conftest.py` pytest loads before it, in its
+    /// directory and those above it down from where conftests load. They
+    /// come in the tiers a lookup tries in turn, in the order the import
+    /// mode leaves them on `sys.path` (pytest 9.1.1, measured): where pytest
+    /// prepends, as it does by default, the file's own basedir, then the
+    /// conftests' deepest first, then the rest; where it appends, the rest,
+    /// then the conftests' in the order they load, outermost first, then
+    /// the file's own.
     fn of_file<'s>(&'s self, from: &'s Node) -> Vec<Vec<&'s [String]>> {
         let package_root = self.package_root_of(&from.directory);
-        let pytest = self.pytest_of(&from.directory);
+        let (pytest, cut) = self.pytest_of(&from.directory);
         let basedir = pytest
             .imports_as_test(Path::new(&from.rel_path))
             .then(|| package_root.unwrap_or(&from.directory));
+        let conftests: Vec<&[String]> = (cut..=from.directory.len())
+            .map(|depth| &from.directory[..depth])
+            .filter(|directory| self.conftests.contains(directory))
+            .map(|directory| self.basedir_of(directory))
+            .collect();
         let mut installed = Vec::new();
         let mut pending: Vec<&[String]> = nearest(&self.projects, &from.directory)
             .map(|(directory, _)| directory.as_slice())
@@ -1101,9 +1147,16 @@ impl<'a> PythonPath<'a> {
             )
             .chain(pytest.pythonpath.iter().map(Vec::as_slice))
             .collect();
+        let conftests = conftests.into_iter().map(|conftest| vec![conftest]);
         match (basedir, pytest.basedir) {
-            (Some(basedir), Basedir::First) => vec![vec![basedir], rest],
-            (Some(basedir), Basedir::Last) => vec![rest, vec![basedir]],
+            (Some(basedir), Basedir::First) => std::iter::once(vec![basedir])
+                .chain(conftests.rev())
+                .chain([rest])
+                .collect(),
+            (Some(basedir), Basedir::Last) => std::iter::once(rest)
+                .chain(conftests)
+                .chain([vec![basedir]])
+                .collect(),
             (None, _) | (_, Basedir::Nowhere) => vec![rest],
         }
     }
@@ -2802,6 +2855,106 @@ mod tests {
         // Inside a package, the basedir is the first directory upward
         // without `__init__.py`.
         assert_eq!(edges(12), vec!["suites/shared_util.py"]);
+    }
+
+    /// pytest imports each `conftest.py` it loads for a test module — in the
+    /// module's directory and those above it, down from the directory of the
+    /// configuration it runs under, else of the `pyproject.toml` it falls
+    /// back to, else the run's root — with the run's import mode, so the
+    /// conftests' basedirs are on the module's `sys.path` too: under
+    /// `prepend` after its own basedir, deepest first, under `append` before
+    /// it, outermost first, under `importlib` nowhere (`pyconf`,
+    /// `pyconf_ini`, and each case run under pytest 9.1.1).
+    #[test]
+    fn a_test_module_imports_from_the_basedirs_of_the_conftests_pytest_loads_for_it() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            // `pyconf`: a service whose pytest-only pyproject makes no project.
+            python(0, "svc/conftest.py", ""),
+            python(1, "svc/app/__init__.py", ""),
+            python(2, "svc/app/core.py", ""),
+            python(3, "svc/tests/test_a.py", "from app.core import c\n"),
+            // `pyconf_ini`: a service run by its `pytest.ini`.
+            python(4, "ini/conftest.py", ""),
+            python(5, "ini/app/__init__.py", ""),
+            python(6, "ini/app/core.py", ""),
+            python(7, "ini/tests/test_b.py", "from app.core import c\n"),
+            // `prepend`: the deepest conftest's basedir before an outer one's.
+            python(8, "pre/conftest.py", ""),
+            python(9, "pre/helpers.py", ""),
+            python(10, "pre/only_root.py", ""),
+            python(11, "pre/sub/conftest.py", ""),
+            python(12, "pre/sub/helpers.py", ""),
+            python(
+                13,
+                "pre/sub/tests/test_x.py",
+                "import helpers\nimport only_root\n",
+            ),
+            // `append`: a conftest's basedir before the module's own.
+            python(14, "app/sub/conftest.py", ""),
+            python(15, "app/sub/helpers.py", ""),
+            python(16, "app/sub/tests/helpers.py", ""),
+            python(17, "app/sub/tests/test_y.py", "import helpers\n"),
+            python(18, "imp/sub/conftest.py", ""),
+            python(19, "imp/sub/helpers.py", ""),
+            python(20, "imp/sub/tests/test_z.py", "import helpers\n"),
+            // A conftest above where conftests load is not loaded: those of
+            // a configuration's directory, of a `pyproject.toml` pytest falls
+            // back to, and otherwise of the project root.
+            python(21, "proj/x/conftest.py", ""),
+            python(22, "proj/x/mod_x.py", ""),
+            python(23, "proj/x/inner/tests/test_q.py", "import mod_x\n"),
+            python(24, "proj/x/fb/tests/test_f.py", "import mod_x\n"),
+            python(25, "proj/x/plain/tests/test_p.py", "import mod_x\n"),
+            // A module pytest does not import as a test has no basedir, and
+            // no conftest's.
+            python(26, "svc/tests/helper.py", "from app.core import c\n"),
+            // Without a configuration file, a `setup.py` roots the run.
+            python(27, "up/conftest.py", ""),
+            python(28, "up/mod_up.py", ""),
+            python(29, "up/sp/tests/test_s.py", "import mod_up\n"),
+            python(30, "up/plain/tests/test_p.py", "import mod_up\n"),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "svc/pyproject.toml",
+                    "[tool.pytest.ini_options]\naddopts = \"-q\"\n",
+                ),
+                ("ini/pytest.ini", "[pytest]\naddopts = -q\n"),
+                ("pre/pytest.ini", "[pytest]\naddopts = -q\n"),
+                (
+                    "app/pytest.ini",
+                    "[pytest]\naddopts = --import-mode=append\n",
+                ),
+                (
+                    "imp/pytest.ini",
+                    "[pytest]\naddopts = --import-mode=importlib\n",
+                ),
+                ("proj/pyproject.toml", "[project]\nname = \"proj\"\n"),
+                ("proj/x/inner/pytest.ini", "[pytest]\n"),
+                (
+                    "proj/x/fb/pyproject.toml",
+                    "[tool.ruff]\nline-length = 100\n",
+                ),
+                (
+                    "up/sp/setup.py",
+                    "from setuptools import setup\nsetup(name='sp')\n",
+                ),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(3), vec!["svc/app/core.py"]);
+        assert_eq!(edges(7), vec!["ini/app/core.py"]);
+        assert_eq!(edges(13), vec!["pre/sub/helpers.py", "pre/only_root.py"]);
+        assert_eq!(edges(17), vec!["app/sub/helpers.py"]);
+        assert!(edges(20).is_empty());
+        assert!(edges(23).is_empty() && edges(24).is_empty());
+        assert_eq!(edges(25), vec!["proj/x/mod_x.py"]);
+        assert!(edges(26).is_empty());
+        assert!(edges(29).is_empty());
+        assert_eq!(edges(30), vec!["up/mod_up.py"]);
     }
 
     /// Installing a project installs the projects in the tree it depends on
