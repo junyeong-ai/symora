@@ -2605,6 +2605,10 @@ mod tests {
             python(8, "iso/utils.py", ""),
             python(9, "iso/tests/utils.py", ""),
             python(10, "iso/tests/test_c.py", "import utils\n"),
+            python(11, "suites/unit/__init__.py", ""),
+            python(12, "suites/unit/test_d.py", "import shared_util\n"),
+            python(13, "suites/shared_util.py", ""),
+            python(14, "shared_util.py", ""),
         ];
         let manifests = manifests_of(
             &[
@@ -2627,6 +2631,9 @@ mod tests {
         assert_eq!(edges(3), vec!["utils.py"]);
         assert_eq!(edges(6), vec!["app/utils.py", "app/tests/only_here.py"]);
         assert_eq!(edges(10), vec!["iso/utils.py"]);
+        // Inside a package, the basedir is the first directory upward
+        // without `__init__.py`.
+        assert_eq!(edges(12), vec!["suites/shared_util.py"]);
     }
 
     /// Installing a project installs the projects in the tree it depends on
@@ -2634,7 +2641,8 @@ mod tests {
     /// `{ workspace = true }`, a uv or Poetry `path` dependency on a directory
     /// any build configuration makes a project — and theirs, so their
     /// packages are on its `sys.path`; a member nothing it installs depends
-    /// on is not, nor a directory that is no project.
+    /// on is not, nor a directory that is no project, nor a directory the
+    /// workspace's `exclude` globs leave out of it.
     #[test]
     fn a_python_project_imports_the_projects_its_dependencies_install() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -2668,13 +2676,14 @@ mod tests {
                 (
                     "pyproject.toml",
                     "[project]\nname = \"root\"\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n\
+                     exclude = [\"packages/other\"]\n\
                      [tool.uv.sources]\nfixture-core = { workspace = true }\n\
                      other_pkg = { workspace = true }\n",
                 ),
                 (
                     "packages/app/pyproject.toml",
                     "[project]\nname = \"fixture-app\"\n\
-                     dependencies = [\"Fixture_Core>=1.0\", \"legacy\", \"loose\"]\n\
+                     dependencies = [\"Fixture_Core>=1.0\", \"legacy\", \"loose\", \"other-pkg\"]\n\
                      [tool.uv.sources]\nlegacy = { path = \"../../legacy\" }\n\
                      loose = { path = \"../../loose\" }\n",
                 ),
@@ -2869,6 +2878,10 @@ mod tests {
             ),
             // Compiled by no project, naming what one's `baseUrl` maps.
             ts(12, "scripts/fx.ts", "import user from \"fixtures/user\";\n"),
+            // Compiled by a project only a referenced project's own
+            // `references` name, which inherits its `include`.
+            ts(13, "e2e/spec.ts", "import h from \"#e2e/helper\";\n"),
+            ts(14, "e2e/support/helper.ts", ""),
         ];
         let manifests = manifests_of(
             &[
@@ -2897,7 +2910,17 @@ mod tests {
                 (
                     "tools/tsconfig.json",
                     "{\"compilerOptions\": {\"paths\": {\"~cfg\": [\"../cfg.ts\"]}}, \
-                     \"files\": [\"../vite.config.ts\"]}",
+                     \"files\": [\"../vite.config.ts\"], \
+                     \"references\": [{\"path\": \"../tsconfig.e2e.json\"}]}",
+                ),
+                (
+                    "tsconfig.e2e.json",
+                    "{\"extends\": \"./config/e2e.base.json\"}",
+                ),
+                (
+                    "config/e2e.base.json",
+                    "{\"compilerOptions\": {\"paths\": {\"#e2e/*\": [\"../e2e/support/*\"]}}, \
+                     \"include\": [\"../e2e\"]}",
                 ),
                 (
                     "plain/tsconfig.json",
@@ -2923,6 +2946,7 @@ mod tests {
         assert_eq!(edges(7), vec!["src/components/Button.tsx"]);
         assert_eq!(edges(9), vec!["plain/y.ts"]);
         assert!(edges(6).is_empty() && edges(8).is_empty() && edges(11).is_empty());
+        assert_eq!(edges(13), vec!["e2e/support/helper.ts"]);
         // A file no project compiles is read without a configuration, and
         // disclosed only where one of those the references reach maps what
         // it imports; projects compiling a file alike but saying different
@@ -3132,6 +3156,8 @@ mod tests {
             ts(15, "legacy/app.ts", "import o from \"@acme/old\";\n"),
             ts(16, "classic/app.ts", "import o from \"@acme/old\";\n"),
             ts(17, "unset/app.ts", imports),
+            ts(18, "cjs/app.mts", "import b from \"@acme/modes\";\n"),
+            ts(19, "esm/app.cts", "import b from \"@acme/modes\";\n"),
         ];
         let manifests = manifests_of(
             &[
@@ -3245,6 +3271,10 @@ mod tests {
             ]
         );
         assert_eq!(edges(17), edges(3));
+        // Node reads `.mts` as an ES module and `.cts` as CommonJS, whatever
+        // the nearest `package.json` says.
+        assert_eq!(edges(18), vec!["packages/modes/src/esm.ts"]);
+        assert_eq!(edges(19), vec!["packages/modes/src/cjs.ts"]);
         // Where the configuration leaves `import` and `require` open (a
         // `module` TypeScript versions read differently), only what every
         // reading agrees on is resolved.
