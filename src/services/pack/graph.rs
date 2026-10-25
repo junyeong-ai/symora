@@ -8,7 +8,7 @@ use super::Node;
 use super::manifests::{
     Basedir, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution, PackageType,
     Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, nearest, own_or_only,
-    project_path, python_packages, python_project, split_package_name,
+    project_path, python_packages, python_project, reads_base_url, split_package_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -156,9 +156,17 @@ struct Importer<'a> {
     /// compiles, which is read without one.
     ts_uncompiled: Option<usize>,
     /// How each TypeScript version that may compile the file reads its
-    /// imports of a package, each reading once: an import forms an edge only
+    /// non-relative imports, each reading once: an import forms an edge only
     /// where they agree.
-    modes: Vec<ImportMode>,
+    readings: Vec<Reading>,
+}
+
+/// How one TypeScript version that may compile a file reads a non-relative
+/// specifier: whether it reads `baseUrl`, and how it reads a package's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reading {
+    base_url: bool,
+    mode: ImportMode,
 }
 
 /// How a module resolution reads a package's name.
@@ -242,20 +250,26 @@ impl<'a> Importer<'a> {
                     ts_config,
                     ts_owners: Vec::new(),
                     ts_uncompiled,
-                    modes: vec![ImportMode::Exports(ExportConditions {
-                        typescript: false,
-                        node: None,
-                        esm: Some(true),
-                    })],
+                    readings: vec![Reading {
+                        base_url: true,
+                        mode: ImportMode::Exports(ExportConditions {
+                            typescript: false,
+                            node: None,
+                            esm: Some(true),
+                        }),
+                    }],
                 };
             }
         };
-        let mut modes = Vec::new();
+        let mut read = Vec::new();
         for (options, typescript) in readings {
             for major in typescript.majors() {
-                let mode = import_mode(options, *major, node, manifests);
-                if !modes.contains(&mode) {
-                    modes.push(mode);
+                let reading = Reading {
+                    base_url: reads_base_url(*major),
+                    mode: import_mode(options, *major, node, manifests),
+                };
+                if !read.contains(&reading) {
+                    read.push(reading);
                 }
             }
         }
@@ -267,7 +281,7 @@ impl<'a> Importer<'a> {
                 _ => Vec::new(),
             },
             ts_uncompiled,
-            modes,
+            readings: read,
         }
     }
 
@@ -1318,11 +1332,36 @@ impl ProjectIndex<'_> {
     /// project, however a project file's path ends. One a `paths` pattern or
     /// a workspace package's name matches that names no file is disclosed
     /// rather than dropped — except where only the catch-all `*` pattern
-    /// matches it, which maps every package name too.
+    /// matches it, which maps every package name too. Each TypeScript
+    /// version that may compile the importer reads it (`Reading`), 7 without
+    /// `baseUrl`; where they name different files, it is disclosed.
     fn bare_specifier(&self, specifier: &str, importer: &Importer, form: ImportForm) -> Resolution {
+        let mut readings = importer
+            .readings
+            .iter()
+            .map(|reading| self.read_bare_specifier(specifier, importer, *reading, form));
+        let Some(first) = readings.next() else {
+            return Resolution::Files(Vec::new());
+        };
+        if readings.all(|reading| reading == first) {
+            first
+        } else {
+            Resolution::Undetermined(specifier.to_string())
+        }
+    }
+
+    /// What a non-relative specifier names under one reading of it
+    /// (`bare_specifier`).
+    fn read_bare_specifier(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        reading: Reading,
+        form: ImportForm,
+    ) -> Resolution {
         let language = importer.node.language;
         let config = importer.ts_config;
-        let mapped = config.and_then(|config| config.mapped(specifier));
+        let mapped = config.and_then(|config| config.mapped(specifier, reading.base_url));
         for path in mapped.iter().flat_map(|mapping| &mapping.paths) {
             if let Some(found) = self.script_target(path, language) {
                 return Resolution::Files(found);
@@ -1330,6 +1369,7 @@ impl ProjectIndex<'_> {
         }
         if let Some(found) = config
             .and_then(|config| config.base_url.as_ref())
+            .filter(|_| reading.base_url)
             .and_then(|base| project_path(base, specifier))
             .and_then(|path| self.script_target(&path, language))
         {
@@ -1339,25 +1379,15 @@ impl ProjectIndex<'_> {
             Some(mapping) if !mapping.catch_all => Resolution::Undetermined(specifier.to_string()),
             _ => Resolution::Files(Vec::new()),
         };
-        let mut readings = importer.modes.iter().map(|mode| {
-            self.workspace_package(specifier, importer, *mode, form)
-                .unwrap_or_else(unmapped)
-        });
-        let Some(first) = readings.next() else {
-            return unmapped();
-        };
-        if readings.all(|reading| reading == first) {
-            first
-        } else {
-            Resolution::Undetermined(specifier.to_string())
-        }
+        self.workspace_package(specifier, importer, reading.mode, form)
+            .unwrap_or_else(unmapped)
     }
 
     /// Whether a TypeScript configuration maps a non-relative specifier:
     /// a `paths` pattern other than the catch-all `*` matches it, or its
     /// `paths` or `baseUrl` name a file for it.
     fn config_maps(&self, config: &TsConfig, specifier: &str, language: Language) -> bool {
-        let mapped = config.mapped(specifier);
+        let mapped = config.mapped(specifier, true);
         mapped.as_ref().is_some_and(|mapping| !mapping.catch_all)
             || mapped
                 .iter()
@@ -3701,6 +3731,11 @@ mod tests {
                 // Files on disk pack does not read: an asset, generated code.
                 ("web/src/assets/logo.svg", "<svg/>"),
                 ("web/src/generated/tokens.ts", ""),
+                // The majors before 7, which read `baseUrl`.
+                (
+                    "web/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
             ],
             &nodes,
         );
@@ -3730,6 +3765,69 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["@/styles/missing".to_string()])
+        );
+    }
+
+    /// TypeScript 7 reads no `baseUrl`: tsc 7.0.2 reports TS5102, resolves
+    /// nothing below it and `paths` against the configuration's own
+    /// directory, where 5.9.3 and 6.0.3 resolve both against `baseUrl`
+    /// (`baseurl7`). Where the major is unknown, a specifier `baseUrl`
+    /// decides is disclosed.
+    #[test]
+    fn typescript_7_reads_no_base_url() {
+        let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
+        let mut nodes = Vec::new();
+        let mut configs = Vec::new();
+        for (app, range) in [
+            ("six", Some("^6.0.3")),
+            ("seven", Some("^7.0.2")),
+            ("any", None),
+        ] {
+            nodes.push(node_in(
+                nodes.len(),
+                &format!("{app}/app/a.ts"),
+                source,
+                Language::TypeScript,
+            ));
+            for file in ["src/lib/x.ts", "lib/x.ts"] {
+                nodes.push(node_in(
+                    nodes.len(),
+                    &format!("{app}/{file}"),
+                    "",
+                    Language::TypeScript,
+                ));
+            }
+            configs.push((
+                format!("{app}/tsconfig.json"),
+                "{\"compilerOptions\": {\"baseUrl\": \"./src\", \"paths\": {\"@/*\": [\"./*\"]}, \
+                 \"module\": \"esnext\", \"moduleResolution\": \"bundler\"}}"
+                    .to_string(),
+            ));
+            if let Some(range) = range {
+                configs.push((
+                    format!("{app}/package.json"),
+                    format!("{{\"devDependencies\": {{\"typescript\": \"{range}\"}}}}"),
+                ));
+            }
+        }
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(0), vec!["six/src/lib/x.ts"]);
+        assert_eq!(edges(3), vec!["seven/lib/x.ts"]);
+        assert!(edges(6).is_empty());
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["@/lib/x".to_string(), "lib/x".to_string()])
         );
     }
 

@@ -75,6 +75,11 @@ pub(super) enum TypeScript {
 /// 5.9.3, 6.0.3 and 7.0.2; a 5.x release is read as 5.9.3 reads.
 const MAJORS: [u8; 3] = [5, 6, 7];
 
+/// Whether TypeScript of `major` reads `baseUrl`, which 7 removed.
+pub(super) fn reads_base_url(major: u8) -> bool {
+    major < 7
+}
+
 impl TypeScript {
     /// The majors that may compile the files: every one pack reads where
     /// none is known.
@@ -228,11 +233,16 @@ impl TsProjects {
 /// names, each `paths` pattern with its substitutions, which resolve
 /// against `baseUrl` or, without one, the directory of the configuration
 /// declaring them, and the conditions a package's `exports` is read under.
+/// TypeScript 7 reads no `baseUrl` (tsc 7.0.2 reports TS5102 and resolves
+/// `paths` against the declaring configuration's directory).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TsConfig {
     pub(super) base_url: Option<Vec<String>>,
     pub(super) paths: Vec<(String, Vec<String>)>,
     pub(super) paths_base: Vec<String>,
+    /// The directory of the configuration declaring `paths`, which its
+    /// substitutions resolve against where `baseUrl` is not read.
+    pub(super) paths_directory: Vec<String>,
     /// The options that, with the TypeScript version compiling it, select
     /// how a package's name resolves for its files.
     pub(super) module_options: ModuleOptions,
@@ -382,9 +392,15 @@ pub(super) struct Mapping {
 
 impl TsConfig {
     /// What the `paths` pattern a specifier matches maps it to, or `None`
-    /// where it matches none. An exact pattern wins, then the one whose
-    /// prefix before `*` is longest, as TypeScript picks.
-    pub(super) fn mapped(&self, specifier: &str) -> Option<Mapping> {
+    /// where it matches none, its substitutions resolving against `baseUrl`
+    /// where `base_url` says the compiler reads it. An exact pattern wins,
+    /// then the one whose prefix before `*` is longest, as TypeScript picks.
+    pub(super) fn mapped(&self, specifier: &str, base_url: bool) -> Option<Mapping> {
+        let base = if base_url {
+            &self.paths_base
+        } else {
+            &self.paths_directory
+        };
         let (pattern, substitutions, star) = self
             .paths
             .iter()
@@ -404,9 +420,7 @@ impl TsConfig {
         Some(Mapping {
             paths: substitutions
                 .iter()
-                .filter_map(|substitution| {
-                    project_path(&self.paths_base, &substitution.replacen('*', star, 1))
-                })
+                .filter_map(|substitution| project_path(base, &substitution.replacen('*', star, 1)))
                 .collect(),
             catch_all: pattern == "*",
         })
@@ -1537,10 +1551,10 @@ fn ts_config(chain: &Chain, typescript: TypeScript) -> TsConfig {
             (pattern.clone(), substitutions)
         })
         .collect();
-    let paths_base = base_url
-        .clone()
-        .or_else(|| declared.map(|(directory, _)| directory.clone()))
+    let paths_directory = declared
+        .map(|(directory, _)| directory.clone())
         .unwrap_or_else(|| directory.to_vec());
+    let paths_base = base_url.clone().unwrap_or_else(|| paths_directory.clone());
     let module_options = ModuleOptions {
         module: setting("module"),
         module_resolution: setting("moduleResolution"),
@@ -1558,6 +1572,7 @@ fn ts_config(chain: &Chain, typescript: TypeScript) -> TsConfig {
         base_url,
         paths,
         paths_base,
+        paths_directory,
         module_options,
         typescript,
         custom_conditions,
