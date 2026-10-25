@@ -252,6 +252,25 @@ pub(super) struct TsConfig {
     /// The conditions `customConditions` adds; `None` where a configuration
     /// the chain extends that could not be read may add any.
     pub(super) custom_conditions: Option<Vec<String>>,
+    /// Whether a `jsconfig.json` holds it: a JavaScript project, which a
+    /// bundler builds whatever TypeScript is installed.
+    pub(super) javascript: bool,
+}
+
+impl TsConfig {
+    /// The TypeScript majors that may compile the configuration's files.
+    /// Where no TypeScript is installed or declared, a chain setting
+    /// `baseUrl` is one no TypeScript 7 compiles — tsc 7.0.2 refuses it with
+    /// TS5102 — so it is read under 5 and 6 alone.
+    pub(super) fn majors(&self) -> Vec<u8> {
+        let refused = self.typescript == TypeScript::Absent && self.base_url.is_some();
+        self.typescript
+            .majors()
+            .iter()
+            .copied()
+            .filter(|major| !refused || reads_base_url(*major))
+            .collect()
+    }
 }
 
 /// What a configuration's `extends` chain says of one compiler option.
@@ -914,7 +933,11 @@ impl TsReader<'_> {
             .collect();
         let index = self.projects.projects.len();
         self.projects.projects.push(TsProject {
-            config: ts_config(&chain, self.versions.of(directory)),
+            config: ts_config(
+                &chain,
+                self.versions.of(directory),
+                path.last().is_some_and(|file| file == "jsconfig.json"),
+            ),
             sources: ts_sources(&chain.configs),
             references: Vec::new(),
         });
@@ -1523,7 +1546,7 @@ fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
 /// What the TypeScript configuration at the head of an `extends` chain
 /// says, with what it extends, for the TypeScript versions that may
 /// compile it.
-fn ts_config(chain: &Chain, typescript: TypeScript) -> TsConfig {
+fn ts_config(chain: &Chain, typescript: TypeScript, javascript: bool) -> TsConfig {
     let configs = chain.configs.as_slice();
     let directory = configs
         .first()
@@ -1596,6 +1619,7 @@ fn ts_config(chain: &Chain, typescript: TypeScript) -> TsConfig {
         module_options,
         typescript,
         custom_conditions,
+        javascript,
     }
 }
 
