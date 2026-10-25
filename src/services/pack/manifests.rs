@@ -29,9 +29,9 @@ pub(super) struct Manifests {
     /// The Cargo package each `Cargo.toml` with a `[package]` roots at its
     /// directory.
     pub(super) rust_packages: HashMap<Vec<String>, RustPackage>,
-    /// The directories each Python project puts on `sys.path`, by the
-    /// directory of the configuration files that make it one.
-    pub(super) python_projects: HashMap<Vec<String>, Vec<Vec<String>>>,
+    /// What each Python project puts on `sys.path`, by the directory of the
+    /// configuration files that make it one.
+    pub(super) python_projects: HashMap<Vec<String>, PythonProject>,
     /// The TypeScript project each `tsconfig.json`, or a `jsconfig.json`
     /// where a directory holds none, describes, by its directory.
     pub(super) ts_configs: HashMap<Vec<String>, TsProject>,
@@ -984,9 +984,71 @@ const PYTHON_PROJECT_FILES: [&str; 5] = [
     "tox.ini",
 ];
 
-/// Every Python project above a Python file, with the directories it puts on
+/// What a Python project puts on `sys.path`.
+#[derive(Debug, Clone, Default)]
+pub(super) struct PythonProject {
+    /// The directories its build configuration puts there.
+    pub(super) roots: Vec<Vec<String>>,
+    /// How pytest runs, where a file of the project configures it.
+    pub(super) pytest: Option<Pytest>,
+}
+
+/// What a pytest configuration puts on `sys.path`: the directories its
+/// `pythonpath` names, and, unless its import mode is `importlib`, the
+/// basedir of each test module and `conftest.py` it imports — test modules
+/// being the files its `python_files` patterns match (`test_*.py` and
+/// `*_test.py` by default), by name, or by path for a pattern holding `/`.
+#[derive(Debug, Clone)]
+pub(super) struct Pytest {
+    pub(super) pythonpath: Vec<Vec<String>>,
+    test_names: globset::GlobSet,
+    test_paths: globset::GlobSet,
+    pub(super) inserts_basedir: bool,
+}
+
+impl Pytest {
+    fn new(pythonpath: Vec<Vec<String>>, python_files: &[&str], inserts_basedir: bool) -> Self {
+        let mut names = globset::GlobSetBuilder::new();
+        let mut paths = globset::GlobSetBuilder::new();
+        for pattern in python_files {
+            // pytest matches a pattern holding a separator against the whole
+            // path, which a relative pattern can match the end of.
+            let (set, pattern) = if pattern.contains('/') {
+                (&mut paths, format!("*/{pattern}"))
+            } else {
+                (&mut names, pattern.to_string())
+            };
+            if let Ok(glob) = globset::Glob::new(&pattern) {
+                set.add(glob);
+            }
+        }
+        Self {
+            pythonpath,
+            test_names: names.build().unwrap_or_default(),
+            test_paths: paths.build().unwrap_or_default(),
+            inserts_basedir,
+        }
+    }
+
+    /// Whether pytest imports the project file at `path` as a test module
+    /// or a `conftest.py`.
+    pub(super) fn imports_as_test(&self, path: &Path) -> bool {
+        let name = path.file_name().unwrap_or_default();
+        name == "conftest.py"
+            || self.test_names.is_match(name)
+            || self.test_paths.is_match(Path::new("/").join(path))
+    }
+}
+
+impl Default for Pytest {
+    fn default() -> Self {
+        Self::new(Vec::new(), &["test_*.py", "*_test.py"], true)
+    }
+}
+
+/// Every Python project above a Python file, with what it puts on
 /// `sys.path`.
-fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, Vec<Vec<String>>> {
+fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, PythonProject> {
     let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
     for file in PYTHON_PROJECT_FILES {
         for (directory, contents) in
@@ -1001,24 +1063,21 @@ fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, Vec<Vec<
     configurations
         .into_iter()
         .map(|(directory, files)| {
-            let roots = python_project_roots(&directory, &files);
-            (directory, roots)
+            let project = python_project(&directory, &files);
+            (directory, project)
         })
         .collect()
 }
 
-/// The directories a Python project at `directory` puts on `sys.path`, from
-/// its configuration `files`: the package locations its build configuration
+/// What a Python project at `directory` puts on `sys.path`, from its
+/// configuration `files`: the package locations its build configuration
 /// declares — setuptools' `package-dir` and `packages.find.where` (in
 /// `pyproject.toml` or `setup.cfg`), Poetry's `packages`, Hatch's `packages`
 /// and `sources`, PDM's `package-dir` — or, where it declares none,
 /// setuptools' automatic discovery: the directory itself (a flat layout) and
-/// its `src/` (a src layout). To those it adds what pytest's `pythonpath`
-/// does, read from the one configuration file pytest itself would read.
-pub(super) fn python_project_roots(
-    directory: &[String],
-    files: &[(&str, String)],
-) -> Vec<Vec<String>> {
+/// its `src/` (a src layout); and what pytest does, read from the one
+/// configuration file pytest itself would read (`pytest_options`).
+pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> PythonProject {
     let file = |name: &str| {
         files
             .iter()
@@ -1052,43 +1111,93 @@ pub(super) fn python_project_roots(
     if declared.is_empty() {
         declared = vec![".".to_string(), "src".to_string()];
     }
-    // pytest reads the first of these that configures it, and no other.
-    let pytest_ini = file("pytest.ini").map(ini_sections);
-    let tox_ini = file("tox.ini").map(ini_sections);
-    let pythonpath: Vec<String> = if let Some(ini) = &pytest_ini {
-        ini_list(
-            ini.get("pytest")
-                .and_then(|pytest| pytest.get("pythonpath")),
-        )
-    } else if let Some(options) = pyproject
-        .as_ref()
-        .and_then(|pyproject| toml_at(pyproject, &["tool", "pytest", "ini_options"]))
-    {
-        match options.get("pythonpath") {
-            Some(toml::Value::String(path)) => {
-                path.split_whitespace().map(str::to_string).collect()
-            }
-            Some(paths) => toml_strings(paths),
-            None => Vec::new(),
-        }
-    } else if let Some(pytest) = tox_ini.as_ref().and_then(|ini| ini.get("pytest")) {
-        ini_list(pytest.get("pythonpath"))
-    } else {
-        ini_list(
-            setup_cfg
-                .as_ref()
-                .and_then(|cfg| cfg.get("tool:pytest"))
-                .and_then(|pytest| pytest.get("pythonpath")),
-        )
-    };
     let mut roots: Vec<Vec<String>> = declared
         .iter()
-        .chain(&pythonpath)
         .filter_map(|path| project_path(directory, path))
         .collect();
     roots.sort();
     roots.dedup();
-    roots
+    let pytest = pytest_options(
+        file("pytest.ini"),
+        pyproject.as_ref(),
+        file("tox.ini"),
+        setup_cfg.as_ref(),
+    )
+    .map(|options| {
+        let option = |key: &str| options.get(key).map(Vec::as_slice).unwrap_or_default();
+        let pythonpath = option("pythonpath")
+            .iter()
+            .filter_map(|path| project_path(directory, path))
+            .collect();
+        let python_files: Vec<&str> = option("python_files").iter().map(String::as_str).collect();
+        let mut mode = None;
+        let mut addopts = option("addopts").iter();
+        while let Some(argument) = addopts.next() {
+            if argument == "--import-mode" {
+                mode = addopts.next().map(String::as_str);
+            } else if let Some(value) = argument.strip_prefix("--import-mode=") {
+                mode = Some(value);
+            }
+        }
+        let inserts_basedir = mode != Some("importlib");
+        if python_files.is_empty() {
+            Pytest {
+                pythonpath,
+                inserts_basedir,
+                ..Pytest::default()
+            }
+        } else {
+            Pytest::new(pythonpath, &python_files, inserts_basedir)
+        }
+    });
+    PythonProject { roots, pytest }
+}
+
+/// The options of the one configuration file pytest reads in a directory,
+/// where one there configures it — `pytest.ini` whatever it holds, else
+/// `pyproject.toml`'s `[tool.pytest.ini_options]`, `tox.ini`'s `[pytest]`,
+/// `setup.cfg`'s `[tool:pytest]` — each as the whitespace-separated items
+/// its value lists.
+fn pytest_options(
+    pytest_ini: Option<&str>,
+    pyproject: Option<&toml::Table>,
+    tox_ini: Option<&str>,
+    setup_cfg: Option<&HashMap<String, HashMap<String, String>>>,
+) -> Option<HashMap<String, Vec<String>>> {
+    let ini = |section: Option<&HashMap<String, String>>| {
+        section
+            .into_iter()
+            .flatten()
+            .map(|(key, value)| (key.clone(), ini_list(Some(value))))
+            .collect()
+    };
+    if let Some(pytest_ini) = pytest_ini {
+        return Some(ini(ini_sections(pytest_ini).get("pytest")));
+    }
+    if let Some(options) =
+        pyproject.and_then(|pyproject| toml_at(pyproject, &["tool", "pytest", "ini_options"]))
+    {
+        return Some(
+            options
+                .iter()
+                .map(|(key, value)| {
+                    let items = toml_strings(value)
+                        .iter()
+                        .flat_map(|item| item.split_whitespace().map(str::to_string))
+                        .collect();
+                    (key.clone(), items)
+                })
+                .collect(),
+        );
+    }
+    if let Some(tox_ini) = tox_ini.map(ini_sections)
+        && let Some(pytest) = tox_ini.get("pytest")
+    {
+        return Some(ini(Some(pytest)));
+    }
+    setup_cfg
+        .and_then(|cfg| cfg.get("tool:pytest"))
+        .map(|pytest| ini(Some(pytest)))
 }
 
 /// The package locations a `pyproject.toml` declares, as paths relative to
