@@ -1312,7 +1312,8 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 /// ([`type_body`]), a property's accessors where they hold a body (C#'s
 /// `{ get; set; }` is the shape it declares), the expression it returns
 /// (`int P => 1`), its observers or delegate, the token opening the rules of
-/// a `macro_rules!` or the statements of a Kotlin secondary constructor, a
+/// a `macro_rules!`, the statements of a Kotlin secondary constructor or the
+/// attributes of a Swift precedence group, a
 /// function value's body (`const f = () => {}`), or the body of the
 /// declaration a wrapper holds (`export`, a decorated definition). A C++
 /// constructor's body begins at its member initializers, which the standard
@@ -1335,6 +1336,11 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
             ])
             .or_else(|| type_body(node, language)),
             Language::Swift => held_as(&["computed_property", "willset_didset_block"])
+                .or_else(|| {
+                    (node.kind() == "precedence_group_declaration")
+                        .then(|| child_of_kind(node, "{"))
+                        .flatten()
+                })
                 .or_else(|| type_body(node, language)),
             Language::CSharp => node
                 .child_by_field_name("accessors")
@@ -2975,12 +2981,14 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         return child_of_kind(node, "constructor");
     }
     // An operator is named by its symbol (Dart's `operator ==`, C#'s
-    // `operator +`), a C# conversion operator by its keyword through the
-    // type it converts to (`operator int`), an indexer by `this` and a
-    // destructor through its class (`~C`).
+    // `operator +`, the one Swift declares after its keyword), a C# conversion
+    // operator by its keyword through the type it converts to (`operator
+    // int`), an indexer by `this` and a destructor through its class (`~C`).
     match node.kind() {
         "operator_signature" | "operator_declaration" => {
-            return node.child_by_field_name("operator");
+            return node
+                .child_by_field_name("operator")
+                .or_else(|| child_of_kind(node, "operator")?.next_sibling());
         }
         "conversion_operator_declaration" => return child_of_kind(node, "operator"),
         "indexer_declaration" => return child_of_kind(node, "this"),
@@ -3129,6 +3137,12 @@ fn node_kind(node: Node) -> SymbolKind {
         "annotation_type_element_declaration" => SymbolKind::Method,
 
         "event_field_declaration" | "event_declaration" => SymbolKind::Event,
+        // Swift declares an operator itself, and a precedence group operators
+        // name, where C# implements an operator as a method of its operands.
+        "operator_declaration" if node.child_by_field_name("parameters").is_none() => {
+            SymbolKind::Operator
+        }
+        "precedence_group_declaration" => SymbolKind::Operator,
         "operator_declaration" | "conversion_operator_declaration" => SymbolKind::Method,
         "indexer_declaration" => SymbolKind::Property,
         "local_function_statement" => SymbolKind::Function,
@@ -3767,6 +3781,8 @@ const SWIFT_QUERY: &str = r#"
 (deinit_declaration) @symbol
 (typealias_declaration) @symbol
 (associatedtype_declaration) @symbol
+(operator_declaration) @symbol
+(precedence_group_declaration) @symbol
 (enum_class_body (enum_entry) @symbol)
 (class_body (property_declaration) @symbol)
 (enum_class_body (property_declaration) @symbol)
@@ -4874,6 +4890,12 @@ func top() {}
 
 let global = 1
 let (gx, (gy, _)) = (1, (2, 3))
+
+precedencegroup Pow {
+    associativity: right
+}
+infix operator **: Pow
+prefix operator +++
 "#,
             declares: &[
                 "interface:P",
@@ -4899,6 +4921,9 @@ let (gx, (gy, _)) = (1, (2, 3))
                 "variable:global",
                 "variable:gx",
                 "variable:gy",
+                "operator:Pow",
+                "operator:**",
+                "operator:+++",
             ],
         },
         DeclarationFixture {
@@ -6544,6 +6569,20 @@ region     = "us-central1"
                 "typealias Pt = Point\n",
                 "Pt",
                 Some("typealias Pt = Point"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "precedencegroup Pow {\n    associativity: right\n}\n",
+                "Pow",
+                Some("precedencegroup Pow"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "infix operator **: Pow\n",
+                "**",
+                Some("infix operator **: Pow"),
             ),
             (
                 "A.java",
