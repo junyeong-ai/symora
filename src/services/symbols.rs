@@ -1075,6 +1075,26 @@ fn read_signature(
     {
         declaration = parent;
     }
+    // A JS/TS statement declaring several names is the declaration of each, as
+    // other grammars hold it, though its grammar holds each name apart: `B` in
+    // `export const A = 1, B = 2` is declared by `export const A, B`.
+    let mut start = start;
+    if matches!(language, Language::TypeScript | Language::JavaScript)
+        && let Some(statement) = std::iter::successors(Some(named), Node::parent)
+            .take_while(|node| node.id() != declaration.id())
+            .chain(std::iter::once(declaration))
+            .find(|node| node.kind() == "variable_declarator")
+            .and_then(|declarator| declarator.parent())
+            .filter(|statement| {
+                matches!(
+                    statement.kind(),
+                    "lexical_declaration" | "variable_declaration"
+                )
+            })
+    {
+        declaration = declaration_node(statement, language);
+        start = start.min(declaration.start_byte());
+    }
     let mut node = named;
     let opens = loop {
         if let Some(body) = body_of(node, language).filter(|body| body.start_byte() > name) {
@@ -5710,6 +5730,20 @@ region     = "us-central1"
                 "class J { String s = switch (x) { default -> \"a\"; }; }\n",
                 "s",
                 Some("String s"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "export const A = 1, B = 2;\n",
+                "A",
+                Some("export const A"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "export const A = 1, B = 2;\n",
+                "B",
+                Some("export const A, B"),
             ),
             (
                 "a.cpp",
