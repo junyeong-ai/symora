@@ -156,6 +156,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
     if result.rust_relative_imports_omitted {
         hints.push("Rust paths relative to a module (self::, super::, a mod declaration, or a path through a module the file declares) and crate:: paths whose crate root the Cargo layout does not determine were omitted, because module ownership is unresolved; use semantic references or inspect source.".to_string());
     }
+    if !result.undetermined_imports.is_empty() {
+        let specifiers: Vec<String> = result
+            .undetermined_imports
+            .iter()
+            .map(|specifier| format!("`{specifier}`"))
+            .collect();
+        hints.push(format!(
+            "{} import specifier(s) matching a tsconfig `paths` alias named no file pack reads ({}); their dependencies do not contribute to ranking. Inspect the configuration or source.",
+            specifiers.len(),
+            name_some(&specifiers)
+        ));
+    }
     if !result.unsupported_import_languages.is_empty() {
         let languages = result
             .unsupported_import_languages
@@ -300,6 +312,7 @@ mod tests {
             unsupported_languages: Vec::new(),
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
+            undetermined_imports: Vec::new(),
             unreadable_paths: Vec::new(),
         }
     }
@@ -373,6 +386,7 @@ mod tests {
         assert!(partial.contains("pub fn main()"));
         assert!(!partial.contains("Rust paths relative to a module"));
         result.rust_relative_imports_omitted = true;
+        result.undetermined_imports = vec!["@/styles/app".to_string()];
         assert!(
             render_markdown(&ctx(), &args, &result).contains("Rust paths relative to a module")
         );
@@ -382,6 +396,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Rust paths relative to a module")
+        );
+        assert!(
+            json["files"]["hints"][1]
+                .as_str()
+                .unwrap()
+                .contains("1 import specifier(s) matching a tsconfig `paths` alias named no file pack reads (`@/styles/app`)")
         );
     }
 
