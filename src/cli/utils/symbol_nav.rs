@@ -312,6 +312,15 @@ pub fn declared_with<'a>(symbols: &'a [Symbol], symbol: &Symbol) -> Vec<&'a Symb
     with
 }
 
+/// Whether `outer`'s declared range holds `inner`'s and is not the same one.
+fn holds(outer: &Symbol, inner: &Symbol) -> bool {
+    let (outer_start, outer_end) = span(outer);
+    let (inner_start, inner_end) = span(inner);
+    (outer_start, outer_end) != (inner_start, inner_end)
+        && outer_start <= inner_start
+        && inner_end <= outer_end
+}
+
 /// A symbol's declared range as (line, column) ends; a range without an end
 /// column runs to the end of its last line.
 fn span(symbol: &Symbol) -> ((u32, u32), (u32, u32)) {
@@ -454,8 +463,18 @@ pub fn line_addressed_symbol(symbols: &[Symbol], line: u32) -> SymbolResolution<
     declared_or_enclosing(symbols, line)
 }
 
+/// A symbol declared on the line inside another declared there is part of
+/// it, not a second declaration of the line: pyright lists the parameters
+/// of `def f(self, cart):` under `f`, and a one-line `struct P { x: i32 }`
+/// holds its field. A statement that declares several names (`int a, b;`)
+/// declares each over the one range they share, so it stays ambiguous.
 fn declared_or_enclosing(symbols: &[Symbol], line: u32) -> SymbolResolution<'_> {
-    let mut declared = symbols_declared_on_line(symbols, line);
+    let on_line = symbols_declared_on_line(symbols, line);
+    let mut declared: Vec<&Symbol> = on_line
+        .iter()
+        .copied()
+        .filter(|symbol| !on_line.iter().any(|other| holds(other, symbol)))
+        .collect();
     declared.sort_by_key(|s| s.location.column);
     match declared.as_slice() {
         [] => match find_symbol_at_position(symbols, line, None) {
