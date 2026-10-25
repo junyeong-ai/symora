@@ -2279,23 +2279,26 @@ fn destructured(target: Node) -> Vec<Node> {
 }
 
 /// Whether an assignment's target is a name it declares, rather than an
-/// attribute, a subscript or a Ruby instance variable it assigns to: an
-/// instance variable belongs to whichever object runs the assignment, while
-/// a class variable belongs to the class whose body binds it.
+/// attribute, a subscript or a Ruby instance or local variable it assigns to:
+/// an instance variable belongs to whichever object runs the assignment, and
+/// a local one to the scope running it, a class body's or the file's, which
+/// nothing outside it reads, while a class variable belongs to the class
+/// whose body binds it.
 fn binds_a_name(target: Node, language: Language) -> bool {
     match language {
         Language::Python => target.kind() == "identifier",
-        Language::Ruby => matches!(target.kind(), "constant" | "identifier" | "class_variable"),
+        Language::Ruby => matches!(target.kind(), "constant" | "class_variable"),
         _ => false,
     }
 }
 
-/// Whether `node` assigns to something besides the names it declares: a
-/// chained assignment through an attribute, a subscript or an instance
-/// variable (`LIMIT = obj.attr = 5`, `@cache = TABLE = {}`). Such a statement
-/// is no declaration of its names alone, and nothing in the answer stands for
-/// the rest of it, so each name's range is the name itself: a whole-line edit
-/// of it is refused rather than taking the other assignment with it.
+/// Whether `node` assigns to something besides the names it declares: an
+/// attribute, a subscript, an instance variable or a Ruby local it assigns
+/// as well (`LIMIT = obj.attr = 5`, `@cache = TABLE = {}`, `a, B = 1, 2`).
+/// Such a statement is no declaration of its names alone, and nothing in the
+/// answer stands for the rest of it, so each name's range is the name itself:
+/// a whole-line edit of it is refused rather than taking the other assignment
+/// with it.
 fn assigns_beyond_its_names(node: Node, language: Language) -> bool {
     matches!(language, Language::Python | Language::Ruby)
         && node.kind() == "assignment"
@@ -4701,13 +4704,17 @@ auto [first_of, second_of] = pair_value;
             source: r#"
 TOP_CONST = 1
 obj.attr = value
+scratch = 1
 
 module M
   IN_MODULE = 2
   CACHE ||= {}
+  helper = 2
 
   class C
     IN_CLASS = 3
+    memo ||= {}
+    first, SECOND = 1, 2
     @@count = 0
     @@count += 1
     @registry = {}
@@ -4724,6 +4731,7 @@ end
                 "variable:CACHE",
                 "class:C",
                 "variable:C/IN_CLASS",
+                "variable:C/SECOND",
                 "variable:C/@@count",
                 "method:C/m",
                 "method:C/cm",
@@ -5667,8 +5675,8 @@ region     = "us-central1"
             (
                 "a.rb",
                 Language::Ruby,
-                "LEVEL = CONF.level = 3\n@cache = TABLE = {}\n",
-                &["LEVEL", "TABLE"],
+                "LEVEL = CONF.level = 3\n@cache = TABLE = {}\nlimit = LIMIT = 4\n",
+                &["LEVEL", "TABLE", "LIMIT"],
             ),
         ] {
             let symbols = extractor.extract(Path::new(path), content, language);
