@@ -1122,10 +1122,17 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 /// (`int P => 1`), its observers or delegate, the token opening the rules of
 /// a `macro_rules!` or the statements of a Kotlin secondary constructor, a
 /// function value's body (`const f = () => {}`), or the body of the
-/// declaration a wrapper holds (`export`, a decorated definition).
+/// declaration a wrapper holds (`export`, a decorated definition). A C++
+/// constructor's body begins at its member initializers, which the standard
+/// counts part of it (`F(int p) : a_(compute(p)) {}`). Only a function value
+/// opens its body after a header the variable shares: a `match` or `switch`
+/// value is a value like any other.
 fn body_of(node: Node, language: Language) -> Option<Node> {
     let held_as = |kinds: &[&str]| kinds.iter().find_map(|kind| child_of_kind(node, kind));
-    node.child_by_field_name("body")
+    (language == Language::Cpp)
+        .then(|| child_of_kind(node, "field_initializer_list"))
+        .flatten()
+        .or_else(|| node.child_by_field_name("body"))
         .or_else(|| match language {
             Language::Kotlin => held_as(&[
                 "function_body",
@@ -1176,6 +1183,11 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
             ["value", "right"]
                 .into_iter()
                 .find_map(|field| node.child_by_field_name(field))
+                .filter(|value| {
+                    ["parameters", "parameter", "declarator"]
+                        .into_iter()
+                        .any(|header| value.child_by_field_name(header).is_some())
+                })
                 .and_then(|value| value.child_by_field_name("body"))
         })
         .or_else(|| {
@@ -5670,6 +5682,34 @@ region     = "us-central1"
                 "package p\n\nvar x, y int = 1, 2\n",
                 "x",
                 Some("var x, y int"),
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "struct F {\n  F(int);\n  int a_, b_;\n};\nF::F(int p) : a_(compute(p)), b_{p} {}\n",
+                "F::F",
+                Some("F::F(int p)"),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                "pub const C: u32 = match FOO { _ => 1 };\n",
+                "C",
+                Some("pub const C: u32"),
+            ),
+            (
+                "a.rs",
+                Language::Rust,
+                "const CL: fn(i32) -> i32 = |x| x;\n",
+                "CL",
+                Some("const CL: fn(i32) -> i32 = |x|"),
+            ),
+            (
+                "A.java",
+                Language::Java,
+                "class J { String s = switch (x) { default -> \"a\"; }; }\n",
+                "s",
+                Some("String s"),
             ),
             (
                 "a.cpp",
