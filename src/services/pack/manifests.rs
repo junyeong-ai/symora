@@ -38,10 +38,56 @@ pub(super) struct Manifests {
     pub(super) ts_projects: TsProjects,
     /// Each package a JavaScript workspace lists, by its directory.
     pub(super) js_packages: HashMap<Vec<String>, JsPackage>,
-    /// Whether each `package.json` above a JavaScript or TypeScript file
-    /// declares `"type": "module"`, by its directory: the nearest decides
-    /// whether Node reads a `.js` or `.ts` file there as an ES module.
-    pub(super) module_types: HashMap<Vec<String>, bool>,
+    /// The `"type"` each `package.json` above a JavaScript or TypeScript
+    /// file declares, by its directory: the nearest decides whether Node
+    /// reads a `.js` or `.ts` file there as an ES module.
+    pub(super) module_types: HashMap<Vec<String>, PackageType>,
+    /// The TypeScript versions that may compile the files of each directory
+    /// holding a JavaScript or TypeScript file (`TypeScriptVersions`).
+    pub(super) typescript: HashMap<Vec<String>, TypeScript>,
+}
+
+/// The `"type"` a `package.json` declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PackageType {
+    Module,
+    CommonJs,
+    /// Neither, which Node reads as CommonJS where it must choose.
+    Unset,
+}
+
+/// The TypeScript versions that may compile a directory's files, by major.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) enum TypeScript {
+    /// Neither installed nor declared above the directory.
+    #[default]
+    Absent,
+    /// The majors it may be: the one installed or declared, or every major
+    /// whose defaults pack reads (`MAJORS`) where that is none of them or a
+    /// declared range fixes none.
+    Majors(Vec<u8>),
+}
+
+/// The TypeScript majors whose defaults pack reads, measured with tsc
+/// 5.9.3, 6.0.3 and 7.0.2; a 5.x release is read as 5.9.3 reads.
+const MAJORS: [u8; 3] = [5, 6, 7];
+
+impl TypeScript {
+    /// The majors that may compile the files: every one pack reads where
+    /// none is known.
+    pub(super) fn majors(&self) -> &[u8] {
+        match self {
+            Self::Majors(majors) => majors,
+            Self::Absent => &MAJORS,
+        }
+    }
+
+    fn of_major(major: Option<u64>) -> Self {
+        match major.and_then(|major| u8::try_from(major).ok()) {
+            Some(major) if MAJORS.contains(&major) => Self::Majors(vec![major]),
+            _ => Self::Majors(MAJORS.to_vec()),
+        }
+    }
 }
 
 /// A package of a JavaScript workspace: the name its `package.json` gives
@@ -103,8 +149,8 @@ pub(super) enum TsOwner<'a> {
     /// writer could have meant.
     Uncompiled(Vec<&'a TsConfig>),
     /// The projects the `references` above it reach that compile it say
-    /// different things about specifiers.
-    Undetermined,
+    /// different things about specifiers: their configurations.
+    Undetermined(Vec<&'a TsConfig>),
 }
 
 impl TsProjects {
@@ -162,28 +208,135 @@ pub(super) struct TsConfig {
     pub(super) base_url: Option<Vec<String>>,
     pub(super) paths: Vec<(String, Vec<String>)>,
     pub(super) paths_base: Vec<String>,
-    /// The module resolution its `moduleResolution`, or the `module` that
-    /// implies one, selects, where that is one deciding how TypeScript reads
-    /// a package's `exports`; `None` where the versions of TypeScript read
-    /// the configuration differently, or where a configuration its chain
-    /// extends that could not be read may set either.
-    pub(super) module_resolution: Option<ModuleResolution>,
-    /// Whether its `module` emits a file whose extension does not say its
-    /// format as CommonJS (`commonjs`); `None` where a configuration its
-    /// chain extends that could not be read may set it.
-    pub(super) emits_commonjs: Option<bool>,
+    /// The options that, with the TypeScript version compiling it, select
+    /// how a package's name resolves for its files.
+    pub(super) module_options: ModuleOptions,
+    /// The TypeScript versions that may compile it, as its directory's
+    /// `package.json` files and `node_modules` say (`TypeScriptVersions`).
+    pub(super) typescript: TypeScript,
     /// The conditions `customConditions` adds; `None` where a configuration
     /// the chain extends that could not be read may add any.
     pub(super) custom_conditions: Option<Vec<String>>,
 }
 
+/// What a configuration's `extends` chain says of one compiler option.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) enum Setting {
+    /// No configuration of the chain sets it.
+    #[default]
+    Unset,
+    /// The value the nearest configuration setting it gives, in lower case.
+    Set(String),
+    /// A configuration the chain extends that could not be read may set it,
+    /// or the value set is no string.
+    Unknown,
+}
+
+impl Setting {
+    fn value(&self) -> Option<Option<&str>> {
+        match self {
+            Self::Unset => Some(None),
+            Self::Set(value) => Some(Some(value)),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// The compiler options that, with the TypeScript version compiling a
+/// configuration's files, select how they resolve a package's name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ModuleOptions {
+    pub(super) module: Setting,
+    pub(super) module_resolution: Setting,
+    pub(super) target: Setting,
+}
+
+/// The module system TypeScript emits a file in, by the `module` option or
+/// the default its `target` implies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModuleKind {
+    CommonJs,
+    /// `es2015` to `esnext`.
+    Es,
+    Preserve,
+    /// `node16` to `nodenext`, which emit each file as Node reads it.
+    Node,
+    /// `amd`, `umd`, `system` or `none`.
+    Other,
+}
+
+impl ModuleOptions {
+    /// The module system TypeScript of `major` emits a file in, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 do: the `module` set, else `commonjs` below
+    /// an ES2015 `target` and `es2015` from one — the default `target` being
+    /// ES5 in TypeScript 5 and a later one in 6 and 7. `None` where an option
+    /// it reads is unknown, or a value no version names.
+    pub(super) fn module_kind(&self, major: u8) -> Option<ModuleKind> {
+        Some(match self.module.value()? {
+            Some("commonjs") => ModuleKind::CommonJs,
+            Some("es6" | "es2015" | "es2020" | "es2022" | "esnext") => ModuleKind::Es,
+            Some("preserve") => ModuleKind::Preserve,
+            Some("node16" | "node18" | "node20" | "nodenext") => ModuleKind::Node,
+            Some("amd" | "umd" | "system" | "none") => ModuleKind::Other,
+            Some(_) => return None,
+            None => match self.target.value()? {
+                None if major == 5 => ModuleKind::CommonJs,
+                None => ModuleKind::Es,
+                Some("es3" | "es5") => ModuleKind::CommonJs,
+                Some("es6" | "esnext") => ModuleKind::Es,
+                Some(target) => {
+                    let year = target.strip_prefix("es")?.parse::<u16>().ok()?;
+                    if year < 2015 {
+                        return None;
+                    }
+                    ModuleKind::Es
+                }
+            },
+        })
+    }
+
+    /// The module resolution TypeScript of `major` reads a package's name
+    /// under, as tsc 5.9.3, 6.0.3 and 7.0.2 do. An explicit
+    /// `moduleResolution` holds, but TypeScript 7 no longer has `node10` or
+    /// `classic` and reads either as `bundler`. Without one the module kind
+    /// implies it: `node16` to `nodenext` themselves, and otherwise in
+    /// TypeScript 5 `commonjs` `node10`, `preserve` `bundler` and the rest
+    /// `classic`; in 6 `amd`, `umd`, `system` and `none` `classic` and the
+    /// rest `bundler`; in 7 `bundler`. `None` where an option it reads is
+    /// unknown, or a value no version names.
+    pub(super) fn resolution(
+        &self,
+        major: u8,
+        kind: Option<ModuleKind>,
+    ) -> Option<ModuleResolution> {
+        Some(match self.module_resolution.value()? {
+            Some("bundler") => ModuleResolution::Bundler,
+            Some("node16" | "nodenext") => ModuleResolution::Node16,
+            Some("node" | "node10") if major >= 7 => ModuleResolution::Bundler,
+            Some("node" | "node10") => ModuleResolution::Node10,
+            Some("classic") if major >= 7 => ModuleResolution::Bundler,
+            Some("classic") => ModuleResolution::Classic,
+            Some(_) => return None,
+            None => match (kind?, major) {
+                (ModuleKind::Node, _) => ModuleResolution::Node16,
+                (ModuleKind::Preserve, _) => ModuleResolution::Bundler,
+                (ModuleKind::CommonJs, 5) => ModuleResolution::Node10,
+                (ModuleKind::Es | ModuleKind::Other, 5) => ModuleResolution::Classic,
+                (ModuleKind::Other, 6) => ModuleResolution::Classic,
+                _ => ModuleResolution::Bundler,
+            },
+        })
+    }
+}
+
 /// A module resolution strategy that says how a package's `exports` is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModuleResolution {
-    /// `bundler`: an import matches `import`, never `require` or `node`.
+    /// `bundler`: an import matches `import` or `require` by its form and
+    /// the format its file is emitted in, never `node`.
     Bundler,
     /// `node16` or `nodenext`: an import matches `node`, and `import` or
-    /// `require` by the module format of the file writing it.
+    /// `require` by its form and the format Node reads its file in.
     Node16,
     /// `node10`, or `node` as it was first named: `exports` is not read, and
     /// a package's name stands for its `types`, `main` or `index`.
@@ -310,12 +463,23 @@ impl Manifests {
         let module_types = package_jsons
             .iter()
             .map(|(directory, manifest)| {
-                let module = manifest.get("type").and_then(|kind| kind.as_str()) == Some("module");
-                (directory.clone(), module)
+                let kind = match manifest.get("type").and_then(|kind| kind.as_str()) {
+                    Some("module") => PackageType::Module,
+                    Some("commonjs") => PackageType::CommonJs,
+                    _ => PackageType::Unset,
+                };
+                (directory.clone(), kind)
             })
             .collect();
         let (python_projects, pytest_configurations) = python_configurations(root, nodes);
         let workspaces = js_workspaces(root, nodes, &package_jsons);
+        let mut versions = TypeScriptVersions::new(root);
+        let ts_projects = ts_projects(root, nodes, &workspaces, &mut versions);
+        let typescript = nodes
+            .iter()
+            .filter(|node| is_javascript(node.language))
+            .map(|node| (node.directory.clone(), versions.of(&node.directory)))
+            .collect();
         Self {
             root: Some(root.to_path_buf()),
             go_modules,
@@ -323,9 +487,10 @@ impl Manifests {
             rust_packages,
             python_projects,
             pytest_configurations,
-            ts_projects: ts_projects(root, nodes, &workspaces),
+            ts_projects,
             js_packages: js_packages(&package_jsons, &workspaces),
             module_types,
+            typescript,
         }
     }
 
@@ -394,7 +559,7 @@ impl Manifests {
             Some((first, rest)) if rest.iter().all(|other| other == first) => {
                 TsOwner::Config(first)
             }
-            Some(_) => TsOwner::Undetermined,
+            Some(_) => TsOwner::Undetermined(owners),
         }
     }
 
@@ -604,11 +769,13 @@ fn ts_projects(
     root: &Path,
     nodes: &[Node],
     workspaces: &[(Vec<String>, Vec<String>)],
+    versions: &mut TypeScriptVersions,
 ) -> TsProjects {
     let mut workspaces = workspaces.to_vec();
     workspaces.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
     let mut reader = TsReader {
         root,
+        versions,
         workspaces: &workspaces,
         members: HashMap::new(),
         parsed: HashMap::new(),
@@ -637,6 +804,7 @@ fn ts_projects(
 /// project built once, by its project path.
 struct TsReader<'r> {
     root: &'r Path,
+    versions: &'r mut TypeScriptVersions,
     /// The project's JavaScript workspaces, the deepest first.
     workspaces: &'r [(Vec<String>, Vec<String>)],
     /// The packages each workspace lists, by its root, found once.
@@ -700,7 +868,7 @@ impl TsReader<'_> {
             .collect();
         let index = self.projects.projects.len();
         self.projects.projects.push(TsProject {
-            config: ts_config(&chain),
+            config: ts_config(&chain, self.versions.of(directory)),
             sources: ts_sources(&chain.configs),
             references: Vec::new(),
         });
@@ -1285,8 +1453,9 @@ fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
 }
 
 /// What the TypeScript configuration at the head of an `extends` chain
-/// says, with what it extends.
-fn ts_config(chain: &Chain) -> TsConfig {
+/// says, with what it extends, for the TypeScript versions that may
+/// compile it.
+fn ts_config(chain: &Chain, typescript: TypeScript) -> TsConfig {
     let configs = chain.configs.as_slice();
     let directory = configs
         .first()
@@ -1310,11 +1479,12 @@ fn ts_config(chain: &Chain) -> TsConfig {
             None => chain.unread.is_none().then_some(None),
         }
     };
-    // A setting the chain decides, in lower case: `Some(None)` where it sets
-    // none; `None` where it is undecided or no string.
-    let setting = |key: &str| match decided(key)? {
-        Some(value) => value.as_str().map(|value| Some(value.to_ascii_lowercase())),
-        None => Some(None),
+    let setting = |key: &str| match decided(key) {
+        Some(Some(value)) => value.as_str().map_or(Setting::Unknown, |value| {
+            Setting::Set(value.to_ascii_lowercase())
+        }),
+        Some(None) => Setting::Unset,
+        None => Setting::Unknown,
     };
     let base_url =
         option("baseUrl").and_then(|(directory, value)| project_path(directory, value.as_str()?));
@@ -1337,33 +1507,11 @@ fn ts_config(chain: &Chain) -> TsConfig {
         .clone()
         .or_else(|| declared.map(|(directory, _)| directory.clone()))
         .unwrap_or_else(|| directory.to_vec());
-    // An explicit `moduleResolution` anywhere in the chain overrides the one
-    // a `module` implies. With neither, TypeScript 6 and 7 resolve as
-    // `bundler` does (`--traceResolution`: "Module resolution kind is not
-    // specified, using 'Bundler'"); a `module` that TypeScript 5 read as
-    // implying `node10` or `classic` and 6 as implying `bundler` — `commonjs`,
-    // the `es` versions — leaves it open, as does an option the chain leaves
-    // undecided.
-    let module_resolution = match setting("moduleResolution") {
-        Some(Some(resolution)) => match resolution.as_str() {
-            "bundler" => Some(ModuleResolution::Bundler),
-            "node16" | "nodenext" => Some(ModuleResolution::Node16),
-            "node" | "node10" => Some(ModuleResolution::Node10),
-            "classic" => Some(ModuleResolution::Classic),
-            _ => None,
-        },
-        Some(None) => match setting("module") {
-            Some(None) => Some(ModuleResolution::Bundler),
-            Some(Some(module)) => match module.as_str() {
-                "preserve" => Some(ModuleResolution::Bundler),
-                "node16" | "node18" | "node20" | "nodenext" => Some(ModuleResolution::Node16),
-                _ => None,
-            },
-            None => None,
-        },
-        None => None,
+    let module_options = ModuleOptions {
+        module: setting("module"),
+        module_resolution: setting("moduleResolution"),
+        target: setting("target"),
     };
-    let emits_commonjs = setting("module").map(|module| module.as_deref() == Some("commonjs"));
     let custom_conditions = decided("customConditions").map(|conditions| {
         conditions
             .and_then(|conditions| conditions.as_array())
@@ -1376,9 +1524,208 @@ fn ts_config(chain: &Chain) -> TsConfig {
         base_url,
         paths,
         paths_base,
-        module_resolution,
-        emits_commonjs,
+        module_options,
+        typescript,
         custom_conditions,
+    }
+}
+
+/// The TypeScript versions each directory's files may be compiled by, each
+/// read once: the version of the `typescript` package installed in the
+/// nearest `node_modules` from the directory up to the project root, as
+/// Node finds it (a link to a store, as pnpm makes, followed), else the
+/// range the nearest `package.json` declaring `typescript` gives
+/// (`declared_typescript`), else none.
+struct TypeScriptVersions {
+    root: PathBuf,
+    installed: HashMap<Vec<String>, Option<Option<u64>>>,
+    declared: HashMap<Vec<String>, Option<Option<u64>>>,
+}
+
+impl TypeScriptVersions {
+    fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            installed: HashMap::new(),
+            declared: HashMap::new(),
+        }
+    }
+
+    fn of(&mut self, directory: &[String]) -> TypeScript {
+        match self
+            .installed(directory)
+            .or_else(|| self.declared(directory))
+        {
+            Some(major) => TypeScript::of_major(major),
+            None => TypeScript::Absent,
+        }
+    }
+
+    /// The major of the `typescript` package installed nearest above
+    /// `directory`; `Some(None)` where its version is no number.
+    fn installed(&mut self, directory: &[String]) -> Option<Option<u64>> {
+        if let Some(known) = self.installed.get(directory) {
+            return *known;
+        }
+        let here = (directory.last().is_none_or(|last| last != "node_modules"))
+            .then(|| {
+                let manifest = project_file(&self.root, directory)
+                    .join("node_modules/typescript/package.json");
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(manifest).ok()?).ok()?;
+                let version = manifest.get("version")?.as_str()?;
+                Some(version.split('.').next()?.parse::<u64>().ok())
+            })
+            .flatten();
+        let found = match (here, directory.split_last()) {
+            (Some(found), _) => Some(found),
+            (None, Some((_, parent))) => self.installed(parent),
+            (None, None) => None,
+        };
+        self.installed.insert(directory.to_vec(), found);
+        found
+    }
+
+    /// The major the `typescript` range declared nearest above `directory`
+    /// fixes (`typescript_major`); `Some(None)` where it fixes none.
+    fn declared(&mut self, directory: &[String]) -> Option<Option<u64>> {
+        if let Some(known) = self.declared.get(directory) {
+            return *known;
+        }
+        let here = declared_typescript(&self.root, directory).map(|range| typescript_major(&range));
+        let found = match (here, directory.split_last()) {
+            (Some(found), _) => Some(found),
+            (None, Some((_, parent))) => self.declared(parent),
+            (None, None) => None,
+        };
+        self.declared.insert(directory.to_vec(), found);
+        found
+    }
+}
+
+/// The `typescript` range the `package.json` at `directory` declares, in
+/// its `dependencies`, `devDependencies`, `optionalDependencies` or
+/// `peerDependencies`, the first holding it: a pnpm `catalog:` or
+/// `catalog:<name>` reference read from the nearest `pnpm-workspace.yaml`'s
+/// `catalog` or `catalogs` (`pnpm_catalog`), and an `npm:` alias
+/// (`npm:@typescript/typescript6@^6.0.2`) read as the range it gives. `None`
+/// where it declares none; an empty string where its catalog holds none.
+fn declared_typescript(root: &Path, directory: &[String]) -> Option<String> {
+    let text = std::fs::read_to_string(project_file(root, directory).join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let range = [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ]
+    .iter()
+    .find_map(|field| manifest.get(field)?.get("typescript")?.as_str())?;
+    let range = match range.strip_prefix("catalog:") {
+        Some(catalog) => {
+            let catalog = if catalog.is_empty() {
+                "default"
+            } else {
+                catalog
+            };
+            (0..=directory.len())
+                .rev()
+                .find_map(|depth| {
+                    let yaml = std::fs::read_to_string(
+                        project_file(root, &directory[..depth]).join("pnpm-workspace.yaml"),
+                    )
+                    .ok()?;
+                    Some(pnpm_catalog(&yaml, catalog, "typescript").unwrap_or_default())
+                })
+                .unwrap_or_default()
+        }
+        None => range.to_string(),
+    };
+    Some(match range.strip_prefix("npm:") {
+        Some(alias) => alias
+            .rsplit_once('@')
+            .map(|(_, range)| range.to_string())
+            .unwrap_or_default(),
+        None => range,
+    })
+}
+
+/// The major a version range fixes by its lower bound: a caret, tilde or
+/// exact version, or an x-range (`^5.9.0`, `~6.0`, `6.x`, `5`), each of the
+/// alternatives `||` joins agreeing. `None` for any other range — an open
+/// one (`>=5`, `*`), a set of comparators, a tag (`latest`).
+fn typescript_major(range: &str) -> Option<u64> {
+    let mut majors = range.split("||").map(|alternative| {
+        let alternative = alternative.trim();
+        if alternative.contains(char::is_whitespace) {
+            return None;
+        }
+        let version = alternative
+            .strip_prefix(['^', '~', '='])
+            .unwrap_or(alternative);
+        let version = version.strip_prefix('v').unwrap_or(version);
+        version.split(['.', '-']).next()?.parse::<u64>().ok()
+    });
+    let first = majors.next()??;
+    majors.all(|major| major == Some(first)).then_some(first)
+}
+
+/// The value a `pnpm-workspace.yaml` catalog gives a package: the default
+/// catalog's under the top-level `catalog` (or `catalogs.default`), a named
+/// one's under `catalogs.<name>`, read as block mappings of plain or quoted
+/// keys and values.
+fn pnpm_catalog(yaml: &str, catalog: &str, package: &str) -> Option<String> {
+    let entries: Vec<(usize, String, String)> = yaml
+        .lines()
+        .filter_map(|line| {
+            let content = line.trim_start();
+            if content.is_empty() || content.starts_with('#') {
+                return None;
+            }
+            let indent = line.len() - content.len();
+            let (key, value) = match content.strip_prefix(['"', '\'']) {
+                Some(rest) => {
+                    let quote = content.chars().next()?;
+                    let (key, rest) = rest.split_once(quote)?;
+                    (key.to_string(), rest.trim_start().strip_prefix(':')?)
+                }
+                None => {
+                    let (key, rest) = content.split_once(':')?;
+                    (key.trim().to_string(), rest)
+                }
+            };
+            let value = match value.find(" #") {
+                Some(comment) => &value[..comment],
+                None => value,
+            };
+            let value = value.trim().trim_matches(['"', '\'']).to_string();
+            Some((indent, key, value))
+        })
+        .collect();
+    let lookup = |path: &[&str]| {
+        let mut within = (0, entries.len(), None::<usize>);
+        let mut found = None;
+        for key in path {
+            let (start, end, parent) = within;
+            let child = entries[start..end]
+                .iter()
+                .map(|(indent, ..)| *indent)
+                .filter(|indent| parent.is_none_or(|parent| *indent > parent))
+                .min()?;
+            let at = (start..end).find(|at| entries[*at].0 == child && entries[*at].1 == *key)?;
+            let below = (at + 1..end)
+                .find(|next| entries[*next].0 <= child)
+                .unwrap_or(end);
+            within = (at + 1, below, Some(child));
+            found = Some(at);
+        }
+        found.map(|at| entries[at].2.clone())
+    };
+    match catalog {
+        "default" => {
+            lookup(&["catalog", package]).or_else(|| lookup(&["catalogs", "default", package]))
+        }
+        name => lookup(&["catalogs", name, package]),
     }
 }
 
@@ -2185,6 +2532,50 @@ mod tests {
             jsonc("{\"a\": \"// not a comment\", \"b\": [1, 2,], /* c */}"),
             Some(serde_json::json!({"a": "// not a comment", "b": [1, 2]}))
         );
+    }
+
+    /// A declared `typescript` range gives a major only where its lower
+    /// bound fixes one, every alternative agreeing.
+    #[test]
+    fn a_typescript_range_fixes_a_major_only_by_its_lower_bound() {
+        for (range, major) in [
+            ("^5.9.0", Some(5)),
+            ("~6.0", Some(6)),
+            ("6.x", Some(6)),
+            ("7", Some(7)),
+            ("=5.9.3", Some(5)),
+            ("^7.0.0-beta", Some(7)),
+            ("^5.9 || 5.x", Some(5)),
+            ("^5.0.0 || ^6.0.0", None),
+            (">=5", None),
+            (">=5.0.0 <6.0.0", None),
+            ("*", None),
+            ("latest", None),
+            ("workspace:*", None),
+            ("", None),
+        ] {
+            assert_eq!(typescript_major(range), major, "{range:?}");
+        }
+    }
+
+    /// A pnpm catalog maps a package to its range: the default catalog under
+    /// `catalog` or `catalogs.default`, a named one under `catalogs`, keys
+    /// and values plain or quoted, comments aside.
+    #[test]
+    fn a_pnpm_catalog_names_the_range_of_a_package() {
+        let yaml = "packages:\n  - apps/*\ncatalog:\n  # the compiler\n  \"typescript\": ^7.0.2 # native\n  \
+                    react: 19.0.0\ncatalogs:\n  legacy:\n    typescript: '~5.9'\n  default:\n    vite: ^7\n";
+        assert_eq!(
+            pnpm_catalog(yaml, "default", "typescript").as_deref(),
+            Some("^7.0.2")
+        );
+        assert_eq!(pnpm_catalog(yaml, "default", "vite").as_deref(), Some("^7"));
+        assert_eq!(
+            pnpm_catalog(yaml, "legacy", "typescript").as_deref(),
+            Some("~5.9")
+        );
+        assert_eq!(pnpm_catalog(yaml, "legacy", "react"), None);
+        assert_eq!(pnpm_catalog(yaml, "missing", "typescript"), None);
     }
 
     /// `pnpm-workspace.yaml` lists its packages as a flow or a block
