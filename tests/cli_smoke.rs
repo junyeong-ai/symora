@@ -2187,6 +2187,9 @@ fn repo_with_a_deleted_function() -> tempfile::TempDir {
     dir
 }
 
+/// A repository with no commit is measured against the empty tree. A file
+/// git does not track is in no diff; measuring the working tree, which holds
+/// it, says so.
 #[cfg(unix)]
 #[test]
 fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
@@ -2195,10 +2198,11 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
     git(repo, &["init", "-q"]);
     std::fs::write(repo.join("m.py"), "def added():\n    return 1\n").unwrap();
     git(repo, &["add", "m.py"]);
+    std::fs::write(repo.join("draft.py"), "def draft():\n    return 2\n").unwrap();
 
-    for args in [
-        &["--deterministic", "diff-impact"][..],
-        &["--deterministic", "diff-impact", "--staged"],
+    for (args, untracked) in [
+        (&["--deterministic", "diff-impact"][..], true),
+        (&["--deterministic", "diff-impact", "--staged"], false),
     ] {
         let page = json_ok(repo, args);
         assert_eq!(page["changes"][0]["name"], "added", "{args:?}: {page}");
@@ -2206,7 +2210,16 @@ fn a_repository_with_no_commit_is_measured_against_the_empty_tree() {
             page["changes"][0]["change_type"], "added",
             "{args:?}: {page}"
         );
-        assert!(page["hints"].is_null(), "{args:?}: {page}");
+        if untracked {
+            assert_eq!(
+                page["hints"],
+                serde_json::json!(["Untracked files are not in this diff: draft.py. \
+                     `git add --intent-to-add -- <file>` puts one in it as a new file."]),
+                "{page}"
+            );
+        } else {
+            assert!(page["hints"].is_null(), "{args:?}: {page}");
+        }
     }
 
     let out = run_in(repo, &["--deterministic", "diff-impact", "main"]);

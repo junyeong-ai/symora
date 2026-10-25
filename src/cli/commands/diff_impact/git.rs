@@ -151,6 +151,28 @@ pub(super) fn unstaged_files(root: &Path) -> Result<HashSet<PathBuf>> {
     diff_names(root, &["-c", "core.fileMode=false"], &[])
 }
 
+/// Files git neither tracks nor ignores, which no diff holds until they are
+/// added, in git's order.
+pub(super) fn untracked_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+        .context("Failed to run git ls-files")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| root.join(path_from_git(name)))
+        .collect())
+}
+
 /// Files in an unresolved merge conflict, which have no single staged
 /// version.
 pub(super) fn unmerged_files(root: &Path, base: &str) -> Result<HashSet<PathBuf>> {
