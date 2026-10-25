@@ -6090,6 +6090,7 @@ declare +f PLUS_F=1
 declare +p PLUS_P
 declare AFTER_NAME=1 -p
 declare -- -p DASHED=1
+declare APPENDED+=1
 FIRST=1 SECOND=2
 echo "$FIRST"
 PREFIX_A=1 PREFIX_B=2 \
@@ -6126,6 +6127,7 @@ run_it &
                 "variable:PLUS_F",
                 "variable:AFTER_NAME",
                 "variable:DASHED",
+                "variable:APPENDED",
                 "variable:PIPED_A",
                 "variable:PIPED_B",
                 "variable:BEFORE_A",
@@ -7418,7 +7420,8 @@ region     = "us-central1"
             declared(
                 "class W {\n  int first;\n  Copy() const;\n  Gone() = delete;\n  It() : base_(0) {}\n  \
                  Value(int&& v) && { return v; }\n  explicit Reporter(Printer* p);\n  \
-                 ONNX_CATCH(const E& e) { handle(e); }\n  Over() override;\n  \
+                 ONNX_CATCH(const E& e) { handle(e); }\n  Over() override;\n  Thrower() throw();\n  \
+                 Peek() volatile;\n  \
                  Safe() noexcept;\n  Constrained() requires true;\n  operator bool();\n  \
                  Q_DISABLE_COPY(W)\n  const int limit_ = 3;\n  \
                  Q_DECLARE_PRIVATE(X)\n  volatile int flag;\n  Q_DISABLE_COPY(V)\n  const QString title;\n  \
@@ -7433,6 +7436,8 @@ region     = "us-central1"
                 "method:Value",
                 "method:Reporter",
                 "method:Over",
+                "method:Thrower",
+                "method:Peek",
                 "method:Safe",
                 "method:Constrained",
                 "method:operator bool",
@@ -7629,7 +7634,7 @@ region     = "us-central1"
                  extern int gethostname __P((char name[64], size_t len));\n\
                  ZEXTERN z_off_t ZEXPORT gztell64 OF((gzFile, z_off_t));\n\
                  ONIG_EXTERN\nvoid onig_regset_free P_((OnigRegSet* set));\n\
-                 EXPORT Timer timer((Clock()));\nint Foo::count((0));\n"
+                 EXPORT Timer timer((Clock()));\nint Foo::count((limit));\n"
             ),
             [
                 "function:clnt_create",
