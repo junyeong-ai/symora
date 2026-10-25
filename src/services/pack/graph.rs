@@ -130,7 +130,7 @@ struct Importer<'a> {
     /// the `references` above it reach compiles, which is read without one.
     ts_uncompiled: Vec<&'a TsConfig>,
     /// The module resolution the file's imports are read under, where it is
-    /// one deciding which mode-dependent `exports` conditions apply.
+    /// one deciding how a package's `exports` is read.
     mode: Option<ImportMode>,
 }
 
@@ -141,6 +141,10 @@ enum ImportMode {
     Node16 {
         esm: bool,
     },
+    /// `node10`, which reads no `exports`.
+    Node10,
+    /// `classic`, which reads no `package.json`.
+    Classic,
 }
 
 impl<'a> Importer<'a> {
@@ -155,14 +159,20 @@ impl<'a> Importer<'a> {
             TsOwner::Uncompiled(candidates) => (None, candidates.clone()),
             TsOwner::None | TsOwner::Undetermined => (None, Vec::new()),
         };
-        let mode = ts_config
-            .and_then(|config| config.module_resolution)
-            .map(|resolution| match resolution {
-                ModuleResolution::Bundler => ImportMode::Bundler,
-                ModuleResolution::Node16 => ImportMode::Node16 {
-                    esm: is_es_module(node, manifests),
-                },
-            });
+        // A file read without a configuration is read under TypeScript's
+        // defaults, which in TypeScript 6 and 7 resolve as `bundler` does.
+        let resolution = match ts_config {
+            Some(config) => config.module_resolution,
+            None => Some(ModuleResolution::Bundler),
+        };
+        let mode = resolution.map(|resolution| match resolution {
+            ModuleResolution::Bundler => ImportMode::Bundler,
+            ModuleResolution::Node16 => ImportMode::Node16 {
+                esm: is_es_module(node, manifests),
+            },
+            ModuleResolution::Node10 => ImportMode::Node10,
+            ModuleResolution::Classic => ImportMode::Classic,
+        });
         Self {
             node,
             ts_config,
@@ -194,6 +204,8 @@ impl<'a> Importer<'a> {
                     "require" => !esm,
                     _ => true,
                 },
+                // Neither reads `exports` (`ProjectIndex::workspace_package`).
+                ImportMode::Node10 | ImportMode::Classic => false,
             }),
             _ if condition.starts_with("types@") => None,
             _ => Some(false),
@@ -1060,14 +1072,18 @@ impl ProjectIndex<'_> {
     /// importer is in. A package with `exports` exports only what it maps:
     /// the name stands for the file `.` maps to, a subpath for the one
     /// `./<subpath>` maps to, read through its conditions (`export_target`).
-    /// Without `exports`, the name stands for the file its `types`, `typings`
-    /// or `main` names, else its `index`, and a subpath for the file below
-    /// the package. A package whose file pack cannot determine is disclosed:
-    /// a pattern `exports` maps, a condition the importer's configuration
-    /// leaves open, an entry naming no file, or a name two packages of the
-    /// workspace give.
+    /// Without `exports`, or under `node10`, which does not read it, the name
+    /// stands for the file its `types`, `typings` or `main` names, else its
+    /// `index`, and a subpath for the file below the package. Under
+    /// `classic`, which reads no `package.json`, no name is a package's. A
+    /// package whose file pack cannot determine is disclosed: a pattern
+    /// `exports` maps, a condition the importer's configuration leaves open,
+    /// an entry naming no file, or a name two packages of the workspace give.
     fn workspace_package(&self, specifier: &str, importer: &Importer) -> Option<Resolution> {
         let from = importer.node;
+        if matches!(importer.mode, Some(ImportMode::Classic)) {
+            return None;
+        }
         let scoped = specifier.starts_with('@');
         let mut segments = specifier.splitn(if scoped { 3 } else { 2 }, '/');
         let name: Vec<&str> = segments.by_ref().take(if scoped { 2 } else { 1 }).collect();
@@ -1086,7 +1102,11 @@ impl ProjectIndex<'_> {
                 .any(declares)
                 .then(undetermined);
         };
-        let Some(exports) = &package.exports else {
+        let exports = package
+            .exports
+            .as_ref()
+            .filter(|_| !matches!(importer.mode, Some(ImportMode::Node10)));
+        let Some(exports) = exports else {
             let entries: Vec<&str> = if subpath.is_empty() {
                 package
                     .types
@@ -3106,6 +3126,12 @@ mod tests {
             ts(9, "packages/same/src/index.ts", ""),
             ts(10, "packages/same/src/source.ts", ""),
             ts(11, "packages/bare/src/index.ts", ""),
+            ts(12, "open/app.ts", imports),
+            ts(13, "packages/old/src/main.ts", ""),
+            ts(14, "packages/old/src/esm.ts", ""),
+            ts(15, "legacy/app.ts", "import o from \"@acme/old\";\n"),
+            ts(16, "classic/app.ts", "import o from \"@acme/old\";\n"),
+            ts(17, "unset/app.ts", imports),
         ];
         let manifests = manifests_of(
             &[
@@ -3149,6 +3175,27 @@ mod tests {
                     "cjs/tsconfig.json",
                     "{\"compilerOptions\": {\"module\": \"node16\", \"moduleResolution\": \"node16\"}}",
                 ),
+                (
+                    "open/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"commonjs\"}}",
+                ),
+                (
+                    "packages/old/package.json",
+                    "{\"name\": \"@acme/old\", \"main\": \"./src/main.ts\", \
+                     \"exports\": {\".\": {\"import\": \"./src/esm.ts\"}}}",
+                ),
+                (
+                    "legacy/tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"node\"}}",
+                ),
+                (
+                    "classic/tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"classic\"}}",
+                ),
+                (
+                    "unset/tsconfig.json",
+                    "{\"compilerOptions\": {\"strict\": true}}",
+                ),
             ],
             &nodes,
         );
@@ -3186,12 +3233,28 @@ mod tests {
                 "packages/same/src/index.ts"
             ]
         );
-        // Without a configuration saying which of `import` and `require`
-        // applies, only what every reading agrees on is resolved.
+        // Without a configuration, or one setting neither `moduleResolution`
+        // nor `module`, TypeScript's defaults resolve as `bundler`.
         assert_eq!(
             edges(3),
+            vec![
+                "packages/typed/src/index.ts",
+                "packages/modes/src/esm.ts",
+                "packages/nested/src/other.ts",
+                "packages/same/src/index.ts"
+            ]
+        );
+        assert_eq!(edges(17), edges(3));
+        // Where the configuration leaves `import` and `require` open (a
+        // `module` TypeScript versions read differently), only what every
+        // reading agrees on is resolved.
+        assert_eq!(
+            edges(12),
             vec!["packages/typed/src/index.ts", "packages/same/src/index.ts"]
         );
+        // `node10` reads no `exports`, `classic` no `package.json`.
+        assert_eq!(edges(15), vec!["packages/old/src/main.ts"]);
+        assert!(edges(16).is_empty());
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from([
