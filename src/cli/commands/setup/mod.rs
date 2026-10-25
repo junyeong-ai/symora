@@ -44,7 +44,7 @@ pub struct SetupArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SetupCommand {
-    /// Install or update the Claude Code skill (.claude/skills/symora).
+    /// Install or update the Claude Code skill (~/.claude/skills/symora).
     Skill(SkillArgs),
     /// Install language servers and ripgrep.
     Deps(DepsArgs),
