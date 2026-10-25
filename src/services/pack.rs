@@ -691,10 +691,10 @@ impl ProjectIndex<'_> {
                 package,
                 components,
             } => {
-                let Some(directory) = self.manifests.dart_packages.get(package) else {
+                let Some(directory) = self.manifests.dart_package(package, from) else {
                     return Vec::new();
                 };
-                let mut path = directory.clone();
+                let mut path = directory.to_vec();
                 path.push("lib".to_string());
                 path.extend_from_slice(components);
                 self.at(&self.exact, &path, from.language, false)
@@ -795,9 +795,10 @@ struct Manifests {
     /// The module path `go.mod` declares. Go has no relative import form, so
     /// every intra-project import repeats it in full.
     go_module: Vec<String>,
-    /// The directory of each Dart package a `pubspec.yaml` names, by name: a
-    /// `package:name/x.dart` URI is that directory's `lib/x.dart`.
-    dart_packages: HashMap<String, Vec<String>>,
+    /// The name each `pubspec.yaml` gives the Dart package rooted at its
+    /// directory: a `package:name/x.dart` URI is that directory's
+    /// `lib/x.dart`.
+    dart_packages: HashMap<Vec<String>, String>,
 }
 
 impl Manifests {
@@ -811,31 +812,70 @@ impl Manifests {
                     .map(|path| split_components(path.trim()))
             })
             .unwrap_or_default();
-        let mut dart_packages = HashMap::new();
-        let mut seen = HashSet::new();
-        for node in nodes.iter().filter(|node| node.language == Language::Dart) {
-            for depth in (0..=node.directory.len()).rev() {
-                let directory = &node.directory[..depth];
-                if !seen.insert(directory.to_vec()) {
-                    break;
-                }
-                let pubspec = directory
-                    .iter()
-                    .fold(root.to_path_buf(), |path, part| path.join(part))
-                    .join("pubspec.yaml");
-                if let Some(name) = std::fs::read_to_string(pubspec)
-                    .ok()
-                    .and_then(|pubspec| dart_package_name(&pubspec))
-                {
-                    dart_packages.insert(name, directory.to_vec());
-                }
-            }
-        }
+        let dart_packages = manifests_above(root, nodes, Language::Dart, "pubspec.yaml")
+            .into_iter()
+            .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
+            .collect();
         Self {
             go_module,
             dart_packages,
         }
     }
+
+    /// The directory of the package a `package:name/…` URI written in `from`
+    /// names: the importer's own package — the nearest `pubspec.yaml` above
+    /// it — when that is its name, otherwise the one package in the project
+    /// that declares it. Where several declare it and none is the importer's,
+    /// which one it depends on is the business of its package config, which
+    /// is not read here, so the URI names none of them.
+    fn dart_package(&self, name: &str, from: &Node) -> Option<&[String]> {
+        let own = (0..=from.directory.len())
+            .rev()
+            .find_map(|depth| self.dart_packages.get_key_value(&from.directory[..depth]));
+        if let Some((directory, own)) = own
+            && own == name
+        {
+            return Some(directory);
+        }
+        let mut declaring = self
+            .dart_packages
+            .iter()
+            .filter(|(_, declared)| *declared == name);
+        match (declaring.next(), declaring.next()) {
+            (Some((directory, _)), None) => Some(directory),
+            _ => None,
+        }
+    }
+}
+
+/// Each directory holding a `manifest` file on the way from a `language`
+/// file up to the project root, with the manifest's contents — every manifest
+/// that governs some file of that language, wherever it sits.
+fn manifests_above(
+    root: &Path,
+    nodes: &[Node],
+    language: Language,
+    manifest: &str,
+) -> Vec<(Vec<String>, String)> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for node in nodes.iter().filter(|node| node.language == language) {
+        for depth in (0..=node.directory.len()).rev() {
+            let directory = &node.directory[..depth];
+            // Every directory above one already visited was visited with it.
+            if !seen.insert(directory) {
+                break;
+            }
+            let path = directory
+                .iter()
+                .fold(root.to_path_buf(), |path, part| path.join(part))
+                .join(manifest);
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                found.push((directory.to_vec(), contents));
+            }
+        }
+    }
+    found
 }
 
 /// The package name a `pubspec.yaml` declares in its top-level `name` key.
@@ -1421,6 +1461,42 @@ mod tests {
         assert_eq!(
             dart_package_name("  name: nested\nname: \"quoted\"\n"),
             Some("quoted".into())
+        );
+    }
+
+    /// Two pubspecs can declare one name — a fork, a copied example. The
+    /// importer's own package answers to its name whatever else declares it;
+    /// any other importer cannot tell which of them it depends on, so the URI
+    /// names neither, whichever manifest was read last.
+    #[test]
+    fn a_dart_package_name_two_pubspecs_declare_names_only_the_importers_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (pubspec, name) in [
+            ("app/pubspec.yaml", "app"),
+            ("packages/core/pubspec.yaml", "core"),
+            ("legacy/core/pubspec.yaml", "core"),
+        ] {
+            let path = dir.path().join(pubspec);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+            std::fs::write(path, format!("name: {name}\n")).expect("write pubspec");
+        }
+        let import = "import 'package:core/src/a.dart';\n";
+        let nodes = vec![
+            node_in(0, "app/lib/main.dart", import, Language::Dart),
+            node_in(1, "legacy/core/lib/core.dart", import, Language::Dart),
+            node_in(2, "legacy/core/lib/src/a.dart", "", Language::Dart),
+            node_in(3, "packages/core/lib/core.dart", import, Language::Dart),
+            node_in(4, "packages/core/lib/src/a.dart", "", Language::Dart),
+        ];
+        let manifests = Manifests::read(dir.path(), &nodes);
+        assert!(edges_under(&nodes, 0, &manifests).is_empty());
+        assert_eq!(
+            edges_under(&nodes, 1, &manifests),
+            vec!["legacy/core/lib/src/a.dart"]
+        );
+        assert_eq!(
+            edges_under(&nodes, 3, &manifests),
+            vec!["packages/core/lib/src/a.dart"]
         );
     }
 
