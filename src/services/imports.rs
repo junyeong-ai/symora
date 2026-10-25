@@ -38,6 +38,9 @@ enum Dialect {
     /// A path wrapped in quotes.
     Quoted,
     Dart,
+    /// A Kotlin import, which spells its path as identifiers a backtick can
+    /// quote.
+    KotlinImport,
     /// A Scala import, which spells each path as its segments and can list
     /// several paths and select several names under one.
     ScalaImport,
@@ -173,6 +176,15 @@ fn references_of(
     };
     match entry.dialect {
         Dialect::RustUse => use_tree_targets(path, source),
+        Dialect::KotlinImport => {
+            let mut cursor = path.walk();
+            let segments: Vec<&str> = path
+                .named_children(&mut cursor)
+                .filter(|segment| segment.kind() == "simple_identifier")
+                .map(|segment| backquoted_name(segment, source))
+                .collect();
+            vec![segments.join(".")]
+        }
         Dialect::ScalaImport => scala_import_targets(path, source),
         Dialect::Plain => vec![text_of(path, source).to_string()],
         Dialect::Quoted | Dialect::Dart => {
@@ -210,7 +222,7 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut cursor = import.walk();
     for (at, child) in import.children(&mut cursor).enumerate() {
         if child.is_named() && import.field_name_for_child(at as u32) == Some("path") {
-            let segment = scala_name(child, source);
+            let segment = backquoted_name(child, source);
             if !(path.is_empty() && segment == "_root_") {
                 path.push(segment);
             }
@@ -221,9 +233,9 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
             "namespace_wildcard" => targets.push(path.join(".")),
             "as_renamed_identifier" => {
                 targets.extend(
-                    child
-                        .child_by_field_name("name")
-                        .map(|name| format!("{}.{}", path.join("."), scala_name(name, source))),
+                    child.child_by_field_name("name").map(|name| {
+                        format!("{}.{}", path.join("."), backquoted_name(name, source))
+                    }),
                 );
             }
             "namespace_selectors" => {
@@ -237,7 +249,9 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
                         _ => None,
                     };
                     targets.push(match name {
-                        Some(name) => format!("{}.{}", path.join("."), scala_name(name, source)),
+                        Some(name) => {
+                            format!("{}.{}", path.join("."), backquoted_name(name, source))
+                        }
                         None => path.join("."),
                     });
                 }
@@ -254,7 +268,7 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
 
 /// The name a Scala identifier spells: backticks quote a name, so `` `type` ``
 /// is `type`.
-fn scala_name<'a>(identifier: Node<'_>, source: &'a [u8]) -> &'a str {
+fn backquoted_name<'a>(identifier: Node<'_>, source: &'a [u8]) -> &'a str {
     let text = text_of(identifier, source);
     text.strip_prefix('`')
         .and_then(|name| name.strip_suffix('`'))
@@ -522,7 +536,7 @@ const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
         Language::Kotlin,
         || tree_sitter_kotlin_sg::LANGUAGE.into(),
         KOTLIN_QUERY,
-        Dialect::Plain,
+        Dialect::KotlinImport,
     ),
     (
         Language::Scala,
@@ -687,8 +701,11 @@ mod tests {
             vec!["com.acme.core.Thing"]
         );
         assert_eq!(
-            extract("import com.acme.core.Thing\n", Language::Kotlin),
-            vec!["com.acme.core.Thing"]
+            extract(
+                "import com.acme.core.Thing\nimport `when`.x.`in`\n",
+                Language::Kotlin
+            ),
+            vec!["com.acme.core.Thing", "when.x.in"]
         );
         assert_eq!(
             extract(
