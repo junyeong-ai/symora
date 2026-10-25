@@ -1419,7 +1419,11 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// pipeline or a command run in the background (`&`), each of which runs in
 /// a shell of its own, nor where the grammar held it only by recovering from
 /// a syntax error, which can lose the header of the function around it and
-/// read its body as the script's. A C or C++ declaration the
+/// read its body as the script's. The grammar can also read a reserved word
+/// as a command's name without an error (`while` after a prefix run, as the
+/// command `while` with the loop's statements after it), which Bash never
+/// does; what that moves to the script's level declares as if written there.
+/// A C or C++ declaration the
 /// grammar ended by supplying its missing `;` was cut short by a macro it
 /// cannot expand, so what it would name is a guess, unless it declares a
 /// function: its parameters complete its declarator, and what the grammar
