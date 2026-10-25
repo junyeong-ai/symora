@@ -1859,7 +1859,9 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 /// declaration a wrapper holds (`export`, a decorated definition). A C++
 /// constructor's body begins at its member initializers, which the standard
 /// counts part of it (`F(int p) : a_(compute(p)) {}`), those the grammar read
-/// as a bit-field too ([`misread_member_initializers`]). Only a function value
+/// as a bit-field too ([`misread_member_initializers`]); a Dart constructor's
+/// initializer list and a Kotlin one's delegation are its signature's, as
+/// their grammars hold them (`P.origin() : this(0)`). Only a function value
 /// opens its body after a header the variable shares: a `match` or `switch`
 /// value is a value like any other.
 fn body_of(node: Node, language: Language) -> Option<Node> {
@@ -7529,6 +7531,20 @@ region     = "us-central1"
                 "class C {\n  external C.make();\n}\n",
                 "C.make",
                 Some("external C.make()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P {\n  final int x;\n  P(this.x);\n  P.origin() : this(0);\n}\n",
+                "P.origin",
+                Some("P.origin() : this(0)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P {\n  final int x;\n  P.diag(int v) : x = v {\n    print(v);\n  }\n}\n",
+                "P.diag",
+                Some("P.diag(int v) : x = v"),
             ),
             (
                 "a.dart",
