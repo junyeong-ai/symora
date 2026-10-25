@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
-use crate::cli::response::disclosure::LowerBound;
+use crate::cli::response::disclosure::{LowerBound, name_some};
 use crate::cli::response::{CallHierarchyOutput, LocationOutput};
 use crate::cli::utils::{members_at_deletion, members_at_line, shell_arg};
 use crate::cli::{SymbolBackend, declared_in};
@@ -19,7 +19,7 @@ mod git;
 
 use git::{
     Base, DiffHunk, ParsedDiff, changed_files, git_show, is_ancestor_of_head, parse_git_diff,
-    resolve_base, unmerged_files, unstaged_files,
+    resolve_base, unmerged_files, unstaged_files, untracked_files,
 };
 
 #[derive(Args, Debug)]
@@ -213,6 +213,20 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         unmeasured.extend(binary);
     }
     unmeasured.extend(links);
+
+    if !args.staged {
+        let untracked: Vec<String> = untracked_files(root)?
+            .iter()
+            .map(|file| relative_display(file, root))
+            .collect();
+        if !untracked.is_empty() {
+            hints.push(format!(
+                "Untracked files are not in this diff: {}. `git add --intent-to-add -- <file>` \
+                 puts one in it as a new file.",
+                name_some(&untracked)
+            ));
+        }
+    }
 
     if args.staged {
         let unstaged = unstaged_files(root)?;
