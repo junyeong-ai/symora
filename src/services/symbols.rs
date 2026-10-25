@@ -887,7 +887,10 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// begins after a member, the body's `}`, an access specifier or a
 /// declaration opening with a word only a declaration opens with
 /// ([`DECLARATION_OPENERS`]), is what macros write, and so is each member of
-/// such a run before it. A member is taken for one only where it is written
+/// such a run before it, through a preprocessor conditional whose branches
+/// hold such members alone (`Q_PROPERTY(…)` under `#if QT_CONFIG(shortcut)`),
+/// which run on into what follows it whichever branch is taken. A member is
+/// taken for one only where it is written
 /// as a macro is: a plain name for its type, if any, then arguments in
 /// parentheses or an invocation under a plain name whose arguments name
 /// nothing and no function's qualifier follows ([`names_a_parameter`],
@@ -913,6 +916,31 @@ fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
                     }
                     _ => false,
                 })
+    }
+    fn macro_written_members(member: Node) -> Option<Vec<Node>> {
+        if macro_written(member) {
+            return Some(vec![member]);
+        }
+        if !matches!(
+            member.kind(),
+            "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_elifdef" | "preproc_else"
+        ) {
+            return None;
+        }
+        let condition = member
+            .child_by_field_name("condition")
+            .or_else(|| member.child_by_field_name("name"))
+            .map(|condition| condition.id());
+        let mut cursor = member.walk();
+        let held: Vec<Node> = member
+            .named_children(&mut cursor)
+            .filter(|part| (!part.is_extra() || part.is_error()) && Some(part.id()) != condition)
+            .collect();
+        let mut members = Vec::new();
+        for part in held {
+            members.extend(macro_written_members(part)?);
+        }
+        Some(members)
     }
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
@@ -944,10 +972,11 @@ fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             if !begins_after_a_member(next) {
                 continue;
             }
-            for &member in members[..at]
+            for member in members[..at]
                 .iter()
                 .rev()
-                .take_while(|member| macro_written(**member))
+                .map_while(|member| macro_written_members(*member))
+                .flatten()
             {
                 macros.extend(written_words(member).iter().map(Node::byte_range));
             }
@@ -7754,6 +7783,25 @@ region     = "us-central1"
             ),
             ["class:Svg"],
             "nor before the body's closing brace"
+        );
+        assert_eq!(
+            declared(
+                "class A {\n    Q_OBJECT\n    Q_DECLARE_PRIVATE(A)\n\n    Q_PROPERTY(bool on READ on)\n\
+                 #if QT_CONFIG(shortcut)\n    Q_PROPERTY(int key READ key)\n#else\n    \
+                 Q_PROPERTY(int none READ none)\n#endif\n    \
+                 Q_PROPERTY(bool visible READ visible)\n\npublic:\n    A();\n};\n\
+                 class B {\n    Q_OBJECT\n    Q_DECLARE_PRIVATE(B)\n#ifdef X\n    int x;\n#endif\n    \
+                 Q_PROPERTY(bool visible READ visible)\n\npublic:\n    B();\n};\n"
+            ),
+            [
+                "class:A",
+                "constructor:A",
+                "class:B",
+                "method:Q_DECLARE_PRIVATE",
+                "field:x",
+                "constructor:B",
+            ],
+            "a run goes on through a conditional only where it holds such members alone"
         );
         for defined in [
             declared("class E {\n  enum Mode { A, B }\n  Q_ENUM(Mode)\n  int count;\n};\n"),
