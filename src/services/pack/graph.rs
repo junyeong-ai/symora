@@ -2989,6 +2989,72 @@ mod tests {
         assert_eq!(edges(9), vec!["dr/lib/inner/x.py"]);
     }
 
+    /// Only a root a project puts on `sys.path` covers the directories below
+    /// it: one it declares, and setuptools' discovered `src/` only where a
+    /// build installs the project. A uv workspace's virtual root installs
+    /// nothing (`uvsrc`, which uv 0.13.5 installs and imports as each member's
+    /// own), and a workspace's members are never covered by its root.
+    #[test]
+    fn only_a_root_a_project_puts_on_sys_path_covers_the_directories_below_it() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let import = "from svc_a.core import c\n";
+        let nodes = vec![
+            python(0, "uvsrc/src/svc_a/svc_a/__init__.py", ""),
+            python(1, "uvsrc/src/svc_a/svc_a/core.py", ""),
+            python(2, "uvsrc/src/svc_a/tests/test_a.py", import),
+            python(3, "uvsrc/src/svc_b/svc_b/__init__.py", ""),
+            python(4, "uvsrc/src/svc_b/svc_b/main.py", import),
+            python(5, "vr/src/tool/tool/__init__.py", ""),
+            python(6, "vr/src/tool/tool/x.py", ""),
+            python(7, "vr/src/tool/tests/test_t.py", "import tool.x\n"),
+            python(8, "bw/src/m/m/__init__.py", ""),
+            python(9, "bw/src/m/m/x.py", ""),
+            python(10, "bw/src/m/tests/test_m.py", "import m.x\n"),
+        ];
+        let member = |name: &str, dependencies: &str| {
+            format!(
+                "[project]\nname = \"{name}\"\ndependencies = [{dependencies}]\n\
+                 [build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n"
+            )
+        };
+        let svc_b = format!(
+            "{}[tool.uv.sources]\nsvc-a = {{ workspace = true }}\n",
+            member("svc-b", "\"svc-a\"")
+        );
+        let configs = [
+            (
+                "uvsrc/pyproject.toml",
+                "[tool.uv.workspace]\nmembers = [\"src/*\"]\n".to_string(),
+            ),
+            ("uvsrc/src/svc_a/pyproject.toml", member("svc-a", "")),
+            ("uvsrc/src/svc_b/pyproject.toml", svc_b),
+            (
+                "vr/pyproject.toml",
+                "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n".to_string(),
+            ),
+            ("vr/src/tool/pyproject.toml", member("tool", "")),
+            (
+                "bw/pyproject.toml",
+                "[project]\nname = \"bw\"\n[build-system]\nrequires = [\"setuptools\"]\n\
+                 build-backend = \"setuptools.build_meta\"\n\
+                 [tool.uv.workspace]\nmembers = [\"src/*\"]\n"
+                    .to_string(),
+            ),
+            ("bw/src/m/pyproject.toml", member("m", "")),
+        ];
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (*path, text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        let core = "uvsrc/src/svc_a/svc_a/core.py";
+        assert_eq!(edges(2), vec![core]);
+        assert_eq!(edges(4), vec![core]);
+        assert_eq!(edges(7), vec!["vr/src/tool/tool/x.py"]);
+        assert_eq!(edges(10), vec!["bw/src/m/m/x.py"]);
+    }
+
     /// pytest 9 reads, in each directory, the first of `pytest.toml`,
     /// `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
     /// `tox.ini` and `setup.cfg` that configures it — the first four
