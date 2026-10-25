@@ -3206,12 +3206,15 @@ mod tests {
     /// own), and a workspace's members are never covered by its root. Below a
     /// root, a directory starts a project only where its own files install
     /// one: a `pyproject.toml` that configures a tool there leaves it the
-    /// enclosing project's (`nobuild_nested`).
+    /// enclosing project's (`nobuild_nested`). A `[project]` uv manages
+    /// without `[build-system]` installs nothing (`uvapp_pathdep`, whose `path`
+    /// dependency below `src/` uv 0.13.5 installs and imports as its own), nor
+    /// one whose `tool.uv.package` is `false`.
     #[test]
     fn only_a_root_a_project_puts_on_sys_path_covers_the_directories_below_it() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
         let import = "from svc_a.core import c\n";
-        let nodes = vec![
+        let mut nodes = vec![
             python(0, "uvsrc/src/svc_a/svc_a/__init__.py", ""),
             python(1, "uvsrc/src/svc_a/svc_a/core.py", ""),
             python(2, "uvsrc/src/svc_a/tests/test_a.py", import),
@@ -3266,9 +3269,53 @@ mod tests {
                 "[tool.ruff]\nextend = \"../../pyproject.toml\"\n".to_string(),
             ),
         ];
+        let mut configs: Vec<(String, String)> = configs
+            .into_iter()
+            .map(|(path, text)| (path.to_string(), text))
+            .collect();
+        let mut plugins = Vec::new();
+        for (app, build) in [
+            ("ua", ""),
+            (
+                "uf",
+                "[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\
+                 [tool.uv]\npackage = false\n",
+            ),
+        ] {
+            let core = format!("{app}/src/plugin/plugin/core.py");
+            for (rel, source) in [
+                (format!("{app}/src/plugin/plugin/__init__.py"), ""),
+                (core.clone(), ""),
+                (format!("{app}/main.py"), "from plugin.core import y\n"),
+                (
+                    format!("{app}/src/plugin/plugin/main.py"),
+                    "from plugin.core import y\n",
+                ),
+                (
+                    format!("{app}/src/plugin/tests/test_core.py"),
+                    "from plugin.core import y\n",
+                ),
+            ] {
+                if !source.is_empty() {
+                    plugins.push((nodes.len(), core.clone()));
+                }
+                nodes.push(node_in(nodes.len(), &rel, source, Language::Python));
+            }
+            configs.push((
+                format!("{app}/pyproject.toml"),
+                format!(
+                    "[project]\nname = \"app\"\ndependencies = [\"plugin\"]\n{build}\
+                     [tool.uv.sources]\nplugin = {{ path = \"src/plugin\", editable = true }}\n"
+                ),
+            ));
+            configs.push((
+                format!("{app}/src/plugin/pyproject.toml"),
+                member("plugin", ""),
+            ));
+        }
         let configs: Vec<(&str, &str)> = configs
             .iter()
-            .map(|(path, text)| (*path, text.as_str()))
+            .map(|(path, text)| (path.as_str(), text.as_str()))
             .collect();
         let manifests = manifests_of(&configs, &nodes);
         let edges = |id| edges_under(&nodes, id, &manifests);
@@ -3279,6 +3326,14 @@ mod tests {
         assert_eq!(edges(10), vec!["bw/src/m/m/x.py"]);
         assert_eq!(edges(12), vec!["nb/src/app/core.py"]);
         assert_eq!(edges(13), vec!["nb/src/app/core.py"]);
+        for (importer, core) in &plugins {
+            assert_eq!(
+                edges(*importer),
+                vec![core.as_str()],
+                "{}",
+                nodes[*importer].rel_path
+            );
+        }
     }
 
     /// pytest 9 reads, in each directory, the first of `pytest.toml`,

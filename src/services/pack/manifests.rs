@@ -2087,12 +2087,22 @@ impl<'f> PythonConfiguration<'f> {
     /// setuptools' automatic discovery puts its flat or `src/` layout on
     /// `sys.path`: a `setup.py`, a `pyproject.toml` with `[project]` or
     /// `[build-system]`, a `setup.cfg` with `[metadata]` or `[options]`. A
-    /// uv workspace's virtual root, which holds `[tool.uv.workspace]` alone,
-    /// installs nothing of its own.
+    /// `pyproject.toml` uv manages, holding `[tool.uv]`, is installed only
+    /// with `[build-system]` unless `tool.uv.package` says otherwise, as uv
+    /// documents and uv 0.13.5 installs it; so a uv workspace's virtual
+    /// root, holding `[tool.uv.workspace]` alone, installs nothing.
     fn builds_its_packages(&self) -> bool {
         self.has_setup_py
             || self.pyproject.as_ref().is_some_and(|pyproject| {
-                pyproject.contains_key("project") || pyproject.contains_key("build-system")
+                match toml_at(pyproject, &["tool", "uv"]) {
+                    Some(uv) => uv
+                        .get("package")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or_else(|| pyproject.contains_key("build-system")),
+                    None => {
+                        pyproject.contains_key("project") || pyproject.contains_key("build-system")
+                    }
+                }
             })
             || self.setup_cfg.as_ref().is_some_and(|sections| {
                 sections.contains_key("metadata") || sections.contains_key("options")
