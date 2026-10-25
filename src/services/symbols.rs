@@ -852,6 +852,86 @@ fn invokes_a_macro(node: Node) -> bool {
         .is_some_and(|declarator| declarator.kind() == "parenthesized_declarator")
 }
 
+/// Whether the grammar read a macro's invocation as a C or C++ declaration
+/// (`Q_DISABLE_COPY(W);`): written without a type under a plain name, as only
+/// a constructor can be, yet not named for a class whose body holds it
+/// ([`named_for_its_class`]), and writing nothing only a function's
+/// declaration writes ([`proves_a_function`]).
+fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
+    node.child_by_field_name("type").is_none()
+        && node
+            .child_by_field_name("declarator")
+            .filter(|declarator| declarator.kind() == "function_declarator")
+            .and_then(|declarator| declarator.child_by_field_name("declarator"))
+            .filter(|name| name.kind() == "identifier")
+            .and_then(|name| content.get(name.byte_range()))
+            .is_some_and(|name| !named_for_its_class(node, name, content))
+        && !proves_a_function(node)
+}
+
+/// Whether a C++ declaration's own syntax proves it a function's, as a
+/// macro's invocation `NAME(args)` cannot be: a body or a defaulted or
+/// deleted definition, an operator's, conversion's or destructor's name, a
+/// parameter that declares a name ([`names_a_parameter`]), or after the
+/// parameters a cv-qualifier, ref-qualifier, exception specification,
+/// virtual specifier, trailing return type or constraint (`Copy() const`,
+/// `Run(int x)`). The grammar reads other specifiers there too, the next
+/// declaration's among them (`ABSL_DEPRECATE_AND_INLINE() constexpr`), and
+/// `= 0` as a pure specifier, though an invocation may precede an
+/// initializer (`DUCKDB_GUARDED_BY(glock) = 0`); neither proves one.
+fn proves_a_function(node: Node) -> bool {
+    if node.child_by_field_name("body").is_some()
+        || child_of_kind(node, "default_method_clause").is_some()
+        || child_of_kind(node, "delete_method_clause").is_some()
+    {
+        return true;
+    }
+    let Some(declarator) = node.child_by_field_name("declarator") else {
+        return false;
+    };
+    if declarator.kind() == "operator_cast" {
+        return true;
+    }
+    let mut cursor = declarator.walk();
+    declarator.kind() == "function_declarator"
+        && (names_a_parameter(declarator)
+            || declarator.named_children(&mut cursor).any(|part| {
+                part.kind() == "type_qualifier"
+                    && part
+                        .child(0)
+                        .is_some_and(|word| matches!(word.kind(), "const" | "volatile"))
+                    || matches!(
+                        part.kind(),
+                        "operator_name"
+                            | "destructor_name"
+                            | "ref_qualifier"
+                            | "noexcept"
+                            | "throw_specifier"
+                            | "virtual_specifier"
+                            | "trailing_return_type"
+                            | "requires_clause"
+                    )
+            }))
+}
+
+/// Whether a C or C++ function declarator's parameters declare a name
+/// (`int x`), as a macro's arguments, expressions or bare types (`mu`,
+/// `int`, `Foo*`), never do. A list the grammar read only by recovering from
+/// an error is a macro's (`Q_PROPERTY(int count READ count)`).
+fn names_a_parameter(declarator: Node) -> bool {
+    declarator
+        .child_by_field_name("parameters")
+        .filter(|parameters| !parameters.has_error())
+        .is_some_and(|parameters| {
+            let mut cursor = parameters.walk();
+            parameters.named_children(&mut cursor).any(|parameter| {
+                parameter
+                    .child_by_field_name("declarator")
+                    .is_some_and(|named| !named.kind().starts_with("abstract_"))
+            })
+        })
+}
+
 /// The name a C or C++ declaration writes alone, with no declarator, which
 /// the grammar reads as a type (`items;`).
 fn lone_name(node: Node) -> Option<Node> {
@@ -1073,6 +1153,7 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
                         member_kind(declarator_name(declarator)) == SymbolKind::Method
                     }))
             || lone_name(node).is_some() && continued_macro(node).is_none()
+            || misreads_a_macro_invocation(node, content)
             || misreads_a_class_key(node, content)
             || matches!(
                 node.kind(),
@@ -1765,7 +1846,7 @@ fn extract_declaration(
                 let text = content.get(name.start_byte()..name_end_node(name).end_byte())?;
                 let kind = match language {
                     Language::Cpp if matches!(node.kind(), "field_declaration" | "declaration") => {
-                        declared_as(node, name)
+                        member_kind(name)
                     }
                     _ => node_kind(node),
                 };
@@ -2588,9 +2669,12 @@ fn signature_beside<'t>(body: Node<'t>, declared: &HashSet<usize>) -> Option<Nod
 /// function is a method only where it takes `self` ([`takes_self`]); a
 /// JavaScript or TypeScript class's `constructor`,
 /// unless `static`, is its constructor; a Swift property no type holds is a
-/// global variable; a C++ member function defined in its class without a
-/// type is a constructor or destructor, as one declared there is
-/// ([`declared_as`]); a C++ declaration outside a class body
+/// global variable; a C++ member function is its constructor or destructor
+/// exactly where it is named for its class ([`named_for_its_class`]), whatever
+/// the grammar read as its type (`Q_INVOKABLE W(QObject*)`), and otherwise a
+/// method, a macro the grammar could not expand having taken the type of one
+/// written without (`API virtual T Copy() const = 0`); a C++ declaration
+/// outside a class body
 /// ([`in_class_body`]) states a function or a variable; and one whose class
 /// key a macro set aside declares that type ([`set_aside_class_kind`]).
 /// What holds a declaration is the nearest enclosing one with a name, as for
@@ -2627,13 +2711,7 @@ fn placed_kind(
         SymbolKind::Function
             if language == Language::Cpp
                 && node.kind() == "function_definition"
-                && in_class_body(node)
-                && node.child_by_field_name("type").is_none()
-                && node
-                    .child_by_field_name("declarator")
-                    .is_some_and(|declarator| {
-                        declarator_name(declarator).kind() != "operator_cast"
-                    }) =>
+                && named_for_its_class(node, name, content) =>
         {
             SymbolKind::Constructor
         }
@@ -2674,6 +2752,11 @@ fn placed_kind(
             } else {
                 SymbolKind::Function
             }
+        }
+        SymbolKind::Method
+            if language == Language::Cpp && named_for_its_class(node, name, content) =>
+        {
+            SymbolKind::Constructor
         }
         kind => kind,
     }
@@ -3372,43 +3455,52 @@ fn go_type_kind(node: Node) -> SymbolKind {
     }
 }
 
-/// Classify a member declaration by its declarator ([`declared_as`]). Java,
+/// Classify a member declaration by its declarator ([`member_kind`]). Java,
 /// whose fields use the same node kind, declares methods elsewhere and is
 /// unaffected.
 fn field_kind(node: Node) -> SymbolKind {
     node.child_by_field_name("declarator")
         .map(declarator_name)
-        .map_or(SymbolKind::Field, |name| declared_as(node, name))
-}
-
-/// What the C or C++ member declaration `statement` declares `name` as. C++
-/// states a method with the same node it states a data member with, and only
-/// the declarator separates them ([`member_kind`]); a member function
-/// declared without a type is a constructor or a destructor, unless its name
-/// states the type it converts to (`operator bool()`). Outside a class the
-/// same declarations state functions and variables ([`placed_kind`]).
-fn declared_as(statement: Node, name: Node) -> SymbolKind {
-    match member_kind(name) {
-        SymbolKind::Method
-            if statement.child_by_field_name("type").is_none()
-                && name.kind() != "operator_cast" =>
-        {
-            SymbolKind::Constructor
-        }
-        kind => kind,
-    }
+        .map_or(SymbolKind::Field, member_kind)
 }
 
 /// Whether a C++ declaration is written in a class body, through a member
 /// template's header, a preprocessor conditional or the syntax error the
 /// grammar recovered from around it.
 fn in_class_body(statement: Node) -> bool {
+    class_body(statement).is_some()
+}
+
+/// The class body a C++ declaration is written in ([`in_class_body`]).
+fn class_body(statement: Node) -> Option<Node> {
     std::iter::successors(statement.parent(), Node::parent)
         .find(|holder| {
             !matches!(holder.kind(), "template_declaration" | "ERROR")
                 && !holder.kind().starts_with("preproc_")
         })
-        .is_some_and(|holder| holder.kind() == "field_declaration_list")
+        .filter(|holder| holder.kind() == "field_declaration_list")
+}
+
+/// Whether a C++ member is named for the class whose body holds it, as only
+/// its constructors and its destructor are: by the class's own name, without
+/// the scope a qualified name writes or the arguments a specialization does
+/// (`ns::Outer::Inner`, `Box<int>`).
+fn named_for_its_class(statement: Node, name: &str, content: &str) -> bool {
+    class_body(statement).is_some_and(|body| {
+        name.starts_with('~')
+            || body
+                .parent()
+                .and_then(|class| class.child_by_field_name("name"))
+                .map(|mut class| {
+                    while matches!(class.kind(), "qualified_identifier" | "template_type")
+                        && let Some(inner) = class.child_by_field_name("name")
+                    {
+                        class = inner;
+                    }
+                    class
+                })
+                .is_some_and(|class| content.get(class.byte_range()) == Some(name))
+    })
 }
 
 /// Whether the C or C++ declarator around `name` declares a method or a data
@@ -3731,8 +3823,8 @@ const KOTLIN_QUERY: &str = r#"
 // A member declared in a class body is a `field_declaration`, and one a
 // `template` header heads is a plain `declaration` inside the template. One
 // declared without a type is a plain `declaration` too: a destructor, a
-// conversion function, or a constructor, which is named for its class. A
-// macro invoked in a class body reads as one of those with another name.
+// conversion function, or a constructor. A macro invoked in a class body
+// reads as a constructor with another name (`misreads_a_macro_invocation`).
 // Outside a class, a `declaration` states a function or a variable where the
 // file, a namespace, `extern "C"` or a template holds it, and under a
 // preprocessor conditional — a header's include guard — wherever no function
@@ -3759,18 +3851,11 @@ const CPP_QUERY: &str = r#"
 (field_declaration) @symbol
 (field_declaration_list (template_declaration (declaration) @symbol))
 (field_declaration_list
-  (declaration declarator: (function_declarator declarator: (destructor_name))) @symbol)
-(field_declaration_list (declaration declarator: (operator_cast)) @symbol)
-(class_specifier
-  name: (type_identifier) @class
-  body: (field_declaration_list
-    (declaration declarator: (function_declarator declarator: (identifier) @name)) @symbol)
-  (#eq? @class @name))
-(struct_specifier
-  name: (type_identifier) @class
-  body: (field_declaration_list
-    (declaration declarator: (function_declarator declarator: (identifier) @name)) @symbol)
-  (#eq? @class @name))
+  (declaration
+    declarator: [
+      (function_declarator declarator: [(identifier) (destructor_name)])
+      (operator_cast)
+    ]) @symbol)
 "#;
 
 const CSHARP_QUERY: &str = r#"
@@ -4704,6 +4789,7 @@ class C {
 public:
     C();
     explicit C(int n);
+    EXPORT C(const char* s);
     ~C();
     DISALLOW_COPY(C);
     void m();
@@ -4737,12 +4823,14 @@ int parse(const char *s);
 extern int counter;
 typedef unsigned long size_type;
 using Handle = int;
-union U { int a; };
+union U { U(int v); int a; };
 extern "C" { int c_linked(void); }
 template <class T> T largest(T a, T b);
 typedef struct { int pa; } Pair;
 extern "C" int c_single(void);
 struct P { P(); };
+template <class T> struct Box<T*> { Box(); };
+struct N::Nested { Nested(); };
 #if defined(X)
 int in_if;
 #elif defined(Y)
@@ -4770,10 +4858,16 @@ void g() {
     namespace lf = N;
 }
 
+class SpinLock {
+    ABSL_DEPRECATE_AND_INLINE()
+    constexpr SpinLock(int mode) : mode_(mode) {}
+};
+
 class EXPORT Exported {
     int size() const;
     int count_;
     int inline_count() const { return count_; }
+    Q_PROPERTY(int count READ size)
 };
 
 namespace fsys = N;
@@ -4788,6 +4882,7 @@ auto [first_of, second_of] = pair_value;
                 "field:S/kind",
                 "enum_member:S/Anon",
                 "class:C",
+                "constructor:C/C",
                 "constructor:C/C",
                 "constructor:C/C",
                 "constructor:C/~C",
@@ -4812,6 +4907,7 @@ auto [first_of, second_of] = pair_value;
                 "class:size_type",
                 "class:Handle",
                 "struct:U",
+                "constructor:U/U",
                 "field:U/a",
                 "function:c_linked",
                 "function:largest",
@@ -4820,6 +4916,10 @@ auto [first_of, second_of] = pair_value;
                 "function:c_single",
                 "struct:P",
                 "constructor:P/P",
+                "struct:Box<T*>",
+                "constructor:Box<T*>/Box",
+                "struct:N::Nested",
+                "constructor:N::Nested/Nested",
                 "variable:in_if",
                 "variable:in_elif",
                 "variable:in_else",
@@ -4833,6 +4933,7 @@ auto [first_of, second_of] = pair_value;
                 "method:Exported/size",
                 "field:Exported/count_",
                 "method:Exported/inline_count",
+                "class:SpinLock",
                 "namespace:fsys",
                 "namespace:outer",
                 "namespace:inner",
