@@ -996,7 +996,9 @@ fn declares_a_function(node: Node) -> bool {
 /// `OPENSSL_EXPORT struct ssl_st {`, `ABSL_NAMESPACE_BEGIN class Clock {`),
 /// or as a variable its block initializes, where `final` or a base clause
 /// after the name shows a class head no variable has (`class EXPORT Inner
-/// final : public Base {`, unlike `struct S s{1};`). An
+/// final : public Base {`, unlike `struct S s{1};`) and the grammar could not
+/// read the variable whole (unlike the conditional's `:` in `struct Opts o =
+/// fast ? a : Opts{};`). An
 /// identifier written before the key, or between the key and the name the
 /// class head ends with (qualified, specialized, then `final`), is no part of
 /// the grammar there, so it is a macro; one inside brackets is an argument or
@@ -1016,6 +1018,7 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
         let read_as_a_variable = matches!(node.kind(), "declaration" | "field_declaration")
+            && node.has_error()
             && node.child_by_field_name("type").is_some_and(|written| {
                 matches!(
                     written.kind(),
@@ -7652,7 +7655,8 @@ region     = "us-central1"
                  class __declspec(dllexport) DECL Declared { int d; };\n\
                  class EXPORT Outer final : public Base {\n public:\n  \
                  class EXPORT Inner final : public Other {\n   public:\n    Inner(const Inner&) = delete;\n    \
-                 int Read(int size);\n  };\n  struct S member{2};\n  int after;\n};\n\
+                 int Read(int size);\n  };\n  struct S member{2};\n  \
+                 struct Opts opts_ = fast ? fast_opts : Opts{};\n  int after;\n};\n\
                  struct S s{1};\nint plain(int a) { int inner = a; return inner; }\n",
                 Language::Cpp,
             )
@@ -7692,6 +7696,7 @@ region     = "us-central1"
                 "constructor:Inner/Inner",
                 "method:Inner/Read",
                 "field:Outer/member",
+                "field:Outer/opts_",
                 "field:Outer/after",
                 "variable:s",
                 "function:plain",
