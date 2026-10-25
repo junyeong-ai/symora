@@ -1050,6 +1050,12 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
     let Some(declarator) = node
         .child_by_field_name("declarator")
         .filter(|declarator| declarator.kind() == "function_declarator")
+        .filter(|_| {
+            matches!(
+                node.kind(),
+                "declaration" | "field_declaration" | "function_definition"
+            )
+        })
     else {
         return false;
     };
@@ -1070,6 +1076,56 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
         } else {
             !proves_a_function(node)
         }
+}
+
+/// Where a prototype the grammar could not read as a declaration begins
+/// and ends, where a C or C++ function declarator a syntax error holds is
+/// one: its parameters name something ([`names_a_parameter`]), and it is
+/// written after a macro whose arguments name nothing, standing for its
+/// return type, whether the error holds that macro (`GIT_EXTERN(int)
+/// git_blob_lookup_prefix(git_blob **blob, size_t len);`) or the statement
+/// before it does (`FT_EXPORT( FT_Error )` before `FT_Init( FT_Library
+/// library );`), or holds it itself ([`name_before_parameters`]). It ends
+/// with the statement after it, which holds its `;` and any macro written
+/// before that.
+fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
+    fn before(node: Node) -> Option<Node> {
+        std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+            .find(|before| !before.is_extra())
+    }
+    fn after(node: Node) -> Option<Node> {
+        std::iter::successors(node.next_sibling(), Node::next_sibling)
+            .find(|after| !after.is_extra())
+    }
+    let error = node.parent().filter(|error| error.is_error())?;
+    if !names_a_parameter(node) {
+        return None;
+    }
+    let start = if name_before_parameters(node).is_some() {
+        node
+    } else {
+        before(node)
+            .or_else(|| before(error))
+            .filter(|macro_| match macro_.kind() {
+                "call_expression" => true,
+                "function_declarator" => !names_a_parameter(*macro_),
+                "expression_statement" => {
+                    macro_.named_child_count() == 1
+                        && macro_
+                            .named_child(0)
+                            .is_some_and(|call| call.kind() == "call_expression")
+                        && macro_
+                            .child(macro_.child_count() - 1)
+                            .is_some_and(|last| last.kind() != ";" || last.is_missing())
+                }
+                _ => false,
+            })?
+    };
+    let end = after(node)
+        .or_else(|| after(error))
+        .filter(|end| end.kind() == "expression_statement")
+        .unwrap_or(node);
+    Some((start, end))
 }
 
 /// Whether a C++ declaration's own syntax proves it a function's, as a
@@ -1372,6 +1428,7 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
             && (invokes_a_macro(node) || !declares_a_function(node))
             || lone_name(node).is_some() && continued_macro(node).is_none()
             || misreads_a_macro_invocation(node, content)
+            || node.kind() == "function_declarator" && error_held_prototype(node).is_none()
             || misreads_a_class_key(node, content)
             || matches!(
                 node.kind(),
@@ -1409,7 +1466,10 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
                 &["program", "internal_module", "module"],
             )
         }
-        (Language::Cpp, "declaration" | "type_definition" | "alias_declaration") => (
+        (
+            Language::Cpp,
+            "declaration" | "type_definition" | "alias_declaration" | "function_declarator",
+        ) => (
             &["compound_statement"],
             &[
                 "translation_unit",
@@ -1541,8 +1601,9 @@ enum Read {
 /// the name opens: a value is a variable's body, and an initializer can be
 /// any size, so every value the statement writes before that stays out as
 /// well ([`declared_text`]). The rest of a C or C++ declaration that invoked
-/// a macro was read apart from where it begins ([`continued_macro`]), so it
-/// is a recovered reading.
+/// a macro was read apart from where it begins ([`continued_macro`]), and so
+/// was a prototype an error holds ([`error_held_prototype`]), so each is a
+/// recovered reading.
 fn read_signature(
     root: Node,
     content: &str,
@@ -1567,7 +1628,12 @@ fn read_signature(
     {
         declaration = parent;
     }
-    if language == Language::Cpp && continued_macro(declaration).is_some() {
+    if language == Language::Cpp
+        && (continued_macro(declaration).is_some()
+            || std::iter::successors(Some(named), Node::parent)
+                .take_while(|node| !node.is_error())
+                .any(|node| error_held_prototype(node).is_some()))
+    {
         return Some(Read::Recovered);
     }
     // A JS/TS statement declaring several names is the declaration of each, as
@@ -2426,6 +2492,7 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .into_iter()
             .filter_map(|declarator| declarator.child_by_field_name("name"))
             .collect(),
+        Language::Cpp if node.kind() == "function_declarator" => vec![declarator_name(node)],
         Language::Cpp => fields("declarator")
             .into_iter()
             .filter(|declarator| {
@@ -2684,10 +2751,13 @@ fn assigns_beyond_its_names(node: Node, language: Language) -> bool {
 /// class member's decorators, a Rust item's outer attributes and doc comments
 /// (`///` is `#[doc]`). A comment between those lines is inside the
 /// declaration; one above them is not. The rest of a C or C++ declaration that
-/// invoked a macro begins where that declaration does ([`continued_macro`]).
+/// invoked a macro begins where that declaration does ([`continued_macro`]),
+/// and a prototype an error holds with the macro it is written after
+/// ([`error_held_prototype`]).
 fn declaration_start(node: Node, language: Language) -> Node {
     if language == Language::Cpp
-        && let Some(head) = continued_macro(node)
+        && let Some(head) =
+            continued_macro(node).or_else(|| error_held_prototype(node).map(|(macro_, _)| macro_))
     {
         return head;
     }
@@ -2763,8 +2833,14 @@ fn errs_before(node: Node, limit: usize) -> bool {
 
 /// Where a declaration's text ends: its node ([`declaration_node`]), or the
 /// token right after it that ends it — a C++ type's `;`, a TypeScript or
-/// JavaScript member's `;` or `,`, a Rust field's or variant's `,`.
+/// JavaScript member's `;` or `,`, a Rust field's or variant's `,`, the `;`
+/// after a prototype an error holds ([`error_held_prototype`]).
 fn declaration_end(node: Node, language: Language) -> Node {
+    if language == Language::Cpp
+        && let Some((_, end)) = error_held_prototype(node)
+    {
+        return end;
+    }
     let Some(next) = node.next_sibling() else {
         return node;
     };
@@ -3462,6 +3538,7 @@ fn node_kind(node: Node) -> SymbolKind {
 
         "function_item"
         | "function_definition"
+        | "function_declarator"
         | "function_declaration"
         | "generator_function_declaration"
         | "function_signature"
@@ -3729,20 +3806,29 @@ fn named_for_its_class(statement: Node, name: &str, content: &str) -> bool {
     })
 }
 
-/// The name of a C or C++ function declarator whose words between its plain
-/// name and its parameters the grammar set aside as an error: a function's
-/// name is what its parameter list follows, so it is the error's last word,
-/// and what the grammar read as the name is a macro written before the type
-/// (`GLIB_AVAILABLE_IN_ALL gsize g_printf_string_upper_bound (…)`). After a
-/// declarator of its own, the error is a macro written after it
-/// (`ngettext (…) _INTL_ASM (libintl_ngettext)`), and this gives none.
+/// The name of a C or C++ function declarator whose words between its
+/// declarator and its parameters the grammar set aside as an error: a
+/// function's name is what its parameter list follows, so it is the error's
+/// last word, and what the grammar read as the declarator is a macro written
+/// before the type: a plain name, or a declarator whose arguments name
+/// nothing before parameters that name something (`GLIB_AVAILABLE_IN_ALL
+/// gsize g_printf_string_upper_bound (…)`, `LZO_EXTERN(int) lzo1x_decompress
+/// (const lzo_bytep src, …)`). Otherwise the declarator is the function's and
+/// the error a macro written after it (`ngettext (const char *a) _INTL_ASM
+/// (libintl_ngettext)`, `newlocale (int, const char *, locale_t) _INTL_ASM
+/// (libintl_newlocale)`), and this gives none.
 fn name_before_parameters(declarator: Node) -> Option<Node> {
     if declarator.kind() != "function_declarator" {
         return None;
     }
     declarator
         .child_by_field_name("declarator")
-        .filter(|named| matches!(named.kind(), "identifier" | "field_identifier"))?;
+        .filter(|named| {
+            matches!(named.kind(), "identifier" | "field_identifier")
+                || named.kind() == "function_declarator"
+                    && !names_a_parameter(*named)
+                    && names_a_parameter(declarator)
+        })?;
     let error = declarator
         .child_by_field_name("parameters")?
         .prev_sibling()
@@ -4106,6 +4192,8 @@ const KOTLIN_QUERY: &str = r#"
 // declared without a type is a plain `declaration` too: a destructor, a
 // conversion function, or a constructor. A macro invoked in a class body
 // reads as a constructor with another name (`misreads_a_macro_invocation`).
+// A prototype the grammar could not read as a declaration is a function
+// declarator an error holds (`error_held_prototype`).
 // Outside a class, a `declaration` states a function or a variable where the
 // file, a namespace, `extern "C"` or a template holds it, and under a
 // preprocessor conditional — a header's include guard — wherever no function
@@ -4137,6 +4225,7 @@ const CPP_QUERY: &str = r#"
       (function_declarator declarator: [(identifier) (destructor_name)])
       (operator_cast)
     ]) @symbol)
+(ERROR (function_declarator) @symbol)
 "#;
 
 const CSHARP_QUERY: &str = r#"
@@ -5155,6 +5244,8 @@ namespace fsys = N;
 namespace outer::inner::innermost { int nested_var; }
 template <class T> concept Small = sizeof(T) < 4;
 auto [first_of, second_of] = pair_value;
+GIT_EXTERN(int) git_lookup(git_blob **blob, size_t len);
+GIT_EXTERN(void) git_init(void);
 "#,
             declares: &[
                 "namespace:N",
@@ -5224,6 +5315,7 @@ auto [first_of, second_of] = pair_value;
                 "variable:Small",
                 "variable:first_of",
                 "variable:second_of",
+                "function:git_lookup",
             ],
         },
         DeclarationFixture {
@@ -6417,12 +6509,49 @@ region     = "us-central1"
         );
         assert_eq!(
             declared(
+                "FT_EXPORT( void )\nFT_List_Add( FT_List      list,\n             FT_ListNode  node );\n\n\
+                 FT_EXPORT( void )\nFT_Done( FT_Face );\n\n\
+                 FT_EXPORT( FT_Error )\nFT_Init( FT_Library  library );\n\
+                 FT_EXPORT( void )\nFT_Set( FT_Face  face ) FT_ATTR;\n\
+                 GIT_EXTERN(const char *) git_c(const git_blob *blob);\n\
+                 GIT_EXTERN(int) git_b(git_blob *);\n\
+                 LZO_EXTERN(int)\nlzo_x ( const lzo_bytep src, lzo_uint  src_len );\n\
+                 class P {\n  ABSL_ATTR void Clear(int a) PROTOBUF_FINAL;\n};\n\
+                 void f() {\n  GIT_EXTERN(int) local(int a);\n}\n"
+            ),
+            [
+                "function:FT_List_Add",
+                "function:FT_Init",
+                "function:FT_Set",
+                "function:git_c",
+                "function:lzo_x",
+                "class:P",
+                "method:Clear",
+                "function:f",
+            ],
+            "a prototype an error holds is the function its parameters name, after its type's macro"
+        );
+        assert_eq!(
+            declared(
+                "FT_EXPORT( void )\nFT_Done( FT_Face );\n\nFT_Init( FT_Library  library );\nint after;\n"
+            ),
+            ["variable:after"],
+            "a statement the source ended with its `;` stands for no type of the prototype after it"
+        );
+        assert_eq!(
+            declared(
                 "G_BEGIN_DECLS\n\n/* c */\nGLIB_AVAILABLE_IN_ALL\n\
                  gsize\tg_printf_string_upper_bound (const gchar* format,\n\t\t\t\t     \
                  va_list\t  args) G_GNUC_PRINTF(1, 0);\n\
-                 extern char *ngettext (const char *a, const char *b) _INTL_ASM (libintl_ngettext);\n"
+                 extern char *ngettext (const char *a, const char *b) _INTL_ASM (libintl_ngettext);\n\
+                 extern locale_t newlocale (int, const char *, locale_t)\n       \
+                 _INTL_ASM (libintl_newlocale);\n"
             ),
-            ["function:g_printf_string_upper_bound", "function:ngettext"],
+            [
+                "function:g_printf_string_upper_bound",
+                "function:ngettext",
+                "function:newlocale",
+            ],
             "a function's name is what its parameters follow"
         );
         assert_eq!(
@@ -6585,6 +6714,27 @@ region     = "us-central1"
                 "unalign16"
             ),
             Some((1, 1))
+        );
+        assert_eq!(
+            begins(
+                "GIT_EXTERN(int) git_a(git_blob **blob, size_t len);\n",
+                "git_a"
+            ),
+            Some((1, 1)),
+            "a prototype an error holds begins with the macro standing for its type"
+        );
+        assert_eq!(
+            extractor
+                .extract(
+                    Path::new("e.h"),
+                    "FT_EXPORT( void )\nFT_Set( FT_Face  face ) FT_ATTR;\nint after;\n",
+                    Language::Cpp
+                )
+                .into_iter()
+                .find(|symbol| symbol.name == "FT_Set")
+                .and_then(|symbol| symbol.location.end_line.zip(symbol.location.end_column)),
+            Some((2, 33)),
+            "and ends with the statement holding its `;`"
         );
         assert_eq!(
             declared(
@@ -6879,6 +7029,14 @@ region     = "us-central1"
                 "struct F {\n  F(int);\n  int a_, b_;\n};\nF::F(int p) : a_(compute(p)), b_{p} {}\n",
                 "F::F",
                 Some("F::F(int p)"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "FT_EXPORT( void )\nFT_List_Add( FT_List  list,\n FT_ListNode node );\n\n\
+                 FT_EXPORT( FT_Error )\nFT_List_Iterate( FT_List  list,\n void*  user );\n",
+                "FT_List_Add",
+                None,
             ),
             (
                 "a.h",
