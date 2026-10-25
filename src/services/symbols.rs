@@ -7301,7 +7301,9 @@ region     = "us-central1"
             declared(
                 "class W {\n  int first;\n  Copy() const;\n  Gone() = delete;\n  It() : base_(0) {}\n  \
                  Value(int&& v) && { return v; }\n  explicit Reporter(Printer* p);\n  \
-                 ONNX_CATCH(const E& e) { handle(e); }\n  Q_DISABLE_COPY(W)\n  const int limit_ = 3;\n  \
+                 ONNX_CATCH(const E& e) { handle(e); }\n  Cast() -> int;\n  Over() override;\n  \
+                 Safe() noexcept;\n  Constrained() requires true;\n  operator bool();\n  \
+                 Q_DISABLE_COPY(W)\n  const int limit_ = 3;\n  \
                  Q_DECLARE_PRIVATE(X)\n  volatile int flag;\n  int after;\n};\n"
             ),
             [
@@ -7312,6 +7314,11 @@ region     = "us-central1"
                 "method:It",
                 "method:Value",
                 "method:Reporter",
+                "method:Cast",
+                "method:Over",
+                "method:Safe",
+                "method:Constrained",
+                "method:operator bool",
                 "field:limit_",
                 "field:flag",
                 "field:after",
