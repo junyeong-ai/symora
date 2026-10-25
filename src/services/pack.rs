@@ -736,11 +736,12 @@ struct ProjectIndex<'a> {
 /// What a project's JVM files declare themselves to be. A file's class is
 /// named by the package its declaration states and the file's own name,
 /// wherever the file sits; its source root is its directory without the path
-/// that package spells, where the directory ends in that path.
+/// that package spells, where the directory ends in that path, and its source
+/// set is what that root belongs to (`SourceSet`).
 struct JvmIndex<'a> {
     by_class: HashMap<Vec<String>, Vec<usize>>,
     by_package: HashMap<Vec<String>, Vec<usize>>,
-    roots: HashMap<usize, &'a [String]>,
+    sets: HashMap<usize, SourceSet<'a>>,
 }
 
 impl<'a> JvmIndex<'a> {
@@ -748,7 +749,7 @@ impl<'a> JvmIndex<'a> {
         let mut index = Self {
             by_class: HashMap::new(),
             by_package: HashMap::new(),
-            roots: HashMap::new(),
+            sets: HashMap::new(),
         };
         for node in nodes.iter().filter(|node| is_jvm(node.language)) {
             let package: Vec<String> = node
@@ -758,7 +759,7 @@ impl<'a> JvmIndex<'a> {
                 .map(|package| package.split('.').map(str::to_string).collect())
                 .unwrap_or_default();
             if let Some(root) = node.directory.strip_suffix(package.as_slice()) {
-                index.roots.insert(node.id, root);
+                index.sets.insert(node.id, SourceSet::of(root));
             }
             if let Some(stem) = node.module_path.last() {
                 let class = [package.as_slice(), std::slice::from_ref(stem)].concat();
@@ -767,6 +768,48 @@ impl<'a> JvmIndex<'a> {
             index.by_package.entry(package).or_default().push(node.id);
         }
         index
+    }
+}
+
+/// The set of sources a JVM source root is compiled with. In the layout
+/// Maven and Gradle share, `<module>/src/<set>/<language>`, it is
+/// `<module>/src/<set>`, so `src/main/java` and `src/main/kotlin` are one set;
+/// any other root is a set of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SourceSet<'a> {
+    Named { module: &'a [String], name: &'a str },
+    Root(&'a [String]),
+}
+
+impl<'a> SourceSet<'a> {
+    fn of(root: &'a [String]) -> Self {
+        match root {
+            [module @ .., src, name, _language] if src == "src" => Self::Named { module, name },
+            _ => Self::Root(root),
+        }
+    }
+
+    /// Whether code in this set sees the classes of `other`: its own, and a
+    /// `test` set those of the `main` set beside it, which Maven and Gradle
+    /// put on the test classpath. Main code never sees test sources.
+    fn sees(self, other: SourceSet<'_>) -> bool {
+        match (self, other) {
+            (
+                Self::Named {
+                    module,
+                    name: "test",
+                },
+                SourceSet::Named {
+                    module: other,
+                    name: "main",
+                },
+            ) => module == other,
+            (Self::Named { module, name }, SourceSet::Named { module: a, name: b }) => {
+                module == a && name == b
+            }
+            (Self::Root(root), SourceSet::Root(other)) => root == other,
+            _ => false,
+        }
     }
 }
 
@@ -951,44 +994,59 @@ impl ProjectIndex<'_> {
     }
 
     /// The one file of several declaring a class that an importer means: the
-    /// only one, or the only one in the importer's own source root.
+    /// one in its own source set, which shadows the rest on its classpath,
+    /// else the one in a set it sees, else the only one in the project.
     fn jvm_one(&self, files: &[usize], from: &Node) -> Option<usize> {
-        if let [only] = files {
-            return Some(*only);
-        }
-        let own = self.jvm.roots.get(&from.id)?;
-        let mut mine = files
-            .iter()
-            .filter(|id| self.jvm.roots.get(id) == Some(own));
-        match (mine.next(), mine.next()) {
-            (Some(one), None) => Some(*one),
-            _ => None,
-        }
+        let own = self.jvm.sets.get(&from.id).copied();
+        let set = |id: &usize| self.jvm.sets.get(id).copied();
+        let found = Found::first([
+            Found::of(
+                files
+                    .iter()
+                    .copied()
+                    .filter(|id| own.is_some() && set(id) == own),
+            ),
+            Found::of(
+                files
+                    .iter()
+                    .copied()
+                    .filter(|id| own.zip(set(id)).is_some_and(|(own, other)| own.sees(other))),
+            ),
+            Found::of(files.iter().copied()),
+        ]);
+        found.first().copied()
     }
 
-    /// The files an import of a whole JVM package names: those declaring it
-    /// in the importer's own source root where it has any there — main code
-    /// does not see the test sources that share its packages — and otherwise
-    /// those of the one directory in the project that holds the package.
+    /// The files an import of a whole JVM package names: every file declaring
+    /// it in a source set the importer's sees — its own, and `main` from
+    /// `test`. Where no set it sees holds the package, the package is another
+    /// module's, which only a build file would say it depends on: it names
+    /// the files of the one source set holding it, or none where several do.
     fn jvm_package(&self, package: &[String], from: &Node) -> Vec<usize> {
         let Some(files) = self.jvm.by_package.get(package) else {
             return Vec::new();
         };
-        if let Some(own) = self.jvm.roots.get(&from.id) {
-            let mine: Vec<usize> = files
+        if let Some(own) = self.jvm.sets.get(&from.id) {
+            let seen: Vec<usize> = files
                 .iter()
                 .copied()
-                .filter(|id| self.jvm.roots.get(id) == Some(own))
+                .filter(|id| self.jvm.sets.get(id).is_some_and(|set| own.sees(*set)))
                 .collect();
-            if !mine.is_empty() {
-                return mine;
+            if !seen.is_empty() {
+                return seen;
             }
         }
-        let directories: HashSet<&[String]> = files
+        let holding: HashSet<SourceSet> = files
             .iter()
-            .map(|id| self.nodes[*id].directory.as_slice())
+            .map(|id| {
+                self.jvm
+                    .sets
+                    .get(id)
+                    .copied()
+                    .unwrap_or(SourceSet::Root(&self.nodes[*id].directory))
+            })
             .collect();
-        if directories.len() == 1 {
+        if holding.len() == 1 {
             files.clone()
         } else {
             Vec::new()
@@ -2552,11 +2610,12 @@ mod tests {
 
     /// A JVM import names classes and packages by what files declare, not by
     /// where they sit: a class is its file's declared package and name, and a
-    /// whole package is the files declaring it in the importer's own source
-    /// root — main code sees none of the test sources sharing its packages.
-    /// Java, Kotlin and Scala share that one namespace.
+    /// whole package is the files declaring it in every source set the
+    /// importer sees — Java and Kotlin roots of one set alike, `main` from
+    /// `test`, but never test sources from main code. Java, Kotlin and Scala
+    /// share that one namespace.
     #[test]
-    fn a_jvm_import_names_what_files_declare_in_the_importers_source_root() {
+    fn a_jvm_import_names_what_files_declare_in_the_source_sets_it_sees() {
         let java = |id, rel, source| node_in(id, rel, source, Language::Java);
         let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
         let util = "package com.acme.util;\n";
@@ -2589,30 +2648,55 @@ mod tests {
                 "src/test/java/com/acme/app/AppTest.java",
                 "package com.acme.app;\nimport com.acme.util.*;\n",
             ),
-            java(9, "src/main/java/com/acme/util/Undeclared.java", ""),
+            kotlin(
+                9,
+                "src/main/kotlin/com/acme/util/Text.kt",
+                "package com.acme.util\n",
+            ),
+            java(
+                10,
+                "lib/src/main/java/com/lib/Lib.java",
+                "package com.lib;\n",
+            ),
+            java(
+                11,
+                "cli/src/main/java/com/cli/Cli.java",
+                "package com.cli;\nimport com.lib.*;\nimport com.acme.util.*;\n",
+            ),
         ];
         assert_eq!(
             edges_of(&nodes, 0),
             vec![
                 "src/main/java/com/acme/util/Strings.java",
                 "src/main/java/com/acme/util/Numbers.java",
+                "src/main/kotlin/com/acme/util/Text.kt",
                 "src/main/kotlin/model/User.kt"
             ]
         );
-        // `Numbers` is declared in two source roots, neither the importer's.
+        // `Numbers` is declared in main and in test; main code means its own.
         assert_eq!(
             edges_of(&nodes, 6),
             vec![
                 "src/main/java/com/acme/util/Strings.java",
+                "src/main/java/com/acme/util/Numbers.java",
                 "src/main/kotlin/model/User.kt"
             ]
         );
         assert_eq!(
             edges_of(&nodes, 8),
             vec![
+                "src/main/java/com/acme/util/Strings.java",
+                "src/main/java/com/acme/util/Numbers.java",
                 "src/test/java/com/acme/util/StringsTest.java",
-                "src/test/java/com/acme/util/Numbers.java"
+                "src/test/java/com/acme/util/Numbers.java",
+                "src/main/kotlin/com/acme/util/Text.kt"
             ]
+        );
+        // Another module's package is the files of the one set holding it;
+        // one held by several sets of another module names none of them.
+        assert_eq!(
+            edges_of(&nodes, 11),
+            vec!["lib/src/main/java/com/lib/Lib.java"]
         );
     }
 
