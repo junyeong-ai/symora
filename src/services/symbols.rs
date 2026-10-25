@@ -1419,11 +1419,15 @@ struct Value {
 /// function whose parameters it cannot parse (`void f(STACK_OF(T) *sk)`) as
 /// one. A parameter's default (Swift lists it beside its parameter, and an
 /// enum case's associated value beside its type), a destructuring pattern's
-/// default (`const { c = 1 } = obj`) and what an alias names are no
-/// declarator's value, nor is what follows the `=` ending C++'s `operator=`.
+/// default (`const { c = 1 } = obj`), what an alias names and a C++
+/// concept's constraint, which is what the concept is, are no declarator's
+/// value, nor is what follows the `=` ending C++'s `operator=`.
 fn given_value(node: Node) -> Option<Value> {
     let parent = node.parent()?;
-    if ALIASES.contains(&parent.kind()) || is_pattern_default(parent) {
+    if ALIASES.contains(&parent.kind())
+        || parent.kind() == "concept_definition"
+        || is_pattern_default(parent)
+    {
         return None;
     }
     let opening = |token: Node| !token.is_named() && matches!(token.kind(), "=" | ":=" | "||=");
@@ -6050,6 +6054,13 @@ region     = "us-central1"
                 "typedef __attribute__((aligned(1))) U16 unalign16;\n",
                 "unalign16",
                 None,
+            ),
+            (
+                "a.cpp",
+                Language::Cpp,
+                "template <class T> concept Small = sizeof(T) < 4;\n",
+                "Small",
+                Some("template <class T> concept Small = sizeof(T) < 4"),
             ),
             (
                 "a.cpp",
