@@ -3618,14 +3618,19 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         return child_of_kind(node, "constructor");
     }
     // An operator is named by its symbol (Dart's `operator ==`, C#'s
-    // `operator +`, the one Swift declares after its keyword), a C# conversion
+    // `operator +`, the one Swift declares after its keyword and any comment
+    // there), a C# conversion
     // operator by its keyword through the type it converts to (`operator
     // int`), an indexer by `this` and a destructor through its class (`~C`).
     match node.kind() {
         "operator_signature" | "operator_declaration" => {
-            return node
-                .child_by_field_name("operator")
-                .or_else(|| child_of_kind(node, "operator")?.next_sibling());
+            return node.child_by_field_name("operator").or_else(|| {
+                std::iter::successors(
+                    child_of_kind(node, "operator")?.next_sibling(),
+                    Node::next_sibling,
+                )
+                .find(|symbol| !symbol.is_extra())
+            });
         }
         "conversion_operator_declaration" => return child_of_kind(node, "operator"),
         "indexer_declaration" => return child_of_kind(node, "this"),
@@ -5755,7 +5760,7 @@ precedencegroup Pow {
     associativity: right
 }
 infix operator **: Pow
-prefix operator +++
+prefix operator /* spelled */ +++
 "#,
             declares: &[
                 "interface:P",
