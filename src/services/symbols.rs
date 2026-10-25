@@ -1154,6 +1154,9 @@ fn proves_a_function(node: Node) -> bool {
 /// the next declaration's among them (`ABSL_DEPRECATE_AND_INLINE()
 /// constexpr`), and `= 0` as a pure specifier, though an invocation may
 /// precede an initializer (`DUCKDB_GUARDED_BY(glock) = 0`); neither is one.
+/// Nor is a cv-qualifier after which the grammar supplied the `;`: the next
+/// declaration begins with it (`Q_DISABLE_COPY(Foo)` before `const int
+/// limit_`).
 fn only_a_function_writes(node: Node) -> bool {
     if [
         "default_method_clause",
@@ -1180,6 +1183,7 @@ fn only_a_function_writes(node: Node) -> bool {
                 && part
                     .child(0)
                     .is_some_and(|word| matches!(word.kind(), "const" | "volatile"))
+                && !ends_on_a_supplied_semicolon(node)
                 || matches!(
                     part.kind(),
                     "operator_name"
@@ -7059,7 +7063,8 @@ region     = "us-central1"
             declared(
                 "class W {\n  int first;\n  Copy() const;\n  Gone() = delete;\n  It() : base_(0) {}\n  \
                  Value(int&& v) && { return v; }\n  explicit Reporter(Printer* p);\n  \
-                 ONNX_CATCH(const E& e) { handle(e); }\n  int after;\n};\n"
+                 ONNX_CATCH(const E& e) { handle(e); }\n  Q_DISABLE_COPY(W)\n  const int limit_ = 3;\n  \
+                 Q_DECLARE_PRIVATE(X)\n  volatile int flag;\n  int after;\n};\n"
             ),
             [
                 "class:W",
@@ -7069,6 +7074,8 @@ region     = "us-central1"
                 "method:It",
                 "method:Value",
                 "method:Reporter",
+                "field:limit_",
+                "field:flag",
                 "field:after",
             ],
             "unless it writes what no macro's invocation can"
