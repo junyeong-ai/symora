@@ -1324,6 +1324,72 @@ fn pattern_batches_refuse_overlapping_original_ranges_before_preview_or_write() 
     }
 }
 
+/// The one file a pattern edit names is its query's whole domain, so a file the
+/// query would not read is refused rather than answered with no matches.
+#[test]
+fn pattern_refuses_a_file_its_query_would_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".symora")).unwrap();
+    std::fs::write(
+        dir.path().join(".symora/config.toml"),
+        "[search]\nmax_file_size_mb = 1\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("deploy"), "#!/bin/sh\necho hello\n").unwrap();
+    std::fs::write(dir.path().join("lib.rs"), "fn f() {}\n").unwrap();
+    std::fs::write(
+        dir.path().join("large.py"),
+        format!("x = 1\n{}", "# padding\n".repeat(120_000)),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("Script.PY"), "x = 1\n").unwrap();
+    let edit = |file, lang| {
+        [
+            "edit",
+            "pattern",
+            file,
+            "--pattern",
+            "(identifier) @name",
+            "--lang",
+            lang,
+            "--text",
+            "y",
+            "--dry-run",
+        ]
+    };
+    for (file, lang, code, hint) in [
+        (
+            "deploy",
+            "shellscript",
+            "invalid_argument",
+            "symora edit replace",
+        ),
+        ("lib.rs", "python", "invalid_argument", "--lang rust"),
+        (
+            "large.py",
+            "python",
+            "file_too_large",
+            "search.max_file_size_mb",
+        ),
+    ] {
+        let out = run_in(dir.path(), &edit(file, lang));
+        assert!(!out.status.success(), "{file} unexpectedly succeeded");
+        let response: serde_json::Value = common::parse_response(&out.stdout).unwrap();
+        assert_eq!(response["error"]["code"], code, "{response}");
+        assert!(
+            response["error"]["hint"]
+                .as_str()
+                .is_some_and(|text| text.contains(hint)),
+            "{response}"
+        );
+    }
+    let read = json_ok(dir.path(), &edit("Script.PY", "python"));
+    assert_eq!(
+        read["count"], 1,
+        "an extension is read without case: {read}"
+    );
+}
+
 #[test]
 fn pattern_batches_apply_disjoint_ranges_against_the_original_document() {
     let dir = tempfile::tempdir().unwrap();
