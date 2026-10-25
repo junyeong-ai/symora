@@ -148,9 +148,9 @@ pub(super) enum TsOwner<'a> {
     Config(&'a TsConfig),
     /// The configuration above it has `references`, and no project they
     /// reach compiles it, so `tsc -b` builds it in none: the configurations
-    /// of the nearest project and of those it reaches are what an import's
-    /// writer could have meant.
-    Uncompiled(Vec<&'a TsConfig>),
+    /// of that nearest project, by its index, and of those it reaches
+    /// (`Manifests::reached`) are what an import's writer could have meant.
+    Uncompiled(usize),
     /// The projects the `references` above it reach that compile it say
     /// different things about specifiers: their configurations.
     Undetermined(Vec<&'a TsConfig>),
@@ -559,12 +559,18 @@ impl Manifests {
         };
         let owners = projects.owners(*project, Path::new(&from.rel_path));
         match owners.split_first() {
-            None => TsOwner::Uncompiled(projects.reached(*project)),
+            None => TsOwner::Uncompiled(*project),
             Some((first, rest)) if rest.iter().all(|other| other == first) => {
                 TsOwner::Config(first)
             }
             Some(_) => TsOwner::Undetermined(owners),
         }
+    }
+
+    /// The configurations of the TypeScript project at `project` and of
+    /// every project its references reach, each once.
+    pub(super) fn reached(&self, project: usize) -> Vec<&TsConfig> {
+        self.ts_projects.reached(project)
     }
 
     /// Whether a file a JavaScript or TypeScript path names is on disk, as
@@ -2759,7 +2765,7 @@ mod tests {
         // of those they reach could have been meant.
         assert!(matches!(
             manifests.ts_owner(&nodes[PACKAGES]),
-            TsOwner::Uncompiled(candidates) if candidates.len() == PACKAGES
+            TsOwner::Uncompiled(project) if manifests.reached(project).len() == PACKAGES
         ));
     }
 
