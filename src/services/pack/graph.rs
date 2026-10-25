@@ -1619,8 +1619,8 @@ impl ProjectIndex<'_> {
     }
 
     /// The files an import of a whole JVM package names: every file declaring
-    /// it in a source set the importer's sees — its own, and `main` from
-    /// `test` (`SourceSet::sees`). Where no set it sees holds the package,
+    /// it in a source set the importer's sees — its own, and those its module
+    /// builds it with (`SourceSet::sees`). Where no set it sees holds the package,
     /// only a build file would say which set it comes from: it names the
     /// files of the one source set holding it that the importer may see
     /// (`SourceSet::may_see`) — never another module's test set — or none
