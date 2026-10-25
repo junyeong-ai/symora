@@ -460,7 +460,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
         let mut seen = HashSet::new();
         for target in &node.imports.references {
             let reference = Reference::parse(target, node.language);
-            if node.language == Language::Rust && matches!(&reference, Reference::Relative { .. }) {
+            if node.language == Language::Rust && manifests.rust_omits(&reference, node) {
                 rust_relative_imports_omitted = true;
                 continue;
             }
@@ -486,6 +486,8 @@ enum Reference {
     Relative { up: usize, components: Vec<String> },
     /// An absolute module name, possibly qualified by its crate or package.
     Absolute(Vec<String>),
+    /// A Rust path from the root of the crate writing it (`crate::a::b`).
+    Crate(Vec<String>),
     /// A JVM import of all a package or class holds (`import a.b.*`).
     Wildcard(Vec<String>),
     /// A Dart `package:` URI: a file under the named package's `lib`.
@@ -501,22 +503,7 @@ enum Reference {
 impl Reference {
     fn parse(raw: &str, language: Language) -> Self {
         if language == Language::Rust {
-            match raw {
-                "self" => {
-                    return Self::Relative {
-                        up: 0,
-                        components: Vec::new(),
-                    };
-                }
-                "super" => {
-                    return Self::Relative {
-                        up: 1,
-                        components: Vec::new(),
-                    };
-                }
-                "crate" => return Self::Absolute(Vec::new()),
-                _ => {}
-            }
+            return Self::rust(raw);
         }
         if language == Language::Python {
             let dots = raw.bytes().take_while(|byte| *byte == b'.').count();
@@ -564,25 +551,11 @@ impl Reference {
             } else if let Some(tail) = rest.strip_prefix("./") {
                 relative = true;
                 rest = tail;
-            } else if language == Language::Rust && rest.starts_with("super::") {
-                up += 1;
-                relative = true;
-                rest = &rest[7..];
-            } else if language == Language::Rust && rest.starts_with("self::") {
-                relative = true;
-                rest = &rest[6..];
             } else {
                 break;
             }
         }
         let mut components: Vec<String> = match language {
-            Language::Rust => rest
-                .strip_prefix("crate::")
-                .unwrap_or(rest)
-                .split("::")
-                .filter(|part| !part.is_empty())
-                .map(str::to_string)
-                .collect(),
             Language::Swift => rest
                 .split('.')
                 .filter(|part| !part.is_empty())
@@ -606,6 +579,31 @@ impl Reference {
             Self::Relative { up, components }
         } else {
             Self::Absolute(components)
+        }
+    }
+
+    /// A Rust use path: `self` and `super` hops are relative to the module
+    /// writing them, `crate` starts at the root of its crate, and any other
+    /// first segment names an extern crate or a name in scope.
+    fn rust(path: &str) -> Self {
+        let segments: Vec<&str> = path.split("::").filter(|part| !part.is_empty()).collect();
+        let owned = |segments: &[&str]| segments.iter().map(|part| part.to_string()).collect();
+        match segments.split_first() {
+            Some((&"crate", rest)) => Self::Crate(owned(rest)),
+            Some((&("self" | "super"), _)) => {
+                let hops = segments
+                    .iter()
+                    .take_while(|part| matches!(**part, "self" | "super"))
+                    .count();
+                Self::Relative {
+                    up: segments[..hops]
+                        .iter()
+                        .filter(|part| **part == "super")
+                        .count(),
+                    components: owned(&segments[hops..]),
+                }
+            }
+            _ => Self::Absolute(owned(&segments)),
         }
     }
 
@@ -808,25 +806,52 @@ impl ProjectIndex<'_> {
                 self.python_module(components, from)
             }
             Reference::Absolute(name) if is_jvm(from.language) => self.jvm_class(name, from),
+            Reference::Crate(path) => self
+                .manifests
+                .rust_crate_root(from)
+                .map(|root| self.rust_module(root, path))
+                .unwrap_or_default(),
+            Reference::Absolute(path) if from.language == Language::Rust => path
+                .split_first()
+                .and_then(|(name, path)| {
+                    let root = self.manifests.rust_library(name, from)?;
+                    Some(self.rust_module(root, path))
+                })
+                .unwrap_or_default(),
             Reference::Wildcard(name) => self.jvm_wildcard(name, from),
             Reference::Absolute(components) => {
-                // `use a::b::Item` names a module and an item in one path;
-                // read it whole, then without the item.
-                let parent = (from.language == Language::Rust)
-                    .then(|| components.split_last().map_or(&[][..], |parts| parts.1));
-                for candidate in std::iter::once(components.as_slice()).chain(parent) {
-                    if candidate.is_empty() {
-                        continue;
-                    }
-                    let directories = package_is_directory(from.language);
-                    let hit = self.at(&self.suffixes, candidate, from.language, directories);
-                    if !hit.is_empty() {
-                        return hit;
-                    }
-                }
-                Vec::new()
+                let directories = package_is_directory(from.language);
+                self.at(&self.suffixes, components, from.language, directories)
             }
         }
+    }
+
+    /// The module a Rust path below a crate's root names: the file of that
+    /// module path, read whole and then without its last segment, which
+    /// names an item in the module where it is not a module itself.
+    fn rust_module(&self, root: &[String], path: &[String]) -> Vec<usize> {
+        let parent = path.split_last().map(|(_, parent)| parent);
+        for candidate in std::iter::once(path).chain(parent) {
+            if candidate.is_empty() {
+                continue;
+            }
+            let module = [root, candidate].concat();
+            let files: Vec<usize> = self
+                .exact
+                .by_module
+                .get(module.as_slice())
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| self.nodes[*id].language == Language::Rust)
+                .collect();
+            match files.as_slice() {
+                [only] => return vec![*only],
+                [] => {}
+                _ => return Vec::new(),
+            }
+        }
+        Vec::new()
     }
 
     /// The file an import of a JVM class names: the one whose declared package
@@ -1036,6 +1061,26 @@ struct Manifests {
     /// directory: a `package:name/x.dart` URI is that directory's
     /// `lib/x.dart`.
     dart_packages: HashMap<Vec<String>, String>,
+    /// The Cargo package each `Cargo.toml` with a `[package]` roots at its
+    /// directory.
+    rust_packages: HashMap<Vec<String>, RustPackage>,
+}
+
+/// What Cargo builds of a package: its library, where it has one, and the
+/// directory of each target's root file, where that crate's module paths
+/// start.
+#[derive(Debug, Clone, Default)]
+struct RustPackage {
+    library: Option<RustLibrary>,
+    roots: Vec<Vec<String>>,
+}
+
+/// A Cargo package's library: the name other crates import it by, and the
+/// directory holding its root file.
+#[derive(Debug, Clone)]
+struct RustLibrary {
+    name: String,
+    root: Vec<String>,
 }
 
 impl Manifests {
@@ -1048,9 +1093,90 @@ impl Manifests {
             .into_iter()
             .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
             .collect();
+        let rust_packages = manifests_above(root, nodes, Language::Rust, "Cargo.toml")
+            .into_iter()
+            .filter_map(|(directory, cargo)| {
+                let package = cargo_package(&directory, &cargo, nodes)?;
+                Some((directory, package))
+            })
+            .collect();
         Self {
             go_modules,
             dart_packages,
+            rust_packages,
+        }
+    }
+
+    /// The directory a `crate::` path written in `from` starts at: that of the
+    /// root file of the one target of its package whose directory holds it.
+    /// A file under a target directory of its own (`src/bin/`, `tests/`,
+    /// `examples/`, `benches/`), or below two targets' roots at once, belongs
+    /// to a crate its location does not determine, and so does a file no
+    /// `Cargo.toml` governs.
+    fn rust_crate_root(&self, from: &Node) -> Option<&[String]> {
+        let (directory, package) = (0..=from.directory.len())
+            .rev()
+            .find_map(|depth| self.rust_packages.get_key_value(&from.directory[..depth]))?;
+        let target = match &from.directory[directory.len()..] {
+            [first, second, ..] if first == "src" && second == "bin" => true,
+            [first, ..] => matches!(first.as_str(), "tests" | "examples" | "benches"),
+            [] => false,
+        };
+        if target {
+            return None;
+        }
+        let mut holding = package
+            .roots
+            .iter()
+            .filter(|root| from.directory.starts_with(root));
+        match (holding.next(), holding.next()) {
+            (Some(root), None) => Some(root),
+            _ => None,
+        }
+    }
+
+    /// The root directory of the project library a Rust path's first segment
+    /// names: the importer's own package's library when that is its name,
+    /// otherwise the one library in the project by that name.
+    fn rust_library(&self, name: &str, from: &Node) -> Option<&[String]> {
+        let own = (0..=from.directory.len())
+            .rev()
+            .find_map(|depth| self.rust_packages.get(&from.directory[..depth]))
+            .and_then(|package| package.library.as_ref());
+        if let Some(own) = own
+            && own.name == name
+        {
+            return Some(&own.root);
+        }
+        let mut named = self
+            .rust_packages
+            .values()
+            .filter_map(|package| package.library.as_ref())
+            .filter(|library| library.name == name);
+        match (named.next(), named.next()) {
+            (Some(library), None) => Some(&library.root),
+            _ => None,
+        }
+    }
+
+    /// Whether a Rust reference is one whose target needs module ownership
+    /// this does not hold: a path relative to the module writing it, a
+    /// `crate::` path from a file whose crate root is not determined, and a
+    /// path from a name that is neither a project library nor a crate of the
+    /// toolchain's own — an extern crate or a name in scope, which a module
+    /// may declare (`mod config; use config::Settings;`).
+    fn rust_omits(&self, reference: &Reference, from: &Node) -> bool {
+        match reference {
+            Reference::Relative { .. } => true,
+            Reference::Crate(_) => self.rust_crate_root(from).is_none(),
+            Reference::Absolute(path) => path.first().is_some_and(|name| {
+                self.rust_library(name, from).is_none()
+                    && !matches!(
+                        name.as_str(),
+                        "std" | "core" | "alloc" | "proc_macro" | "test"
+                    )
+            }),
+            _ => false,
         }
     }
 
@@ -1162,6 +1288,58 @@ fn dart_package_name(pubspec: &str) -> Option<String> {
                 .to_string()
         })
         .filter(|name| !name.is_empty())
+}
+
+/// What a `Cargo.toml` declares, where it declares a package: its library —
+/// named by `[lib] name` or the package's name with `-` read as `_`, its root
+/// file where `[lib] path` (by default `src/lib.rs`) puts it — and the
+/// directory of every target root file: the library's, each `[[bin]]` path's,
+/// and `src/` for `src/main.rs`. A target counts only where its root file is a
+/// project file; a workspace's own manifest declares no package.
+fn cargo_package(directory: &[String], cargo_toml: &str, nodes: &[Node]) -> Option<RustPackage> {
+    let manifest: toml::Table = toml::from_str(cargo_toml).ok()?;
+    let package = manifest.get("package")?.as_table()?.get("name")?.as_str()?;
+    let project_file = |path: &str| {
+        let mut file = directory.to_vec();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                // A root file outside the package's own tree is not followed.
+                ".." => return None,
+                part => file.push(part.to_string()),
+            }
+        }
+        let present = nodes.iter().any(|node| {
+            node.language == Language::Rust
+                && Path::new(&node.rel_path) == file.iter().collect::<PathBuf>()
+        });
+        file.pop();
+        present.then_some(file)
+    };
+    let lib = manifest.get("lib").and_then(toml::Value::as_table);
+    let setting = |key| {
+        lib.and_then(|lib| lib.get(key))
+            .and_then(toml::Value::as_str)
+    };
+    let library = project_file(setting("path").unwrap_or("src/lib.rs")).map(|root| RustLibrary {
+        name: setting("name").unwrap_or(package).replace('-', "_"),
+        root,
+    });
+    let bins = manifest
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|bin| bin.get("path")?.as_str())
+        .chain(["src/main.rs"]);
+    let mut roots: Vec<Vec<String>> = library
+        .iter()
+        .map(|library| library.root.clone())
+        .chain(bins.filter_map(project_file))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    Some(RustPackage { library, roots })
 }
 
 /// The module path a `go.mod` declares, read by that file's lexical rules:
@@ -1498,6 +1676,29 @@ mod tests {
         }
     }
 
+    /// Manifests declaring one Cargo package at the project root, its
+    /// library `app` rooted in `src/`, as the default layout has it.
+    fn default_cargo_layout() -> Manifests {
+        let src = vec!["src".to_string()];
+        Manifests {
+            rust_packages: HashMap::from([(
+                Vec::new(),
+                RustPackage {
+                    library: Some(RustLibrary {
+                        name: "app".to_string(),
+                        root: src.clone(),
+                    }),
+                    roots: vec![src],
+                },
+            )]),
+            ..Manifests::default()
+        }
+    }
+
+    fn rust_edges(nodes: &[Node], id: usize) -> Vec<String> {
+        edges_under(nodes, id, &default_cargo_layout())
+    }
+
     fn edges_under(nodes: &[Node], id: usize, manifests: &Manifests) -> Vec<String> {
         build_import_graph(nodes, manifests)
             .edges
@@ -1563,7 +1764,11 @@ mod tests {
 
         assert_eq!(
             Reference::parse("crate::services::pack", Language::Rust),
-            abs(&["services", "pack"])
+            Reference::Crate(vec!["services".into(), "pack".into()])
+        );
+        assert_eq!(
+            Reference::parse("serde::Serialize", Language::Rust),
+            abs(&["serde", "Serialize"])
         );
         assert_eq!(
             Reference::parse("github.com/acme/w/internal/store", Language::Go),
@@ -1592,7 +1797,10 @@ mod tests {
         assert_eq!(Reference::parse(".", Language::Python), rel(0, &[]));
         assert_eq!(Reference::parse("self", Language::Rust), rel(0, &[]));
         assert_eq!(Reference::parse("super", Language::Rust), rel(1, &[]));
-        assert_eq!(Reference::parse("crate", Language::Rust), abs(&[]));
+        assert_eq!(
+            Reference::parse("crate", Language::Rust),
+            Reference::Crate(Vec::new())
+        );
         assert_eq!(Reference::parse("b.dart", Language::Dart), rel(0, &["b"]));
         assert_eq!(
             Reference::parse("src/../../x.g.dart", Language::Dart),
@@ -2027,12 +2235,16 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_resolves_to_the_file_whose_module_path_it_ends() {
+    fn a_crate_path_resolves_to_the_file_of_its_module_below_the_crate_root() {
         let nodes = vec![
             node(0, "src/cli/output.rs", "use crate::services::pack;\n"),
             node(1, "src/services/pack.rs", ""),
+            node(2, "src/cli/services/pack.rs", ""),
         ];
-        assert_eq!(edges_of(&nodes, 0), vec!["src/services/pack.rs"]);
+        assert_eq!(rust_edges(&nodes, 0), vec!["src/services/pack.rs"]);
+        // No `Cargo.toml` governs the file, so nothing says where its crate's
+        // root is.
+        assert!(edges_of(&nodes, 0).is_empty());
     }
 
     #[test]
@@ -2045,19 +2257,29 @@ mod tests {
             ),
             node(1, "src/services/pack.rs", ""),
         ];
-        assert_eq!(edges_of(&nodes, 0), vec!["src/services/pack.rs"]);
+        assert_eq!(rust_edges(&nodes, 0), vec!["src/services/pack.rs"]);
     }
 
     /// The failure a bare-name index cannot avoid: an external crate whose
-    /// final segment happens to match a project file's name. `std::process`
-    /// names nothing in this project, so it must contribute no edge.
+    /// segments happen to match a project file's name. `std::process` and
+    /// `serde::Serialize` name nothing in this project, so they contribute
+    /// no edge, while the project's own library is found by its name.
     #[test]
     fn an_external_reference_never_lands_on_a_same_named_project_file() {
         let nodes = vec![
-            node(0, "src/cli/output.rs", "use std::process::Command;\n"),
+            node(
+                0,
+                "src/cli/output.rs",
+                "use std::process::Command;\nuse serde::Serialize;\nuse log::info;\n",
+            ),
             node(1, "src/services/dist/process.rs", ""),
+            node(2, "src/util/serde.rs", ""),
+            node(3, "src/log.rs", ""),
+            node(4, "tests/cli.rs", "use app::services::pack;\n"),
+            node(5, "src/services/pack.rs", ""),
         ];
-        assert!(edges_of(&nodes, 0).is_empty());
+        assert!(rust_edges(&nodes, 0).is_empty());
+        assert_eq!(rust_edges(&nodes, 4), vec!["src/services/pack.rs"]);
     }
 
     /// An absolute Python import names a module below a directory on
@@ -2121,7 +2343,7 @@ mod tests {
             node(1, "src/services/store/symbols.rs", ""),
             node(2, "src/services/lsp/symbols.rs", ""),
         ];
-        assert!(edges_of(&nodes, 0).is_empty());
+        assert!(rust_edges(&nodes, 0).is_empty());
 
         let qualified = vec![
             node(
@@ -2133,7 +2355,7 @@ mod tests {
             node(2, "src/services/lsp/symbols.rs", ""),
         ];
         assert_eq!(
-            edges_of(&qualified, 0),
+            rust_edges(&qualified, 0),
             vec!["src/services/store/symbols.rs"]
         );
     }
@@ -2145,7 +2367,7 @@ mod tests {
             node(0, "src/app.rs", "use crate::services::lsp::LspService;\n"),
             node(1, "src/services/lsp/mod.rs", ""),
         ];
-        assert_eq!(edges_of(&nodes, 0), vec!["src/services/lsp/mod.rs"]);
+        assert_eq!(rust_edges(&nodes, 0), vec!["src/services/lsp/mod.rs"]);
     }
 
     #[test]
@@ -2199,10 +2421,75 @@ mod tests {
                 node(3, "src/known.rs", ""),
                 node(4, "src/crate.rs", ""),
             ];
-            let graph = build_import_graph(&nodes, &Manifests::default());
+            let graph = build_import_graph(&nodes, &default_cargo_layout());
             assert!(graph.rust_relative_imports_omitted, "{file}");
             assert_eq!(graph.edges[&0], vec![3], "{file}");
         }
+    }
+
+    /// A `crate::` path starts at the root of the crate writing it, which
+    /// Cargo's layout determines for a package's library and `src/main.rs`
+    /// but not for a target directory of its own; a workspace member's
+    /// library is imported by the name its `Cargo.toml` gives it.
+    #[test]
+    fn a_rust_path_starts_where_cargo_roots_its_crate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (manifest, contents) in [
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+            (
+                "crates/core/Cargo.toml",
+                "[package]\nname = \"acme-core\"\n",
+            ),
+            (
+                "crates/cli/Cargo.toml",
+                "[package]\nname = \"acme-cli\"\n[lib]\nname = \"cli\"\npath = \"lib/root.rs\"\n\
+                 [[bin]]\nname = \"gen\"\npath = \"src/tools/gen.rs\"\n",
+            ),
+        ] {
+            let path = dir.path().join(manifest);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+            std::fs::write(path, contents).expect("write Cargo.toml");
+        }
+        let nodes = vec![
+            node(0, "crates/core/src/lib.rs", ""),
+            node(1, "crates/core/src/model.rs", ""),
+            node(
+                2,
+                "crates/cli/src/main.rs",
+                "use acme_core::model::User;\nuse cli::args;\nuse crate::run;\n",
+            ),
+            node(3, "crates/cli/src/run.rs", ""),
+            node(4, "crates/cli/lib/root.rs", ""),
+            node(5, "crates/cli/lib/args.rs", "use crate::flags;\n"),
+            node(6, "crates/cli/lib/flags.rs", ""),
+            node(7, "crates/cli/src/bin/tool.rs", "use crate::run;\n"),
+            node(8, "crates/core/tests/it.rs", "use crate::model;\n"),
+            node(9, "crates/cli/src/tools/gen.rs", ""),
+            node(10, "crates/cli/src/tools/emit.rs", "use crate::run;\n"),
+        ];
+        let manifests = Manifests::read(dir.path(), &nodes);
+        assert_eq!(
+            edges_under(&nodes, 2, &manifests),
+            vec![
+                "crates/core/src/model.rs",
+                "crates/cli/lib/args.rs",
+                "crates/cli/src/run.rs"
+            ]
+        );
+        assert_eq!(
+            edges_under(&nodes, 5, &manifests),
+            vec!["crates/cli/lib/flags.rs"]
+        );
+        // A binary of `src/bin/` and an integration test are crates of their
+        // own, whose `crate::` paths are omitted and disclosed.
+        assert!(edges_under(&nodes, 7, &manifests).is_empty());
+        assert!(edges_under(&nodes, 8, &manifests).is_empty());
+        // Below both `src/` and the `gen` binary's root, a file could be a
+        // module of either.
+        assert!(edges_under(&nodes, 10, &manifests).is_empty());
+        let rooted = build_import_graph(&nodes[..7], &manifests);
+        assert!(!rooted.rust_relative_imports_omitted);
+        assert!(build_import_graph(&nodes, &manifests).rust_relative_imports_omitted);
     }
 
     #[test]
@@ -2468,7 +2755,7 @@ mod tests {
     fn import_graph_links_use_to_target() {
         let a = node(0, "src/a.rs", "use crate::b;\npub fn a() {}\n");
         let b = node(1, "src/b.rs", "pub fn b() {}\n");
-        let graph = build_import_graph(&[a, b], &Manifests::default());
+        let graph = build_import_graph(&[a, b], &default_cargo_layout());
         assert!(graph.edges[&0].contains(&1));
         assert!(graph.edges[&1].is_empty());
         assert!(!graph.rust_relative_imports_omitted);
