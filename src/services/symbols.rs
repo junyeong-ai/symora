@@ -554,6 +554,7 @@ impl SymbolExtractor {
                 macros.extend(qualified_type_macros(tree.root_node(), source));
                 macros.extend(access_specifier_macros(tree.root_node(), source));
                 macros.extend(unended_member_macros(tree.root_node(), content));
+                macros.extend(literal_argument_macros(tree.root_node()));
                 if macros.is_empty() {
                     break;
                 }
@@ -1022,6 +1023,97 @@ fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize
             {
                 macros.extend(written_words(member).iter().map(Node::byte_range));
             }
+        }
+    }
+    macros
+}
+
+/// The macros a C or C++ source invokes with literal arguments before a
+/// declaration (`QT_CORE_INLINE_SINCE(6, 8)` before `static void f();`,
+/// `QT_DEPRECATED_VERSION_X_6_0("…")` before `explicit C() = default;`):
+/// literal arguments name no parameter, so the invocation is no declarator,
+/// nor is a name with arguments a specifier, and a word only a declaration
+/// opens with ([`DECLARATION_OPENERS`]) or a primitive type follows no
+/// declarator, nor an expression, which ends with `;` first. Taken where
+/// the grammar set the invocation aside as an error's last words or read
+/// it as a call ending a statement whose `;` it supplied, the statement's
+/// written words ending with the `)`, and the next node opens with such a
+/// word. One on a directive's line is the directive's, which ends with its
+/// line (`#if QT_VERSION < QT_VERSION_CHECK(7,0,0)` before `struct`); a
+/// directive continued past that line is not seen. An empty list may be a
+/// declarator's, which `const` follows, and a keyword taking arguments is
+/// a specifier (`__declspec(…)`). Left as read: such an invocation before a
+/// type's name (`QT_DEPRECATED_X("…") QString f();`), since the grammar
+/// reads GNU `typeof` as a name, and `typeof(1) x;` declares `x`; that one
+/// written before a cv-qualifier or storage class (`typeof(1) const x;`)
+/// would be taken.
+fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
+    fn leaf_before(node: Node) -> Option<Node> {
+        let mut at = node;
+        let mut before = loop {
+            if let Some(before) = at.prev_sibling() {
+                break before;
+            }
+            at = at.parent()?;
+        };
+        while let Some(last) = before.child(before.child_count().wrapping_sub(1)) {
+            before = last;
+        }
+        Some(before)
+    }
+    let literal = |word: &Node| {
+        matches!(word.kind(), "," | "number_literal" | "true" | "false")
+            || word.parent().is_some_and(|literal| {
+                matches!(
+                    literal.kind(),
+                    "string_literal" | "char_literal" | "raw_string_literal"
+                )
+            })
+    };
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+        if !node.is_error() && node.kind() != "expression_statement" {
+            continue;
+        }
+        let words = written_words(node);
+        let Some((close, before)) = words.split_last() else {
+            continue;
+        };
+        let arguments = before.iter().rev().take_while(|word| literal(word)).count();
+        let Some(at) = before.len().checked_sub(arguments + 2) else {
+            continue;
+        };
+        let name = words[at];
+        if close.kind() != ")"
+            || words[at + 1].kind() != "("
+            || !before[at + 2..].iter().any(|word| word.kind() != ",")
+            || !matches!(
+                name.kind(),
+                "identifier" | "type_identifier" | "field_identifier"
+            )
+            || std::iter::successors(leaf_before(name), |leaf| leaf_before(*leaf))
+                .take_while(|leaf| leaf.start_position().row == name.start_position().row)
+                .any(|leaf| leaf.kind().starts_with('#') || leaf.kind() == "preproc_directive")
+        {
+            continue;
+        }
+        let opens_a_declaration = std::iter::successors(node.next_sibling(), Node::next_sibling)
+            .find(|next| !next.is_extra())
+            .and_then(|next| {
+                std::iter::successors(Some(next), |part| {
+                    let mut cursor = part.walk();
+                    part.children(&mut cursor).find(|child| !child.is_extra())
+                })
+                .last()
+            })
+            .is_some_and(|word| {
+                word.kind() == "primitive_type" || DECLARATION_OPENERS.contains(&word.kind())
+            });
+        if opens_a_declaration {
+            macros.extend(words[at..].iter().map(Node::byte_range));
         }
     }
     macros
@@ -8018,6 +8110,80 @@ region     = "us-central1"
                 .as_deref(),
             Some("QString name(int index)"),
             "arguments in parentheses after a macro's name are no invocation to read past alone"
+        );
+        assert_eq!(
+            declared(
+                "QT_BEGIN_NAMESPACE\nclass QTimerPrivate;\nclass Q_CORE_EXPORT QTimer : public QObject\n{\n    \
+                 bool isActive() const;\n    QT_CORE_INLINE_SINCE(6, 8)\n    \
+                 static void singleShot(int msec, const QObject *receiver, const char *member);\n};\n\
+                 QT_BEGIN_NAMESPACE\nclass QFontEngine;\nclass Q_GUI_EXPORT QFontDatabase\n{\n    \
+                 enum WritingSystem {\n    };\n    \
+                 QT_DEPRECATED_VERSION_X_6_0(\"Call the static functions instead\") explicit QFontDatabase() = default;\n};\n"
+            ),
+            [
+                "class:QTimerPrivate",
+                "class:QTimer",
+                "method:isActive",
+                "method:singleShot",
+                "class:QFontEngine",
+                "class:QFontDatabase",
+                "enum:WritingSystem",
+                "constructor:QFontDatabase",
+            ],
+            "an invocation whose arguments are literals before a declaration's first word is a macro's"
+        );
+        assert_eq!(
+            declared(
+                "#include <QtGui/qpixmap.h>\nclass Q_GUI_EXPORT QPixmapCache\n{\n    class KeyData;\n    \
+                 QT_DEPRECATED_VERSION_X_6_6(\"Use remove(key), followed by key = insert(pixmap).\")\n    \
+                 QT_GUI_INLINE_SINCE(6, 6)\n    static bool replace(const Key &key, const QPixmap &pixmap);\n}\n"
+            ),
+            ["class:QPixmapCache", "class:KeyData", "method:replace"],
+            "whether the grammar read it as a call or as an error's words"
+        );
+        assert_eq!(
+            declared(
+                "class Q_CORE_EXPORT QRangeModel : public QAbstractItemModel\n{\n    Q_OBJECT\npublic:\n    \
+                 void setAutoConnectPolicy(AutoConnectPolicy policy);\n\nQ_SIGNALS:\n    \
+                 void roleNamesChanged();\n    \
+                 Q_REVISION(6, 11) void autoConnectPolicyChanged(AutoConnectPolicy policy);\n    \
+                 Q_REVISION(6, 12) void sortRoleChanged(int role);\n    \
+                 Q_REVISION(6, 12) void sortCollatorChanged(const QCollator &collator);\n    \
+                 Q_REVISION(6, 13) void matchCollatorChanged(const QCollator &collator);\n    \
+                 Q_REVISION(6, 12) void supportedDragActionsChanged(Qt::DropActions actions);\n};\n"
+            ),
+            [
+                "class:QRangeModel",
+                "method:setAutoConnectPolicy",
+                "method:roleNamesChanged",
+                "method:autoConnectPolicyChanged",
+                "method:sortRoleChanged",
+                "method:matchCollatorChanged",
+                "method:supportedDragActionsChanged",
+            ],
+            "and before a primitive type"
+        );
+        assert_eq!(
+            declared(
+                "class Q_CORE_EXPORT QDateTime\n{\npublic:\n    QDateTime() noexcept;\n\
+                 #if QT_DEPRECATED_SINCE(6, 9)\n    QT_DEPRECATED_VERSION_X_6_9(\"Pass QTimeZone instead\")\n    \
+                 QDateTime(QDate date, QTime time, Qt::TimeSpec spec, int offsetSeconds = 0);\n#endif\n    \
+                 QDateTime(QDate date, QTime time);\n};\n\
+                 extern NCURSES_EXPORT(char *) longname (void);\n\
+                 extern NCURSES_EXPORT(int) mvinstr (int, int, char *);\n\
+                 extern NCURSES_EXPORT(int) mvprintw (int,int, const char *,...)\n\
+                 extern NCURSES_EXPORT(int) mvscanw (int,int, NCURSES_CONST char *,...)\n"
+            ),
+            [
+                "class:QDateTime",
+                "constructor:QDateTime",
+                "constructor:QDateTime",
+                "constructor:QDateTime",
+                "function:longname",
+                "function:mvinstr",
+                "function:mvprintw",
+            ],
+            "nor is one with other arguments, or before a word a declarator may have after it"
         );
         assert_eq!(
             declared(
