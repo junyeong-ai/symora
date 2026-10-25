@@ -189,16 +189,15 @@ impl TsConfig {
 }
 
 /// What Cargo builds of a package: its library, where it has one, and the
-/// directory of each target's root file, where that crate's module paths
-/// start.
+/// root file of each crate it builds, where that crate's module tree starts.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RustPackage {
     pub(super) library: Option<RustLibrary>,
-    pub(super) roots: Vec<Vec<String>>,
+    pub(super) crates: Vec<Vec<String>>,
 }
 
-/// A Cargo package's library: the name other crates import it by, and the
-/// directory holding its root file.
+/// A Cargo package's library: the name other crates import it by, and its
+/// root file.
 #[derive(Debug, Clone)]
 pub(super) struct RustLibrary {
     pub(super) name: String,
@@ -221,23 +220,39 @@ impl Manifests {
         .into_iter()
         .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
         .collect();
-        let rust_files: HashSet<&Path> = nodes
-            .iter()
-            .filter(|node| node.language == Language::Rust)
-            .map(|node| Path::new(&node.rel_path))
-            .collect();
-        let rust_packages = manifests_above(
+        let cargo_manifests: Vec<(Vec<String>, toml::Table)> = manifests_above(
             root,
             nodes,
             |language| language == Language::Rust,
             "Cargo.toml",
         )
         .into_iter()
-        .filter_map(|(directory, cargo)| {
-            let package = cargo_package(&directory, &cargo, &rust_files)?;
-            Some((directory, package))
-        })
+        .filter_map(|(directory, cargo)| Some((directory, toml::from_str(&cargo).ok()?)))
+        .filter(|(_, manifest): &(_, toml::Table)| manifest.contains_key("package"))
         .collect();
+        // Each Rust file is its nearest package's.
+        let mut package_files: HashMap<&[String], Vec<Vec<String>>> = cargo_manifests
+            .iter()
+            .map(|(directory, _)| (directory.as_slice(), Vec::new()))
+            .collect();
+        for node in nodes.iter().filter(|node| node.language == Language::Rust) {
+            let file = split_components(&node.rel_path);
+            let package = (0..=node.directory.len())
+                .rev()
+                .map(|depth| &node.directory[..depth])
+                .find(|directory| package_files.contains_key(directory));
+            if let Some(files) = package.and_then(|package| package_files.get_mut(package)) {
+                files.push(file);
+            }
+        }
+        let rust_packages = cargo_manifests
+            .iter()
+            .filter_map(|(directory, manifest)| {
+                let files = package_files.get(directory.as_slice())?;
+                let package = cargo_package(directory, manifest, files)?;
+                Some((directory.clone(), package))
+            })
+            .collect();
         let package_jsons: Vec<(Vec<String>, serde_json::Value)> =
             manifests_above(root, nodes, is_javascript, "package.json")
                 .into_iter()
@@ -264,33 +279,7 @@ impl Manifests {
         }
     }
 
-    /// The directory a `crate::` path written in `from` starts at: that of the
-    /// root file of the one target of its package whose directory holds it.
-    /// A file under a target directory of its own (`src/bin/`, `tests/`,
-    /// `examples/`, `benches/`), or below two targets' roots at once, belongs
-    /// to a crate its location does not determine, and so does a file no
-    /// `Cargo.toml` governs.
-    pub(super) fn rust_crate_root(&self, from: &Node) -> Option<&[String]> {
-        let (directory, package) = nearest(&self.rust_packages, &from.directory)?;
-        let target = match &from.directory[directory.len()..] {
-            [first, second, ..] if first == "src" && second == "bin" => true,
-            [first, ..] => matches!(first.as_str(), "tests" | "examples" | "benches"),
-            [] => false,
-        };
-        if target {
-            return None;
-        }
-        let mut holding = package
-            .roots
-            .iter()
-            .filter(|root| from.directory.starts_with(root));
-        match (holding.next(), holding.next()) {
-            (Some(root), None) => Some(root),
-            _ => None,
-        }
-    }
-
-    /// The root directory of the project library a Rust path's first segment
+    /// The root file of the project library a Rust path's first segment
     /// names, by the rule every manifest name follows (`own_or_only`).
     pub(super) fn rust_library(&self, name: &str, from: &Node) -> Option<&[String]> {
         own_or_only(&self.rust_packages, from, |package| {
@@ -474,18 +463,22 @@ fn dart_package_name(pubspec: &str) -> Option<String> {
 
 /// What a `Cargo.toml` declares, where it declares a package: its library —
 /// named by `[lib] name` or the package's name with `-` read as `_`, its root
-/// file where `[lib] path` (by default `src/lib.rs`) puts it — and the
-/// directory of every target root file: the library's, each `[[bin]]` path's,
-/// and `src/` for `src/main.rs`. A target counts only where its root file is a
-/// project file; a workspace's own manifest declares no package.
+/// file where `[lib] path` (by default `src/lib.rs`) puts it — and the root
+/// file of every crate it builds: the library's; each binary, test, example
+/// and bench a target table's `path` names or Cargo discovers (`src/main.rs`,
+/// `src/bin/*.rs` and `src/bin/*/main.rs`; `tests/`, `examples/` and
+/// `benches/` alike), unless its `autobins`-style key turns discovery off;
+/// and the build script, `package.build` or `build.rs`. A crate counts only
+/// where its root file is one of `files`, the package's own Rust files; a
+/// workspace's own manifest declares no package.
 fn cargo_package(
     directory: &[String],
-    cargo_toml: &str,
-    rust_files: &HashSet<&Path>,
+    manifest: &toml::Table,
+    files: &[Vec<String>],
 ) -> Option<RustPackage> {
-    let manifest: toml::Table = toml::from_str(cargo_toml).ok()?;
-    let package = manifest.get("package")?.as_table()?.get("name")?.as_str()?;
-    let project_file = |path: &str| {
+    let package = manifest.get("package")?.as_table()?;
+    let name = package.get("name")?.as_str()?;
+    let file_of = |path: &str| {
         let mut file = directory.to_vec();
         for part in path.split('/') {
             match part {
@@ -495,34 +488,61 @@ fn cargo_package(
                 part => file.push(part.to_string()),
             }
         }
-        let present = rust_files.contains(file.iter().collect::<PathBuf>().as_path());
-        file.pop();
-        present.then_some(file)
+        files.contains(&file).then_some(file)
     };
     let lib = manifest.get("lib").and_then(toml::Value::as_table);
     let setting = |key| {
         lib.and_then(|lib| lib.get(key))
             .and_then(toml::Value::as_str)
     };
-    let library = project_file(setting("path").unwrap_or("src/lib.rs")).map(|root| RustLibrary {
-        name: setting("name").unwrap_or(package).replace('-', "_"),
+    let library = file_of(setting("path").unwrap_or("src/lib.rs")).map(|root| RustLibrary {
+        name: setting("name").unwrap_or(name).replace('-', "_"),
         root,
     });
-    let bins = manifest
-        .get("bin")
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|bin| bin.get("path")?.as_str())
-        .chain(["src/main.rs"]);
-    let mut roots: Vec<Vec<String>> = library
-        .iter()
-        .map(|library| library.root.clone())
-        .chain(bins.filter_map(project_file))
-        .collect();
-    roots.sort();
-    roots.dedup();
-    Some(RustPackage { library, roots })
+    let mut crates: Vec<Vec<String>> = library.iter().map(|library| library.root.clone()).collect();
+    for (table, discovery, location) in [
+        ("bin", "autobins", &["src", "bin"][..]),
+        ("test", "autotests", &["tests"]),
+        ("example", "autoexamples", &["examples"]),
+        ("bench", "autobenches", &["benches"]),
+    ] {
+        let targets = manifest.get(table).and_then(toml::Value::as_array);
+        crates.extend(
+            targets
+                .into_iter()
+                .flatten()
+                .filter_map(|target| file_of(target.get("path")?.as_str()?)),
+        );
+        if package.get(discovery).and_then(toml::Value::as_bool) == Some(false) {
+            continue;
+        }
+        if table == "bin" {
+            crates.extend(file_of("src/main.rs"));
+        }
+        let discovered = files.iter().filter(|file| {
+            let below = &file[directory.len()..];
+            let inside = below.len() >= location.len()
+                && below
+                    .iter()
+                    .zip(location)
+                    .all(|(part, wanted)| part == wanted);
+            let rest = inside.then(|| &below[location.len()..]);
+            match rest {
+                Some([file]) => file.ends_with(".rs"),
+                Some([_, file]) => file == "main.rs",
+                _ => false,
+            }
+        });
+        crates.extend(discovered.cloned());
+    }
+    match package.get("build") {
+        Some(toml::Value::String(build)) => crates.extend(file_of(build)),
+        Some(toml::Value::Boolean(false)) => {}
+        _ => crates.extend(file_of("build.rs")),
+    }
+    crates.sort();
+    crates.dedup();
+    Some(RustPackage { library, crates })
 }
 
 /// Every TypeScript configuration above a JavaScript or TypeScript file, by

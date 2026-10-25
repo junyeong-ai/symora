@@ -120,6 +120,7 @@ impl ImportExtractor {
         let source = content.as_bytes();
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), source);
+        let mut rust = Vec::new();
         while let Some(m) = matches.next() {
             let captured = |name| {
                 m.captures()
@@ -127,8 +128,26 @@ impl ImportExtractor {
                     .find(|capture| entry.capture_name(capture) == Some(name))
             };
             if let Some(module) = captured("declared") {
-                let name = rust_identifier_name(module.node, source);
-                imports.modules.push(name.to_string());
+                let Some(item) = module.node.parent() else {
+                    continue;
+                };
+                let (scope, in_block) = rust_scope(item, source);
+                if in_block {
+                    continue;
+                }
+                let declaration = ModuleDeclaration {
+                    scope,
+                    name: rust_identifier_name(module.node, source).to_string(),
+                    inline: item.child_by_field_name("body").is_some(),
+                    path: rust_module_path(item, source),
+                };
+                if !declaration.inline {
+                    rust.push(RustReference::Module {
+                        scope: declaration.scope.clone(),
+                        name: declaration.name.clone(),
+                    });
+                }
+                imports.modules.push(declaration);
                 continue;
             }
             if let Some(name) = captured("declares") {
@@ -147,26 +166,211 @@ impl ImportExtractor {
                 });
                 continue;
             }
-            imports
-                .references
-                .extend(references_of(m.captures(), source, entry));
+            let references = references_of(m.captures(), source, entry);
+            match captured("path") {
+                Some(path) if entry.dialect == Dialect::RustUse => {
+                    let (scope, _) = rust_scope(path.node, source);
+                    rust.extend(references.into_iter().map(|target| RustReference::Use {
+                        scope: scope.clone(),
+                        target,
+                    }));
+                }
+                _ => imports.references.extend(references),
+            }
         }
+        imports.references.extend(
+            rust.into_iter()
+                .map(|reference| reference.relative_to_the_file(&imports.modules)),
+        );
         imports
     }
+}
+
+/// A module reference a Rust file makes, with the inline modules it is
+/// written in.
+enum RustReference {
+    /// A `use` path.
+    Use { scope: Vec<String>, target: String },
+    /// A module declared without a body, which names its file.
+    Module { scope: Vec<String>, name: String },
+}
+
+impl RustReference {
+    /// The reference as written from the file's own module: `self::` and
+    /// `super::` hops, and a path from a module declared where the reference
+    /// is written, taken through the inline modules enclosing it, so that
+    /// `super::x` in `mod a { mod b { … } }` reads `self::a::x`. Any other
+    /// path is a `crate::` path or one from an extern crate's name.
+    fn relative_to_the_file(self, declarations: &[ModuleDeclaration]) -> String {
+        let (scope, segments) = match &self {
+            Self::Module { scope, name } => (scope, vec![name.as_str()]),
+            Self::Use { scope, target } => (scope, target.split("::").collect()),
+        };
+        let within = |kept: &[String], rest: &[&str]| {
+            std::iter::once("self")
+                .chain(kept.iter().map(String::as_str))
+                .chain(rest.iter().copied())
+                .collect::<Vec<_>>()
+                .join("::")
+        };
+        match segments.first().copied() {
+            Some("self" | "super") => {
+                let hops = segments
+                    .iter()
+                    .take_while(|segment| matches!(**segment, "self" | "super"))
+                    .count();
+                let up = segments[..hops]
+                    .iter()
+                    .filter(|segment| **segment == "super")
+                    .count();
+                if up <= scope.len() {
+                    within(&scope[..scope.len() - up], &segments[hops..])
+                } else {
+                    std::iter::repeat_n("super", up - scope.len())
+                        .chain(segments[hops..].iter().copied())
+                        .collect::<Vec<_>>()
+                        .join("::")
+                }
+            }
+            Some(first)
+                if matches!(self, Self::Module { .. })
+                    || declarations
+                        .iter()
+                        .any(|declared| declared.scope == *scope && declared.name == first) =>
+            {
+                within(scope, &segments)
+            }
+            _ => segments.join("::"),
+        }
+    }
+}
+
+/// The inline modules enclosing a Rust node, outermost first, and whether a
+/// block (a function's body) encloses it.
+fn rust_scope(node: Node<'_>, source: &[u8]) -> (Vec<String>, bool) {
+    let mut scope = Vec::new();
+    let mut in_block = false;
+    let mut current = node.parent();
+    while let Some(ancestor) = current {
+        match ancestor.kind() {
+            "block" => in_block = true,
+            "declaration_list" => {
+                if let Some(name) = ancestor
+                    .parent()
+                    .filter(|item| item.kind() == "mod_item")
+                    .and_then(|item| item.child_by_field_name("name"))
+                {
+                    scope.push(rust_identifier_name(name, source).to_string());
+                }
+            }
+            _ => {}
+        }
+        current = ancestor.parent();
+    }
+    scope.reverse();
+    (scope, in_block)
+}
+
+/// Where the attributes written before a `mod` item put its file: the
+/// first `path` attribute among them, or none; a `cfg_attr` that can set
+/// one first leaves it open.
+fn rust_module_path(item: Node<'_>, source: &[u8]) -> ModulePath {
+    let mut attributes = Vec::new();
+    let mut sibling = item.prev_named_sibling();
+    while let Some(node) = sibling {
+        match node.kind() {
+            "attribute_item" => attributes.extend(node.named_child(0)),
+            "line_comment" | "block_comment" => {}
+            _ => break,
+        }
+        sibling = node.prev_named_sibling();
+    }
+    for attribute in attributes.into_iter().rev() {
+        let Some(name) = attribute
+            .named_child(0)
+            .filter(|name| name.kind() == "identifier")
+        else {
+            continue;
+        };
+        match text_of(name, source) {
+            "path" => {
+                return attribute
+                    .child_by_field_name("value")
+                    .and_then(|value| rust_string(value, source))
+                    .map_or(ModulePath::Undetermined, ModulePath::Attribute);
+            }
+            "cfg_attr" => {
+                let sets_path =
+                    attribute
+                        .child_by_field_name("arguments")
+                        .is_some_and(|arguments| {
+                            let mut cursor = arguments.walk();
+                            arguments.named_children(&mut cursor).any(|argument| {
+                                argument.kind() == "identifier"
+                                    && text_of(argument, source) == "path"
+                            })
+                        });
+                if sets_path {
+                    return ModulePath::Undetermined;
+                }
+            }
+            _ => {}
+        }
+    }
+    ModulePath::Default
+}
+
+/// The value a Rust string literal spells, where it carries no escape.
+fn rust_string(literal: Node<'_>, source: &[u8]) -> Option<String> {
+    if !matches!(literal.kind(), "string_literal" | "raw_string_literal") {
+        return None;
+    }
+    let mut cursor = literal.walk();
+    let mut value = String::new();
+    for part in literal.named_children(&mut cursor) {
+        match part.kind() {
+            "string_content" => value.push_str(text_of(part, source)),
+            _ => return None,
+        }
+    }
+    Some(value)
 }
 
 /// What a file's imports say: the package it declares itself in, where its
 /// language names one in the file (`package com.acme.app`), the names it
 /// declares at its top level, which an import of that package names it by
-/// (a JVM class, object or top-level function), the modules it declares,
-/// which its own paths can start from (a Rust `mod`), and the module
-/// references it makes, in source order.
+/// (a JVM class, object or top-level function), the modules it declares (a
+/// Rust `mod`), and the module references it makes, in source order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileImports {
     pub package: Option<String>,
     pub declares: Vec<String>,
-    pub modules: Vec<String>,
+    pub modules: Vec<ModuleDeclaration>,
     pub references: Vec<String>,
+}
+
+/// A module a Rust file declares, `mod name;` or `mod name { … }`, outside
+/// any block: one a block declares is no module of the file's tree.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModuleDeclaration {
+    /// The inline modules the declaration is written in, outermost first.
+    pub scope: Vec<String>,
+    pub name: String,
+    /// Whether its body is written inline rather than in a file of its own.
+    pub inline: bool,
+    pub path: ModulePath,
+}
+
+/// Where a module's file, or an inline module's directory, is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ModulePath {
+    /// Where Rust's default rules put it.
+    Default,
+    /// Where its first `#[path = "…"]` attribute puts it.
+    Attribute(String),
+    /// Where its source does not say: a path a `#[cfg_attr(…)]` sets, or a
+    /// path string with an escape.
+    Undetermined,
 }
 
 fn register(
@@ -211,9 +415,6 @@ fn references_of(
             .find(|capture| entry.capture_name(capture) == Some(name))
             .map(|capture| capture.node)
     };
-    if let Some(module) = captured("module") {
-        return vec![format!("self::{}", rust_identifier_name(module, source))];
-    }
     let Some(path) = captured("path") else {
         return Vec::new();
     };
@@ -488,12 +689,11 @@ fn rust_identifier_name<'a>(node: Node, source: &'a [u8]) -> &'a str {
     name.strip_prefix("r#").unwrap_or(name)
 }
 
-/// Out-of-line declarations name modules; inline modules add lexical context.
-/// Every module a file declares, either way, is a name its own paths can
-/// start from.
+/// A `use` declaration's paths, and each module a file declares: one without
+/// a body names the file Rust's module rules and the attributes written
+/// before it place, and any can start a path the module declaring it writes.
 const RUST_QUERY: &str = r#"
 (use_declaration argument: (_) @path)
-(mod_item name: (identifier) @module !body)
 (mod_item name: (identifier) @declared)
 "#;
 
@@ -738,20 +938,69 @@ mod tests {
         assert_eq!(extract(source, Language::Rust), vec!["crate::real::one"]);
     }
 
+    /// A module declared without a body names its file, from the inline
+    /// modules it is written in, and a `#[path]` attribute before it says
+    /// where that file is; one declared in a block is no module of the
+    /// file's tree.
     #[test]
     fn a_mod_declaration_names_a_file_only_when_it_has_no_body() {
-        let source = "mod auth;\nmod r#type;\nmod tests {\n    fn helper() {}\n    mod inner;\n}\n";
+        let source = "mod auth;\nmod r#type;\nmod tests {\n    fn helper() { mod local; }\n    \
+                      /// docs\n    #[cfg(unix)]\n    #[path = \"in/ner.rs\"]\n    mod inner;\n}\n\
+                      #[cfg_attr(unix, path = \"u.rs\")]\nmod cond;\n";
         assert_eq!(
             extract(source, Language::Rust),
-            vec!["self::auth", "self::type", "self::inner"]
+            vec![
+                "self::auth",
+                "self::type",
+                "self::tests::inner",
+                "self::cond"
+            ]
         );
-        // Every module the file declares, with a body or without, is one its
-        // own paths can start from.
+        let declared = |scope: &[&str], name: &str, inline, path| ModuleDeclaration {
+            scope: scope.iter().map(|part| part.to_string()).collect(),
+            name: name.to_string(),
+            inline,
+            path,
+        };
         assert_eq!(
             ImportExtractor::shared()
                 .extract(source, Language::Rust)
                 .modules,
-            vec!["auth", "type", "tests", "inner"]
+            vec![
+                declared(&[], "auth", false, ModulePath::Default),
+                declared(&[], "type", false, ModulePath::Default),
+                declared(&[], "tests", true, ModulePath::Default),
+                declared(
+                    &["tests"],
+                    "inner",
+                    false,
+                    ModulePath::Attribute("in/ner.rs".to_string())
+                ),
+                declared(&[], "cond", false, ModulePath::Undetermined),
+            ]
+        );
+    }
+
+    /// A Rust `use` path is read as written from the file's own module:
+    /// `self::` and `super::` hops and a path from a module declared where
+    /// the `use` is written go through the inline modules enclosing it.
+    #[test]
+    fn a_rust_use_path_is_read_from_the_file_module() {
+        let source = "mod a {\n    mod b {\n        use super::x;\n        use super::super::super::y;\n\
+                      use self::z;\n        mod c;\n        use c::C;\n        use ext::E;\n    }\n}\n\
+                      use a::A;\nfn f() { use super::w; }\n";
+        assert_eq!(
+            extract(source, Language::Rust),
+            vec![
+                "self::a::x",
+                "super::y",
+                "self::a::b::z",
+                "self::a::b::c",
+                "self::a::b::c::C",
+                "ext::E",
+                "self::a::A",
+                "super::w"
+            ]
         );
     }
 
