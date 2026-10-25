@@ -168,6 +168,10 @@ pub(super) struct TsConfig {
     /// the configuration differently, or where a configuration its chain
     /// extends that could not be read may set either.
     pub(super) module_resolution: Option<ModuleResolution>,
+    /// Whether its `module` emits a file whose extension does not say its
+    /// format as CommonJS (`commonjs`); `None` where a configuration its
+    /// chain extends that could not be read may set it.
+    pub(super) emits_commonjs: Option<bool>,
     /// The conditions `customConditions` adds; `None` where a configuration
     /// the chain extends that could not be read may add any.
     pub(super) custom_conditions: Option<Vec<String>>,
@@ -1359,6 +1363,7 @@ fn ts_config(chain: &Chain) -> TsConfig {
         },
         None => None,
     };
+    let emits_commonjs = setting("module").map(|module| module.as_deref() == Some("commonjs"));
     let custom_conditions = decided("customConditions").map(|conditions| {
         conditions
             .and_then(|conditions| conditions.as_array())
@@ -1372,6 +1377,7 @@ fn ts_config(chain: &Chain) -> TsConfig {
         paths,
         paths_base,
         module_resolution,
+        emits_commonjs,
         custom_conditions,
     }
 }

@@ -67,7 +67,12 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         graph.entry(node.id).or_default();
         let importer = Importer::of(node, manifests);
         let mut seen = HashSet::new();
-        for target in &node.imports.references {
+        let declarations = node.imports.references.iter();
+        let requires = node.imports.requires.iter();
+        let written = declarations
+            .map(|target| (target, ImportForm::Declaration))
+            .chain(requires.map(|target| (target, ImportForm::Require)));
+        for (target, form) in written {
             let reference = Reference::parse(target, node.language);
             if let Reference::Bare(specifier) = &reference
                 && (importer.ts_owner_undetermined
@@ -78,7 +83,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
             {
                 ts_owner_undetermined.insert(node.rel_path.clone());
             }
-            let files = match index.resolve(&reference, &importer) {
+            let files = match index.resolve(&reference, &importer, form) {
                 Resolution::Files(files) => files,
                 Resolution::NeedsOwnership => {
                     rust_relative_imports_omitted = true;
@@ -148,11 +153,23 @@ enum ImportMode {
 /// The conditions a module resolution that reads `exports` matches.
 #[derive(Debug, Clone, Copy)]
 enum ExportConditions {
-    Bundler,
+    /// `bundler`, for a file TypeScript emits as an ES module or not, which
+    /// decides an import declaration's condition; `None` where its
+    /// configuration leaves the format open.
+    Bundler { esm: Option<bool> },
     /// `node16` or `nodenext`, for a file Node reads as an ES module or not.
-    Node16 {
-        esm: bool,
-    },
+    Node16 { esm: bool },
+}
+
+/// How an import is written, which TypeScript resolves under `bundler`,
+/// `node16` and `nodenext` as an ES import or a CommonJS `require`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportForm {
+    /// An `import` or `export … from` declaration, read by the format the
+    /// file is emitted in.
+    Declaration,
+    /// A TypeScript `import x = require("…")`, a `require` in any file.
+    Require,
 }
 
 impl<'a> Importer<'a> {
@@ -174,7 +191,9 @@ impl<'a> Importer<'a> {
             None => Some(ModuleResolution::Bundler),
         };
         let mode = resolution.map(|resolution| match resolution {
-            ModuleResolution::Bundler => ImportMode::Exports(ExportConditions::Bundler),
+            ModuleResolution::Bundler => ImportMode::Exports(ExportConditions::Bundler {
+                esm: emits_es_module(node, ts_config),
+            }),
             ModuleResolution::Node16 => ImportMode::Exports(ExportConditions::Node16 {
                 esm: is_es_module(node, manifests),
             }),
@@ -190,15 +209,22 @@ impl<'a> Importer<'a> {
         }
     }
 
-    /// Whether TypeScript matches an `exports` condition for this file's
-    /// imports under `conditions`, `None` where its configuration leaves
-    /// those open: `types`, `default` and the `customConditions` always;
-    /// `import` under `bundler` or for an ES module under `node16`; `require`
-    /// for any other file under `node16`; `node` under `node16`; nothing
-    /// else. A versioned `types@<range>` key depends on the compiler's own
-    /// version, and any other key on a configuration whose
-    /// `customConditions` its chain leaves undecided.
-    fn matches(&self, conditions: Option<ExportConditions>, condition: &str) -> Option<bool> {
+    /// Whether TypeScript matches an `exports` condition for an import this
+    /// file writes in `form` under `conditions`, `None` where its
+    /// configuration leaves that open: `types`, `default` and the
+    /// `customConditions` always; `import` for a declaration in a file
+    /// emitted (`bundler`) or read by Node (`node16`) as an ES module;
+    /// `require` for any other declaration and for every `import x =
+    /// require()`; `node` under `node16`; nothing else, as TypeScript's
+    /// `getModeForUsageLocation` selects them. A versioned `types@<range>`
+    /// key depends on the compiler's own version, and any other key on a
+    /// configuration whose `customConditions` its chain leaves undecided.
+    fn matches(
+        &self,
+        conditions: Option<ExportConditions>,
+        form: ImportForm,
+        condition: &str,
+    ) -> Option<bool> {
         if matches!(condition, "types" | "default") {
             return Some(true);
         }
@@ -209,14 +235,21 @@ impl<'a> Importer<'a> {
             return Some(true);
         }
         match condition {
-            "import" | "require" | "node" => Some(match conditions? {
-                ExportConditions::Bundler => condition == "import",
-                ExportConditions::Node16 { esm } => match condition {
+            "import" | "require" | "node" => {
+                let (esm, node) = match conditions? {
+                    ExportConditions::Bundler { esm } => (esm, false),
+                    ExportConditions::Node16 { esm } => (Some(esm), true),
+                };
+                let esm = match form {
+                    ImportForm::Declaration => esm,
+                    ImportForm::Require => Some(false),
+                };
+                match condition {
+                    "node" => Some(node),
                     "import" => esm,
-                    "require" => !esm,
-                    _ => true,
-                },
-            }),
+                    _ => esm.map(|esm| !esm),
+                }
+            }
             _ if condition.starts_with("types@") || custom.is_none() => None,
             _ => Some(false),
         }
@@ -235,6 +268,26 @@ fn is_es_module(node: &Node, manifests: &Manifests) -> bool {
         Some("mjs" | "mts") => true,
         Some("cjs" | "cts") => false,
         _ => nearest(&manifests.module_types, &node.directory).is_some_and(|(_, module)| *module),
+    }
+}
+
+/// Whether TypeScript emits a file as an ES module under `bundler`, which
+/// reads its format from its extension (`.mts` and `.mjs` are, `.cts` and
+/// `.cjs` are not) and otherwise from the configuration's `module`:
+/// `commonjs` emits CommonJS, any other an ES module, and so does the
+/// default of TypeScript 6 and 7 where neither a configuration nor its
+/// `module` says. `None` where the configuration leaves `module`
+/// undecided.
+fn emits_es_module(node: &Node, config: Option<&TsConfig>) -> Option<bool> {
+    match Path::new(&node.rel_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("mjs" | "mts") => Some(true),
+        Some("cjs" | "cts") => Some(false),
+        _ => config.map_or(Some(true), |config| {
+            config.emits_commonjs.map(|commonjs| !commonjs)
+        }),
     }
 }
 
@@ -972,7 +1025,7 @@ impl<'a> PythonPath<'a> {
 impl ProjectIndex<'_> {
     /// What a reference names, nothing where it names something outside the
     /// project or nothing unambiguous.
-    fn resolve(&self, reference: &Reference, importer: &Importer) -> Resolution {
+    fn resolve(&self, reference: &Reference, importer: &Importer, form: ImportForm) -> Resolution {
         let from = importer.node;
         let files = match reference {
             Reference::Relative { up, components } if from.language == Language::Rust => {
@@ -1018,7 +1071,7 @@ impl ProjectIndex<'_> {
             Reference::Absolute(path) if from.language == Language::Rust => {
                 return self.rust_path(path, from);
             }
-            Reference::Bare(specifier) => return self.bare_specifier(specifier, importer),
+            Reference::Bare(specifier) => return self.bare_specifier(specifier, importer, form),
             // Anywhere else an absolute name (a Terraform registry source)
             // names what the project's dependencies provide, never a project
             // file by its spelling.
@@ -1035,7 +1088,7 @@ impl ProjectIndex<'_> {
     /// a workspace package's name matches that names no file is disclosed
     /// rather than dropped — except where only the catch-all `*` pattern
     /// matches it, which maps every package name too.
-    fn bare_specifier(&self, specifier: &str, importer: &Importer) -> Resolution {
+    fn bare_specifier(&self, specifier: &str, importer: &Importer, form: ImportForm) -> Resolution {
         let language = importer.node.language;
         let config = importer.ts_config;
         let mapped = config.and_then(|config| config.mapped(specifier));
@@ -1051,7 +1104,7 @@ impl ProjectIndex<'_> {
         {
             return Resolution::Files(found);
         }
-        if let Some(package) = self.workspace_package(specifier, importer) {
+        if let Some(package) = self.workspace_package(specifier, importer, form) {
             return package;
         }
         match mapped {
@@ -1089,7 +1142,12 @@ impl ProjectIndex<'_> {
     /// package whose file pack cannot determine is disclosed: a pattern
     /// `exports` maps, a condition the importer's configuration leaves open,
     /// an entry naming no file, or a name two packages of the workspace give.
-    fn workspace_package(&self, specifier: &str, importer: &Importer) -> Option<Resolution> {
+    fn workspace_package(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        form: ImportForm,
+    ) -> Option<Resolution> {
         let from = importer.node;
         // The conditions `exports` is read under, `None` where the
         // configuration leaves them open; `node10` reads no `exports`.
@@ -1146,8 +1204,8 @@ impl ProjectIndex<'_> {
             }
             _ => (key == ".").then_some(exports),
         };
-        let exported =
-            target.map(|target| self.export_target(target, directory, importer, conditions));
+        let exported = target
+            .map(|target| self.export_target(target, directory, importer, (conditions, form)));
         Some(match exported {
             Some(Exported::Files(files)) => Resolution::Files(files),
             _ => undetermined(),
@@ -1166,7 +1224,7 @@ impl ProjectIndex<'_> {
         target: &serde_json::Value,
         directory: &[String],
         importer: &Importer,
-        reading: Option<ExportConditions>,
+        reading: (Option<ExportConditions>, ImportForm),
     ) -> Exported {
         match target {
             serde_json::Value::String(path) if path.starts_with("./") => {
@@ -1192,10 +1250,10 @@ impl ProjectIndex<'_> {
         conditions: &[(&String, &serde_json::Value)],
         directory: &[String],
         importer: &Importer,
-        reading: Option<ExportConditions>,
+        reading: (Option<ExportConditions>, ImportForm),
     ) -> Exported {
         for (at, (condition, target)) in conditions.iter().enumerate() {
-            let matched = importer.matches(reading, condition);
+            let matched = importer.matches(reading.0, reading.1, condition);
             if matched == Some(false) {
                 continue;
             }
@@ -3307,6 +3365,64 @@ mod tests {
                 "@acme/modes".to_string(),
                 "@acme/nested".to_string()
             ])
+        );
+    }
+
+    /// TypeScript resolves an import under `bundler` with the condition
+    /// its form and its file's emitted format select (`tsdef_bundler`, and
+    /// each case run under tsc 5.9.3, 6.0.3 and 7.0.2): a declaration in a
+    /// file emitted as an ES module matches `import`; one in a `.cts` file,
+    /// or in any file a `module: commonjs` emits as CommonJS, matches
+    /// `require`, and so does every `import x = require()`, under `nodenext`
+    /// in an ES module too.
+    #[test]
+    fn an_import_matches_the_condition_its_form_and_its_files_format_select() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let declaration = "import { main } from 'p6'\n";
+        let required = "import p = require('p6')\n";
+        let nodes = vec![
+            ts(0, "esnext/src/a.ts", declaration),
+            ts(1, "esnext/src/b.cts", declaration),
+            ts(2, "esnext/src/c.ts", required),
+            ts(3, "esnext/src/d.mts", declaration),
+            ts(4, "commonjs/src/a.ts", declaration),
+            ts(5, "commonjs/src/d.mts", declaration),
+            ts(6, "nodenext/src/a.ts", declaration),
+            ts(7, "nodenext/src/c.ts", required),
+            ts(8, "packages/p6/src/esm.ts", ""),
+            ts(9, "packages/p6/src/cjs.ts", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+                (
+                    "packages/p6/package.json",
+                    "{\"name\": \"p6\", \"exports\": {\".\": {\"import\": \"./src/esm.ts\", \
+                     \"require\": \"./src/cjs.ts\"}}}",
+                ),
+                (
+                    "esnext/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"esnext\", \"moduleResolution\": \"bundler\"}}",
+                ),
+                (
+                    "commonjs/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"commonjs\", \"moduleResolution\": \"bundler\"}}",
+                ),
+                (
+                    "nodenext/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"nodenext\"}}",
+                ),
+                ("nodenext/package.json", "{\"type\": \"module\"}"),
+            ],
+            &nodes,
+        );
+        let (esm, cjs) = ("packages/p6/src/esm.ts", "packages/p6/src/cjs.ts");
+        let edges: Vec<Vec<String>> = (0..8)
+            .map(|id| edges_under(&nodes, id, &manifests))
+            .collect();
+        assert_eq!(
+            edges,
+            [esm, cjs, cjs, esm, cjs, esm, esm, cjs].map(|file| vec![file.to_string()])
         );
     }
 

@@ -180,6 +180,10 @@ impl ImportExtractor {
                 continue;
             }
             let references = references_of(m.captures(), source, entry);
+            if captured("required").is_some() {
+                imports.requires.extend(references);
+                continue;
+            }
             match captured("path") {
                 Some(path) if entry.dialect == Dialect::RustUse => {
                     let (scope, _) = rust_scope(path.node, source);
@@ -378,7 +382,8 @@ fn rust_string(literal: Node<'_>, source: &[u8]) -> Option<String> {
 /// class, object or Scala `val`), and the functions and properties, which an
 /// import names only whole — the class its top-level functions and
 /// properties compile into, the modules it declares (a Rust `mod`), and the
-/// module references it makes, in source order.
+/// module references it makes, in source order: those written as imports,
+/// and apart from them those a TypeScript `import x = require("…")` writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileImports {
     pub package: Option<String>,
@@ -387,6 +392,7 @@ pub struct FileImports {
     pub file_class: Option<FileClass>,
     pub modules: Vec<ModuleDeclaration>,
     pub references: Vec<String>,
+    pub requires: Vec<String>,
 }
 
 /// The JVM class a Kotlin file's top-level functions and properties compile
@@ -763,10 +769,12 @@ const JAVASCRIPT_QUERY: &str = r#"
 (export_statement source: (string) @path)
 "#;
 
-/// TypeScript also imports a CommonJS module by name: `import x = require("./m")`.
+/// TypeScript also imports a CommonJS module by name, `import x =
+/// require("./m")`, which it resolves as a `require` whatever the file's
+/// module format.
 const TYPESCRIPT_QUERY: &str = r#"
 (import_statement source: (string) @path)
-(import_statement (import_require_clause source: (string) @path))
+(import_statement (import_require_clause source: (string) @path) @required)
 (export_statement source: (string) @path)
 "#;
 
@@ -1096,12 +1104,15 @@ mod tests {
                 "{language:?}",
             );
         }
+        // TypeScript's `import x = require()` is a reference of its own form,
+        // which resolves as a `require`.
+        let required = ImportExtractor::shared().extract(
+            "import legacy = require(\"./legacy\");\nimport m from \"./m\";\n",
+            Language::TypeScript,
+        );
         assert_eq!(
-            extract(
-                "import legacy = require(\"./legacy\");\n",
-                Language::TypeScript
-            ),
-            vec!["./legacy"]
+            (required.references, required.requires),
+            (vec!["./m".to_string()], vec!["./legacy".to_string()])
         );
     }
 
