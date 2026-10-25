@@ -94,14 +94,6 @@ impl ServerConfig {
         self.tier.init_timeout()
     }
 
-    pub fn request_timeout(&self) -> Duration {
-        self.tier.request_timeout()
-    }
-
-    pub fn cross_file_timeout(&self) -> Duration {
-        self.tier.cross_file_timeout()
-    }
-
     /// Resolve `command` to an absolute, spawnable executable path.
     ///
     /// One deterministic search shared by spawn, `server_status`, and

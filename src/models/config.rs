@@ -229,22 +229,6 @@ impl ServerTier {
             Self::Slow => Duration::from_secs(120),
         }
     }
-
-    pub fn request_timeout(&self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_secs(15),
-            Self::Standard => Duration::from_secs(30),
-            Self::Slow => Duration::from_secs(60),
-        }
-    }
-
-    pub fn cross_file_timeout(&self) -> Duration {
-        match self {
-            Self::Fast => Duration::from_secs(20),
-            Self::Standard => Duration::from_secs(45),
-            Self::Slow => Duration::from_secs(90),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
