@@ -2319,7 +2319,11 @@ fn placed_kind(
         }
         SymbolKind::Method
             if matches!(language, Language::TypeScript | Language::JavaScript)
-                && node.kind() == "method_definition"
+                && (node.kind() == "method_definition"
+                    || node.kind() == "method_signature"
+                        && node
+                            .parent()
+                            .is_some_and(|body| body.kind() == "class_body"))
                 && name == "constructor"
                 && child_of_kind(node, "static").is_none() =>
         {
@@ -3939,6 +3943,7 @@ declare module "bare" { const inBare: number; }
 export declare class Decl {
     method(a: string): void;
     static create(): Decl;
+    constructor(x: number);
 }
 "#,
             declares: &[
@@ -3983,6 +3988,7 @@ export declare class Decl {
                 "class:Decl",
                 "method:Decl/method",
                 "method:Decl/create",
+                "constructor:Decl/constructor",
             ],
         },
         DeclarationFixture {
