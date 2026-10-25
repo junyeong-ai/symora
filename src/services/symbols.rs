@@ -774,7 +774,9 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
 /// neither before `}` is what macros write, a name alone
 /// (`PROTOBUF_TSAN_DECLARE_MEMBER` before a struct's `};`), one with its
 /// arguments (`Q_DECLARE_PRIVATE(Job)`) or one after another (`Q_GADGET
-/// QML_VALUE_TYPE(release)`).
+/// QML_VALUE_TYPE(release)`), and so is the run of members written as macros
+/// are before it ([`run_before`], [`macro_written_members`]), which the
+/// brace ends once it is blanked ([`unended_member_macros`]).
 fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
@@ -802,6 +804,9 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
                     .is_some_and(|brace| brace.kind() == "}" && !brace.is_missing())
         }) {
             macros.extend(written);
+            for member in run_before(node, macro_written_members) {
+                macros.extend(written_words(member).iter().map(Node::byte_range));
+            }
         }
     }
     macros
@@ -915,59 +920,11 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// QT_NO_QOBJECT Q_OBJECT #endif`), since a declaration may go on past a
 /// directive.
 fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize>> {
-    fn macro_written(member: Node) -> bool {
-        let mut cursor = member.walk();
-        matches!(member.kind(), "field_declaration" | "declaration")
-            && member
-                .children(&mut cursor)
-                .filter(|part| !part.is_extra() && !part.is_missing())
-                .all(|part| match part.kind() {
-                    "type_identifier" | "parenthesized_declarator" => true,
-                    "function_declarator" => {
-                        part.child_by_field_name("declarator").is_some_and(|name| {
-                            matches!(name.kind(), "identifier" | "field_identifier")
-                        }) && !names_a_parameter(part)
-                            && function_qualifiers(part).next().is_none()
-                    }
-                    _ => false,
-                })
-    }
-    fn macro_written_members(member: Node) -> Option<Vec<Node>> {
-        if macro_written(member) {
-            return Some(vec![member]);
-        }
-        if !matches!(
-            member.kind(),
-            "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_elifdef" | "preproc_else"
-        ) {
-            return None;
-        }
-        let condition = member
-            .child_by_field_name("condition")
-            .or_else(|| member.child_by_field_name("name"))
-            .map(|condition| condition.id());
-        let mut cursor = member.walk();
-        let held: Vec<Node> = member
-            .named_children(&mut cursor)
-            .filter(|part| (!part.is_extra() || part.is_error()) && Some(part.id()) != condition)
-            .collect();
-        let mut members = Vec::new();
-        for part in held {
-            members.extend(macro_written_members(part)?);
-        }
-        Some(members)
-    }
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
             || node.kind() == "access_specifier"
             || node.child_count() > 0 && opens_with_a_declaration_word(node)
     };
-    fn invocation(member: Node) -> Option<Node> {
-        member
-            .child_by_field_name("declarator")
-            .filter(|declarator| declarator.kind() == "function_declarator")
-            .filter(|_| macro_written(member))
-    }
     let declares_a_function_of_its_own = |member: Node| {
         matches!(
             member.kind(),
@@ -996,29 +953,96 @@ fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize
         if node.kind() != "field_declaration_list" {
             continue;
         }
-        for (at, &next) in members.iter().enumerate() {
-            if let Some(member) = at
-                .checked_sub(1)
-                .map(|before| members[before])
-                .filter(|member| invocation(*member).is_some())
-                .filter(|_| declares_a_function_of_its_own(next))
-            {
-                macros.extend(written_words(member).iter().map(Node::byte_range));
+        for &next in &members {
+            if declares_a_function_of_its_own(next) {
+                for member in run_before(next, |member| invocation(member).map(|_| vec![member])) {
+                    macros.extend(written_words(member).iter().map(Node::byte_range));
+                }
             }
             if !begins_after_a_member(next) {
                 continue;
             }
-            for member in members[..at]
-                .iter()
-                .rev()
-                .map_while(|member| macro_written_members(*member))
-                .flatten()
-            {
+            for member in run_before(next, macro_written_members) {
                 macros.extend(written_words(member).iter().map(Node::byte_range));
             }
         }
     }
     macros
+}
+
+/// Whether a C++ member is written as a macro is: a plain name for its
+/// type, if any, then arguments in parentheses or an invocation under a
+/// plain name whose arguments name nothing and no function's qualifier
+/// follows ([`names_a_parameter`], [`function_qualifiers`]), and nothing
+/// else but the `;` the grammar supplied ([`unended_member_macros`]).
+fn macro_written(member: Node) -> bool {
+    let mut cursor = member.walk();
+    matches!(member.kind(), "field_declaration" | "declaration")
+        && member
+            .children(&mut cursor)
+            .filter(|part| !part.is_extra() && !part.is_missing())
+            .all(|part| match part.kind() {
+                "type_identifier" | "parenthesized_declarator" => true,
+                "function_declarator" => {
+                    part.child_by_field_name("declarator").is_some_and(|name| {
+                        matches!(name.kind(), "identifier" | "field_identifier")
+                    }) && !names_a_parameter(part)
+                        && function_qualifiers(part).next().is_none()
+                }
+                _ => false,
+            })
+}
+
+/// The C++ members written as a macro is ([`macro_written`]) that a member
+/// is, or that a preprocessor conditional holds alone in each branch, which
+/// run on into what follows it whichever branch is taken.
+fn macro_written_members(member: Node) -> Option<Vec<Node>> {
+    if macro_written(member) {
+        return Some(vec![member]);
+    }
+    if !matches!(
+        member.kind(),
+        "preproc_if" | "preproc_ifdef" | "preproc_elif" | "preproc_elifdef" | "preproc_else"
+    ) {
+        return None;
+    }
+    let condition = member
+        .child_by_field_name("condition")
+        .or_else(|| member.child_by_field_name("name"))
+        .map(|condition| condition.id());
+    let mut cursor = member.walk();
+    let held: Vec<Node> = member
+        .named_children(&mut cursor)
+        .filter(|part| (!part.is_extra() || part.is_error()) && Some(part.id()) != condition)
+        .collect();
+    let mut members = Vec::new();
+    for part in held {
+        members.extend(macro_written_members(part)?);
+    }
+    Some(members)
+}
+
+/// The invocation a C++ member written as a macro is holds as its
+/// declarator ([`macro_written`]).
+fn invocation(member: Node) -> Option<Node> {
+    member
+        .child_by_field_name("declarator")
+        .filter(|declarator| declarator.kind() == "function_declarator")
+        .filter(|_| macro_written(member))
+}
+
+/// The C or C++ nodes of the run of macros written before `boundary`, nearest
+/// first: each node before it that `of_the_run` takes, back to the first it
+/// does not ([`sibling_before`]). A rule that proves a macro before a
+/// boundary proves the one before that once it is blanked, since that one
+/// then stands before the same boundary; taking the run in the pass that
+/// finds the boundary reads it in one parse, where blanking only the macro
+/// next to the boundary parses the file again for each.
+fn run_before(boundary: Node, of_the_run: impl Fn(Node) -> Option<Vec<Node>>) -> Vec<Node> {
+    std::iter::successors(sibling_before(boundary), |node| sibling_before(*node))
+        .map_while(of_the_run)
+        .flatten()
+        .collect()
 }
 
 /// The macros a C or C++ source invokes with literal arguments before a
@@ -1054,7 +1078,7 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
         }
         Some(before)
     }
-    let literal = |word: &Node| {
+    fn literal(word: &Node) -> bool {
         matches!(word.kind(), "," | "number_literal" | "true" | "false")
             || word.parent().is_some_and(|literal| {
                 matches!(
@@ -1062,42 +1086,61 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
                     "string_literal" | "char_literal" | "raw_string_literal"
                 )
             })
-    };
+    }
+    /// Where the run of such invocations that `words` end with begins:
+    /// the index of its first word, or `words.len()` where they end with
+    /// none. Each one, once those after it are blanked, stands before the
+    /// same word, so the run is taken whole ([`run_before`]).
+    fn invocations_from(words: &[Node]) -> usize {
+        let mut end = words.len();
+        while let Some((close, before)) = words[..end].split_last() {
+            let arguments = before.iter().rev().take_while(|word| literal(word)).count();
+            let Some(at) = before.len().checked_sub(arguments + 2) else {
+                break;
+            };
+            let name = words[at];
+            if close.kind() != ")"
+                || words[at + 1].kind() != "("
+                || !before[at + 2..].iter().any(|word| word.kind() != ",")
+                || !matches!(
+                    name.kind(),
+                    "identifier" | "type_identifier" | "field_identifier"
+                )
+                || std::iter::successors(leaf_before(name), |leaf| leaf_before(*leaf))
+                    .take_while(|leaf| leaf.start_position().row == name.start_position().row)
+                    .any(|leaf| leaf.kind().starts_with('#') || leaf.kind() == "preproc_directive")
+            {
+                break;
+            }
+            end = at;
+        }
+        end
+    }
+    let holds_a_statement = |node: Node| node.is_error() || node.kind() == "expression_statement";
     let mut macros = Vec::new();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
-        if !node.is_error() && node.kind() != "expression_statement" {
+        if !holds_a_statement(node)
+            || !std::iter::successors(node.next_sibling(), Node::next_sibling)
+                .find(|next| !next.is_extra())
+                .is_some_and(opens_with_a_declaration_word)
+        {
             continue;
         }
         let words = written_words(node);
-        let Some((close, before)) = words.split_last() else {
-            continue;
-        };
-        let arguments = before.iter().rev().take_while(|word| literal(word)).count();
-        let Some(at) = before.len().checked_sub(arguments + 2) else {
-            continue;
-        };
-        let name = words[at];
-        if close.kind() != ")"
-            || words[at + 1].kind() != "("
-            || !before[at + 2..].iter().any(|word| word.kind() != ",")
-            || !matches!(
-                name.kind(),
-                "identifier" | "type_identifier" | "field_identifier"
-            )
-            || std::iter::successors(leaf_before(name), |leaf| leaf_before(*leaf))
-                .take_while(|leaf| leaf.start_position().row == name.start_position().row)
-                .any(|leaf| leaf.kind().starts_with('#') || leaf.kind() == "preproc_directive")
-        {
+        let from = invocations_from(&words);
+        macros.extend(words[from..].iter().map(Node::byte_range));
+        if from > 0 || words.is_empty() {
             continue;
         }
-        if std::iter::successors(node.next_sibling(), Node::next_sibling)
-            .find(|next| !next.is_extra())
-            .is_some_and(opens_with_a_declaration_word)
-        {
-            macros.extend(words[at..].iter().map(Node::byte_range));
+        for statement in run_before(node, |before| {
+            let words = written_words(before);
+            (holds_a_statement(before) && !words.is_empty() && invocations_from(&words) == 0)
+                .then(|| vec![before])
+        }) {
+            macros.extend(written_words(statement).iter().map(Node::byte_range));
         }
     }
     macros
@@ -7646,6 +7689,62 @@ region     = "us-central1"
             Some("#define OPEN(n) int n(void) \\\n  { \\\n  int v;")
         );
         assert_eq!(end("{ int never_closed;\n"), None);
+    }
+
+    /// A run of macros before the boundary a re-read rule proves them by is
+    /// blanked in the pass that finds the boundary, so its length costs no
+    /// parse of the file per macro.
+    #[test]
+    fn a_macro_run_is_blanked_in_the_pass_that_finds_its_boundary() {
+        let first_pass = |content: &str| {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_cpp::LANGUAGE.into())
+                .expect("the C++ grammar loads");
+            let tree = parser.parse(content, None).expect("the source parses");
+            let root = tree.root_node();
+            let mut bytes = content.as_bytes().to_vec();
+            for range in brace_swallowing_macros(root)
+                .into_iter()
+                .chain(unended_member_macros(root, content))
+                .chain(literal_argument_macros(root))
+            {
+                bytes[range].fill(b' ');
+            }
+            String::from_utf8(bytes).expect("blanks keep the source UTF-8")
+        };
+        for (content, macro_) in [
+            (
+                "class Op {\npublic:\n  REGISTER(T0, K0)\n  REGISTER(T1, K1)\n  REGISTER(T2, K2)\n  \
+                 Op(const char *name);\n  int after;\n};\n",
+                "REGISTER",
+            ),
+            (
+                "#ifndef QANIMATIONGROUP_H\nclass               QAnimationGroup : public QAbstractAnimation\n\
+                 {\n    Q_DISABLE_COPY(QAnimationGroup)\n    Q_DECLARE_PRIVATE(QAnimationGroup)\n};\n",
+                "QAnimationGroup)",
+            ),
+            (
+                "extern NCURSES_EXPORT(char *) tparm (NCURSES_CONST char *, NCURSES_TPARM_ARG,\
+                 NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,\
+                 NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG);\n\
+                 extern NCURSES_EXPORT(char *) tparm_varargs (NCURSES_CONST char *, ...);\n\
+                 __OSX_AVAILABLE(14.0) __IOS_AVAILABLE(17.0) __WATCHOS_AVAILABLE(10.0)\n\
+                 extern NCURSES_EXPORT(char *) tiparm (const char *, ...);\n",
+                "_AVAILABLE",
+            ),
+            (
+                "GEN_RECORD(1, 10)\nGEN_RECORD(5, 10)\nGEN_RECORD(11, 9)\nGEN_RECORD(43, 8)\n\n\
+                 static int after(const void *src, size_t srcSize);\n",
+                "GEN_RECORD",
+            ),
+        ] {
+            let blanked = first_pass(content);
+            assert!(
+                !blanked.contains(macro_),
+                "one pass blanks the whole run: {blanked:?}"
+            );
+        }
     }
 
     #[test]
