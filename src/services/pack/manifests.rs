@@ -37,6 +37,10 @@ pub(super) struct Manifests {
     pub(super) ts_configs: HashMap<Vec<String>, TsConfig>,
     /// Each package a JavaScript workspace lists, by its directory.
     pub(super) js_packages: HashMap<Vec<String>, JsPackage>,
+    /// Whether each `package.json` above a JavaScript or TypeScript file
+    /// declares `"type": "module"`, by its directory: the nearest decides
+    /// whether Node reads a `.js` or `.ts` file there as an ES module.
+    pub(super) module_types: HashMap<Vec<String>, bool>,
 }
 
 /// A package of a JavaScript workspace: the name its `package.json` gives
@@ -54,14 +58,30 @@ pub(super) struct JsPackage {
 
 /// What a TypeScript configuration, with every configuration it extends,
 /// says about the specifiers its files import: the directory `baseUrl`
-/// names, and each `paths` pattern with its substitutions, which resolve
+/// names, each `paths` pattern with its substitutions, which resolve
 /// against `baseUrl` or, without one, the directory of the configuration
-/// declaring them.
+/// declaring them, and the conditions a package's `exports` is read under.
 #[derive(Debug, Clone, Default)]
 pub(super) struct TsConfig {
     pub(super) base_url: Option<Vec<String>>,
     pub(super) paths: Vec<(String, Vec<String>)>,
     pub(super) paths_base: Vec<String>,
+    /// The module resolution its `moduleResolution`, or the `module` that
+    /// implies one, selects, where that is one deciding which of the
+    /// `import`, `require` and `node` conditions TypeScript matches.
+    pub(super) module_resolution: Option<ModuleResolution>,
+    /// The conditions `customConditions` adds.
+    pub(super) custom_conditions: Vec<String>,
+}
+
+/// A module resolution strategy that says which `exports` conditions apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModuleResolution {
+    /// `bundler`: an import matches `import`, never `require` or `node`.
+    Bundler,
+    /// `node16` or `nodenext`: an import matches `node`, and `import` or
+    /// `require` by the module format of the file writing it.
+    Node16,
 }
 
 /// What the `paths` pattern a specifier matches maps it to.
@@ -156,6 +176,20 @@ impl Manifests {
             Some((directory, package))
         })
         .collect();
+        let package_jsons: Vec<(Vec<String>, serde_json::Value)> =
+            manifests_above(root, nodes, is_javascript, "package.json")
+                .into_iter()
+                .filter_map(|(directory, text)| {
+                    Some((directory, serde_json::from_str(&text).ok()?))
+                })
+                .collect();
+        let module_types = package_jsons
+            .iter()
+            .map(|(directory, manifest)| {
+                let module = manifest.get("type").and_then(|kind| kind.as_str()) == Some("module");
+                (directory.clone(), module)
+            })
+            .collect();
         Self {
             root: Some(root.to_path_buf()),
             go_modules,
@@ -163,7 +197,8 @@ impl Manifests {
             rust_packages,
             python_projects: python_projects(root, nodes),
             ts_configs: ts_configs(root, nodes),
-            js_packages: js_packages(root, nodes),
+            js_packages: js_packages(root, nodes, &package_jsons),
+            module_types,
         }
     }
 
@@ -427,15 +462,14 @@ fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsConfig> {
 }
 
 /// Every package a JavaScript workspace in the project lists: each
-/// `package.json` with a name below a workspace root — a `package.json` with
-/// `workspaces`, or a `pnpm-workspace.yaml` — whose directory one of the
-/// root's globs matches and none of its `!` globs does.
-fn js_packages(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, JsPackage> {
-    let manifests: Vec<(Vec<String>, serde_json::Value)> =
-        manifests_above(root, nodes, is_javascript, "package.json")
-            .into_iter()
-            .filter_map(|(directory, text)| Some((directory, serde_json::from_str(&text).ok()?)))
-            .collect();
+/// `package.json` of `manifests` with a name below a workspace root — a
+/// `package.json` with `workspaces`, or a `pnpm-workspace.yaml` — whose
+/// directory one of the root's globs matches and none of its `!` globs does.
+fn js_packages(
+    root: &Path,
+    nodes: &[Node],
+    manifests: &[(Vec<String>, serde_json::Value)],
+) -> HashMap<Vec<String>, JsPackage> {
     let mut workspaces: Vec<(Vec<String>, Vec<String>)> = manifests
         .iter()
         .filter_map(|(directory, manifest)| {
@@ -480,7 +514,7 @@ fn js_packages(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, JsPackage> {
             continue;
         };
         let excluded = matcher(&mut globs.iter().filter_map(|glob| glob.strip_prefix('!')));
-        for (directory, manifest) in &manifests {
+        for (directory, manifest) in manifests {
             let Some(member) = directory.strip_prefix(workspace.as_slice()) else {
                 continue;
             };
@@ -585,10 +619,35 @@ fn ts_config(root: &Path, file: &[String], contents: &str) -> TsConfig {
         .clone()
         .or_else(|| declared.map(|(directory, _)| directory.clone()))
         .unwrap_or_else(|| directory.to_vec());
+    let setting = |key: &str| {
+        option(key)
+            .and_then(|(_, value)| value.as_str())
+            .map(str::to_ascii_lowercase)
+    };
+    // An explicit `moduleResolution` anywhere in the chain overrides the one
+    // a `module` implies.
+    let module_resolution = match setting("moduleResolution").as_deref() {
+        Some("bundler") => Some(ModuleResolution::Bundler),
+        Some("node16" | "nodenext") => Some(ModuleResolution::Node16),
+        Some(_) => None,
+        None => match setting("module").as_deref() {
+            Some("preserve") => Some(ModuleResolution::Bundler),
+            Some("node16" | "node18" | "node20" | "nodenext") => Some(ModuleResolution::Node16),
+            _ => None,
+        },
+    };
+    let custom_conditions = option("customConditions")
+        .and_then(|(_, conditions)| conditions.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|condition| condition.as_str().map(str::to_string))
+        .collect();
     TsConfig {
         base_url,
         paths,
         paths_base,
+        module_resolution,
+        custom_conditions,
     }
 }
 
