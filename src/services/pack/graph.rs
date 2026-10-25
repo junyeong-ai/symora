@@ -750,9 +750,9 @@ fn kotlin_file_class(path: &str) -> Option<String> {
 }
 
 /// The set of sources a JVM source root is compiled with. In the layout
-/// Maven and Gradle share, `<module>/src/<set>/<language>`, it is
-/// `<module>/src/<set>`, so `src/main/java` and `src/main/kotlin` are one set;
-/// any other root is a set of its own.
+/// Maven, Gradle and Kotlin Multiplatform share, `<module>/src/<set>/<language>`,
+/// it is `<module>/src/<set>`, so `src/main/java` and `src/main/kotlin` are
+/// one set; any other root is a set of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SourceSet<'a> {
     Named { module: &'a [String], name: &'a str },
@@ -767,23 +767,35 @@ impl<'a> SourceSet<'a> {
         }
     }
 
-    /// Whether code in this set sees the classes of `other`: its own, and a
-    /// `test` set those of the `main` set beside it, which Maven and Gradle
-    /// put on the test classpath. Main code never sees test sources.
+    /// Whether the set holds tests, by the names the build tools give test
+    /// sets: Maven's and Gradle's `test`, and a name ending in `Test` —
+    /// Kotlin Multiplatform's `<target>Test` (`commonTest`, `jvmTest`),
+    /// Android's `androidUnitTest` and `androidInstrumentedTest`, a Gradle
+    /// test suite's `integrationTest`. Gradle's `testFixtures` is no test
+    /// set: it is what tests build on.
+    fn is_test(self) -> bool {
+        match self {
+            Self::Named { name, .. } => {
+                name == "test" || (name.len() > "Test".len() && name.ends_with("Test"))
+            }
+            Self::Root(_) => false,
+        }
+    }
+
+    /// Whether code in this set sees the classes of `other` by the build
+    /// tools' defaults: its own; in one module, a `test` set those of `main`
+    /// and of `testFixtures`, and `testFixtures` those of `main`, which
+    /// Maven, Gradle and its `java-test-fixtures` plugin put on their
+    /// classpaths.
     fn sees(self, other: SourceSet<'_>) -> bool {
         match (self, other) {
-            (
-                Self::Named {
-                    module,
-                    name: "test",
-                },
-                SourceSet::Named {
-                    module: other,
-                    name: "main",
-                },
-            ) => module == other,
             (Self::Named { module, name }, SourceSet::Named { module: a, name: b }) => {
-                module == a && name == b
+                module == a
+                    && (name == b
+                        || matches!(
+                            (name, b),
+                            ("test", "main" | "testFixtures") | ("testFixtures", "main")
+                        ))
             }
             (Self::Root(root), SourceSet::Root(other)) => root == other,
             _ => false,
@@ -791,16 +803,24 @@ impl<'a> SourceSet<'a> {
     }
 
     /// Whether code in this set can see the classes of `other` through any
-    /// build: those of a set it sees, of another module's `main` set, which
-    /// a build can make it depend on, and of a set whose role the layout does
-    /// not say. Another module's `test` set, like every named set besides
-    /// `main`, is on no classpath but its own module's.
+    /// build. Within a module, every set but two: a test set, from a set
+    /// that holds no tests, and `testFixtures` from `main`, which
+    /// `testFixtures` itself is compiled against. Across modules, any set
+    /// that holds no tests, which a build can make this one depend on —
+    /// another module's `testFixtures` among them, through
+    /// `testFixtures(project(…))` — and a set whose role the layout does not
+    /// say; never another module's test set, which is on no classpath but
+    /// its own module's.
     fn may_see(self, other: SourceSet<'_>) -> bool {
-        self.sees(other)
-            || match other {
-                SourceSet::Named { name, .. } => name == "main",
-                SourceSet::Root(_) => true,
+        match (self, other) {
+            (_, SourceSet::Root(_)) => true,
+            (Self::Named { module, name }, SourceSet::Named { module: a, name: b })
+                if module == a =>
+            {
+                (self.is_test() || !other.is_test()) && !(name == "main" && b == "testFixtures")
             }
+            _ => !other.is_test(),
+        }
     }
 }
 
@@ -1268,10 +1288,11 @@ impl ProjectIndex<'_> {
 
     /// The files an import of a whole JVM package names: every file declaring
     /// it in a source set the importer's sees — its own, and `main` from
-    /// `test`. Where no set it sees holds the package, the package is another
-    /// module's, which only a build file would say it depends on: it names
-    /// the files of the one source set holding it that the importer may see
-    /// — never another module's `test` set — or none where several do.
+    /// `test` (`SourceSet::sees`). Where no set it sees holds the package,
+    /// only a build file would say which set it comes from: it names the
+    /// files of the one source set holding it that the importer may see
+    /// (`SourceSet::may_see`) — never another module's test set — or none
+    /// where several do.
     fn jvm_package(&self, package: &[String], from: &Node) -> Vec<usize> {
         let Some(files) = self.jvm.by_package.get(package) else {
             return Vec::new();
@@ -2021,6 +2042,98 @@ mod tests {
                 "lib/src/main/java/com/lib/Twin.java"
             ]
         );
+    }
+
+    /// A JVM file may see every source set of its own module but the test
+    /// sets, from code that is no test, and `testFixtures` from `main`, and
+    /// every set of another module that holds no tests: Kotlin
+    /// Multiplatform's `commonMain` from `jvmMain`, `commonTest` and another
+    /// module's `main`, Gradle's `testFixtures` from its module's `test` and
+    /// another module's tests.
+    #[test]
+    fn a_jvm_file_may_see_its_modules_sets_and_other_modules_sets_without_tests() {
+        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        let java = |id, rel, source| node_in(id, rel, source, Language::Java);
+        let nodes = vec![
+            kotlin(
+                0,
+                "shared/src/commonMain/kotlin/com/acme/core/Model.kt",
+                "package com.acme.core\nclass Model\n",
+            ),
+            kotlin(
+                1,
+                "shared/src/jvmMain/kotlin/com/acme/app/A.kt",
+                "package com.acme.app\nimport com.acme.core.Model\nimport com.acme.probe.Probe\n",
+            ),
+            kotlin(
+                2,
+                "shared/src/commonTest/kotlin/com/acme/core/ModelTest.kt",
+                "package com.acme.core\nimport com.acme.probe.Probe\nclass ModelTest\n",
+            ),
+            kotlin(
+                3,
+                "shared/src/jvmTest/kotlin/com/acme/probe/Probe.kt",
+                "package com.acme.probe\nimport com.acme.core.Model\nclass Probe\n",
+            ),
+            kotlin(
+                4,
+                "app/src/main/kotlin/com/acme/x/U.kt",
+                "package com.acme.x\nimport com.acme.core.Model\nimport com.acme.probe.Probe\n\
+                 import com.acme.fix.Fixture\n",
+            ),
+            java(
+                5,
+                "lib/src/main/java/com/acme/lib/Lib.java",
+                "package com.acme.lib;\nimport com.acme.fix.Fixture;\nclass Lib {}\n",
+            ),
+            java(
+                6,
+                "lib/src/testFixtures/java/com/acme/fix/Fixture.java",
+                "package com.acme.fix;\nimport com.acme.lib.Lib;\npublic class Fixture {}\n",
+            ),
+            java(
+                7,
+                "lib/src/test/java/com/acme/t/T1.java",
+                "package com.acme.t;\nimport com.acme.fix.Fixture;\nclass T1 {}\n",
+            ),
+            kotlin(
+                8,
+                "app/src/test/kotlin/com/acme/x/UTest.kt",
+                "package com.acme.x\nimport com.acme.fix.Fixture\nimport com.acme.probe.Probe\n",
+            ),
+        ];
+        let model = "shared/src/commonMain/kotlin/com/acme/core/Model.kt";
+        let fixture = "lib/src/testFixtures/java/com/acme/fix/Fixture.java";
+        // Main code sees neither its module's test sets nor its fixtures.
+        assert_eq!(edges_of(&nodes, 1), vec![model]);
+        assert_eq!(
+            edges_of(&nodes, 2),
+            vec!["shared/src/jvmTest/kotlin/com/acme/probe/Probe.kt"]
+        );
+        assert_eq!(edges_of(&nodes, 3), vec![model]);
+        assert_eq!(edges_of(&nodes, 4), vec![model, fixture]);
+        assert!(edges_of(&nodes, 5).is_empty());
+        assert_eq!(
+            edges_of(&nodes, 6),
+            vec!["lib/src/main/java/com/acme/lib/Lib.java"]
+        );
+        assert_eq!(edges_of(&nodes, 7), vec![fixture]);
+        assert_eq!(edges_of(&nodes, 8), vec![fixture]);
+
+        let named = |name| SourceSet::Named { module: &[], name };
+        for test in [
+            "test",
+            "commonTest",
+            "jvmTest",
+            "androidUnitTest",
+            "androidInstrumentedTest",
+            "integrationTest",
+        ] {
+            assert!(named(test).is_test(), "{test}");
+        }
+        for set in ["main", "commonMain", "jvmMain", "testFixtures", "Test"] {
+            assert!(!named(set).is_test(), "{set}");
+        }
     }
 
     /// A JVM import names a file by what it declares at its top level, not by
