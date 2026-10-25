@@ -977,7 +977,10 @@ fn declares_a_function(node: Node) -> bool {
 /// The macros of each C or C++ class definition the grammar read as a
 /// function definition: one whose declarator names no function, as only a
 /// type's can, with a class key before its block (`class EXPORT Widget {`,
-/// `OPENSSL_EXPORT struct ssl_st {`, `ABSL_NAMESPACE_BEGIN class Clock {`). An
+/// `OPENSSL_EXPORT struct ssl_st {`, `ABSL_NAMESPACE_BEGIN class Clock {`),
+/// or as a variable its block initializes, where `final` or a base clause
+/// after the name shows a class head no variable has (`class EXPORT Inner
+/// final : public Base {`, unlike `struct S s{1};`). An
 /// identifier written before the key, or between the key and the name the
 /// class head ends with (qualified, specialized, then `final`), is no part of
 /// the grammar there, so it is a macro; one inside brackets is an argument or
@@ -996,22 +999,34 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
     while let Some(node) = pending.pop() {
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
-        if node.kind() != "function_definition"
-            || node
+        let read_as_a_variable = matches!(node.kind(), "declaration" | "field_declaration")
+            && node.child_by_field_name("type").is_some_and(|written| {
+                matches!(
+                    written.kind(),
+                    "class_specifier" | "struct_specifier" | "union_specifier"
+                ) && written.child_by_field_name("body").is_none()
+            });
+        let opens = if read_as_a_variable {
+            first_brace(node)
+        } else if node.kind() == "function_definition"
+            && node
                 .child_by_field_name("declarator")
-                .is_none_or(|declarator| {
-                    member_kind(declarator_name(declarator)) == SymbolKind::Method
+                .is_some_and(|declarator| {
+                    member_kind(declarator_name(declarator)) != SymbolKind::Method
                 })
         {
-            continue;
-        }
-        let Some(body) = node.child_by_field_name("body") else {
+            node.child_by_field_name("body")
+                .map(|body| body.start_byte())
+        } else {
+            None
+        };
+        let Some(opens) = opens else {
             continue;
         };
         let mut leaves = Vec::new();
         let mut walk = vec![node];
         while let Some(part) = walk.pop() {
-            if part.start_byte() >= body.start_byte() || part.is_extra() && !part.is_error() {
+            if part.start_byte() >= opens || part.is_extra() && !part.is_error() {
                 continue;
             }
             if part.child_count() == 0 {
@@ -1047,6 +1062,9 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         if name > key + 1 && text(leaves[name - 1]) == b"final" {
             name -= 1;
         }
+        if read_as_a_variable && name == leaves.len() {
+            continue;
+        }
         if name > key + 1 && leaves[name - 1].kind() == ">" {
             let mut open = 0usize;
             while name > key + 1 {
@@ -1076,6 +1094,20 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         );
     }
     macros
+}
+
+/// Where the first `{` a C or C++ node holds opens.
+fn first_brace(node: Node) -> Option<usize> {
+    let mut pending = vec![node];
+    while let Some(part) = pending.pop() {
+        if part.kind() == "{" && !part.is_missing() {
+            return Some(part.start_byte());
+        }
+        let mut cursor = part.walk();
+        let children: Vec<_> = part.children(&mut cursor).collect();
+        pending.extend(children.into_iter().rev());
+    }
+    None
 }
 
 /// Whether the grammar ended a C or C++ declaration by supplying the `;` it
@@ -7363,9 +7395,10 @@ region     = "us-central1"
         );
     }
 
-    /// A class definition a macro made the grammar read as a function is read
-    /// again past the macro, so it is the class it defines, with its members
-    /// read as a class body holds them.
+    /// A class definition a macro made the grammar read as a function, or as
+    /// a variable its body initializes, is read again past the macro, so it
+    /// is the class it defines, with its members read as a class body holds
+    /// them.
     #[test]
     fn a_class_a_macro_misread_as_a_function_is_read_past_it() {
         let declared: Vec<String> = SymbolExtractor::new()
@@ -7380,6 +7413,9 @@ region     = "us-central1"
                  class EXPORT ns::Qualified { int q; };\n\
                  template <> class EXPORT Spec<int> { int s; };\n\
                  class __declspec(dllexport) DECL Declared { int d; };\n\
+                 class EXPORT Outer final : public Base {\n public:\n  \
+                 class EXPORT Inner final : public Other {\n   public:\n    Inner(const Inner&) = delete;\n    \
+                 int Read(int size);\n  };\n  struct S member{2};\n  int after;\n};\n\
                  struct S s{1};\nint plain(int a) { int inner = a; return inner; }\n",
                 Language::Cpp,
             )
@@ -7414,6 +7450,12 @@ region     = "us-central1"
                 "field:Spec<int>/s",
                 "class:Declared",
                 "field:Declared/d",
+                "class:Outer",
+                "class:Outer/Inner",
+                "constructor:Inner/Inner",
+                "method:Inner/Read",
+                "field:Outer/member",
+                "field:Outer/after",
                 "variable:s",
                 "function:plain",
             ]
