@@ -1046,11 +1046,13 @@ fn binding_scope(assignment: Node) -> Option<usize> {
         .map(|scope| scope.id())
 }
 
-/// Whether a captured node declares anything: a Python assignment, or a C
-/// or C++ declaration a preprocessor conditional holds, binds a local where
-/// a function's scope holds it, however deep in the function's statements,
-/// and declares where a class's, a namespace's or the file's does; a type
-/// alias is a type, read wherever it is declared. A C or C++ declaration the
+/// Whether a captured node declares anything: a Python assignment, a C or C++
+/// declaration a preprocessor conditional holds, or a JavaScript or
+/// TypeScript `var`, which belongs to the function or program around the
+/// block that holds it, binds a local where a function's scope holds it,
+/// however deep in the function's statements, and declares where a class's,
+/// a namespace's or the file's does; a type alias is a type, read wherever
+/// it is declared. A C or C++ declaration the
 /// grammar ended by supplying its missing `;` was cut short by a macro it
 /// cannot expand, so what it would name is a guess, unless it declares a
 /// function: its parameters complete its declarator, and what the grammar
@@ -1090,6 +1092,24 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
             &["function_definition", "lambda"],
             &["class_definition", "module"],
         ),
+        (Language::TypeScript | Language::JavaScript, "variable_declarator")
+            if node
+                .parent()
+                .is_some_and(|statement| statement.kind() == "variable_declaration") =>
+        {
+            (
+                &[
+                    "function_declaration",
+                    "generator_function_declaration",
+                    "function_expression",
+                    "generator_function",
+                    "arrow_function",
+                    "method_definition",
+                    "class_static_block",
+                ],
+                &["program", "internal_module", "module"],
+            )
+        }
         (Language::Cpp, "declaration" | "type_definition" | "alias_declaration") => (
             &["compound_statement"],
             &[
@@ -3606,7 +3626,10 @@ const PYTHON_QUERY: &str = r#"
 // A module's variables are the declarators no body encloses: at the top of a
 // file, exported, ambient, or in a namespace. Anchoring there keeps a
 // function's locals and loop counters out, and a destructuring declarator
-// declares each name its pattern binds (see `declared_names`). A constructor
+// declares each name its pattern binds (see `declared_names`). A `var`
+// belongs to the function or the program around whatever block holds it, so
+// it is read wherever it is written and judged by that scope (see
+// `declares`). A constructor
 // parameter declares a property where a modifier says so (see
 // `find_name_node`).
 const TYPESCRIPT_QUERY: &str = r#"
@@ -3633,17 +3656,11 @@ const TYPESCRIPT_QUERY: &str = r#"
 (enum_body name: (property_identifier) @symbol)
 (enum_body (enum_assignment) @symbol)
 (program (lexical_declaration (variable_declarator) @symbol))
-(program (variable_declaration (variable_declarator) @symbol))
 (export_statement (lexical_declaration (variable_declarator) @symbol))
-(export_statement (variable_declaration (variable_declarator) @symbol))
 (ambient_declaration (lexical_declaration (variable_declarator) @symbol))
-(ambient_declaration (variable_declaration (variable_declarator) @symbol))
-(internal_module body: (statement_block
-  [(lexical_declaration (variable_declarator) @symbol)
-   (variable_declaration (variable_declarator) @symbol)]))
-(module body: (statement_block
-  [(lexical_declaration (variable_declarator) @symbol)
-   (variable_declaration (variable_declarator) @symbol)]))
+(internal_module body: (statement_block (lexical_declaration (variable_declarator) @symbol)))
+(module body: (statement_block (lexical_declaration (variable_declarator) @symbol)))
+(variable_declaration (variable_declarator) @symbol)
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
@@ -3653,9 +3670,8 @@ const JAVASCRIPT_QUERY: &str = r#"
 (method_definition) @symbol
 (class_body (field_definition) @symbol)
 (program (lexical_declaration (variable_declarator) @symbol))
-(program (variable_declaration (variable_declarator) @symbol))
 (export_statement (lexical_declaration (variable_declarator) @symbol))
-(export_statement (variable_declaration (variable_declarator) @symbol))
+(variable_declaration (variable_declarator) @symbol)
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -4339,6 +4355,8 @@ export var exported = 2;
 declare const ambientConst: number;
 declare var ambientVar: number;
 namespace Plain { const inPlain = 1; }
+namespace Hoist { if (ready) { var inHoist = 1; } }
+if (ready) { var tsHoisted = 1; }
 declare module "bare" { const inBare: number; }
 export declare class Decl {
     method(a: string): void;
@@ -4383,6 +4401,9 @@ export declare class Decl {
                 "variable:ambientVar",
                 "module:Plain",
                 "constant:inPlain",
+                "module:Hoist",
+                "variable:inHoist",
+                "variable:tsHoisted",
                 "module:\"bare\"",
                 "constant:inBare",
                 "class:Decl",
@@ -4409,6 +4430,11 @@ let counter = 0;
 const { picked } = source;
 var legacy = 1;
 export var exported = 2;
+if (ready) { var hoisted = 1; let scoped = 2; }
+for (var i = 0; i < 1; i++) {}
+function hold() { { var inFunction = 1; } }
+const run = () => { var inArrow = 1; };
+class K { static { var inStatic = 1; } }
 "#,
             declares: &[
                 "class:C",
@@ -4424,6 +4450,11 @@ export var exported = 2;
                 "constant:picked",
                 "variable:legacy",
                 "variable:exported",
+                "variable:hoisted",
+                "variable:i",
+                "function:hold",
+                "function:run",
+                "class:K",
             ],
         },
         DeclarationFixture {
