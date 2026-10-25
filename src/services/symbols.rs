@@ -4791,7 +4791,12 @@ const CPP_QUERY: &str = r#"
 (field_declaration_list
   (declaration
     declarator: [
-      (function_declarator declarator: [(identifier) (destructor_name)])
+      (function_declarator declarator: [
+        (identifier)
+        (destructor_name)
+        (function_declarator parameters: (parameter_list
+          . (parameter_declaration type: [(type_identifier) (identifier)] !declarator) .))
+      ])
       (operator_cast)
     ]) @symbol)
 (ERROR (function_declarator) @symbol)
@@ -5789,6 +5794,8 @@ public:
     C(const C&) = default;
     virtual ~C() = default;
     EXPORT virtual ~C();
+    STDMETHOD(QueryInterface)(REFIID riid, void **ppv) PURE;
+    STDMETHOD_(ULONG, AddRef)(THIS) PURE;
     void inline_method() {}
 };
 
@@ -5876,6 +5883,7 @@ GIT_EXTERN(void) git_init(void);
                 "constructor:C/C",
                 "constructor:C/~C",
                 "constructor:C/~C",
+                "method:C/QueryInterface",
                 "method:C/inline_method",
                 "method:C/m",
                 "method:C/at",
@@ -7434,7 +7442,10 @@ region     = "us-central1"
             declared(
                 "PyAPI_FUNC(int) Py_IsInitialized(void);\nLUA_API int (lua_gettop) (lua_State *L);\n\
                  typedef Array(uint32_t) IdList;\nstruct S {\n  Array(uint32_t) ids[4];\n  \
-                 int GIT_CALLBACK(read)(void *);\n};\n"
+                 int GIT_CALLBACK(read)(void *);\n};\n\
+                 struct Ops {\n  Sint64 (SDLCALL * size)(struct SDL_RWops * context);\n  int after;\n};\n\
+                 typedef struct IFooVtbl {\n  HRESULT ( STDMETHODCALLTYPE *QueryInterface )(IFoo * This);\n  \
+                 ULONG ( STDMETHODCALLTYPE *AddRef )(IFoo * This);\n} IFooVtbl;\n"
             ),
             [
                 "function:lua_gettop",
@@ -7442,6 +7453,10 @@ region     = "us-central1"
                 "struct:S",
                 "field:ids",
                 "method:read",
+                "struct:Ops",
+                "field:after",
+                "class:IFooVtbl",
+                "struct:IFooVtbl",
             ],
             "a keyword names nothing, and a macro's argument list stands for the name it wraps"
         );
