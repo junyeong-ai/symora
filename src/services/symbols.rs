@@ -1412,7 +1412,13 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// block that holds it, binds a local where a function's scope holds it,
 /// however deep in the function's statements, and declares where a class's,
 /// a namespace's or the file's does; a type alias is a type, read wherever
-/// it is declared. A C or C++ declaration the
+/// it is declared. A shell assignment declares where the script's own shell
+/// runs it, and not in a function's body, which runs only when called, nor
+/// in a subshell, a command or process substitution, an element of a
+/// pipeline or a command run in the background (`&`), each of which runs in
+/// a shell of its own, nor where the grammar held it only by recovering from
+/// a syntax error, which can lose the header of the function around it and
+/// read its body as the script's. A C or C++ declaration the
 /// grammar ended by supplying its missing `;` was cut short by a macro it
 /// cannot expand, so what it would name is a guess, unless it declares a
 /// function: its parameters complete its declarator, and what the grammar
@@ -1478,6 +1484,29 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
                 "field_declaration_list",
             ],
         ),
+        (
+            Language::Bash,
+            "variable_assignment" | "variable_assignments" | "declaration_command",
+        ) => {
+            if std::iter::successors(Some(node), Node::parent).any(|statement| {
+                std::iter::successors(statement.next_sibling(), Node::next_sibling)
+                    .find(|next| !next.is_extra())
+                    .is_some_and(|next| next.kind() == "&")
+            }) {
+                return false;
+            }
+            (
+                &[
+                    "function_definition",
+                    "subshell",
+                    "command_substitution",
+                    "process_substitution",
+                    "pipeline",
+                    "ERROR",
+                ],
+                &["program"],
+            )
+        }
         _ => return true,
     };
     let mut ancestor = node.parent();
@@ -4263,15 +4292,27 @@ const RUBY_QUERY: &str = r#"
 (class (body_statement [(assignment) (operator_assignment operator: "||=")] @symbol))
 "#;
 
-// A script's variables are the ones its top level assigns, alone, under
-// `export`, `readonly` or `declare`, or several in one statement; a function's
-// are its own, and an assignment written before a command sets that
-// command's environment alone (`TRACE=1 run`). An element (`a[0]=1`) or an
-// append (`A+=1`) assigns to a variable rather than binding one.
+// A script's variables are the ones its own shell assigns, alone, under
+// `export`, `readonly` or `declare`, or several in one statement: at its top
+// level, in an `&&` or `||` list, an `if`, a `case`, a loop's body, a `{ … }`
+// group or a redirected statement, each judged by the nearest scope (see
+// `declares`). A function's body declares none of the script's: it assigns
+// only when the function is called, to whichever variable the name resolves
+// to then — a global, unless `local` made it the function's or a caller's.
+// An assignment written before a command sets that command's
+// environment alone (`TRACE=1 run`), and an element (`a[0]=1`) or an append
+// (`A+=1`) assigns to a variable rather than binding one.
 const BASH_QUERY: &str = r#"
 (function_definition) @symbol
-(program (variable_assignment name: (variable_name) "=") @symbol)
-(program [(variable_assignments) (declaration_command)] @symbol)
+(program [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(list [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(if_statement [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(elif_clause [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(else_clause [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(case_item [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(do_group [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(compound_statement [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(redirected_statement body: [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
 "#;
 
 // Lua defines its function statement as the assignment of a function
@@ -5377,6 +5418,25 @@ setup() {
   local scoped=1
   IN_FUNCTION=2
 }
+TOKEN=abc && USER_ID=42
+if [[ -z "${ENVIRONMENT:-}" ]]; then
+  ENVIRONMENT=staging
+elif [[ $ENVIRONMENT == prod ]]; then
+  REGION=eu
+else
+  REGION=us
+fi
+case "$1" in
+  -v) VERBOSE=1 ;;
+esac
+{ GROUPED=1; }
+for item in a b; do LOOPED=$item; done
+readonly STAMP=1 2>/dev/null
+( if true; then IN_SUBSHELL=1; fi )
+NOW=$( { IN_SUBSTITUTION=1; }; date )
+diff <( { IN_PROCESS=1; } ) /dev/null
+echo x | { IN_PIPELINE=1; }
+{ IN_BACKGROUND=1; } &
 FIRST=1 SECOND=2
 "#,
             declares: &[
@@ -5389,6 +5449,15 @@ FIRST=1 SECOND=2
                 "variable:FIRST",
                 "variable:SECOND",
                 "function:setup",
+                "variable:TOKEN",
+                "variable:USER_ID",
+                "variable:ENVIRONMENT",
+                "variable:REGION",
+                "variable:VERBOSE",
+                "variable:GROUPED",
+                "variable:LOOPED",
+                "variable:STAMP",
+                "variable:NOW",
             ],
         },
         DeclarationFixture {
@@ -7981,6 +8050,18 @@ end
         );
         assert_eq!(shell.len(), 2);
         assert!(shell.iter().all(|s| s.kind == SymbolKind::Function));
+
+        // An unterminated string loses `setup`'s header, and the grammar
+        // holds its body, `INSIDE` with it, in a syntax error.
+        let recovered = extractor.extract(
+            Path::new("a.sh"),
+            "setup() {\n  if true; then\n    INSIDE=1\n  fi\n  echo \"unterminated\n}\n",
+            Language::Bash,
+        );
+        assert!(
+            recovered.iter().all(|s| s.name != "INSIDE"),
+            "{recovered:?}"
+        );
 
         let lua = extractor.extract(
             Path::new("a"),
