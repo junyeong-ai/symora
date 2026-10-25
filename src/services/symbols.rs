@@ -2657,7 +2657,9 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .into_iter()
             .filter_map(|declarator| declarator.child_by_field_name("name"))
             .collect(),
-        Language::Cpp if node.kind() == "function_declarator" => vec![declarator_name(node)],
+        Language::Cpp if node.kind() == "function_declarator" => {
+            vec![destructor_named_apart(declarator_name(node))]
+        }
         Language::Cpp => fields("declarator")
             .into_iter()
             .filter(|declarator| {
@@ -2670,6 +2672,7 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
                     .filter(|name| name.kind() == "nested_namespace_specifier"),
             )
             .flat_map(cpp_bound_names)
+            .map(destructor_named_apart)
             .collect(),
         Language::CSharp => child_of_kind(node, "variable_declaration")
             .map(|list| children_of_kind(list, "variable_declarator"))
@@ -3430,13 +3433,24 @@ fn extract_name_and_kind(
 
 /// The node a declared name ends with: its own, the name a Dart named
 /// constructor gives itself after its class's (`Widget.named`), the class a
-/// C# destructor names after its `~`, the type a C# conversion operator names
-/// after `operator`, or the token before the parameters a C++ conversion
-/// function's name holds, so `operator bool() const` is named `operator bool`
-/// and `operator const char*()` `operator const char*`.
+/// C# destructor names after its `~`, the name a C++ destructor writes after
+/// the `~` the grammar set aside ([`destructor_named_apart`]), the type a C#
+/// conversion operator names after `operator`, or the token before the
+/// parameters a C++ conversion function's name holds, so `operator bool()
+/// const` is named `operator bool` and `operator const char*()` `operator
+/// const char*`.
 fn name_end_node(name: Node) -> Node {
     match (name.kind(), name.parent().map(|parent| parent.kind())) {
         ("~", Some("destructor_declaration")) => return name.next_sibling().unwrap_or(name),
+        ("ERROR", _) => {
+            if let Some(named) = name
+                .next_sibling()
+                .and_then(|declarator| declarator.child_by_field_name("declarator"))
+                .filter(|named| destructor_named_apart(*named).id() == name.id())
+            {
+                return named;
+            }
+        }
         ("operator", Some("conversion_operator_declaration")) => {
             return name
                 .parent()
@@ -4215,6 +4229,28 @@ fn declarator_name(declarator: Node) -> Node {
             None => return node,
         }
     }
+}
+
+/// Where a C++ destructor's name begins: at the `~` the grammar set aside as
+/// an error before the function declarator holding the rest of the name,
+/// where a macro written first read as the type (`DUCKDB_API ~Table();`).
+/// `~` begins no other declarator, so the name is `~Table`, as the grammar
+/// reads it without the macro; otherwise the name is `name` itself.
+fn destructor_named_apart(name: Node) -> Node {
+    name.parent()
+        .filter(|declarator| {
+            declarator.kind() == "function_declarator"
+                && declarator
+                    .child_by_field_name("declarator")
+                    .is_some_and(|named| named.id() == name.id())
+        })
+        .and_then(|declarator| declarator.prev_sibling())
+        .filter(|before| {
+            before.is_error()
+                && before.child_count() == 1
+                && before.child(0).is_some_and(|tilde| tilde.kind() == "~")
+        })
+        .unwrap_or(name)
 }
 
 /// The name a C or C++ declarator writes after a macro's argument list: a
@@ -5468,6 +5504,7 @@ public:
     typedef int Id;
     C(const C&) = default;
     virtual ~C() = default;
+    EXPORT virtual ~C();
     void inline_method() {}
 };
 
@@ -5553,6 +5590,7 @@ GIT_EXTERN(void) git_init(void);
                 "constructor:C/C",
                 "constructor:C/~C",
                 "constructor:C/C",
+                "constructor:C/~C",
                 "constructor:C/~C",
                 "method:C/inline_method",
                 "method:C/m",
