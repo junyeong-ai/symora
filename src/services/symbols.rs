@@ -588,7 +588,8 @@ impl SymbolExtractor {
 /// - the node right after a declaration the grammar ended by supplying its
 ///   missing `;`, which holds the rest of it up to the `;` the source writes
 ///   (`MACRO_A MACRO_B;` after `int f(int x)`, read as a declaration of
-///   `MACRO_B`).
+///   `MACRO_B`), unless the declaration invoked a macro, whose rest holds
+///   what it names ([`continued_macro`]).
 ///
 /// No other loose bracket opens anything: the grammar strands brackets whose
 /// partners it absorbed elsewhere (a macro body it failed to read as one),
@@ -677,7 +678,10 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
             let mut closed = left_open.clone();
             apply(&mut closed, child, node.is_error());
             if left_open.contains(&true) && closed.len() < left_open.len()
-                || std::mem::replace(&mut continues, ends_on_a_supplied_semicolon(child))
+                || std::mem::replace(
+                    &mut continues,
+                    ends_on_a_supplied_semicolon(child) && !invokes_a_macro(child),
+                )
             {
                 inside.insert(child.id());
             }
@@ -711,6 +715,43 @@ fn ends_on_a_supplied_semicolon(node: Node) -> bool {
     ) && node
         .child(node.child_count().saturating_sub(1))
         .is_some_and(|last| last.kind() == ";" && last.is_missing())
+}
+
+/// Whether a C or C++ declaration invokes a macro the grammar cannot expand:
+/// a declarator in parentheses right after the type is the macro's argument
+/// list (`Array(T)`, `__attribute__((aligned(1)))`), and the name the
+/// declaration declares follows it.
+fn invokes_a_macro(node: Node) -> bool {
+    node.child_by_field_name("declarator")
+        .is_some_and(|declarator| declarator.kind() == "parenthesized_declarator")
+}
+
+/// The name a C or C++ declaration writes alone, with no declarator, which
+/// the grammar reads as a type (`items;`).
+fn lone_name(node: Node) -> Option<Node> {
+    node.child_by_field_name("type").filter(|written| {
+        written.kind() == "type_identifier" && node.child_by_field_name("declarator").is_none()
+    })
+}
+
+/// The declaration a C or C++ declaration is the rest of: the one before it,
+/// which invoked a macro and which the grammar ended by supplying its `;`, so
+/// the source's one declaration reads as two (`Array(T)` and `items;`,
+/// `typedef __attribute__((aligned(1)))` and `U16 unalign16;`). The rest of a
+/// typedef always is, since a typedef names its type; after another
+/// declaration, a name alone is, where a declaration complete on its own may
+/// follow a macro that wrote its own `;`.
+fn continued_macro(node: Node) -> Option<Node> {
+    if !matches!(node.kind(), "declaration" | "field_declaration") {
+        return None;
+    }
+    std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+        .find(|before| !before.is_extra())
+        .filter(|head| {
+            ends_on_a_supplied_semicolon(*head)
+                && invokes_a_macro(*head)
+                && (head.kind() == "type_definition" || lone_name(node).is_some())
+        })
 }
 
 /// The byte after the `}` that closes the `{` at `open`, counted as one
@@ -885,21 +926,25 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// and declares where a class's, a namespace's or the file's does; a type
 /// alias is a type, read wherever it is declared. A C or C++ declaration the
 /// grammar ended by supplying its missing `;` was cut short by a macro it
-/// cannot expand (`typedef Array(T) Ts;` reads `typedef Array(T)`), so what
-/// it would name is a guess, unless it declares a function: its parameters
-/// complete its declarator, and what the grammar could not read after them
-/// is a macro written there (`int f(int x) G_GNUC_PURE;`). A class, struct,
+/// cannot expand, so what it would name is a guess, unless it declares a
+/// function: its parameters complete its declarator, and what the grammar
+/// could not read after them is a macro written there (`int f(int x)
+/// G_GNUC_PURE;`). One that invoked a macro names nothing itself, and its rest
+/// declares ([`continued_macro`]); a name written alone declares nothing
+/// otherwise (`PADDING;`), since no declaration is a name alone. A class, struct,
 /// union or enum without a body declares only standing alone, a forward
 /// declaration: as the type of another declaration it names a type that
 /// declaration uses (`struct stat st`, `struct item *it`).
 fn declares(node: Node, content: &str, language: Language) -> bool {
     if language == Language::Cpp
         && (ends_on_a_supplied_semicolon(node)
-            && !node
-                .child_by_field_name("declarator")
-                .is_some_and(|declarator| {
-                    member_kind(declarator_name(declarator)) == SymbolKind::Method
-                })
+            && (invokes_a_macro(node)
+                || !node
+                    .child_by_field_name("declarator")
+                    .is_some_and(|declarator| {
+                        member_kind(declarator_name(declarator)) == SymbolKind::Method
+                    }))
+            || lone_name(node).is_some() && continued_macro(node).is_none()
             || misreads_a_class_key(node, content)
             || matches!(
                 node.kind(),
@@ -1050,7 +1095,9 @@ enum Read {
 /// outside the node stays out, and ends where the first body or value above
 /// the name opens: a value is a variable's body, and an initializer can be
 /// any size, so every value the statement writes before that stays out as
-/// well ([`declared_text`]).
+/// well ([`declared_text`]). The rest of a C or C++ declaration that invoked
+/// a macro was read apart from where it begins ([`continued_macro`]), so it
+/// is a recovered reading.
 fn read_signature(
     root: Node,
     content: &str,
@@ -1074,6 +1121,9 @@ fn read_signature(
         && within(parent)
     {
         declaration = parent;
+    }
+    if language == Language::Cpp && continued_macro(declaration).is_some() {
+        return Some(Read::Recovered);
     }
     // A JS/TS statement declaring several names is the declaration of each, as
     // other grammars hold it, though its grammar holds each name apart: `B` in
@@ -2116,8 +2166,14 @@ fn assigns_beyond_its_names(node: Node, language: Language) -> bool {
 /// the lines before it among its siblings that belong to it — a TypeScript
 /// class member's decorators, a Rust item's outer attributes and doc comments
 /// (`///` is `#[doc]`). A comment between those lines is inside the
-/// declaration; one above them is not.
+/// declaration; one above them is not. The rest of a C or C++ declaration that
+/// invoked a macro begins where that declaration does ([`continued_macro`]).
 fn declaration_start(node: Node, language: Language) -> Node {
+    if language == Language::Cpp
+        && let Some(head) = continued_macro(node)
+    {
+        return head;
+    }
     let mut start = node;
     let mut before = node.prev_sibling();
     while let Some(sibling) = before {
@@ -2319,7 +2375,11 @@ fn placed_kind(
     });
     let enclosing = container.map(|(_, kind)| kind);
     if language == Language::Cpp
-        && let Some(kind) = set_aside_class_kind(node, content)
+        && let Some(kind) = set_aside_class_kind(node, content).or_else(|| {
+            continued_macro(node)
+                .filter(|head| head.kind() == "type_definition")
+                .map(node_kind)
+        })
     {
         return kind;
     }
@@ -2752,7 +2812,8 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         Language::Cpp => declared_names(node, language)
             .into_iter()
             .next()
-            .or_else(|| node.child_by_field_name("name")),
+            .or_else(|| node.child_by_field_name("name"))
+            .or_else(|| lone_name(node)),
         Language::TypeScript | Language::JavaScript => declared_names(node, language)
             .into_iter()
             .next()
@@ -5475,6 +5536,48 @@ region     = "us-central1"
         );
         assert_eq!(
             declared(
+                "typedef struct {\n  Array(Entry) list;\n  Entry empty;\n  uint32_t count;\n  \
+                 Array(uint32_t) free_ids;\n} Pool;\n\
+                 typedef __attribute__((aligned(1))) U16 unalign16;\n\
+                 struct Q {\n  int a;\n  Array(uint32_t)\n  int after_macro;\n  PADDING;\n};\n"
+            ),
+            [
+                "class:Pool",
+                "field:list",
+                "field:empty",
+                "field:count",
+                "field:free_ids",
+                "class:unalign16",
+                "struct:Q",
+                "field:a",
+                "field:after_macro",
+            ],
+            "a macro's arguments name nothing, and what follows them is its declaration's name"
+        );
+        let begins = |content: &str, name: &str| {
+            extractor
+                .extract(Path::new("e.h"), content, Language::Cpp)
+                .into_iter()
+                .find(|symbol| symbol.name == name)
+                .map(|symbol| symbol.location.effective_start())
+        };
+        assert_eq!(
+            begins(
+                "typedef struct {\n  Entry empty;\n  Array(uint32_t) free_ids;\n} Pool;\n",
+                "free_ids"
+            ),
+            Some((3, 3)),
+            "the declaration a macro's rest names begins with the macro"
+        );
+        assert_eq!(
+            begins(
+                "typedef __attribute__((aligned(1))) U16 unalign16;\n",
+                "unalign16"
+            ),
+            Some((1, 1))
+        );
+        assert_eq!(
+            declared(
                 "class Widget {\n  class Impl;\n  struct Node;\n  Impl* impl_;\n};\n\
                  void uses(struct Used);\nstruct Glob *gp;\n"
             ),
@@ -5751,6 +5854,13 @@ region     = "us-central1"
                 "int c = 1, *p;\n",
                 "p",
                 Some("int c, *p"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "typedef __attribute__((aligned(1))) U16 unalign16;\n",
+                "unalign16",
+                None,
             ),
             (
                 "a.cpp",
