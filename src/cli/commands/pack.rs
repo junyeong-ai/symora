@@ -168,6 +168,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             name_some(&specifiers)
         ));
     }
+    if !result.version_undetermined_imports.is_empty() {
+        let specifiers: Vec<String> = result
+            .version_undetermined_imports
+            .iter()
+            .map(|specifier| format!("`{specifier}`"))
+            .collect();
+        hints.push(format!(
+            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}): the TypeScript version is not known, or not read from a declared range whose lower bound fixes no major from 5 to 7; their dependencies do not contribute to ranking. Install `typescript`, or declare it in the nearest `package.json`, to settle them.",
+            specifiers.len(),
+            name_some(&specifiers)
+        ));
+    }
     if !result.undetermined_ts_projects.is_empty() {
         hints.push(format!(
             "{} file(s) sit below a tsconfig whose `references` name no one project compiling them ({}); their non-relative specifiers were read without a tsconfig's `paths`, `baseUrl` or conditions. Inspect the project references.",
@@ -320,6 +332,7 @@ mod tests {
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
+            version_undetermined_imports: Vec::new(),
             undetermined_ts_projects: Vec::new(),
             unreadable_paths: Vec::new(),
         }
@@ -395,6 +408,7 @@ mod tests {
         assert!(!partial.contains("Rust paths whose file the crate's module tree leaves open"));
         result.rust_relative_imports_omitted = true;
         result.undetermined_imports = vec!["@/styles/app".to_string()];
+        result.version_undetermined_imports = vec!["p6".to_string()];
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
         assert!(
             render_markdown(&ctx(), &args, &result)
@@ -415,6 +429,12 @@ mod tests {
         );
         assert!(
             json["files"]["hints"][2]
+                .as_str()
+                .unwrap()
+                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`): the TypeScript version is not known")
+        );
+        assert!(
+            json["files"]["hints"][3]
                 .as_str()
                 .unwrap()
                 .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")

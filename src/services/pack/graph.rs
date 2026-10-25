@@ -24,6 +24,10 @@ pub(super) struct ImportGraph {
     pub(super) edges: Graph,
     pub(super) rust_relative_imports_omitted: bool,
     pub(super) undetermined_imports: BTreeSet<String>,
+    /// The specifiers the TypeScript majors that may compile an importer
+    /// read as different files, where no installed or declared version
+    /// fixes one major.
+    pub(super) version_undetermined_imports: BTreeSet<String>,
     /// The files writing a non-relative specifier whose TypeScript
     /// configuration the `references` above them leave undetermined: the
     /// projects compiling the file disagree, or none compiles it and one
@@ -64,6 +68,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut graph: Graph = BTreeMap::new();
     let mut rust_relative_imports_omitted = false;
     let mut undetermined_imports = BTreeSet::new();
+    let mut version_undetermined_imports = BTreeSet::new();
     let mut ts_owner_undetermined = BTreeSet::new();
     // The configurations each TypeScript project's references reach, and
     // whether one of them maps a specifier, each worked out once for every
@@ -111,6 +116,10 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     undetermined_imports.insert(specifier);
                     continue;
                 }
+                Resolution::VersionUndetermined(specifier) => {
+                    version_undetermined_imports.insert(specifier);
+                    continue;
+                }
             };
             for dst in files {
                 if dst != node.id && seen.insert(dst) {
@@ -123,6 +132,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         edges: graph,
         rust_relative_imports_omitted,
         undetermined_imports,
+        version_undetermined_imports,
         ts_owner_undetermined,
     }
 }
@@ -138,6 +148,9 @@ enum Resolution {
     /// A specifier the project's own configuration declares that names no
     /// file pack reads.
     Undetermined(String),
+    /// A specifier the TypeScript majors that may compile the importer, no
+    /// installed or declared version fixing one, read as different files.
+    VersionUndetermined(String),
 }
 
 /// What resolving a file's references needs to know about where the file
@@ -164,8 +177,10 @@ struct Importer<'a> {
 
 /// How one TypeScript version that may compile a file reads a non-relative
 /// specifier: whether it reads `baseUrl`, and how it reads a package's name.
+/// `major` is that version's major, `None` where Node or a bundler reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Reading {
+    major: Option<u8>,
     base_url: bool,
     mode: ImportMode,
 }
@@ -252,6 +267,7 @@ impl<'a> Importer<'a> {
                     ts_owners: Vec::new(),
                     ts_uncompiled,
                     readings: vec![Reading {
+                        major: None,
                         base_url: true,
                         mode: ImportMode::Exports(ExportConditions {
                             typescript: false,
@@ -266,6 +282,7 @@ impl<'a> Importer<'a> {
         for (options, typescript) in readings {
             for major in typescript.majors() {
                 let reading = Reading {
+                    major: Some(*major),
                     base_url: reads_base_url(*major),
                     mode: import_mode(options, *major, node, manifests),
                 };
@@ -1335,17 +1352,30 @@ impl ProjectIndex<'_> {
     /// rather than dropped — except where only the catch-all `*` pattern
     /// matches it, which maps every package name too. Each TypeScript
     /// version that may compile the importer reads it (`Reading`), 7 without
-    /// `baseUrl`; where they name different files, it is disclosed.
+    /// `baseUrl`; where they name different files, it is disclosed, as one
+    /// the TypeScript version decides where each major's readings agree.
     fn bare_specifier(&self, specifier: &str, importer: &Importer, form: ImportForm) -> Resolution {
-        let mut readings = importer
+        let read: Vec<(Option<u8>, Resolution)> = importer
             .readings
             .iter()
-            .map(|reading| self.read_bare_specifier(specifier, importer, *reading, form));
-        let Some(first) = readings.next() else {
-            return Resolution::Files(Vec::new());
-        };
-        if readings.all(|reading| reading == first) {
-            first
+            .map(|reading| {
+                let resolution = self.read_bare_specifier(specifier, importer, *reading, form);
+                (reading.major, resolution)
+            })
+            .collect();
+        if read.windows(2).all(|pair| pair[0].1 == pair[1].1) {
+            return read
+                .into_iter()
+                .next()
+                .map_or(Resolution::Files(Vec::new()), |(_, first)| first);
+        }
+        let each_major_agrees = read.iter().all(|(major, reading)| {
+            read.iter()
+                .filter(|(other, _)| other == major)
+                .all(|(_, other)| other == reading)
+        });
+        if each_major_agrees {
+            Resolution::VersionUndetermined(specifier.to_string())
         } else {
             Resolution::Undetermined(specifier.to_string())
         }
@@ -3818,8 +3848,9 @@ mod tests {
         assert_eq!(edges(0), vec!["six/src/lib/x.ts"]);
         assert_eq!(edges(3), vec!["seven/lib/x.ts"]);
         assert!(edges(6).is_empty());
+        assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.version_undetermined_imports,
             BTreeSet::from(["@/lib/x".to_string(), "lib/x".to_string()])
         );
     }
@@ -4109,6 +4140,75 @@ mod tests {
             BTreeSet::from(["p".to_string()])
         );
         assert_eq!(graph.ts_owner_undetermined.len(), 3);
+    }
+
+    /// A specifier that each TypeScript major reads alike but the majors
+    /// read differently is disclosed as one the unknown version decides;
+    /// one that projects compiling the file read differently under one
+    /// major is disclosed as undetermined whatever the version.
+    #[test]
+    fn a_specifier_only_the_typescript_version_decides_is_disclosed_as_such() {
+        let ts = |id, rel: &str, source: &str| node_in(id, rel, source, Language::TypeScript);
+        let mut nodes = vec![
+            ts(0, "ver/src/a.ts", "import p from 'p6'\n"),
+            ts(1, "owners/shared/s.ts", "import q from 'q6'\n"),
+        ];
+        let mut configs = vec![
+            (
+                "package.json".to_string(),
+                "{\"workspaces\": [\"packages/*\"]}".to_string(),
+            ),
+            ("ver/tsconfig.json".to_string(), "{}".to_string()),
+            (
+                "owners/package.json".to_string(),
+                "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}".to_string(),
+            ),
+            (
+                "owners/tsconfig.json".to_string(),
+                "{\"files\": [], \"references\": [{\"path\": \"./a\"}, {\"path\": \"./b\"}]}"
+                    .to_string(),
+            ),
+        ];
+        for (project, resolution) in [("a", "node10"), ("b", "bundler")] {
+            configs.push((
+                format!("owners/{project}/tsconfig.json"),
+                format!(
+                    "{{\"compilerOptions\": {{\"module\": \"esnext\", \
+                     \"moduleResolution\": \"{resolution}\"}}, \"include\": [\"../shared\"]}}"
+                ),
+            ));
+        }
+        for package in ["p6", "q6"] {
+            for file in ["types", "esm", "cjs"] {
+                nodes.push(ts(
+                    nodes.len(),
+                    &format!("packages/{package}/src/{file}.ts"),
+                    "",
+                ));
+            }
+            configs.push((
+                format!("packages/{package}/package.json"),
+                format!(
+                    "{{\"name\": \"{package}\", \"types\": \"./src/types.ts\", \"exports\": \
+                     {{\".\": {{\"import\": \"./src/esm.ts\", \"require\": \"./src/cjs.ts\"}}}}}}"
+                ),
+            ));
+        }
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.edges[&0].is_empty() && graph.edges[&1].is_empty());
+        assert_eq!(
+            graph.version_undetermined_imports,
+            BTreeSet::from(["p6".to_string()])
+        );
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["q6".to_string()])
+        );
     }
 
     /// Every specifier matches the catch-all pattern `*`, and TypeScript looks
@@ -4667,9 +4767,11 @@ mod tests {
             })
             .collect();
         assert_eq!(edges, expected);
-        // Where the majors disagree (`unknown`), the import is disclosed.
+        // Where the majors disagree (`unknown`, `ts8`), the import is
+        // disclosed as one the TypeScript version decides.
+        assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.version_undetermined_imports,
             BTreeSet::from(["p6".to_string()])
         );
     }
