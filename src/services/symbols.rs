@@ -527,6 +527,17 @@ impl SymbolExtractor {
     /// prototype wraps its parameters in ([`prototype_macros`]) and those
     /// written before a member's qualified type ([`qualified_type_macros`]),
     /// each spelled as blanks, so every offset still addresses `content`.
+    /// The grammar's recovery from an error is not local, so a blank can
+    /// change how it reads declarations far from it, for better or worse,
+    /// however well proved, and what a file reads depends on the blanks taken
+    /// together: in ICU's `utfiterator.h`, the one after its first
+    /// `operator++` alone reads 28 declarations fewer than the grammar alone,
+    /// and all of them together read more, yet lose a namespace. The measures
+    /// of the re-read tree tried did not tell a better reading from a worse:
+    /// the bytes it holds in errors favour a misreading the grammar holds
+    /// without one, and keeping each declaration the first reading made
+    /// refuses the passes that remove its misread ones. So each blank needs a
+    /// proof of its own, and a file reads what its proved blanks give.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
         let mut parser = entry.parser.lock().ok()?;
@@ -797,9 +808,10 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
 /// are attribute macros (`const U_LIFETIME_BOUND = 0;`, `lzma_nothrow
 /// lzma_attr_pure;`), which the grammar can recover from by taking the
 /// members after them into an error. The declarator must prove itself a
-/// function, by parameters that declare a name or qualifiers only a
-/// function's takes ([`function_qualifiers`]): a macro's invocation reads as
-/// one too, and the names after it are a declaration of their own
+/// function, by parameters that declare a name, an operator's name, or
+/// qualifiers only a function's takes ([`function_qualifiers`]): a macro's
+/// invocation reads as one too, and the
+/// names after it are a declaration of their own
 /// (`_LIBC_COUNT(gl_matchc) gl_pathv;`, `Entry entry;` after
 /// `DEFINE_MEMBERS(File)`), which no function's declarator runs into. A
 /// cv-qualifier proves nothing where the grammar ended an untyped
@@ -812,6 +824,9 @@ fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<
     while let Some(node) = pending.pop() {
         if node.kind() == "function_declarator"
             && (names_a_parameter(node)
+                || node
+                    .child_by_field_name("declarator")
+                    .is_some_and(|name| name.kind() == "operator_name")
                 || function_qualifiers(node).any(|qualifier| {
                     qualifier.kind() != "type_qualifier"
                         || !node.parent().is_some_and(|declaration| {
@@ -7614,13 +7629,18 @@ region     = "us-central1"
                 "class A {\n    API virtual CharacterIterator& getText() const U_LIFETIME_BOUND = 0;\n    \
                  API void after();\n};\n\
                  extern LZMA_API(lzma_ret) lzma_index_append(lzma_index *i)\n\t\t\
-                 lzma_nothrow lzma_attr_warn_unused_result;\n"
+                 lzma_nothrow lzma_attr_warn_unused_result;\n\
+                 class R {\n    INLINE reverse_iterator& operator++() U_LIFETIME_BOUND {\n      \
+                 return *this;\n    }\n    int limit_;\n};\n"
             ),
             [
                 "class:A",
                 "method:getText",
                 "method:after",
-                "function:lzma_index_append"
+                "function:lzma_index_append",
+                "class:R",
+                "method:operator++",
+                "field:limit_",
             ],
             "the names after a function's declarator are macros written there"
         );
