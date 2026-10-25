@@ -680,12 +680,10 @@ impl ProjectIndex<'_> {
                 };
                 let mut path = from.directory[..base].to_vec();
                 path.extend_from_slice(components);
-                self.at(
-                    &self.exact,
-                    &path,
-                    from.language,
-                    package_is_directory(from.language),
-                )
+                if package_is_directory(from.language) {
+                    return self.package(&path, from.language);
+                }
+                self.at(&self.exact, &path, from.language, false)
             }
             Reference::Package {
                 package,
@@ -700,13 +698,12 @@ impl ProjectIndex<'_> {
                 self.at(&self.exact, &path, from.language, false)
             }
             Reference::Unresolved => Vec::new(),
+            Reference::Absolute(components) if from.language == Language::Go => self
+                .manifests
+                .go_package(components, from)
+                .map(|directory| self.package(&directory, Language::Go))
+                .unwrap_or_default(),
             Reference::Absolute(components) => {
-                // A declared module prefix is part of the reference but not
-                // part of the tree, so it is removed before matching rather
-                // than hunted for on disk.
-                let components = components
-                    .strip_prefix(self.manifests.go_module.as_slice())
-                    .unwrap_or(components);
                 // `use a::b::Item` names a module and an item in one path;
                 // read it whole, then without the item.
                 let parent = matches!(
@@ -714,7 +711,10 @@ impl ProjectIndex<'_> {
                     Language::Rust | Language::Java | Language::Kotlin | Language::Scala
                 )
                 .then(|| components.split_last().map_or(&[][..], |parts| parts.1));
-                for (attempt, candidate) in std::iter::once(components).chain(parent).enumerate() {
+                for (attempt, candidate) in std::iter::once(components.as_slice())
+                    .chain(parent)
+                    .enumerate()
+                {
                     if candidate.is_empty() {
                         continue;
                     }
@@ -763,12 +763,38 @@ impl ProjectIndex<'_> {
         }
         Vec::new()
     }
+
+    /// The files of the package that is the directory at `path`, in a
+    /// language whose packages are directories. A file beside it named like
+    /// the directory is not the package. A Go package is the directory's `.go`
+    /// files the build reads: neither its tests (`_test.go`, whichever package
+    /// they declare) nor the files it ignores (named from `_` or `.`).
+    fn package(&self, path: &[String], language: Language) -> Vec<usize> {
+        let Some(files) = self.exact.by_directory.get(path) else {
+            return Vec::new();
+        };
+        files
+            .iter()
+            .copied()
+            .filter(|id| {
+                let node = &self.nodes[*id];
+                let name = Path::new(&node.rel_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                node.language == language
+                    && !(language == Language::Go
+                        && (name.ends_with("_test.go") || name.starts_with(['_', '.'])))
+            })
+            .collect()
+    }
 }
 
 /// Whether the language defines a package as a directory, so that a
-/// reference to one names every file in it rather than a single module
-/// file. Go's specification says so outright; the rest address a directory
-/// through a `mod`/`index` file, which `module_path` already folds in.
+/// reference to one names every file in it and never a single module file.
+/// Go's specification says so outright, and a Terraform module's source is
+/// its directory; the rest address a directory through a `mod`/`index` file,
+/// which `module_path` already folds in.
 fn package_is_directory(language: Language) -> bool {
     matches!(language, Language::Go | Language::Terraform)
 }
@@ -792,9 +818,10 @@ fn imports_a_package_by_its_directory(language: Language) -> bool {
 /// from the tree would be a guess about which components are real.
 #[derive(Default)]
 struct Manifests {
-    /// The module path `go.mod` declares. Go has no relative import form, so
-    /// every intra-project import repeats it in full.
-    go_module: Vec<String>,
+    /// The module path each `go.mod` declares, by the directory it roots. Go
+    /// has no relative import form in a module, so every import of a project
+    /// package spells its module's path in full.
+    go_modules: HashMap<Vec<String>, Vec<String>>,
     /// The name each `pubspec.yaml` gives the Dart package rooted at its
     /// directory: a `package:name/x.dart` URI is that directory's
     /// `lib/x.dart`.
@@ -803,18 +830,56 @@ struct Manifests {
 
 impl Manifests {
     fn read(root: &Path, nodes: &[Node]) -> Self {
-        let go_module = std::fs::read_to_string(root.join("go.mod"))
-            .ok()
-            .and_then(|go_mod| go_module_path(&go_mod))
-            .unwrap_or_default();
+        let go_modules = manifests_above(root, nodes, Language::Go, "go.mod")
+            .into_iter()
+            .filter_map(|(directory, go_mod)| Some((directory, go_module_path(&go_mod)?)))
+            .collect();
         let dart_packages = manifests_above(root, nodes, Language::Dart, "pubspec.yaml")
             .into_iter()
             .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
             .collect();
         Self {
-            go_module,
+            go_modules,
             dart_packages,
         }
+    }
+
+    /// The directory a Go import path names in the project, as the go command
+    /// finds it. The module providing a package is the one with the longest
+    /// path the import path begins with, and the package is the directory as
+    /// far below that module's root — unless a `go.mod` of its own makes that
+    /// directory another module, which the first does not contain. An import
+    /// path under no module the project declares names a package the
+    /// importer's own module vendors, or nothing in the project.
+    fn go_package(&self, import: &[String], from: &Node) -> Option<Vec<String>> {
+        let providing = self
+            .go_modules
+            .iter()
+            .filter(|(_, module)| import.starts_with(module));
+        let longest = providing.clone().map(|(_, module)| module.len()).max();
+        let Some(longest) = longest else {
+            let own = (0..=from.directory.len())
+                .rev()
+                .map(|depth| &from.directory[..depth])
+                .find(|directory| self.go_modules.contains_key(*directory))?;
+            let mut vendored = own.to_vec();
+            vendored.push("vendor".to_string());
+            vendored.extend_from_slice(import);
+            return Some(vendored);
+        };
+        // Two `go.mod` files declaring one path leave the import naming
+        // neither.
+        let mut providers = providing.filter(|(_, module)| module.len() == longest);
+        let (Some((root, _)), None) = (providers.next(), providers.next()) else {
+            return None;
+        };
+        let mut directory = root.clone();
+        directory.extend_from_slice(&import[longest..]);
+        let nested = self
+            .go_modules
+            .keys()
+            .any(|other| other.len() > root.len() && directory.starts_with(other));
+        (!nested).then_some(directory)
     }
 
     /// The directory of the package a `package:name/…` URI written in `from`
@@ -1208,15 +1273,19 @@ mod tests {
     }
 
     fn edges_of(nodes: &[Node], id: usize) -> Vec<String> {
-        edges_with(nodes, id, &[])
+        edges_under(nodes, id, &Manifests::default())
     }
 
-    fn edges_with(nodes: &[Node], id: usize, prefix: &[String]) -> Vec<String> {
-        let manifests = Manifests {
-            go_module: prefix.to_vec(),
+    /// Manifests declaring each Go module path at its directory, as the
+    /// `go.mod` files there would.
+    fn go_modules(modules: &[(&str, &str)]) -> Manifests {
+        Manifests {
+            go_modules: modules
+                .iter()
+                .map(|(directory, module)| (split_components(directory), split_components(module)))
+                .collect(),
             ..Manifests::default()
-        };
-        edges_under(nodes, id, &manifests)
+        }
     }
 
     fn edges_under(nodes: &[Node], id: usize, manifests: &Manifests) -> Vec<String> {
@@ -1433,10 +1502,6 @@ mod tests {
     /// the ranking it feeds degenerates to uniform.
     #[test]
     fn a_go_import_resolves_through_the_module_path_go_mod_declares() {
-        let prefix: Vec<String> = ["github.com", "acme", "widget"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
         let nodes = vec![
             node_in(
                 0,
@@ -1449,11 +1514,132 @@ mod tests {
         ];
         // A Go package is a directory, so the reference names every file in it.
         assert_eq!(
-            edges_with(&nodes, 0, &prefix),
+            edges_under(&nodes, 0, &go_modules(&[("", "github.com/acme/widget")])),
             vec!["internal/store/store.go", "internal/store/query.go"]
         );
         // Without the declared prefix the reference matches nothing.
         assert!(edges_of(&nodes, 0).is_empty());
+    }
+
+    /// A Go import path always names a package directory — the build's files
+    /// in it — and never a file beside it that happens to share its name, nor
+    /// the package's tests. One under no module the project declares (the
+    /// standard library, a dependency) names nothing here, however its last
+    /// segments match a project path.
+    #[test]
+    fn a_go_import_names_a_package_directory_of_a_declared_module_only() {
+        let nodes = vec![
+            node_in(
+                0,
+                "cmd/app/main.go",
+                "package main\nimport (\n\t\"example.com/svc/internal/config\"\n\t\
+                 \"example.com/svc/internal/store\"\n\t\"log\"\n)\n",
+                Language::Go,
+            ),
+            node_in(1, "cmd/app/log.go", "package main\n", Language::Go),
+            node_in(2, "internal/config.go", "package internal\n", Language::Go),
+            node_in(
+                3,
+                "internal/config/load.go",
+                "package config\n",
+                Language::Go,
+            ),
+            node_in(4, "internal/context.go", "package internal\n", Language::Go),
+            node_in(
+                5,
+                "internal/store/store.go",
+                "package store\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"log\"\n\t\
+                 \"github.com/other/svc/internal/config\"\n)\n",
+                Language::Go,
+            ),
+            node_in(
+                6,
+                "internal/store/errors.go",
+                "package store\n",
+                Language::Go,
+            ),
+            node_in(
+                7,
+                "internal/store/store_test.go",
+                "package store_test\n",
+                Language::Go,
+            ),
+            node_in(
+                8,
+                "internal/store/_scratch.go",
+                "package store\n",
+                Language::Go,
+            ),
+        ];
+        let manifests = go_modules(&[("", "example.com/svc")]);
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            vec![
+                "internal/config/load.go",
+                "internal/store/store.go",
+                "internal/store/errors.go"
+            ]
+        );
+        assert!(edges_under(&nodes, 5, &manifests).is_empty());
+    }
+
+    /// Every `go.mod` roots its own module, wherever it sits: a workspace's
+    /// modules import each other by their declared paths, a directory with a
+    /// `go.mod` of its own is no package of the module above it, and a path
+    /// under no declared module names what the importer's module vendors.
+    #[test]
+    fn every_go_mod_maps_its_module_path_to_its_own_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (go_mod, contents) in [
+            ("backend/go.mod", "module example.com/backend\n"),
+            ("tools/go.mod", "module example.com/tools\n"),
+            ("backend/plugins/go.mod", "module example.com/plugins\n"),
+        ] {
+            let path = dir.path().join(go_mod);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+            std::fs::write(path, contents).expect("write go.mod");
+        }
+        let util = "import \"example.com/backend/pkg/util\"\n";
+        let nodes = vec![
+            node_in(
+                0,
+                "backend/cmd/main.go",
+                &format!("{util}import \"example.com/backend/plugins/auth\"\n"),
+                Language::Go,
+            ),
+            node_in(1, "backend/pkg/util/u.go", "", Language::Go),
+            node_in(2, "backend/plugins/auth/auth.go", "", Language::Go),
+            node_in(
+                3,
+                "tools/gen/g.go",
+                &format!("{util}import \"github.com/dep/lib\"\n"),
+                Language::Go,
+            ),
+            node_in(
+                4,
+                "tools/vendor/github.com/dep/lib/lib.go",
+                "",
+                Language::Go,
+            ),
+            node_in(
+                5,
+                "backend/vendor/github.com/dep/lib/lib.go",
+                "",
+                Language::Go,
+            ),
+        ];
+        let manifests = Manifests::read(dir.path(), &nodes);
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            vec!["backend/pkg/util/u.go"]
+        );
+        assert_eq!(
+            edges_under(&nodes, 3, &manifests),
+            vec![
+                "backend/pkg/util/u.go",
+                "tools/vendor/github.com/dep/lib/lib.go"
+            ]
+        );
     }
 
     /// `go.mod` is read by its own lexical rules, not as a line beginning
@@ -2081,6 +2267,8 @@ mod tests {
             ),
             node_in(1, "network/main.tf", "", Language::Terraform),
             node_in(2, "network/variables.tf", "", Language::Terraform),
+            // A module's source is its directory, never a file named like it.
+            node_in(3, "network.tf", "", Language::Terraform),
         ];
         assert_eq!(
             edges_of(&tf, 0),
