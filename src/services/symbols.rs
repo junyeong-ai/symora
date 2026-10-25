@@ -1488,11 +1488,13 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
             Language::Bash,
             "variable_assignment" | "variable_assignments" | "declaration_command",
         ) => {
-            if std::iter::successors(Some(node), Node::parent).any(|statement| {
-                std::iter::successors(statement.next_sibling(), Node::next_sibling)
-                    .find(|next| !next.is_extra())
-                    .is_some_and(|next| next.kind() == "&")
-            }) {
+            if !shell_command_declares(node, content)
+                || std::iter::successors(Some(node), Node::parent).any(|statement| {
+                    std::iter::successors(statement.next_sibling(), Node::next_sibling)
+                        .find(|next| !next.is_extra())
+                        .is_some_and(|next| next.kind() == "&")
+                })
+            {
                 return false;
             }
             (
@@ -1520,6 +1522,26 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
         ancestor = scope.parent();
     }
     true
+}
+
+/// Whether a shell declaration command declares variables at all: `local`
+/// declares the function's that runs it and fails anywhere else, and
+/// `declare` or `typeset` with `-f`, `-F` or `-p` among the options written
+/// before its first name lists functions or prints variables, assigning
+/// nothing.
+fn shell_command_declares(node: Node, content: &str) -> bool {
+    match node.child(0).map(|keyword| keyword.kind()) {
+        Some("local") => false,
+        Some("declare" | "typeset") => {
+            let mut cursor = node.walk();
+            !node
+                .named_children(&mut cursor)
+                .take_while(|argument| argument.kind() == "word")
+                .filter_map(|word| content.get(word.byte_range())?.strip_prefix(['-', '+']))
+                .any(|options| options.contains(['f', 'F', 'p']))
+        }
+        _ => true,
+    }
 }
 
 /// Where a file's types are declared outside their bodies
@@ -2559,12 +2581,25 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         Language::Python | Language::Ruby => assignment_targets(node)
             .filter(|target| binds_a_name(*target, language))
             .collect(),
-        Language::Bash => children_of_kind(node, "variable_assignment")
-            .into_iter()
-            .filter(|assignment| child_of_kind(*assignment, "=").is_some())
-            .filter_map(|assignment| assignment.child_by_field_name("name"))
-            .filter(|name| name.kind() == "variable_name")
-            .collect(),
+        // `declare` and `typeset` declare a name they give no value (`declare
+        // -A MAP`), where `export` and `readonly` mark one, for the
+        // environment of the commands the script runs or against assignment.
+        Language::Bash => {
+            let declares_alone = matches!(
+                node.child(0).map(|keyword| keyword.kind()),
+                Some("declare" | "typeset")
+            );
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .filter_map(|argument| match argument.kind() {
+                    "variable_assignment" => child_of_kind(argument, "=")
+                        .and(argument.child_by_field_name("name"))
+                        .filter(|name| name.kind() == "variable_name"),
+                    "variable_name" if declares_alone => Some(argument),
+                    _ => None,
+                })
+                .collect()
+        }
         Language::PHP => children_of_kind(node, "property_element")
             .into_iter()
             .filter_map(|element| {
@@ -4292,8 +4327,9 @@ const RUBY_QUERY: &str = r#"
 (class (body_statement [(assignment) (operator_assignment operator: "||=")] @symbol))
 "#;
 
-// A script's variables are the ones its own shell assigns, alone, under
-// `export`, `readonly` or `declare`, or several in one statement: at its top
+// A script's variables are the ones its own shell assigns, alone, in a
+// declaration command (`export`, `readonly`, `declare`, which also declares a
+// name it gives no value), or several in one statement: at its top
 // level, in an `&&` or `||` list, an `if`, a `case`, a loop's body, a `{ … }`
 // group or a redirected statement, each judged by the nearest scope (see
 // `declares`). A function's body declares none of the script's: it assigns
@@ -5437,6 +5473,14 @@ NOW=$( { IN_SUBSTITUTION=1; }; date )
 diff <( { IN_PROCESS=1; } ) /dev/null
 echo x | { IN_PIPELINE=1; }
 { IN_BACKGROUND=1; } &
+declare -A REGISTRY
+typeset -a LIST
+export MARKED
+readonly FROZEN
+local OUTSIDE=1
+declare -p PRINTED
+declare -F greet
+declare -fx NO_FUNCTION=1
 FIRST=1 SECOND=2
 "#,
             declares: &[
@@ -5458,6 +5502,8 @@ FIRST=1 SECOND=2
                 "variable:LOOPED",
                 "variable:STAMP",
                 "variable:NOW",
+                "variable:REGISTRY",
+                "variable:LIST",
             ],
         },
         DeclarationFixture {
