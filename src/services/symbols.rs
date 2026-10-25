@@ -1103,12 +1103,13 @@ fn invokes_a_macro(node: Node) -> bool {
 /// a constructor can be, yet not named for a class whose body holds it
 /// ([`named_for_its_class`]). A member function has a type, so in a class
 /// body it is a declaration only where one the grammar cut short before it
-/// holds the type ([`begins_its_own_declaration`]) or it writes what only a
-/// function does, its type lost to another error the grammar recovered from
-/// ([`only_a_function_writes`]), whatever specifiers it writes (`static
-/// NAN_METHOD(New);`); elsewhere a C function may go without one (`main()
-/// {}`), and its own syntax tells it from an invocation
-/// ([`proves_a_function`]).
+/// holds the type, declaring no function of its own, as its syntax or the
+/// head's shows ([`proves_a_function`], [`leaves_its_function_to_the_next`]),
+/// or it writes what only a function does, its type lost to another error
+/// the grammar recovered from ([`only_a_function_writes`]), whatever
+/// specifiers it writes (`static NAN_METHOD(New);` after `Q_DISABLE_COPY(W)`);
+/// elsewhere a C function may go without one (`main() {}`), and its own
+/// syntax tells it from an invocation ([`proves_a_function`]).
 fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
     let Some(declarator) = node
         .child_by_field_name("declarator")
@@ -1134,7 +1135,9 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
                     .find(|before| !before.is_extra())
                     .is_some_and(|head| {
                         ends_on_a_supplied_semicolon(head)
-                            && begins_its_own_declaration(node, head, content)
+                            && !declares_a_function(head)
+                            && proves_a_function(node)
+                            || leaves_its_function_to_the_next(head, content)
                     })
         } else {
             !proves_a_function(node)
@@ -7096,7 +7099,8 @@ region     = "us-central1"
                  API explicit operator bool() const;\n};\n\
                  class Buffer {\n\tidx_t parked_bytes DUCKDB_GUARDED_BY(glock) = 0;\n\tint after;\n};\n\
                  struct uv_pipe_s {\n  UV_HANDLE_FIELDS\n  UV_STREAM_FIELDS\n  int ipc;\n};\n\
-                 union Symbol {\n  DEFINE_MEMBERS(File, FULL, file)\n  Entry entry;\n};\n"
+                 union Symbol {\n  DEFINE_MEMBERS(File, FULL, file)\n  Entry entry;\n};\n\
+                 struct LogicalType {\n\tDUCKDB_API static LogicalType DECIMAL(uint8_t width, uint8_t scale);\n};\n"
             ),
             [
                 "class:Logger",
@@ -7113,6 +7117,8 @@ region     = "us-central1"
                 "field:ipc",
                 "struct:Symbol",
                 "field:entry",
+                "struct:LogicalType",
+                "method:DECIMAL",
             ],
             "a declaration the grammar cut short goes on only into what cannot begin one of its own"
         );
@@ -7120,7 +7126,7 @@ region     = "us-central1"
             declared(
                 "class B {\n  static constexpr result_type(min)() { return 0; }\n  \
                  ORT_API_T(const char*, GetName, const OrtEpFactory* this_ptr);\n  \
-                 static NAN_METHOD(New);\n  \
+                 static NAN_METHOD(New);\n  Q_DISABLE_COPY(B)\n  static NAN_METHOD(Old);\n  \
                  template <typename R>\n  bool try_lock_for(const R &timeout) DUCKDB_TRY_ACQUIRE(true) {\n    \
                  return false;\n  }\n  int after;\n};\n"
             ),
