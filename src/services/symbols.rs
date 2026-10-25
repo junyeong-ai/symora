@@ -1409,7 +1409,8 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// Whether a captured node declares anything: a Python assignment, a C or C++
 /// declaration a preprocessor conditional holds, or a JavaScript or
 /// TypeScript `var`, which belongs to the function or program around the
-/// block that holds it, binds a local where a function's scope holds it,
+/// block or loop that holds it (`for (var k in o)` as well), binds a local
+/// where a function's scope holds it,
 /// however deep in the function's statements, and declares where a class's,
 /// a namespace's or the file's does; a type alias is a type, read wherever
 /// it is declared. A shell assignment declares where the script's own shell
@@ -1456,10 +1457,12 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
             &["function_definition", "lambda"],
             &["class_definition", "module"],
         ),
-        (Language::TypeScript | Language::JavaScript, "variable_declarator")
-            if node
-                .parent()
-                .is_some_and(|statement| statement.kind() == "variable_declaration") =>
+        (Language::TypeScript | Language::JavaScript, kind)
+            if kind == "variable_declarator"
+                && node
+                    .parent()
+                    .is_some_and(|statement| statement.kind() == "variable_declaration")
+                || for_in_binding(node).is_some() =>
         {
             (
                 &[
@@ -1607,6 +1610,17 @@ fn shell_line<'t>(assignment: Node<'t>, content: &str) -> Option<(Node<'t>, Node
         before = Some(child);
     }
     None
+}
+
+/// The `for … in` or `for … of` loop that binds `node`, the name or pattern
+/// written after its `var`, `let` or `const`: the grammar holds that keyword
+/// beside the loop's `left` (`for (var k in o)`), with no declaration of its
+/// own around them. The query reads only what a `var` binds.
+fn for_in_binding(node: Node) -> Option<Node> {
+    let statement = node
+        .parent()
+        .filter(|parent| parent.kind() == "for_in_statement")?;
+    (statement.child_by_field_name("left")?.id() == node.id()).then_some(statement)
 }
 
 /// Where a file's types are declared outside their bodies
@@ -1806,7 +1820,13 @@ fn read_signature(
         }
         node = node.parent()?;
     };
-    let from = start.max(declaration.start_byte());
+    // The keyword a loop declares with begins the declaration it writes
+    // beside: `k` in `for (var k in o)` is declared by `var k`.
+    let begins = matches!(language, Language::TypeScript | Language::JavaScript)
+        .then(|| for_in_binding(declaration)?.child_by_field_name("kind"))
+        .flatten()
+        .map_or(declaration.start_byte(), |keyword| keyword.start_byte());
+    let from = start.max(begins);
     if errs_within(declaration, from, opens) {
         return Some(Read::Recovered);
     }
@@ -2641,11 +2661,9 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
                     .or_else(|| child_of_kind(declarator, "identifier"))
             })
             .collect(),
-        Language::TypeScript | Language::JavaScript => node
-            .child_by_field_name("name")
-            .filter(|name| matches!(name.kind(), "object_pattern" | "array_pattern"))
-            .map(bound_names)
-            .unwrap_or_default(),
+        Language::TypeScript | Language::JavaScript => {
+            destructured_by(node).map(bound_names).unwrap_or_default()
+        }
         Language::Scala => node
             .child_by_field_name("pattern")
             .filter(|pattern| pattern.kind() != "identifier")
@@ -2734,6 +2752,15 @@ fn embedded_type_name(embedded: Node) -> Option<Node> {
             .and_then(embedded_type_name),
         _ => None,
     }
+}
+
+/// The destructuring pattern a JavaScript or TypeScript declarator binds
+/// (`const { a } = obj`), or that a loop's `var` does (`for (var [k, v] of
+/// entries)`).
+fn destructured_by(node: Node) -> Option<Node> {
+    node.child_by_field_name("name")
+        .or_else(|| for_in_binding(node).map(|_| node))
+        .filter(|pattern| matches!(pattern.kind(), "object_pattern" | "array_pattern"))
 }
 
 /// The names a Swift `name` binds: an enum case's own, a pattern's bound
@@ -2923,7 +2950,8 @@ fn shell_bound_name<'t>(part: Node<'t>, statement: Node) -> Option<Node<'t>> {
 /// Where a declaration's text begins: its node ([`declaration_node`]), or
 /// the lines before it among its siblings that belong to it — a TypeScript
 /// class member's decorators, a Rust item's outer attributes and doc comments
-/// (`///` is `#[doc]`). A comment between those lines is inside the
+/// (`///` is `#[doc]`) — or the `var` a loop binds it with (`for (var k in
+/// o)`, see [`for_in_binding`]). A comment between those lines is inside the
 /// declaration; one above them is not. The rest of a C or C++ declaration that
 /// invoked a macro begins where that declaration does ([`continued_macro`]),
 /// and a prototype an error holds with the macro it is written after
@@ -2940,6 +2968,7 @@ fn declaration_start(node: Node, language: Language) -> Node {
     while let Some(sibling) = before {
         let leads = match (language, sibling.kind()) {
             (Language::TypeScript | Language::JavaScript, "decorator") => true,
+            (Language::TypeScript | Language::JavaScript, "var") => for_in_binding(node).is_some(),
             (Language::Rust, "attribute_item") => true,
             (Language::Rust, "line_comment" | "block_comment") => {
                 sibling.child_by_field_name("outer").is_some()
@@ -3553,9 +3582,7 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     // A destructuring pattern is named by the names it binds alone, so one
     // binding none (`const {} = obj`) names nothing.
     if matches!(language, Language::TypeScript | Language::JavaScript)
-        && let Some(pattern) = node
-            .child_by_field_name("name")
-            .filter(|name| matches!(name.kind(), "object_pattern" | "array_pattern"))
+        && let Some(pattern) = destructured_by(node)
     {
         return bound_names(pattern).into_iter().next();
     }
@@ -4278,8 +4305,8 @@ const PYTHON_QUERY: &str = r#"
 // function's locals and loop counters out, and a destructuring declarator
 // declares each name its pattern binds (see `declared_names`). A `var`
 // belongs to the function or the program around whatever block holds it, so
-// it is read wherever it is written and judged by that scope (see
-// `declares`). A constructor
+// it is read wherever it is written, a loop's (`for (var k in o)`) as well,
+// and judged by that scope (see `declares`). A constructor
 // parameter declares a property where a modifier says so (see
 // `find_name_node`).
 const TYPESCRIPT_QUERY: &str = r#"
@@ -4311,6 +4338,7 @@ const TYPESCRIPT_QUERY: &str = r#"
 (internal_module body: (statement_block (lexical_declaration (variable_declarator) @symbol)))
 (module body: (statement_block (lexical_declaration (variable_declarator) @symbol)))
 (variable_declaration (variable_declarator) @symbol)
+(for_in_statement kind: "var" left: (_) @symbol)
 "#;
 
 const JAVASCRIPT_QUERY: &str = r#"
@@ -4322,6 +4350,7 @@ const JAVASCRIPT_QUERY: &str = r#"
 (program (lexical_declaration (variable_declarator) @symbol))
 (export_statement (lexical_declaration (variable_declarator) @symbol))
 (variable_declaration (variable_declarator) @symbol)
+(for_in_statement kind: "var" left: (_) @symbol)
 "#;
 
 const JAVA_QUERY: &str = r#"
@@ -5018,6 +5047,9 @@ declare var ambientVar: number;
 namespace Plain { const inPlain = 1; }
 namespace Hoist { if (ready) { var inHoist = 1; } }
 if (ready) { var tsHoisted = 1; }
+for (var tsKey in source) {}
+for (const tsScoped of items) {}
+namespace Loop { for (var inLoop of items) {} }
 declare module "bare" { const inBare: number; }
 export declare class Decl {
     method(a: string): void;
@@ -5065,6 +5097,9 @@ export declare class Decl {
                 "module:Hoist",
                 "variable:inHoist",
                 "variable:tsHoisted",
+                "variable:tsKey",
+                "module:Loop",
+                "variable:inLoop",
                 "module:\"bare\"",
                 "constant:inBare",
                 "class:Decl",
@@ -5096,6 +5131,10 @@ for (var i = 0; i < 1; i++) {}
 function hold() { { var inFunction = 1; } }
 const run = () => { var inArrow = 1; };
 class K { static { var inStatic = 1; } }
+for (var key in source) {}
+for (var [first, { second }] of pairs) {}
+for (let blockScoped of pairs) {}
+function scan() { for (var inLoop of pairs) {} }
 "#,
             declares: &[
                 "class:C",
@@ -5116,6 +5155,10 @@ class K { static { var inStatic = 1; } }
                 "function:hold",
                 "function:run",
                 "class:K",
+                "variable:key",
+                "variable:first",
+                "variable:second",
+                "function:scan",
             ],
         },
         DeclarationFixture {
@@ -7812,6 +7855,20 @@ region     = "us-central1"
                 "const [first = 0, second] = arr;\n",
                 "first",
                 Some("const [first = 0, second]"),
+            ),
+            (
+                "a.ts",
+                Language::TypeScript,
+                "for (var key in obj) {}\n",
+                "key",
+                Some("var key"),
+            ),
+            (
+                "a.js",
+                Language::JavaScript,
+                "for (var [k, { v = 0 }] of entries) {}\n",
+                "v",
+                Some("var [k, { v = 0 }]"),
             ),
             (
                 "a.scala",
