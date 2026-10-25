@@ -576,13 +576,11 @@ impl<'a> SourceSet<'a> {
 }
 
 /// The directories a Python tree puts on `sys.path`, as its own tooling
-/// establishes them: the directory above each top-level package (a package is
-/// a directory holding `__init__.py`), and those each project's configuration
-/// declares or its build backend discovers.
+/// establishes them: the directory above a file's top-level package (a
+/// package is a directory holding `__init__.py`), and those each project's
+/// configuration declares or its build backend discovers.
 struct PythonPath<'a> {
     packages: HashSet<&'a [String]>,
-    /// The directory above each top-level package, where it is imported from.
-    package_roots: Vec<&'a [String]>,
     /// The directories each project puts on `sys.path`, by the project's
     /// directory. The project root is a project whether or not it holds a
     /// configuration file of its own.
@@ -601,22 +599,11 @@ impl<'a> PythonPath<'a> {
             })
             .map(|node| node.directory.as_slice())
             .collect();
-        let mut package_roots: Vec<&[String]> = packages
-            .iter()
-            .filter_map(|package| package.split_last().map(|(_, parent)| parent))
-            .filter(|parent| !packages.contains(parent))
-            .collect();
-        package_roots.sort();
-        package_roots.dedup();
         let mut projects = manifests.python_projects.clone();
         projects
             .entry(Vec::new())
             .or_insert_with(|| python_project_roots(&[], &[]));
-        Self {
-            packages,
-            package_roots,
-            projects,
-        }
+        Self { packages, projects }
     }
 
     /// The directory a file in `directory` is imported from where that
@@ -1054,12 +1041,15 @@ impl ProjectIndex<'_> {
     }
 
     /// The module an absolute Python import names: the file at that dotted
-    /// path below a directory on `sys.path` (`PythonPath`), searched first
-    /// among the importer's own — the one above its top-level package, and
-    /// those of its own project — then among every other. Two files on one
-    /// footing name neither. A path below none of them (the standard library,
-    /// an installed distribution) names nothing in the project, however its
-    /// last segments match a project file: `logging` is not
+    /// path below a directory on the importer's `sys.path` (`PythonPath`) —
+    /// the one above its top-level package, which has to be there for it to
+    /// run as part of its package, and those its own project, the nearest
+    /// above it, puts there. Another project's roots, and the directory above
+    /// some other top-level package, are on it only where an installation
+    /// puts them, which pack does not read, so they name nothing. Two files
+    /// on that footing name neither. A path below none of them (the standard
+    /// library, an installed distribution) names nothing in the project,
+    /// however its last segments match a project file: `logging` is not
     /// `app/util/logging.py`, whose name is `app.util.logging`, and a
     /// directory is on `sys.path` only where the tooling puts it there, never
     /// because a script happens to sit in it.
@@ -1070,30 +1060,16 @@ impl ProjectIndex<'_> {
         let own_project = nearest(&self.python.projects, &from.directory)
             .map(|(_, roots)| roots.as_slice())
             .unwrap_or_default();
-        let own: Vec<&[String]> = self
+        let bases = self
             .python
             .package_root_of(&from.directory)
             .into_iter()
-            .chain(own_project.iter().map(Vec::as_slice))
-            .collect();
-        let every: Vec<&[String]> = self
-            .python
-            .package_roots
-            .iter()
-            .copied()
-            .chain(self.python.projects.values().flatten().map(Vec::as_slice))
-            .collect();
-        let mut searched = HashSet::new();
-        Found::first([own, every].into_iter().map(|tier| {
-            let bases: Vec<&[String]> = tier
-                .into_iter()
-                .filter(|base| searched.insert(*base))
-                .collect();
-            self.modules_at(
-                bases.into_iter().map(|base| [base, module].concat()),
-                |language| language == Language::Python,
-            )
-        }))
+            .chain(own_project.iter().map(Vec::as_slice));
+        Found::first([
+            self.modules_at(bases.map(|base| [base, module].concat()), |language| {
+                language == Language::Python
+            }),
+        ])
     }
 
     /// The files of the package that is the directory at `path`, in a
@@ -1910,6 +1886,9 @@ mod tests {
             python(15, "b/app/db.py", ""),
             python(16, "a/app/serve.py", "import app.db\n"),
             python(17, "c/serve.py", "import app.db\n"),
+            python(18, "x/lone/__init__.py", ""),
+            python(19, "x/lone/m.py", ""),
+            python(20, "d/run.py", "import lone.m\n"),
         ];
         assert_eq!(
             edges_of(&nodes, 1),
@@ -1927,10 +1906,11 @@ mod tests {
             python(1, "src/app/core.py", ""),
         ];
         assert_eq!(edges_of(&namespace, 0), vec!["src/app/core.py"]);
-        // An importer inside a top-level package finds that package first;
-        // one outside every `app` cannot tell which of them it means.
+        // An importer inside a top-level package imports it from the
+        // directory above it; one outside every `app` has none of those
+        // directories on its `sys.path`.
         assert_eq!(edges_of(&nodes, 16), vec!["a/app/db.py"]);
-        assert!(edges_of(&nodes, 17).is_empty());
+        assert!(edges_of(&nodes, 17).is_empty() && edges_of(&nodes, 20).is_empty());
     }
 
     /// A project's configuration says where its packages are imported from,
@@ -1949,11 +1929,16 @@ mod tests {
                 "svc/checks/test_main.py",
                 "import helpers\nimport app.core\n",
             ),
-            python(5, "poetry/source/pkg/a.py", "import pkg.b\n"),
+            python(
+                5,
+                "poetry/source/pkg/a.py",
+                "import pkg.b\nimport helpers\nimport secrets\n",
+            ),
             python(6, "poetry/source/pkg/b.py", ""),
             python(7, "cfg/lib/mod/a.py", "import mod.b\nimport shared\n"),
             python(8, "cfg/lib/mod/b.py", ""),
             python(9, "cfg/tools/shared.py", ""),
+            python(10, "tools/secrets.py", ""),
         ];
         let manifests = manifests_of(
             &[
@@ -1970,6 +1955,7 @@ mod tests {
                     "cfg/setup.cfg",
                     "[options]\npackage_dir =\n    =lib\n\n[tool:pytest]\npythonpath = tools\n",
                 ),
+                ("tools/pyproject.toml", "[project]\nname = \"tools\"\n"),
             ],
             &nodes,
         );
@@ -1977,13 +1963,15 @@ mod tests {
             edges_under(&nodes, 1, &manifests),
             vec!["svc/code/app/core.py"]
         );
-        assert_eq!(
-            edges_under(&nodes, 4, &manifests),
-            vec!["svc/checks/helpers.py", "svc/code/app/core.py"]
-        );
+        // Another project's roots are on no `sys.path` of this one: `secrets`
+        // is the standard library's, `helpers` the other project's own.
         assert_eq!(
             edges_under(&nodes, 5, &manifests),
             vec!["poetry/source/pkg/b.py"]
+        );
+        assert_eq!(
+            edges_under(&nodes, 4, &manifests),
+            vec!["svc/checks/helpers.py", "svc/code/app/core.py"]
         );
         assert_eq!(
             edges_under(&nodes, 7, &manifests),
