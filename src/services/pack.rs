@@ -489,6 +489,9 @@ enum Reference {
         package: String,
         components: Vec<String>,
     },
+    /// A reference that names nothing in the project, or that is spelled in a
+    /// form whose value is not decoded here.
+    Unresolved,
 }
 
 impl Reference {
@@ -527,21 +530,8 @@ impl Reference {
                 Self::Absolute(components)
             };
         }
-        if language == Language::Dart
-            && let Some((package, path)) = raw
-                .strip_prefix("package:")
-                .and_then(|uri| uri.split_once('/'))
-        {
-            let mut components = split_components(path);
-            if let Some(last) = components.last_mut()
-                && let Some(stem) = last.strip_suffix(".dart")
-            {
-                *last = stem.to_string();
-            }
-            return Self::Package {
-                package: package.to_string(),
-                components,
-            };
+        if language == Language::Dart {
+            return Self::dart(raw);
         }
         let mut rest = raw;
         let mut up = 0;
@@ -582,12 +572,12 @@ impl Reference {
         };
         if matches!(
             language,
-            Language::JavaScript | Language::TypeScript | Language::Vue | Language::Dart
+            Language::JavaScript | Language::TypeScript | Language::Vue
         ) && let Some(last) = components.last_mut()
             && let Some((stem, extension)) = last.rsplit_once('.')
             && matches!(
                 extension,
-                "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "vue" | "dart"
+                "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "vue"
             )
         {
             *last = stem.to_string();
@@ -596,6 +586,62 @@ impl Reference {
             Self::Relative { up, components }
         } else {
             Self::Absolute(components)
+        }
+    }
+
+    /// A Dart URI, which the language resolves against the URI of the library
+    /// it is written in: one without a scheme is relative to the importing
+    /// file whether or not it starts with `./`, a `package:` URI names a file
+    /// under that package's `lib`, and any other scheme (`dart:`, `http:`)
+    /// names nothing in the project. A URI names a file by its whole name, so
+    /// one that does not end in `.dart` names no Dart file, and one carrying
+    /// percent-encoding, a query or a fragment is not decoded here.
+    fn dart(uri: &str) -> Self {
+        if uri.contains(['%', '?', '#']) || uri.starts_with('/') {
+            return Self::Unresolved;
+        }
+        let scheme = uri.split_once(':').filter(|(scheme, _)| {
+            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+        let (package, path) = match scheme {
+            Some(("package", rest)) => match rest.split_once('/') {
+                Some((package, path)) => (Some(package), path),
+                None => return Self::Unresolved,
+            },
+            Some(_) => return Self::Unresolved,
+            None => (None, uri),
+        };
+        let mut up = 0;
+        let mut components: Vec<String> = Vec::new();
+        for segment in path.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    if components.pop().is_none() {
+                        up += 1;
+                    }
+                }
+                _ => components.push(segment.to_string()),
+            }
+        }
+        let Some(stem) = components
+            .pop()
+            .and_then(|last| last.strip_suffix(".dart").map(str::to_string))
+        else {
+            return Self::Unresolved;
+        };
+        components.push(stem);
+        match package {
+            // A `package:` path that climbs out of `lib` names no file in it.
+            Some(_) if up > 0 => Self::Unresolved,
+            Some(package) => Self::Package {
+                package: package.to_string(),
+                components,
+            },
+            None => Self::Relative { up, components },
         }
     }
 }
@@ -653,6 +699,7 @@ impl ProjectIndex<'_> {
                 path.extend_from_slice(components);
                 self.at(&self.exact, &path, from.language, false)
             }
+            Reference::Unresolved => Vec::new(),
             Reference::Absolute(components) => {
                 // A declared module prefix is part of the reference but not
                 // part of the tree, so it is removed before matching rather
@@ -1175,6 +1222,57 @@ mod tests {
         assert_eq!(Reference::parse("self", Language::Rust), rel(0, &[]));
         assert_eq!(Reference::parse("super", Language::Rust), rel(1, &[]));
         assert_eq!(Reference::parse("crate", Language::Rust), abs(&[]));
+        assert_eq!(Reference::parse("b.dart", Language::Dart), rel(0, &["b"]));
+        assert_eq!(
+            Reference::parse("src/../../x.g.dart", Language::Dart),
+            rel(1, &["x.g"])
+        );
+        assert_eq!(
+            Reference::parse("package:app/src/a.dart", Language::Dart),
+            Reference::Package {
+                package: "app".into(),
+                components: vec!["src".into(), "a".into()]
+            }
+        );
+        for unresolved in [
+            "dart:async",
+            "http://x/a.dart",
+            "b",
+            "a%20b.dart",
+            "/abs.dart",
+        ] {
+            assert_eq!(
+                Reference::parse(unresolved, Language::Dart),
+                Reference::Unresolved,
+                "{unresolved}"
+            );
+        }
+    }
+
+    /// Dart resolves every URI against the library it is written in, so one
+    /// without a scheme names the file beside the importer whether or not it
+    /// starts with `./` — never a same-named file elsewhere.
+    #[test]
+    fn a_dart_uri_without_a_scheme_is_relative_to_the_importing_file() {
+        let nodes = vec![
+            node_in(
+                0,
+                "lib/src/a.dart",
+                "import 'b.dart';\nimport 'sub/../c.dart';\nimport 'd';\n\
+                 import 'dart:async';\npart 'a.g.dart';\n",
+                Language::Dart,
+            ),
+            node_in(1, "lib/src/b.dart", "", Language::Dart),
+            node_in(2, "test/b.dart", "", Language::Dart),
+            node_in(3, "lib/src/a.g.dart", "part of 'a.dart';\n", Language::Dart),
+            node_in(4, "lib/src/c.dart", "", Language::Dart),
+            node_in(5, "lib/src/d.dart", "", Language::Dart),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 0),
+            vec!["lib/src/b.dart", "lib/src/c.dart", "lib/src/a.g.dart"]
+        );
+        assert_eq!(edges_of(&nodes, 3), vec!["lib/src/a.dart"]);
     }
 
     /// Two files can share a trailing name and be reached by relative
