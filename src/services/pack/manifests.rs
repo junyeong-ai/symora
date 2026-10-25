@@ -32,9 +32,9 @@ pub(super) struct Manifests {
     /// The directories each Python project puts on `sys.path`, by the
     /// directory of the configuration files that make it one.
     pub(super) python_projects: HashMap<Vec<String>, Vec<Vec<String>>>,
-    /// The TypeScript configuration each `tsconfig.json`, or a
-    /// `jsconfig.json` where a directory holds none, gives the files below it.
-    pub(super) ts_configs: HashMap<Vec<String>, TsConfig>,
+    /// The TypeScript project each `tsconfig.json`, or a `jsconfig.json`
+    /// where a directory holds none, describes, by its directory.
+    pub(super) ts_configs: HashMap<Vec<String>, TsProject>,
     /// Each package a JavaScript workspace lists, by its directory.
     pub(super) js_packages: HashMap<Vec<String>, JsPackage>,
     /// Whether each `package.json` above a JavaScript or TypeScript file
@@ -56,12 +56,74 @@ pub(super) struct JsPackage {
     pub(super) main: Option<String>,
 }
 
+/// A TypeScript configuration as the project `tsc -b` builds from it: what
+/// it says about its files' specifiers, the files it compiles itself, and
+/// the projects its `references` name.
+#[derive(Debug, Clone, Default)]
+pub(super) struct TsProject {
+    pub(super) config: TsConfig,
+    sources: TsSources,
+    references: Vec<TsProject>,
+}
+
+/// The files a TypeScript project compiles itself (`ts_sources`).
+#[derive(Debug, Clone, Default)]
+struct TsSources {
+    files: HashSet<PathBuf>,
+    include: globset::GlobSet,
+    exclude: globset::GlobSet,
+}
+
+impl TsSources {
+    fn covers(&self, file: &Path) -> bool {
+        self.files.contains(file) || (self.include.is_match(file) && !self.exclude.is_match(file))
+    }
+}
+
+/// The configuration a JavaScript or TypeScript file is compiled under.
+pub(super) enum TsOwner<'a> {
+    /// No configuration is above it.
+    None,
+    Config(&'a TsConfig),
+    /// The configuration above it has `references` naming no one project
+    /// that compiles it.
+    Undetermined,
+}
+
+impl TsProject {
+    /// The configurations `file` is compiled under in this project: its own
+    /// where it compiles the file itself — or has no `references`, a
+    /// configuration's files being whatever is below it — else those of the
+    /// projects it references that do, as `tsc -b` builds them.
+    fn owners<'a>(&'a self, file: &Path, owners: &mut Vec<&'a TsConfig>) {
+        if self.references.is_empty() || self.sources.covers(file) {
+            owners.push(&self.config);
+            return;
+        }
+        for reference in &self.references {
+            reference.compiling(file, owners);
+        }
+    }
+
+    /// The configurations of this referenced project, and those it
+    /// references in turn, that compile `file` themselves.
+    fn compiling<'a>(&'a self, file: &Path, owners: &mut Vec<&'a TsConfig>) {
+        if self.sources.covers(file) {
+            owners.push(&self.config);
+            return;
+        }
+        for reference in &self.references {
+            reference.compiling(file, owners);
+        }
+    }
+}
+
 /// What a TypeScript configuration, with every configuration it extends,
 /// says about the specifiers its files import: the directory `baseUrl`
 /// names, each `paths` pattern with its substitutions, which resolve
 /// against `baseUrl` or, without one, the directory of the configuration
 /// declaring them, and the conditions a package's `exports` is read under.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TsConfig {
     pub(super) base_url: Option<Vec<String>>,
     pub(super) paths: Vec<(String, Vec<String>)>,
@@ -276,6 +338,25 @@ impl Manifests {
         (!nested).then_some(directory)
     }
 
+    /// The configuration a JavaScript or TypeScript file is compiled under:
+    /// the nearest above it, or, where that one has `references` and does
+    /// not compile the file itself, the one the referenced projects compiling
+    /// it agree on (`TsProject::owners`). Projects that say different things
+    /// about specifiers, or none compiling it, leave it undetermined.
+    pub(super) fn ts_owner(&self, from: &Node) -> TsOwner<'_> {
+        let Some((_, project)) = nearest(&self.ts_configs, &from.directory) else {
+            return TsOwner::None;
+        };
+        let mut owners = Vec::new();
+        project.owners(Path::new(&from.rel_path), &mut owners);
+        match owners.split_first() {
+            Some((first, rest)) if rest.iter().all(|other| other == first) => {
+                TsOwner::Config(first)
+            }
+            _ => TsOwner::Undetermined,
+        }
+    }
+
     /// Whether a file a JavaScript or TypeScript path names is on disk, as
     /// TypeScript looks for one: the file as written, with a script
     /// extension it leaves out or in place of the JavaScript one it writes,
@@ -446,7 +527,7 @@ fn cargo_package(
 
 /// Every TypeScript configuration above a JavaScript or TypeScript file, by
 /// its directory: the `tsconfig.json` there, or else its `jsconfig.json`.
-fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsConfig> {
+fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsProject> {
     let mut configs = HashMap::new();
     for file in ["tsconfig.json", "jsconfig.json"] {
         for (directory, contents) in manifests_above(root, nodes, is_javascript, file) {
@@ -454,11 +535,121 @@ fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsConfig> {
                 continue;
             }
             let path = [directory.as_slice(), &[file.to_string()]].concat();
-            let config = ts_config(root, &path, &contents);
-            configs.insert(directory, config);
+            if let Some(project) = ts_project(root, &path, Some(&contents), 0) {
+                configs.insert(directory, project);
+            }
         }
     }
     configs
+}
+
+/// The project the TypeScript configuration in `file` describes, with each
+/// project its `references` name — a configuration file, or a directory's
+/// `tsconfig.json` — read the same way. `references` is not inherited.
+fn ts_project(
+    root: &Path,
+    file: &[String],
+    contents: Option<&str>,
+    depth: usize,
+) -> Option<TsProject> {
+    // A project referencing itself through others would never end.
+    const DEPTH: usize = 16;
+    let mut chain = Vec::new();
+    ts_config_chain(root, file, contents, &mut chain);
+    let (directory, head) = chain.first()?;
+    let references = head
+        .get("references")
+        .and_then(|references| references.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|_| depth < DEPTH)
+        .filter_map(|reference| project_path(directory, reference.get("path")?.as_str()?))
+        .filter_map(|mut path| {
+            if !project_file(root, &path).is_file() {
+                path.push("tsconfig.json".to_string());
+            }
+            ts_project(root, &path, None, depth + 1)
+        })
+        .collect();
+    Some(TsProject {
+        config: ts_config(&chain),
+        sources: ts_sources(&chain),
+        references,
+    })
+}
+
+/// What a configuration compiles itself, from the first configuration of
+/// its `extends` chain declaring each of `files`, `include` and `exclude`,
+/// relative to that one's directory. Without `files` or `include` it includes
+/// everything below its directory; without `exclude` it excludes
+/// `node_modules`, `bower_components` and `jspm_packages`. An `include`
+/// pattern whose last segment holds no `.`, `*` or `?` names a directory,
+/// and everything below it. Which extensions a compiler then takes from
+/// what a pattern matches (`allowJs`, a `.vue` compiler's) is not read: a
+/// pattern covers every file it matches.
+fn ts_sources(chain: &[(Vec<String>, serde_json::Value)]) -> TsSources {
+    let head = chain.first().map(|(directory, _)| directory.as_slice());
+    let head = head.unwrap_or_default();
+    let declared = |key: &str| {
+        chain.iter().find_map(|(directory, config)| {
+            let paths = config.get(key)?.as_array()?;
+            let paths: Vec<Vec<String>> = paths
+                .iter()
+                .filter_map(|path| project_path(directory, path.as_str()?))
+                .collect();
+            Some(paths)
+        })
+    };
+    let files = declared("files");
+    let include = declared("include").unwrap_or_else(|| match files {
+        Some(_) => Vec::new(),
+        None => vec![[head, &["**".to_string(), "*".to_string()]].concat()],
+    });
+    let exclude = declared("exclude").unwrap_or_else(|| {
+        ["node_modules", "bower_components", "jspm_packages"]
+            .map(|excluded| [head, &[excluded.to_string()]].concat())
+            .to_vec()
+    });
+    let globs = |patterns: &mut dyn Iterator<Item = String>| {
+        let mut set = globset::GlobSetBuilder::new();
+        for pattern in patterns {
+            if let Ok(glob) = globset::GlobBuilder::new(&pattern)
+                .literal_separator(true)
+                .build()
+            {
+                set.add(glob);
+            }
+        }
+        set.build().unwrap_or_default()
+    };
+    let include = globs(&mut include.iter().map(|pattern| {
+        let directory = pattern
+            .last()
+            .is_none_or(|last| !last.contains(['.', '*', '?']));
+        let mut pattern = pattern.clone();
+        if directory {
+            pattern.extend(["**".to_string(), "*".to_string()]);
+        }
+        pattern.join("/")
+    }));
+    let exclude = globs(&mut exclude.iter().flat_map(|pattern| {
+        let pattern = pattern.join("/");
+        let below = if pattern.is_empty() {
+            "**".to_string()
+        } else {
+            format!("{pattern}/**")
+        };
+        [pattern, below]
+    }));
+    TsSources {
+        files: files
+            .into_iter()
+            .flatten()
+            .map(|file| file.iter().collect())
+            .collect(),
+        include,
+        exclude,
+    }
 }
 
 /// Every package a JavaScript workspace in the project lists: each
@@ -587,11 +778,13 @@ fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// What the TypeScript configuration in `file` says, with what it extends.
-fn ts_config(root: &Path, file: &[String], contents: &str) -> TsConfig {
-    let mut chain = Vec::new();
-    ts_config_chain(root, file, Some(contents), &mut chain);
-    let directory = &file[..file.len().saturating_sub(1)];
+/// What the TypeScript configuration at the head of an `extends` chain
+/// says, with what it extends.
+fn ts_config(chain: &[(Vec<String>, serde_json::Value)]) -> TsConfig {
+    let directory = chain
+        .first()
+        .map(|(directory, _)| directory.as_slice())
+        .unwrap_or_default();
     let option = |key: &str| {
         chain.iter().find_map(|(directory, config)| {
             let value = config.get("compilerOptions")?.get(key)?;

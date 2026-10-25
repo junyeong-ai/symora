@@ -83,6 +83,10 @@ pub struct PackResult {
     /// `paths` alias, a workspace package's name — that named no file it
     /// determines, so their edges are missing rather than absent.
     pub undetermined_imports: Vec<String>,
+    /// The JavaScript and TypeScript files below a configuration whose
+    /// `references` name no one project compiling them, so that their
+    /// non-relative specifiers were read without a configuration.
+    pub undetermined_ts_projects: Vec<String>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
     /// publishes how many the selection chose FROM, and the budget's own
@@ -117,6 +121,7 @@ pub fn build_pack(
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
+            undetermined_ts_projects: Vec::new(),
             unreadable_paths: Vec::new(),
         });
     }
@@ -186,6 +191,7 @@ pub fn build_pack(
         unsupported_languages,
         rust_relative_imports_omitted: graph.rust_relative_imports_omitted,
         undetermined_imports: graph.undetermined_imports.into_iter().collect(),
+        undetermined_ts_projects: graph.ts_owner_undetermined.into_iter().collect(),
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
         graph_size: nodes.len(),
