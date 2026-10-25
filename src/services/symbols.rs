@@ -867,7 +867,8 @@ fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<
 /// which nothing written after a declarator can (`static`, `template`, a
 /// primitive type, a class key) but a K&R definition's declarations of its
 /// parameters, which the grammar reads as declarations of the file's (`int
-/// f(a) int a; {…}`, a form C23 removed), or the head declares no function
+/// f(a) int a; {…}`, a form C23 removed), while its header, naming no
+/// parameter, declares no function `f`, or the head declares no function
 /// while the node's own syntax proves it one ([`proves_a_function`]), or the
 /// head leaves its function to the node ([`leaves_its_function_to_the_next`]).
 /// A macro written after a data member's declarator does neither (`idx_t
