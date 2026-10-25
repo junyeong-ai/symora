@@ -3538,6 +3538,12 @@ mod tests {
             python(28, "up/mod_up.py", ""),
             python(29, "up/sp/tests/test_s.py", "import mod_up\n"),
             python(30, "up/plain/tests/test_p.py", "import mod_up\n"),
+            // A conftest inside a package: its basedir is the directory
+            // above the package (`pyconf_pkg`).
+            python(31, "cp/pkg/svc/__init__.py", ""),
+            python(32, "cp/pkg/svc/conftest.py", ""),
+            python(33, "cp/pkg/svc/core.py", ""),
+            python(34, "cp/pkg/svc/tests/test_a.py", "from svc.core import c\n"),
         ];
         let manifests = manifests_of(
             &[
@@ -3565,6 +3571,7 @@ mod tests {
                     "up/sp/setup.py",
                     "from setuptools import setup\nsetup(name='sp')\n",
                 ),
+                ("cp/pytest.ini", "[pytest]\n"),
             ],
             &nodes,
         );
@@ -3579,6 +3586,7 @@ mod tests {
         assert!(edges(26).is_empty());
         assert!(edges(29).is_empty());
         assert_eq!(edges(30), vec!["up/mod_up.py"]);
+        assert_eq!(edges(34), vec!["cp/pkg/svc/core.py"]);
     }
 
     /// Installing a project installs the projects in the tree it depends on
@@ -4669,6 +4677,29 @@ mod tests {
             // A major below 5 reads 5's defaults; one above 7 is unknown.
             ("ts4", "^4.9.5", "", Some("{}"), Some("types")),
             ("ts8", "^8.0.0", "", Some("{}"), None),
+            // 5 reads an ES5 `target` without `module` as `commonjs`, 6 reads
+            // `amd` as `classic`, and 7 reads `classic` as `bundler`.
+            (
+                "ts5es5",
+                "^5.9.0",
+                "",
+                Some("{\"compilerOptions\": {\"target\": \"es5\"}}"),
+                Some("types"),
+            ),
+            (
+                "ts6amd",
+                "~6.0",
+                "",
+                Some("{\"compilerOptions\": {\"module\": \"amd\"}}"),
+                None,
+            ),
+            (
+                "ts7classic",
+                "^7.0.2",
+                "",
+                Some("{\"compilerOptions\": {\"moduleResolution\": \"classic\"}}"),
+                Some("esm"),
+            ),
             (
                 "nodenext",
                 ">=5",
