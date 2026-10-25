@@ -2549,6 +2549,44 @@ mod tests {
         }
     }
 
+    /// A name the sets a JVM file sees declare is theirs, whatever other set
+    /// it may see declares it too: `testFixtures` sees its module's `main`,
+    /// and `test` its module's `testFixtures`, as Gradle's
+    /// `java-test-fixtures` plugin wires them, before another module's sets.
+    #[test]
+    fn a_name_the_sets_a_jvm_file_sees_declare_is_theirs_before_another_modules() {
+        let java = |id, rel, source| node_in(id, rel, source, Language::Java);
+        let base = "package com.acme.base; public class Base {}\n";
+        let fixture = "package com.acme.fix; public class Fixture {}\n";
+        let nodes = vec![
+            java(0, "lib/src/main/java/com/acme/base/Base.java", base),
+            java(1, "other/src/main/java/com/acme/base/Base.java", base),
+            java(
+                2,
+                "lib/src/testFixtures/java/com/acme/fix/Fixture.java",
+                "package com.acme.fix;\nimport com.acme.base.Base;\npublic class Fixture {}\n",
+            ),
+            java(
+                3,
+                "other/src/testFixtures/java/com/acme/fix/Fixture.java",
+                fixture,
+            ),
+            java(
+                4,
+                "lib/src/test/java/com/acme/t/T.java",
+                "package com.acme.t;\nimport com.acme.fix.Fixture;\nclass T {}\n",
+            ),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 2),
+            vec!["lib/src/main/java/com/acme/base/Base.java"]
+        );
+        assert_eq!(
+            edges_of(&nodes, 4),
+            vec!["lib/src/testFixtures/java/com/acme/fix/Fixture.java"]
+        );
+    }
+
     /// A JVM import names a file by what it declares at its top level, not by
     /// the file's own name: a Kotlin file holds several classes, functions
     /// and properties, imported by their names, and a file named like a
@@ -2806,12 +2844,12 @@ mod tests {
     }
 
     /// A Python project is a directory whose files configure a build — a
-    /// `setup.py`, a `pyproject.toml` or `setup.cfg` with more than pytest's
-    /// table — and that is no package: a package's `setup.py` is one of its
-    /// modules. A file that only configures pytest (`pytest.ini`,
-    /// `tox.ini`, a `pyproject.toml` or `setup.cfg` holding only pytest's
-    /// table) sets how pytest runs below it, and the files there stay the
-    /// enclosing project's.
+    /// `setup.py`, a `pyproject.toml` or `setup.cfg` other than one holding
+    /// pytest's table alone — and that is no package: a package's
+    /// `setup.py` is one of its modules. A file that only configures pytest
+    /// (`pytest.ini`, `tox.ini`, a `pyproject.toml` or `setup.cfg` holding
+    /// only pytest's table) sets how pytest runs below it, wherever it is,
+    /// and the files there stay the enclosing project's.
     #[test]
     fn a_python_project_is_a_directory_whose_files_configure_a_build() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -2829,6 +2867,16 @@ mod tests {
             python(10, "more/extra/bit.py", ""),
             python(11, "side/run.py", "import core_pkg.m\nimport sidekick\n"),
             python(12, "side/sidekick.py", ""),
+            python(13, "lone/run.py", "import core_pkg.m\nimport lonely\n"),
+            python(14, "lone/lonely.py", ""),
+            python(15, "blank/run.py", "import core_pkg.m\nimport blanket\n"),
+            python(16, "blank/blanket.py", ""),
+            python(17, "bare/run.py", "import core_pkg.m\nimport barely\n"),
+            python(18, "bare/barely.py", ""),
+            python(19, "bad/run.py", "import core_pkg.m\nimport badge\n"),
+            python(20, "bad/badge.py", ""),
+            python(21, "src/app/tests/test_v.py", "import vendored\n"),
+            python(22, "src/app/vendor/vendored.py", ""),
         ];
         let core = "core/src/core_pkg/m.py";
         let manifests = manifests_of(
@@ -2850,6 +2898,14 @@ mod tests {
                     "side/setup.cfg",
                     "[metadata]\nname = side\n\n[tool:pytest]\naddopts = -q\n",
                 ),
+                (
+                    "lone/pyproject.toml",
+                    "[project]\nname = \"lone\"\n\n[tool.pytest.ini_options]\naddopts = \"-q\"\n",
+                ),
+                ("blank/setup.cfg", ""),
+                ("bare/pyproject.toml", "[tool]\n"),
+                ("bad/pyproject.toml", "[project\nname = \"bad\"\n"),
+                ("src/app/pytest.ini", "[pytest]\npythonpath = vendor\n"),
             ],
             &nodes,
         );
@@ -2859,8 +2915,18 @@ mod tests {
         assert_eq!(edges(7), vec![core, "checks/support/aid.py"]);
         assert_eq!(edges(9), vec![core, "more/extra/bit.py"]);
         // A `setup.cfg` with build metadata makes a project of its own, which
-        // declares no dependency.
+        // declares no dependency, and so does a `pyproject.toml` with
+        // `[project]` besides pytest's table, and a file pytest does not read
+        // as its configuration: an empty `setup.cfg` or `[tool]` table, a
+        // `pyproject.toml` that cannot be parsed.
         assert_eq!(edges(11), vec!["side/sidekick.py"]);
+        assert_eq!(edges(13), vec!["lone/lonely.py"]);
+        assert_eq!(edges(15), vec!["blank/blanket.py"]);
+        assert_eq!(edges(17), vec!["bare/barely.py"]);
+        assert_eq!(edges(19), vec!["bad/badge.py"]);
+        // pytest reads a configuration in a package directory, run from the
+        // project root as `pytest src/app/tests`, as pytest 9.1.1 does.
+        assert_eq!(edges(21), vec!["src/app/vendor/vendored.py"]);
     }
 
     /// A directory below a root an enclosing project puts on `sys.path` —
@@ -3490,12 +3556,17 @@ mod tests {
             // `references` name, which inherits its `include`.
             ts(13, "e2e/spec.ts", "import h from \"#e2e/helper\";\n"),
             ts(14, "e2e/support/helper.ts", ""),
+            // Compiled by no project, naming a file only the catch-all `*`
+            // of one maps.
+            ts(15, "scripts/t.ts", "import s from \"shared\";\n"),
+            ts(16, "types/shared.ts", ""),
         ];
         let manifests = manifests_of(
             &[
                 (
                     "tsconfig.json",
-                    "{\"files\": [], \"references\": [{\"path\": \"./tsconfig.app.json\"}, \
+                    "{\"compilerOptions\": {\"baseUrl\": \".\", \"paths\": {\"@/*\": [\"./src/*\"]}}, \
+                     \"files\": [], \"references\": [{\"path\": \"./tsconfig.app.json\"}, \
                      {\"path\": \"./tsconfig.test.json\"}, {\"path\": \"./tsconfig.lint.json\"}, \
                      {\"path\": \"./tools\"}]}",
                 ),
@@ -3553,17 +3624,21 @@ mod tests {
         assert_eq!(edges(4), vec!["cfg.ts"]);
         assert_eq!(edges(7), vec!["src/components/Button.tsx"]);
         assert_eq!(edges(9), vec!["plain/y.ts"]);
-        assert!(edges(6).is_empty() && edges(8).is_empty() && edges(11).is_empty());
+        assert!(edges(8).is_empty() && edges(11).is_empty());
         assert_eq!(edges(13), vec!["e2e/support/helper.ts"]);
-        // A file no project compiles is read without a configuration, and
-        // disclosed only where one of those the references reach maps what
-        // it imports; projects compiling a file alike but saying different
-        // things about specifiers leave it undetermined.
+        // A file no project compiles is read without a configuration — the
+        // root's own `paths` and `baseUrl`, which shadcn's Vite setup puts
+        // there, map nothing for it — and disclosed only where one of those
+        // the references reach maps what it imports; projects compiling a
+        // file alike but saying different things about specifiers leave it
+        // undetermined.
+        assert!(edges(6).is_empty() && edges(12).is_empty() && edges(15).is_empty());
         assert_eq!(
             graph.ts_owner_undetermined,
             BTreeSet::from([
                 "scripts/fx.ts".to_string(),
                 "scripts/gen.ts".to_string(),
+                "scripts/t.ts".to_string(),
                 "src/test-utils/render.tsx".to_string()
             ])
         );
