@@ -28,6 +28,7 @@ use crate::services::store::SymbolSearchResult;
 use crate::services::symbols::SymbolExtractor;
 
 use super::common::{looks_like_symbol_path, resolve_search_paths};
+use crate::cli::commands::common::parse_symbol_kind;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct SymbolResultOutput {
@@ -211,13 +212,10 @@ pub async fn execute_symbol_search(app: &App, request: SymbolQuery<'_>) -> Resul
         return Ok(());
     }
 
-    let kind = match kind.map(str::parse::<SymbolKind>).transpose() {
+    let kind = match kind.map(parse_symbol_kind).transpose() {
         Ok(kind) => kind,
         Err(error) => {
-            ctx.print_error(OutputError::invalid(error).with_hint(format!(
-                "Valid kinds: {}",
-                SymbolKind::all_kind_names().join(", ")
-            )));
+            ctx.print_error(error);
             return Ok(());
         }
     };

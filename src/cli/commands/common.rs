@@ -12,7 +12,18 @@ use crate::cli::utils::{AnchorResolution, shell_arg};
 use crate::cli::{ErrorCode, LocationArg, OutputError, ParsedLocation};
 use crate::error::LspError;
 use crate::models::lsp::{FindSymbolsOptions, Indexed};
+use crate::models::symbol::SymbolKind;
 use crate::services::lsp::LspService;
+
+/// Read a `--kind` value, naming the kinds it can be.
+pub(crate) fn parse_symbol_kind(text: &str) -> Result<SymbolKind, OutputError> {
+    text.parse().map_err(|error: String| {
+        OutputError::invalid(error).with_hint(format!(
+            "Valid kinds: {}",
+            SymbolKind::all_kind_names().join(", ")
+        ))
+    })
+}
 
 /// Map a position-anchored LSP failure, adding the recovery route that is
 /// still open at that position.

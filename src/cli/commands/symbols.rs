@@ -7,8 +7,9 @@ use futures::StreamExt;
 
 use crate::app::App;
 use crate::cli::analysis::LocationAnalysis;
-use crate::cli::resolve_project_file;
+use crate::cli::commands::common::parse_symbol_kind;
 use crate::cli::response::{Section, SymbolOutput, SymbolSource};
+use crate::cli::{OutputError, resolve_project_file};
 use crate::constants::defaults::SYMBOL_REFS_CONCURRENCY;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Symbol, SymbolFilter, SymbolKind};
@@ -249,30 +250,15 @@ struct FileSymbolsOutput {
     symbols: Section<SymbolOutput>,
 }
 
-fn parse_kind_list(kind_str: &Option<String>) -> Result<Option<Vec<SymbolKind>>> {
-    let Some(kinds) = kind_str else {
+fn parse_kind_list(kinds: &Option<String>) -> Result<Option<Vec<SymbolKind>>, OutputError> {
+    let Some(kinds) = kinds else {
         return Ok(None);
     };
-
-    let mut result = Vec::new();
-    for k in kinds.split(',') {
-        let k = k.trim();
-        if k.is_empty() {
-            continue;
-        }
-        match k.parse::<SymbolKind>() {
-            Ok(kind) => result.push(kind),
-            Err(_) => anyhow::bail!(
-                "Unknown symbol kind: '{}'. Valid: {}",
-                k,
-                SymbolKind::all_kind_names().join(", ")
-            ),
-        }
-    }
-
-    Ok(if result.is_empty() {
-        None
-    } else {
-        Some(result)
-    })
+    let kinds = kinds
+        .split(',')
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(parse_symbol_kind)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((!kinds.is_empty()).then_some(kinds))
 }
