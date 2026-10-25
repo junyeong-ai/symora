@@ -10,6 +10,7 @@ use super::manifests::{
     own_or_only, project_path, python_project,
 };
 use crate::models::symbol::Language;
+use crate::services::imports::{ModuleDeclaration, ModulePath};
 
 // BTreeMap, not HashMap: PageRank accumulates f64 scores by iterating this
 // graph, and float addition is non-associative — a random HashMap iteration
@@ -49,10 +50,11 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     }
     let index = ProjectIndex {
         nodes,
-        exact,
         manifests,
         python: PythonPath::of(nodes, manifests),
         jvm: JvmIndex::of(nodes),
+        rust: RustModules::of(nodes, manifests, &exact.by_file),
+        exact,
     };
 
     let mut graph: Graph = BTreeMap::new();
@@ -99,8 +101,7 @@ enum Resolution {
     /// The files it names: none where it names nothing in the project, or
     /// nothing unambiguous.
     Files(Vec<usize>),
-    /// A Rust path whose file only module ownership, which pack does not
-    /// hold, would determine.
+    /// A Rust path whose file the crates' module trees do not determine.
     NeedsOwnership,
     /// A specifier the project's own configuration declares that names no
     /// file pack reads.
@@ -111,9 +112,6 @@ enum Resolution {
 /// sits, worked out once for the file rather than once per reference.
 struct Importer<'a> {
     node: &'a Node,
-    /// The directory a `crate::` path written in a Rust file starts at, where
-    /// the package layout determines it.
-    crate_root: Option<&'a [String]>,
     /// The TypeScript configuration a JavaScript or TypeScript file is
     /// compiled under (`Manifests::ts_owner`).
     ts_config: Option<&'a TsConfig>,
@@ -136,11 +134,6 @@ enum ImportMode {
 
 impl<'a> Importer<'a> {
     fn of(node: &'a Node, manifests: &'a Manifests) -> Self {
-        let crate_root = if node.language == Language::Rust {
-            manifests.rust_crate_root(node)
-        } else {
-            None
-        };
         let owner = if is_javascript(node.language) {
             manifests.ts_owner(node)
         } else {
@@ -160,7 +153,6 @@ impl<'a> Importer<'a> {
             });
         Self {
             node,
-            crate_root,
             ts_config,
             ts_owner_undetermined: matches!(owner, TsOwner::Undetermined),
             mode,
@@ -259,8 +251,7 @@ impl Found {
 
 /// Syntactic reference anchors. Filesystem-relative paths retain their hops;
 /// an absolute name is read as its language reads it, through what the tree
-/// and its manifests declare. Rust paths relative to a module require
-/// ownership not held here.
+/// and its manifests declare; a Rust path through its crate's module tree.
 #[derive(Debug, PartialEq, Eq)]
 enum Reference {
     /// Relative to the language's source/module context, retaining parent hops.
@@ -478,6 +469,208 @@ struct ProjectIndex<'a> {
     manifests: &'a Manifests,
     python: PythonPath<'a>,
     jvm: JvmIndex<'a>,
+    rust: RustModules,
+}
+
+/// Each crate's module tree, as Rust builds it from the crate's root file
+/// through the `mod` declarations its files make. A module declared without
+/// a body is the file its `#[path]` attribute names, relative to the
+/// directory of the module declaring it, or else `name.rs` or `name/mod.rs`
+/// — in the declaring module's directory where it is a crate root, a
+/// `mod.rs` or a file a `#[path]` named, and otherwise in a directory named
+/// for the declaring module, the way `a.rs` holds `a/name.rs`. An inline
+/// module is a directory of its own below the module declaring it, or the
+/// one its `#[path]` names. A module whose file both or neither candidate
+/// is, whose declarations disagree, or whose path a `cfg_attr` may set, is
+/// left open. A file sits wherever each crate reaching it puts it.
+#[derive(Default)]
+struct RustModules {
+    /// Where each file sits: each crate whose tree holds it, by the crate's
+    /// root file, with the file's module path there.
+    positions: HashMap<usize, Vec<(usize, Vec<String>)>>,
+    /// Each crate's modules by their paths from its root.
+    modules: HashMap<usize, HashMap<Vec<String>, ModuleFile>>,
+}
+
+/// What a module of a crate's tree is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleFile {
+    /// The file holding it: its own, or the one declaring it inline.
+    File(usize),
+    /// A file pack does not read.
+    Missing,
+    /// A file its source leaves open.
+    Undetermined,
+}
+
+impl RustModules {
+    fn of(nodes: &[Node], manifests: &Manifests, files: &HashMap<Vec<String>, usize>) -> Self {
+        let mut builder = TreeBuilder {
+            nodes,
+            files,
+            tree: Self::default(),
+        };
+        let roots: BTreeSet<usize> = manifests
+            .rust_packages
+            .values()
+            .flat_map(|package| &package.crates)
+            .filter_map(|root| files.get(root).copied())
+            .collect();
+        for root in roots {
+            let directory = nodes[root].directory.clone();
+            builder.walk(root, root, Vec::new(), directory, None, 0);
+        }
+        builder.tree
+    }
+
+    /// Record what a module of a crate is; two different answers for one
+    /// module leave it open.
+    fn place(&mut self, krate: usize, module: Vec<String>, file: ModuleFile) {
+        let modules = self.modules.entry(krate).or_default();
+        let placed = modules.entry(module).or_insert(file);
+        if *placed != file {
+            *placed = ModuleFile::Undetermined;
+        }
+    }
+
+    /// What a path below the module `base` of a crate names: the module it
+    /// names whole, else the one without its last segment, which names an
+    /// item there; `None` where neither is a module of the crate.
+    fn lookup(&self, krate: usize, base: &[String], path: &[String]) -> Option<ModuleFile> {
+        let modules = self.modules.get(&krate)?;
+        let whole = [base, path].concat();
+        let parent = (!path.is_empty()).then(|| &whole[..whole.len() - 1]);
+        std::iter::once(whole.as_slice())
+            .chain(parent)
+            .find_map(|candidate| modules.get(candidate).copied())
+    }
+}
+
+/// The module trees being read from the project's Rust files, which it
+/// finds by their paths.
+struct TreeBuilder<'a> {
+    nodes: &'a [Node],
+    files: &'a HashMap<Vec<String>, usize>,
+    tree: RustModules,
+}
+
+impl TreeBuilder<'_> {
+    /// Place `file` at `module` of the crate `krate`, then the modules it
+    /// declares, `directory` being where its own declarations' files are
+    /// found and `relative` the directory below it a non-`mod.rs` module
+    /// file adds for them.
+    fn walk(
+        &mut self,
+        krate: usize,
+        file: usize,
+        module: Vec<String>,
+        directory: Vec<String>,
+        relative: Option<String>,
+        depth: usize,
+    ) {
+        // `#[path]` attributes can lead a tree back into itself.
+        const DEPTH: usize = 64;
+        let (nodes, files) = (self.nodes, self.files);
+        self.tree
+            .positions
+            .entry(file)
+            .or_default()
+            .push((krate, module.clone()));
+        self.tree
+            .place(krate, module.clone(), ModuleFile::File(file));
+        if depth >= DEPTH {
+            return;
+        }
+        let declarations = &nodes[file].imports.modules;
+        for declaration in declarations {
+            let path = [
+                module.as_slice(),
+                &declaration.scope,
+                std::slice::from_ref(&declaration.name),
+            ]
+            .concat();
+            if declaration.inline {
+                self.tree.place(krate, path, ModuleFile::File(file));
+                continue;
+            }
+            let Some((base, relative)) =
+                scope_directory(declarations, &declaration.scope, &directory, &relative)
+            else {
+                self.tree.place(krate, path, ModuleFile::Undetermined);
+                continue;
+            };
+            let (child, directory, relative) = match &declaration.path {
+                ModulePath::Undetermined => {
+                    self.tree.place(krate, path, ModuleFile::Undetermined);
+                    continue;
+                }
+                ModulePath::Attribute(written) => {
+                    let Some(target) = project_path(&base, written) else {
+                        self.tree.place(krate, path, ModuleFile::Missing);
+                        continue;
+                    };
+                    let directory = target[..target.len().saturating_sub(1)].to_vec();
+                    (files.get(&target).copied(), directory, None)
+                }
+                ModulePath::Default => {
+                    let mut prefix = base;
+                    prefix.extend(relative);
+                    let name = &declaration.name;
+                    let flat = [prefix.as_slice(), &[format!("{name}.rs")]].concat();
+                    let nested =
+                        [prefix.as_slice(), &[name.clone(), "mod.rs".to_string()]].concat();
+                    match (files.get(&flat), files.get(&nested)) {
+                        (Some(flat), None) => (Some(*flat), prefix, Some(name.clone())),
+                        (None, Some(nested)) => {
+                            prefix.push(name.clone());
+                            (Some(*nested), prefix, None)
+                        }
+                        (Some(_), Some(_)) => {
+                            self.tree.place(krate, path, ModuleFile::Undetermined);
+                            continue;
+                        }
+                        (None, None) => (None, prefix, None),
+                    }
+                }
+            };
+            match child {
+                Some(child) => self.walk(krate, child, path, directory, relative, depth + 1),
+                None => self.tree.place(krate, path, ModuleFile::Missing),
+            }
+        }
+    }
+}
+
+/// The directory the out-of-line modules declared in the inline modules
+/// `scope` of a file are found in, and the one a non-`mod.rs` file adds
+/// below it, from the file's own: each inline module adds its name, after
+/// the file's added directory, or replaces it with the one its `#[path]`
+/// names. `None` where an inline module's path is left open.
+fn scope_directory(
+    declarations: &[ModuleDeclaration],
+    scope: &[String],
+    directory: &[String],
+    relative: &Option<String>,
+) -> Option<(Vec<String>, Option<String>)> {
+    let mut directory = directory.to_vec();
+    let mut relative = relative.clone();
+    for (depth, name) in scope.iter().enumerate() {
+        let declared = declarations.iter().find(|declaration| {
+            declaration.inline && declaration.scope == scope[..depth] && declaration.name == *name
+        });
+        match declared.map(|declaration| &declaration.path) {
+            Some(ModulePath::Attribute(written)) => {
+                directory = project_path(&directory, written)?;
+                relative = None;
+            }
+            Some(ModulePath::Undetermined) => return None,
+            _ => {
+                directory.extend(relative.take());
+                directory.push(name.clone());
+            }
+        }
+    }
+    Some((directory, relative))
 }
 
 /// What a project's JVM files declare themselves to be. Each name a file
@@ -666,8 +859,8 @@ impl ProjectIndex<'_> {
     fn resolve(&self, reference: &Reference, importer: &Importer) -> Resolution {
         let from = importer.node;
         let files = match reference {
-            Reference::Relative { .. } if from.language == Language::Rust => {
-                return Resolution::NeedsOwnership;
+            Reference::Relative { up, components } if from.language == Language::Rust => {
+                return self.rust_in_crate(from, Some(*up), components);
             }
             Reference::Relative { up, components } => {
                 let base = from.directory.len().checked_sub(*up);
@@ -705,10 +898,7 @@ impl ProjectIndex<'_> {
             }
             Reference::Absolute(name) if is_jvm(from.language) => self.jvm_class(name, from),
             Reference::Wildcard(name) => self.jvm_wildcard(name, from),
-            Reference::Crate(path) => match importer.crate_root {
-                Some(root) => self.rust_module(root, path),
-                None => return Resolution::NeedsOwnership,
-            },
+            Reference::Crate(path) => return self.rust_in_crate(from, None, path),
             Reference::Absolute(path) if from.language == Language::Rust => {
                 return self.rust_path(path, from);
             }
@@ -903,41 +1093,54 @@ impl ProjectIndex<'_> {
     }
 
     /// What a Rust path from a name, rather than from `crate`, `self` or
-    /// `super`, names. Through a module the file declares (`mod config; use
-    /// config::Settings;`) it is relative to the module writing it, which only
-    /// module ownership places; from a project library's name it starts at
-    /// that library's root; any other name is an extern crate's, which names
-    /// nothing in the project and leaves nothing out of its graph.
+    /// `super`, names. A path from a module declared where it is written
+    /// reads as one from `self` (`FileImports`); from a project library's
+    /// name it starts at that library's root; any other name is an extern
+    /// crate's, which names nothing in the project and leaves nothing out of
+    /// its graph.
     fn rust_path(&self, path: &[String], from: &Node) -> Resolution {
         let Some((name, path)) = path.split_first() else {
             return Resolution::Files(Vec::new());
         };
-        if from.imports.modules.contains(name) {
-            return Resolution::NeedsOwnership;
+        let root = self
+            .manifests
+            .rust_library(name, from)
+            .and_then(|root| self.exact.by_file.get(root));
+        match root.and_then(|root| self.rust.lookup(*root, &[], path)) {
+            Some(ModuleFile::File(file)) => Resolution::Files(vec![file]),
+            Some(ModuleFile::Undetermined) => Resolution::NeedsOwnership,
+            Some(ModuleFile::Missing) | None => Resolution::Files(Vec::new()),
         }
-        Resolution::Files(
-            self.manifests
-                .rust_library(name, from)
-                .map(|root| self.rust_module(root, path))
-                .unwrap_or_default(),
-        )
     }
 
-    /// The module a Rust path below a crate's root names: the file of that
-    /// module path, read whole and then without its last segment, which
-    /// names an item in the module where it is not a module itself.
-    fn rust_module(&self, root: &[String], path: &[String]) -> Vec<usize> {
-        let parent = path.split_last().map(|(_, parent)| parent);
-        Found::first(
-            std::iter::once(path)
-                .chain(parent)
-                .filter(|candidate| !candidate.is_empty())
-                .map(|candidate| {
-                    self.modules_at([[root, candidate].concat()], |language| {
-                        language == Language::Rust
-                    })
-                }),
-        )
+    /// What a Rust path from the module writing it, `up` modules above it
+    /// (`self`, `super`), or from its crate's root (`crate`, `up` none)
+    /// names: in each crate whose module tree holds the file, the module the
+    /// path reaches (`RustModules::lookup`). A file no crate's tree holds,
+    /// and a path through a module whose file the tree leaves open, are
+    /// undetermined.
+    fn rust_in_crate(&self, from: &Node, up: Option<usize>, path: &[String]) -> Resolution {
+        let Some(positions) = self.rust.positions.get(&from.id) else {
+            return Resolution::NeedsOwnership;
+        };
+        let mut files = Vec::new();
+        for (krate, module) in positions {
+            let base = match up {
+                None => Some(&module[..0]),
+                Some(up) => module.len().checked_sub(up).map(|keep| &module[..keep]),
+            };
+            let Some(base) = base else {
+                continue;
+            };
+            match self.rust.lookup(*krate, base, path) {
+                Some(ModuleFile::File(file)) => files.push(file),
+                Some(ModuleFile::Undetermined) => return Resolution::NeedsOwnership,
+                Some(ModuleFile::Missing) | None => {}
+            }
+        }
+        files.sort_unstable();
+        files.dedup();
+        Resolution::Files(files)
     }
 
     /// The file an import of a JVM class names: the one declaring, in the
@@ -1188,16 +1391,16 @@ mod tests {
     /// Manifests declaring one Cargo package at the project root, its
     /// library `app` rooted in `src/`, as the default layout has it.
     fn default_cargo_layout() -> Manifests {
-        let src = vec!["src".to_string()];
+        let lib = split_components("src/lib.rs");
         Manifests {
             rust_packages: HashMap::from([(
                 Vec::new(),
                 RustPackage {
                     library: Some(RustLibrary {
                         name: "app".to_string(),
-                        root: src.clone(),
+                        root: lib.clone(),
                     }),
-                    roots: vec![src],
+                    crates: vec![lib],
                 },
             )]),
             ..Manifests::default()
@@ -1831,54 +2034,6 @@ mod tests {
             edges_of(&nodes, 6),
             vec!["src/main/scala/com/acme/s/Defs.scala"]
         );
-    }
-
-    #[test]
-    fn a_crate_path_resolves_to_the_file_of_its_module_below_the_crate_root() {
-        let nodes = vec![
-            node(0, "src/cli/output.rs", "use crate::services::pack;\n"),
-            node(1, "src/services/pack.rs", ""),
-            node(2, "src/cli/services/pack.rs", ""),
-        ];
-        assert_eq!(rust_edges(&nodes, 0), vec!["src/services/pack.rs"]);
-        // No `Cargo.toml` governs the file, so nothing says where its crate's
-        // root is.
-        assert!(edges_of(&nodes, 0).is_empty());
-    }
-
-    #[test]
-    fn a_reference_that_names_an_item_resolves_to_its_module() {
-        let nodes = vec![
-            node(
-                0,
-                "src/cli/output.rs",
-                "use crate::services::pack::PackConfig;\n",
-            ),
-            node(1, "src/services/pack.rs", ""),
-        ];
-        assert_eq!(rust_edges(&nodes, 0), vec!["src/services/pack.rs"]);
-    }
-
-    /// The failure a bare-name index cannot avoid: an external crate whose
-    /// segments happen to match a project file's name. `std::process` and
-    /// `serde::Serialize` name nothing in this project, so they contribute
-    /// no edge, while the project's own library is found by its name.
-    #[test]
-    fn an_external_reference_never_lands_on_a_same_named_project_file() {
-        let nodes = vec![
-            node(
-                0,
-                "src/cli/output.rs",
-                "use std::process::Command;\nuse serde::Serialize;\nuse log::info;\n",
-            ),
-            node(1, "src/services/dist/process.rs", ""),
-            node(2, "src/util/serde.rs", ""),
-            node(3, "src/log.rs", ""),
-            node(4, "tests/cli.rs", "use app::services::pack;\n"),
-            node(5, "src/services/pack.rs", ""),
-        ];
-        assert!(rust_edges(&nodes, 0).is_empty());
-        assert_eq!(rust_edges(&nodes, 4), vec!["src/services/pack.rs"]);
     }
 
     /// An absolute Python import names a module below a directory on
@@ -2563,142 +2718,289 @@ mod tests {
         );
     }
 
-    /// Four files can share a basename; a reference short enough to fit all
-    /// of them identifies none, and inventing an edge to each would hand
-    /// every one of them the same borrowed rank.
+    /// A `crate::` path names the module the crate's tree puts at that path,
+    /// not a file whose path merely ends the same way, and a path naming an
+    /// item names the module holding it.
     #[test]
-    fn an_ambiguous_reference_yields_no_edge() {
+    fn a_rust_path_names_the_module_its_crate_tree_holds() {
         let nodes = vec![
-            node(0, "src/cli/output.rs", "use symbols;\n"),
-            node(1, "src/services/store/symbols.rs", ""),
-            node(2, "src/services/lsp/symbols.rs", ""),
-        ];
-        assert!(rust_edges(&nodes, 0).is_empty());
-
-        let qualified = vec![
+            node(0, "src/lib.rs", "mod cli;\nmod services;\n"),
+            node(1, "src/cli/mod.rs", "mod output;\n"),
             node(
-                0,
+                2,
                 "src/cli/output.rs",
-                "use crate::services::store::symbols;\n",
+                "use crate::services::store::symbols;\nuse crate::services::lsp::Client;\n\
+                 use symbols;\n",
             ),
-            node(1, "src/services/store/symbols.rs", ""),
-            node(2, "src/services/lsp/symbols.rs", ""),
+            node(3, "src/services/mod.rs", "mod store;\nmod lsp;\n"),
+            node(4, "src/services/store/mod.rs", "mod symbols;\n"),
+            node(5, "src/services/store/symbols.rs", ""),
+            node(6, "src/services/lsp/mod.rs", ""),
+            node(7, "src/cli/services/store/symbols.rs", ""),
+            node(8, "src/symbols.rs", ""),
         ];
         assert_eq!(
-            rust_edges(&qualified, 0),
-            vec!["src/services/store/symbols.rs"]
+            rust_edges(&nodes, 2),
+            vec!["src/services/store/symbols.rs", "src/services/lsp/mod.rs"]
         );
+        // No `Cargo.toml` governs the files, so no crate holds them.
+        let graph = build_import_graph(&nodes, &Manifests::default());
+        assert!(graph.edges[&2].is_empty() && graph.rust_relative_imports_omitted);
     }
 
-    /// A path from a name is relative to the module writing it only where the
-    /// file declares that name as a module; any other names an extern crate,
-    /// which no project file stands for, so nothing is left out of the graph
-    /// and nothing is disclosed.
+    /// The failure a bare-name index cannot avoid: an external crate whose
+    /// segments happen to match a project file's name. `std::process` and
+    /// `serde::Serialize` name nothing in this project, so they contribute
+    /// no edge, while the project's own library is found by its name.
     #[test]
-    fn only_a_path_through_a_declared_module_needs_module_ownership() {
-        for (source, omitted) in [
-            ("use anyhow::Result;\nuse std::fmt;\n", false),
-            (
-                "mod config { pub struct Settings; }\nuse config::Settings;\n",
-                true,
-            ),
-            ("mod config;\n", true),
-        ] {
-            let nodes = vec![node(0, "src/main.rs", source)];
-            let graph = build_import_graph(&nodes, &default_cargo_layout());
-            assert_eq!(graph.rust_relative_imports_omitted, omitted, "{source}");
-        }
-    }
-
-    /// A directory module is addressed by its directory, not by `mod`.
-    #[test]
-    fn a_directory_module_resolves_through_its_directory_name() {
+    fn an_external_reference_never_lands_on_a_same_named_project_file() {
         let nodes = vec![
-            node(0, "src/app.rs", "use crate::services::lsp::LspService;\n"),
-            node(1, "src/services/lsp/mod.rs", ""),
+            node(0, "src/lib.rs", "pub mod services;\nmod cli;\n"),
+            node(
+                1,
+                "src/cli.rs",
+                "use std::process::Command;\nuse serde::Serialize;\nuse log::info;\n",
+            ),
+            node(2, "src/services/dist/process.rs", ""),
+            node(3, "src/util/serde.rs", ""),
+            node(4, "src/log.rs", ""),
+            node(5, "tests/cli.rs", "use app::services::pack;\n"),
+            node(6, "src/services/mod.rs", "pub mod pack;\n"),
+            node(7, "src/services/pack.rs", ""),
         ];
-        assert_eq!(rust_edges(&nodes, 0), vec!["src/services/lsp/mod.rs"]);
+        let graph = build_import_graph(&nodes, &default_cargo_layout());
+        assert!(graph.edges[&1].is_empty());
+        assert_eq!(graph.edges[&5], vec![7]);
+        assert!(!graph.rust_relative_imports_omitted);
     }
 
+    /// Rust builds a crate's module tree from its root file through its
+    /// `mod` declarations: a crate root, a `mod.rs` and a file a `#[path]`
+    /// names hold their modules' files beside them, any other module file
+    /// in a directory named for it; an inline module is a directory below
+    /// the module declaring it, or the one its `#[path]` names; a `#[path]`
+    /// on a module is relative to the declaring module's directory. `self::`,
+    /// `super::`, `crate::`, and a path from a module declared where it is
+    /// written, resolve through that tree.
     #[test]
-    fn rust_relative_imports_require_module_ownership() {
-        for (file, source, child, decoy) in [
-            (
-                "src/foo.rs",
-                "mod child; use self::child as dependency;",
-                "src/foo/child.rs",
-                "src/child.rs",
-            ),
-            (
-                "src/custom_root.rs",
-                "mod child; use self::child as dependency;",
-                "src/child.rs",
-                "src/custom_root/child.rs",
-            ),
-            (
-                "src/handlers/mod.rs",
-                "mod child;",
-                "src/handlers/child.rs",
-                "src/child.rs",
-            ),
-            (
+    fn a_rust_module_path_resolves_through_the_crate_module_tree() {
+        let nodes = vec![
+            node(
+                0,
                 "src/lib.rs",
-                "mod child;",
-                "src/child.rs",
-                "src/lib/child.rs",
+                "mod a;\nmod b;\npub mod c {\n    mod d;\n    use super::a::X;\n}\n\
+                 #[path = \"x/y.rs\"]\nmod weird;\nmod gone;\n#[path = \"p\"]\nmod q {\n    mod r;\n}\n",
+            ),
+            node(
+                1,
+                "src/a.rs",
+                "mod inner;\nmod m {\n    mod n;\n}\nmod deep;\n#[path = \"pa.rs\"]\nmod pa;\n\
+                 use self::inner::T;\nuse super::b;\nuse crate::c::d::Z;\n",
+            ),
+            node(
+                2,
+                "src/a/inner.rs",
+                "use super::super::b::Y;\nuse crate as root;\n",
+            ),
+            node(
+                3,
+                "src/b/mod.rs",
+                "mod e;\nuse e::Thing;\nuse self::e as _;\n",
+            ),
+            node(4, "src/b/e.rs", ""),
+            node(5, "src/c/d.rs", ""),
+            node(6, "src/x/y.rs", "mod z;\n"),
+            node(7, "src/x/z.rs", ""),
+            node(8, "src/a/m/n.rs", ""),
+            node(9, "src/p/r.rs", ""),
+            // Where no module is: `inner` of `a.rs` is `src/a/inner.rs`.
+            node(10, "src/inner.rs", ""),
+            node(11, "src/d.rs", ""),
+            node(12, "src/m/n.rs", ""),
+            node(13, "src/q/r.rs", ""),
+            node(14, "src/a/deep/mod.rs", ""),
+            node(15, "src/pa.rs", ""),
+            node(16, "src/a/pa.rs", ""),
+        ];
+        let graph = build_import_graph(&nodes, &default_cargo_layout());
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec![
+                "src/a.rs",
+                "src/b/mod.rs",
+                "src/c/d.rs",
+                "src/x/y.rs",
+                "src/p/r.rs"
+            ]
+        );
+        assert_eq!(
+            edges(1),
+            vec![
+                "src/a/inner.rs",
+                "src/a/m/n.rs",
+                "src/a/deep/mod.rs",
+                "src/pa.rs",
+                "src/b/mod.rs",
+                "src/c/d.rs"
+            ]
+        );
+        assert_eq!(edges(2), vec!["src/b/mod.rs", "src/lib.rs"]);
+        assert_eq!(edges(3), vec!["src/b/e.rs"]);
+        assert_eq!(edges(6), vec!["src/x/z.rs"]);
+        assert!(!graph.rust_relative_imports_omitted);
+    }
+
+    /// What the module tree leaves open is omitted and disclosed: a module
+    /// both `x.rs` and `x/mod.rs` could be, one whose path a `cfg_attr` may
+    /// set or whose `#[path]` string carries an escape, one two declarations
+    /// put in different files, and a path from a file no crate's `mod`
+    /// declarations reach.
+    #[test]
+    fn a_rust_path_the_module_tree_leaves_open_is_omitted_and_disclosed() {
+        let orphan = "use super::a;\nuse crate::a::B;\n";
+        for (source, other, uses, candidate) in [
+            (
+                "#[cfg(unix)]\nmod sys;\n#[cfg(not(unix))]\n#[path = \"win.rs\"]\nmod sys;\n",
+                "src/sys.rs",
+                "",
+                "src/win.rs",
             ),
             (
-                "src/lib.rs",
-                "mod outer { mod child; use self::child as dependency; use super::other; }",
-                "src/outer/child.rs",
-                "src/child.rs",
+                "mod both;\nuse both::X;\n",
+                "src/both.rs",
+                "",
+                "src/both/mod.rs",
             ),
             (
-                "src/lib.rs",
-                "mod outer { use self as current; use super as parent; }",
-                "src/self.rs",
-                "src/super.rs",
+                "#[cfg_attr(unix, path = \"u.rs\")]\nmod cond;\n",
+                "src/cond.rs",
+                "",
+                "src/u.rs",
             ),
+            (
+                "#[path = \"\\x61.rs\"]\nmod esc;\n",
+                "src/a.rs",
+                "",
+                "src/esc.rs",
+            ),
+            ("", "src/orphan.rs", orphan, "src/a.rs"),
         ] {
             let nodes = vec![
-                node(
-                    0,
-                    file,
-                    &format!("{source}\nuse crate as root;\nuse crate::known;\n"),
-                ),
-                node(1, child, ""),
-                node(2, decoy, ""),
-                node(3, "src/known.rs", ""),
-                node(4, "src/crate.rs", ""),
+                node(0, "src/lib.rs", source),
+                node(1, other, uses),
+                node(2, candidate, ""),
             ];
             let graph = build_import_graph(&nodes, &default_cargo_layout());
-            assert!(graph.rust_relative_imports_omitted, "{file}");
-            assert_eq!(graph.edges[&0], vec![3], "{file}");
+            assert!(graph.rust_relative_imports_omitted, "{source}");
+            assert!(graph.edges[&0].is_empty(), "{source}");
         }
     }
 
-    /// A `crate::` path starts at the root of the crate writing it, which
-    /// Cargo's layout determines for a package's library and `src/main.rs`
-    /// but not for a target directory of its own; a workspace member's
-    /// library is imported by the name its `Cargo.toml` gives it.
+    /// Every crate a package builds has a module tree of its own: binaries,
+    /// integration tests and examples are crates whose `crate::` paths start
+    /// at their own root, and a module file two crates declare is, in each,
+    /// what that crate's tree makes it, so its paths name what each reaches.
+    #[test]
+    fn every_crate_a_package_builds_has_its_own_module_tree() {
+        let nodes = vec![
+            node(0, "src/lib.rs", "pub mod util;\n"),
+            node(1, "src/main.rs", "mod util;\nmod config;\nuse app::util;\n"),
+            node(2, "src/util.rs", "use crate::config::Settings;\n"),
+            node(3, "src/config.rs", ""),
+            node(
+                4,
+                "tests/it.rs",
+                "mod common;\nmod fixture;\nuse app::util::helper;\n",
+            ),
+            node(5, "tests/common/mod.rs", "use super::fixture;\n"),
+            node(6, "tests/fixture.rs", ""),
+            node(
+                7,
+                "src/bin/tool.rs",
+                "mod helpers;\nuse crate::helpers::x;\n",
+            ),
+            node(8, "src/bin/helpers.rs", ""),
+            node(9, "examples/demo/main.rs", "mod part;\n"),
+            node(10, "examples/demo/part.rs", ""),
+        ];
+        let manifests = manifests_of(&[("Cargo.toml", "[package]\nname = \"app\"\n")], &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(1), vec!["src/util.rs", "src/config.rs"]);
+        assert_eq!(edges(2), vec!["src/config.rs"]);
+        assert_eq!(
+            edges(4),
+            vec!["tests/common/mod.rs", "tests/fixture.rs", "src/util.rs"]
+        );
+        assert_eq!(edges(5), vec!["tests/fixture.rs"]);
+        assert_eq!(edges(7), vec!["src/bin/helpers.rs"]);
+        assert_eq!(edges(9), vec!["examples/demo/part.rs"]);
+        assert!(!graph.rust_relative_imports_omitted);
+    }
+
+    /// Cargo discovers a package's crates unless its manifest turns that off,
+    /// and builds `build.rs` unless `build = false`; a target table's `path`
+    /// names a crate either way.
+    #[test]
+    fn a_package_builds_the_crates_its_manifest_leaves_cargo_to_discover() {
+        let nodes = vec![
+            node(0, "p/examples/auto.rs", "mod a;\n"),
+            node(1, "p/examples/a.rs", ""),
+            node(2, "p/examples/named.rs", "mod b;\n"),
+            node(3, "p/examples/b.rs", ""),
+            node(4, "p/build.rs", "mod c;\n"),
+            node(5, "p/c.rs", ""),
+            node(6, "q/build.rs", "mod d;\n"),
+            node(7, "q/d.rs", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "p/Cargo.toml",
+                    "[package]\nname = \"p\"\nautoexamples = false\nbuild = false\n\
+                     [[example]]\nname = \"named\"\npath = \"examples/named.rs\"\n",
+                ),
+                ("q/Cargo.toml", "[package]\nname = \"q\"\n"),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.edges[&0].is_empty() && graph.edges[&4].is_empty());
+        assert_eq!(graph.edges[&2], vec![3]);
+        assert_eq!(graph.edges[&6], vec![7]);
+    }
+
+    /// A workspace member's library is imported by the name its `Cargo.toml`
+    /// gives it, from the root file its `[lib] path` names, and a target
+    /// table's `path` roots a crate of its own.
     #[test]
     fn a_rust_path_starts_where_cargo_roots_its_crate() {
         let nodes = vec![
-            node(0, "crates/core/src/lib.rs", ""),
+            node(0, "crates/core/src/lib.rs", "pub mod model;\n"),
             node(1, "crates/core/src/model.rs", ""),
             node(
                 2,
                 "crates/cli/src/main.rs",
-                "use acme_core::model::User;\nuse cli::args;\nuse crate::run;\n",
+                "mod run;\nuse acme_core::model::User;\nuse cli::args;\nuse crate::run::go;\n",
             ),
             node(3, "crates/cli/src/run.rs", ""),
-            node(4, "crates/cli/lib/root.rs", ""),
+            node(4, "crates/cli/lib/root.rs", "pub mod args;\nmod flags;\n"),
             node(5, "crates/cli/lib/args.rs", "use crate::flags;\n"),
             node(6, "crates/cli/lib/flags.rs", ""),
-            node(7, "crates/cli/src/bin/tool.rs", "use crate::run;\n"),
-            node(8, "crates/core/tests/it.rs", "use crate::model;\n"),
-            node(9, "crates/cli/src/tools/gen.rs", ""),
-            node(10, "crates/cli/src/tools/emit.rs", "use crate::run;\n"),
+            node(7, "crates/cli/src/tools/gen.rs", "mod emit;\n"),
+            node(8, "crates/cli/src/tools/emit.rs", "use crate::emit as _;\n"),
+            node(9, "crates/cli/src/tools/stray.rs", "use crate::run;\n"),
         ];
         let manifests = manifests_of(
             &[
@@ -2718,35 +3020,24 @@ mod tests {
         assert_eq!(
             edges_under(&nodes, 2, &manifests),
             vec![
+                "crates/cli/src/run.rs",
                 "crates/core/src/model.rs",
-                "crates/cli/lib/args.rs",
-                "crates/cli/src/run.rs"
+                "crates/cli/lib/args.rs"
             ]
         );
         assert_eq!(
             edges_under(&nodes, 5, &manifests),
             vec!["crates/cli/lib/flags.rs"]
         );
-        // A binary of `src/bin/` and an integration test are crates of their
-        // own, whose `crate::` paths are omitted and disclosed.
-        assert!(edges_under(&nodes, 7, &manifests).is_empty());
-        assert!(edges_under(&nodes, 8, &manifests).is_empty());
-        // Below both `src/` and the `gen` binary's root, a file could be a
-        // module of either.
-        assert!(edges_under(&nodes, 10, &manifests).is_empty());
-        let rooted = build_import_graph(&nodes[..7], &manifests);
+        assert_eq!(
+            edges_under(&nodes, 7, &manifests),
+            vec!["crates/cli/src/tools/emit.rs"]
+        );
+        // No crate's `mod` declarations reach the file, so no tree holds it.
+        assert!(edges_under(&nodes, 9, &manifests).is_empty());
+        let rooted = build_import_graph(&nodes[..9], &manifests);
         assert!(!rooted.rust_relative_imports_omitted);
         assert!(build_import_graph(&nodes, &manifests).rust_relative_imports_omitted);
-    }
-
-    #[test]
-    fn import_graph_links_use_to_target() {
-        let a = node(0, "src/a.rs", "use crate::b;\npub fn a() {}\n");
-        let b = node(1, "src/b.rs", "pub fn b() {}\n");
-        let graph = build_import_graph(&[a, b], &default_cargo_layout());
-        assert!(graph.edges[&0].contains(&1));
-        assert!(graph.edges[&1].is_empty());
-        assert!(!graph.rust_relative_imports_omitted);
     }
 
     #[test]

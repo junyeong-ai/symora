@@ -15,8 +15,8 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
                        signatures are emitted until the budget is reached. This is an\n\
                        orientation aid, not a complete dependency graph.\n\
                        Unsupported escape or string syntax is omitted from import edges.\n\
-                       Rust paths relative to a module, and crate:: paths whose crate root\n\
-                       the Cargo layout does not determine, are omitted with a hint.\n\
+                       Rust paths resolve through each crate's module tree; a path whose\n\
+                       file that tree leaves open is omitted with a hint.\n\
                        \n\
                        Examples:\n  \
                        symora pack --tokens 4000\n  \
@@ -154,7 +154,7 @@ fn build_json_output(
 fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
     let mut hints = Vec::new();
     if result.rust_relative_imports_omitted {
-        hints.push("Rust paths relative to a module (self::, super::, a mod declaration, or a path through a module the file declares) and crate:: paths whose crate root the Cargo layout does not determine were omitted, because module ownership is unresolved; use semantic references or inspect source.".to_string());
+        hints.push("Rust paths whose file the crate's module tree leaves open (from a file no crate's mod declarations reach, or through a module both x.rs and x/mod.rs could be, or whose path a cfg_attr sets) were omitted; use semantic references or inspect source.".to_string());
     }
     if !result.undetermined_imports.is_empty() {
         let specifiers: Vec<String> = result
@@ -392,19 +392,20 @@ mod tests {
         let partial = render_markdown(&ctx(), &args, &result);
         assert!(partial.contains("Showing 1 of 3 declarations"));
         assert!(partial.contains("pub fn main()"));
-        assert!(!partial.contains("Rust paths relative to a module"));
+        assert!(!partial.contains("Rust paths whose file the crate's module tree leaves open"));
         result.rust_relative_imports_omitted = true;
         result.undetermined_imports = vec!["@/styles/app".to_string()];
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
         assert!(
-            render_markdown(&ctx(), &args, &result).contains("Rust paths relative to a module")
+            render_markdown(&ctx(), &args, &result)
+                .contains("Rust paths whose file the crate's module tree leaves open")
         );
         let json = serde_json::to_value(build_json_output(&ctx(), &args, result)).unwrap();
         assert!(
             json["files"]["hints"][0]
                 .as_str()
                 .unwrap()
-                .contains("Rust paths relative to a module")
+                .contains("Rust paths whose file the crate's module tree leaves open")
         );
         assert!(
             json["files"]["hints"][1]
