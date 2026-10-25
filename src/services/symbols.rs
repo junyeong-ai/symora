@@ -522,9 +522,10 @@ impl SymbolExtractor {
     /// grammar here or the parse failed. C and C++ are read again past the
     /// macros a class definition holds where the grammar took it for a function
     /// ([`misread_class_macros`]), those a class body writes alone before its
-    /// closing brace ([`brace_swallowing_macros`]) and those written after a
-    /// function declarator ([`trailing_declarator_macros`]), each spelled as
-    /// blanks, so every offset still addresses `content`.
+    /// closing brace ([`brace_swallowing_macros`]), those written after a
+    /// function declarator ([`trailing_declarator_macros`]) and those a
+    /// prototype wraps its parameters in ([`prototype_macros`]), each spelled
+    /// as blanks, so every offset still addresses `content`.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
         let mut parser = entry.parser.lock().ok()?;
@@ -536,6 +537,7 @@ impl SymbolExtractor {
                 let mut macros = misread_class_macros(tree.root_node(), source);
                 macros.extend(brace_swallowing_macros(tree.root_node()));
                 macros.extend(trailing_declarator_macros(tree.root_node(), source));
+                macros.extend(prototype_macros(tree.root_node()));
                 if macros.is_empty() {
                     break;
                 }
@@ -1092,6 +1094,83 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
                 .filter(|&at| at != key && outside[at] && is_identifier(leaves[at]))
                 .map(|at| leaves[at].byte_range()),
         );
+    }
+    macros
+}
+
+/// The macros a C prototype wraps its parameter list in so that it compiles
+/// without prototypes as well (`clnt_create __P((const char *, int))`,
+/// zlib's `deflate OF((z_streamp strm, int flush))`): a name right after the
+/// declarator's, followed by the list in a second pair of parentheses, as no
+/// declarator or initializer writes. The grammar reads the two names either
+/// as one, supplying a `::` between them, or as a declarator after a name it
+/// set aside as an error, where a declaration has its type. The macro
+/// expands to the list, so its name and its own parentheses are spelled as
+/// blanks.
+fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+        let invoked = if node.kind() == "qualified_identifier"
+            && child_of_kind(node, "::").is_some_and(|scope| scope.is_missing())
+        {
+            node.child_by_field_name("name")
+                .filter(|name| name.kind() == "identifier")
+                .zip(
+                    std::iter::successors(Some(node), Node::parent)
+                        .take_while(|level| level.kind() == "qualified_identifier")
+                        .last()
+                        .and_then(|outer| outer.next_sibling()),
+                )
+        } else if matches!(node.kind(), "init_declarator" | "function_declarator")
+            && node
+                .prev_sibling()
+                .and_then(|before| {
+                    if before.is_error() {
+                        let mut cursor = before.walk();
+                        before.named_children(&mut cursor).last()
+                    } else {
+                        node.parent()
+                            .is_some_and(|error| error.is_error())
+                            .then_some(before)
+                    }
+                })
+                .is_some_and(|name| name.kind() == "identifier")
+        {
+            node.child_by_field_name("declarator")
+                .filter(|name| name.kind() == "identifier")
+                .and_then(|name| Some((name, name.next_sibling()?)))
+        } else {
+            None
+        };
+        let Some((name, list)) =
+            invoked.filter(|(_, list)| matches!(list.kind(), "parameter_list" | "argument_list"))
+        else {
+            continue;
+        };
+        let mut cursor = list.walk();
+        let held: Vec<Node> = list.named_children(&mut cursor).collect();
+        let (Some(open), Some(close)) = (
+            list.child(0),
+            list.child(list.child_count().saturating_sub(1)),
+        ) else {
+            continue;
+        };
+        if let [wrapped] = held[..]
+            && std::iter::successors(Some(wrapped), |part| {
+                let mut cursor = part.walk();
+                part.children(&mut cursor).find(|child| !child.is_missing())
+            })
+            .last()
+            .is_some_and(|inner| inner.kind() == "(")
+            && open.kind() == "("
+            && close.kind() == ")"
+            && !close.is_missing()
+        {
+            macros.extend([name.byte_range(), open.byte_range(), close.byte_range()]);
+        }
     }
     macros
 }
@@ -7392,6 +7471,23 @@ region     = "us-central1"
                 "function:lzma_index_append"
             ],
             "the names after a function's declarator are macros written there"
+        );
+        assert_eq!(
+            declared(
+                "extern CLIENT *clnt_create __P((const char *, rpcprog_t));\n\
+                 extern void clnt_pcreateerror __P((const char *));\n\
+                 ZEXTERN int ZEXPORT deflate OF((z_streamp strm, int flush));\n\
+                 ZEXTERN int ZEXPORT deflateBound OF((z_streamp strm,\n    uLong sourceLen))\n    \
+                 __API_AVAILABLE(macos(10.13));\nWidget w((a));\n"
+            ),
+            [
+                "function:clnt_create",
+                "function:clnt_pcreateerror",
+                "function:deflate",
+                "function:deflateBound",
+                "variable:w",
+            ],
+            "a macro a prototype wraps its parameters in expands to them"
         );
     }
 
