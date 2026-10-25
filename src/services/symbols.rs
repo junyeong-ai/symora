@@ -918,8 +918,9 @@ fn declares_a_function(node: Node) -> bool {
 /// `OPENSSL_EXPORT struct ssl_st {`, `ABSL_NAMESPACE_BEGIN class Clock {`). An
 /// identifier written before the key, or between the key and the name the
 /// class head ends with (qualified, specialized, then `final`), is no part of
-/// the grammar there, so it is a macro; one inside brackets is an argument
-/// (`__declspec(dllexport)`), and the head ends where a base clause begins.
+/// the grammar there, so it is a macro; one inside brackets is an argument or
+/// an attribute (`__declspec(dllexport)`, `[[nodiscard]]`), and the head ends
+/// where a base clause begins.
 fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let text = |node: Node| source.get(node.byte_range()).unwrap_or_default();
     let is_identifier = |node: Node| {
@@ -965,11 +966,11 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         let mut outside = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
             match leaf.kind() {
-                "(" | "[" => depth += 1,
-                ")" | "]" => depth = depth.saturating_sub(1),
+                "(" | "[" | "[[" => depth += 1,
+                ")" | "]" | "]]" => depth = depth.saturating_sub(1),
                 _ => {}
             }
-            outside.push(depth == 0 && !matches!(leaf.kind(), ")" | "]"));
+            outside.push(depth == 0 && !matches!(leaf.kind(), ")" | "]" | "]]"));
         }
         let head_end = (0..leaves.len())
             .find(|&at| outside[at] && leaves[at].kind() == ":")
@@ -6662,6 +6663,18 @@ region     = "us-central1"
                 "field:b",
             ],
             "a bit-field's width follows only a data member, so after a function it opens initializers"
+        );
+        assert_eq!(
+            declared(
+                "class ABSL_SCOPED_LOCKABLE [[nodiscard]] SpinLockHolder\n    : public Guard {\n \
+                 public:\n  explicit SpinLockHolder(SpinLock& l) ABSL_LOCK(l) : Guard(l) {}\n  int held;\n};\n"
+            ),
+            [
+                "class:SpinLockHolder",
+                "constructor:SpinLockHolder",
+                "field:held"
+            ],
+            "an attribute in a class head is no macro"
         );
         assert_eq!(
             declared(
