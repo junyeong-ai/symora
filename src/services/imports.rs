@@ -156,6 +156,12 @@ impl ImportExtractor {
                 imports
                     .declares
                     .push(backquoted_name(name.node, source).to_string());
+                continue;
+            }
+            if let Some(name) = captured("member") {
+                imports
+                    .members
+                    .push(backquoted_name(name.node, source).to_string());
                 callables |= captured("callable").is_some();
                 continue;
             }
@@ -367,14 +373,17 @@ fn rust_string(literal: Node<'_>, source: &[u8]) -> Option<String> {
 
 /// What a file's imports say: the package it declares itself in, where its
 /// language names one in the file (`package com.acme.app`), the names it
-/// declares at its top level, which an import of that package names it by
-/// (a JVM class, object or top-level function), the class its top-level
-/// functions and properties compile into, the modules it declares (a Rust
-/// `mod`), and the module references it makes, in source order.
+/// declares at its top level, which an import of that package names it by —
+/// the ones that can hold what a longer import names through them (a JVM
+/// class, object or Scala `val`), and the functions and properties, which an
+/// import names only whole — the class its top-level functions and
+/// properties compile into, the modules it declares (a Rust `mod`), and the
+/// module references it makes, in source order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileImports {
     pub package: Option<String>,
     pub declares: Vec<String>,
+    pub members: Vec<String>,
     pub file_class: Option<FileClass>,
     pub modules: Vec<ModuleDeclaration>,
     pub references: Vec<String>,
@@ -775,15 +784,17 @@ const JAVA_QUERY: &str = r#"
 "#;
 
 /// A Kotlin file declares classes, objects and type aliases at its top
-/// level, and functions and properties, which are imported by name too and
-/// compile into the class a `@file:JvmName` names.
+/// level, and functions and properties, which are imported by their whole
+/// name — Kotlin reads an import's qualifier as a package or a class, never
+/// a function or property — and compile into the class a `@file:JvmName`
+/// names.
 const KOTLIN_QUERY: &str = r#"
 (package_header (identifier) @package)
 (source_file (class_declaration (type_identifier) @declares))
 (source_file (object_declaration (type_identifier) @declares))
 (source_file (type_alias (type_identifier) @declares))
-(source_file (function_declaration (simple_identifier) @declares) @callable)
-(source_file (property_declaration (variable_declaration (simple_identifier) @declares)) @callable)
+(source_file (function_declaration (simple_identifier) @member) @callable)
+(source_file (property_declaration (variable_declaration (simple_identifier) @member)) @callable)
 (source_file
   (file_annotation
     (constructor_invocation
@@ -794,7 +805,9 @@ const KOTLIN_QUERY: &str = r#"
 "#;
 
 /// A package clause with a body declares a package for that body alone, so
-/// only what the compilation unit holds itself is in the file's package.
+/// only what the compilation unit holds itself is in the file's package. An
+/// import reaches through a stable path — a package, an object, a `val` —
+/// so a `def`, `var`, `given` or extension method is imported only whole.
 const SCALA_QUERY: &str = r#"
 (compilation_unit (package_clause name: (package_identifier) @package !body))
 (compilation_unit (class_definition name: (identifier) @declares))
@@ -803,11 +816,11 @@ const SCALA_QUERY: &str = r#"
 (compilation_unit (enum_definition name: (identifier) @declares))
 (compilation_unit (package_object name: (identifier) @declares))
 (compilation_unit (type_definition name: (type_identifier) @declares))
-(compilation_unit (function_definition name: (identifier) @declares))
-(compilation_unit (given_definition name: (identifier) @declares))
+(compilation_unit (function_definition name: (identifier) @member))
+(compilation_unit (given_definition name: (identifier) @member))
 (compilation_unit (val_definition pattern: (identifier) @declares))
-(compilation_unit (var_definition pattern: (identifier) @declares))
-(compilation_unit (extension_definition body: (function_definition name: (identifier) @declares)))
+(compilation_unit (var_definition pattern: (identifier) @member))
+(compilation_unit (extension_definition body: (function_definition name: (identifier) @member)))
 (import_declaration) @path
 "#;
 
@@ -1181,14 +1194,20 @@ mod tests {
 
     /// A JVM file declares at its top level what an import of its package
     /// names it by — classes of every kind, objects, and in Kotlin and Scala
-    /// functions and values too — and never what those declarations nest.
+    /// functions and values too, apart from the names an import can reach
+    /// through — and never what those declarations nest.
     #[test]
     fn jvm_languages_read_the_names_a_file_declares_at_its_top_level() {
         let declares = |content: &str, language| {
-            ImportExtractor::shared()
-                .extract(content, language)
-                .declares
+            let imports = ImportExtractor::shared().extract(content, language);
+            assert!(
+                language != Language::Java || imports.members.is_empty(),
+                "{content}"
+            );
+            imports.declares
         };
+        let members =
+            |content: &str, language| ImportExtractor::shared().extract(content, language).members;
         assert_eq!(
             declares(
                 "package a;\npublic class C { class Inner {} void m() {} }\ninterface I {}\n\
@@ -1204,7 +1223,15 @@ mod tests {
                  fun String.ext() = 1\nval p = 1\nvar `q` = 2\n",
                 Language::Kotlin
             ),
-            vec!["C", "I", "O", "E", "T", "f", "ext", "p", "q"]
+            vec!["C", "I", "O", "E", "T"]
+        );
+        assert_eq!(
+            members(
+                "package a\nclass C {\n    fun m() {}\n}\nobject O {\n    val inner = 1\n}\n\
+                 fun f() {}\nfun String.ext() = 1\nval p = 1\nvar `q` = 2\n",
+                Language::Kotlin
+            ),
+            vec!["f", "ext", "p", "q"]
         );
         assert_eq!(
             declares(
@@ -1214,9 +1241,15 @@ mod tests {
                  package inner { class Hidden }\n",
                 Language::Scala
             ),
-            vec![
-                "C", "T", "O", "D", "E", "po", "Al", "f", "g", "v", "w", "ex"
-            ]
+            vec!["C", "T", "O", "D", "E", "po", "Al", "v"]
+        );
+        assert_eq!(
+            members(
+                "package a\nclass C { def m = 1 }\ndef f = 1\ngiven g: Int = 1\nval v = 1\n\
+                 var w = 2\nextension (s: String) def ex = 1\n",
+                Language::Scala
+            ),
+            vec!["f", "g", "w", "ex"]
         );
     }
 
