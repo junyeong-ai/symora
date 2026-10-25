@@ -2530,8 +2530,10 @@ fn signature_beside<'t>(body: Node<'t>, declared: &HashSet<usize>) -> Option<Nod
 
 /// The kind a declaration's place settles beyond its own node: a function a
 /// type declares as a member is a method, as language servers read one,
-/// wherever the type itself is declared, except a Rust associated function,
-/// which is a method only where it takes `self` ([`takes_self`]); a JavaScript or TypeScript class's `constructor`,
+/// wherever the type itself is declared, and so is one an enum constant's
+/// body declares, which is the body of a class of its own; a Rust associated
+/// function is a method only where it takes `self` ([`takes_self`]); a
+/// JavaScript or TypeScript class's `constructor`,
 /// unless `static`, is its constructor; a Swift property no type holds is a
 /// global variable; a C++ member function defined in its class without a
 /// type is a constructor or destructor, as one declared there is
@@ -2584,8 +2586,8 @@ fn placed_kind(
         }
         SymbolKind::Function
             if container.is_some_and(|(outer, kind)| {
-                kind.holds_members()
-                    && !kind.is_namespace_like()
+                (kind.holds_members() && !kind.is_namespace_like()
+                    || kind == SymbolKind::EnumMember && type_body(outer, language).is_some())
                     && !is_local_below(node, outer, declared)
             }) && (language != Language::Rust
                 || node
@@ -4559,6 +4561,13 @@ typealias Name = String
 class OneLine { val x = 1 }
 
 enum class Flag { ON; val z = 1 }
+
+enum class Op {
+    PLUS {
+        override fun apply(a: Int) = a
+    };
+    abstract fun apply(a: Int): Int
+}
 "#,
             declares: &[
                 "class:I",
@@ -4586,6 +4595,10 @@ enum class Flag { ON; val z = 1 }
                 "class:Flag",
                 "enum_member:Flag/ON",
                 "property:Flag/z",
+                "class:Op",
+                "enum_member:Op/PLUS",
+                "method:PLUS/apply",
+                "method:Op/apply",
             ],
         },
         DeclarationFixture {
