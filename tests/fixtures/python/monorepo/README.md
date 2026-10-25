@@ -9,9 +9,4 @@ npm ci --ignore-scripts
 uv sync --frozen
 ```
 
-From the repository root, run the fixtures with the local pyright on `PATH`:
-
-```bash
-PATH="$PWD/tests/fixtures/python/monorepo/node_modules/.bin:$PATH" \
-  cargo test --test lang_fixtures -- --include-ignored
-```
+From the repository root, run the real-server suites as the Validation section of [`CLAUDE.md`](../../../../CLAUDE.md) shows.
