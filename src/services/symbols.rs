@@ -1955,14 +1955,15 @@ struct Value {
 /// function whose parameters it cannot parse (`void f(STACK_OF(T) *sk)`) as
 /// one. A parameter's default (Swift lists it beside its parameter, and an
 /// enum case's associated value beside its type), a destructuring pattern's
-/// default (`const { c = 1 } = obj`), what an alias names and a C++
+/// default (`const { c = 1 } = obj`) or a Scala named pattern's binding
+/// (`val Person(name = n) = p`), what an alias names and a C++
 /// concept's constraint, which is what the concept is, are no declarator's
 /// value, nor is what follows the `=` ending C++'s `operator=`.
 fn given_value(node: Node) -> Option<Value> {
     let parent = node.parent()?;
     if ALIASES.contains(&parent.kind())
         || parent.kind() == "concept_definition"
-        || is_pattern_default(parent)
+        || is_pattern_part(parent)
     {
         return None;
     }
@@ -2073,11 +2074,13 @@ fn declared_text(
     Some(text)
 }
 
-/// Whether `node` gives a name a destructuring pattern binds its default.
-fn is_pattern_default(node: Node) -> bool {
+/// Whether the `=` in `node` is part of a pattern rather than a value: it
+/// gives a name a destructuring pattern binds its default, or binds the
+/// field a Scala named pattern matches to a name.
+fn is_pattern_part(node: Node) -> bool {
     matches!(
         node.kind(),
-        "assignment_pattern" | "object_assignment_pattern"
+        "assignment_pattern" | "object_assignment_pattern" | "named_pattern"
     )
 }
 
@@ -7809,6 +7812,20 @@ region     = "us-central1"
                 "const [first = 0, second] = arr;\n",
                 "first",
                 Some("const [first = 0, second]"),
+            ),
+            (
+                "a.scala",
+                Language::Scala,
+                "object O {\n  val Person(name = n, age = years) = p\n}\n",
+                "n",
+                Some("val Person(name = n, age = years)"),
+            ),
+            (
+                "a.scala",
+                Language::Scala,
+                "object O {\n  val (px = qx, py = qy) = t\n}\n",
+                "qy",
+                Some("val (px = qx, py = qy)"),
             ),
             (
                 "a.scala",
