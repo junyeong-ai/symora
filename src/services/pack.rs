@@ -649,7 +649,7 @@ impl Reference {
         }
         let mut components = split_components(rest);
         if is_javascript(language) {
-            without_script_extension(&mut components);
+            as_script_module(&mut components);
         }
         if relative {
             Self::Relative { up, components }
@@ -740,9 +740,10 @@ impl Reference {
     }
 }
 
-/// A module path without the extension of the script its last component
-/// names, which a JavaScript or TypeScript specifier may or may not write.
-fn without_script_extension(components: &mut [String]) {
+/// The module path a JavaScript or TypeScript specifier's components name:
+/// without the script extension it may or may not write, and with a
+/// directory's `index` folded into the directory, as `module_path` folds it.
+fn as_script_module(components: &mut Vec<String>) {
     if let Some(last) = components.last_mut()
         && let Some((stem, extension)) = last.rsplit_once('.')
         && matches!(
@@ -751,6 +752,9 @@ fn without_script_extension(components: &mut [String]) {
         )
     {
         *last = stem.to_string();
+    }
+    if components.last().is_some_and(|last| last == "index") {
+        components.pop();
     }
 }
 
@@ -1726,7 +1730,7 @@ fn project_file(root: &Path, path: &[String]) -> PathBuf {
 /// it is absolute or climbs out of the project.
 fn script_path(directory: &[String], specifier: &str) -> Option<Vec<String>> {
     let mut path = project_path(directory, specifier)?;
-    without_script_extension(&mut path);
+    as_script_module(&mut path);
     Some(path)
 }
 
@@ -3303,6 +3307,26 @@ mod tests {
         assert_eq!(
             jsonc("{\"a\": \"// not a comment\", \"b\": [1, 2,], /* c */}"),
             Some(serde_json::json!({"a": "// not a comment", "b": [1, 2]}))
+        );
+    }
+
+    /// A specifier can name a directory's `index` file outright, which is the
+    /// directory's module, as the language folds it.
+    #[test]
+    fn a_specifier_naming_an_index_file_names_its_directory_module() {
+        let nodes = vec![
+            node_in(
+                0,
+                "web/app.ts",
+                "import a from \"./components/index\";\nimport b from \"./lib/index.js\";\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "web/components/index.ts", "", Language::TypeScript),
+            node_in(2, "web/lib/index.ts", "", Language::TypeScript),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 0),
+            vec!["web/components/index.ts", "web/lib/index.ts"]
         );
     }
 
