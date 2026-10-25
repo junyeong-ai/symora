@@ -15,7 +15,8 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
                        signatures are emitted until the budget is reached. This is an\n\
                        orientation aid, not a complete dependency graph.\n\
                        Unsupported escape or string syntax is omitted from import edges.\n\
-                       Rust relative module paths are omitted without crate/module ownership.\n\
+                       Rust paths relative to a module, and crate:: paths whose crate root\n\
+                       the Cargo layout does not determine, are omitted with a hint.\n\
                        \n\
                        Examples:\n  \
                        symora pack --tokens 4000\n  \
@@ -153,7 +154,7 @@ fn build_json_output(
 fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
     let mut hints = Vec::new();
     if result.rust_relative_imports_omitted {
-        hints.push("Rust relative module paths were omitted because crate/module ownership is unresolved; use semantic references or inspect source.".to_string());
+        hints.push("Rust paths relative to a module (self::, super::, a mod declaration, or a path through a module the file declares) and crate:: paths whose crate root the Cargo layout does not determine were omitted, because module ownership is unresolved; use semantic references or inspect source.".to_string());
     }
     if !result.unsupported_import_languages.is_empty() {
         let languages = result
@@ -370,18 +371,17 @@ mod tests {
         let partial = render_markdown(&ctx(), &args, &result);
         assert!(partial.contains("Showing 1 of 3 declarations"));
         assert!(partial.contains("pub fn main()"));
-        assert!(!partial.contains("Rust relative module paths"));
+        assert!(!partial.contains("Rust paths relative to a module"));
         result.rust_relative_imports_omitted = true;
         assert!(
-            render_markdown(&ctx(), &args, &result)
-                .contains("Rust relative module paths were omitted")
+            render_markdown(&ctx(), &args, &result).contains("Rust paths relative to a module")
         );
         let json = serde_json::to_value(build_json_output(&ctx(), &args, result)).unwrap();
         assert!(
             json["files"]["hints"][0]
                 .as_str()
                 .unwrap()
-                .contains("Rust relative module paths were omitted")
+                .contains("Rust paths relative to a module")
         );
     }
 

@@ -531,8 +531,8 @@ impl Found {
 
 /// Syntactic reference anchors. Filesystem-relative paths retain their hops;
 /// an absolute name is read as its language reads it, through what the tree
-/// and its manifests declare. Rust relative module paths require ownership
-/// not held here.
+/// and its manifests declare. Rust paths relative to a module require
+/// ownership not held here.
 #[derive(Debug, PartialEq, Eq)]
 enum Reference {
     /// Relative to the language's source/module context, retaining parent hops.
@@ -871,25 +871,24 @@ impl ProjectIndex<'_> {
     }
 
     /// What a Rust path from a name, rather than from `crate`, `self` or
-    /// `super`, names: below a project library's root where the name is that
-    /// library's; nothing in the project for a crate of the toolchain's own;
-    /// and otherwise an extern crate or a name in scope, which a module may
-    /// declare (`mod config; use config::Settings;`) and which only module
-    /// ownership would tell apart.
+    /// `super`, names. Through a module the file declares (`mod config; use
+    /// config::Settings;`) it is relative to the module writing it, which only
+    /// module ownership places; from a project library's name it starts at
+    /// that library's root; any other name is an extern crate's, which names
+    /// nothing in the project and leaves nothing out of its graph.
     fn rust_path(&self, path: &[String], from: &Node) -> Resolution {
         let Some((name, path)) = path.split_first() else {
             return Resolution::Files(Vec::new());
         };
-        if let Some(root) = self.manifests.rust_library(name, from) {
-            return Resolution::Files(self.rust_module(root, path));
+        if from.imports.modules.contains(name) {
+            return Resolution::NeedsOwnership;
         }
-        if matches!(
-            name.as_str(),
-            "std" | "core" | "alloc" | "proc_macro" | "test"
-        ) {
-            return Resolution::Files(Vec::new());
-        }
-        Resolution::NeedsOwnership
+        Resolution::Files(
+            self.manifests
+                .rust_library(name, from)
+                .map(|root| self.rust_module(root, path))
+                .unwrap_or_default(),
+        )
     }
 
     /// The module a Rust path below a crate's root names: the file of that
@@ -2442,6 +2441,26 @@ mod tests {
             rust_edges(&qualified, 0),
             vec!["src/services/store/symbols.rs"]
         );
+    }
+
+    /// A path from a name is relative to the module writing it only where the
+    /// file declares that name as a module; any other names an extern crate,
+    /// which no project file stands for, so nothing is left out of the graph
+    /// and nothing is disclosed.
+    #[test]
+    fn only_a_path_through_a_declared_module_needs_module_ownership() {
+        for (source, omitted) in [
+            ("use anyhow::Result;\nuse std::fmt;\n", false),
+            (
+                "mod config { pub struct Settings; }\nuse config::Settings;\n",
+                true,
+            ),
+            ("mod config;\n", true),
+        ] {
+            let nodes = vec![node(0, "src/main.rs", source)];
+            let graph = build_import_graph(&nodes, &default_cargo_layout());
+            assert_eq!(graph.rust_relative_imports_omitted, omitted, "{source}");
+        }
     }
 
     /// A directory module is addressed by its directory, not by `mod`.

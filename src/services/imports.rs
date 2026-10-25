@@ -121,11 +121,17 @@ impl ImportExtractor {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), source);
         while let Some(m) = matches.next() {
-            let package = m
-                .captures()
-                .iter()
-                .find(|capture| entry.capture_name(capture) == Some("package"));
-            if let Some(package) = package {
+            let captured = |name| {
+                m.captures()
+                    .iter()
+                    .find(|capture| entry.capture_name(capture) == Some(name))
+            };
+            if let Some(module) = captured("declared") {
+                let name = rust_identifier_name(module.node, source);
+                imports.modules.push(name.to_string());
+                continue;
+            }
+            if let Some(package) = captured("package") {
                 // Scala chains its package clauses: `package a.b` then
                 // `package c` declares `a.b.c`.
                 let name = jvm_name(package.node, source);
@@ -144,11 +150,13 @@ impl ImportExtractor {
 }
 
 /// What a file's imports say: the package it declares itself in, where its
-/// language names one in the file (`package com.acme.app`), and the module
-/// references it makes, in source order.
+/// language names one in the file (`package com.acme.app`), the modules it
+/// declares, which its own paths can start from (a Rust `mod`), and the
+/// module references it makes, in source order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileImports {
     pub package: Option<String>,
+    pub modules: Vec<String>,
     pub references: Vec<String>,
 }
 
@@ -472,9 +480,12 @@ fn rust_identifier_name<'a>(node: Node, source: &'a [u8]) -> &'a str {
 }
 
 /// Out-of-line declarations name modules; inline modules add lexical context.
+/// Every module a file declares, either way, is a name its own paths can
+/// start from.
 const RUST_QUERY: &str = r#"
 (use_declaration argument: (_) @path)
 (mod_item name: (identifier) @module !body)
+(mod_item name: (identifier) @declared)
 "#;
 
 /// Python from-imports name a module; imported attributes are not assumed to be modules.
@@ -695,10 +706,18 @@ mod tests {
 
     #[test]
     fn a_mod_declaration_names_a_file_only_when_it_has_no_body() {
-        let source = "mod auth;\nmod r#type;\nmod tests {\n    fn helper() {}\n}\n";
+        let source = "mod auth;\nmod r#type;\nmod tests {\n    fn helper() {}\n    mod inner;\n}\n";
         assert_eq!(
             extract(source, Language::Rust),
-            vec!["self::auth", "self::type"]
+            vec!["self::auth", "self::type", "self::inner"]
+        );
+        // Every module the file declares, with a body or without, is one its
+        // own paths can start from.
+        assert_eq!(
+            ImportExtractor::shared()
+                .extract(source, Language::Rust)
+                .modules,
+            vec!["auth", "type", "tests", "inner"]
         );
     }
 
