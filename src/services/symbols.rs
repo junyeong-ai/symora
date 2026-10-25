@@ -1833,7 +1833,7 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
 /// Whether a shell declaration command declares variables at all: `local`
 /// declares the function's that runs it and fails anywhere else, and
 /// `declare` or `typeset` with `-f`, `-F`, or `p` under either sign among the
-/// options written before its first name lists functions or prints
+/// options written before its first name or `--` lists functions or prints
 /// variables, assigning nothing (`+f` only turns an attribute off).
 fn shell_command_declares(node: Node, content: &str) -> bool {
     match node.child(0).map(|keyword| keyword.kind()) {
@@ -1844,6 +1844,7 @@ fn shell_command_declares(node: Node, content: &str) -> bool {
                 .named_children(&mut cursor)
                 .take_while(|argument| argument.kind() == "word")
                 .filter_map(|word| content.get(word.byte_range()))
+                .take_while(|word| *word != "--")
                 .any(|word| {
                     word.strip_prefix('-')
                         .is_some_and(|options| options.contains(['f', 'F', 'p']))
@@ -6074,6 +6075,7 @@ declare -a ITEMS[0]=x ITEM_COUNT=1
 declare +f PLUS_F=1
 declare +p PLUS_P
 declare AFTER_NAME=1 -p
+declare -- -p DASHED=1
 FIRST=1 SECOND=2
 echo "$FIRST"
 PREFIX_A=1 PREFIX_B=2 \
@@ -6109,6 +6111,7 @@ run_it &
                 "variable:ITEM_COUNT",
                 "variable:PLUS_F",
                 "variable:AFTER_NAME",
+                "variable:DASHED",
                 "variable:PIPED_A",
                 "variable:PIPED_B",
                 "variable:BEFORE_A",
