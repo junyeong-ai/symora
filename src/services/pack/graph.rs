@@ -459,6 +459,19 @@ impl<'a> SourceSet<'a> {
             _ => false,
         }
     }
+
+    /// Whether code in this set can see the classes of `other` through any
+    /// build: those of a set it sees, of another module's `main` set, which
+    /// a build can make it depend on, and of a set whose role the layout does
+    /// not say. Another module's `test` set, like every named set besides
+    /// `main`, is on no classpath but its own module's.
+    fn may_see(self, other: SourceSet<'_>) -> bool {
+        self.sees(other)
+            || match other {
+                SourceSet::Named { name, .. } => name == "main",
+                SourceSet::Root(_) => true,
+            }
+    }
 }
 
 /// The directories a Python tree puts on `sys.path`, as its own tooling
@@ -738,7 +751,7 @@ impl ProjectIndex<'_> {
 
     /// The one file of several declaring a class that an importer means: the
     /// one in its own source set, which shadows the rest on its classpath,
-    /// else the one in a set it sees, else the only one in the project.
+    /// else the one in a set it sees, else the only one in a set it may see.
     fn jvm_one(&self, files: &[usize], from: &Node) -> Option<usize> {
         let own = self.jvm.sets.get(&from.id).copied();
         let set = |id: &usize| self.jvm.sets.get(id).copied();
@@ -755,16 +768,38 @@ impl ProjectIndex<'_> {
                     .copied()
                     .filter(|id| own.zip(set(id)).is_some_and(|(own, other)| own.sees(other))),
             ),
-            Found::of(files.iter().copied()),
+            Found::of(
+                files
+                    .iter()
+                    .copied()
+                    .filter(|id| self.jvm_may_see(from, *id)),
+            ),
         ]);
         found.first().copied()
+    }
+
+    /// Whether the importer `from` may see the classes of the JVM file `id`
+    /// (`SourceSet::may_see`). An importer whose set its layout does not say
+    /// may be anything, a test included.
+    fn jvm_may_see(&self, from: &Node, id: usize) -> bool {
+        let set = self
+            .jvm
+            .sets
+            .get(&id)
+            .copied()
+            .unwrap_or(SourceSet::Root(&self.nodes[id].directory));
+        self.jvm
+            .sets
+            .get(&from.id)
+            .is_none_or(|own| own.may_see(set))
     }
 
     /// The files an import of a whole JVM package names: every file declaring
     /// it in a source set the importer's sees — its own, and `main` from
     /// `test`. Where no set it sees holds the package, the package is another
     /// module's, which only a build file would say it depends on: it names
-    /// the files of the one source set holding it, or none where several do.
+    /// the files of the one source set holding it that the importer may see
+    /// — never another module's `test` set — or none where several do.
     fn jvm_package(&self, package: &[String], from: &Node) -> Vec<usize> {
         let Some(files) = self.jvm.by_package.get(package) else {
             return Vec::new();
@@ -779,18 +814,21 @@ impl ProjectIndex<'_> {
                 return seen;
             }
         }
-        let holding: HashSet<SourceSet> = files
+        let set = |id: &usize| {
+            self.jvm
+                .sets
+                .get(id)
+                .copied()
+                .unwrap_or(SourceSet::Root(&self.nodes[*id].directory))
+        };
+        let visible: Vec<usize> = files
             .iter()
-            .map(|id| {
-                self.jvm
-                    .sets
-                    .get(id)
-                    .copied()
-                    .unwrap_or(SourceSet::Root(&self.nodes[*id].directory))
-            })
+            .copied()
+            .filter(|id| self.jvm_may_see(from, *id))
             .collect();
+        let holding: HashSet<SourceSet> = visible.iter().map(set).collect();
         if holding.len() == 1 {
-            files.clone()
+            visible
         } else {
             Vec::new()
         }
@@ -1441,7 +1479,33 @@ mod tests {
             java(
                 11,
                 "cli/src/main/java/com/cli/Cli.java",
-                "package com.cli;\nimport com.lib.*;\nimport com.acme.util.*;\n",
+                "package com.cli;\nimport com.lib.*;\nimport com.shared.*;\n\
+                 import com.lib.LibTest;\nimport com.lib.Twin;\n",
+            ),
+            java(
+                12,
+                "lib/src/test/java/com/lib/LibTest.java",
+                "package com.lib;\n",
+            ),
+            java(
+                13,
+                "a/src/main/java/com/shared/A.java",
+                "package com.shared;\n",
+            ),
+            java(
+                14,
+                "b/src/main/java/com/shared/B.java",
+                "package com.shared;\n",
+            ),
+            java(
+                15,
+                "lib/src/main/java/com/lib/Twin.java",
+                "package com.lib;\n",
+            ),
+            java(
+                16,
+                "lib/src/test/java/com/lib/Twin.java",
+                "package com.lib;\n",
             ),
         ];
         assert_eq!(
@@ -1472,11 +1536,16 @@ mod tests {
                 "src/main/kotlin/com/acme/util/Text.kt"
             ]
         );
-        // Another module's package is the files of the one set holding it;
-        // one held by several sets of another module names none of them.
+        // Another module's package is the files of the one set holding it
+        // that the importer may see, its `main` — its `test` set is on no
+        // other module's classpath — and one two modules' `main` sets hold
+        // names neither. A class is another module's `main` one alike.
         assert_eq!(
             edges_of(&nodes, 11),
-            vec!["lib/src/main/java/com/lib/Lib.java"]
+            vec![
+                "lib/src/main/java/com/lib/Lib.java",
+                "lib/src/main/java/com/lib/Twin.java"
+            ]
         );
     }
 
