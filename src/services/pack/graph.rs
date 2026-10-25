@@ -2804,6 +2804,114 @@ mod tests {
         assert_eq!(edges(9), vec!["dr/lib/inner/x.py"]);
     }
 
+    /// pytest 9 reads, in each directory, the first of `pytest.toml`,
+    /// `.pytest.toml`, `pytest.ini`, `.pytest.ini`, `pyproject.toml`,
+    /// `tox.ini` and `setup.cfg` that configures it — the first four
+    /// whatever they hold, `pyproject.toml` through its native `[tool.pytest]`
+    /// or its `[tool.pytest.ini_options]` but not both — and a native table's
+    /// `pythonpath` only as an array (`py9_native`, `py9_pytesttoml`, and each
+    /// case run under pytest 9.1.1).
+    #[test]
+    fn pytest_reads_the_first_configuration_file_pytest_9_reads() {
+        let cases = [
+            (
+                "n",
+                &[(
+                    "pyproject.toml",
+                    "[project]\nname = \"n\"\n\n[tool.pytest]\npythonpath = [\"lib\"]\n",
+                )][..],
+                true,
+            ),
+            (
+                "t",
+                &[("pytest.toml", "[pytest]\npythonpath = [\"lib\"]\n")],
+                true,
+            ),
+            (
+                "d",
+                &[(".pytest.ini", "[pytest]\npythonpath = lib\n")],
+                true,
+            ),
+            (
+                "dt",
+                &[(".pytest.toml", "[pytest]\npythonpath = [\"lib\"]\n")],
+                true,
+            ),
+            // An empty `pytest.toml` is pytest's configuration all the same.
+            (
+                "o",
+                &[
+                    ("pytest.toml", ""),
+                    ("pytest.ini", "[pytest]\npythonpath = lib\n"),
+                ],
+                false,
+            ),
+            (
+                "p",
+                &[
+                    ("pytest.ini", "[pytest]\n"),
+                    (
+                        "pyproject.toml",
+                        "[tool.pytest.ini_options]\npythonpath = [\"lib\"]\n",
+                    ),
+                ],
+                false,
+            ),
+            (
+                "b",
+                &[(
+                    "pyproject.toml",
+                    "[tool.pytest]\npythonpath = [\"lib\"]\n\n[tool.pytest.ini_options]\naddopts = \"-q\"\n",
+                )],
+                false,
+            ),
+            (
+                "s",
+                &[("pyproject.toml", "[tool.pytest]\npythonpath = \"lib\"\n")],
+                false,
+            ),
+            (
+                "x",
+                &[
+                    ("tox.ini", "[pytest]\npythonpath = lib\n"),
+                    ("setup.cfg", "[tool:pytest]\npythonpath = other\n"),
+                ],
+                true,
+            ),
+        ];
+        let mut nodes = Vec::new();
+        let mut files = Vec::new();
+        for (directory, configuration, _) in cases {
+            for (rel, source) in [
+                ("tests/test_a.py", "import helpers\n"),
+                ("lib/helpers.py", ""),
+                ("other/helpers.py", ""),
+            ] {
+                let path = format!("{directory}/{rel}");
+                nodes.push(node_in(nodes.len(), &path, source, Language::Python));
+            }
+            for (file, contents) in configuration {
+                files.push((format!("{directory}/{file}"), *contents));
+            }
+        }
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, contents)| (path.as_str(), *contents))
+            .collect();
+        let manifests = manifests_of(&files, &nodes);
+        for (at, (directory, _, found)) in cases.iter().enumerate() {
+            let expected: Vec<String> = found
+                .then(|| format!("{directory}/lib/helpers.py"))
+                .into_iter()
+                .collect();
+            assert_eq!(
+                edges_under(&nodes, at * 3, &manifests),
+                expected,
+                "{directory}"
+            );
+        }
+    }
+
     /// pytest's default import mode puts on `sys.path` the basedir of each
     /// test module and `conftest.py` it imports — the first directory upward
     /// without `__init__.py` — so a test imports the helpers beside it; a
