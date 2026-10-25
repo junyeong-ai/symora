@@ -441,14 +441,18 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
     let mut rust_relative_imports_omitted = false;
     for node in nodes {
         graph.entry(node.id).or_default();
+        let importer = Importer::of(node, manifests);
         let mut seen = HashSet::new();
         for target in &node.imports.references {
             let reference = Reference::parse(target, node.language);
-            if node.language == Language::Rust && manifests.rust_omits(&reference, node) {
-                rust_relative_imports_omitted = true;
-                continue;
-            }
-            for dst in index.resolve(&reference, node) {
+            let files = match index.resolve(&reference, &importer) {
+                Resolution::Files(files) => files,
+                Resolution::NeedsOwnership => {
+                    rust_relative_imports_omitted = true;
+                    continue;
+                }
+            };
+            for dst in files {
                 if dst != node.id && seen.insert(dst) {
                     graph.entry(node.id).or_default().push(dst);
                 }
@@ -458,6 +462,70 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
     ImportGraph {
         edges: graph,
         rust_relative_imports_omitted,
+    }
+}
+
+/// What a reference resolves to.
+enum Resolution {
+    /// The files it names: none where it names nothing in the project, or
+    /// nothing unambiguous.
+    Files(Vec<usize>),
+    /// A Rust path whose file only module ownership, which pack does not
+    /// hold, would determine.
+    NeedsOwnership,
+}
+
+/// What resolving a file's references needs to know about where the file
+/// sits, worked out once for the file rather than once per reference.
+struct Importer<'a> {
+    node: &'a Node,
+    /// The directory a `crate::` path written in a Rust file starts at, where
+    /// the package layout determines it.
+    crate_root: Option<&'a [String]>,
+}
+
+impl<'a> Importer<'a> {
+    fn of(node: &'a Node, manifests: &'a Manifests) -> Self {
+        let crate_root = if node.language == Language::Rust {
+            manifests.rust_crate_root(node)
+        } else {
+            None
+        };
+        Self { node, crate_root }
+    }
+}
+
+/// What a set of candidate files names: one file, none, or several — which
+/// name none of them, since an edge to each would hand every one of them the
+/// same borrowed rank.
+enum Found {
+    One(usize),
+    Nothing,
+    Several,
+}
+
+impl Found {
+    fn of(candidates: impl IntoIterator<Item = usize>) -> Self {
+        let distinct: BTreeSet<usize> = candidates.into_iter().collect();
+        let mut distinct = distinct.into_iter();
+        match (distinct.next(), distinct.next()) {
+            (None, _) => Self::Nothing,
+            (Some(one), None) => Self::One(one),
+            _ => Self::Several,
+        }
+    }
+
+    /// The file the first attempt that finds anything names, none where that
+    /// attempt finds several.
+    fn first(attempts: impl IntoIterator<Item = Found>) -> Vec<usize> {
+        for found in attempts {
+            match found {
+                Self::One(file) => return vec![file],
+                Self::Several => return Vec::new(),
+                Self::Nothing => {}
+            }
+        }
+        Vec::new()
     }
 }
 
@@ -745,34 +813,37 @@ impl<'a> PythonPath<'a> {
 }
 
 impl ProjectIndex<'_> {
-    /// The nodes a reference names, empty when it names something outside
-    /// the project or nothing unambiguous.
-    fn resolve(&self, reference: &Reference, from: &Node) -> Vec<usize> {
-        match reference {
+    /// What a reference names, nothing where it names something outside the
+    /// project or nothing unambiguous.
+    fn resolve(&self, reference: &Reference, importer: &Importer) -> Resolution {
+        let from = importer.node;
+        let files = match reference {
+            Reference::Relative { .. } if from.language == Language::Rust => {
+                return Resolution::NeedsOwnership;
+            }
             Reference::Relative { up, components } => {
                 let base = from.directory.len().checked_sub(*up);
                 let Some(base) = base else {
-                    return Vec::new();
+                    return Resolution::Files(Vec::new());
                 };
                 let mut path = from.directory[..base].to_vec();
                 path.extend_from_slice(components);
                 if package_is_directory(from.language) {
-                    return self.package(&path, from.language);
+                    self.package(&path, from.language)
+                } else {
+                    self.module(&path, from.language)
                 }
-                self.module(&path, from.language)
             }
             Reference::Package {
                 package,
                 components,
-            } => {
-                let Some(directory) = self.manifests.dart_package(package, from) else {
-                    return Vec::new();
-                };
-                let mut path = directory.to_vec();
-                path.push("lib".to_string());
-                path.extend_from_slice(components);
-                self.module(&path, from.language)
-            }
+            } => match self.manifests.dart_package(package, from) {
+                Some(directory) => {
+                    let path = [directory, &["lib".to_string()], components].concat();
+                    self.module(&path, from.language)
+                }
+                None => Vec::new(),
+            },
             Reference::Unresolved => Vec::new(),
             Reference::Absolute(components) if from.language == Language::Go => self
                 .manifests
@@ -783,24 +854,42 @@ impl ProjectIndex<'_> {
                 self.python_module(components, from)
             }
             Reference::Absolute(name) if is_jvm(from.language) => self.jvm_class(name, from),
-            Reference::Crate(path) => self
-                .manifests
-                .rust_crate_root(from)
-                .map(|root| self.rust_module(root, path))
-                .unwrap_or_default(),
-            Reference::Absolute(path) if from.language == Language::Rust => path
-                .split_first()
-                .and_then(|(name, path)| {
-                    let root = self.manifests.rust_library(name, from)?;
-                    Some(self.rust_module(root, path))
-                })
-                .unwrap_or_default(),
             Reference::Wildcard(name) => self.jvm_wildcard(name, from),
+            Reference::Crate(path) => match importer.crate_root {
+                Some(root) => self.rust_module(root, path),
+                None => return Resolution::NeedsOwnership,
+            },
+            Reference::Absolute(path) if from.language == Language::Rust => {
+                return self.rust_path(path, from);
+            }
             // Anywhere else an absolute name (a JavaScript package specifier,
             // a Terraform registry source) names what the project's
             // dependencies provide, never a project file by its spelling.
             Reference::Absolute(_) => Vec::new(),
+        };
+        Resolution::Files(files)
+    }
+
+    /// What a Rust path from a name, rather than from `crate`, `self` or
+    /// `super`, names: below a project library's root where the name is that
+    /// library's; nothing in the project for a crate of the toolchain's own;
+    /// and otherwise an extern crate or a name in scope, which a module may
+    /// declare (`mod config; use config::Settings;`) and which only module
+    /// ownership would tell apart.
+    fn rust_path(&self, path: &[String], from: &Node) -> Resolution {
+        let Some((name, path)) = path.split_first() else {
+            return Resolution::Files(Vec::new());
+        };
+        if let Some(root) = self.manifests.rust_library(name, from) {
+            return Resolution::Files(self.rust_module(root, path));
         }
+        if matches!(
+            name.as_str(),
+            "std" | "core" | "alloc" | "proc_macro" | "test"
+        ) {
+            return Resolution::Files(Vec::new());
+        }
+        Resolution::NeedsOwnership
     }
 
     /// The module a Rust path below a crate's root names: the file of that
@@ -808,27 +897,16 @@ impl ProjectIndex<'_> {
     /// names an item in the module where it is not a module itself.
     fn rust_module(&self, root: &[String], path: &[String]) -> Vec<usize> {
         let parent = path.split_last().map(|(_, parent)| parent);
-        for candidate in std::iter::once(path).chain(parent) {
-            if candidate.is_empty() {
-                continue;
-            }
-            let module = [root, candidate].concat();
-            let files: Vec<usize> = self
-                .exact
-                .by_module
-                .get(module.as_slice())
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|id| self.nodes[*id].language == Language::Rust)
-                .collect();
-            match files.as_slice() {
-                [only] => return vec![*only],
-                [] => {}
-                _ => return Vec::new(),
-            }
-        }
-        Vec::new()
+        Found::first(
+            std::iter::once(path)
+                .chain(parent)
+                .filter(|candidate| !candidate.is_empty())
+                .map(|candidate| {
+                    self.modules_at([[root, candidate].concat()], |language| {
+                        language == Language::Rust
+                    })
+                }),
+        )
     }
 
     /// The file an import of a JVM class names: the one whose declared package
@@ -902,33 +980,33 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// The one file of a language compatible with `language` at the module
-    /// path `path`, or none where none or several are.
+    /// The one file at the module path `path` that a `language` file can
+    /// import, or none where none or several are.
     fn module(&self, path: &[String], language: Language) -> Vec<usize> {
-        let compatible = |id: &usize| {
-            let target = self.nodes[*id].language;
-            target == language
-                || (matches!(
-                    target,
-                    Language::JavaScript | Language::TypeScript | Language::Vue
-                ) && matches!(
-                    language,
-                    Language::JavaScript | Language::TypeScript | Language::Vue
-                ))
-        };
-        let candidates: Vec<usize> = self
-            .exact
-            .by_module
-            .get(path)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(compatible)
-            .collect();
-        match candidates.as_slice() {
-            [only] => vec![*only],
-            _ => Vec::new(),
-        }
+        Found::first([self.modules_at([path.to_vec()], |target| imports_across(language, target))])
+    }
+
+    /// What the files at any of `paths`, module paths, of a language
+    /// `accepts` takes name.
+    fn modules_at(
+        &self,
+        paths: impl IntoIterator<Item = Vec<String>>,
+        accepts: impl Fn(Language) -> bool,
+    ) -> Found {
+        Found::of(
+            paths
+                .into_iter()
+                .flat_map(|path| {
+                    self.exact
+                        .by_module
+                        .get(path.as_slice())
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .collect::<Vec<_>>()
+                })
+                .filter(|id| accepts(self.nodes[*id].language)),
+        )
     }
 
     /// The module an absolute Python import names: the file at that dotted
@@ -951,27 +1029,16 @@ impl ProjectIndex<'_> {
             self.python.roots.clone(),
         ];
         let mut searched = HashSet::new();
-        for tier in tiers {
-            let mut found = BTreeSet::new();
-            for base in tier.into_iter().filter(|base| searched.insert(*base)) {
-                let path = [base, module].concat();
-                found.extend(
-                    self.exact
-                        .by_module
-                        .get(path.as_slice())
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                        .filter(|id| self.nodes[*id].language == Language::Python),
-                );
-            }
-            match found.len() {
-                0 => continue,
-                1 => return found.into_iter().collect(),
-                _ => return Vec::new(),
-            }
-        }
-        Vec::new()
+        Found::first(tiers.into_iter().map(|tier: Vec<&[String]>| {
+            let bases: Vec<&[String]> = tier
+                .into_iter()
+                .filter(|base| searched.insert(*base))
+                .collect();
+            self.modules_at(
+                bases.into_iter().map(|base| [base, module].concat()),
+                |language| language == Language::Python,
+            )
+        }))
     }
 
     /// The files of the package that is the directory at `path`, in a
@@ -1017,6 +1084,18 @@ fn is_jvm(language: Language) -> bool {
         language,
         Language::Java | Language::Kotlin | Language::Scala
     )
+}
+
+/// Whether a `from` file's import can name a `to` file: one of its own
+/// language, or any of the JavaScript family, which import each other.
+fn imports_across(from: Language, to: Language) -> bool {
+    let javascript = |language| {
+        matches!(
+            language,
+            Language::JavaScript | Language::TypeScript | Language::Vue
+        )
+    };
+    from == to || (javascript(from) && javascript(to))
 }
 
 /// What a project's build manifests declare about the names its own imports
@@ -1065,10 +1144,15 @@ impl Manifests {
             .into_iter()
             .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
             .collect();
+        let rust_files: HashSet<&Path> = nodes
+            .iter()
+            .filter(|node| node.language == Language::Rust)
+            .map(|node| Path::new(&node.rel_path))
+            .collect();
         let rust_packages = manifests_above(root, nodes, Language::Rust, "Cargo.toml")
             .into_iter()
             .filter_map(|(directory, cargo)| {
-                let package = cargo_package(&directory, &cargo, nodes)?;
+                let package = cargo_package(&directory, &cargo, &rust_files)?;
                 Some((directory, package))
             })
             .collect();
@@ -1086,9 +1170,7 @@ impl Manifests {
     /// to a crate its location does not determine, and so does a file no
     /// `Cargo.toml` governs.
     fn rust_crate_root(&self, from: &Node) -> Option<&[String]> {
-        let (directory, package) = (0..=from.directory.len())
-            .rev()
-            .find_map(|depth| self.rust_packages.get_key_value(&from.directory[..depth]))?;
+        let (directory, package) = nearest(&self.rust_packages, &from.directory)?;
         let target = match &from.directory[directory.len()..] {
             [first, second, ..] if first == "src" && second == "bin" => true,
             [first, ..] => matches!(first.as_str(), "tests" | "examples" | "benches"),
@@ -1108,48 +1190,16 @@ impl Manifests {
     }
 
     /// The root directory of the project library a Rust path's first segment
-    /// names: the importer's own package's library when that is its name,
-    /// otherwise the one library in the project by that name.
+    /// names, by the rule every manifest name follows (`own_or_only`).
     fn rust_library(&self, name: &str, from: &Node) -> Option<&[String]> {
-        let own = (0..=from.directory.len())
-            .rev()
-            .find_map(|depth| self.rust_packages.get(&from.directory[..depth]))
-            .and_then(|package| package.library.as_ref());
-        if let Some(own) = own
-            && own.name == name
-        {
-            return Some(&own.root);
-        }
-        let mut named = self
-            .rust_packages
-            .values()
-            .filter_map(|package| package.library.as_ref())
-            .filter(|library| library.name == name);
-        match (named.next(), named.next()) {
-            (Some(library), None) => Some(&library.root),
-            _ => None,
-        }
-    }
-
-    /// Whether a Rust reference is one whose target needs module ownership
-    /// this does not hold: a path relative to the module writing it, a
-    /// `crate::` path from a file whose crate root is not determined, and a
-    /// path from a name that is neither a project library nor a crate of the
-    /// toolchain's own — an extern crate or a name in scope, which a module
-    /// may declare (`mod config; use config::Settings;`).
-    fn rust_omits(&self, reference: &Reference, from: &Node) -> bool {
-        match reference {
-            Reference::Relative { .. } => true,
-            Reference::Crate(_) => self.rust_crate_root(from).is_none(),
-            Reference::Absolute(path) => path.first().is_some_and(|name| {
-                self.rust_library(name, from).is_none()
-                    && !matches!(
-                        name.as_str(),
-                        "std" | "core" | "alloc" | "proc_macro" | "test"
-                    )
-            }),
-            _ => false,
-        }
+        own_or_only(&self.rust_packages, from, |package| {
+            package
+                .library
+                .as_ref()
+                .is_some_and(|library| library.name == name)
+        })
+        .and_then(|(_, package)| package.library.as_ref())
+        .map(|library| library.root.as_slice())
     }
 
     /// The directory a Go import path names in the project, as the go command
@@ -1166,11 +1216,8 @@ impl Manifests {
             .filter(|(_, module)| import.starts_with(module));
         let longest = providing.clone().map(|(_, module)| module.len()).max();
         let Some(longest) = longest else {
-            let own = (0..=from.directory.len())
-                .rev()
-                .map(|depth| &from.directory[..depth])
-                .find(|directory| self.go_modules.contains_key(*directory))?;
-            let mut vendored = own.to_vec();
+            let (own, _) = nearest(&self.go_modules, &from.directory)?;
+            let mut vendored = own.clone();
             vendored.push("vendor".to_string());
             vendored.extend_from_slice(import);
             return Some(vendored);
@@ -1191,28 +1238,42 @@ impl Manifests {
     }
 
     /// The directory of the package a `package:name/…` URI written in `from`
-    /// names: the importer's own package — the nearest `pubspec.yaml` above
-    /// it — when that is its name, otherwise the one package in the project
-    /// that declares it. Where several declare it and none is the importer's,
-    /// which one it depends on is the business of its package config, which
-    /// is not read here, so the URI names none of them.
+    /// names, by the rule every manifest name follows (`own_or_only`).
     fn dart_package(&self, name: &str, from: &Node) -> Option<&[String]> {
-        let own = (0..=from.directory.len())
-            .rev()
-            .find_map(|depth| self.dart_packages.get_key_value(&from.directory[..depth]));
-        if let Some((directory, own)) = own
-            && own == name
-        {
-            return Some(directory);
-        }
-        let mut declaring = self
-            .dart_packages
-            .iter()
-            .filter(|(_, declared)| *declared == name);
-        match (declaring.next(), declaring.next()) {
-            (Some((directory, _)), None) => Some(directory),
-            _ => None,
-        }
+        own_or_only(&self.dart_packages, from, |declared| declared == name)
+            .map(|(directory, _)| directory.as_slice())
+    }
+}
+
+/// The manifest nearest above `directory`, with the directory holding it.
+fn nearest<'m, T>(
+    manifests: &'m HashMap<Vec<String>, T>,
+    directory: &[String],
+) -> Option<(&'m Vec<String>, &'m T)> {
+    (0..=directory.len())
+        .rev()
+        .find_map(|depth| manifests.get_key_value(&directory[..depth]))
+}
+
+/// The one of the manifests declaring a name that an importer means: its own
+/// — the nearest above it — where that one `declares` the name, otherwise the
+/// only one in the project that does. Where several do and none is the
+/// importer's own, which of them it depends on is configuration pack does not
+/// read, so the name means none of them.
+fn own_or_only<'m, T>(
+    manifests: &'m HashMap<Vec<String>, T>,
+    from: &Node,
+    declares: impl Fn(&T) -> bool,
+) -> Option<(&'m Vec<String>, &'m T)> {
+    if let Some(own) = nearest(manifests, &from.directory)
+        && declares(own.1)
+    {
+        return Some(own);
+    }
+    let mut declaring = manifests.iter().filter(|(_, manifest)| declares(manifest));
+    match (declaring.next(), declaring.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
     }
 }
 
@@ -1268,7 +1329,11 @@ fn dart_package_name(pubspec: &str) -> Option<String> {
 /// directory of every target root file: the library's, each `[[bin]]` path's,
 /// and `src/` for `src/main.rs`. A target counts only where its root file is a
 /// project file; a workspace's own manifest declares no package.
-fn cargo_package(directory: &[String], cargo_toml: &str, nodes: &[Node]) -> Option<RustPackage> {
+fn cargo_package(
+    directory: &[String],
+    cargo_toml: &str,
+    rust_files: &HashSet<&Path>,
+) -> Option<RustPackage> {
     let manifest: toml::Table = toml::from_str(cargo_toml).ok()?;
     let package = manifest.get("package")?.as_table()?.get("name")?.as_str()?;
     let project_file = |path: &str| {
@@ -1281,10 +1346,7 @@ fn cargo_package(directory: &[String], cargo_toml: &str, nodes: &[Node]) -> Opti
                 part => file.push(part.to_string()),
             }
         }
-        let present = nodes.iter().any(|node| {
-            node.language == Language::Rust
-                && Path::new(&node.rel_path) == file.iter().collect::<PathBuf>()
-        });
+        let present = rust_files.contains(file.iter().collect::<PathBuf>().as_path());
         file.pop();
         present.then_some(file)
     };
@@ -1671,6 +1733,18 @@ mod tests {
         edges_under(nodes, id, &default_cargo_layout())
     }
 
+    /// The manifests a project holding these files declares, read from disk
+    /// as a pack over `nodes` would read them.
+    fn manifests_of(files: &[(&str, &str)], nodes: &[Node]) -> Manifests {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (path, contents) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write manifest");
+        }
+        Manifests::read(dir.path(), nodes)
+    }
+
     fn edges_under(nodes: &[Node], id: usize, manifests: &Manifests) -> Vec<String> {
         build_import_graph(nodes, manifests)
             .edges
@@ -1979,16 +2053,6 @@ mod tests {
     /// under no declared module names what the importer's module vendors.
     #[test]
     fn every_go_mod_maps_its_module_path_to_its_own_directory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for (go_mod, contents) in [
-            ("backend/go.mod", "module example.com/backend\n"),
-            ("tools/go.mod", "module example.com/tools\n"),
-            ("backend/plugins/go.mod", "module example.com/plugins\n"),
-        ] {
-            let path = dir.path().join(go_mod);
-            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
-            std::fs::write(path, contents).expect("write go.mod");
-        }
         let util = "import \"example.com/backend/pkg/util\"\n";
         let nodes = vec![
             node_in(
@@ -2018,7 +2082,14 @@ mod tests {
                 Language::Go,
             ),
         ];
-        let manifests = Manifests::read(dir.path(), &nodes);
+        let manifests = manifests_of(
+            &[
+                ("backend/go.mod", "module example.com/backend\n"),
+                ("tools/go.mod", "module example.com/tools\n"),
+                ("backend/plugins/go.mod", "module example.com/plugins\n"),
+            ],
+            &nodes,
+        );
         assert_eq!(
             edges_under(&nodes, 0, &manifests),
             vec!["backend/pkg/util/u.go"]
@@ -2068,19 +2139,6 @@ mod tests {
     /// that name, wherever in the project it sits.
     #[test]
     fn a_dart_package_uri_resolves_under_the_lib_of_the_package_its_pubspec_names() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for (pubspec, name) in [
-            ("pubspec.yaml", "app"),
-            ("packages/core/pubspec.yaml", "core"),
-        ] {
-            let path = dir.path().join(pubspec);
-            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
-            std::fs::write(
-                path,
-                format!("name: {name} # the package\nversion: 1.0.0\n"),
-            )
-            .expect("write pubspec");
-        }
         let nodes = vec![
             node_in(
                 0,
@@ -2093,7 +2151,13 @@ mod tests {
             node_in(2, "packages/core/lib/model.dart", "", Language::Dart),
             node_in(3, "packages/core/lib/src/a.dart", "", Language::Dart),
         ];
-        let manifests = Manifests::read(dir.path(), &nodes);
+        let manifests = manifests_of(
+            &[
+                ("pubspec.yaml", "name: app # the package\nversion: 1.0.0\n"),
+                ("packages/core/pubspec.yaml", "name: core\n"),
+            ],
+            &nodes,
+        );
         assert_eq!(
             edges_under(&nodes, 0, &manifests),
             vec!["lib/src/a.dart", "packages/core/lib/model.dart"]
@@ -2110,16 +2174,6 @@ mod tests {
     /// names neither, whichever manifest was read last.
     #[test]
     fn a_dart_package_name_two_pubspecs_declare_names_only_the_importers_own() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for (pubspec, name) in [
-            ("app/pubspec.yaml", "app"),
-            ("packages/core/pubspec.yaml", "core"),
-            ("legacy/core/pubspec.yaml", "core"),
-        ] {
-            let path = dir.path().join(pubspec);
-            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
-            std::fs::write(path, format!("name: {name}\n")).expect("write pubspec");
-        }
         let import = "import 'package:core/src/a.dart';\n";
         let nodes = vec![
             node_in(0, "app/lib/main.dart", import, Language::Dart),
@@ -2128,7 +2182,14 @@ mod tests {
             node_in(3, "packages/core/lib/core.dart", import, Language::Dart),
             node_in(4, "packages/core/lib/src/a.dart", "", Language::Dart),
         ];
-        let manifests = Manifests::read(dir.path(), &nodes);
+        let manifests = manifests_of(
+            &[
+                ("app/pubspec.yaml", "name: app\n"),
+                ("packages/core/pubspec.yaml", "name: core\n"),
+                ("legacy/core/pubspec.yaml", "name: core\n"),
+            ],
+            &nodes,
+        );
         assert!(edges_under(&nodes, 0, &manifests).is_empty());
         assert_eq!(
             edges_under(&nodes, 1, &manifests),
@@ -2433,23 +2494,6 @@ mod tests {
     /// library is imported by the name its `Cargo.toml` gives it.
     #[test]
     fn a_rust_path_starts_where_cargo_roots_its_crate() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        for (manifest, contents) in [
-            ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
-            (
-                "crates/core/Cargo.toml",
-                "[package]\nname = \"acme-core\"\n",
-            ),
-            (
-                "crates/cli/Cargo.toml",
-                "[package]\nname = \"acme-cli\"\n[lib]\nname = \"cli\"\npath = \"lib/root.rs\"\n\
-                 [[bin]]\nname = \"gen\"\npath = \"src/tools/gen.rs\"\n",
-            ),
-        ] {
-            let path = dir.path().join(manifest);
-            std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
-            std::fs::write(path, contents).expect("write Cargo.toml");
-        }
         let nodes = vec![
             node(0, "crates/core/src/lib.rs", ""),
             node(1, "crates/core/src/model.rs", ""),
@@ -2467,7 +2511,21 @@ mod tests {
             node(9, "crates/cli/src/tools/gen.rs", ""),
             node(10, "crates/cli/src/tools/emit.rs", "use crate::run;\n"),
         ];
-        let manifests = Manifests::read(dir.path(), &nodes);
+        let manifests = manifests_of(
+            &[
+                ("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n"),
+                (
+                    "crates/core/Cargo.toml",
+                    "[package]\nname = \"acme-core\"\n",
+                ),
+                (
+                    "crates/cli/Cargo.toml",
+                    "[package]\nname = \"acme-cli\"\n[lib]\nname = \"cli\"\npath = \"lib/root.rs\"\n\
+                     [[bin]]\nname = \"gen\"\npath = \"src/tools/gen.rs\"\n",
+                ),
+            ],
+            &nodes,
+        );
         assert_eq!(
             edges_under(&nodes, 2, &manifests),
             vec![
