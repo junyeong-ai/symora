@@ -74,6 +74,10 @@ pub struct PackResult {
     pub unsupported_languages: Vec<Language>,
     pub unsupported_import_languages: Vec<Language>,
     pub rust_relative_imports_omitted: bool,
+    /// The specifiers the project's own configuration declares — a TypeScript
+    /// `paths` alias — that named no file pack reads, so their edges are
+    /// missing rather than absent.
+    pub undetermined_imports: Vec<String>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
     /// publishes how many the selection chose FROM, and the budget's own
@@ -107,6 +111,7 @@ pub fn build_pack(
             unsupported_languages: Vec::new(),
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
+            undetermined_imports: Vec::new(),
             unreadable_paths: Vec::new(),
         });
     }
@@ -175,6 +180,7 @@ pub fn build_pack(
         unsupported_import_languages,
         unsupported_languages,
         rust_relative_imports_omitted: graph.rust_relative_imports_omitted,
+        undetermined_imports: graph.undetermined_imports.into_iter().collect(),
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
         graph_size: nodes.len(),
@@ -413,6 +419,7 @@ type Graph = BTreeMap<usize, Vec<usize>>;
 struct ImportGraph {
     edges: Graph,
     rust_relative_imports_omitted: bool,
+    undetermined_imports: BTreeSet<String>,
 }
 
 fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
@@ -439,6 +446,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
 
     let mut graph: Graph = BTreeMap::new();
     let mut rust_relative_imports_omitted = false;
+    let mut undetermined_imports = BTreeSet::new();
     for node in nodes {
         graph.entry(node.id).or_default();
         let importer = Importer::of(node, manifests);
@@ -449,6 +457,10 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
                 Resolution::Files(files) => files,
                 Resolution::NeedsOwnership => {
                     rust_relative_imports_omitted = true;
+                    continue;
+                }
+                Resolution::Undetermined(specifier) => {
+                    undetermined_imports.insert(specifier);
                     continue;
                 }
             };
@@ -462,6 +474,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
     ImportGraph {
         edges: graph,
         rust_relative_imports_omitted,
+        undetermined_imports,
     }
 }
 
@@ -473,6 +486,9 @@ enum Resolution {
     /// A Rust path whose file only module ownership, which pack does not
     /// hold, would determine.
     NeedsOwnership,
+    /// A specifier the project's own configuration declares that names no
+    /// file pack reads.
+    Undetermined(String),
 }
 
 /// What resolving a file's references needs to know about where the file
@@ -482,6 +498,9 @@ struct Importer<'a> {
     /// The directory a `crate::` path written in a Rust file starts at, where
     /// the package layout determines it.
     crate_root: Option<&'a [String]>,
+    /// The TypeScript configuration a JavaScript or TypeScript file is
+    /// compiled under: the nearest above it.
+    ts_config: Option<&'a TsConfig>,
 }
 
 impl<'a> Importer<'a> {
@@ -491,7 +510,16 @@ impl<'a> Importer<'a> {
         } else {
             None
         };
-        Self { node, crate_root }
+        let ts_config = if is_javascript(node.language) {
+            nearest(&manifests.ts_configs, &node.directory).map(|(_, config)| config)
+        } else {
+            None
+        };
+        Self {
+            node,
+            crate_root,
+            ts_config,
+        }
     }
 }
 
@@ -543,6 +571,10 @@ enum Reference {
     Crate(Vec<String>),
     /// A JVM import of all a package or class holds (`import a.b.*`).
     Wildcard(Vec<String>),
+    /// A JavaScript or TypeScript specifier that is no relative path
+    /// (`react`, `@/components/Button`): a package's, or one the project's
+    /// TypeScript configuration maps.
+    Bare(String),
     /// A Dart `package:` URI: a file under the named package's `lib`.
     Package {
         package: String,
@@ -608,18 +640,16 @@ impl Reference {
                 break;
             }
         }
+        if is_javascript(language) && !relative {
+            return if raw.starts_with('/') {
+                Self::Unresolved
+            } else {
+                Self::Bare(raw.to_string())
+            };
+        }
         let mut components = split_components(rest);
-        if matches!(
-            language,
-            Language::JavaScript | Language::TypeScript | Language::Vue
-        ) && let Some(last) = components.last_mut()
-            && let Some((stem, extension)) = last.rsplit_once('.')
-            && matches!(
-                extension,
-                "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "vue"
-            )
-        {
-            *last = stem.to_string();
+        if is_javascript(language) {
+            without_script_extension(&mut components);
         }
         if relative {
             Self::Relative { up, components }
@@ -707,6 +737,20 @@ impl Reference {
             },
             None => Self::Relative { up, components },
         }
+    }
+}
+
+/// A module path without the extension of the script its last component
+/// names, which a JavaScript or TypeScript specifier may or may not write.
+fn without_script_extension(components: &mut [String]) {
+    if let Some(last) = components.last_mut()
+        && let Some((stem, extension)) = last.rsplit_once('.')
+        && matches!(
+            extension,
+            "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "vue"
+        )
+    {
+        *last = stem.to_string();
     }
 }
 
@@ -921,12 +965,47 @@ impl ProjectIndex<'_> {
             Reference::Absolute(path) if from.language == Language::Rust => {
                 return self.rust_path(path, from);
             }
-            // Anywhere else an absolute name (a JavaScript package specifier,
-            // a Terraform registry source) names what the project's
-            // dependencies provide, never a project file by its spelling.
+            Reference::Bare(specifier) => return self.bare_specifier(specifier, importer),
+            // Anywhere else an absolute name (a Terraform registry source)
+            // names what the project's dependencies provide, never a project
+            // file by its spelling.
             Reference::Absolute(_) => Vec::new(),
         };
         Resolution::Files(files)
+    }
+
+    /// What a non-relative JavaScript or TypeScript specifier names, as
+    /// TypeScript resolves one: through the `paths` pattern it matches, each
+    /// substitution in turn, then below `baseUrl`. Any other names a package
+    /// outside the project, however a project file's path ends. One a `paths`
+    /// pattern matches whose substitutions name no file pack reads is
+    /// disclosed rather than dropped.
+    fn bare_specifier(&self, specifier: &str, importer: &Importer) -> Resolution {
+        let language = importer.node.language;
+        let Some(config) = importer.ts_config else {
+            return Resolution::Files(Vec::new());
+        };
+        let mapped = config.mapped(specifier);
+        for path in mapped.iter().flatten() {
+            let found = self.module(path, language);
+            if !found.is_empty() {
+                return Resolution::Files(found);
+            }
+        }
+        if let Some(path) = config
+            .base_url
+            .as_ref()
+            .and_then(|base| script_path(base, specifier))
+        {
+            let found = self.module(&path, language);
+            if !found.is_empty() {
+                return Resolution::Files(found);
+            }
+        }
+        match mapped {
+            Some(_) => Resolution::Undetermined(specifier.to_string()),
+            None => Resolution::Files(Vec::new()),
+        }
     }
 
     /// What a Rust path from a name, rather than from `crate`, `self` or
@@ -1173,13 +1252,16 @@ fn is_jvm(language: Language) -> bool {
 /// Whether a `from` file's import can name a `to` file: one of its own
 /// language, or any of the JavaScript family, which import each other.
 fn imports_across(from: Language, to: Language) -> bool {
-    let javascript = |language| {
-        matches!(
-            language,
-            Language::JavaScript | Language::TypeScript | Language::Vue
-        )
-    };
-    from == to || (javascript(from) && javascript(to))
+    from == to || (is_javascript(from) && is_javascript(to))
+}
+
+/// Whether the language is one of the JavaScript family, which share module
+/// resolution and import each other's files.
+fn is_javascript(language: Language) -> bool {
+    matches!(
+        language,
+        Language::JavaScript | Language::TypeScript | Language::Vue
+    )
 }
 
 /// What a project's build manifests declare about the names its own imports
@@ -1202,6 +1284,54 @@ struct Manifests {
     /// The directories each Python project puts on `sys.path`, by the
     /// directory of the configuration files that make it one.
     python_projects: HashMap<Vec<String>, Vec<Vec<String>>>,
+    /// The TypeScript configuration each `tsconfig.json`, or a
+    /// `jsconfig.json` where a directory holds none, gives the files below it.
+    ts_configs: HashMap<Vec<String>, TsConfig>,
+}
+
+/// What a TypeScript configuration, with every configuration it extends,
+/// says about the specifiers its files import: the directory `baseUrl`
+/// names, and each `paths` pattern with its substitutions, which resolve
+/// against `baseUrl` or, without one, the directory of the configuration
+/// declaring them.
+#[derive(Debug, Clone, Default)]
+struct TsConfig {
+    base_url: Option<Vec<String>>,
+    paths: Vec<(String, Vec<String>)>,
+    paths_base: Vec<String>,
+}
+
+impl TsConfig {
+    /// The module paths the `paths` pattern a specifier matches maps it to,
+    /// in the order its substitutions are written, or `None` where it matches
+    /// none. An exact pattern wins, then the one whose prefix before `*` is
+    /// longest, as TypeScript picks.
+    fn mapped(&self, specifier: &str) -> Option<Vec<Vec<String>>> {
+        let (substitutions, star) = self
+            .paths
+            .iter()
+            .find(|(pattern, _)| pattern == specifier)
+            .map(|(_, substitutions)| (substitutions, ""))
+            .or_else(|| {
+                self.paths
+                    .iter()
+                    .filter_map(|(pattern, substitutions)| {
+                        let (prefix, suffix) = pattern.split_once('*')?;
+                        let star = specifier.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                        Some((prefix.len(), substitutions, star))
+                    })
+                    .max_by_key(|(prefix, _, _)| *prefix)
+                    .map(|(_, substitutions, star)| (substitutions, star))
+            })?;
+        Some(
+            substitutions
+                .iter()
+                .filter_map(|substitution| {
+                    script_path(&self.paths_base, &substitution.replacen('*', star, 1))
+                })
+                .collect(),
+        )
+    }
 }
 
 /// What Cargo builds of a package: its library, where it has one, and the
@@ -1223,31 +1353,43 @@ struct RustLibrary {
 
 impl Manifests {
     fn read(root: &Path, nodes: &[Node]) -> Self {
-        let go_modules = manifests_above(root, nodes, Language::Go, "go.mod")
-            .into_iter()
-            .filter_map(|(directory, go_mod)| Some((directory, go_module_path(&go_mod)?)))
-            .collect();
-        let dart_packages = manifests_above(root, nodes, Language::Dart, "pubspec.yaml")
-            .into_iter()
-            .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
-            .collect();
+        let go_modules =
+            manifests_above(root, nodes, |language| language == Language::Go, "go.mod")
+                .into_iter()
+                .filter_map(|(directory, go_mod)| Some((directory, go_module_path(&go_mod)?)))
+                .collect();
+        let dart_packages = manifests_above(
+            root,
+            nodes,
+            |language| language == Language::Dart,
+            "pubspec.yaml",
+        )
+        .into_iter()
+        .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
+        .collect();
         let rust_files: HashSet<&Path> = nodes
             .iter()
             .filter(|node| node.language == Language::Rust)
             .map(|node| Path::new(&node.rel_path))
             .collect();
-        let rust_packages = manifests_above(root, nodes, Language::Rust, "Cargo.toml")
-            .into_iter()
-            .filter_map(|(directory, cargo)| {
-                let package = cargo_package(&directory, &cargo, &rust_files)?;
-                Some((directory, package))
-            })
-            .collect();
+        let rust_packages = manifests_above(
+            root,
+            nodes,
+            |language| language == Language::Rust,
+            "Cargo.toml",
+        )
+        .into_iter()
+        .filter_map(|(directory, cargo)| {
+            let package = cargo_package(&directory, &cargo, &rust_files)?;
+            Some((directory, package))
+        })
+        .collect();
         Self {
             go_modules,
             dart_packages,
             rust_packages,
             python_projects: python_projects(root, nodes),
+            ts_configs: ts_configs(root, nodes),
         }
     }
 
@@ -1365,18 +1507,18 @@ fn own_or_only<'m, T>(
     }
 }
 
-/// Each directory holding a `manifest` file on the way from a `language`
-/// file up to the project root, with the manifest's contents — every manifest
+/// Each directory holding a `manifest` file on the way from a file of a
+/// `language` it takes up to the project root, with the manifest's contents — every manifest
 /// that governs some file of that language, wherever it sits.
 fn manifests_above(
     root: &Path,
     nodes: &[Node],
-    language: Language,
+    language: impl Fn(Language) -> bool,
     manifest: &str,
 ) -> Vec<(Vec<String>, String)> {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
-    for node in nodes.iter().filter(|node| node.language == language) {
+    for node in nodes.iter().filter(|node| language(node.language)) {
         for depth in (0..=node.directory.len()).rev() {
             let directory = &node.directory[..depth];
             // Every directory above one already visited was visited with it.
@@ -1464,6 +1606,201 @@ fn cargo_package(
     Some(RustPackage { library, roots })
 }
 
+/// Every TypeScript configuration above a JavaScript or TypeScript file, by
+/// its directory: the `tsconfig.json` there, or else its `jsconfig.json`.
+fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsConfig> {
+    let mut configs = HashMap::new();
+    for file in ["tsconfig.json", "jsconfig.json"] {
+        for (directory, contents) in manifests_above(root, nodes, is_javascript, file) {
+            if configs.contains_key(&directory) {
+                continue;
+            }
+            let path = [directory.as_slice(), &[file.to_string()]].concat();
+            let config = ts_config(root, &path, &contents);
+            configs.insert(directory, config);
+        }
+    }
+    configs
+}
+
+/// What the TypeScript configuration in `file` says, with what it extends.
+fn ts_config(root: &Path, file: &[String], contents: &str) -> TsConfig {
+    let mut chain = Vec::new();
+    ts_config_chain(root, file, Some(contents), &mut chain);
+    let directory = &file[..file.len().saturating_sub(1)];
+    let option = |key: &str| {
+        chain.iter().find_map(|(directory, config)| {
+            let value = config.get("compilerOptions")?.get(key)?;
+            Some((directory, value))
+        })
+    };
+    let base_url =
+        option("baseUrl").and_then(|(directory, value)| project_path(directory, value.as_str()?));
+    let declared = option("paths");
+    let paths = declared
+        .and_then(|(_, paths)| paths.as_object())
+        .into_iter()
+        .flatten()
+        .map(|(pattern, substitutions)| {
+            let substitutions = substitutions
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|substitution| substitution.as_str().map(str::to_string))
+                .collect();
+            (pattern.clone(), substitutions)
+        })
+        .collect();
+    let paths_base = base_url
+        .clone()
+        .or_else(|| declared.map(|(directory, _)| directory.clone()))
+        .unwrap_or_else(|| directory.to_vec());
+    TsConfig {
+        base_url,
+        paths,
+        paths_base,
+    }
+}
+
+/// The configuration in `file`, then each it extends, nearest first: what an
+/// extending configuration sets overrides what it extends, and of several it
+/// extends at once the later wins. Only an `extends` written as a relative
+/// path names a file in the project; a package's configuration is not read.
+fn ts_config_chain(
+    root: &Path,
+    file: &[String],
+    contents: Option<&str>,
+    chain: &mut Vec<(Vec<String>, serde_json::Value)>,
+) {
+    // A configuration extending itself through others would never end.
+    const DEPTH: usize = 16;
+    if chain.len() >= DEPTH {
+        return;
+    }
+    let text = match contents {
+        Some(contents) => contents.to_string(),
+        None => match std::fs::read_to_string(project_file(root, file)) {
+            Ok(text) => text,
+            Err(_) => return,
+        },
+    };
+    let Some(config) = jsonc(&text) else {
+        return;
+    };
+    let directory = file[..file.len().saturating_sub(1)].to_vec();
+    let extends: Vec<String> = match config.get("extends") {
+        Some(serde_json::Value::String(extended)) => vec![extended.clone()],
+        Some(serde_json::Value::Array(extended)) => extended
+            .iter()
+            .filter_map(|extended| extended.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    chain.push((directory.clone(), config));
+    for extended in extends.iter().rev() {
+        if !(extended.starts_with("./") || extended.starts_with("../")) {
+            continue;
+        }
+        let Some(mut path) = project_path(&directory, extended) else {
+            continue;
+        };
+        // TypeScript takes the name as written, then with `.json` added.
+        if !extended.ends_with(".json")
+            && !project_file(root, &path).is_file()
+            && let Some(last) = path.last_mut()
+        {
+            last.push_str(".json");
+        }
+        ts_config_chain(root, &path, None, chain);
+    }
+}
+
+/// The file on disk a project path names.
+fn project_file(root: &Path, path: &[String]) -> PathBuf {
+    path.iter()
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
+/// The module path a JavaScript or TypeScript specifier relative to
+/// `directory` names, without the script extension it may write; none where
+/// it is absolute or climbs out of the project.
+fn script_path(directory: &[String], specifier: &str) -> Option<Vec<String>> {
+    let mut path = project_path(directory, specifier)?;
+    without_script_extension(&mut path);
+    Some(path)
+}
+
+/// A JSON-with-comments document, as `tsconfig.json` is, read as JSON: its
+/// `//` and `/* */` comments, and the commas it allows before a closing
+/// bracket, removed wherever they stand outside a string.
+fn jsonc(text: &str) -> Option<serde_json::Value> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            plain.push(c);
+            match c {
+                '\\' => plain.extend(chars.next()),
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                plain.push(c);
+            }
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        plain.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+                plain.push(' ');
+            }
+            _ => plain.push(c),
+        }
+    }
+    let mut json = String::with_capacity(plain.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, c) in plain.char_indices() {
+        if in_string {
+            json.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+        }
+        let trailing = c == ',' && plain[at + 1..].trim_start().starts_with([']', '}']);
+        if !trailing {
+            json.push(c);
+        }
+    }
+    serde_json::from_str(&json).ok()
+}
+
 /// The files whose presence makes a directory a Python project's: its build
 /// configuration, and the files pytest takes its own from.
 const PYTHON_PROJECT_FILES: [&str; 5] = [
@@ -1479,7 +1816,9 @@ const PYTHON_PROJECT_FILES: [&str; 5] = [
 fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, Vec<Vec<String>>> {
     let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
     for file in PYTHON_PROJECT_FILES {
-        for (directory, contents) in manifests_above(root, nodes, Language::Python, file) {
+        for (directory, contents) in
+            manifests_above(root, nodes, |language| language == Language::Python, file)
+        {
             configurations
                 .entry(directory)
                 .or_default()
@@ -2891,6 +3230,80 @@ mod tests {
         ];
         assert_eq!(edges_of(&nodes, 0), vec!["src/util.ts"]);
         assert!(edges_of(&nodes, 4).is_empty());
+    }
+
+    /// TypeScript maps a non-relative specifier through the `paths` pattern
+    /// it matches, then below `baseUrl`, from the nearest configuration and
+    /// what it extends; `paths` resolve against `baseUrl`, or without one
+    /// against the configuration declaring them. A specifier a pattern
+    /// matches that names no file is disclosed; one nothing maps is a
+    /// package's.
+    #[test]
+    fn a_typescript_specifier_resolves_through_the_paths_and_base_url_its_config_declares() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "web/src/app.ts",
+                "import a from \"@/components/Button\";\nimport b from \"utils/format\";\n\
+                 import c from \"@/styles/missing\";\nimport d from \"~lib\";\n",
+            ),
+            ts(1, "web/src/components/Button.tsx", ""),
+            ts(2, "web/src/utils/format.ts", ""),
+            ts(3, "web/vendor/lib/index.ts", ""),
+            ts(
+                4,
+                "other/app.ts",
+                "import a from \"#lib/x\";\nimport b from \"utils/format\";\n",
+            ),
+            ts(5, "other/lib/x.ts", ""),
+            ts(6, "plain/app.ts", "import a from \"utils/format\";\n"),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "web/tsconfig.json",
+                    "{\n  // the app\n  \"extends\": \"./tsconfig.base\",\n  \"compilerOptions\": {\n    \
+                     \"paths\": { \"@/*\": [\"*\"], \"~lib\": [\"../missing\", \"../vendor/lib\"], },\n  },\n}\n",
+                ),
+                (
+                    "web/tsconfig.base.json",
+                    "{ \"compilerOptions\": { /* shared */ \"baseUrl\": \"src\" } }",
+                ),
+                (
+                    "other/tsconfig.json",
+                    "{ \"compilerOptions\": { \"paths\": { \"#lib/*\": [\"./lib/*\"] } } }",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        // `paths` resolve against the inherited `baseUrl`, `src/`, and a
+        // pattern's substitutions are tried in turn.
+        assert_eq!(
+            edges(0),
+            vec![
+                "web/src/components/Button.tsx",
+                "web/src/utils/format.ts",
+                "web/vendor/lib/index.ts"
+            ]
+        );
+        assert_eq!(edges(4), vec!["other/lib/x.ts"]);
+        assert!(edges(6).is_empty());
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["@/styles/missing".to_string()])
+        );
+        assert_eq!(
+            jsonc("{\"a\": \"// not a comment\", \"b\": [1, 2,], /* c */}"),
+            Some(serde_json::json!({"a": "// not a comment", "b": [1, 2]}))
+        );
     }
 
     /// Four files can share a basename; a reference short enough to fit all
