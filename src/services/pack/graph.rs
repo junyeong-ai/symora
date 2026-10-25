@@ -534,15 +534,17 @@ impl RustModules {
     }
 
     /// What a path below the module `base` of a crate names: the module it
-    /// names whole, else the one without its last segment, which names an
-    /// item there; `None` where neither is a module of the crate.
+    /// names whole, else the longest of its prefixes down to `base` that is
+    /// a module of the crate, which holds the item the next segment names —
+    /// an item the path then goes into, as an enum's variants or a type's
+    /// associated items (`kind::Kind::A`), lies in that item's module.
+    /// `None` where no such prefix is a module of the crate.
     fn lookup(&self, krate: usize, base: &[String], path: &[String]) -> Option<ModuleFile> {
         let modules = self.modules.get(&krate)?;
         let whole = [base, path].concat();
-        let parent = (!path.is_empty()).then(|| &whole[..whole.len() - 1]);
-        std::iter::once(whole.as_slice())
-            .chain(parent)
-            .find_map(|candidate| modules.get(candidate).copied())
+        (base.len()..=whole.len())
+            .rev()
+            .find_map(|length| modules.get(&whole[..length]).copied())
     }
 }
 
@@ -3240,6 +3242,32 @@ mod tests {
         assert!(graph.edges[&2].is_empty() && graph.rust_relative_imports_omitted);
     }
 
+    /// A path that goes into an item — an enum's variants, a type's
+    /// associated items — names the module holding that item: the deepest
+    /// module of the crate the path passes through.
+    #[test]
+    fn a_rust_path_into_an_item_names_the_module_holding_the_item() {
+        let nodes = vec![
+            node(0, "src/lib.rs", "mod model;\nmod a;\npub struct Thing;\n"),
+            node(
+                1,
+                "src/model/mod.rs",
+                "pub mod kind;\npub enum Shape { Round }\n",
+            ),
+            node(2, "src/model/kind.rs", "pub enum Kind { A, B }\n"),
+            node(
+                3,
+                "src/a.rs",
+                "use crate::model::kind::Kind::{A, B};\nuse crate::model::Shape::Round;\n\
+                 use super::model::kind::Kind::A as K;\nuse crate::Thing::new;\n",
+            ),
+        ];
+        assert_eq!(
+            rust_edges(&nodes, 3),
+            vec!["src/model/kind.rs", "src/model/mod.rs", "src/lib.rs"]
+        );
+    }
+
     /// The failure a bare-name index cannot avoid: an external crate whose
     /// segments happen to match a project file's name. `std::process` and
     /// `serde::Serialize` name nothing in this project, so they contribute
@@ -3430,7 +3458,9 @@ mod tests {
                 .collect()
         };
         assert_eq!(edges(1), vec!["src/util.rs", "src/config.rs"]);
-        assert_eq!(edges(2), vec!["src/config.rs"]);
+        // The library builds `util.rs` too, and there `config` is no module:
+        // for the path to compile, the library's root binds the name.
+        assert_eq!(edges(2), vec!["src/lib.rs", "src/config.rs"]);
         assert_eq!(
             edges(4),
             vec!["tests/common/mod.rs", "tests/fixture.rs", "src/util.rs"]
