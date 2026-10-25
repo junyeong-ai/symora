@@ -10,7 +10,7 @@ use super::manifests::{
     own_or_only, project_path, python_project,
 };
 use crate::models::symbol::Language;
-use crate::services::imports::{ModuleDeclaration, ModulePath};
+use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
 
 // BTreeMap, not HashMap: PageRank accumulates f64 scores by iterating this
 // graph, and float addition is non-associative — a random HashMap iteration
@@ -676,7 +676,9 @@ fn scope_directory(
 /// What a project's JVM files declare themselves to be. Each name a file
 /// declares at its top level — a class, an object, a Kotlin or Scala
 /// function — is named by the package its declaration states and that name,
-/// whatever the file is called and wherever it sits; its source root is its
+/// whatever the file is called and wherever it sits, and so is the class a
+/// Kotlin file's top-level functions and properties compile into, which
+/// Java imports them through (`kotlin_file_class`); its source root is its
 /// directory without the path that package spells, where the directory ends
 /// in that path, and its source set is what that root belongs to
 /// (`SourceSet`).
@@ -703,7 +705,15 @@ impl<'a> JvmIndex<'a> {
             if let Some(root) = node.directory.strip_suffix(package.as_slice()) {
                 index.sets.insert(node.id, SourceSet::of(root));
             }
-            for name in &node.imports.declares {
+            let file_class = node
+                .imports
+                .file_class
+                .as_ref()
+                .and_then(|class| match class {
+                    FileClass::Named(name) => Some(name.clone()),
+                    FileClass::OfFileName => kotlin_file_class(&node.rel_path),
+                });
+            for name in node.imports.declares.iter().chain(&file_class) {
                 let class = [package.as_slice(), std::slice::from_ref(name)].concat();
                 index.by_class.entry(class).or_default().push(node.id);
             }
@@ -711,6 +721,32 @@ impl<'a> JvmIndex<'a> {
         }
         index
     }
+}
+
+/// The class Kotlin compiles a `.kt` file's top-level functions and
+/// properties into where no `@file:JvmName` names one: the file's name
+/// without `.kt`, each character neither a letter nor a digit read as `_`,
+/// with its first letter in upper case if it is an ASCII one, and `Kt`.
+fn kotlin_file_class(path: &str) -> Option<String> {
+    let stem = Path::new(path).file_name()?.to_str()?.strip_suffix(".kt")?;
+    let mut class: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphabetic() || c.is_numeric() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if class.is_empty() {
+        class.push('_');
+    }
+    if let Some(first) = class.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    class.push_str("Kt");
+    Some(class)
 }
 
 /// The set of sources a JVM source root is compiled with. In the layout
@@ -2813,6 +2849,59 @@ mod tests {
                 "@acme/modes".to_string(),
                 "@acme/nested".to_string()
             ])
+        );
+    }
+
+    /// Java imports a Kotlin file's top-level functions and properties
+    /// through the class they compile into: the one its `@file:JvmName`
+    /// names, or else the file's name with `Kt` — `Strings.kt` holds
+    /// `StringsKt`, `date-utils.kt` `Date_utilsKt` — and a file declaring
+    /// none holds no such class.
+    #[test]
+    fn a_java_import_of_a_kotlin_file_class_names_that_file() {
+        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        let nodes = vec![
+            node_in(
+                0,
+                "src/main/java/com/acme/app/App.java",
+                "package com.acme.app;\nimport com.acme.util.StringsKt;\n\
+                 import static com.acme.util.Utils.helper;\nimport com.acme.util.Date_utilsKt;\n\
+                 import com.acme.util.ModelsKt;\nclass App {}\n",
+                Language::Java,
+            ),
+            kotlin(
+                1,
+                "src/main/kotlin/com/acme/util/Strings.kt",
+                "package com.acme.util\nfun format() = 1\n",
+            ),
+            kotlin(
+                2,
+                "src/main/kotlin/com/acme/util/Helpers.kt",
+                "@file:JvmName(\"Utils\")\npackage com.acme.util\nfun helper() = 1\n",
+            ),
+            kotlin(
+                3,
+                "src/main/kotlin/com/acme/util/date-utils.kt",
+                "package com.acme.util\nval today = 1\n",
+            ),
+            kotlin(
+                4,
+                "src/main/kotlin/com/acme/util/Models.kt",
+                "package com.acme.util\nclass Model\n",
+            ),
+            kotlin(
+                5,
+                "src/main/kotlin/com/acme/util/Utils.kt",
+                "package com.acme.util\nclass Other\n",
+            ),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 0),
+            vec![
+                "src/main/kotlin/com/acme/util/Strings.kt",
+                "src/main/kotlin/com/acme/util/Helpers.kt",
+                "src/main/kotlin/com/acme/util/date-utils.kt"
+            ]
         );
     }
 
