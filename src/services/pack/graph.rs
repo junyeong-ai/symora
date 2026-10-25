@@ -681,9 +681,12 @@ fn scope_directory(
 /// Java imports them through (`kotlin_file_class`); its source root is its
 /// directory without the path that package spells, where the directory ends
 /// in that path, and its source set is what that root belongs to
-/// (`SourceSet`).
+/// (`SourceSet`). The names an import can reach through, which hold what a
+/// longer import or a wildcard names (`by_class`), are kept apart from the
+/// functions and properties an import names only whole (`by_member`).
 struct JvmIndex<'a> {
     by_class: HashMap<Vec<String>, Vec<usize>>,
+    by_member: HashMap<Vec<String>, Vec<usize>>,
     by_package: HashMap<Vec<String>, Vec<usize>>,
     sets: HashMap<usize, SourceSet<'a>>,
 }
@@ -692,6 +695,7 @@ impl<'a> JvmIndex<'a> {
     fn of(nodes: &'a [Node]) -> Self {
         let mut index = Self {
             by_class: HashMap::new(),
+            by_member: HashMap::new(),
             by_package: HashMap::new(),
             sets: HashMap::new(),
         };
@@ -716,6 +720,10 @@ impl<'a> JvmIndex<'a> {
             for name in node.imports.declares.iter().chain(&file_class) {
                 let class = [package.as_slice(), std::slice::from_ref(name)].concat();
                 index.by_class.entry(class).or_default().push(node.id);
+            }
+            for name in &node.imports.members {
+                let member = [package.as_slice(), std::slice::from_ref(name)].concat();
+                index.by_member.entry(member).or_default().push(node.id);
             }
             index.by_package.entry(package).or_default().push(node.id);
         }
@@ -1216,11 +1224,22 @@ impl ProjectIndex<'_> {
 
     /// The file an import of a JVM class names: the one declaring, in the
     /// package the import spells, the top-level name it spells — read whole,
-    /// then without each trailing segment in turn, which nested classes and
-    /// members add to what their file declares. Scala imports a package by
-    /// its name as well, which names the files the package holds.
+    /// a function or property among those, then without each trailing
+    /// segment in turn, which nested classes and members add to what a
+    /// class-like name holds (a function or property holds nothing an
+    /// import names). Scala imports a package by its name as well, which
+    /// names the files the package holds.
     fn jvm_class(&self, name: &[String], from: &Node) -> Vec<usize> {
-        for length in (1..=name.len()).rev() {
+        let whole: Vec<usize> = [&self.jvm.by_class, &self.jvm.by_member]
+            .into_iter()
+            .filter_map(|index| index.get(name))
+            .flatten()
+            .copied()
+            .collect();
+        if !whole.is_empty() {
+            return self.jvm_one(&whole, from).into_iter().collect();
+        }
+        for length in (1..name.len()).rev() {
             if let Some(files) = self.jvm.by_class.get(&name[..length]) {
                 return self.jvm_one(files, from).into_iter().collect();
             }
@@ -1231,8 +1250,8 @@ impl ProjectIndex<'_> {
         Vec::new()
     }
 
-    /// The files `import a.b.*` names: the class `a.b`, whose members it
-    /// imports, or else everything the package `a.b` holds.
+    /// The files `import a.b.*` names: the class-like name `a.b`, whose
+    /// members it imports, or else everything the package `a.b` holds.
     fn jvm_wildcard(&self, name: &[String], from: &Node) -> Vec<usize> {
         match self.jvm.by_class.get(name) {
             Some(files) => self.jvm_one(files, from).into_iter().collect(),
@@ -2197,6 +2216,65 @@ mod tests {
             edges_of(&nodes, 4),
             vec!["src/main/kotlin/com/acme/model/Models.kt"]
         );
+        assert_eq!(
+            edges_of(&nodes, 6),
+            vec!["src/main/scala/com/acme/s/Defs.scala"]
+        );
+    }
+
+    /// A top-level function or property is imported only by its whole name:
+    /// Kotlin reads an import's qualifier as a package or a class, and Scala
+    /// as a stable path (a package, an object, a `val`), so a longer import
+    /// or a wildcard through a function names nothing — it is some class
+    /// pack does not read. Java reaches them through the file class.
+    #[test]
+    fn a_jvm_function_or_property_is_imported_only_by_its_whole_name() {
+        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        let scala = |id, rel, source| node_in(id, rel, source, Language::Scala);
+        let nodes = vec![
+            kotlin(
+                0,
+                "src/main/kotlin/com/acme/Routes.kt",
+                "package com.acme\nfun api(): String = \"/api\"\nval base = 1\n",
+            ),
+            kotlin(
+                1,
+                "src/main/kotlin/com/acme/app/A.kt",
+                "package com.acme.app\nimport com.acme.api.UserDto\nimport com.acme.api.*\n\
+                 import com.acme.base.Inner\n",
+            ),
+            kotlin(
+                2,
+                "src/main/kotlin/com/acme/app/B.kt",
+                "package com.acme.app\nimport com.acme.api\n",
+            ),
+            node_in(
+                3,
+                "src/main/java/com/acme/j/J.java",
+                "package com.acme.j;\nimport static com.acme.RoutesKt.api;\nclass J {}\n",
+                Language::Java,
+            ),
+            scala(
+                4,
+                "src/main/scala/com/acme/s/Defs.scala",
+                "package com.acme.s\ndef helper = 1\nval config = Config()\n",
+            ),
+            scala(
+                5,
+                "src/main/scala/com/acme/t/Use.scala",
+                "package com.acme.t\nimport com.acme.s.helper.x\nimport com.acme.s.helper._\n",
+            ),
+            scala(
+                6,
+                "src/main/scala/com/acme/t/Port.scala",
+                "package com.acme.t\nimport com.acme.s.config.port\n",
+            ),
+        ];
+        let routes = "src/main/kotlin/com/acme/Routes.kt";
+        assert!(edges_of(&nodes, 1).is_empty());
+        assert_eq!(edges_of(&nodes, 2), vec![routes]);
+        assert_eq!(edges_of(&nodes, 3), vec![routes]);
+        assert!(edges_of(&nodes, 5).is_empty());
         assert_eq!(
             edges_of(&nodes, 6),
             vec!["src/main/scala/com/acme/s/Defs.scala"]
