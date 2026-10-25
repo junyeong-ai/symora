@@ -2052,14 +2052,16 @@ fn read_signature(
         declaration = parent;
     }
     // A run of shell assignments a newline ends is declared by that run
-    // ([`shell_line`]), which the grammar holds in the command after it.
+    // ([`shell_line`]), which the grammar holds in the command after it, so
+    // it ends with the run's last assignment.
+    let mut run_end = None;
     if language == Language::Bash
-        && let Some(command) = std::iter::successors(Some(named), Node::parent)
+        && let Some((command, last)) = std::iter::successors(Some(named), Node::parent)
             .find(|node| node.kind() == "variable_assignment")
-            .filter(|assignment| shell_line(*assignment, content).is_some())
-            .and_then(|assignment| assignment.parent())
+            .and_then(|assignment| Some((assignment.parent()?, shell_line(assignment, content)?.1)))
     {
         declaration = command;
+        run_end = Some(last.end_byte());
     }
     if language == Language::Cpp
         && (continued_macro(declaration).is_some()
@@ -2122,6 +2124,7 @@ fn read_signature(
         }
         node = node.parent()?;
     };
+    let opens = run_end.map_or(opens, |end| opens.min(end));
     // The keyword a loop declares with begins the declaration it writes
     // beside: `k` in `for (var k in o)` is declared by `var k`.
     let begins = matches!(language, Language::TypeScript | Language::JavaScript)
@@ -8536,6 +8539,13 @@ region     = "us-central1"
                 "FIRST=1 SECOND=2 # note\necho hi\n",
                 "SECOND",
                 Some("FIRST SECOND"),
+            ),
+            (
+                "a.sh",
+                Language::Bash,
+                "C=1 D=\nrm -rf \"$TMP\"\n",
+                "D",
+                Some("C D="),
             ),
             (
                 "a.tf",
