@@ -1450,6 +1450,7 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
     {
         return false;
     }
+    let mut held = node.parent();
     let (local, declaring): (&[&str], &[&str]) = match (language, node.kind()) {
         (Language::Python, "assignment") => (
             &["function_definition", "lambda"],
@@ -1488,8 +1489,25 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
             Language::Bash,
             "variable_assignment" | "variable_assignments" | "declaration_command",
         ) => {
+            // A prefix assignment a newline ends is a statement of its own
+            // ([`shell_line`]), standing where the statement its command
+            // begins stands, and the newline, not that statement's `&`,
+            // ends it.
+            let prefixed = node.parent().filter(|parent| parent.kind() == "command");
+            if let Some(command) = prefixed {
+                if shell_line(node, content).is_none() {
+                    return false;
+                }
+                held = std::iter::successors(Some(command), Node::parent)
+                    .take_while(|outer| {
+                        outer.parent().is_some() && outer.start_byte() == command.start_byte()
+                    })
+                    .last()
+                    .and_then(|statement| statement.parent());
+            }
+            let ends = if prefixed.is_some() { held } else { Some(node) };
             if !shell_command_declares(node, content)
-                || std::iter::successors(Some(node), Node::parent).any(|statement| {
+                || std::iter::successors(ends, Node::parent).any(|statement| {
                     std::iter::successors(statement.next_sibling(), Node::next_sibling)
                         .find(|next| !next.is_extra())
                         .is_some_and(|next| next.kind() == "&")
@@ -1511,7 +1529,7 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
         }
         _ => return true,
     };
-    let mut ancestor = node.parent();
+    let mut ancestor = held;
     while let Some(scope) = ancestor {
         if local.contains(&scope.kind()) {
             return false;
@@ -1542,6 +1560,53 @@ fn shell_command_declares(node: Node, content: &str) -> bool {
         }
         _ => true,
     }
+}
+
+/// The statement a shell assignment the grammar read as a command's prefix
+/// is, from its first word to its last, where a newline no `\` escapes ends
+/// it before the command's own word. Bash ends a simple command at such a
+/// newline, but the grammar reads a line of two or more assignments into
+/// the command on the lines after it (`A=1 B=2` on the line before `echo
+/// hi`, as `echo hi` run with `A` and `B` in its environment), so each run
+/// of its prefix that a newline ends is a statement the shell runs first. An
+/// assignment on the command's own line sets that command's environment
+/// alone and is none. The grammar still reads what follows the newline as
+/// the command, so a declaration command written there (`readonly C=1`)
+/// reads as a command named `readonly`, which declares nothing.
+fn shell_line<'t>(assignment: Node<'t>, content: &str) -> Option<(Node<'t>, Node<'t>)> {
+    let command = assignment
+        .parent()
+        .filter(|parent| parent.kind() == "command")?;
+    let word = command.child_by_field_name("name")?;
+    let mut line: Option<(Node, Node)> = None;
+    let mut before: Option<Node> = None;
+    let mut cursor = command.walk();
+    for child in command.children(&mut cursor) {
+        let ends_a_line = before.is_some_and(|before| {
+            content
+                .get(before.end_byte()..child.start_byte())
+                .is_some_and(|gap| {
+                    let mut lines = gap.split('\n');
+                    lines.next_back();
+                    lines.any(|line| !line.trim_end_matches('\r').ends_with('\\'))
+                })
+        });
+        if ends_a_line
+            && let Some((first, last)) = line.take()
+            && first.start_byte() <= assignment.start_byte()
+            && assignment.end_byte() <= last.end_byte()
+        {
+            return Some((first, last));
+        }
+        if child.id() == word.id() {
+            return None;
+        }
+        if !child.is_extra() {
+            line = Some((line.map_or(child, |(first, _)| first), child));
+        }
+        before = Some(child);
+    }
+    None
 }
 
 /// Where a file's types are declared outside their bodies
@@ -2218,10 +2283,15 @@ fn extract_declaration(
     // identifier). The declaration node supplies the surrounding range, so a
     // body is sliced from the same two fields a document-symbol answer fills.
     let declaration = declaration_node(node, language);
-    let statement = (
-        declaration_start(declaration, language),
-        declaration_end(declaration, language),
-    );
+    let statement = (language == Language::Bash)
+        .then(|| shell_line(node, content))
+        .flatten()
+        .unwrap_or_else(|| {
+            (
+                declaration_start(declaration, language),
+                declaration_end(declaration, language),
+            )
+        });
     let own_name = assigns_beyond_its_names(node, language);
 
     named
@@ -4335,9 +4405,10 @@ const RUBY_QUERY: &str = r#"
 // `declares`). A function's body declares none of the script's: it assigns
 // only when the function is called, to whichever variable the name resolves
 // to then — a global, unless `local` made it the function's or a caller's.
-// An assignment written before a command sets that command's
-// environment alone (`TRACE=1 run`), and an element (`a[0]=1`) or an append
-// (`A+=1`) assigns to a variable rather than binding one.
+// An assignment written before a command on its line sets that command's
+// environment alone (`TRACE=1 run`, see `shell_line`), and an element
+// (`a[0]=1`) or an append (`A+=1`) assigns to a variable rather than binding
+// one.
 const BASH_QUERY: &str = r#"
 (function_definition) @symbol
 (program [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
@@ -4349,6 +4420,7 @@ const BASH_QUERY: &str = r#"
 (do_group [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
 (compound_statement [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
 (redirected_statement body: [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
+(command (variable_assignment name: (variable_name) "=") @symbol)
 "#;
 
 // Lua defines its function statement as the assignment of a function
@@ -5482,6 +5554,13 @@ declare -p PRINTED
 declare -F greet
 declare -fx NO_FUNCTION=1
 FIRST=1 SECOND=2
+echo "$FIRST"
+PREFIX_A=1 PREFIX_B=2 \
+  run_it
+PIPED_A=1 PIPED_B=2
+echo "$PIPED_A" | cat
+BEFORE_A=1 BEFORE_B=2
+run_it &
 "#,
             declares: &[
                 "function:greet",
@@ -5504,6 +5583,10 @@ FIRST=1 SECOND=2
                 "variable:NOW",
                 "variable:REGISTRY",
                 "variable:LIST",
+                "variable:PIPED_A",
+                "variable:PIPED_B",
+                "variable:BEFORE_A",
+                "variable:BEFORE_B",
             ],
         },
         DeclarationFixture {
@@ -6386,6 +6469,13 @@ region     = "us-central1"
                 "a.sh",
                 Language::Bash,
                 "export unused=1 shared=2\nreadonly one=1\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.sh",
+                Language::Bash,
+                "echo start\nunused=1 shared=2\necho hi\none=1\n",
                 &["unused", "shared"],
                 "one",
             ),
