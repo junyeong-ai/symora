@@ -1361,7 +1361,8 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
 /// and ends, where a C or C++ function declarator a syntax error holds is
 /// one: its parameters name something ([`names_a_parameter`]), and it is
 /// written after a macro whose arguments name nothing, standing for its
-/// return type, whether the error holds that macro (`GIT_EXTERN(int)
+/// return type, or a run of them (`LZMA_API(int) DEPRECATED(x)`), whether
+/// the error holds that macro (`GIT_EXTERN(int)
 /// git_blob_lookup_prefix(git_blob **blob, size_t len);`) or the statement
 /// before it does (`FT_EXPORT( FT_Error )` before `FT_Init( FT_Library
 /// library );`), or holds it itself ([`name_before_parameters`]). It ends
@@ -1391,8 +1392,10 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
                 "ERROR" => {
                     let mut cursor = macro_.walk();
                     let held: Vec<Node> = macro_.named_children(&mut cursor).collect();
-                    matches!(held[..], [invoked] if invoked.kind() == "function_declarator"
-                        && !names_a_parameter(invoked))
+                    !held.is_empty()
+                        && held.iter().all(|invoked| {
+                            invoked.kind() == "function_declarator" && !names_a_parameter(*invoked)
+                        })
                 }
                 "expression_statement" => {
                     macro_.named_child_count() == 1
@@ -7722,6 +7725,14 @@ region     = "us-central1"
             ),
             ["variable:x"],
             "and stands for a type only where its arguments name nothing"
+        );
+        assert_eq!(
+            declared(
+                "extern LZMA_API(lzma_index *) LZMA_DEPRECATED(5.4) \
+                 lzma_index_init(const lzma_allocator *allocator)\n\t\tlzma_nothrow;\n"
+            ),
+            ["function:lzma_index_init"],
+            "and so does a run of such macros"
         );
     }
 
