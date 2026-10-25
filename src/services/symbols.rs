@@ -855,11 +855,13 @@ fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<
 /// its `;` (`head`) begins a declaration of its own rather than holding the
 /// rest of that one: it opens with a word only a declaration opens with,
 /// which nothing written after a declarator can (`static`, `template`, a
-/// primitive type, a class key), or the head declares no function while the
-/// node's own syntax proves it one ([`proves_a_function`]), or the head
-/// leaves its function to the node ([`leaves_its_function_to_the_next`]). A
-/// macro written after a data member's declarator does neither
-/// (`idx_t parked_bytes DUCKDB_GUARDED_BY(glock) = 0;`).
+/// primitive type, a class key) but a K&R definition's declarations of its
+/// parameters, which the grammar reads as declarations of the file's (`int
+/// f(a) int a; {…}`, a form C23 removed), or the head declares no function
+/// while the node's own syntax proves it one ([`proves_a_function`]), or the
+/// head leaves its function to the node ([`leaves_its_function_to_the_next`]).
+/// A macro written after a data member's declarator does neither (`idx_t
+/// parked_bytes DUCKDB_GUARDED_BY(glock) = 0;`).
 fn begins_its_own_declaration(node: Node, head: Node, content: &str) -> bool {
     std::iter::successors(Some(node), |part| {
         let mut cursor = part.walk();
