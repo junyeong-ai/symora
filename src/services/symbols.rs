@@ -4669,7 +4669,7 @@ fn macro_wrapped_name(declarator: Node) -> Option<Node> {
     }
     parameter
         .child_by_field_name("type")
-        .filter(|name| matches!(name.kind(), "type_identifier" | "identifier"))
+        .filter(|name| name.kind() == "type_identifier")
 }
 
 /// The function declarator that stands where a macro-wrapped name
@@ -4878,7 +4878,7 @@ const CPP_QUERY: &str = r#"
         (identifier)
         (destructor_name)
         (function_declarator parameters: (parameter_list
-          . (parameter_declaration type: [(type_identifier) (identifier)] !declarator) .))
+          . (parameter_declaration type: (type_identifier) !declarator) .))
       ])
       (operator_cast)
     ]) @symbol)
@@ -7570,7 +7570,7 @@ region     = "us-central1"
             declared(
                 "PyAPI_FUNC(int) Py_IsInitialized(void);\nLUA_API int (lua_gettop) (lua_State *L);\n\
                  typedef Array(uint32_t) IdList;\nstruct S {\n  Array(uint32_t) ids[4];\n  \
-                 int GIT_CALLBACK(read)(void *);\n};\n\
+                 int GIT_CALLBACK(read)(void *);\n  M(int)(x);\n};\n\
                  struct Ops {\n  Sint64 (SDLCALL * size)(struct SDL_RWops * context);\n  int after;\n};\n\
                  typedef struct IFooVtbl {\n  HRESULT ( STDMETHODCALLTYPE *QueryInterface )(IFoo * This);\n  \
                  ULONG ( STDMETHODCALLTYPE *AddRef )(IFoo * This);\n} IFooVtbl;\n"
