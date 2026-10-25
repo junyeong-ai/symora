@@ -3080,6 +3080,16 @@ fn declares_property(parameter: Node) -> bool {
 /// ever serves nameless container parents whose kind is discarded.
 fn node_kind(node: Node) -> SymbolKind {
     match node.kind() {
+        // A Scala auxiliary constructor is a `def` named by the keyword
+        // `this`, which the grammar reads as an identifier.
+        "function_definition"
+            if node
+                .child_by_field_name("name")
+                .is_some_and(|name| name.grammar_name() == "this") =>
+        {
+            SymbolKind::Constructor
+        }
+
         "function_item"
         | "function_definition"
         | "function_declaration"
@@ -4913,6 +4923,7 @@ given topGiven: Int = 1
 
 class C {
   def cm(): Unit = {}
+  def this(x: Int) = this()
 }
 
 enum Color(val rgb: Int) {
@@ -4969,6 +4980,7 @@ package object pkg {
                 "constant:topGiven",
                 "class:C",
                 "method:C/cm",
+                "constructor:C/this",
                 "class:pkg",
                 "constant:pkg/pv",
                 "method:pkg/pf",
