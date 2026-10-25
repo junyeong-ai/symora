@@ -1171,7 +1171,10 @@ fn declares_a_function(node: Node) -> bool {
 /// after the name shows a class head no variable has (`class EXPORT Inner
 /// final : public Base {`, unlike `struct S s{1};`) and the grammar could not
 /// read the variable whole (unlike the conditional's `:` in `struct Opts o =
-/// fast ? a : Opts{};`). An
+/// fast ? a : Opts{};`), or as the start of an error holding the block, the
+/// members after the head read as fragments of its (`class Q_CORE_EXPORT
+/// QPauseAnimation : public QAbstractAnimation {`), where the head shows the
+/// same. An
 /// identifier written before the key, or between the key and the name the
 /// class head ends with (qualified, specialized, then `final`), is no part of
 /// the grammar there, so it is a macro; one inside brackets is an argument or
@@ -1190,14 +1193,19 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
     while let Some(node) = pending.pop() {
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
-        let read_as_a_variable = matches!(node.kind(), "declaration" | "field_declaration")
-            && node.has_error()
-            && node.child_by_field_name("type").is_some_and(|written| {
-                matches!(
-                    written.kind(),
-                    "class_specifier" | "struct_specifier" | "union_specifier"
-                ) && written.child_by_field_name("body").is_none()
-            });
+        let read_as_a_variable = if node.is_error() {
+            node.child(0)
+        } else if matches!(node.kind(), "declaration" | "field_declaration") && node.has_error() {
+            node.child_by_field_name("type")
+        } else {
+            None
+        }
+        .is_some_and(|written| {
+            matches!(
+                written.kind(),
+                "class_specifier" | "struct_specifier" | "union_specifier"
+            ) && written.child_by_field_name("body").is_none()
+        });
         let opens = if read_as_a_variable {
             first_brace(node)
         } else if node.kind() == "function_definition"
@@ -8110,6 +8118,34 @@ region     = "us-central1"
                 "variable:s",
                 "function:plain",
             ]
+        );
+        let held: Vec<String> = SymbolExtractor::new()
+            .extract(
+                Path::new("m.h"),
+                "class Q_CORE_EXPORT QPauseAnimation : public QAbstractAnimation\n{\n    \
+                 QPauseAnimation(int msecs, QObject *parent = nullptr);\n    \
+                 int duration() const override;\n    void updateCurrentTime(int) override;\n    \
+                 Q_DECLARE_PRIVATE(QPauseAnimation)\n};\nQT_END_NAMESPACE\n",
+                Language::Cpp,
+            )
+            .iter()
+            .map(|symbol| {
+                format!(
+                    "{}:{}",
+                    symbol.kind,
+                    symbol.name_path.as_deref().unwrap_or(&symbol.name)
+                )
+            })
+            .collect();
+        assert_eq!(
+            held,
+            [
+                "class:QPauseAnimation",
+                "constructor:QPauseAnimation/QPauseAnimation",
+                "method:QPauseAnimation/duration",
+                "method:QPauseAnimation/updateCurrentTime",
+            ],
+            "a class head the grammar set aside as an error with its block is read as one too"
         );
     }
 
