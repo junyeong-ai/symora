@@ -898,7 +898,13 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// supplied. One that declares a function, a type with a body or a qualifier
 /// the next declaration begins with (`Q_DISABLE_COPY(W) const` before `int
 /// limit_;`) is left to the grammar's reading, and so is a run an error the
-/// grammar set aside interrupts, which may hold the rest of a member.
+/// grammar set aside interrupts, which may hold the rest of a member. Not
+/// read yet: such a member before a declaration with a type of its own
+/// (`Q_INVOKABLE Q_REVISION(6, 11)` before `QModelIndex mapToSource(…)
+/// const;`), macros whether they end a member or open that declaration.
+/// Left as read: one alone in a conditional's branch (`#ifndef
+/// QT_NO_QOBJECT Q_OBJECT #endif`), since a declaration may go on past a
+/// directive.
 fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     fn macro_written(member: Node) -> bool {
         let mut cursor = member.walk();
