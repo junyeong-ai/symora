@@ -1812,12 +1812,27 @@ fn jsonc(text: &str) -> Option<serde_json::Value> {
 
 /// The files a Python project's build configuration, or pytest's own, is
 /// written in.
-const PYTHON_CONFIGURATION_FILES: [&str; 5] = [
+const PYTHON_CONFIGURATION_FILES: [&str; 8] = [
     "pyproject.toml",
     "setup.cfg",
     "setup.py",
+    "pytest.toml",
+    ".pytest.toml",
     "pytest.ini",
+    ".pytest.ini",
     "tox.ini",
+];
+
+/// The files pytest 9 reads its configuration from, in the order it tries
+/// them in each directory (`_pytest/config/findpaths.py` `locate_config`).
+const PYTEST_CONFIGURATION_FILES: [&str; 7] = [
+    "pytest.toml",
+    ".pytest.toml",
+    "pytest.ini",
+    ".pytest.ini",
+    "pyproject.toml",
+    "tox.ini",
+    "setup.cfg",
 ];
 
 /// What a Python project puts on `sys.path`.
@@ -1925,17 +1940,16 @@ pub(super) fn python_packages(nodes: &[Node]) -> HashSet<&[String]> {
 
 /// The Python configuration files one directory holds, read.
 pub(super) struct PythonConfiguration<'f> {
+    files: &'f [(&'f str, String)],
     pyproject: Option<toml::Table>,
     /// Whether it holds a `pyproject.toml`, read or not.
     has_pyproject: bool,
     setup_cfg: Option<HashMap<String, HashMap<String, String>>>,
     has_setup_py: bool,
-    pytest_ini: Option<&'f str>,
-    tox_ini: Option<&'f str>,
 }
 
 impl<'f> PythonConfiguration<'f> {
-    fn read(files: &'f [(&str, String)]) -> Self {
+    fn read(files: &'f [(&'f str, String)]) -> Self {
         let file = |name: &str| {
             files
                 .iter()
@@ -1943,19 +1957,26 @@ impl<'f> PythonConfiguration<'f> {
                 .map(|(_, contents)| contents.as_str())
         };
         Self {
+            files,
             pyproject: file("pyproject.toml").and_then(|contents| toml::from_str(contents).ok()),
             has_pyproject: file("pyproject.toml").is_some(),
             setup_cfg: file("setup.cfg").map(ini_sections),
             has_setup_py: file("setup.py").is_some(),
-            pytest_ini: file("pytest.ini"),
-            tox_ini: file("tox.ini"),
         }
+    }
+
+    /// The contents of the file named `name` in the directory.
+    fn file(&self, name: &str) -> Option<&'f str> {
+        self.files
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, contents)| contents.as_str())
     }
 
     /// Whether the directory's files configure a build, which is what makes
     /// it a project's: a `setup.py`, or a `pyproject.toml` or `setup.cfg`
-    /// holding more than pytest's own table. `pytest.ini` and `tox.ini`
-    /// configure tools, never a build.
+    /// holding more than pytest's own table. `pytest.toml`, `pytest.ini`,
+    /// their dotted names and `tox.ini` configure tools, never a build.
     fn configures_a_build(&self) -> bool {
         let pytest_only_toml = self.pyproject.as_ref().is_some_and(|pyproject| {
             pyproject.keys().all(|key| key == "tool")
@@ -2226,12 +2247,7 @@ impl PythonConfiguration<'_> {
     /// configure it, read from the one configuration file pytest itself
     /// would read there (`pytest_options`).
     fn pytest(&self, directory: &[String]) -> Option<Pytest> {
-        let options = pytest_options(
-            self.pytest_ini,
-            self.pyproject.as_ref(),
-            self.tox_ini,
-            self.setup_cfg.as_ref(),
-        )?;
+        let options = self.pytest_options()?;
         let option = |key: &str| options.get(key).map(Vec::as_slice).unwrap_or_default();
         let pythonpath = option("pythonpath")
             .iter()
@@ -2264,51 +2280,95 @@ impl PythonConfiguration<'_> {
     }
 }
 
-/// The options of the one configuration file pytest reads in a directory,
-/// where one there configures it — `pytest.ini` whatever it holds, else
-/// `pyproject.toml`'s `[tool.pytest.ini_options]`, `tox.ini`'s `[pytest]`,
-/// `setup.cfg`'s `[tool:pytest]` — each as the whitespace-separated items
-/// its value lists.
-fn pytest_options(
-    pytest_ini: Option<&str>,
-    pyproject: Option<&toml::Table>,
-    tox_ini: Option<&str>,
-    setup_cfg: Option<&HashMap<String, HashMap<String, String>>>,
-) -> Option<HashMap<String, Vec<String>>> {
-    let ini = |section: Option<&HashMap<String, String>>| {
-        section
-            .into_iter()
-            .flatten()
-            .map(|(key, value)| (key.clone(), ini_list(Some(value))))
-            .collect()
-    };
-    if let Some(pytest_ini) = pytest_ini {
-        return Some(ini(ini_sections(pytest_ini).get("pytest")));
-    }
-    if let Some(options) =
-        pyproject.and_then(|pyproject| toml_at(pyproject, &["tool", "pytest", "ini_options"]))
-    {
-        return Some(
-            options
+impl PythonConfiguration<'_> {
+    /// The options of the one configuration file pytest reads in the
+    /// directory, the first of `PYTEST_CONFIGURATION_FILES` that configures
+    /// it (`_pytest/config/findpaths.py` `load_config_dict_from_file`):
+    /// `pytest.toml` and `.pytest.toml` whatever they hold, their `[pytest]`
+    /// table read in TOML's own types; `pytest.ini` and `.pytest.ini` whatever
+    /// they hold, their `[pytest]` section; `pyproject.toml`'s `[tool.pytest]`
+    /// in TOML's types or its `[tool.pytest.ini_options]` as INI values — a
+    /// file holding both is one pytest refuses, which configures nothing —
+    /// `tox.ini`'s `[pytest]`; `setup.cfg`'s `[tool:pytest]`. An INI value is
+    /// the whitespace-separated items it lists; a TOML-typed one the strings
+    /// of the array it must be.
+    fn pytest_options(&self) -> Option<HashMap<String, Vec<String>>> {
+        let ini = |section: Option<&HashMap<String, String>>| {
+            section
+                .into_iter()
+                .flatten()
+                .map(|(key, value)| (key.clone(), ini_list(Some(value))))
+                .collect()
+        };
+        let typed = |table: &toml::Table| -> HashMap<String, Vec<String>> {
+            table
                 .iter()
                 .map(|(key, value)| {
-                    let items = toml_strings(value)
-                        .iter()
-                        .flat_map(|item| item.split_whitespace().map(str::to_string))
+                    let items = value
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_string)
                         .collect();
                     (key.clone(), items)
                 })
-                .collect(),
-        );
+                .collect()
+        };
+        PYTEST_CONFIGURATION_FILES
+            .iter()
+            .find_map(|name| match *name {
+                "pytest.toml" | ".pytest.toml" => self.file(name).map(|text| {
+                    let config = toml::from_str::<toml::Table>(text).ok();
+                    config
+                        .as_ref()
+                        .and_then(|config| config.get("pytest")?.as_table())
+                        .map(typed)
+                        .unwrap_or_default()
+                }),
+                "pytest.ini" | ".pytest.ini" => self
+                    .file(name)
+                    .map(|text| ini(ini_sections(text).get("pytest"))),
+                "pyproject.toml" => {
+                    let pytest = toml_at(self.pyproject.as_ref()?, &["tool", "pytest"])?;
+                    let native: toml::Table = pytest
+                        .iter()
+                        .filter(|(key, _)| *key != "ini_options")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    match (native.is_empty(), pytest.get("ini_options")) {
+                        (false, Some(_)) => Some(HashMap::new()),
+                        (false, None) => Some(typed(&native)),
+                        (true, Some(options)) => Some(
+                            options
+                                .as_table()
+                                .into_iter()
+                                .flatten()
+                                .map(|(key, value)| {
+                                    let items = toml_strings(value)
+                                        .iter()
+                                        .flat_map(|item| {
+                                            item.split_whitespace().map(str::to_string)
+                                        })
+                                        .collect();
+                                    (key.clone(), items)
+                                })
+                                .collect(),
+                        ),
+                        (true, None) => None,
+                    }
+                }
+                "tox.ini" => {
+                    let sections = ini_sections(self.file(name)?);
+                    sections.get("pytest").map(|pytest| ini(Some(pytest)))
+                }
+                _ => self
+                    .setup_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.get("tool:pytest"))
+                    .map(|pytest| ini(Some(pytest))),
+            })
     }
-    if let Some(tox_ini) = tox_ini.map(ini_sections)
-        && let Some(pytest) = tox_ini.get("pytest")
-    {
-        return Some(ini(Some(pytest)));
-    }
-    setup_cfg
-        .and_then(|cfg| cfg.get("tool:pytest"))
-        .map(|pytest| ini(Some(pytest)))
 }
 
 /// The package locations a `pyproject.toml` declares, as paths relative to
