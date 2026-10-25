@@ -86,7 +86,7 @@ flowchart TD
 ```
 
 - **두 백엔드, 다른 요구.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 응답하면 서버의 심볼 트리로, 응답하지 않으면 컴파일된 문법으로 읽은 선언으로 답하고, 어느 쪽인지 `backend`(`document`|`ast`)로 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요합니다. 서버에 없는 기능은 구조화된 `unsupported` 응답으로 알리거나, 다른 근거로 대신 만든 결과임을 밝혀 돌려줍니다(call hierarchy가 없으면 `callers`에 `callers_status: "references_derived"`가 붙습니다). 틀린 결과를 말없이 내놓지는 않습니다.
-- **daemon은 자동.** Unix에서는 띄워 둔 language server 세션을 호출 사이에 재사용하므로 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스에서는 자동으로 in-process로 실행합니다. 어느 쪽이든 답은 같습니다.
+- **daemon은 자동.** Unix에서는 띄워 둔 language server 세션을 호출 사이에 재사용하므로 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스에서는 자동으로 in-process로 실행합니다. 같은 소스와 language server 상태라면 두 방식의 답은 같습니다.
 
 ---
 
@@ -339,7 +339,7 @@ symora typedef … / implementations … / supertypes … / subtypes …
 symora context src/services/checkout.ts:48 --all    # 본문 + 참조 + 호출자/피호출자 + 타입 + 테스트
 symora context src/services/checkout.ts:48 --callees --types --with-bodies   # 피호출자·타입 본문 포함
 symora impact src/services/checkout.ts:48           # 변경 영향 범위
-symora diff-impact                                  # HEAD 대비 작업 트리 변경(스테이징 여부 무관)의 영향
+symora diff-impact                                  # HEAD 대비 추적 중인 파일의 작업 트리 변경(스테이징 여부 무관)의 영향
 symora diff-impact $(git merge-base main HEAD)      # 이 브랜치가 바꾼 것의 영향 (범위 A..B는 받지 않음)
 
 # 편집 & 리팩터링 (변경 작업은 --dry-run으로 미리보기)
@@ -357,7 +357,7 @@ symora doctor                # language server: 실제 동작 여부(serves) / �
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 ```
 
-전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format pretty search symbols X`(들여쓴 JSON), `symora -q rename …`(에러만), `symora -v doctor`(verbose). `--deterministic`과 `--check-version <REQ>`도 전역입니다. `--deterministic`을 주면 language server를 조회하지 않고 인덱스와 내장 문법, 파일 스캔으로만 답하므로, 어떤 서버가 설치돼 있든 같은 답이 나옵니다. language server가 있어야 하는 명령은 `unsupported`로 실패합니다. `--check-version`은 이 바이너리가 요구 버전(`0.35`, `>=0.35,<0.36`)을 만족하지 않으면 실행을 거부하므로, 출력을 파싱하는 호출자가 `--version` 문자열을 직접 비교할 필요가 없습니다.
+전역 플래그는 서브커맨드 앞뒤 어디든 둘 수 있습니다: `symora --format pretty search symbols X`(들여쓴 JSON), `symora -q rename …`(에러만), `symora -v doctor`(verbose). `--deterministic`과 `--check-version <REQ>`도 전역입니다. `--deterministic`을 주면 language server를 조회하지 않고 인덱스와 내장 문법, 파일 스캔으로만 답하므로, 어떤 서버가 설치돼 있든 같은 답이 나옵니다. language server가 있어야 하는 명령은 `unsupported`로 실패합니다. `--check-version <REQ>`는 이 바이너리가 SemVer 요구 조건을 만족하지 않으면 실행을 거부합니다(실행 중인 버전에 맞는 예시는 `symora --help`에 나옵니다). 따라서 출력을 파싱하는 호출자가 `--version` 문자열을 직접 비교할 필요가 없습니다.
 
 ---
 
@@ -371,7 +371,7 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code`와 `message`는 항상 있고, `hint`는 실행 가능한 다음 단계가 있을 때만 붙습니다. 흔한 `code` 값: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. 잘못된 CLI 인자도 같은 형식의 `invalid_argument` 오류로 나옵니다. clap이 출력하는 일반 텍스트 대신 JSON으로 나오므로, 어떤 실패든 stdout 하나만 파싱하면 됩니다. 이 형식을 따르지 않는 경우는 하나입니다. 아무것도 찾지 못한 정상 결과(예: 정의가 없는 위치에서 실행한 `def`)는 exit 0과 함께 `{ "message": … }`로 나옵니다. 부재는 오류가 아니기 때문입니다.
-- **위치는 1-indexed** — 입력과 출력 모두 그렇고, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정하며, 본문 줄이면 그 줄을 감싸는 심볼을 지정) 또는 `file:line:column`을 받습니다. 컬럼을 주면 위치가 정확해집니다. 컬럼이 심볼 이름 위에 있으면 그 심볼을, 그 밖이면 그 자리의 토큰을 가리킵니다. 호출 지점의 토큰은 정의를 따라가 호출된 심볼을 가리키며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 대상과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit`은 선언만 지정하므로 컬럼이 선언 위에 있어야 합니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 file과 line만 담고 column은 없습니다.
+- **위치는 1-indexed** — 입력과 출력 모두 그렇고, 명시한 `file:line:column`은 모든 명령에서 같은 뜻입니다. 심볼 단위 명령(`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`)은 컬럼을 생략한 `file:line`(그 줄에 선언된 심볼을 지정하며, 본문 줄이면 그 줄을 감싸는 심볼을 지정) 또는 `file:line:column`을 받습니다. 컬럼을 주면 위치가 정확해집니다. 컬럼이 심볼 이름 위에 있으면 그 심볼을, 그 밖이면 그 자리의 토큰을 가리킵니다. 호출 지점의 토큰은 정의를 따라가 호출된 심볼을 가리키며, 같은 위치에서 `def`, `hover`, `rename`이 읽는 대상과 정확히 같습니다. `def`·`hover`·`typedef`·`rename`은 컬럼을 생략하면 1열로 읽습니다. `edit replace-body`·`insert-before`·`insert-after`·`delete`는 선언만 지정하므로 컬럼이 선언 위에 있어야 합니다. `edit replace`는 문자 범위를 그대로 받으며, 컬럼을 생략하면 1열로 읽습니다. 탐색 결과의 위치 객체는 line과 column을 담습니다. `context`·`impact` 등의 요약 target은 file과 line만 담고 column은 없습니다.
 - **결과가 불완전하면 숨기지 않고 밝힙니다.** `incomplete: true`는 count 자체가 하한이라는 뜻입니다. 답이 조회한 소스에 있던 것을 전부 담지 못했다는 뜻이며, 맨 앞의 `hints`가 원인을 밝히고 고칠 방법이 있으면 `next_commands`가 그 명령을 담습니다. 원인이 읽지 못한 경로이면 `map`·`pack`·`search index status`가 `unread_paths`로 그 경로를 직접 지목합니다. 읽을 수 없는 경로는 재빌드해도 읽히지 않으므로 권한부터 확인하세요. `stale`은 인덱스의 최신 여부, `indexing`은 language server의 준비 상태, `incomplete`는 조회한 소스 안에서 열거를 마쳤는지를 나타냅니다. `coverage_gaps`는 검색하지 못한 언어를 나열하고, `unsupported` 오류는 빠진 기능(서버의 기능이든, Symora가 적용하지 않는 편집 형태든)을 지목하고 대안을 알려 줍니다.
 - **출력 형식**은 stdout이 터미널이면 들여쓴 JSON, 파이프나 파일이면 한 줄 JSON입니다. `--format pretty|compact`로 고정할 수 있습니다. 자체 예산을 밝힌 응답(`budget_tokens`)은 해당 명령의 예산을 적용합니다. 나머지는 `output.max_response_chars`(기본 20,000자, 0은 제한 해제)를 목표로 합니다. 소스 본문은 먼저 통째로 생략하고 `body_omitted: "response_size"`로 공개하며, 선언 정보는 남깁니다. 그래도 넘치면 목록 항목을 줄이되 `count`는 그대로 두고, `truncated`와 `output.max_response_chars`를 지목하는 hint를 붙입니다. 고정 메타데이터는 목표를 초과할 수 있습니다. compact 직렬화로 측정하므로 출력 형식이 결과 항목을 바꾸지 않습니다.
 
@@ -420,7 +420,7 @@ symora config init --global   # 사용자 설정에 같은 템플릿 작성
 [lsp.servers.typescript]
 command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
 args = ["--stdio"]   # 생략 가능; 없으면 기본 args 상속
-tier = "slow"        # 생략 가능; fast | standard | slow 중 하나
+tier = "slow"        # 생략 가능; fast | standard | slow — `symora doctor`가 서버의 핸드셰이크를 기다리는 시간
 env = { NODE_OPTIONS = "--max-old-space-size=2048" } # 생략 가능; 서버 환경 변수
 ```
 
@@ -438,7 +438,7 @@ extraPaths = ["packages/core/src"]
 
 프로젝트가 사용하는 환경이나 서버 자체 설정을 우선 준비하세요. 위 경로는 명시적인 설정 예시이며 Symora가 패키지 경로를 추측해 추가하지는 않습니다. 같은 언어의 프로젝트 설정 stanza는 사용자 설정 stanza 전체를 대체합니다.
 
-`symora doctor python`의 `python_interpreter`는 새 서버에 전달할 인터프리터 설정의 출처를 표시합니다. 명시한 `settings`, 프로젝트에서 찾은 `project_environment`, 서버에 선택을 맡긴 `server_default`를 구분합니다. `serves`가 확인하는 것은 LSP 핸드셰이크 완료뿐이며, 두 필드 모두 import 해석이나 참조의 완전성을 검증하지 않습니다. 유지 중인 daemon 세션에 변경한 설정이나 새로 준비한 환경을 적용하려면 프로젝트를 재시작해야 합니다.
+`symora doctor python`의 `python_interpreter`는 새 서버에 전달할 인터프리터 설정의 출처를 표시합니다. 명시한 `settings`, 프로젝트에서 찾은 `project_environment`, 서버에 선택을 맡긴 `server_default`를 구분합니다. `serves`가 확인하는 것은 LSP 핸드셰이크 완료뿐이며, 두 필드 모두 import 해석이나 참조의 완전성을 검증하지 않습니다. 유지 중인 daemon 세션에 변경한 설정이나 새로 준비한 환경을 적용하려면 `symora daemon restart --project`를 실행해야 합니다.
 
 키는 `symora doctor`가 출력하는 `language` id입니다. 잘못된 키는 `config_errors`로 보고되며 조용히 적용되지 않습니다. daemon은 프로젝트를 처음 처리할 때 그 설정을 읽어 프로젝트 세션을 해제할 때까지 유지합니다. 변경 후 `symora daemon restart --project`를 실행하면 다음 요청이 해당 프로젝트의 서버를 새 설정으로 시작합니다. 다른 프로젝트의 세션은 유지하며, 진행 중인 요청이나 서버 시작 작업이 있으면 `conflict`를 반환합니다. 영구 인덱스를 초기화하거나 워크스페이스 인덱싱 완료를 보장하는 명령은 아닙니다.
 
@@ -503,12 +503,15 @@ symora setup mcp --uninstall         # 연결 해제 (자신이 만든 항목만
 
 symora mcp serve                                 # stdio (Claude Code, Cursor 등)
 symora mcp serve --transport http --port 7700    # HTTP
+symora mcp serve --profile read-only             # 변경 도구를 숨기고 tools/call에서도 거부하는 read-only 서버
 
 symora mcp tools                                 # 도구 카탈로그를 JSON으로 (스키마·mutation 표시 포함)
 symora mcp tools --profile read-only             # read-only 서버가 노출할 목록
 ```
 
-`mcp tools`는 `tools/list`가 돌려주는 것과 같은 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 기능 목록을 얻을 수 있습니다. 입력 스키마는 모든 도구에, 출력 스키마는 그것을 선언한 도구에 실리며, 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 무언가를 쓰는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`), 그중 소스를 고치는 도구는 모두 `dry_run`을 지원합니다(인덱스만 다시 만드는 `build_index`는 제외). 공식 Rust MCP SDK가 버전 협상, 전송, 취소를 처리합니다. 2026-07-28의 요청별 메타데이터와 이전 버전의 initialize 흐름을 지원합니다. HTTP는 loopback 주소에만 바인딩하며 원격 연결은 인증 프록시를 통해 구성하세요.
+`setup mcp`는 전체 도구를 노출하는 서버를 연결합니다. read-only 서버로 쓰려면 호스트 설정의 인자에 `--profile read-only`를 추가하세요.
+
+`mcp tools`는 `tools/list`가 돌려주는 것과 같은 카탈로그를 출력하므로, 서버를 띄우지 않고도 기계가 읽을 수 있는 기능 목록을 얻을 수 있습니다. 입력 스키마는 모든 도구에, 출력 스키마는 그것을 선언한 도구에 실리며, 출력 스키마는 대응하는 CLI 명령의 JSON에도 그대로 적용됩니다. 무언가를 쓰는 도구는 두 곳에 표시되고(description의 `Mutates`, `annotations.readOnlyHint: false`), 그중 소스를 고치는 도구는 모두 `dry_run`을 지원합니다(인덱스만 다시 만드는 `build_index`는 제외). 2026-07-28의 요청별 메타데이터와 이전 버전의 initialize 흐름을 지원합니다. HTTP는 loopback 주소에만 바인딩하며 원격 연결은 인증 프록시를 통해 구성하세요.
 
 ---
 
@@ -516,7 +519,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 
 에이전트용 플레이북은 이 README가 아니라 *도구와 함께* 배포되어 바이너리와 항상 일치합니다.
 
-- `symora setup skill`은 바이너리에 내장된 스킬을 네트워크 없이 설치합니다. 명시적인 `--git-ref`는 지정한 소스만 사용하며 실패하면 다른 버전으로 대체하지 않습니다.
+- `symora setup skill`은 바이너리에 내장된 스킬을 네트워크 없이 `~/.claude/skills/symora`에 설치합니다. 명시적인 `--git-ref`는 지정한 소스만 사용하며 실패하면 다른 버전으로 대체하지 않습니다.
 - `symora mcp serve`는 MCP 도구의 사용 순서, 결과의 한계, 오류 대응을 설명하는 instructions를 제공합니다. 연결 클라이언트가 지원하는 프로토콜에 따라 이를 조회합니다.
 
 파일·선언을 알고 있다면 `symbols`, `context`, `refs`, `impact`로 바로 조사하세요. 저장소 방향 파악에는 `map summary`와 `pack`을 선택적으로 사용합니다. 리스트 응답은 공통 형태를 쓰고, 위치는 1-indexed이며, 잘못된 CLI 인자를 포함한 명령 실패는 구조화된 `{code, message, hint}`와 0이 아닌 종료 코드로 전달됩니다.

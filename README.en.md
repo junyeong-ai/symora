@@ -86,7 +86,7 @@ flowchart TD
 ```
 
 - **Two backends, different needs.** Index and `search ast`/`map` work with no language server. `symbols` and `map file` answer from the server's tree when one serves and from the compiled-in grammar when not, and say which in `backend` (`document` | `ast`). The other LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language, and when a server lacks a capability they degrade *honestly* — a structured `unsupported` response, or a fallback that says it is one (`callers` without call hierarchy marks `callers_status: "references_derived"`) — never a silently-wrong answer.
-- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process; a sandbox that cannot write the daemon directory (`~/.symora`) runs in-process on its own. The answers are the same either way.
+- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process; a sandbox that cannot write the daemon directory (`~/.symora`) runs in-process on its own. For the same source and language-server state, both modes give the same answer.
 
 ---
 
@@ -339,7 +339,7 @@ symora typedef … / implementations … / supertypes … / subtypes …
 symora context src/services/checkout.ts:48 --all    # body + refs + callers + callees + types + tests
 symora context src/services/checkout.ts:48 --callees --types --with-bodies   # with callee and type bodies
 symora impact src/services/checkout.ts:48           # change blast radius
-symora diff-impact                                  # impact of the working tree's changes against HEAD, staged or not
+symora diff-impact                                  # impact of tracked changes in the working tree against HEAD, staged or not
 symora diff-impact $(git merge-base main HEAD)      # impact of what this branch changed (a range A..B is refused)
 
 # Edit & refactor (mutations preview with --dry-run)
@@ -357,7 +357,7 @@ symora doctor                # language servers: verified serving / missing + in
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 ```
 
-Global flags work before or after the subcommand: `symora --format pretty search symbols X` (indented JSON), `symora -q rename …` (errors only), `symora -v doctor` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` never consults a language server: it answers from the index, the compiled-in grammars, and file scans, so the answer does not depend on which servers are installed, and a command that needs a server fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.35`, `>=0.35,<0.36`), so a caller that parses the output never has to compare `--version` strings itself.
+Global flags work before or after the subcommand: `symora --format pretty search symbols X` (indented JSON), `symora -q rename …` (errors only), `symora -v doctor` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` never consults a language server: it answers from the index, the compiled-in grammars, and file scans, so the answer does not depend on which servers are installed, and a command that needs a server fails with `unsupported`. `--check-version <REQ>` refuses to run unless this binary satisfies the SemVer requirement (`symora --help` prints an example for the running version), so a caller that parses the output never has to compare `--version` strings itself.
 
 ---
 
@@ -371,7 +371,7 @@ Every command is built for machine parsing, and the rules are stable:
   { "error": { "code": "server_not_installed", "message": "…", "hint": "…" } }
   ```
   `code` and `message` are always present; `hint` only when there's an actionable next step. Common `code` values: `not_found`, `invalid_argument`, `unsupported`, `conflict`, `precondition_failed`, `server_not_installed`, `lsp_unavailable`, `timeout`, `cancelled`. A bad CLI argument arrives in the same envelope — `invalid_argument`, as JSON rather than clap's prose — so parsing one stream, stdout, covers every failure. One thing sits outside: a clean "nothing found" (e.g. `def` on a position with no definition) is `{ "message": … }` at exit 0 — absence is not an error.
-- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit` addresses declarations only: a column must sit on one. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
+- **Positions are 1-indexed** on both input and output, and an explicit `file:line:column` means one thing on every command. Symbol-level commands (`refs`, `callers`, `callees`, `implementations`, `supertypes`, `subtypes`, `context`, `impact`) take a column-less `file:line`, which addresses the symbol declared on that line (a body line falls back to the enclosing symbol), or a `file:line:column`, which is precise: on a symbol's name it means that symbol, elsewhere it means the token there — a call site resolves through its definition to the symbol called, exactly what `def`, `hover`, and `rename` read at the same position. `def`, `hover`, `typedef`, and `rename` read an omitted column as column 1. `edit replace-body`, `insert-before`, `insert-after` and `delete` address declarations only, so a column must sit on one; `edit replace` takes a raw range and reads an omitted column as column 1. Navigation location objects carry line and column. Summary targets such as those in `context` and `impact` carry file and line without a column.
 - **Degradation is disclosed, never hidden.** `incomplete: true` means the count itself is a lower bound — the answer does not hold everything its own sources held; the leading `hints` name the cause, and `next_commands` carries the fix where one exists. When the cause is a path that could not be read, `map`, `pack`, and `search index status` name those paths directly in `unread_paths` — check their permissions, since no rebuild reaches a path nothing can read. `stale` describes index currency, `indexing` qualifies language-server readiness, and `incomplete` describes enumeration within the consulted sources. `coverage_gaps` lists languages that couldn't be searched, and an `unsupported` error names the missing capability — the server's, or an edit shape Symora does not apply — and points to an alternative.
 - **Output format** is indented JSON when stdout is a terminal and single-line JSON when it is a pipe or file; `--format pretty|compact` fixes it. Responses declaring `budget_tokens` use their command budget. Other responses target `output.max_response_chars` (default 20,000; 0 disables). Source bodies are omitted whole before list items, with `body_omitted: "response_size"`, preserving declaration identity. A list cut to fit keeps its `count`, sets `truncated`, and adds a hint naming `output.max_response_chars`. Fixed metadata may exceed the target. Compact serialization determines fitting regardless of display format.
 
@@ -420,7 +420,7 @@ Common settings: LSP timeouts and limits, daemon behavior, test-file patterns, a
 [lsp.servers.typescript]
 command = "/Users/me/.nvm/versions/node/v20.11.0/bin/typescript-language-server"
 args = ["--stdio"]   # optional; absent = inherit built-in args
-tier = "slow"        # optional; one of fast | standard | slow
+tier = "slow"        # optional; fast | standard | slow — how long `symora doctor` waits for the server's handshake
 env = { NODE_OPTIONS = "--max-old-space-size=2048" } # optional; server environment variables
 ```
 
@@ -438,7 +438,7 @@ extraPaths = ["packages/core/src"]
 
 Prepare the project's environment or native server configuration first. These paths are explicit examples; Symora does not infer package paths. A project override replaces the entire user-level stanza for that language.
 
-`symora doctor python` reports the interpreter setting a fresh server will receive in `python_interpreter`: explicit `settings`, a discovered `project_environment`, or `server_default` when selection is left to the server. `serves` only confirms the LSP handshake; neither field verifies imports or reference completeness. A retained daemon session needs project restart to pick up changed settings or a newly prepared environment.
+`symora doctor python` reports the interpreter setting a fresh server will receive in `python_interpreter`: explicit `settings`, a discovered `project_environment`, or `server_default` when selection is left to the server. `serves` only confirms the LSP handshake; neither field verifies imports or reference completeness. A retained daemon session needs `symora daemon restart --project` to pick up changed settings or a newly prepared environment.
 
 The key is the `language` id printed by `symora doctor`. A rejected key is reported in `config_errors` and never silently applied. The daemon reads a project's config when it first serves that project and retains it until the project is unloaded. After editing it, run `symora daemon restart --project`; the next request starts that project's servers with fresh settings. Other projects keep their sessions; active requests or pending server startup make the restart return `conflict`. This does not reset the persistent index or confirm workspace indexing completeness.
 
@@ -503,12 +503,15 @@ symora setup mcp --uninstall         # disconnect (removes only the entry it wro
 
 symora mcp serve                                 # stdio (Claude Code, Cursor, etc.)
 symora mcp serve --transport http --port 7700    # HTTP
+symora mcp serve --profile read-only             # hide the mutating tools and refuse them at tools/call
 
 symora mcp tools                                 # tool catalog as JSON (schemas and mutation annotations)
 symora mcp tools --profile read-only             # what a read-only server would expose
 ```
 
-`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the tools that declare one, and a tool's output schema also describes the JSON the matching CLI command emits. Tools that write are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and every one that edits source supports `dry_run` (`build_index`, which only rebuilds the index, does not). The official Rust MCP SDK handles negotiation, transport, and cancellation. Both the 2026-07-28 per-request metadata flow and earlier initialize flows are supported. HTTP binds to loopback only; put remote access behind an authenticated proxy.
+`setup mcp` wires the full profile; for a read-only server, add `--profile read-only` to the entry's arguments.
+
+`mcp tools` prints the same catalog `tools/list` serves, so a machine-readable capability inventory is available without starting a server — input schemas on every tool, output schemas on the tools that declare one, and a tool's output schema also describes the JSON the matching CLI command emits. Tools that write are marked twice — the word `Mutates` in the description and `annotations.readOnlyHint: false` — and every one that edits source supports `dry_run` (`build_index`, which only rebuilds the index, does not). Both the 2026-07-28 per-request metadata flow and earlier initialize flows are supported. HTTP binds to loopback only; put remote access behind an authenticated proxy.
 
 ---
 
@@ -516,7 +519,7 @@ symora mcp tools --profile read-only             # what a read-only server would
 
 The agent-facing playbook ships *with the tool*, not in this README, so it stays in lockstep with the binary:
 
-- `symora setup skill` installs the skill bundled into the binary without network access. An explicit `--git-ref` uses only that source and never falls back to another version on failure.
+- `symora setup skill` installs the skill bundled into the binary into `~/.claude/skills/symora`, without network access. An explicit `--git-ref` uses only that source and never falls back to another version on failure.
 - `symora mcp serve` exposes instructions for tool sequencing, result limits and error recovery through the metadata flow supported by the connected client.
 
 For a known file or declaration, go directly to `symbols`, `context`, `refs`, or `impact`. Use `map summary` and `pack` when repository orientation helps. List responses share one shape; positions are 1-indexed; command failures, including bad CLI arguments, are structured `{code, message, hint}` at non-zero exit.
