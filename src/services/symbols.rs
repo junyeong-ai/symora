@@ -4268,6 +4268,9 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 /// [`macro_wrapped_name`]), and a function's name is what its parameters
 /// follow ([`name_before_parameters`]).
 fn declarator_name(declarator: Node) -> Node {
+    if let Some(named) = typedef_name_before_macros(declarator) {
+        return named;
+    }
     let mut node = declarator;
     loop {
         if let Some(set_aside) = node
@@ -4341,6 +4344,36 @@ fn destructor_named_apart(name: Node) -> Node {
                 && before.child(0).is_some_and(|tilde| tilde.kind() == "~")
         })
         .unwrap_or(name)
+}
+
+/// The name a C or C++ typedef gives a class it defines, where macros
+/// written after the name left the grammar setting the name aside as an
+/// error with them and reading the last as the declarator (`typedef struct
+/// {…} SPAngle SPATIAL_SWIFT_NAME(Angle2D) __API_AVAILABLE(…);`): a type its
+/// class specifier ends takes no other type name, so the first word after it
+/// is the name, and what follows invocations naming nothing.
+fn typedef_name_before_macros(declarator: Node) -> Option<Node> {
+    let definition = declarator
+        .parent()
+        .filter(|definition| definition.kind() == "type_definition")?;
+    definition.child_by_field_name("type").filter(|written| {
+        matches!(
+            written.kind(),
+            "struct_specifier" | "class_specifier" | "union_specifier" | "enum_specifier"
+        )
+    })?;
+    let error = declarator
+        .prev_sibling()
+        .filter(|before| before.is_error())?;
+    let mut cursor = error.walk();
+    let held: Vec<Node> = error.named_children(&mut cursor).collect();
+    let (name, invocations) = held.split_first()?;
+    (matches!(name.kind(), "identifier" | "type_identifier")
+        && invocations
+            .iter()
+            .chain([&declarator])
+            .all(|invoked| invoked.kind() == "function_declarator" && !names_a_parameter(*invoked)))
+    .then_some(*name)
 }
 
 /// The name a C or C++ declarator writes after a macro's argument list: a
@@ -7086,7 +7119,9 @@ region     = "us-central1"
                 "typedef struct {\n  Array(Entry) list;\n  Entry empty;\n  uint32_t count;\n  \
                  Array(uint32_t) free_ids;\n} Pool;\n\
                  typedef __attribute__((aligned(1))) U16 unalign16;\n\
-                 struct Q {\n  int a;\n  Array(uint32_t)\n  int after_macro;\n  PADDING;\n};\n"
+                 struct Q {\n  int a;\n  Array(uint32_t)\n  int after_macro;\n  PADDING;\n};\n\
+                 typedef struct {\n  double radians;\n} SPAngle\nSWIFT_NAME(Angle2D)\n\
+                 API_AVAILABLE(macos(13.0), ios(16.0));\n"
             ),
             [
                 "class:Pool",
@@ -7098,6 +7133,8 @@ region     = "us-central1"
                 "struct:Q",
                 "field:a",
                 "field:after_macro",
+                "class:SPAngle",
+                "field:radians",
             ],
             "a macro's arguments name nothing, and what follows them is its declaration's name"
         );
