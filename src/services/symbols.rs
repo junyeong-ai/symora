@@ -7488,7 +7488,8 @@ region     = "us-central1"
             declared(
                 "struct Outer {\n  template <class T> struct Inner { Inner(T); };\n  \
                  template <class T> Inner(T) -> Inner<T>;\n  Inner(const char *) -> Inner<int>;\n  \
-                 auto Cast() -> int;\n  int after;\n};\n"
+                 auto Cast() -> int;\n  int after;\n};\nauto top() -> int;\n\
+                 template <class T> auto tmpl(T t) -> T;\n"
             ),
             [
                 "struct:Outer",
@@ -7496,6 +7497,8 @@ region     = "us-central1"
                 "constructor:Inner",
                 "method:Cast",
                 "field:after",
+                "function:top",
+                "function:tmpl",
             ],
             "a deduction guide names the class template it guides, which declares the name"
         );
@@ -7709,7 +7712,7 @@ region     = "us-central1"
                 "class F {\n public:\n  API std::string DebugString() const;\n  \
                  ONNX_API const std::string& GetName() const;\n  Flags mode : 2;\n  \
                  INLINE const std::string& Get() const {\n    return name_;\n  }\n  \
-                 Flags width:::ns::kWidth;\n  int after;\n};\n"
+                 Flags width:::ns::kWidth;\n  API std ::string Spaced() const;\n  int after;\n};\n"
             ),
             [
                 "class:F",
@@ -7718,6 +7721,7 @@ region     = "us-central1"
                 "field:mode",
                 "method:Get",
                 "field:width",
+                "method:Spaced",
                 "field:after",
             ],
             "a name before `::` qualifies a type, so what was read as the type is a macro"
@@ -8670,6 +8674,13 @@ region     = "us-central1"
                 "class X {\n  int size(int x) ATTR_A ATTR_B;\n};\n",
                 "size",
                 Some("int size(int x) ATTR_A ATTR_B"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "class X {\n  StringPiece getString() const U_LIFETIME_BOUND;\n};\n",
+                "getString",
+                Some("StringPiece getString() const U_LIFETIME_BOUND"),
             ),
             (
                 "a.h",
