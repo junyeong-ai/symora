@@ -895,6 +895,8 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
                 && node.parent().is_some_and(|user| {
                     user.child_by_field_name("type")
                         .is_some_and(|used| used.id() == node.id())
+                        && (user.child_by_field_name("declarator").is_some()
+                            || !matches!(user.kind(), "declaration" | "field_declaration"))
                 }))
     {
         return false;
@@ -5410,6 +5412,21 @@ region     = "us-central1"
                 "method:name",
             ],
             "a macro written after a declarator names nothing"
+        );
+        assert_eq!(
+            declared(
+                "class Widget {\n  class Impl;\n  struct Node;\n  Impl* impl_;\n};\n\
+                 void uses(struct Used);\nstruct Glob *gp;\n"
+            ),
+            [
+                "class:Widget",
+                "class:Impl",
+                "struct:Node",
+                "field:impl_",
+                "function:uses",
+                "variable:gp",
+            ],
+            "a bodiless type standing alone in a class body is a forward declaration"
         );
         assert_eq!(
             declared(
