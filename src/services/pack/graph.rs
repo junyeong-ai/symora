@@ -23,7 +23,9 @@ pub(super) struct ImportGraph {
     pub(super) rust_relative_imports_omitted: bool,
     pub(super) undetermined_imports: BTreeSet<String>,
     /// The files writing a non-relative specifier whose TypeScript
-    /// configuration the `references` above them leave undetermined.
+    /// configuration the `references` above them leave undetermined: the
+    /// projects compiling the file disagree, or none compiles it and one
+    /// that could have been meant maps the specifier.
     pub(super) ts_owner_undetermined: BTreeSet<String>,
 }
 
@@ -67,7 +69,13 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         let mut seen = HashSet::new();
         for target in &node.imports.references {
             let reference = Reference::parse(target, node.language);
-            if importer.ts_owner_undetermined && matches!(reference, Reference::Bare(_)) {
+            if let Reference::Bare(specifier) = &reference
+                && (importer.ts_owner_undetermined
+                    || importer
+                        .ts_uncompiled
+                        .iter()
+                        .any(|config| index.config_maps(config, specifier, node.language)))
+            {
                 ts_owner_undetermined.insert(node.rel_path.clone());
             }
             let files = match index.resolve(&reference, &importer) {
@@ -115,9 +123,12 @@ struct Importer<'a> {
     /// The TypeScript configuration a JavaScript or TypeScript file is
     /// compiled under (`Manifests::ts_owner`).
     ts_config: Option<&'a TsConfig>,
-    /// Whether the configuration above the file names no one project
-    /// compiling it, so that its specifiers are read without one.
+    /// Whether the projects compiling the file say different things about
+    /// specifiers, so that its specifiers are read without a configuration.
     ts_owner_undetermined: bool,
+    /// The configurations that could have been meant for a file no project
+    /// the `references` above it reach compiles, which is read without one.
+    ts_uncompiled: Vec<&'a TsConfig>,
     /// The module resolution the file's imports are read under, where it is
     /// one deciding which mode-dependent `exports` conditions apply.
     mode: Option<ImportMode>,
@@ -139,9 +150,10 @@ impl<'a> Importer<'a> {
         } else {
             TsOwner::None
         };
-        let ts_config = match owner {
-            TsOwner::Config(config) => Some(config),
-            TsOwner::None | TsOwner::Undetermined => None,
+        let (ts_config, ts_uncompiled) = match &owner {
+            TsOwner::Config(config) => (Some(*config), Vec::new()),
+            TsOwner::Uncompiled(candidates) => (None, candidates.clone()),
+            TsOwner::None | TsOwner::Undetermined => (None, Vec::new()),
         };
         let mode = ts_config
             .and_then(|config| config.module_resolution)
@@ -155,6 +167,7 @@ impl<'a> Importer<'a> {
             node,
             ts_config,
             ts_owner_undetermined: matches!(owner, TsOwner::Undetermined),
+            ts_uncompiled,
             mode,
         }
     }
@@ -1023,6 +1036,23 @@ impl ProjectIndex<'_> {
             Some(mapping) if !mapping.catch_all => Resolution::Undetermined(specifier.to_string()),
             _ => Resolution::Files(Vec::new()),
         }
+    }
+
+    /// Whether a TypeScript configuration maps a non-relative specifier:
+    /// a `paths` pattern other than the catch-all `*` matches it, or its
+    /// `paths` or `baseUrl` name a file for it.
+    fn config_maps(&self, config: &TsConfig, specifier: &str, language: Language) -> bool {
+        let mapped = config.mapped(specifier);
+        mapped.as_ref().is_some_and(|mapping| !mapping.catch_all)
+            || mapped
+                .iter()
+                .flat_map(|mapping| &mapping.paths)
+                .any(|path| self.script_target(path, language).is_some())
+            || config
+                .base_url
+                .as_ref()
+                .and_then(|base| project_path(base, specifier))
+                .is_some_and(|path| self.script_target(&path, language).is_some())
     }
 
     /// What a workspace package's name, or a subpath below it, stands for,
@@ -2811,6 +2841,14 @@ mod tests {
             // below it.
             ts(9, "plain/tools/x.ts", "import y from \"#y\";\n"),
             ts(10, "plain/y.ts", ""),
+            // Compiled by no project, and naming only what no project maps.
+            ts(
+                11,
+                "eslint.config.js",
+                "import js from \"@eslint/js\";\nimport c from \"lodash\";\n",
+            ),
+            // Compiled by no project, naming what one's `baseUrl` maps.
+            ts(12, "scripts/fx.ts", "import user from \"fixtures/user\";\n"),
         ];
         let manifests = manifests_of(
             &[
@@ -2827,8 +2865,8 @@ mod tests {
                 ),
                 (
                     "tsconfig.test.json",
-                    "{\"compilerOptions\": {\"paths\": {\"@/*\": [\"./src/*\"], \
-                     \"#fixtures/*\": [\"./fixtures/*\"]}}, \
+                    "{\"compilerOptions\": {\"baseUrl\": \".\", \"paths\": {\"@/*\": [\"./src/*\"], \
+                     \"#fixtures/*\": [\"./fixtures/*\"], \"*\": [\"./types/*\"]}}, \
                      \"include\": [\"src/**/*.test.ts\", \"src/test-utils\"]}",
                 ),
                 (
@@ -2864,10 +2902,15 @@ mod tests {
         assert_eq!(edges(4), vec!["cfg.ts"]);
         assert_eq!(edges(7), vec!["src/components/Button.tsx"]);
         assert_eq!(edges(9), vec!["plain/y.ts"]);
-        assert!(edges(6).is_empty() && edges(8).is_empty());
+        assert!(edges(6).is_empty() && edges(8).is_empty() && edges(11).is_empty());
+        // A file no project compiles is read without a configuration, and
+        // disclosed only where one of those the references reach maps what
+        // it imports; projects compiling a file alike but saying different
+        // things about specifiers leave it undetermined.
         assert_eq!(
             graph.ts_owner_undetermined,
             BTreeSet::from([
+                "scripts/fx.ts".to_string(),
                 "scripts/gen.ts".to_string(),
                 "src/test-utils/render.tsx".to_string()
             ])

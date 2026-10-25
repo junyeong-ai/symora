@@ -84,8 +84,10 @@ pub struct PackResult {
     /// determines, so their edges are missing rather than absent.
     pub undetermined_imports: Vec<String>,
     /// The JavaScript and TypeScript files below a configuration whose
-    /// `references` name no one project compiling them, so that their
-    /// non-relative specifiers were read without a configuration.
+    /// `references` name no one project compiling them — several that
+    /// disagree, or none where one of those projects maps a specifier the
+    /// file writes — so that their non-relative specifiers were read without
+    /// a configuration that may have been meant.
     pub undetermined_ts_projects: Vec<String>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
