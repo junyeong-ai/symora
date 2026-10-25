@@ -1984,7 +1984,7 @@ fn syntax_keyword(node: Node, keyword: &str) -> bool {
 /// `decorated_definition`, a C++ `template` header or `extern "C"`, a Go
 /// `type`, `const` or `var` declaring it alone outside a parenthesized
 /// group, and a Dart function, method or class member, which holds its
-/// annotations and body beside the signature the query reads.
+/// annotations, modifiers and body beside the signature the query reads.
 fn declaration_node(mut node: Node, language: Language) -> Node {
     while let Some(parent) = node.parent() {
         let holds = |field| {
@@ -2020,11 +2020,14 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
                 "function_declaration"
                 | "method_declaration"
                 | "getter_declaration"
-                | "setter_declaration",
+                | "setter_declaration"
+                | "external_function_declaration"
+                | "external_getter_declaration"
+                | "external_setter_declaration",
             ) => holds("signature"),
             (
                 Language::Dart,
-                "method_signature" | "class_member" | "local_function_declaration",
+                "method_signature" | "class_member" | "declaration" | "local_function_declaration",
             ) => true,
             _ => false,
         };
@@ -6248,6 +6251,41 @@ region     = "us-central1"
                 "int get answer {\n  return 42;\n}\n",
                 "answer",
                 Some("int get answer"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "external void bind(int port);\n",
+                "bind",
+                Some("external void bind(int port)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "external int get port;\n",
+                "port",
+                Some("external int get port"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class C {\n  external static int count();\n}\n",
+                "count",
+                Some("external static int count()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class C {\n  external C.make();\n}\n",
+                "C.make",
+                Some("external C.make()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "abstract class A {\n  void run();\n}\n",
+                "run",
+                Some("void run()"),
             ),
             (
                 "a.scala",
