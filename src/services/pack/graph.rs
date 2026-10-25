@@ -3569,6 +3569,88 @@ mod tests {
         );
     }
 
+    /// A file a project takes that a project its references reach also takes
+    /// is compiled in that referenced project alone, whose `paths` its
+    /// imports resolve through: the referencing project's program reads the
+    /// file as that project's output declaration, as tsc 5.9.3, 6.0.3 and
+    /// 7.0.2 all build it. Projects neither of which reaches the other each
+    /// compile it.
+    #[test]
+    fn a_file_a_project_and_one_it_references_both_take_is_compiled_in_the_referenced_one() {
+        let shapes = ["chain", "own", "deep", "siblings"];
+        let mut nodes = Vec::new();
+        for shape in shapes {
+            for (rel, source) in [
+                ("shared/s.ts", "import { x } from \"@x\";\n"),
+                ("a/ax.ts", ""),
+                ("b/bx.ts", ""),
+            ] {
+                let rel = format!("{shape}/{rel}");
+                nodes.push(node_in(
+                    nodes.len(),
+                    rel.as_str(),
+                    source,
+                    Language::TypeScript,
+                ));
+            }
+        }
+        let a = |include: &str, references: &str| {
+            format!(
+                "{{\"compilerOptions\": {{\"paths\": {{\"@x\": [\"./ax.ts\"]}}}}, \
+                 \"include\": [{include}]{references}}}"
+            )
+        };
+        let b = "{\"compilerOptions\": {\"paths\": {\"@x\": [\"./bx.ts\"]}}, \
+                 \"include\": [\"../shared\", \".\"]}";
+        let root = |include: &str, reference: &str| {
+            format!(
+                "{{\"compilerOptions\": {{\"paths\": {{\"@x\": [\"./a/ax.ts\"]}}}}, \
+                 \"include\": [{include}], \"references\": [{{\"path\": \"{reference}\"}}]}}"
+            )
+        };
+        let to_b = ", \"references\": [{\"path\": \"../b\"}]";
+        let configs = [
+            (
+                "chain/tsconfig.json",
+                "{\"files\": [], \"references\": [{\"path\": \"./a\"}]}".to_string(),
+            ),
+            ("chain/a/tsconfig.json", a("\"../shared\", \".\"", to_b)),
+            ("chain/b/tsconfig.json", b.to_string()),
+            ("own/tsconfig.json", root("\"shared\", \"a\"", "./b")),
+            ("own/b/tsconfig.json", b.to_string()),
+            ("deep/tsconfig.json", root("\"shared\"", "./a")),
+            ("deep/a/tsconfig.json", a("\".\"", to_b)),
+            ("deep/b/tsconfig.json", b.to_string()),
+            (
+                "siblings/tsconfig.json",
+                "{\"files\": [], \"references\": [{\"path\": \"./a\"}, {\"path\": \"./b\"}]}"
+                    .to_string(),
+            ),
+            ("siblings/a/tsconfig.json", a("\"../shared\", \".\"", "")),
+            ("siblings/b/tsconfig.json", b.to_string()),
+        ];
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (*path, text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(0), vec!["chain/b/bx.ts"]);
+        assert_eq!(edges(3), vec!["own/b/bx.ts"]);
+        assert_eq!(edges(6), vec!["deep/b/bx.ts"]);
+        assert!(edges(9).is_empty());
+        assert_eq!(
+            graph.ts_owner_undetermined,
+            BTreeSet::from(["siblings/shared/s.ts".to_string()])
+        );
+    }
+
     /// Every specifier matches the catch-all pattern `*`, and TypeScript looks
     /// one it maps to no file up as a package, so that one is a package's,
     /// not an alias naming nothing.
