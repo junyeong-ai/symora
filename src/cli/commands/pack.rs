@@ -20,7 +20,7 @@ use crate::services::pack::{PackConfig, PackResult, PackedFile, PackedSymbol, bu
                        \n\
                        Examples:\n  \
                        symora pack --tokens 4000\n  \
-                       symora pack --tokens 8000 --focus src/services/pack.rs\n  \
+                       symora pack --tokens 8000 --focus src/services/pack/mod.rs\n  \
                        symora pack --tokens 2000 --shape markdown"
 )]
 pub struct PackArgs {

@@ -1,0 +1,1117 @@
+//! The build manifests and configuration files that declare the names a
+//! project's imports are written against, read by each file's own format.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use super::Node;
+use super::graph::{as_script_module, is_javascript, split_components};
+use crate::models::symbol::Language;
+
+/// What a project's build manifests declare about the names its own imports
+/// are written against, where those names are not paths on disk. Reading them
+/// is how the languages themselves resolve such imports; inferring the names
+/// from the tree would be a guess about which components are real.
+#[derive(Default)]
+pub(super) struct Manifests {
+    /// The module path each `go.mod` declares, by the directory it roots. Go
+    /// has no relative import form in a module, so every import of a project
+    /// package spells its module's path in full.
+    pub(super) go_modules: HashMap<Vec<String>, Vec<String>>,
+    /// The name each `pubspec.yaml` gives the Dart package rooted at its
+    /// directory: a `package:name/x.dart` URI is that directory's
+    /// `lib/x.dart`.
+    pub(super) dart_packages: HashMap<Vec<String>, String>,
+    /// The Cargo package each `Cargo.toml` with a `[package]` roots at its
+    /// directory.
+    pub(super) rust_packages: HashMap<Vec<String>, RustPackage>,
+    /// The directories each Python project puts on `sys.path`, by the
+    /// directory of the configuration files that make it one.
+    pub(super) python_projects: HashMap<Vec<String>, Vec<Vec<String>>>,
+    /// The TypeScript configuration each `tsconfig.json`, or a
+    /// `jsconfig.json` where a directory holds none, gives the files below it.
+    pub(super) ts_configs: HashMap<Vec<String>, TsConfig>,
+    /// Each package a JavaScript workspace lists, by its directory.
+    pub(super) js_packages: HashMap<Vec<String>, JsPackage>,
+}
+
+/// A package of a JavaScript workspace: the name its `package.json` gives
+/// it, the workspace root whose `workspaces` (or `pnpm-workspace.yaml`) makes
+/// it a member, and the fields that say which file the name and its
+/// subpaths stand for.
+#[derive(Debug, Clone)]
+pub(super) struct JsPackage {
+    pub(super) name: String,
+    pub(super) workspace: Vec<String>,
+    pub(super) exports: Option<serde_json::Value>,
+    pub(super) types: Option<String>,
+    pub(super) main: Option<String>,
+}
+
+/// What a TypeScript configuration, with every configuration it extends,
+/// says about the specifiers its files import: the directory `baseUrl`
+/// names, and each `paths` pattern with its substitutions, which resolve
+/// against `baseUrl` or, without one, the directory of the configuration
+/// declaring them.
+#[derive(Debug, Clone, Default)]
+pub(super) struct TsConfig {
+    pub(super) base_url: Option<Vec<String>>,
+    pub(super) paths: Vec<(String, Vec<String>)>,
+    pub(super) paths_base: Vec<String>,
+}
+
+impl TsConfig {
+    /// The module paths the `paths` pattern a specifier matches maps it to,
+    /// in the order its substitutions are written, or `None` where it matches
+    /// none. An exact pattern wins, then the one whose prefix before `*` is
+    /// longest, as TypeScript picks.
+    pub(super) fn mapped(&self, specifier: &str) -> Option<Vec<Vec<String>>> {
+        let (substitutions, star) = self
+            .paths
+            .iter()
+            .find(|(pattern, _)| pattern == specifier)
+            .map(|(_, substitutions)| (substitutions, ""))
+            .or_else(|| {
+                self.paths
+                    .iter()
+                    .filter_map(|(pattern, substitutions)| {
+                        let (prefix, suffix) = pattern.split_once('*')?;
+                        let star = specifier.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                        Some((prefix.len(), substitutions, star))
+                    })
+                    .max_by_key(|(prefix, _, _)| *prefix)
+                    .map(|(_, substitutions, star)| (substitutions, star))
+            })?;
+        Some(
+            substitutions
+                .iter()
+                .filter_map(|substitution| {
+                    script_path(&self.paths_base, &substitution.replacen('*', star, 1))
+                })
+                .collect(),
+        )
+    }
+}
+
+/// What Cargo builds of a package: its library, where it has one, and the
+/// directory of each target's root file, where that crate's module paths
+/// start.
+#[derive(Debug, Clone, Default)]
+pub(super) struct RustPackage {
+    pub(super) library: Option<RustLibrary>,
+    pub(super) roots: Vec<Vec<String>>,
+}
+
+/// A Cargo package's library: the name other crates import it by, and the
+/// directory holding its root file.
+#[derive(Debug, Clone)]
+pub(super) struct RustLibrary {
+    pub(super) name: String,
+    pub(super) root: Vec<String>,
+}
+
+impl Manifests {
+    pub(super) fn read(root: &Path, nodes: &[Node]) -> Self {
+        let go_modules =
+            manifests_above(root, nodes, |language| language == Language::Go, "go.mod")
+                .into_iter()
+                .filter_map(|(directory, go_mod)| Some((directory, go_module_path(&go_mod)?)))
+                .collect();
+        let dart_packages = manifests_above(
+            root,
+            nodes,
+            |language| language == Language::Dart,
+            "pubspec.yaml",
+        )
+        .into_iter()
+        .filter_map(|(directory, pubspec)| Some((directory, dart_package_name(&pubspec)?)))
+        .collect();
+        let rust_files: HashSet<&Path> = nodes
+            .iter()
+            .filter(|node| node.language == Language::Rust)
+            .map(|node| Path::new(&node.rel_path))
+            .collect();
+        let rust_packages = manifests_above(
+            root,
+            nodes,
+            |language| language == Language::Rust,
+            "Cargo.toml",
+        )
+        .into_iter()
+        .filter_map(|(directory, cargo)| {
+            let package = cargo_package(&directory, &cargo, &rust_files)?;
+            Some((directory, package))
+        })
+        .collect();
+        Self {
+            go_modules,
+            dart_packages,
+            rust_packages,
+            python_projects: python_projects(root, nodes),
+            ts_configs: ts_configs(root, nodes),
+            js_packages: js_packages(root, nodes),
+        }
+    }
+
+    /// The directory a `crate::` path written in `from` starts at: that of the
+    /// root file of the one target of its package whose directory holds it.
+    /// A file under a target directory of its own (`src/bin/`, `tests/`,
+    /// `examples/`, `benches/`), or below two targets' roots at once, belongs
+    /// to a crate its location does not determine, and so does a file no
+    /// `Cargo.toml` governs.
+    pub(super) fn rust_crate_root(&self, from: &Node) -> Option<&[String]> {
+        let (directory, package) = nearest(&self.rust_packages, &from.directory)?;
+        let target = match &from.directory[directory.len()..] {
+            [first, second, ..] if first == "src" && second == "bin" => true,
+            [first, ..] => matches!(first.as_str(), "tests" | "examples" | "benches"),
+            [] => false,
+        };
+        if target {
+            return None;
+        }
+        let mut holding = package
+            .roots
+            .iter()
+            .filter(|root| from.directory.starts_with(root));
+        match (holding.next(), holding.next()) {
+            (Some(root), None) => Some(root),
+            _ => None,
+        }
+    }
+
+    /// The root directory of the project library a Rust path's first segment
+    /// names, by the rule every manifest name follows (`own_or_only`).
+    pub(super) fn rust_library(&self, name: &str, from: &Node) -> Option<&[String]> {
+        own_or_only(&self.rust_packages, from, |package| {
+            package
+                .library
+                .as_ref()
+                .is_some_and(|library| library.name == name)
+        })
+        .and_then(|(_, package)| package.library.as_ref())
+        .map(|library| library.root.as_slice())
+    }
+
+    /// The directory a Go import path names in the project, as the go command
+    /// finds it. The module providing a package is the one with the longest
+    /// path the import path begins with — where two `go.mod` files declare
+    /// that path, the one every manifest name means (`own_or_only`) — and the
+    /// package is the directory as far below that module's root, unless a
+    /// `go.mod` of its own makes that directory another module, which the
+    /// first does not contain. An import path under no module the project
+    /// declares names a package the importer's own module vendors, or nothing
+    /// in the project.
+    pub(super) fn go_package(&self, import: &[String], from: &Node) -> Option<Vec<String>> {
+        let longest = self
+            .go_modules
+            .values()
+            .filter(|module| import.starts_with(module))
+            .map(Vec::len)
+            .max();
+        let Some(longest) = longest else {
+            let (own, _) = nearest(&self.go_modules, &from.directory)?;
+            let mut vendored = own.clone();
+            vendored.push("vendor".to_string());
+            vendored.extend_from_slice(import);
+            return Some(vendored);
+        };
+        let (root, _) = own_or_only(&self.go_modules, from, |module| {
+            module.len() == longest && import.starts_with(module)
+        })?;
+        let mut directory = root.clone();
+        directory.extend_from_slice(&import[longest..]);
+        let nested = self
+            .go_modules
+            .keys()
+            .any(|other| other.len() > root.len() && directory.starts_with(other));
+        (!nested).then_some(directory)
+    }
+
+    /// The directory of the package a `package:name/…` URI written in `from`
+    /// names, by the rule every manifest name follows (`own_or_only`).
+    pub(super) fn dart_package(&self, name: &str, from: &Node) -> Option<&[String]> {
+        own_or_only(&self.dart_packages, from, |declared| declared == name)
+            .map(|(directory, _)| directory.as_slice())
+    }
+}
+
+/// The manifest nearest above `directory`, with the directory holding it.
+pub(super) fn nearest<'m, T>(
+    manifests: &'m HashMap<Vec<String>, T>,
+    directory: &[String],
+) -> Option<(&'m Vec<String>, &'m T)> {
+    (0..=directory.len())
+        .rev()
+        .find_map(|depth| manifests.get_key_value(&directory[..depth]))
+}
+
+/// The one of the manifests declaring a name that an importer means: its own
+/// — the nearest above it — where that one `declares` the name, otherwise the
+/// only one in the project that does. Where several do and none is the
+/// importer's own, which of them it depends on is configuration pack does not
+/// read, so the name means none of them.
+pub(super) fn own_or_only<'m, T>(
+    manifests: &'m HashMap<Vec<String>, T>,
+    from: &Node,
+    declares: impl Fn(&T) -> bool,
+) -> Option<(&'m Vec<String>, &'m T)> {
+    if let Some(own) = nearest(manifests, &from.directory)
+        && declares(own.1)
+    {
+        return Some(own);
+    }
+    let mut declaring = manifests.iter().filter(|(_, manifest)| declares(manifest));
+    match (declaring.next(), declaring.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+/// Each directory holding a `manifest` file on the way from a file of a
+/// `language` it takes up to the project root, with the manifest's contents — every manifest
+/// that governs some file of that language, wherever it sits.
+fn manifests_above(
+    root: &Path,
+    nodes: &[Node],
+    language: impl Fn(Language) -> bool,
+    manifest: &str,
+) -> Vec<(Vec<String>, String)> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for node in nodes.iter().filter(|node| language(node.language)) {
+        for depth in (0..=node.directory.len()).rev() {
+            let directory = &node.directory[..depth];
+            // Every directory above one already visited was visited with it.
+            if !seen.insert(directory) {
+                break;
+            }
+            let path = directory
+                .iter()
+                .fold(root.to_path_buf(), |path, part| path.join(part))
+                .join(manifest);
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                found.push((directory.to_vec(), contents));
+            }
+        }
+    }
+    found
+}
+
+/// The package name a `pubspec.yaml` declares in its top-level `name` key.
+fn dart_package_name(pubspec: &str) -> Option<String> {
+    pubspec
+        .lines()
+        .find_map(|line| line.strip_prefix("name:"))
+        .map(|name| {
+            name.split(" #")
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .trim_matches(['"', '\''])
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+}
+
+/// What a `Cargo.toml` declares, where it declares a package: its library —
+/// named by `[lib] name` or the package's name with `-` read as `_`, its root
+/// file where `[lib] path` (by default `src/lib.rs`) puts it — and the
+/// directory of every target root file: the library's, each `[[bin]]` path's,
+/// and `src/` for `src/main.rs`. A target counts only where its root file is a
+/// project file; a workspace's own manifest declares no package.
+fn cargo_package(
+    directory: &[String],
+    cargo_toml: &str,
+    rust_files: &HashSet<&Path>,
+) -> Option<RustPackage> {
+    let manifest: toml::Table = toml::from_str(cargo_toml).ok()?;
+    let package = manifest.get("package")?.as_table()?.get("name")?.as_str()?;
+    let project_file = |path: &str| {
+        let mut file = directory.to_vec();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                // A root file outside the package's own tree is not followed.
+                ".." => return None,
+                part => file.push(part.to_string()),
+            }
+        }
+        let present = rust_files.contains(file.iter().collect::<PathBuf>().as_path());
+        file.pop();
+        present.then_some(file)
+    };
+    let lib = manifest.get("lib").and_then(toml::Value::as_table);
+    let setting = |key| {
+        lib.and_then(|lib| lib.get(key))
+            .and_then(toml::Value::as_str)
+    };
+    let library = project_file(setting("path").unwrap_or("src/lib.rs")).map(|root| RustLibrary {
+        name: setting("name").unwrap_or(package).replace('-', "_"),
+        root,
+    });
+    let bins = manifest
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|bin| bin.get("path")?.as_str())
+        .chain(["src/main.rs"]);
+    let mut roots: Vec<Vec<String>> = library
+        .iter()
+        .map(|library| library.root.clone())
+        .chain(bins.filter_map(project_file))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    Some(RustPackage { library, roots })
+}
+
+/// Every TypeScript configuration above a JavaScript or TypeScript file, by
+/// its directory: the `tsconfig.json` there, or else its `jsconfig.json`.
+fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsConfig> {
+    let mut configs = HashMap::new();
+    for file in ["tsconfig.json", "jsconfig.json"] {
+        for (directory, contents) in manifests_above(root, nodes, is_javascript, file) {
+            if configs.contains_key(&directory) {
+                continue;
+            }
+            let path = [directory.as_slice(), &[file.to_string()]].concat();
+            let config = ts_config(root, &path, &contents);
+            configs.insert(directory, config);
+        }
+    }
+    configs
+}
+
+/// Every package a JavaScript workspace in the project lists: each
+/// `package.json` with a name below a workspace root — a `package.json` with
+/// `workspaces`, or a `pnpm-workspace.yaml` — whose directory one of the
+/// root's globs matches and none of its `!` globs does.
+fn js_packages(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, JsPackage> {
+    let manifests: Vec<(Vec<String>, serde_json::Value)> =
+        manifests_above(root, nodes, is_javascript, "package.json")
+            .into_iter()
+            .filter_map(|(directory, text)| Some((directory, serde_json::from_str(&text).ok()?)))
+            .collect();
+    let mut workspaces: Vec<(Vec<String>, Vec<String>)> = manifests
+        .iter()
+        .filter_map(|(directory, manifest)| {
+            let globs = match manifest.get("workspaces")? {
+                serde_json::Value::Object(workspaces) => workspaces.get("packages")?,
+                globs => globs,
+            };
+            let globs = globs
+                .as_array()?
+                .iter()
+                .filter_map(|glob| glob.as_str().map(str::to_string))
+                .collect();
+            Some((directory.clone(), globs))
+        })
+        .collect();
+    workspaces.extend(
+        manifests_above(root, nodes, is_javascript, "pnpm-workspace.yaml")
+            .into_iter()
+            .map(|(directory, yaml)| (directory, pnpm_workspace_globs(&yaml))),
+    );
+    let mut packages = HashMap::new();
+    for (workspace, globs) in workspaces {
+        let matcher = |globs: &mut dyn Iterator<Item = &str>| {
+            let mut set = globset::GlobSetBuilder::new();
+            for glob in globs {
+                let glob = glob.trim_start_matches("./").trim_end_matches('/');
+                if let Ok(glob) = globset::GlobBuilder::new(glob)
+                    .literal_separator(true)
+                    .build()
+                {
+                    set.add(glob);
+                }
+            }
+            set.build().ok()
+        };
+        let Some(included) = matcher(
+            &mut globs
+                .iter()
+                .filter(|glob| !glob.starts_with('!'))
+                .map(String::as_str),
+        ) else {
+            continue;
+        };
+        let excluded = matcher(&mut globs.iter().filter_map(|glob| glob.strip_prefix('!')));
+        for (directory, manifest) in &manifests {
+            let Some(member) = directory.strip_prefix(workspace.as_slice()) else {
+                continue;
+            };
+            let member = member.join("/");
+            if member.is_empty()
+                || !included.is_match(&member)
+                || excluded
+                    .as_ref()
+                    .is_some_and(|excluded| excluded.is_match(&member))
+            {
+                continue;
+            }
+            let field = |key: &str| {
+                manifest
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            };
+            let Some(name) = field("name") else {
+                continue;
+            };
+            packages.insert(
+                directory.clone(),
+                JsPackage {
+                    name,
+                    workspace: workspace.clone(),
+                    exports: manifest.get("exports").cloned(),
+                    types: field("types").or_else(|| field("typings")),
+                    main: field("main"),
+                },
+            );
+        }
+    }
+    packages
+}
+
+/// The package globs a `pnpm-workspace.yaml` lists under `packages:`, as a
+/// block sequence (`- 'packages/*'`) or a flow one (`['packages/*']`).
+fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
+    let unquote = |item: &str| {
+        let item = item.trim();
+        let item = match item.find(" #") {
+            Some(comment) => item[..comment].trim_end(),
+            None => item,
+        };
+        item.trim_matches(['\'', '"']).to_string()
+    };
+    let mut lines = yaml.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("packages:") else {
+            continue;
+        };
+        if let Some(flow) = rest
+            .trim()
+            .strip_prefix('[')
+            .and_then(|flow| flow.split(']').next())
+        {
+            return flow
+                .split(',')
+                .map(unquote)
+                .filter(|glob| !glob.is_empty())
+                .collect();
+        }
+        return lines
+            .take_while(|line| line.trim().is_empty() || line.starts_with([' ', '\t', '-', '#']))
+            .filter_map(|line| line.trim().strip_prefix('-').map(unquote))
+            .filter(|glob| !glob.is_empty())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// What the TypeScript configuration in `file` says, with what it extends.
+fn ts_config(root: &Path, file: &[String], contents: &str) -> TsConfig {
+    let mut chain = Vec::new();
+    ts_config_chain(root, file, Some(contents), &mut chain);
+    let directory = &file[..file.len().saturating_sub(1)];
+    let option = |key: &str| {
+        chain.iter().find_map(|(directory, config)| {
+            let value = config.get("compilerOptions")?.get(key)?;
+            Some((directory, value))
+        })
+    };
+    let base_url =
+        option("baseUrl").and_then(|(directory, value)| project_path(directory, value.as_str()?));
+    let declared = option("paths");
+    let paths = declared
+        .and_then(|(_, paths)| paths.as_object())
+        .into_iter()
+        .flatten()
+        .map(|(pattern, substitutions)| {
+            let substitutions = substitutions
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|substitution| substitution.as_str().map(str::to_string))
+                .collect();
+            (pattern.clone(), substitutions)
+        })
+        .collect();
+    let paths_base = base_url
+        .clone()
+        .or_else(|| declared.map(|(directory, _)| directory.clone()))
+        .unwrap_or_else(|| directory.to_vec());
+    TsConfig {
+        base_url,
+        paths,
+        paths_base,
+    }
+}
+
+/// The configuration in `file`, then each it extends, nearest first: what an
+/// extending configuration sets overrides what it extends, and of several it
+/// extends at once the later wins. Only an `extends` written as a relative
+/// path names a file in the project; a package's configuration is not read.
+fn ts_config_chain(
+    root: &Path,
+    file: &[String],
+    contents: Option<&str>,
+    chain: &mut Vec<(Vec<String>, serde_json::Value)>,
+) {
+    // A configuration extending itself through others would never end.
+    const DEPTH: usize = 16;
+    if chain.len() >= DEPTH {
+        return;
+    }
+    let text = match contents {
+        Some(contents) => contents.to_string(),
+        None => match std::fs::read_to_string(project_file(root, file)) {
+            Ok(text) => text,
+            Err(_) => return,
+        },
+    };
+    let Some(config) = jsonc(&text) else {
+        return;
+    };
+    let directory = file[..file.len().saturating_sub(1)].to_vec();
+    let extends: Vec<String> = match config.get("extends") {
+        Some(serde_json::Value::String(extended)) => vec![extended.clone()],
+        Some(serde_json::Value::Array(extended)) => extended
+            .iter()
+            .filter_map(|extended| extended.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    chain.push((directory.clone(), config));
+    for extended in extends.iter().rev() {
+        if !(extended.starts_with("./") || extended.starts_with("../")) {
+            continue;
+        }
+        let Some(mut path) = project_path(&directory, extended) else {
+            continue;
+        };
+        // TypeScript takes the name as written, then with `.json` added.
+        if !extended.ends_with(".json")
+            && !project_file(root, &path).is_file()
+            && let Some(last) = path.last_mut()
+        {
+            last.push_str(".json");
+        }
+        ts_config_chain(root, &path, None, chain);
+    }
+}
+
+/// The file on disk a project path names.
+fn project_file(root: &Path, path: &[String]) -> PathBuf {
+    path.iter()
+        .fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
+/// The module path a JavaScript or TypeScript specifier relative to
+/// `directory` names, without the script extension it may write; none where
+/// it is absolute or climbs out of the project.
+pub(super) fn script_path(directory: &[String], specifier: &str) -> Option<Vec<String>> {
+    let mut path = project_path(directory, specifier)?;
+    as_script_module(&mut path);
+    Some(path)
+}
+
+/// A JSON-with-comments document, as `tsconfig.json` is, read as JSON: its
+/// `//` and `/* */` comments, and the commas it allows before a closing
+/// bracket, removed wherever they stand outside a string.
+fn jsonc(text: &str) -> Option<serde_json::Value> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            plain.push(c);
+            match c {
+                '\\' => plain.extend(chars.next()),
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                plain.push(c);
+            }
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        plain.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+                plain.push(' ');
+            }
+            _ => plain.push(c),
+        }
+    }
+    let mut json = String::with_capacity(plain.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, c) in plain.char_indices() {
+        if in_string {
+            json.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+        }
+        let trailing = c == ',' && plain[at + 1..].trim_start().starts_with([']', '}']);
+        if !trailing {
+            json.push(c);
+        }
+    }
+    serde_json::from_str(&json).ok()
+}
+
+/// The files whose presence makes a directory a Python project's: its build
+/// configuration, and the files pytest takes its own from.
+const PYTHON_PROJECT_FILES: [&str; 5] = [
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "pytest.ini",
+    "tox.ini",
+];
+
+/// Every Python project above a Python file, with the directories it puts on
+/// `sys.path`.
+fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, Vec<Vec<String>>> {
+    let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
+    for file in PYTHON_PROJECT_FILES {
+        for (directory, contents) in
+            manifests_above(root, nodes, |language| language == Language::Python, file)
+        {
+            configurations
+                .entry(directory)
+                .or_default()
+                .push((file, contents));
+        }
+    }
+    configurations
+        .into_iter()
+        .map(|(directory, files)| {
+            let roots = python_project_roots(&directory, &files);
+            (directory, roots)
+        })
+        .collect()
+}
+
+/// The directories a Python project at `directory` puts on `sys.path`, from
+/// its configuration `files`: the package locations its build configuration
+/// declares — setuptools' `package-dir` and `packages.find.where` (in
+/// `pyproject.toml` or `setup.cfg`), Poetry's `packages`, Hatch's `packages`
+/// and `sources`, PDM's `package-dir` — or, where it declares none,
+/// setuptools' automatic discovery: the directory itself (a flat layout) and
+/// its `src/` (a src layout). To those it adds what pytest's `pythonpath`
+/// does, read from the one configuration file pytest itself would read.
+pub(super) fn python_project_roots(
+    directory: &[String],
+    files: &[(&str, String)],
+) -> Vec<Vec<String>> {
+    let file = |name: &str| {
+        files
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, contents)| contents.as_str())
+    };
+    let pyproject: Option<toml::Table> =
+        file("pyproject.toml").and_then(|contents| toml::from_str(contents).ok());
+    let setup_cfg = file("setup.cfg").map(ini_sections);
+    let mut declared: Vec<String> = Vec::new();
+    if let Some(pyproject) = &pyproject {
+        declared.extend(pyproject_package_roots(pyproject));
+    }
+    if let Some(package_dir) = setup_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.get("options"))
+        .and_then(|options| options.get("package_dir"))
+    {
+        declared.extend(package_dir.lines().filter_map(|line| {
+            let (package, location) = line.split_once('=')?;
+            root_of_package(package.trim(), location.trim())
+        }));
+    }
+    if let Some(find) = setup_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.get("options.packages.find"))
+        .and_then(|find| find.get("where"))
+    {
+        declared.extend(find.split_whitespace().map(str::to_string));
+    }
+    if declared.is_empty() {
+        declared = vec![".".to_string(), "src".to_string()];
+    }
+    // pytest reads the first of these that configures it, and no other.
+    let pytest_ini = file("pytest.ini").map(ini_sections);
+    let tox_ini = file("tox.ini").map(ini_sections);
+    let pythonpath: Vec<String> = if let Some(ini) = &pytest_ini {
+        ini_list(
+            ini.get("pytest")
+                .and_then(|pytest| pytest.get("pythonpath")),
+        )
+    } else if let Some(options) = pyproject
+        .as_ref()
+        .and_then(|pyproject| toml_at(pyproject, &["tool", "pytest", "ini_options"]))
+    {
+        match options.get("pythonpath") {
+            Some(toml::Value::String(path)) => {
+                path.split_whitespace().map(str::to_string).collect()
+            }
+            Some(paths) => toml_strings(paths),
+            None => Vec::new(),
+        }
+    } else if let Some(pytest) = tox_ini.as_ref().and_then(|ini| ini.get("pytest")) {
+        ini_list(pytest.get("pythonpath"))
+    } else {
+        ini_list(
+            setup_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.get("tool:pytest"))
+                .and_then(|pytest| pytest.get("pythonpath")),
+        )
+    };
+    let mut roots: Vec<Vec<String>> = declared
+        .iter()
+        .chain(&pythonpath)
+        .filter_map(|path| project_path(directory, path))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// The package locations a `pyproject.toml` declares, as paths relative to
+/// its directory.
+fn pyproject_package_roots(pyproject: &toml::Table) -> Vec<String> {
+    let mut roots = Vec::new();
+    let setuptools = toml_at(pyproject, &["tool", "setuptools"]);
+    let package_dir = setuptools
+        .and_then(|setuptools| setuptools.get("package-dir"))
+        .and_then(toml::Value::as_table);
+    for (package, location) in package_dir.into_iter().flatten() {
+        roots.extend(
+            location
+                .as_str()
+                .and_then(|location| root_of_package(package, location)),
+        );
+    }
+    if let Some(find) = setuptools.and_then(|setuptools| toml_at(setuptools, &["packages", "find"]))
+    {
+        match find.get("where") {
+            Some(places) => roots.extend(toml_strings(places)),
+            None => roots.push(".".to_string()),
+        }
+    } else if setuptools.is_some_and(|setuptools| setuptools.contains_key("packages"))
+        && roots.is_empty()
+    {
+        // An explicit package list without a `package-dir` sits at the root.
+        roots.push(".".to_string());
+    }
+    let poetry =
+        toml_value(pyproject, &["tool", "poetry", "packages"]).and_then(toml::Value::as_array);
+    roots.extend(poetry.into_iter().flatten().map(|package| {
+        package
+            .get("from")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(".")
+            .to_string()
+    }));
+    for hatch in [
+        &["tool", "hatch", "build"][..],
+        &["tool", "hatch", "build", "targets", "wheel"],
+    ] {
+        let Some(build) = toml_at(pyproject, hatch) else {
+            continue;
+        };
+        if let Some(packages) = build.get("packages") {
+            roots.extend(toml_strings(packages).iter().map(|package| {
+                match package.trim_end_matches('/').rsplit_once('/') {
+                    Some((parent, _)) => parent.to_string(),
+                    None => ".".to_string(),
+                }
+            }));
+        }
+        match build.get("sources") {
+            Some(toml::Value::Table(rewrites)) => roots.extend(
+                rewrites
+                    .iter()
+                    .filter(|(_, to)| to.as_str() == Some(""))
+                    .map(|(from, _)| from.clone()),
+            ),
+            Some(sources) => roots.extend(toml_strings(sources)),
+            None => {}
+        }
+    }
+    roots.extend(
+        toml_value(pyproject, &["tool", "pdm", "build", "package-dir"])
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+    );
+    roots
+}
+
+/// The directory a package mapping (`package = location`) puts on
+/// `sys.path`: the location itself for the root mapping (`"" = "src"`), and
+/// the one above a top-level package that keeps its own name there. A
+/// mapping that renames a package is not one a directory on `sys.path`
+/// expresses.
+fn root_of_package(package: &str, location: &str) -> Option<String> {
+    if package.is_empty() {
+        return Some(location.to_string());
+    }
+    let location = location.trim_end_matches('/');
+    let (parent, name) = location.rsplit_once('/').unwrap_or((".", location));
+    (!package.contains('.') && name == package).then(|| parent.to_string())
+}
+
+/// A configuration's path, relative to the project directory, as a project
+/// path; none for an absolute one or one that climbs out of the project.
+fn project_path(directory: &[String], path: &str) -> Option<Vec<String>> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut resolved = directory.to_vec();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                resolved.pop()?;
+            }
+            part => resolved.push(part.to_string()),
+        }
+    }
+    Some(resolved)
+}
+
+/// The table a TOML table holds at a dotted path of keys.
+fn toml_at<'t>(table: &'t toml::Table, keys: &[&str]) -> Option<&'t toml::Table> {
+    keys.iter().try_fold(table, |table, key| {
+        table.get(*key).and_then(toml::Value::as_table)
+    })
+}
+
+/// The value a TOML table holds at a dotted path of keys.
+fn toml_value<'t>(table: &'t toml::Table, keys: &[&str]) -> Option<&'t toml::Value> {
+    let (last, path) = keys.split_last()?;
+    toml_at(table, path)?.get(*last)
+}
+
+/// The strings a TOML value holds: itself where it is one, its string items
+/// where it is an array.
+fn toml_strings(value: &toml::Value) -> Vec<String> {
+    match value {
+        toml::Value::String(value) => vec![value.clone()],
+        toml::Value::Array(values) => values
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The whitespace-separated items of an INI value.
+fn ini_list(value: Option<&String>) -> Vec<String> {
+    value
+        .map(|value| value.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// An INI file's sections as Python's configparser reads them: `[section]`
+/// headers, `key = value` or `key: value` entries (keys in lower case) whose
+/// indented lines continue the value, and `#` or `;` comment lines.
+fn ini_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
+    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut section: Option<String> = None;
+    let mut key: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(['#', ';']) {
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            if let (Some(section), Some(key)) = (&section, &key)
+                && let Some(value) = sections
+                    .get_mut(section)
+                    .and_then(|entries| entries.get_mut(key))
+            {
+                value.push('\n');
+                value.push_str(trimmed);
+            }
+            continue;
+        }
+        if let Some(name) = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            section = Some(name.trim().to_string());
+            sections.entry(name.trim().to_string()).or_default();
+            key = None;
+            continue;
+        }
+        key = None;
+        let (Some(current), Some(split)) = (&section, trimmed.find(['=', ':'])) else {
+            continue;
+        };
+        let name = trimmed[..split].trim().to_lowercase();
+        let value = trimmed[split + 1..].trim().to_string();
+        sections
+            .entry(current.clone())
+            .or_default()
+            .insert(name.clone(), value);
+        key = Some(name);
+    }
+    sections
+}
+
+/// The module path a `go.mod` declares, read by that file's lexical rules:
+/// tokens separated by whitespace, `//` comments to the end of a line, a path
+/// that may be written as an interpreted or a raw string, and the directive
+/// on one line or as a `module ( … )` block. A path whose string carries an
+/// escape is not decoded here, so it declares nothing.
+fn go_module_path(go_mod: &str) -> Option<Vec<String>> {
+    let mut lines = go_mod.lines().map(go_mod_tokens);
+    while let Some(tokens) = lines.next() {
+        let path = match tokens.as_slice() {
+            [Some(verb), Some(open)] if verb == "module" && open == "(" => lines
+                .find(|line| !line.is_empty())
+                .and_then(|line| match line.as_slice() {
+                    [path] => path.clone(),
+                    _ => None,
+                }),
+            [Some(verb), path] if verb == "module" => path.clone(),
+            _ => continue,
+        };
+        return path
+            .map(|path| split_components(&path))
+            .filter(|path| !path.is_empty());
+    }
+    None
+}
+
+/// The tokens of one `go.mod` line, `None` standing for a string whose value
+/// is not decoded here.
+fn go_mod_tokens(line: &str) -> Vec<Option<String>> {
+    const PUNCTUATION: [char; 7] = ['(', ')', '[', ']', '{', '}', ','];
+    let mut tokens = Vec::new();
+    let mut rest = line.trim_start();
+    while !rest.is_empty() && !rest.starts_with("//") {
+        let first = rest.chars().next().expect("a non-empty line");
+        if PUNCTUATION.contains(&first) {
+            tokens.push(Some(first.to_string()));
+            rest = &rest[1..];
+        } else if first == '"' || first == '`' {
+            let Some(end) = rest[1..].find(first) else {
+                tokens.push(None);
+                break;
+            };
+            let value = &rest[1..1 + end];
+            tokens.push((first == '`' || !value.contains('\\')).then(|| value.to_string()));
+            rest = &rest[end + 2..];
+        } else {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || PUNCTUATION.contains(&c))
+                .unwrap_or(rest.len());
+            let end = rest[..end].find("//").unwrap_or(end);
+            tokens.push(Some(rest[..end].to_string()));
+            rest = &rest[end..];
+        }
+        rest = rest.trim_start();
+    }
+    tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `pubspec.yaml` names its package in its top-level `name` key, not in
+    /// an indented one.
+    #[test]
+    fn a_pubspec_names_its_package_in_its_top_level_name_key() {
+        assert_eq!(
+            dart_package_name("  name: nested\nname: \"quoted\"\n"),
+            Some("quoted".into())
+        );
+    }
+
+    /// A `tsconfig.json` is JSON with comments and trailing commas, and a
+    /// comment marker inside a string is part of the string.
+    #[test]
+    fn a_typescript_configuration_is_read_as_json_with_comments() {
+        assert_eq!(
+            jsonc("{\"a\": \"// not a comment\", \"b\": [1, 2,], /* c */}"),
+            Some(serde_json::json!({"a": "// not a comment", "b": [1, 2]}))
+        );
+    }
+
+    /// `pnpm-workspace.yaml` lists its packages as a flow or a block
+    /// sequence, and the list ends where the next top-level key begins.
+    #[test]
+    fn a_pnpm_workspace_lists_its_packages_in_either_sequence_form() {
+        assert_eq!(
+            pnpm_workspace_globs("packages: ['a/*', \"b/**\"]\n"),
+            vec!["a/*", "b/**"]
+        );
+        assert_eq!(
+            pnpm_workspace_globs("packages:\n  - a/*\n\n  - \"b\"\ncatalog:\n  - c\n"),
+            vec!["a/*", "b"]
+        );
+    }
+
+    /// `go.mod` is read by its own lexical rules, not as a line beginning
+    /// `module `: the path may be quoted or followed by a comment, the
+    /// directive may be a block, and a commented-out directive is no
+    /// directive.
+    #[test]
+    fn a_go_mod_module_directive_is_read_as_go_mod_spells_it() {
+        for go_mod in [
+            "module github.com/acme/widget\n\ngo 1.24\n",
+            "module github.com/acme/widget // the widget\n",
+            "module\tgithub.com/acme/widget\n",
+            "module \"github.com/acme/widget\"\n",
+            "module `github.com/acme/widget`\n",
+            "// module example.com/fake\nmodule (\n\t// the widget\n\tgithub.com/acme/widget\n)\n",
+            "  module github.com/acme/widget//vanity\r\n",
+        ] {
+            assert_eq!(
+                go_module_path(go_mod),
+                Some(split_components("github.com/acme/widget")),
+                "{go_mod:?}"
+            );
+        }
+        for go_mod in [
+            "module \"github.com/acme/wi\\x64get\"\n",
+            "// module example.com/fake\n",
+            "module\n",
+            "modules example.com/fake\n",
+        ] {
+            assert_eq!(go_module_path(go_mod), None, "{go_mod:?}");
+        }
+    }
+}
