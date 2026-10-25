@@ -64,6 +64,12 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut rust_relative_imports_omitted = false;
     let mut undetermined_imports = BTreeSet::new();
     let mut ts_owner_undetermined = BTreeSet::new();
+    // The configurations each TypeScript project's references reach, and
+    // whether one of them maps a specifier, each worked out once for every
+    // file no project compiles below it. A specifier's mapping is the same
+    // for every JavaScript-family importer, which imports any of their files.
+    let mut reached: HashMap<usize, Vec<&TsConfig>> = HashMap::new();
+    let mut mapped: HashMap<usize, HashMap<String, bool>> = HashMap::new();
     for node in nodes {
         graph.entry(node.id).or_default();
         let importer = Importer::of(node, manifests);
@@ -75,14 +81,24 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
             .chain(requires.map(|target| (target, ImportForm::Require)));
         for (target, form) in written {
             let reference = Reference::parse(target, node.language);
-            if let Reference::Bare(specifier) = &reference
-                && (importer.ts_owner_undetermined
-                    || importer
-                        .ts_uncompiled
+            if let Reference::Bare(specifier) = &reference {
+                let uncompiled_maps = importer.ts_uncompiled.is_some_and(|project| {
+                    let answers = mapped.entry(project).or_default();
+                    if let Some(answer) = answers.get(specifier.as_str()) {
+                        return *answer;
+                    }
+                    let configs = reached
+                        .entry(project)
+                        .or_insert_with(|| manifests.reached(project));
+                    let answer = configs
                         .iter()
-                        .any(|config| index.config_maps(config, specifier, node.language)))
-            {
-                ts_owner_undetermined.insert(node.rel_path.clone());
+                        .any(|config| index.config_maps(config, specifier, node.language));
+                    answers.insert(specifier.clone(), answer);
+                    answer
+                });
+                if importer.ts_owner_undetermined || uncompiled_maps {
+                    ts_owner_undetermined.insert(node.rel_path.clone());
+                }
             }
             let files = match index.resolve(&reference, &importer, form) {
                 Resolution::Files(files) => files,
@@ -133,9 +149,10 @@ struct Importer<'a> {
     /// Whether the projects compiling the file say different things about
     /// specifiers, so that its specifiers are read without a configuration.
     ts_owner_undetermined: bool,
-    /// The configurations that could have been meant for a file no project
-    /// the `references` above it reach compiles, which is read without one.
-    ts_uncompiled: Vec<&'a TsConfig>,
+    /// The project whose configuration, with those its references reach,
+    /// could have been meant for a file no project those `references` reach
+    /// compiles, which is read without one.
+    ts_uncompiled: Option<usize>,
     /// How each TypeScript version that may compile the file reads its
     /// imports of a package, each reading once: an import forms an edge only
     /// where they agree.
@@ -188,9 +205,9 @@ impl<'a> Importer<'a> {
             TsOwner::None
         };
         let (ts_config, ts_uncompiled) = match &owner {
-            TsOwner::Config(config) => (Some(*config), Vec::new()),
-            TsOwner::Uncompiled(candidates) => (None, candidates.clone()),
-            TsOwner::None | TsOwner::Undetermined(_) => (None, Vec::new()),
+            TsOwner::Config(config) => (Some(*config), None),
+            TsOwner::Uncompiled(project) => (None, Some(*project)),
+            TsOwner::None | TsOwner::Undetermined(_) => (None, None),
         };
         // A TypeScript file no configuration governs is read under the
         // defaults of the TypeScript versions its directory installs or
