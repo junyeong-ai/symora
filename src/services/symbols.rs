@@ -2924,7 +2924,7 @@ fn assigns_beyond_its_names(node: Node, language: Language, statement: (Node, No
                 part.is_named()
                     && !part.is_extra()
                     && part.kind() != "word"
-                    && shell_bound_name(part, node).is_none()
+                    && shell_sets_beyond_its_name(part, node)
             })
         }
         _ => false,
@@ -2933,24 +2933,45 @@ fn assigns_beyond_its_names(node: Node, language: Language, statement: (Node, No
 
 /// The name a part of the shell statement `statement` declares: an
 /// assignment's where it binds one (`A=1`, not the append `A+=1` or the
-/// element `a[0]=1`), or a name `declare` or `typeset` writes without a value
-/// (`declare -A MAP`), where `export` and `readonly` mark one, for the
-/// environment of the commands the script runs or against assignment.
+/// element `a[0]=1`, which change a variable rather than declare it), and
+/// within `declare` or `typeset`, which declare each name they write, the
+/// name an append or an element's assignment changes (`declare -a
+/// ITEMS[0]=x`, `declare X+=1`) and one written without a value (`declare -A
+/// MAP`), where `export` and `readonly` mark one, for the environment of the
+/// commands the script runs or against assignment. The grammar reads an
+/// element written without a value (`declare -a SLOTS[3]`) as a syntax error,
+/// which names nothing.
 fn shell_bound_name<'t>(part: Node<'t>, statement: Node) -> Option<Node<'t>> {
+    let declares_each = matches!(
+        statement.child(0).map(|keyword| keyword.kind()),
+        Some("declare" | "typeset")
+    );
     match part.kind() {
-        "variable_assignment" => child_of_kind(part, "=")
-            .and(part.child_by_field_name("name"))
-            .filter(|name| name.kind() == "variable_name"),
-        "variable_name"
-            if matches!(
-                statement.child(0).map(|keyword| keyword.kind()),
-                Some("declare" | "typeset")
-            ) =>
-        {
-            Some(part)
+        "variable_assignment" => {
+            let name = part.child_by_field_name("name")?;
+            let name = if declares_each && name.kind() == "subscript" {
+                name.child_by_field_name("name")?
+            } else {
+                name
+            };
+            (declares_each || child_of_kind(part, "=").is_some())
+                .then_some(name)
+                .filter(|name| name.kind() == "variable_name")
         }
+        "variable_name" if declares_each => Some(part),
         _ => None,
     }
+}
+
+/// Whether a part of a shell statement sets more than the name it declares
+/// ([`shell_bound_name`]): it declares none, or it appends to or sets an
+/// element of the variable it declares (`declare -a ITEMS[0]=x`).
+fn shell_sets_beyond_its_name(part: Node, statement: Node) -> bool {
+    shell_bound_name(part, statement).is_none_or(|name| {
+        part.kind() == "variable_assignment"
+            && (child_of_kind(part, "=").is_none()
+                || name.parent().is_some_and(|held| held.id() != part.id()))
+    })
 }
 
 /// Where a declaration's text begins: its node ([`declaration_node`]), or
@@ -4477,17 +4498,17 @@ const RUBY_QUERY: &str = r#"
 "#;
 
 // A script's variables are the ones its own shell assigns, alone, in a
-// declaration command (`export`, `readonly`, `declare`, which also declares a
-// name it gives no value), or several in one statement: at its top
+// declaration command (`export`, `readonly`, `declare`, which declares each
+// name it writes, given a value or not), or several in one statement: at its top
 // level, in an `&&` or `||` list, an `if`, a `case`, a loop's body, a `{ … }`
 // group or a redirected statement, each judged by the nearest scope (see
 // `declares`). A function's body declares none of the script's: it assigns
 // only when the function is called, to whichever variable the name resolves
 // to then — a global, unless `local` made it the function's or a caller's.
 // An assignment written before a command on its line sets that command's
-// environment alone (`TRACE=1 run`, see `shell_line`), and an element
-// (`a[0]=1`) or an append (`A+=1`) assigns to a variable rather than binding
-// one.
+// environment alone (`TRACE=1 run`, see `shell_line`), and outside `declare`
+// an element (`a[0]=1`) or an append (`A+=1`) assigns to a variable rather
+// than binding one.
 const BASH_QUERY: &str = r#"
 (function_definition) @symbol
 (program [(variable_assignment name: (variable_name) "=") (variable_assignments) (declaration_command)] @symbol)
@@ -5698,6 +5719,7 @@ run_it &
                 "variable:REGISTRY",
                 "variable:LIST",
                 "variable:EXTRA",
+                "variable:ITEMS",
                 "variable:ITEM_COUNT",
                 "variable:PLUS_F",
                 "variable:AFTER_NAME",
@@ -6675,8 +6697,8 @@ region     = "us-central1"
                 "a.sh",
                 Language::Bash,
                 "COUNT+=1 TOTAL=2;\nexport PATH+=\":/opt/bin\" EXTRA=1\nexport KEEP=1 OTHER\n\
-                 echo start\nPREFIXED=2 REST+=1\necho hi\n",
-                &["TOTAL", "EXTRA", "KEEP", "PREFIXED"][..],
+                 echo start\nPREFIXED=2 REST+=1\necho hi\ndeclare -a ITEMS[0]=x ITEM_COUNT=1\n",
+                &["TOTAL", "EXTRA", "KEEP", "PREFIXED", "ITEMS", "ITEM_COUNT"][..],
             ),
             (
                 "a.py",
