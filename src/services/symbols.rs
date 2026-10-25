@@ -766,10 +766,13 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
 }
 
 /// The macros a C or C++ class body writes alone before its closing brace,
-/// which the grammar took for a member's type and so took the brace into that
+/// which the grammar took for a member and so took the brace into that
 /// member, leaving the body open past it: a member declaration ends with `;`
-/// or a body, so a name standing alone before `}` is a macro
-/// (`PROTOBUF_TSAN_DECLARE_MEMBER` before a struct's `};`).
+/// or a body, so a member with a plain name for its type that ends with
+/// neither before `}` is what macros write, a name alone
+/// (`PROTOBUF_TSAN_DECLARE_MEMBER` before a struct's `};`), one with its
+/// arguments (`Q_DECLARE_PRIVATE(Job)`) or one after another (`Q_GADGET
+/// QML_VALUE_TYPE(release)`).
 fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
@@ -779,26 +782,24 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
         }
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
-        if node.kind() != "field_declaration" || node.child_by_field_name("declarator").is_some() {
+        if node.kind() != "field_declaration" {
             continue;
         }
-        let Some(written) = node
+        let mut after = node
             .child_by_field_name("type")
-            .filter(|written| written.kind() == "type_identifier")
-        else {
-            continue;
-        };
-        if std::iter::successors(written.next_sibling(), Node::next_sibling)
-            .find(|after| !after.is_extra() || after.is_error())
-            .is_some_and(|after| {
-                after.is_error()
-                    && after.child_count() == 1
-                    && after
-                        .child(0)
-                        .is_some_and(|brace| brace.kind() == "}" && !brace.is_missing())
-            })
-        {
-            macros.push(written.byte_range());
+            .filter(|written| written.kind() == "type_identifier");
+        let mut written = Vec::new();
+        while let Some(part) = after.filter(|part| !part.is_error()) {
+            written.extend(written_words(part).iter().map(Node::byte_range));
+            after = part.next_sibling();
+        }
+        if after.is_some_and(|error| {
+            error.child_count() == 1
+                && error
+                    .child(0)
+                    .is_some_and(|brace| brace.kind() == "}" && !brace.is_missing())
+        }) {
+            macros.extend(written);
         }
     }
     macros
@@ -847,20 +848,7 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
         else {
             continue;
         };
-        let mut leaves = Vec::new();
-        let mut walk = vec![node];
-        while let Some(part) = walk.pop() {
-            if part.is_extra() && !part.is_error() || part.is_missing() {
-                continue;
-            }
-            if part.child_count() == 0 {
-                leaves.push(part);
-                continue;
-            }
-            let mut cursor = part.walk();
-            let children: Vec<_> = part.children(&mut cursor).collect();
-            walk.extend(children.into_iter().rev());
-        }
+        let leaves = written_words(node);
         let at = leaves.partition_point(|leaf| leaf.start_byte() < colon.start_byte());
         let (mut before, width) = leaves.split_at(at);
         let specifier = before.split_last().filter(|(word, _)| {
@@ -1348,6 +1336,27 @@ fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize
         }
     }
     macros
+}
+
+/// The tokens a C or C++ node writes, in order, comments and the tokens the
+/// grammar supplied left out: what a macro is spelled with, blanked word by
+/// word so the lines between them hold.
+fn written_words(node: Node) -> Vec<Node> {
+    let mut words = Vec::new();
+    let mut walk = vec![node];
+    while let Some(part) = walk.pop() {
+        if part.is_extra() && !part.is_error() || part.is_missing() {
+            continue;
+        }
+        if part.child_count() == 0 {
+            words.push(part);
+            continue;
+        }
+        let mut cursor = part.walk();
+        let children: Vec<_> = part.children(&mut cursor).collect();
+        walk.extend(children.into_iter().rev());
+    }
+    words
 }
 
 /// Whether a C or C++ expression holds a call or a literal.
@@ -7674,7 +7683,8 @@ region     = "us-central1"
             declared(
                 "#ifdef __cplusplus\nextern \"C++\" {\n#endif\nclass Version {\n  struct Impl_ {\n    \
                  int major_;\n    MEMBER_MACRO\n  };\n};\nclass Next { int n; };\n\
-                 #ifdef __cplusplus\n}\n#endif\n"
+                 #ifdef __cplusplus\n}\n#endif\n\
+                 class Job {\n  int a;\nprivate:\n  Q_DECLARE_PRIVATE(Job)\n};\nint after(int x);\n"
             ),
             [
                 "class:Version",
@@ -7682,8 +7692,12 @@ region     = "us-central1"
                 "field:major_",
                 "class:Next",
                 "field:n",
+                "class:Job",
+                "field:a",
+                "function:after",
             ],
-            "a name alone before a class body's closing brace is a macro, and the brace closes it"
+            "a name alone or with its arguments before a class body's closing brace is a macro, \
+             and the brace closes it"
         );
         assert_eq!(
             declared(
