@@ -400,11 +400,26 @@ fn declares_es_imports(
 enum Exported {
     /// The files it resolves to: none where the file is only on disk.
     Files(Vec<usize>),
-    /// No file: a target naming none, or no condition the importer matches.
+    /// No target: no condition the importer matches.
     Nothing,
+    /// A path naming no file.
+    Missing,
     /// Which file depends on a condition the importer's configuration leaves
     /// open.
     Undetermined,
+}
+
+impl Exported {
+    /// Whether a lookup stops at this target rather than reading the next
+    /// entry or key: TypeScript passes over a path naming no file, which
+    /// Node and the bundlers resolve and stop at.
+    fn ends_lookup(&self, conditions: ExportConditions) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Missing => !conditions.typescript,
+            Self::Files(_) | Self::Undetermined => true,
+        }
+    }
 }
 
 /// What a set of candidate files names: one file, none, or several — which
@@ -1327,7 +1342,10 @@ impl ProjectIndex<'_> {
     /// `./<subpath>` maps to, read through its conditions (`export_target`).
     /// Without `exports`, or under `node10`, which does not read it, the name
     /// stands for the file its `types`, `typings` or `main` names, else its
-    /// `index`, and a subpath for the file below the package. Under
+    /// `index` — for Node and the bundlers, which read no `types`, its `main`,
+    /// else its `index`, where no `module` or `browser` field names another
+    /// (`bundler_entry_differs`) — and a subpath for the file below the
+    /// package. Under
     /// `classic`, which reads no `package.json`, no name is a package's. A
     /// package whose file pack cannot determine is disclosed: a pattern
     /// `exports` maps, a condition the importer's configuration leaves open,
@@ -1360,9 +1378,12 @@ impl ProjectIndex<'_> {
                 .any(declares)
                 .then(undetermined);
         };
+        let typescript = conditions.is_none_or(|conditions| conditions.typescript);
         let exports = package.exports.as_ref().zip(conditions);
         let Some((exports, conditions)) = exports else {
-            let entries: Vec<&str> = if subpath.is_empty() {
+            let entries: Vec<&str> = if !subpath.is_empty() {
+                vec![subpath]
+            } else if typescript {
                 package
                     .types
                     .as_deref()
@@ -1371,15 +1392,33 @@ impl ProjectIndex<'_> {
                     .chain(["index"])
                     .collect()
             } else {
-                vec![subpath]
-            };
-            return Some(
-                entries
+                package
+                    .main
+                    .as_deref()
                     .into_iter()
-                    .filter_map(|entry| project_path(directory, entry))
-                    .find_map(|path| self.script_target(&path, from.language))
-                    .map_or_else(undetermined, Resolution::Files),
-            );
+                    .chain(["index"])
+                    .collect()
+            };
+            let found = entries
+                .into_iter()
+                .filter_map(|entry| project_path(directory, entry))
+                .find_map(|path| self.script_target(&path, from.language));
+            return Some(match found {
+                Some(files)
+                    if !typescript
+                        && subpath.is_empty()
+                        && self.bundler_entry_differs(
+                            package,
+                            directory,
+                            &files,
+                            from.language,
+                        ) =>
+                {
+                    undetermined()
+                }
+                Some(files) => Resolution::Files(files),
+                None => undetermined(),
+            });
         };
         let key = if subpath.is_empty() {
             ".".to_string()
@@ -1401,13 +1440,44 @@ impl ProjectIndex<'_> {
         })
     }
 
-    /// What an `exports` target names for an importer, as TypeScript reads
-    /// one: a path, which has to start `./`, the file it spells; an array,
-    /// what its first entry naming a file names; a condition object, what the
-    /// target of the first of its keys, in their written order, that the
-    /// importer matches names, where that names a file — nested objects read
-    /// alike. Where a key the importer's configuration leaves open names a
-    /// file that the keys after it do not, the target is undetermined.
+    /// Whether a bundler can take a package without `exports` for another
+    /// file than the `main` (or `index`) Node takes, `files`: its `module`
+    /// field, or its `browser` field — a path, or an object replacing that
+    /// file's path with another or with `false` — naming one.
+    fn bundler_entry_differs(
+        &self,
+        package: &JsPackage,
+        directory: &[String],
+        files: &[usize],
+        language: Language,
+    ) -> bool {
+        let names = |path: &str| {
+            project_path(directory, path).and_then(|path| self.script_target(&path, language))
+        };
+        let names_other = |path: &str| names(path).is_some_and(|named| named != files);
+        package.module.as_deref().is_some_and(names_other)
+            || match &package.browser {
+                Some(serde_json::Value::String(path)) => names_other(path),
+                Some(serde_json::Value::Object(replaced)) => {
+                    replaced.iter().any(|(path, replacement)| {
+                        path.starts_with('.')
+                            && names(path).is_some_and(|named| named == files)
+                            && replacement.as_str().is_none_or(names_other)
+                    })
+                }
+                _ => false,
+            }
+    }
+
+    /// What an `exports` target names for an importer: a path, which has to
+    /// start `./`, the file it spells; an array, what its first entry naming
+    /// a file names; a condition object, what the target of the first of its
+    /// keys, in their written order, that the importer matches names — nested
+    /// objects read alike. TypeScript passes over a target naming no file to
+    /// the next entry or key; Node and the bundlers stop at it, so where they
+    /// resolve the file, the lookup ends there. Where a key the importer's
+    /// configuration leaves open names a file that the keys after it do not,
+    /// the target is undetermined.
     fn export_target(
         &self,
         target: &serde_json::Value,
@@ -1419,12 +1489,12 @@ impl ProjectIndex<'_> {
             serde_json::Value::String(path) if path.starts_with("./") => {
                 project_path(directory, path)
                     .and_then(|path| self.script_target(&path, importer.node.language))
-                    .map_or(Exported::Nothing, Exported::Files)
+                    .map_or(Exported::Missing, Exported::Files)
             }
             serde_json::Value::Array(entries) => entries
                 .iter()
                 .map(|entry| self.export_target(entry, directory, importer, reading))
-                .find(|exported| *exported != Exported::Nothing)
+                .find(|exported| exported.ends_lookup(reading.0))
                 .unwrap_or(Exported::Nothing),
             serde_json::Value::Object(conditions) => {
                 let conditions: Vec<_> = conditions.iter().collect();
@@ -1446,23 +1516,20 @@ impl ProjectIndex<'_> {
             if matched == Some(false) {
                 continue;
             }
-            match self.export_target(target, directory, importer, reading) {
-                Exported::Nothing => {}
-                Exported::Files(files) if matched.is_none() => {
-                    let rest = self.conditional_target(
-                        &conditions[at + 1..],
-                        directory,
-                        importer,
-                        reading,
-                    );
-                    return if rest == Exported::Files(files) {
-                        rest
-                    } else {
-                        Exported::Undetermined
-                    };
-                }
-                exported => return exported,
+            let exported = self.export_target(target, directory, importer, reading);
+            if !exported.ends_lookup(reading.0) {
+                continue;
             }
+            if matched.is_none() {
+                let rest =
+                    self.conditional_target(&conditions[at + 1..], directory, importer, reading);
+                return if rest == exported {
+                    rest
+                } else {
+                    Exported::Undetermined
+                };
+            }
+            return exported;
         }
         Exported::Nothing
     }
@@ -4419,6 +4486,129 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["p10".to_string(), "p7".to_string()])
+        );
+    }
+
+    /// Node and the bundlers take a package without `exports` for its
+    /// `main`, else its `index`, never its `types` (Node 26.12.1 resolves
+    /// each). A bundler's `module` or `browser` field naming another file
+    /// leaves which one open. They stop at the first `exports` key that
+    /// matches, whatever its target names, where tsc 5.9.3, 6.0.3 and 7.0.2
+    /// pass over a target naming no file to the next key.
+    #[test]
+    fn node_and_the_bundlers_take_a_packages_main_and_stop_at_its_first_matched_export() {
+        let names = [
+            "pm", "pmi", "pmod", "same", "pbs", "pbo", "pfs", "pdist", "pend",
+        ];
+        let imports: String = names
+            .iter()
+            .map(|name| format!("import {name} from '{name}'\n"))
+            .collect();
+        let mut nodes = vec![
+            node_in(0, "app/a.js", &imports, Language::JavaScript),
+            node_in(
+                1,
+                "ts/b.ts",
+                "import pend from 'pend'\n",
+                Language::TypeScript,
+            ),
+        ];
+        for file in [
+            "pm/src/main.js",
+            "pm/src/types.ts",
+            "pmi/index.js",
+            "pmod/src/main.js",
+            "pmod/src/esm.js",
+            "same/src/main.js",
+            "pbs/src/main.js",
+            "pbs/src/browser.js",
+            "pbo/src/main.js",
+            "pbo/src/browser.js",
+            "pfs/src/main.js",
+            "pdist/src/index.ts",
+            "pend/src/index.js",
+        ] {
+            let language = if file.ends_with(".ts") {
+                Language::TypeScript
+            } else {
+                Language::JavaScript
+            };
+            nodes.push(node_in(
+                nodes.len(),
+                &format!("packages/{file}"),
+                "",
+                language,
+            ));
+        }
+        let package = |name: &str, fields: &str| {
+            (
+                format!("packages/{name}/package.json"),
+                format!("{{\"name\": \"{name}\", {fields}}}"),
+            )
+        };
+        let main = "\"main\": \"./src/main.js\"";
+        let configs = [
+            (
+                "package.json".to_string(),
+                "{\"workspaces\": [\"packages/*\"]}".to_string(),
+            ),
+            (
+                "ts/package.json".to_string(),
+                "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}".to_string(),
+            ),
+            (
+                "ts/tsconfig.json".to_string(),
+                "{\"compilerOptions\": {\"module\": \"esnext\", \"moduleResolution\": \"bundler\"}}"
+                    .to_string(),
+            ),
+            package("pm", &format!("{main}, \"types\": \"./src/types.ts\"")),
+            package("pmi", "\"main\": \"./dist/index.js\""),
+            package("pmod", &format!("{main}, \"module\": \"./src/esm.js\"")),
+            package("same", &format!("{main}, \"module\": \"./src/main.js\"")),
+            package("pbs", &format!("{main}, \"browser\": \"./src/browser.js\"")),
+            package(
+                "pbo",
+                &format!("{main}, \"browser\": {{\"./src/main.js\": \"./src/browser.js\"}}"),
+            ),
+            package("pfs", &format!("{main}, \"browser\": {{\"fs\": false}}")),
+            package(
+                "pdist",
+                "\"main\": \"./dist/index.js\", \"types\": \"./src/index.ts\"",
+            ),
+            package(
+                "pend",
+                "\"exports\": {\".\": {\"import\": \"./dist/index.mjs\", \
+                 \"default\": \"./src/index.js\"}}",
+            ),
+        ];
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec![
+                "packages/pm/src/main.js",
+                "packages/pmi/index.js",
+                "packages/same/src/main.js",
+                "packages/pfs/src/main.js"
+            ]
+        );
+        assert_eq!(edges(1), vec!["packages/pend/src/index.js"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            ["pbo", "pbs", "pdist", "pend", "pmod"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
         );
     }
 

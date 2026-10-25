@@ -104,6 +104,10 @@ pub(super) struct JsPackage {
     pub(super) exports: Option<serde_json::Value>,
     pub(super) types: Option<String>,
     pub(super) main: Option<String>,
+    /// The bundlers' `module` field, and their `browser` field: a path, or
+    /// an object replacing the package's own paths.
+    pub(super) module: Option<String>,
+    pub(super) browser: Option<serde_json::Value>,
 }
 
 /// Every TypeScript project the tree's configurations describe, each read
@@ -1432,6 +1436,8 @@ fn js_packages(
                     exports: manifest.get("exports").cloned(),
                     types: field("types").or_else(|| field("typings")),
                     main: field("main"),
+                    module: field("module"),
+                    browser: manifest.get("browser").cloned(),
                 },
             );
         }
