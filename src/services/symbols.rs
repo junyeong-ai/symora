@@ -521,8 +521,9 @@ impl SymbolExtractor {
     /// `content` read by this language's grammar, or `None` where it has no
     /// grammar here or the parse failed. C and C++ are read again past the
     /// macros a class definition holds where the grammar took it for a function
-    /// ([`misread_class_macros`]), each spelled as blanks, so every offset
-    /// still addresses `content`.
+    /// ([`misread_class_macros`]) and those a class body writes alone before
+    /// its closing brace ([`brace_swallowing_macros`]), each spelled as blanks,
+    /// so every offset still addresses `content`.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
         let mut parser = entry.parser.lock().ok()?;
@@ -531,7 +532,8 @@ impl SymbolExtractor {
             let mut blanked: Option<Vec<u8>> = None;
             loop {
                 let source = blanked.as_deref().unwrap_or(content.as_bytes());
-                let macros = misread_class_macros(tree.root_node(), source);
+                let mut macros = misread_class_macros(tree.root_node(), source);
+                macros.extend(brace_swallowing_macros(tree.root_node()));
                 if macros.is_empty() {
                     break;
                 }
@@ -742,6 +744,45 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
         }
     }
     inside
+}
+
+/// The macros a C or C++ class body writes alone before its closing brace,
+/// which the grammar took for a member's type and so took the brace into that
+/// member, leaving the body open past it: a member declaration ends with `;`
+/// or a body, so a name standing alone before `}` is a macro
+/// (`PROTOBUF_TSAN_DECLARE_MEMBER` before a struct's `};`).
+fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if !node.has_error() {
+            continue;
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+        if node.kind() != "field_declaration" || node.child_by_field_name("declarator").is_some() {
+            continue;
+        }
+        let Some(written) = node
+            .child_by_field_name("type")
+            .filter(|written| written.kind() == "type_identifier")
+        else {
+            continue;
+        };
+        if std::iter::successors(written.next_sibling(), Node::next_sibling)
+            .find(|after| !after.is_extra() || after.is_error())
+            .is_some_and(|after| {
+                after.is_error()
+                    && after.child_count() == 1
+                    && after
+                        .child(0)
+                        .is_some_and(|brace| brace.kind() == "}" && !brace.is_missing())
+            })
+        {
+            macros.push(written.byte_range());
+        }
+    }
+    macros
 }
 
 /// Whether a C or C++ node after a declaration the grammar ended by supplying
@@ -6404,6 +6445,21 @@ region     = "us-central1"
                 "field:b",
             ],
             "a bit-field's width follows only a data member, so after a function it opens initializers"
+        );
+        assert_eq!(
+            declared(
+                "#ifdef __cplusplus\nextern \"C++\" {\n#endif\nclass Version {\n  struct Impl_ {\n    \
+                 int major_;\n    MEMBER_MACRO\n  };\n};\nclass Next { int n; };\n\
+                 #ifdef __cplusplus\n}\n#endif\n"
+            ),
+            [
+                "class:Version",
+                "struct:Impl_",
+                "field:major_",
+                "class:Next",
+                "field:n",
+            ],
+            "a name alone before a class body's closing brace is a macro, and the brace closes it"
         );
         assert_eq!(
             declared(
