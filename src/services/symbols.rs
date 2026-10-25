@@ -1429,16 +1429,18 @@ fn proves_a_function(node: Node) -> bool {
 
 /// Whether a C++ declaration writes what no macro's invocation `NAME(args)`
 /// can, even one taking a declaration or opening a block (`ONNX_CATCH(const
-/// std::exception& e) {…}`): a specifier only a function takes (`explicit`,
-/// `virtual`), a defaulted or deleted definition, member initializers, an
-/// operator's, conversion's or destructor's name, or after
+/// std::exception& e) {…}`): `explicit`, which only a constructor or a
+/// conversion takes, a defaulted or deleted definition, member
+/// initializers, an operator's, conversion's or destructor's name, or after
 /// the parameters a cv-qualifier, ref-qualifier, exception specification,
 /// virtual specifier, trailing return type or constraint (`Copy() const`,
 /// `value_or(U&& v) && {…}`). The grammar reads other specifiers there too,
 /// the next declaration's among them (`ABSL_DEPRECATE_AND_INLINE()
 /// constexpr`), and `= 0` as a pure specifier, though an invocation may
 /// precede an initializer (`DUCKDB_GUARDED_BY(glock) = 0`); neither is one.
-/// Nor is a cv-qualifier after which the grammar supplied the `;`: the next
+/// Nor is `virtual`: a virtual function has a type, a destructor aside,
+/// whose name proves it, so one written without is an invocation (`virtual
+/// DECLARE_TRACE();`). Nor is a cv-qualifier after which the grammar supplied the `;`: the next
 /// declaration begins with it (`Q_DISABLE_COPY(Foo)` before `const int
 /// limit_`).
 fn only_a_function_writes(node: Node) -> bool {
@@ -1447,7 +1449,6 @@ fn only_a_function_writes(node: Node) -> bool {
         "delete_method_clause",
         "field_initializer_list",
         "explicit_function_specifier",
-        "virtual",
     ]
     .iter()
     .any(|kind| child_of_kind(node, kind).is_some())
@@ -7429,7 +7430,7 @@ region     = "us-central1"
                  ORT_API_T(const char*, GetName, const OrtEpFactory* this_ptr);\n  \
                  static NAN_METHOD(New);\n  Q_DISABLE_COPY(B)\n  static NAN_METHOD(Old);\n  \
                  template <typename R>\n  bool try_lock_for(const R &timeout) DUCKDB_TRY_ACQUIRE(true) {\n    \
-                 return false;\n  }\n  int after;\n};\n"
+                 return false;\n  }\n  virtual DECLARE_TRACE();\n  int after;\n};\n"
             ),
             [
                 "class:B",
