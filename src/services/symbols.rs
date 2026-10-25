@@ -2124,6 +2124,11 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         .filter_map(|(list, item)| Some(children_of_kind(child_of_kind(node, list)?, item)))
         .flatten()
         .filter_map(|bound| child_of_kind(bound, "identifier"))
+        .chain(
+            child_of_kind(node, "identifier_list")
+                .map(|list| children_of_kind(list, "identifier"))
+                .unwrap_or_default(),
+        )
         .collect(),
         Language::Lua => {
             let statement = child_of_kind(node, "assignment_statement").unwrap_or(node);
@@ -3221,7 +3226,7 @@ fn node_kind(node: Node) -> SymbolKind {
         }
         "field_declaration" | "declaration" => field_kind(node),
         "extension_type_representation" => SymbolKind::Field,
-        "top_level_variable_declaration" => SymbolKind::Variable,
+        "top_level_variable_declaration" | "external_variable_declaration" => SymbolKind::Variable,
         "getter_signature" | "setter_signature" => SymbolKind::Property,
         "operator_signature" => SymbolKind::Method,
         "variable_declaration" | "assignment_statement" if lua_function_value(node).is_some() => {
@@ -3752,7 +3757,7 @@ const DART_QUERY: &str = r#"
 (extension_declaration) @symbol
 (extension_type_declaration) @symbol
 (extension_type_representation) @symbol
-(source_file [(type_alias) (top_level_variable_declaration)] @symbol)
+(source_file [(type_alias) (top_level_variable_declaration) (external_variable_declaration)] @symbol)
 (function_signature) @symbol
 (getter_signature) @symbol
 (setter_signature) @symbol
@@ -4922,6 +4927,8 @@ enum E {
 
 abstract class A {
   void am();
+  abstract int af, ag;
+  external int ef;
 }
 
 class C {
@@ -4953,6 +4960,8 @@ void top() {
 final topLevel = 1;
 
 typedef Callback = void Function();
+
+external final int topExternal, otherExternal;
 "#,
             declares: &[
                 "interface:M",
@@ -4962,6 +4971,9 @@ typedef Callback = void Function();
                 "constructor:E/E",
                 "class:A",
                 "method:A/am",
+                "field:A/af",
+                "field:A/ag",
+                "field:A/ef",
                 "class:C",
                 "field:C/field",
                 "field:C/sc",
@@ -4983,6 +4995,8 @@ typedef Callback = void Function();
                 "function:top/helper",
                 "variable:topLevel",
                 "class:Callback",
+                "variable:topExternal",
+                "variable:otherExternal",
             ],
         },
         DeclarationFixture {
