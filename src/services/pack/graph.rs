@@ -158,6 +158,9 @@ enum ImportMode {
 /// file, each `None` where its configuration leaves it open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExportConditions {
+    /// Whether TypeScript resolves the file's imports; where it does not,
+    /// Node and the bundlers do (`Importer::matches`).
+    typescript: bool,
     /// Whether `node` matches: under `node16` and `nodenext`, not under
     /// `bundler`.
     node: Option<bool>,
@@ -189,14 +192,19 @@ impl<'a> Importer<'a> {
             TsOwner::Uncompiled(candidates) => (None, candidates.clone()),
             TsOwner::None | TsOwner::Undetermined(_) => (None, Vec::new()),
         };
-        // A file read without a configuration is read under the defaults of
-        // the TypeScript versions its directory may use; one the projects
-        // compiling it disagree on, under each of theirs.
+        // A TypeScript file no configuration governs is read under the
+        // defaults of the TypeScript versions its directory installs or
+        // declares; one the projects compiling it disagree on, under each
+        // of theirs. A JavaScript file no configuration governs, which
+        // TypeScript compiles only where a configuration's `allowJs` takes
+        // it, and any file where no TypeScript is installed or declared, is
+        // Node's or a bundler's to resolve.
         let unset = ModuleOptions::default();
-        let no_configuration = || {
-            let typescript = manifests.typescript.get(&node.directory);
-            vec![(&unset, typescript.cloned().unwrap_or(TypeScript::Absent))]
-        };
+        let typescript = manifests
+            .typescript
+            .get(&node.directory)
+            .cloned()
+            .unwrap_or_default();
         let readings = match &owner {
             _ if !is_javascript(node.language) => Vec::new(),
             TsOwner::Config(config) => vec![(&config.module_options, config.typescript.clone())],
@@ -204,7 +212,24 @@ impl<'a> Importer<'a> {
                 .iter()
                 .map(|config| (&config.module_options, config.typescript.clone()))
                 .collect(),
-            TsOwner::None | TsOwner::Uncompiled(_) => no_configuration(),
+            TsOwner::None | TsOwner::Uncompiled(_)
+                if node.language == Language::TypeScript && typescript != TypeScript::Absent =>
+            {
+                vec![(&unset, typescript)]
+            }
+            TsOwner::None | TsOwner::Uncompiled(_) => {
+                return Self {
+                    node,
+                    ts_config,
+                    ts_owner_undetermined: false,
+                    ts_uncompiled,
+                    modes: vec![ImportMode::Exports(ExportConditions {
+                        typescript: false,
+                        node: None,
+                        esm: Some(true),
+                    })],
+                };
+            }
         };
         let mut modes = Vec::new();
         for (options, typescript) in readings {
@@ -234,12 +259,31 @@ impl<'a> Importer<'a> {
     /// `getModeForUsageLocation` selects them. A versioned `types@<range>`
     /// key depends on the compiler's own version, and any other key on a
     /// configuration whose `customConditions` its chain leaves undecided.
+    /// Where TypeScript does not resolve the file, Node and the bundlers
+    /// agree on `default`, on `import` for a declaration and `require` for
+    /// a `require`, and on never matching `types`; every other condition —
+    /// `node`, `browser`, `module`, a custom one — some of them match and
+    /// others do not, so it stays open.
     fn matches(
         &self,
         conditions: ExportConditions,
         form: ImportForm,
         condition: &str,
     ) -> Option<bool> {
+        let esm = match form {
+            ImportForm::Declaration => conditions.esm,
+            ImportForm::Require => Some(false),
+        };
+        if !conditions.typescript {
+            return match condition {
+                "default" => Some(true),
+                "import" => esm,
+                "require" => esm.map(|esm| !esm),
+                "node" => conditions.node,
+                _ if condition == "types" || condition.starts_with("types@") => Some(false),
+                _ => None,
+            };
+        }
         if matches!(condition, "types" | "default") {
             return Some(true);
         }
@@ -250,17 +294,11 @@ impl<'a> Importer<'a> {
             return Some(true);
         }
         match condition {
-            "import" | "require" | "node" => {
-                let esm = match form {
-                    ImportForm::Declaration => conditions.esm,
-                    ImportForm::Require => Some(false),
-                };
-                match condition {
-                    "node" => conditions.node,
-                    "import" => esm,
-                    _ => esm.map(|esm| !esm),
-                }
-            }
+            "import" | "require" | "node" => match condition {
+                "node" => conditions.node,
+                "import" => esm,
+                _ => esm.map(|esm| !esm),
+            },
             _ if condition.starts_with("types@") || custom.is_none() => None,
             _ => Some(false),
         }
@@ -284,6 +322,7 @@ fn import_mode(
         Some(ModuleResolution::Node10) => ImportMode::Node10,
         Some(ModuleResolution::Classic) => ImportMode::Classic,
         _ => ImportMode::Exports(ExportConditions {
+            typescript: true,
             node: resolution.map(|resolution| resolution == ModuleResolution::Node16),
             esm: resolution
                 .and_then(|resolution| declares_es_imports(resolution, kind, node, manifests)),
@@ -3632,6 +3671,91 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["p6".to_string()])
+        );
+    }
+
+    /// A file TypeScript does not compile — a JavaScript file no
+    /// configuration takes, or any file where no TypeScript is installed or
+    /// declared — is resolved by Node or a bundler, so a condition stands
+    /// only where they agree: `default`, `import` for a declaration and
+    /// `require` for a `require`, and never `types`; `node`, `browser` and
+    /// the rest some of them match and others do not (`jsnode`, where Node
+    /// prints the `node` file and bundlers take the `import` one).
+    #[test]
+    fn a_file_typescript_does_not_compile_matches_what_node_and_bundlers_agree_on() {
+        let imports = "import a from 'p7'\nimport b from 'p8'\nimport c from 'p9'\n\
+                       import d from 'p10'\n";
+        let nodes = vec![
+            node_in(0, "apps/cli/src/a.js", imports, Language::JavaScript),
+            node_in(
+                1,
+                "apps/cli/src/t.ts",
+                "import p = require('p8')\n",
+                Language::TypeScript,
+            ),
+            node_in(
+                2,
+                "tools/x.mjs",
+                "import b from 'p8'\n",
+                Language::JavaScript,
+            ),
+            node_in(3, "packages/p7/src/node.js", "", Language::JavaScript),
+            node_in(4, "packages/p7/src/esm.js", "", Language::JavaScript),
+            node_in(5, "packages/p8/src/esm.js", "", Language::JavaScript),
+            node_in(6, "packages/p8/src/cjs.js", "", Language::JavaScript),
+            node_in(7, "packages/p9/src/x.d.ts", "", Language::TypeScript),
+            node_in(8, "packages/p9/src/def.js", "", Language::JavaScript),
+            node_in(9, "packages/p10/src/b.js", "", Language::JavaScript),
+            node_in(10, "packages/p10/src/d.js", "", Language::JavaScript),
+        ];
+        let manifests = manifests_of(
+            &[
+                ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+                ("apps/cli/package.json", "{\"type\": \"module\"}"),
+                // TypeScript is declared, but no configuration takes the file.
+                (
+                    "tools/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "packages/p7/package.json",
+                    "{\"name\": \"p7\", \"exports\": {\".\": {\"node\": \"./src/node.js\", \
+                     \"import\": \"./src/esm.js\", \"default\": \"./src/esm.js\"}}}",
+                ),
+                (
+                    "packages/p8/package.json",
+                    "{\"name\": \"p8\", \"exports\": {\".\": {\"import\": \"./src/esm.js\", \
+                     \"require\": \"./src/cjs.js\"}}}",
+                ),
+                (
+                    "packages/p9/package.json",
+                    "{\"name\": \"p9\", \"exports\": {\".\": {\"types\": \"./src/x.d.ts\", \
+                     \"default\": \"./src/def.js\"}}}",
+                ),
+                (
+                    "packages/p10/package.json",
+                    "{\"name\": \"p10\", \"exports\": {\".\": {\"browser\": \"./src/b.js\", \
+                     \"default\": \"./src/d.js\"}}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec!["packages/p8/src/esm.js", "packages/p9/src/def.js"]
+        );
+        assert_eq!(edges(1), vec!["packages/p8/src/cjs.js"]);
+        assert_eq!(edges(2), vec!["packages/p8/src/esm.js"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["p10".to_string(), "p7".to_string()])
         );
     }
 
