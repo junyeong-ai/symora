@@ -4555,10 +4555,11 @@ fn declarator_name(declarator: Node) -> Node {
             "reference_declarator" | "parenthesized_declarator" | "attributed_declarator" => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor).find(|child| {
-                    !matches!(
-                        child.kind(),
-                        "attribute_declaration" | "ms_call_modifier" | "ERROR"
-                    )
+                    !child.is_extra()
+                        && !matches!(
+                            child.kind(),
+                            "attribute_declaration" | "ms_call_modifier" | "ERROR"
+                        )
                 })
             }
             _ => node.child_by_field_name("declarator"),
@@ -7570,7 +7571,7 @@ region     = "us-central1"
             declared(
                 "PyAPI_FUNC(int) Py_IsInitialized(void);\nLUA_API int (lua_gettop) (lua_State *L);\n\
                  typedef Array(uint32_t) IdList;\nstruct S {\n  Array(uint32_t) ids[4];\n  \
-                 int GIT_CALLBACK(read)(void *);\n  M(int)(x);\n};\n\
+                 int GIT_CALLBACK(read)(void *);\n  M(int)(x);\n  int (/*cb*/ *fp)(int);\n};\n\
                  struct Ops {\n  Sint64 (SDLCALL * size)(struct SDL_RWops * context);\n  int after;\n};\n\
                  typedef struct IFooVtbl {\n  HRESULT ( STDMETHODCALLTYPE *QueryInterface )(IFoo * This);\n  \
                  ULONG ( STDMETHODCALLTYPE *AddRef )(IFoo * This);\n} IFooVtbl;\n"
@@ -7581,6 +7582,7 @@ region     = "us-central1"
                 "struct:S",
                 "field:ids",
                 "method:read",
+                "field:fp",
                 "struct:Ops",
                 "field:after",
                 "class:IFooVtbl",
