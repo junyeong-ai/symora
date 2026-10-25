@@ -959,16 +959,7 @@ fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
             || node.kind() == "access_specifier"
-            || std::iter::successors(Some(node), |part| {
-                let mut cursor = part.walk();
-                part.children(&mut cursor).find(|child| !child.is_extra())
-            })
-            .last()
-            .is_some_and(|word| {
-                word.id() != node.id()
-                    && (word.kind() == "primitive_type"
-                        || DECLARATION_OPENERS.contains(&word.kind()))
-            })
+            || node.child_count() > 0 && opens_with_a_declaration_word(node)
     };
     fn invocation(member: Node) -> Option<Node> {
         member
@@ -1100,19 +1091,10 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
         {
             continue;
         }
-        let opens_a_declaration = std::iter::successors(node.next_sibling(), Node::next_sibling)
+        if std::iter::successors(node.next_sibling(), Node::next_sibling)
             .find(|next| !next.is_extra())
-            .and_then(|next| {
-                std::iter::successors(Some(next), |part| {
-                    let mut cursor = part.walk();
-                    part.children(&mut cursor).find(|child| !child.is_extra())
-                })
-                .last()
-            })
-            .is_some_and(|word| {
-                word.kind() == "primitive_type" || DECLARATION_OPENERS.contains(&word.kind())
-            });
-        if opens_a_declaration {
+            .is_some_and(opens_with_a_declaration_word)
+        {
             macros.extend(words[at..].iter().map(Node::byte_range));
         }
     }
@@ -1208,6 +1190,16 @@ fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<
 /// A macro written after a data member's declarator does neither (`idx_t
 /// parked_bytes DUCKDB_GUARDED_BY(glock) = 0;`).
 fn begins_its_own_declaration(node: Node, head: Node, content: &str) -> bool {
+    opens_with_a_declaration_word(node)
+        || child_of_kind(node, "virtual").is_some()
+        || !declares_a_function(head) && proves_a_function(node)
+        || leaves_its_function_to_the_next(head, content)
+}
+
+/// Whether the first word a C or C++ node writes is one only a declaration
+/// opens with ([`DECLARATION_OPENERS`]) or a primitive type, which nothing
+/// written after a declarator or an expression can be.
+fn opens_with_a_declaration_word(node: Node) -> bool {
     std::iter::successors(Some(node), |part| {
         let mut cursor = part.walk();
         part.children(&mut cursor).find(|child| !child.is_extra())
@@ -1215,9 +1207,7 @@ fn begins_its_own_declaration(node: Node, head: Node, content: &str) -> bool {
     .last()
     .is_some_and(|word| {
         word.kind() == "primitive_type" || DECLARATION_OPENERS.contains(&word.kind())
-    }) || child_of_kind(node, "virtual").is_some()
-        || !declares_a_function(head) && proves_a_function(node)
-        || leaves_its_function_to_the_next(head, content)
+    })
 }
 
 /// The node a C or C++ node writes first: itself, or what a preprocessor
@@ -1386,22 +1376,7 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         let Some(opens) = opens else {
             continue;
         };
-        let mut leaves = Vec::new();
-        let mut walk = vec![node];
-        while let Some(part) = walk.pop() {
-            if part.start_byte() >= opens || part.is_extra() && !part.is_error() {
-                continue;
-            }
-            if part.child_count() == 0 {
-                if !part.is_missing() {
-                    leaves.push(part);
-                }
-                continue;
-            }
-            let mut cursor = part.walk();
-            let children: Vec<_> = part.children(&mut cursor).collect();
-            walk.extend(children.into_iter().rev());
-        }
+        let leaves = written_words_before(node, opens);
         let mut depth = 0usize;
         let mut outside = Vec::with_capacity(leaves.len());
         for leaf in &leaves {
@@ -1593,10 +1568,16 @@ fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize
 /// grammar supplied left out: what a macro is spelled with, blanked word by
 /// word so the lines between them hold.
 fn written_words(node: Node) -> Vec<Node> {
+    written_words_before(node, usize::MAX)
+}
+
+/// The tokens a C or C++ node writes before the byte `end`
+/// ([`written_words`]).
+fn written_words_before(node: Node, end: usize) -> Vec<Node> {
     let mut words = Vec::new();
     let mut walk = vec![node];
     while let Some(part) = walk.pop() {
-        if part.is_extra() && !part.is_error() || part.is_missing() {
+        if part.start_byte() >= end || part.is_extra() && !part.is_error() || part.is_missing() {
             continue;
         }
         if part.child_count() == 0 {
@@ -1713,6 +1694,25 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
         }
 }
 
+/// The C or C++ node written right before `node` among its siblings,
+/// comments passed over, a syntax error not.
+fn sibling_before(node: Node) -> Option<Node> {
+    std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+        .find(|before| !before.is_extra() || before.is_error())
+}
+
+/// Whether a C or C++ node is a word of the run of macros and type words a
+/// prototype the grammar could not read is written after: an invocation
+/// whose arguments name nothing ([`names_a_parameter`]), a plain name or a
+/// primitive type.
+fn in_a_prototype_run(part: Node) -> bool {
+    match part.kind() {
+        "function_declarator" => !names_a_parameter(part),
+        "identifier" | "type_identifier" | "primitive_type" => true,
+        _ => false,
+    }
+}
+
 /// Where a prototype the grammar could not read as a declaration begins
 /// and ends, where a C or C++ function declarator a syntax error holds is
 /// one: its parameters name something ([`names_a_parameter`]), and it is
@@ -1726,10 +1726,6 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
 /// with the statement after it, which holds its `;` and any macro written
 /// before that.
 fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
-    fn before(node: Node) -> Option<Node> {
-        std::iter::successors(node.prev_sibling(), Node::prev_sibling)
-            .find(|before| !before.is_extra() || before.is_error())
-    }
     fn after(node: Node) -> Option<Node> {
         std::iter::successors(node.next_sibling(), Node::next_sibling)
             .find(|after| !after.is_extra())
@@ -1741,20 +1737,15 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
     let start = if name_before_parameters(node).is_some() {
         node
     } else {
-        before(node)
-            .or_else(|| before(error))
+        sibling_before(node)
+            .or_else(|| sibling_before(error))
             .filter(|macro_| match macro_.kind() {
                 "call_expression" => true,
                 "function_declarator" => !names_a_parameter(*macro_),
                 "ERROR" => {
                     let mut cursor = macro_.walk();
                     let held: Vec<Node> = macro_.named_children(&mut cursor).collect();
-                    !held.is_empty()
-                        && held.iter().all(|written| match written.kind() {
-                            "function_declarator" => !names_a_parameter(*written),
-                            "identifier" | "type_identifier" | "primitive_type" => true,
-                            _ => false,
-                        })
+                    !held.is_empty() && held.iter().all(|written| in_a_prototype_run(*written))
                 }
                 "expression_statement" => {
                     macro_.named_child_count() == 1
@@ -1789,20 +1780,9 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
 /// direct initializer (`extern T y(b);`). A list of type names alone
 /// (`(chtype)`) reads either way and is left unread.
 fn declares_unnamed_parameters(declarator: Node) -> bool {
-    fn before(node: Node) -> Option<Node> {
-        std::iter::successors(node.prev_sibling(), Node::prev_sibling)
-            .find(|before| !before.is_extra() || before.is_error())
-    }
-    fn in_the_run(part: Node) -> bool {
-        match part.kind() {
-            "function_declarator" => !names_a_parameter(part),
-            "identifier" | "type_identifier" | "primitive_type" => true,
-            _ => false,
-        }
-    }
-    let mut written = before(declarator);
-    while let Some(part) = written.filter(|part| in_the_run(*part)) {
-        written = before(part);
+    let mut written = sibling_before(declarator);
+    while let Some(part) = written.filter(|part| in_a_prototype_run(*part)) {
+        written = sibling_before(part);
     }
     declarator.kind() == "function_declarator"
         && match written {
@@ -1810,7 +1790,7 @@ fn declares_unnamed_parameters(declarator: Node) -> bool {
             None => declarator
                 .parent()
                 .filter(|error| error.is_error())
-                .and_then(before)
+                .and_then(sibling_before)
                 .is_some_and(|part| part.kind() == "storage_class_specifier"),
         }
         && declarator
