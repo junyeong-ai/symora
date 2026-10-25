@@ -3,11 +3,13 @@
 use anyhow::Result;
 
 use crate::app::App;
-use crate::cli::OutputError;
 use crate::cli::commands::search::{ast_query_error, parse_ast_language};
 use crate::cli::response::{EditOutput, LineRange, Section};
-use crate::infra::file_filter::FileFilter;
+use crate::cli::{ErrorCode, OutputError};
+use crate::infra::ast::supported_languages;
+use crate::infra::file_filter::{FileFilter, has_extension};
 use crate::models::lsp::{Position, Range as LspRange, TextEdit};
+use crate::models::symbol::Language;
 use crate::services::ast_query::AstMatch;
 
 use super::finish;
@@ -31,6 +33,42 @@ pub(super) async fn pattern_edit(
 
     let abs_path = resolve_file_path(app, file)?;
     let doc = FileDocument::load(&abs_path, dry_run)?;
+    // The query reads only the files its language's extensions name and none
+    // over the search size limit, so either would answer "no matches" for a
+    // file it never read.
+    if !has_extension(&abs_path, language.extensions()) {
+        let named = Language::from_path(&abs_path);
+        let hint = if supported_languages().contains(&named) {
+            format!("Its extension names {0}: pass `--lang {0}`", named.lsp_id())
+        } else {
+            "Replace a range with `symora edit replace` instead".to_string()
+        };
+        anyhow::bail!(
+            OutputError::invalid(format!(
+                "{file} has no {} extension, so an AST query does not read it",
+                language.lsp_id()
+            ))
+            .with_hint(hint)
+        );
+    }
+    let search = &app.config().search;
+    let size = std::fs::metadata(&abs_path)?.len();
+    if size > search.max_file_size_bytes() {
+        anyhow::bail!(
+            OutputError::new(
+                ErrorCode::FileTooLarge,
+                format!(
+                    "{file} ({:.1} MB) is over search.max_file_size_mb = {}, so an AST query \
+                     does not read it",
+                    size as f64 / (1024.0 * 1024.0),
+                    search.max_file_size_mb
+                ),
+            )
+            .with_hint(
+                "Raise search.max_file_size_mb, or replace a range with `symora edit replace`"
+            )
+        );
+    }
 
     let answer = app
         .ast
