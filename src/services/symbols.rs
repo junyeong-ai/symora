@@ -1038,38 +1038,75 @@ fn invokes_a_macro(node: Node) -> bool {
 /// Whether the grammar read a macro's invocation as a C or C++ declaration
 /// (`Q_DISABLE_COPY(W);`): written without a type under a plain name, as only
 /// a constructor can be, yet not named for a class whose body holds it
-/// ([`named_for_its_class`]), writing nothing only a function's declaration
-/// writes ([`proves_a_function`]), and not the function a declaration cut
-/// short before it left ([`leaves_its_function_to_the_next`]).
+/// ([`named_for_its_class`]). A member function has a type, so in a class
+/// body it is a declaration only where one the grammar cut short before it
+/// holds the type ([`begins_its_own_declaration`]) or it writes what only a
+/// function does, its type lost to another error the grammar recovered from
+/// ([`only_a_function_writes`]), whatever specifiers it writes (`static
+/// NAN_METHOD(New);`); elsewhere a C function may go without one (`main()
+/// {}`), and its own syntax tells it from an invocation
+/// ([`proves_a_function`]).
 fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
+    let Some(declarator) = node
+        .child_by_field_name("declarator")
+        .filter(|declarator| declarator.kind() == "function_declarator")
+    else {
+        return false;
+    };
     node.child_by_field_name("type").is_none()
-        && node
+        && declarator
             .child_by_field_name("declarator")
-            .filter(|declarator| declarator.kind() == "function_declarator")
-            .and_then(|declarator| declarator.child_by_field_name("declarator"))
             .filter(|name| name.kind() == "identifier")
             .and_then(|name| content.get(name.byte_range()))
             .is_some_and(|name| !named_for_its_class(node, name, content))
-        && !proves_a_function(node)
-        && !std::iter::successors(node.prev_sibling(), Node::prev_sibling)
-            .find(|before| !before.is_extra())
-            .is_some_and(|head| leaves_its_function_to_the_next(head, content))
+        && if in_class_body(node) {
+            !only_a_function_writes(node)
+                && !std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+                    .find(|before| !before.is_extra())
+                    .is_some_and(|head| {
+                        ends_on_a_supplied_semicolon(head)
+                            && begins_its_own_declaration(node, head, content)
+                    })
+        } else {
+            !proves_a_function(node)
+        }
 }
 
 /// Whether a C++ declaration's own syntax proves it a function's, as a
-/// macro's invocation `NAME(args)` cannot be: a body or a defaulted or
-/// deleted definition, an operator's, conversion's or destructor's name, a
-/// parameter that declares a name ([`names_a_parameter`]), or after the
-/// parameters a cv-qualifier, ref-qualifier, exception specification,
-/// virtual specifier, trailing return type or constraint (`Copy() const`,
-/// `Run(int x)`). The grammar reads other specifiers there too, the next
-/// declaration's among them (`ABSL_DEPRECATE_AND_INLINE() constexpr`), and
-/// `= 0` as a pure specifier, though an invocation may precede an
-/// initializer (`DUCKDB_GUARDED_BY(glock) = 0`); neither proves one.
+/// macro's invocation `NAME(args)` cannot be: a body or a parameter that
+/// declares a name ([`names_a_parameter`]), which a macro taking a
+/// declaration or opening a block writes as well, or what only a function
+/// writes ([`only_a_function_writes`]).
 fn proves_a_function(node: Node) -> bool {
-    if node.child_by_field_name("body").is_some()
-        || child_of_kind(node, "default_method_clause").is_some()
-        || child_of_kind(node, "delete_method_clause").is_some()
+    node.child_by_field_name("body").is_some()
+        || node
+            .child_by_field_name("declarator")
+            .filter(|declarator| declarator.kind() == "function_declarator")
+            .is_some_and(names_a_parameter)
+        || only_a_function_writes(node)
+}
+
+/// Whether a C++ declaration writes what no macro's invocation `NAME(args)`
+/// can, even one taking a declaration or opening a block (`ONNX_CATCH(const
+/// std::exception& e) {…}`): a specifier only a function takes (`explicit`,
+/// `virtual`), a defaulted or deleted definition, member initializers, an
+/// operator's, conversion's or destructor's name, or after
+/// the parameters a cv-qualifier, ref-qualifier, exception specification,
+/// virtual specifier, trailing return type or constraint (`Copy() const`,
+/// `value_or(U&& v) && {…}`). The grammar reads other specifiers there too,
+/// the next declaration's among them (`ABSL_DEPRECATE_AND_INLINE()
+/// constexpr`), and `= 0` as a pure specifier, though an invocation may
+/// precede an initializer (`DUCKDB_GUARDED_BY(glock) = 0`); neither is one.
+fn only_a_function_writes(node: Node) -> bool {
+    if [
+        "default_method_clause",
+        "delete_method_clause",
+        "field_initializer_list",
+        "explicit_function_specifier",
+        "virtual",
+    ]
+    .iter()
+    .any(|kind| child_of_kind(node, kind).is_some())
     {
         return true;
     }
@@ -1081,24 +1118,23 @@ fn proves_a_function(node: Node) -> bool {
     }
     let mut cursor = declarator.walk();
     declarator.kind() == "function_declarator"
-        && (names_a_parameter(declarator)
-            || declarator.named_children(&mut cursor).any(|part| {
-                part.kind() == "type_qualifier"
-                    && part
-                        .child(0)
-                        .is_some_and(|word| matches!(word.kind(), "const" | "volatile"))
-                    || matches!(
-                        part.kind(),
-                        "operator_name"
-                            | "destructor_name"
-                            | "ref_qualifier"
-                            | "noexcept"
-                            | "throw_specifier"
-                            | "virtual_specifier"
-                            | "trailing_return_type"
-                            | "requires_clause"
-                    )
-            }))
+        && declarator.named_children(&mut cursor).any(|part| {
+            part.kind() == "type_qualifier"
+                && part
+                    .child(0)
+                    .is_some_and(|word| matches!(word.kind(), "const" | "volatile"))
+                || matches!(
+                    part.kind(),
+                    "operator_name"
+                        | "destructor_name"
+                        | "ref_qualifier"
+                        | "noexcept"
+                        | "throw_specifier"
+                        | "virtual_specifier"
+                        | "trailing_return_type"
+                        | "requires_clause"
+                )
+        })
 }
 
 /// Whether a C or C++ function declarator's parameters declare a name
@@ -6437,6 +6473,40 @@ region     = "us-central1"
                 "field:entry",
             ],
             "a declaration the grammar cut short goes on only into what cannot begin one of its own"
+        );
+        assert_eq!(
+            declared(
+                "class B {\n  static constexpr result_type(min)() { return 0; }\n  \
+                 ORT_API_T(const char*, GetName, const OrtEpFactory* this_ptr);\n  \
+                 static NAN_METHOD(New);\n  \
+                 template <typename R>\n  bool try_lock_for(const R &timeout) DUCKDB_TRY_ACQUIRE(true) {\n    \
+                 return false;\n  }\n  int after;\n};\n"
+            ),
+            [
+                "class:B",
+                "method:min",
+                "method:try_lock_for",
+                "field:after",
+            ],
+            "a member function has a type, so one written without is a macro's invocation"
+        );
+        assert_eq!(
+            declared(
+                "class W {\n  int first;\n  Copy() const;\n  Gone() = delete;\n  It() : base_(0) {}\n  \
+                 Value(int&& v) && { return v; }\n  explicit Reporter(Printer* p);\n  \
+                 ONNX_CATCH(const E& e) { handle(e); }\n  int after;\n};\n"
+            ),
+            [
+                "class:W",
+                "field:first",
+                "method:Copy",
+                "method:Gone",
+                "method:It",
+                "method:Value",
+                "method:Reporter",
+                "field:after",
+            ],
+            "unless it writes what no macro's invocation can"
         );
         assert_eq!(
             declared(
