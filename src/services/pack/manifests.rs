@@ -30,8 +30,10 @@ pub(super) struct Manifests {
     /// directory.
     pub(super) rust_packages: HashMap<Vec<String>, RustPackage>,
     /// What each Python project puts on `sys.path`, by the directory of the
-    /// configuration files that make it one.
+    /// build configuration that makes it one.
     pub(super) python_projects: HashMap<Vec<String>, PythonProject>,
+    /// How pytest runs from each directory whose files configure it.
+    pub(super) pytest_configurations: HashMap<Vec<String>, Pytest>,
     /// The TypeScript project each `tsconfig.json`, or a `jsconfig.json`
     /// where a directory holds none, describes, by its directory.
     pub(super) ts_configs: HashMap<Vec<String>, TsProject>,
@@ -267,12 +269,14 @@ impl Manifests {
                 (directory.clone(), module)
             })
             .collect();
+        let (python_projects, pytest_configurations) = python_configurations(root, nodes);
         Self {
             root: Some(root.to_path_buf()),
             go_modules,
             dart_packages,
             rust_packages,
-            python_projects: python_projects(root, nodes),
+            python_projects,
+            pytest_configurations,
             ts_configs: ts_configs(root, nodes),
             js_packages: js_packages(root, nodes, &package_jsons),
             module_types,
@@ -994,9 +998,9 @@ fn jsonc(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&json).ok()
 }
 
-/// The files whose presence makes a directory a Python project's: its build
-/// configuration, and the files pytest takes its own from.
-const PYTHON_PROJECT_FILES: [&str; 5] = [
+/// The files a Python project's build configuration, or pytest's own, is
+/// written in.
+const PYTHON_CONFIGURATION_FILES: [&str; 5] = [
     "pyproject.toml",
     "setup.cfg",
     "setup.py",
@@ -1009,8 +1013,6 @@ const PYTHON_PROJECT_FILES: [&str; 5] = [
 pub(super) struct PythonProject {
     /// The directories its build configuration puts there.
     pub(super) roots: Vec<Vec<String>>,
-    /// How pytest runs, where a file of the project configures it.
-    pub(super) pytest: Option<Pytest>,
     /// The projects in the tree its dependencies install (`python_dependencies`),
     /// by their directories.
     pub(super) dependencies: Vec<Vec<String>>,
@@ -1069,11 +1071,86 @@ impl Default for Pytest {
     }
 }
 
-/// Every Python project above a Python file, with what it puts on
-/// `sys.path`.
-fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, PythonProject> {
+/// The directories of a tree's Python packages: those holding an
+/// `__init__.py`.
+pub(super) fn python_packages(nodes: &[Node]) -> HashSet<&[String]> {
+    nodes
+        .iter()
+        .filter(|node| {
+            node.language == Language::Python
+                && Path::new(&node.rel_path)
+                    .file_stem()
+                    .is_some_and(|stem| stem == "__init__")
+        })
+        .map(|node| node.directory.as_slice())
+        .collect()
+}
+
+/// The Python configuration files one directory holds, read.
+pub(super) struct PythonConfiguration<'f> {
+    pyproject: Option<toml::Table>,
+    /// Whether it holds a `pyproject.toml`, read or not.
+    has_pyproject: bool,
+    setup_cfg: Option<HashMap<String, HashMap<String, String>>>,
+    has_setup_py: bool,
+    pytest_ini: Option<&'f str>,
+    tox_ini: Option<&'f str>,
+}
+
+impl<'f> PythonConfiguration<'f> {
+    fn read(files: &'f [(&str, String)]) -> Self {
+        let file = |name: &str| {
+            files
+                .iter()
+                .find(|(file, _)| *file == name)
+                .map(|(_, contents)| contents.as_str())
+        };
+        Self {
+            pyproject: file("pyproject.toml").and_then(|contents| toml::from_str(contents).ok()),
+            has_pyproject: file("pyproject.toml").is_some(),
+            setup_cfg: file("setup.cfg").map(ini_sections),
+            has_setup_py: file("setup.py").is_some(),
+            pytest_ini: file("pytest.ini"),
+            tox_ini: file("tox.ini"),
+        }
+    }
+
+    /// Whether the directory's files configure a build, which is what makes
+    /// it a project's: a `setup.py`, or a `pyproject.toml` or `setup.cfg`
+    /// holding more than pytest's own table. `pytest.ini` and `tox.ini`
+    /// configure tools, never a build.
+    fn configures_a_build(&self) -> bool {
+        let pytest_only_toml = self.pyproject.as_ref().is_some_and(|pyproject| {
+            pyproject.keys().all(|key| key == "tool")
+                && toml_at(pyproject, &["tool"])
+                    .is_some_and(|tool| !tool.is_empty() && tool.keys().all(|key| key == "pytest"))
+        });
+        let pytest_only_cfg = self.setup_cfg.as_ref().is_some_and(|sections| {
+            !sections.is_empty() && sections.keys().all(|section| section == "tool:pytest")
+        });
+        self.has_setup_py
+            || (self.has_pyproject && !pytest_only_toml)
+            || (self.setup_cfg.is_some() && !pytest_only_cfg)
+    }
+}
+
+/// What the Python files of a project tree are configured by: every
+/// project above a Python file, with what it puts on `sys.path`, and every
+/// pytest configuration there, each by its directory. A directory is a
+/// project's where its files configure a build
+/// (`PythonConfiguration::configures_a_build`) and it is no package — one
+/// holding `__init__.py` is part of the project above it, its `setup.py` a
+/// module like any other.
+fn python_configurations(
+    root: &Path,
+    nodes: &[Node],
+) -> (
+    HashMap<Vec<String>, PythonProject>,
+    HashMap<Vec<String>, Pytest>,
+) {
+    let packages = python_packages(nodes);
     let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
-    for file in PYTHON_PROJECT_FILES {
+    for file in PYTHON_CONFIGURATION_FILES {
         for (directory, contents) in
             manifests_above(root, nodes, |language| language == Language::Python, file)
         {
@@ -1083,21 +1160,30 @@ fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, PythonPr
                 .push((file, contents));
         }
     }
-    let pyprojects: HashMap<&[String], toml::Table> = configurations
-        .iter()
-        .filter_map(|(directory, files)| {
-            let (_, contents) = files.iter().find(|(file, _)| *file == "pyproject.toml")?;
-            Some((directory.as_slice(), toml::from_str(contents).ok()?))
-        })
-        .collect();
-    configurations
-        .iter()
-        .map(|(directory, files)| {
-            let mut project = python_project(directory, files);
+    let mut pytest = HashMap::new();
+    let mut pyprojects: HashMap<&[String], toml::Table> = HashMap::new();
+    let mut projects = Vec::new();
+    for (directory, files) in &configurations {
+        let mut configuration = PythonConfiguration::read(files);
+        if let Some(options) = configuration.pytest(directory) {
+            pytest.insert(directory.clone(), options);
+        }
+        if packages.contains(directory.as_slice()) || !configuration.configures_a_build() {
+            continue;
+        }
+        projects.push((directory, python_project(directory, Some(&configuration))));
+        if let Some(pyproject) = configuration.pyproject.take() {
+            pyprojects.insert(directory.as_slice(), pyproject);
+        }
+    }
+    let projects = projects
+        .into_iter()
+        .map(|(directory, mut project)| {
             project.dependencies = python_dependencies(directory, &pyprojects);
             (directory.clone(), project)
         })
-        .collect()
+        .collect();
+    (projects, pytest)
 }
 
 /// The projects in the tree that the project at `directory` declares a
@@ -1224,29 +1310,24 @@ fn distribution_name(name: &str) -> String {
 }
 
 /// What a Python project at `directory` puts on `sys.path`, from its
-/// configuration `files`: the package locations its build configuration
-/// declares — setuptools' `package-dir` and `packages.find.where` (in
+/// `configuration`: the package locations its build configuration declares
+/// — setuptools' `package-dir` and `packages.find.where` (in
 /// `pyproject.toml` or `setup.cfg`), Poetry's `packages`, Hatch's `packages`
 /// and `sources`, PDM's `package-dir` — or, where it declares none,
 /// setuptools' automatic discovery: the directory itself (a flat layout) and
-/// its `src/` (a src layout); and what pytest does, read from the one
-/// configuration file pytest itself would read (`pytest_options`).
-pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> PythonProject {
-    let file = |name: &str| {
-        files
-            .iter()
-            .find(|(file, _)| *file == name)
-            .map(|(_, contents)| contents.as_str())
-    };
-    let pyproject: Option<toml::Table> =
-        file("pyproject.toml").and_then(|contents| toml::from_str(contents).ok());
-    let setup_cfg = file("setup.cfg").map(ini_sections);
+/// its `src/` (a src layout). A project without a configuration (the
+/// project root where none is there) is read with none.
+pub(super) fn python_project(
+    directory: &[String],
+    configuration: Option<&PythonConfiguration>,
+) -> PythonProject {
+    let pyproject = configuration.and_then(|configuration| configuration.pyproject.as_ref());
+    let setup_cfg = configuration.and_then(|configuration| configuration.setup_cfg.as_ref());
     let mut declared: Vec<String> = Vec::new();
-    if let Some(pyproject) = &pyproject {
+    if let Some(pyproject) = pyproject {
         declared.extend(pyproject_package_roots(pyproject));
     }
     if let Some(package_dir) = setup_cfg
-        .as_ref()
         .and_then(|cfg| cfg.get("options"))
         .and_then(|options| options.get("package_dir"))
     {
@@ -1256,7 +1337,6 @@ pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> 
         }));
     }
     if let Some(find) = setup_cfg
-        .as_ref()
         .and_then(|cfg| cfg.get("options.packages.find"))
         .and_then(|find| find.get("where"))
     {
@@ -1271,13 +1351,23 @@ pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> 
         .collect();
     roots.sort();
     roots.dedup();
-    let pytest = pytest_options(
-        file("pytest.ini"),
-        pyproject.as_ref(),
-        file("tox.ini"),
-        setup_cfg.as_ref(),
-    )
-    .map(|options| {
+    PythonProject {
+        roots,
+        dependencies: Vec::new(),
+    }
+}
+
+impl PythonConfiguration<'_> {
+    /// How pytest runs from the directory at `directory`, where its files
+    /// configure it, read from the one configuration file pytest itself
+    /// would read there (`pytest_options`).
+    fn pytest(&self, directory: &[String]) -> Option<Pytest> {
+        let options = pytest_options(
+            self.pytest_ini,
+            self.pyproject.as_ref(),
+            self.tox_ini,
+            self.setup_cfg.as_ref(),
+        )?;
         let option = |key: &str| options.get(key).map(Vec::as_slice).unwrap_or_default();
         let pythonpath = option("pythonpath")
             .iter()
@@ -1294,7 +1384,7 @@ pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> 
             }
         }
         let inserts_basedir = mode != Some("importlib");
-        if python_files.is_empty() {
+        Some(if python_files.is_empty() {
             Pytest {
                 pythonpath,
                 inserts_basedir,
@@ -1302,12 +1392,7 @@ pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> 
             }
         } else {
             Pytest::new(pythonpath, &python_files, inserts_basedir)
-        }
-    });
-    PythonProject {
-        roots,
-        pytest,
-        dependencies: Vec::new(),
+        })
     }
 }
 
