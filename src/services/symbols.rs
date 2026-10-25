@@ -2210,16 +2210,25 @@ fn swift_bound_names(name: Node) -> Vec<Node> {
 /// The names a JavaScript, TypeScript or Scala destructuring pattern binds:
 /// `{ a, b: renamed, c = 1, ...rest }` binds `a`, `renamed`, `c` and `rest`,
 /// `[x, [y]]` binds `x` and `y`, Scala's `val a, b` and `val (c, d: Int)`
-/// each name they list, and `val c @ Some(x)`, `val head :: tail` the names
-/// their patterns hold. A key it reads from, a type it matches and an
-/// operator are no binding, and `_` binds nothing.
+/// each name they list, and `val c @ Some(x)`, `val head :: tail`, `val
+/// Seq(a, rest*)` and `val (x = a, y = b)` the names their patterns hold. A
+/// key it reads from, a field a named pattern matches, a type and an operator
+/// are no binding, and `_` binds nothing.
 fn bound_names(pattern: Node) -> Vec<Node> {
     let held = |field| pattern.child_by_field_name(field).map(bound_names);
     match pattern.kind() {
         "identifier" | "shorthand_property_identifier_pattern" => vec![pattern],
         "pair_pattern" => held("value").unwrap_or_default(),
         "assignment_pattern" | "object_assignment_pattern" => held("left").unwrap_or_default(),
-        "typed_pattern" => held("pattern").unwrap_or_default(),
+        "typed_pattern" | "repeat_pattern" => held("pattern").unwrap_or_default(),
+        "named_pattern" => {
+            let mut cursor = pattern.walk();
+            let bound = pattern
+                .named_children(&mut cursor)
+                .filter(|child| !child.is_extra())
+                .last();
+            bound.map(bound_names).unwrap_or_default()
+        }
         "infix_pattern" => [held("left"), held("right")]
             .into_iter()
             .flatten()
@@ -2233,7 +2242,12 @@ fn bound_names(pattern: Node) -> Vec<Node> {
                 .flat_map(bound_names)
                 .collect()
         }
-        "object_pattern" | "array_pattern" | "rest_pattern" | "identifiers" | "tuple_pattern" => {
+        "object_pattern"
+        | "array_pattern"
+        | "rest_pattern"
+        | "identifiers"
+        | "tuple_pattern"
+        | "named_tuple_pattern" => {
             let mut cursor = pattern.walk();
             pattern
                 .named_children(&mut cursor)
@@ -4873,6 +4887,9 @@ object O {
   val Some(inner) = opt
   val whole @ Some(_) = opt
   val head :: tail = items
+  val Seq(first, rest @ _*) = items
+  val List(lead, others*) = items
+  val (px = qx, py = qy) = point
   val _ = sideEffect
   var m, n = 0
   type Id = Int
@@ -4931,6 +4948,12 @@ package object pkg {
                 "constant:O/whole",
                 "constant:O/head",
                 "constant:O/tail",
+                "constant:O/first",
+                "constant:O/rest",
+                "constant:O/lead",
+                "constant:O/others",
+                "constant:O/qx",
+                "constant:O/qy",
                 "variable:O/m",
                 "variable:O/n",
                 "class:O/Id",
