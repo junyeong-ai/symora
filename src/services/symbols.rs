@@ -1281,7 +1281,7 @@ fn holds_a_value(node: Node) -> bool {
 fn first_brace(node: Node) -> Option<usize> {
     let mut pending = vec![node];
     while let Some(part) = pending.pop() {
-        if part.kind() == "{" && !part.is_missing() {
+        if part.kind() == "{" {
             return Some(part.start_byte());
         }
         let mut cursor = part.walk();
@@ -4396,12 +4396,9 @@ fn named_for_its_class(statement: Node, name: &str, content: &str) -> bool {
 /// name (`typedef UChar (U_CALLCONV *F)(int32_t c)` after `U_CDECL_BEGIN`).
 fn name_before_parameters(declarator: Node) -> Option<Node> {
     if declarator.kind() != "function_declarator"
-        || declarator.parent().is_some_and(|outer| {
-            outer.kind() == "function_declarator"
-                && outer
-                    .child_by_field_name("declarator")
-                    .is_some_and(|inner| inner.id() == declarator.id())
-        })
+        || declarator
+            .parent()
+            .is_some_and(|outer| outer.kind() == "function_declarator")
     {
         return None;
     }
@@ -4564,12 +4561,7 @@ fn declarator_name(declarator: Node) -> Node {
 /// reads it without the macro; otherwise the name is `name` itself.
 fn destructor_named_apart(name: Node) -> Node {
     name.parent()
-        .filter(|declarator| {
-            declarator.kind() == "function_declarator"
-                && declarator
-                    .child_by_field_name("declarator")
-                    .is_some_and(|named| named.id() == name.id())
-        })
+        .filter(|declarator| declarator.kind() == "function_declarator")
         .and_then(|declarator| declarator.prev_sibling())
         .filter(|before| {
             before.is_error()
