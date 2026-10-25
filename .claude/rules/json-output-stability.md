@@ -61,7 +61,7 @@ File-scoped symbols carry a response-level `backend`: `document` is the language
 
 For JavaScript/TypeScript, an AST export wrapper establishes `true`; without one, only declaration forms that cannot themselves be exported establish `false`. Other declarations omit the field rather than treating the absence of a parsed wrapper as proof.
 
-Reference counts on `symbols --refs` and `diff-impact` rows (`refs`, `test_refs`, `prod_refs`) carry `refs_status`: `unavailable` when the query failed, so the counts are absent rather than zero, and `indexing_degraded` when it ran under degraded analysis, so they are lower bounds.
+Reference counts on `symbols --refs` and `diff-impact` rows (`refs`, `test_refs`, `prod_refs`) carry `refs_status`: `unavailable` when the query failed, so the counts are absent rather than zero, and `indexing_degraded` when it ran under degraded analysis, so they are lower bounds. `diff-impact`'s `total_references` sums the measured rows and is absent when none was measured; its top-level `refs_status` carries the strongest row status beside it.
 
 Navigation location objects carry file, line, and column. Location analysis echoes a summary `target` with file and line, without a column. A local or parameter may be a `binding` even when the document-symbol tree omits it. `not_a_symbol` and `unavailable` are not resolved declarations. A member's zero references may still permit construction, dispatch, or structural conformance through its declaring type; a free function can also be reached through registration or reflection. Never label either unused from a static zero alone.
 
