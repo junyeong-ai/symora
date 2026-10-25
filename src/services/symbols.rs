@@ -5136,6 +5136,10 @@ for (var i = 0; i < 1; i++) {}
 function hold() { { var inFunction = 1; } }
 const run = () => { var inArrow = 1; };
 class K { static { var inStatic = 1; } }
+class M { run() { var inMethod = 1; } }
+(function () { var inExpression = 1; })();
+const make = function* () { var inGenerator = 1; };
+function* produce() { var inGeneratorDeclaration = 1; }
 for (var key in source) {}
 for (var [first, { second }] of pairs) {}
 for (let blockScoped of pairs) {}
@@ -5160,6 +5164,10 @@ function scan() { for (var inLoop of pairs) {} }
                 "function:hold",
                 "function:run",
                 "class:K",
+                "class:M",
+                "method:M/run",
+                "function:make",
+                "function:produce",
                 "variable:key",
                 "variable:first",
                 "variable:second",
@@ -5351,6 +5359,10 @@ enum class Op {
     };
     abstract fun apply(a: Int): Int
 }
+
+enum class Lazy(val make: () -> Int) {
+    ONE({ fun one() = 1; one() })
+}
 "#,
             declares: &[
                 "class:I",
@@ -5382,6 +5394,10 @@ enum class Op {
                 "enum_member:Op/PLUS",
                 "method:PLUS/apply",
                 "method:Op/apply",
+                "class:Lazy",
+                "property:Lazy/make",
+                "enum_member:Lazy/ONE",
+                "function:ONE/one",
             ],
         },
         DeclarationFixture {
