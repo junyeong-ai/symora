@@ -7133,8 +7133,17 @@ region     = "us-central1"
                 "a.sh",
                 Language::Bash,
                 "COUNT+=1 TOTAL=2;\nexport PATH+=\":/opt/bin\" EXTRA=1\nexport KEEP=1 OTHER\n\
-                 echo start\nPREFIXED=2 REST+=1\necho hi\ndeclare -a ITEMS[0]=x ITEM_COUNT=1\n",
-                &["TOTAL", "EXTRA", "KEEP", "PREFIXED", "ITEMS", "ITEM_COUNT"][..],
+                 echo start\nPREFIXED=2 REST+=1\necho hi\ndeclare -a ITEMS[0]=x ITEM_COUNT=1\n\
+                 declare SUM+=1\n",
+                &[
+                    "TOTAL",
+                    "EXTRA",
+                    "KEEP",
+                    "PREFIXED",
+                    "ITEMS",
+                    "ITEM_COUNT",
+                    "SUM",
+                ][..],
             ),
             (
                 "a.py",
@@ -7358,7 +7367,9 @@ region     = "us-central1"
                  typedef __attribute__((aligned(1))) U16 unalign16;\n\
                  struct Q {\n  int a;\n  Array(uint32_t)\n  int after_macro;\n  PADDING;\n};\n\
                  typedef struct {\n  double radians;\n} SPAngle\nSWIFT_NAME(Angle2D)\n\
-                 API_AVAILABLE(macos(13.0), ios(16.0));\n"
+                 API_AVAILABLE(macos(13.0), ios(16.0));\n\
+                 typedef struct { int code; } EXPORT handler_fn(int code);\n\
+                 typedef int EXPORT handler(void);\ntypedef union { int a; } av_alias av_alias64;\n"
             ),
             [
                 "class:Pool",
@@ -7372,6 +7383,11 @@ region     = "us-central1"
                 "field:after_macro",
                 "class:SPAngle",
                 "field:radians",
+                "class:handler_fn",
+                "field:code",
+                "class:handler",
+                "class:av_alias64",
+                "field:a",
             ],
             "a macro's arguments name nothing, and what follows them is its declaration's name"
         );
@@ -7646,7 +7662,9 @@ region     = "us-central1"
                  extern int gethostname __P((char name[64], size_t len));\n\
                  ZEXTERN z_off_t ZEXPORT gztell64 OF((gzFile, z_off_t));\n\
                  ONIG_EXTERN\nvoid onig_regset_free P_((OnigRegSet* set));\n\
-                 EXPORT Timer timer((Clock()));\nint Foo::count((limit));\n"
+                 EXPORT Timer timer((Clock()));\nint Foo::count((limit));\n\
+                 int *Codec::encode OF((const char *in, int n)) { return 0; }\n\
+                 EXPORT Widget pair((a), b);\n"
             ),
             [
                 "function:clnt_create",
@@ -7659,6 +7677,8 @@ region     = "us-central1"
                 "function:onig_regset_free",
                 "variable:timer",
                 "variable:Foo::count",
+                "function:Codec::encode",
+                "variable:pair",
             ],
             "a macro a prototype wraps its parameters in expands to them"
         );
@@ -7693,6 +7713,14 @@ region     = "us-central1"
                 "function:lzma_index_end",
             ],
             "a prototype's type is the macro an error holds before it, however deep"
+        );
+        assert_eq!(
+            declared(
+                "extern int x;\n/** doc */\nextern LZMA_API(lzma_index *p) \
+                 lzma_index_init(const lzma_allocator *allocator)\n\t\tlzma_nothrow;\n"
+            ),
+            ["variable:x"],
+            "and stands for a type only where its arguments name nothing"
         );
     }
 
@@ -8598,6 +8626,34 @@ region     = "us-central1"
                 "int f(int a) // does x\n{\n  return a;\n}\n",
                 "f",
                 Some("int f(int a)"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "static int k(int a) G_GNUC_CONST G_GNUC_WARN;\n",
+                "k",
+                Some("static int k(int a) G_GNUC_CONST G_GNUC_WARN"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "class X {\n  int size(int x) ATTR_A ATTR_B;\n};\n",
+                "size",
+                Some("int size(int x) ATTR_A ATTR_B"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "int g(int x) ATTR { return x; }\n",
+                "g",
+                Some("int g(int x)"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "class D : public B {\n  void h(int x) ATTR_A ATTR_B override { }\n};\n",
+                "h",
+                Some("void h(int x) ATTR_A ATTR_B override"),
             ),
             (
                 "a.swift",
