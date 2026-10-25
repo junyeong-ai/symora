@@ -18,18 +18,19 @@ use rusqlite::{Connection, params};
 
 use crate::error::StoreError;
 use crate::models::symbol::Language;
+use crate::services::imports::FileImports;
 use crate::services::pack::PackedSymbol;
 
 /// Bumped whenever the on-disk layout changes shape (new column, changed
 /// JSON shape inside a TEXT column, etc.). Mismatched versions recreate the
 /// table rather than risking stale-decode bugs at read time.
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 #[derive(Debug, Clone)]
 pub struct CachedEntry {
     pub mtime: i64,
     pub language: Language,
-    pub imports: Vec<String>,
+    pub imports: FileImports,
     pub signatures: Option<Vec<PackedSymbol>>,
 }
 
@@ -209,7 +210,10 @@ mod tests {
         CachedEntry {
             mtime,
             language: Language::Rust,
-            imports: vec!["crate::baz".into()],
+            imports: FileImports {
+                package: Some("com.acme".into()),
+                references: vec!["crate::baz".into()],
+            },
             signatures: Some(vec![PackedSymbol {
                 name: "foo".into(),
                 kind: "function".into(),
@@ -226,6 +230,7 @@ mod tests {
         cache.put("src/foo.rs", &entry(100)).unwrap();
         let got = cache.get("src/foo.rs").unwrap();
         assert_eq!(got.mtime, 100);
+        assert_eq!(got.imports, entry(100).imports);
         let signatures = got.signatures.unwrap();
         assert_eq!(signatures.len(), 1);
         assert_eq!(signatures[0].name, "foo");

@@ -11,7 +11,7 @@ use crate::constants::defaults::PACK_SYMBOLS_PER_FILE;
 use crate::infra::file_filter::{Discovery, FileFilter};
 use crate::models::config::SearchConfig;
 use crate::models::symbol::Language;
-use crate::services::imports::ImportExtractor;
+use crate::services::imports::{FileImports, ImportExtractor};
 use crate::services::pack_cache::{CachedEntry, PackCache};
 use crate::utils::estimate_tokens;
 
@@ -193,7 +193,7 @@ struct Node {
     /// Components of the directory holding this file — what a reference to
     /// a package resolves to in languages where a package is a directory.
     directory: Vec<String>,
-    imports: Vec<String>,
+    imports: FileImports,
     mtime: i64,
     signatures: Option<Vec<PackedSymbol>>,
 }
@@ -450,6 +450,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
         suffixes,
         manifests,
         python: PythonPath::of(nodes),
+        jvm: JvmIndex::of(nodes),
     };
 
     let mut graph: Graph = BTreeMap::new();
@@ -457,7 +458,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
     for node in nodes {
         graph.entry(node.id).or_default();
         let mut seen = HashSet::new();
-        for target in &node.imports {
+        for target in &node.imports.references {
             let reference = Reference::parse(target, node.language);
             if node.language == Language::Rust && matches!(&reference, Reference::Relative { .. }) {
                 rust_relative_imports_omitted = true;
@@ -485,6 +486,8 @@ enum Reference {
     Relative { up: usize, components: Vec<String> },
     /// An absolute module name, possibly qualified by its crate or package.
     Absolute(Vec<String>),
+    /// A JVM import of all a package or class holds (`import a.b.*`).
+    Wildcard(Vec<String>),
     /// A Dart `package:` URI: a file under the named package's `lib`.
     Package {
         package: String,
@@ -534,6 +537,22 @@ impl Reference {
         if language == Language::Dart {
             return Self::dart(raw);
         }
+        if is_jvm(language) {
+            let (name, wildcard) = match raw.strip_suffix(".*") {
+                Some(name) => (name, true),
+                None => (raw, false),
+            };
+            let components = name
+                .split('.')
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect();
+            return if wildcard {
+                Self::Wildcard(components)
+            } else {
+                Self::Absolute(components)
+            };
+        }
         let mut rest = raw;
         let mut up = 0;
         let mut relative = false;
@@ -564,7 +583,7 @@ impl Reference {
                 .filter(|part| !part.is_empty())
                 .map(str::to_string)
                 .collect(),
-            Language::Java | Language::Kotlin | Language::Scala | Language::Swift => rest
+            Language::Swift => rest
                 .split('.')
                 .filter(|part| !part.is_empty())
                 .map(str::to_string)
@@ -668,6 +687,44 @@ struct ProjectIndex<'a> {
     suffixes: PathIndex<'a>,
     manifests: &'a Manifests,
     python: PythonPath<'a>,
+    jvm: JvmIndex<'a>,
+}
+
+/// What a project's JVM files declare themselves to be. A file's class is
+/// named by the package its declaration states and the file's own name,
+/// wherever the file sits; its source root is its directory without the path
+/// that package spells, where the directory ends in that path.
+struct JvmIndex<'a> {
+    by_class: HashMap<Vec<String>, Vec<usize>>,
+    by_package: HashMap<Vec<String>, Vec<usize>>,
+    roots: HashMap<usize, &'a [String]>,
+}
+
+impl<'a> JvmIndex<'a> {
+    fn of(nodes: &'a [Node]) -> Self {
+        let mut index = Self {
+            by_class: HashMap::new(),
+            by_package: HashMap::new(),
+            roots: HashMap::new(),
+        };
+        for node in nodes.iter().filter(|node| is_jvm(node.language)) {
+            let package: Vec<String> = node
+                .imports
+                .package
+                .as_deref()
+                .map(|package| package.split('.').map(str::to_string).collect())
+                .unwrap_or_default();
+            if let Some(root) = node.directory.strip_suffix(package.as_slice()) {
+                index.roots.insert(node.id, root);
+            }
+            if let Some(stem) = node.module_path.last() {
+                let class = [package.as_slice(), std::slice::from_ref(stem)].concat();
+                index.by_class.entry(class).or_default().push(node.id);
+            }
+            index.by_package.entry(package).or_default().push(node.id);
+        }
+        index
+    }
 }
 
 /// The directories a Python tree puts on `sys.path`, as far as the tree says:
@@ -750,23 +807,18 @@ impl ProjectIndex<'_> {
             Reference::Absolute(components) if from.language == Language::Python => {
                 self.python_module(components, from)
             }
+            Reference::Absolute(name) if is_jvm(from.language) => self.jvm_class(name, from),
+            Reference::Wildcard(name) => self.jvm_wildcard(name, from),
             Reference::Absolute(components) => {
                 // `use a::b::Item` names a module and an item in one path;
                 // read it whole, then without the item.
-                let parent = matches!(
-                    from.language,
-                    Language::Rust | Language::Java | Language::Kotlin | Language::Scala
-                )
-                .then(|| components.split_last().map_or(&[][..], |parts| parts.1));
-                for (attempt, candidate) in std::iter::once(components.as_slice())
-                    .chain(parent)
-                    .enumerate()
-                {
+                let parent = (from.language == Language::Rust)
+                    .then(|| components.split_last().map_or(&[][..], |parts| parts.1));
+                for candidate in std::iter::once(components.as_slice()).chain(parent) {
                     if candidate.is_empty() {
                         continue;
                     }
-                    let directories = package_is_directory(from.language)
-                        || (attempt == 0 && imports_a_package_by_its_directory(from.language));
+                    let directories = package_is_directory(from.language);
                     let hit = self.at(&self.suffixes, candidate, from.language, directories);
                     if !hit.is_empty() {
                         return hit;
@@ -774,6 +826,77 @@ impl ProjectIndex<'_> {
                 }
                 Vec::new()
             }
+        }
+    }
+
+    /// The file an import of a JVM class names: the one whose declared package
+    /// and name spell the class — read whole, then without each trailing
+    /// segment in turn, which nested classes and members add to the class
+    /// their file declares. Scala imports a package by its name as well,
+    /// which names the files the package holds.
+    fn jvm_class(&self, name: &[String], from: &Node) -> Vec<usize> {
+        for length in (1..=name.len()).rev() {
+            if let Some(files) = self.jvm.by_class.get(&name[..length]) {
+                return self.jvm_one(files, from).into_iter().collect();
+            }
+        }
+        if from.language == Language::Scala {
+            return self.jvm_package(name, from);
+        }
+        Vec::new()
+    }
+
+    /// The files `import a.b.*` names: the class `a.b`, whose members it
+    /// imports, or else everything the package `a.b` holds.
+    fn jvm_wildcard(&self, name: &[String], from: &Node) -> Vec<usize> {
+        match self.jvm.by_class.get(name) {
+            Some(files) => self.jvm_one(files, from).into_iter().collect(),
+            None => self.jvm_package(name, from),
+        }
+    }
+
+    /// The one file of several declaring a class that an importer means: the
+    /// only one, or the only one in the importer's own source root.
+    fn jvm_one(&self, files: &[usize], from: &Node) -> Option<usize> {
+        if let [only] = files {
+            return Some(*only);
+        }
+        let own = self.jvm.roots.get(&from.id)?;
+        let mut mine = files
+            .iter()
+            .filter(|id| self.jvm.roots.get(id) == Some(own));
+        match (mine.next(), mine.next()) {
+            (Some(one), None) => Some(*one),
+            _ => None,
+        }
+    }
+
+    /// The files an import of a whole JVM package names: those declaring it
+    /// in the importer's own source root where it has any there — main code
+    /// does not see the test sources that share its packages — and otherwise
+    /// those of the one directory in the project that holds the package.
+    fn jvm_package(&self, package: &[String], from: &Node) -> Vec<usize> {
+        let Some(files) = self.jvm.by_package.get(package) else {
+            return Vec::new();
+        };
+        if let Some(own) = self.jvm.roots.get(&from.id) {
+            let mine: Vec<usize> = files
+                .iter()
+                .copied()
+                .filter(|id| self.jvm.roots.get(id) == Some(own))
+                .collect();
+            if !mine.is_empty() {
+                return mine;
+            }
+        }
+        let directories: HashSet<&[String]> = files
+            .iter()
+            .map(|id| self.nodes[*id].directory.as_slice())
+            .collect();
+        if directories.len() == 1 {
+            files.clone()
+        } else {
+            Vec::new()
         }
     }
 
@@ -889,13 +1012,10 @@ fn package_is_directory(language: Language) -> bool {
     matches!(language, Language::Go | Language::Terraform)
 }
 
-/// Whether a language's import of a whole package (`import com.acme.util.*`)
-/// names the files under the directory the package path spells, as its
-/// import of a class names the file the class path spells. Only the
-/// reference as written can name a package: a class's import read without
-/// its class (`java.util` of `java.util.List`) is a guess at a module, not
-/// at a directory.
-fn imports_a_package_by_its_directory(language: Language) -> bool {
+/// Whether the language is one of the JVM's, which share one namespace of
+/// packages and classes: a Kotlin file imports a Java class by the name its
+/// package declaration gives it, as a Java file does.
+fn is_jvm(language: Language) -> bool {
     matches!(
         language,
         Language::Java | Language::Kotlin | Language::Scala
@@ -1840,37 +1960,68 @@ mod tests {
         );
     }
 
-    /// A Java package is the directory its path spells, so importing all of
-    /// one names each file there; a class's import read without its class
-    /// names no directory.
+    /// A JVM import names classes and packages by what files declare, not by
+    /// where they sit: a class is its file's declared package and name, and a
+    /// whole package is the files declaring it in the importer's own source
+    /// root — main code sees none of the test sources sharing its packages.
+    /// Java, Kotlin and Scala share that one namespace.
     #[test]
-    fn a_jvm_wildcard_import_names_the_files_of_its_package() {
+    fn a_jvm_import_names_what_files_declare_in_the_importers_source_root() {
+        let java = |id, rel, source| node_in(id, rel, source, Language::Java);
+        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        let util = "package com.acme.util;\n";
         let nodes = vec![
-            node_in(
+            java(
                 0,
-                "src/main/java/com/acme/app/Main.java",
-                "package com.acme.app;\nimport com.acme.util.*;\nimport java.util.List;\n",
-                Language::Java,
+                "src/main/java/com/acme/app/App.java",
+                "package com.acme.app;\nimport com.acme.util.*;\nimport java.util.List;\n\
+                 import com.acme.model.User;\n",
             ),
-            node_in(
-                1,
-                "src/main/java/com/acme/util/Strings.java",
-                "",
-                Language::Java,
+            java(1, "src/main/java/com/acme/util/Strings.java", util),
+            java(2, "src/main/java/com/acme/util/Numbers.java", util),
+            java(3, "src/test/java/com/acme/util/StringsTest.java", util),
+            java(4, "src/test/java/com/acme/util/Numbers.java", util),
+            java(5, "src/main/java/util/List.java", "package util;\n"),
+            kotlin(
+                6,
+                "src/main/kotlin/com/acme/kt/Main.kt",
+                "package com.acme.kt\nimport com.acme.util.Strings\n\
+                 import com.acme.util.Numbers\nimport com.acme.model.User.Companion.create\n",
             ),
-            node_in(
-                2,
-                "src/main/java/com/acme/util/Numbers.java",
-                "",
-                Language::Java,
+            // Kotlin does not tie a file's directory to its package.
+            kotlin(
+                7,
+                "src/main/kotlin/model/User.kt",
+                "package com.acme.model\n",
             ),
-            node_in(3, "src/main/java/util/Local.java", "", Language::Java),
+            java(
+                8,
+                "src/test/java/com/acme/app/AppTest.java",
+                "package com.acme.app;\nimport com.acme.util.*;\n",
+            ),
+            java(9, "src/main/java/com/acme/util/Undeclared.java", ""),
         ];
         assert_eq!(
             edges_of(&nodes, 0),
             vec![
                 "src/main/java/com/acme/util/Strings.java",
-                "src/main/java/com/acme/util/Numbers.java"
+                "src/main/java/com/acme/util/Numbers.java",
+                "src/main/kotlin/model/User.kt"
+            ]
+        );
+        // `Numbers` is declared in two source roots, neither the importer's.
+        assert_eq!(
+            edges_of(&nodes, 6),
+            vec![
+                "src/main/java/com/acme/util/Strings.java",
+                "src/main/kotlin/model/User.kt"
+            ]
+        );
+        assert_eq!(
+            edges_of(&nodes, 8),
+            vec![
+                "src/test/java/com/acme/util/StringsTest.java",
+                "src/test/java/com/acme/util/Numbers.java"
             ]
         );
     }
@@ -2258,7 +2409,7 @@ mod tests {
             directory: vec![],
             module_path: vec!["a".to_string()],
             language: Language::Rust,
-            imports: vec![],
+            imports: FileImports::default(),
             mtime: 0,
             signatures: Some(signatures),
         }];
