@@ -904,9 +904,10 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// macro's arguments do but those of one taking a declaration
 /// (`Q_PRIVATE_SLOT(d_func(), void f())`), and which has a type of its own
 /// or is named for its class, as a constructor is and such an invocation is
-/// not, the invocation of such a member is a macro's alone: no declarator is
-/// followed by a function's, and no specifier is a name with arguments,
-/// while the name before it is left to the grammar
+/// not, a member with an invocation is what macros write: no declarator is
+/// followed by a function's, no specifier is a name with arguments, and the
+/// name before the invocation is not the function's type, since that
+/// function has one of its own or is a constructor, which takes none
 /// (`Q_INVOKABLE Q_REVISION(6, 11)` before `QModelIndex mapToSource(const
 /// QModelIndex &i) const;`). Left as read: such an invocation before a
 /// function with no type of its own (`QString Q_DECL_X(1)` before `f(int
@@ -996,12 +997,13 @@ fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize
             continue;
         }
         for (at, &next) in members.iter().enumerate() {
-            if let Some(invoked) = at
+            if let Some(member) = at
                 .checked_sub(1)
-                .and_then(|before| invocation(members[before]))
+                .map(|before| members[before])
+                .filter(|member| invocation(*member).is_some())
                 .filter(|_| declares_a_function_of_its_own(next))
             {
-                macros.extend(written_words(invoked).iter().map(Node::byte_range));
+                macros.extend(written_words(member).iter().map(Node::byte_range));
             }
             if !begins_after_a_member(next) {
                 continue;
@@ -8091,6 +8093,40 @@ region     = "us-central1"
             Some("QString name(int index)"),
             "arguments in parentheses after a macro's name are no invocation to read past alone"
         );
+        let signed = extractor.extract_with_signatures(
+            Path::new("s.h"),
+            "class QSessionManager : public QObject\n{\n    Q_OBJECT\n    \
+             Q_DECLARE_PRIVATE(QSessionManager)\n    \
+             QSessionManager(QGuiApplication *app, QString &id, QString &key);\npublic:\n    int after;\n};\n\
+             class R : public QObject {\n    Q_OBJECT\npublic:\n    \
+             Q_INVOKABLE Q_REVISION(6, 11) QModelIndex mapFromSource(const QModelIndex &sourceIndex) const;\n    \
+             int tail;\n};\n\
+             class Foo : public QObject\n{\n    Q_OBJECT\n    \
+             Q_PROPERTY(int p0 READ p0 WRITE setP0 NOTIFY p0Changed)\n    \
+             Q_PROPERTY(int p1 READ p1 WRITE setP1 NOTIFY p1Changed)\n    \
+             QString name(int index) const;\npublic:\n    Foo(QObject *parent);\n};\n",
+            Language::Cpp,
+        );
+        for (name, expected) in [
+            (
+                "QSessionManager/QSessionManager",
+                "QSessionManager(QGuiApplication *app, QString &id, QString &key)",
+            ),
+            (
+                "R/mapFromSource",
+                "QModelIndex mapFromSource(const QModelIndex &sourceIndex) const",
+            ),
+            ("Foo/name", "QString name(int index) const"),
+        ] {
+            assert_eq!(
+                signed
+                    .iter()
+                    .find(|symbol| symbol.name_path.as_deref() == Some(name))
+                    .and_then(|symbol| symbol.signature.as_deref()),
+                Some(expected),
+                "the macros before a function of its own sign no part of it: {name}"
+            );
+        }
         assert_eq!(
             declared(
                 "QT_BEGIN_NAMESPACE\nclass QTimerPrivate;\nclass Q_CORE_EXPORT QTimer : public QObject\n{\n    \
