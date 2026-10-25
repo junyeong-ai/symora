@@ -136,15 +136,23 @@ struct Importer<'a> {
 
 #[derive(Debug, Clone, Copy)]
 enum ImportMode {
+    /// `bundler`, `node16` or `nodenext`, which read a package's `exports`
+    /// under these conditions.
+    Exports(ExportConditions),
+    /// `node10`, which reads no `exports`.
+    Node10,
+    /// `classic`, which reads no `package.json`.
+    Classic,
+}
+
+/// The conditions a module resolution that reads `exports` matches.
+#[derive(Debug, Clone, Copy)]
+enum ExportConditions {
     Bundler,
     /// `node16` or `nodenext`, for a file Node reads as an ES module or not.
     Node16 {
         esm: bool,
     },
-    /// `node10`, which reads no `exports`.
-    Node10,
-    /// `classic`, which reads no `package.json`.
-    Classic,
 }
 
 impl<'a> Importer<'a> {
@@ -166,10 +174,10 @@ impl<'a> Importer<'a> {
             None => Some(ModuleResolution::Bundler),
         };
         let mode = resolution.map(|resolution| match resolution {
-            ModuleResolution::Bundler => ImportMode::Bundler,
-            ModuleResolution::Node16 => ImportMode::Node16 {
+            ModuleResolution::Bundler => ImportMode::Exports(ExportConditions::Bundler),
+            ModuleResolution::Node16 => ImportMode::Exports(ExportConditions::Node16 {
                 esm: is_es_module(node, manifests),
-            },
+            }),
             ModuleResolution::Node10 => ImportMode::Node10,
             ModuleResolution::Classic => ImportMode::Classic,
         });
@@ -183,12 +191,13 @@ impl<'a> Importer<'a> {
     }
 
     /// Whether TypeScript matches an `exports` condition for this file's
-    /// imports, `None` where its configuration leaves that open: `types`,
-    /// `default` and the `customConditions` always; `import` under `bundler`
-    /// or for an ES module under `node16`; `require` for any other file under
-    /// `node16`; `node` under `node16`; nothing else. A versioned
-    /// `types@<range>` key depends on the compiler's own version.
-    fn matches(&self, condition: &str) -> Option<bool> {
+    /// imports under `conditions`, `None` where its configuration leaves
+    /// those open: `types`, `default` and the `customConditions` always;
+    /// `import` under `bundler` or for an ES module under `node16`; `require`
+    /// for any other file under `node16`; `node` under `node16`; nothing
+    /// else. A versioned `types@<range>` key depends on the compiler's own
+    /// version.
+    fn matches(&self, conditions: Option<ExportConditions>, condition: &str) -> Option<bool> {
         if matches!(condition, "types" | "default")
             || self
                 .ts_config
@@ -197,15 +206,13 @@ impl<'a> Importer<'a> {
             return Some(true);
         }
         match condition {
-            "import" | "require" | "node" => Some(match self.mode? {
-                ImportMode::Bundler => condition == "import",
-                ImportMode::Node16 { esm } => match condition {
+            "import" | "require" | "node" => Some(match conditions? {
+                ExportConditions::Bundler => condition == "import",
+                ExportConditions::Node16 { esm } => match condition {
                     "import" => esm,
                     "require" => !esm,
                     _ => true,
                 },
-                // Neither reads `exports` (`ProjectIndex::workspace_package`).
-                ImportMode::Node10 | ImportMode::Classic => false,
             }),
             _ if condition.starts_with("types@") => None,
             _ => Some(false),
@@ -1081,9 +1088,14 @@ impl ProjectIndex<'_> {
     /// an entry naming no file, or a name two packages of the workspace give.
     fn workspace_package(&self, specifier: &str, importer: &Importer) -> Option<Resolution> {
         let from = importer.node;
-        if matches!(importer.mode, Some(ImportMode::Classic)) {
-            return None;
-        }
+        // The conditions `exports` is read under, `None` where the
+        // configuration leaves them open; `node10` reads no `exports`.
+        let conditions = match importer.mode {
+            Some(ImportMode::Classic) => return None,
+            Some(ImportMode::Node10) => Err(()),
+            Some(ImportMode::Exports(conditions)) => Ok(Some(conditions)),
+            None => Ok(None),
+        };
         let scoped = specifier.starts_with('@');
         let mut segments = specifier.splitn(if scoped { 3 } else { 2 }, '/');
         let name: Vec<&str> = segments.by_ref().take(if scoped { 2 } else { 1 }).collect();
@@ -1102,11 +1114,8 @@ impl ProjectIndex<'_> {
                 .any(declares)
                 .then(undetermined);
         };
-        let exports = package
-            .exports
-            .as_ref()
-            .filter(|_| !matches!(importer.mode, Some(ImportMode::Node10)));
-        let Some(exports) = exports else {
+        let exports = package.exports.as_ref().zip(conditions.ok());
+        let Some((exports, conditions)) = exports else {
             let entries: Vec<&str> = if subpath.is_empty() {
                 package
                     .types
@@ -1138,12 +1147,12 @@ impl ProjectIndex<'_> {
             }
             _ => (key == ".").then_some(exports),
         };
-        Some(
-            match target.map(|target| self.export_target(target, directory, importer)) {
-                Some(Exported::Files(files)) => Resolution::Files(files),
-                _ => undetermined(),
-            },
-        )
+        let exported =
+            target.map(|target| self.export_target(target, directory, importer, conditions));
+        Some(match exported {
+            Some(Exported::Files(files)) => Resolution::Files(files),
+            _ => undetermined(),
+        })
     }
 
     /// What an `exports` target names for an importer, as TypeScript reads
@@ -1158,6 +1167,7 @@ impl ProjectIndex<'_> {
         target: &serde_json::Value,
         directory: &[String],
         importer: &Importer,
+        reading: Option<ExportConditions>,
     ) -> Exported {
         match target {
             serde_json::Value::String(path) if path.starts_with("./") => {
@@ -1167,12 +1177,12 @@ impl ProjectIndex<'_> {
             }
             serde_json::Value::Array(entries) => entries
                 .iter()
-                .map(|entry| self.export_target(entry, directory, importer))
+                .map(|entry| self.export_target(entry, directory, importer, reading))
                 .find(|exported| *exported != Exported::Nothing)
                 .unwrap_or(Exported::Nothing),
             serde_json::Value::Object(conditions) => {
                 let conditions: Vec<_> = conditions.iter().collect();
-                self.conditional_target(&conditions, directory, importer)
+                self.conditional_target(&conditions, directory, importer, reading)
             }
             _ => Exported::Nothing,
         }
@@ -1183,16 +1193,22 @@ impl ProjectIndex<'_> {
         conditions: &[(&String, &serde_json::Value)],
         directory: &[String],
         importer: &Importer,
+        reading: Option<ExportConditions>,
     ) -> Exported {
         for (at, (condition, target)) in conditions.iter().enumerate() {
-            let matched = importer.matches(condition);
+            let matched = importer.matches(reading, condition);
             if matched == Some(false) {
                 continue;
             }
-            match self.export_target(target, directory, importer) {
+            match self.export_target(target, directory, importer, reading) {
                 Exported::Nothing => {}
                 Exported::Files(files) if matched.is_none() => {
-                    let rest = self.conditional_target(&conditions[at + 1..], directory, importer);
+                    let rest = self.conditional_target(
+                        &conditions[at + 1..],
+                        directory,
+                        importer,
+                        reading,
+                    );
                     return if rest == Exported::Files(files) {
                         rest
                     } else {
