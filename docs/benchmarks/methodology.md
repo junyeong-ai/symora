@@ -2,7 +2,7 @@
 
 Measure whether Symora helps an agent answer structural code questions correctly at useful cost and latency. A cheaper incorrect answer is a failure. No performance claim follows from the existence of the harness or its unit tests.
 
-The harness is in [`scripts/agent-eval/`](../../scripts/agent-eval/README.md): `run-ab.sh` is the convenience runner, `parse-run.mjs` the transcript parser, `aggregate.mjs` the comparison of judged runs, and `tasks/impact.txt` the sample task.
+The harness and how to run it are in [`scripts/agent-eval/`](../../scripts/agent-eval/README.md).
 
 ## Freeze a cell before running
 
