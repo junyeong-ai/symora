@@ -6,8 +6,8 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    JsPackage, Manifests, ModuleResolution, TsConfig, TsOwner, nearest, own_or_only, project_path,
-    python_project_roots,
+    JsPackage, Manifests, ModuleResolution, Pytest, PythonProject, TsConfig, TsOwner, nearest,
+    own_or_only, project_path, python_project,
 };
 use crate::models::symbol::Language;
 
@@ -577,14 +577,17 @@ impl<'a> SourceSet<'a> {
 
 /// The directories a Python tree puts on `sys.path`, as its own tooling
 /// establishes them: the directory above a file's top-level package (a
-/// package is a directory holding `__init__.py`), and those each project's
-/// configuration declares or its build backend discovers.
+/// package is a directory holding `__init__.py`), those each project's
+/// configuration declares or its build backend discovers, and those pytest
+/// adds.
 struct PythonPath<'a> {
     packages: HashSet<&'a [String]>,
-    /// The directories each project puts on `sys.path`, by the project's
-    /// directory. The project root is a project whether or not it holds a
-    /// configuration file of its own.
-    projects: HashMap<Vec<String>, Vec<Vec<String>>>,
+    /// What each project puts on `sys.path`, by the project's directory. The
+    /// project root is a project whether or not it holds a configuration
+    /// file of its own.
+    projects: HashMap<Vec<String>, PythonProject>,
+    /// How pytest runs where no configuration file says.
+    default_pytest: Pytest,
 }
 
 impl<'a> PythonPath<'a> {
@@ -602,14 +605,18 @@ impl<'a> PythonPath<'a> {
         let mut projects = manifests.python_projects.clone();
         projects
             .entry(Vec::new())
-            .or_insert_with(|| python_project_roots(&[], &[]));
-        Self { packages, projects }
+            .or_insert_with(|| python_project(&[], &[]));
+        Self {
+            packages,
+            projects,
+            default_pytest: Pytest::default(),
+        }
     }
 
     /// The directory a file in `directory` is imported from where that
     /// directory is a package: the one above its top-level package, which
     /// has to be on `sys.path` for the file to run as part of its package.
-    fn package_root_of(&self, directory: &'a [String]) -> Option<&'a [String]> {
+    fn package_root_of<'d>(&self, directory: &'d [String]) -> Option<&'d [String]> {
         if !self.packages.contains(directory) {
             return None;
         }
@@ -617,6 +624,39 @@ impl<'a> PythonPath<'a> {
             .rev()
             .map(|depth| &directory[..depth])
             .find(|directory| !self.packages.contains(directory))
+    }
+
+    /// The pytest configuration a file in `directory` runs under: that of
+    /// the nearest project above it whose files configure pytest, as pytest
+    /// looks for one upward from where it runs.
+    fn pytest_of(&self, directory: &[String]) -> &Pytest {
+        (0..=directory.len())
+            .rev()
+            .find_map(|depth| self.projects.get(&directory[..depth])?.pytest.as_ref())
+            .unwrap_or(&self.default_pytest)
+    }
+
+    /// The directories on a Python file's `sys.path` that its own project
+    /// and pytest establish: the one above its top-level package; its own
+    /// project's roots; the `pythonpath` of the pytest configuration it runs
+    /// under; and, for a test module or `conftest.py` that configuration
+    /// imports by inserting its basedir, that basedir — the first directory
+    /// upward without `__init__.py`.
+    fn of_file<'s>(&'s self, from: &'s Node) -> Vec<&'s [String]> {
+        let package_root = self.package_root_of(&from.directory);
+        let own = nearest(&self.projects, &from.directory).map(|(_, project)| project);
+        let pytest = self.pytest_of(&from.directory);
+        let basedir = (pytest.inserts_basedir && pytest.imports_as_test(Path::new(&from.rel_path)))
+            .then(|| package_root.unwrap_or(&from.directory));
+        package_root
+            .into_iter()
+            .chain(
+                own.into_iter()
+                    .flat_map(|own| own.roots.iter().map(Vec::as_slice)),
+            )
+            .chain(pytest.pythonpath.iter().map(Vec::as_slice))
+            .chain(basedir)
+            .collect()
     }
 }
 
@@ -1041,15 +1081,14 @@ impl ProjectIndex<'_> {
     }
 
     /// The module an absolute Python import names: the file at that dotted
-    /// path below a directory on the importer's `sys.path` (`PythonPath`) —
-    /// the one above its top-level package, which has to be there for it to
-    /// run as part of its package, and those its own project, the nearest
-    /// above it, puts there. Another project's roots, and the directory above
-    /// some other top-level package, are on it only where an installation
-    /// puts them, which pack does not read, so they name nothing. Two files
-    /// on that footing name neither. A path below none of them (the standard
-    /// library, an installed distribution) names nothing in the project,
-    /// however its last segments match a project file: `logging` is not
+    /// path below a directory on the importer's `sys.path` that its own
+    /// project and pytest establish (`PythonPath::of_file`). Another
+    /// project's roots, and the directory above some other top-level
+    /// package, are on it only where an installation puts them, which pack
+    /// does not read, so they name nothing. Two files on that footing name
+    /// neither. A path below none of them (the standard library, an
+    /// installed distribution) names nothing in the project, however its
+    /// last segments match a project file: `logging` is not
     /// `app/util/logging.py`, whose name is `app.util.logging`, and a
     /// directory is on `sys.path` only where the tooling puts it there, never
     /// because a script happens to sit in it.
@@ -1057,19 +1096,11 @@ impl ProjectIndex<'_> {
         if module.is_empty() {
             return Vec::new();
         }
-        let own_project = nearest(&self.python.projects, &from.directory)
-            .map(|(_, roots)| roots.as_slice())
-            .unwrap_or_default();
-        let bases = self
-            .python
-            .package_root_of(&from.directory)
-            .into_iter()
-            .chain(own_project.iter().map(Vec::as_slice));
-        Found::first([
-            self.modules_at(bases.map(|base| [base, module].concat()), |language| {
-                language == Language::Python
-            }),
-        ])
+        let bases = self.python.of_file(from);
+        Found::first([self.modules_at(
+            bases.into_iter().map(|base| [base, module].concat()),
+            |language| language == Language::Python,
+        )])
     }
 
     /// The files of the package that is the directory at `path`, in a
@@ -1894,9 +1925,12 @@ mod tests {
             edges_of(&nodes, 1),
             vec!["app/util/logging.py", "app/util/__init__.py"]
         );
-        // `src/` is on `sys.path` by the src layout; the test's own directory
-        // is not, whatever the test runner does with it.
-        assert_eq!(edges_of(&nodes, 6), vec!["src/pkg/core.py"]);
+        // `src/` is on `sys.path` by the src layout, and pytest puts a test
+        // module's own directory there.
+        assert_eq!(
+            edges_of(&nodes, 6),
+            vec!["src/pkg/core.py", "tests/conftest.py"]
+        );
         assert!(edges_of(&nodes, 8).is_empty());
         // A namespace package needs no `__init__.py` below a root, and `src/`
         // is one by the src layout even where no package says so.
@@ -1977,6 +2011,70 @@ mod tests {
             edges_under(&nodes, 7, &manifests),
             vec!["cfg/lib/mod/b.py", "cfg/tools/shared.py"]
         );
+    }
+
+    /// pytest's default import mode puts on `sys.path` the basedir of each
+    /// test module and `conftest.py` it imports — the first directory upward
+    /// without `__init__.py` — so a test imports the helpers beside it; a
+    /// module that is neither gets no such directory. The configuration
+    /// pytest reads, the nearest above the file that configures it, names
+    /// test modules by `python_files` and adds its `pythonpath`; its
+    /// `importlib` mode inserts no basedir.
+    #[test]
+    fn a_test_module_imports_from_the_basedir_pytest_puts_on_sys_path() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "tests/test_a.py", "import factories\nimport app.core\n"),
+            python(1, "tests/factories.py", ""),
+            python(2, "tests/helpers.py", "import factories\n"),
+            python(3, "tests/conftest.py", "import factories\n"),
+            python(4, "src/app/__init__.py", ""),
+            python(5, "src/app/core.py", ""),
+            python(
+                6,
+                "outer/inner/t/spec_one.py",
+                "import near\nimport common\n",
+            ),
+            python(7, "outer/inner/t/test_two.py", "import near\n"),
+            python(8, "outer/inner/t/near.py", ""),
+            python(9, "outer/shared/common.py", ""),
+            python(10, "iso/tests/test_z.py", "import factories\n"),
+            python(11, "iso/tests/factories.py", ""),
+            python(12, "outer/inner/t/check_x.py", "import near\n"),
+            python(13, "iso2/tests/test_z.py", "import factories\n"),
+            python(14, "iso2/tests/factories.py", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "outer/pytest.ini",
+                    "[pytest]\npython_files =\n    spec_*.py\n    t/check_*.py\npythonpath = shared\n",
+                ),
+                (
+                    "outer/inner/pyproject.toml",
+                    "[project]\nname = \"inner\"\n",
+                ),
+                (
+                    "iso/pyproject.toml",
+                    "[tool.pytest.ini_options]\naddopts = [\"-q\", \"--import-mode\", \"importlib\"]\n",
+                ),
+                (
+                    "iso2/pytest.ini",
+                    "[pytest]\naddopts = -q --import-mode=importlib\n",
+                ),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(0), vec!["tests/factories.py", "src/app/core.py"]);
+        assert!(edges(2).is_empty());
+        assert_eq!(edges(3), vec!["tests/factories.py"]);
+        assert_eq!(
+            edges(6),
+            vec!["outer/inner/t/near.py", "outer/shared/common.py"]
+        );
+        assert_eq!(edges(12), vec!["outer/inner/t/near.py"]);
+        assert!(edges(7).is_empty() && edges(10).is_empty() && edges(13).is_empty());
     }
 
     /// A name that is no path in the project — a JavaScript package
