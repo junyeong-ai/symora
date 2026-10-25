@@ -1120,7 +1120,13 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
 /// as one, supplying a `::` between them, or as a declarator after a name it
 /// set aside as an error, where a declaration has its type. The macro
 /// expands to the list, so its name and its own parentheses are spelled as
-/// blanks.
+/// blanks. Read as an expression, a parameter list writes names and the
+/// operators its declarators spell (`OF((gzFile, z_off_t))`, `P_((OnigRegSet*
+/// set))`) or leaves an error, as its arrays' and function pointers' types
+/// do, so a list the grammar read as arguments without an error that holds a
+/// call or a literal is a C++ direct-initializer instead (`EXPORT Timer
+/// timer((Clock()));`). A lone function pointer written with type names
+/// alone reads as a call (`P_((T (*f)(U)))`), and so as an initializer.
 fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
@@ -1173,6 +1179,7 @@ fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             continue;
         };
         if let [wrapped] = held[..]
+            && (list.has_error() || !holds_a_value(wrapped))
             && std::iter::successors(Some(wrapped), |part| {
                 let mut cursor = part.walk();
                 part.children(&mut cursor).find(|child| !child.is_missing())
@@ -1217,6 +1224,28 @@ fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize
         }
     }
     macros
+}
+
+/// Whether a C or C++ expression holds a call or a literal.
+fn holds_a_value(node: Node) -> bool {
+    let mut pending = vec![node];
+    while let Some(part) = pending.pop() {
+        if matches!(
+            part.kind(),
+            "call_expression"
+                | "number_literal"
+                | "string_literal"
+                | "char_literal"
+                | "true"
+                | "false"
+                | "null"
+        ) {
+            return true;
+        }
+        let mut cursor = part.walk();
+        pending.extend(part.named_children(&mut cursor));
+    }
+    false
 }
 
 /// Where the first `{` a C or C++ node holds opens.
@@ -7552,7 +7581,11 @@ region     = "us-central1"
                  extern void clnt_pcreateerror __P((const char *));\n\
                  ZEXTERN int ZEXPORT deflate OF((z_streamp strm, int flush));\n\
                  ZEXTERN int ZEXPORT deflateBound OF((z_streamp strm,\n    uLong sourceLen))\n    \
-                 __API_AVAILABLE(macos(10.13));\nWidget w((a));\n"
+                 __API_AVAILABLE(macos(10.13));\nWidget w((a));\n\
+                 extern int gethostname __P((char name[64], size_t len));\n\
+                 ZEXTERN z_off_t ZEXPORT gztell64 OF((gzFile, z_off_t));\n\
+                 ONIG_EXTERN\nvoid onig_regset_free P_((OnigRegSet* set));\n\
+                 EXPORT Timer timer((Clock()));\nint Foo::count((0));\n"
             ),
             [
                 "function:clnt_create",
@@ -7560,6 +7593,11 @@ region     = "us-central1"
                 "function:deflate",
                 "function:deflateBound",
                 "variable:w",
+                "function:gethostname",
+                "function:gztell64",
+                "function:onig_regset_free",
+                "variable:timer",
+                "variable:Foo::count",
             ],
             "a macro a prototype wraps its parameters in expands to them"
         );
