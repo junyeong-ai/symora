@@ -34,6 +34,9 @@ pub(super) struct Manifests {
     pub(super) python_projects: HashMap<Vec<String>, PythonProject>,
     /// How pytest runs from each directory whose files configure it.
     pub(super) pytest_configurations: HashMap<Vec<String>, Pytest>,
+    /// The directories pytest takes for its root where no configuration
+    /// file above a test configures it (`Rootdir`).
+    pub(super) pytest_rootdirs: HashMap<Vec<String>, Rootdir>,
     /// The TypeScript projects the tree's configurations describe.
     pub(super) ts_projects: TsProjects,
     /// Each package a JavaScript workspace lists, by its directory.
@@ -471,7 +474,7 @@ impl Manifests {
                 (directory.clone(), kind)
             })
             .collect();
-        let (python_projects, pytest_configurations) = python_configurations(root, nodes);
+        let python = python_configurations(root, nodes);
         let workspaces = js_workspaces(root, nodes, &package_jsons);
         let mut versions = TypeScriptVersions::new(root);
         let ts_projects = ts_projects(root, nodes, &workspaces, &mut versions);
@@ -485,8 +488,9 @@ impl Manifests {
             go_modules,
             dart_packages,
             rust_packages,
-            python_projects,
-            pytest_configurations,
+            python_projects: python.projects,
+            pytest_configurations: python.pytest,
+            pytest_rootdirs: python.rootdirs,
             ts_projects,
             js_packages: js_packages(&package_jsons, &workspaces),
             module_types,
@@ -1839,6 +1843,18 @@ pub(super) struct Pytest {
     pub(super) basedir: Basedir,
 }
 
+/// What makes a directory the one pytest roots a run at where no file above
+/// a test configures pytest (`_pytest/config/findpaths.py`
+/// `determine_setup`): the nearest `pyproject.toml` it passed on the way up
+/// becomes its configuration file, and without one the nearest directory
+/// holding a `setup.py` its root. Conftests load from that directory down
+/// (`Config._is_in_confcutdir`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Rootdir {
+    Pyproject,
+    SetupPy,
+}
+
 /// Where pytest's `--import-mode` puts a test module's basedir on
 /// `sys.path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1956,19 +1972,14 @@ impl<'f> PythonConfiguration<'f> {
 }
 
 /// What the Python files of a project tree are configured by: every
-/// project above a Python file, with what it puts on `sys.path`, and every
-/// pytest configuration there, each by its directory. A directory is a
+/// project above a Python file, with what it puts on `sys.path`, every
+/// pytest configuration there, and each directory pytest roots a run at
+/// where no file configures it, each by its directory. A directory is a
 /// project's where its files configure a build
 /// (`PythonConfiguration::configures_a_build`) and it is no package — one
 /// holding `__init__.py` is part of the project above it, its `setup.py` a
 /// module like any other.
-fn python_configurations(
-    root: &Path,
-    nodes: &[Node],
-) -> (
-    HashMap<Vec<String>, PythonProject>,
-    HashMap<Vec<String>, Pytest>,
-) {
+fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
     let packages = python_packages(nodes);
     let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
     for file in PYTHON_CONFIGURATION_FILES {
@@ -1982,12 +1993,18 @@ fn python_configurations(
         }
     }
     let mut pytest = HashMap::new();
+    let mut rootdirs = HashMap::new();
     let mut pyprojects: HashMap<&[String], toml::Table> = HashMap::new();
     let mut projects = Vec::new();
     for (directory, files) in &configurations {
         let mut configuration = PythonConfiguration::read(files);
         if let Some(options) = configuration.pytest(directory) {
             pytest.insert(directory.clone(), options);
+        }
+        if configuration.has_pyproject {
+            rootdirs.insert(directory.clone(), Rootdir::Pyproject);
+        } else if configuration.has_setup_py {
+            rootdirs.insert(directory.clone(), Rootdir::SetupPy);
         }
         if packages.contains(directory.as_slice()) || !configuration.configures_a_build() {
             continue;
@@ -2004,7 +2021,19 @@ fn python_configurations(
             (directory.clone(), project)
         })
         .collect();
-    (projects, pytest)
+    PythonConfigurations {
+        projects,
+        pytest,
+        rootdirs,
+    }
+}
+
+/// What the Python configuration files of a tree say, each by its
+/// directory (`python_configurations`).
+struct PythonConfigurations {
+    projects: HashMap<Vec<String>, PythonProject>,
+    pytest: HashMap<Vec<String>, Pytest>,
+    rootdirs: HashMap<Vec<String>, Rootdir>,
 }
 
 /// The projects in the tree that the project at `directory` declares a
