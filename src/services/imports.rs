@@ -131,6 +131,12 @@ impl ImportExtractor {
                 imports.modules.push(name.to_string());
                 continue;
             }
+            if let Some(name) = captured("declares") {
+                imports
+                    .declares
+                    .push(backquoted_name(name.node, source).to_string());
+                continue;
+            }
             if let Some(package) = captured("package") {
                 // Scala chains its package clauses: `package a.b` then
                 // `package c` declares `a.b.c`.
@@ -150,12 +156,15 @@ impl ImportExtractor {
 }
 
 /// What a file's imports say: the package it declares itself in, where its
-/// language names one in the file (`package com.acme.app`), the modules it
-/// declares, which its own paths can start from (a Rust `mod`), and the
-/// module references it makes, in source order.
+/// language names one in the file (`package com.acme.app`), the names it
+/// declares at its top level, which an import of that package names it by
+/// (a JVM class, object or top-level function), the modules it declares,
+/// which its own paths can start from (a Rust `mod`), and the module
+/// references it makes, in source order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileImports {
     pub package: Option<String>,
+    pub declares: Vec<String>,
     pub modules: Vec<String>,
     pub references: Vec<String>,
 }
@@ -511,21 +520,46 @@ const TYPESCRIPT_QUERY: &str = r#"
 (export_statement source: (string) @path)
 "#;
 
-/// A JVM file declares the package it belongs to, which with its name is the
-/// class it holds, and imports classes and whole packages by those names.
+/// A JVM file declares the package it belongs to and the names it holds at
+/// its top level, which together are what an import names it by, and imports
+/// classes and whole packages by those names.
 const JAVA_QUERY: &str = r#"
 (package_declaration [(scoped_identifier) (identifier)] @package)
+(program (class_declaration name: (identifier) @declares))
+(program (interface_declaration name: (identifier) @declares))
+(program (enum_declaration name: (identifier) @declares))
+(program (record_declaration name: (identifier) @declares))
+(program (annotation_type_declaration name: (identifier) @declares))
 (import_declaration) @path
 "#;
 
+/// A Kotlin file declares classes, objects and type aliases at its top
+/// level, and functions and properties, which are imported by name too.
 const KOTLIN_QUERY: &str = r#"
 (package_header (identifier) @package)
+(source_file (class_declaration (type_identifier) @declares))
+(source_file (object_declaration (type_identifier) @declares))
+(source_file (type_alias (type_identifier) @declares))
+(source_file (function_declaration (simple_identifier) @declares))
+(source_file (property_declaration (variable_declaration (simple_identifier) @declares)))
 (import_header) @path
 "#;
 
-/// A package clause with a body declares a package for that body alone.
+/// A package clause with a body declares a package for that body alone, so
+/// only what the compilation unit holds itself is in the file's package.
 const SCALA_QUERY: &str = r#"
 (compilation_unit (package_clause name: (package_identifier) @package !body))
+(compilation_unit (class_definition name: (identifier) @declares))
+(compilation_unit (trait_definition name: (identifier) @declares))
+(compilation_unit (object_definition name: (identifier) @declares))
+(compilation_unit (enum_definition name: (identifier) @declares))
+(compilation_unit (package_object name: (identifier) @declares))
+(compilation_unit (type_definition name: (type_identifier) @declares))
+(compilation_unit (function_definition name: (identifier) @declares))
+(compilation_unit (given_definition name: (identifier) @declares))
+(compilation_unit (val_definition pattern: (identifier) @declares))
+(compilation_unit (var_definition pattern: (identifier) @declares))
+(compilation_unit (extension_definition body: (function_definition name: (identifier) @declares)))
 (import_declaration) @path
 "#;
 
@@ -848,6 +882,47 @@ mod tests {
         assert_eq!(package("package app\n", Language::Python), None);
     }
 
+    /// A JVM file declares at its top level what an import of its package
+    /// names it by — classes of every kind, objects, and in Kotlin and Scala
+    /// functions and values too — and never what those declarations nest.
+    #[test]
+    fn jvm_languages_read_the_names_a_file_declares_at_its_top_level() {
+        let declares = |content: &str, language| {
+            ImportExtractor::shared()
+                .extract(content, language)
+                .declares
+        };
+        assert_eq!(
+            declares(
+                "package a;\npublic class C { class Inner {} void m() {} }\ninterface I {}\n\
+                 enum E { A }\nrecord R(int x) {}\n@interface N {}\n",
+                Language::Java
+            ),
+            vec!["C", "I", "E", "R", "N"]
+        );
+        assert_eq!(
+            declares(
+                "package a\nclass C {\n    class Inner\n    fun m() {}\n}\ninterface I\n\
+                 object O {\n    val inner = 1\n}\nenum class E { A }\ntypealias T = Int\nfun f() {}\n\
+                 fun String.ext() = 1\nval p = 1\nvar `q` = 2\n",
+                Language::Kotlin
+            ),
+            vec!["C", "I", "O", "E", "T", "f", "ext", "p", "q"]
+        );
+        assert_eq!(
+            declares(
+                "package a\nclass C { def m = 1 }\ntrait T\nobject O\ncase class D(x: Int)\n\
+                 enum E { case A }\npackage object po { def z = 1 }\ntype Al = Int\ndef f = 1\n\
+                 given g: Int = 1\nval v = 1\nvar w = 2\nextension (s: String) def ex = 1\n\
+                 package inner { class Hidden }\n",
+                Language::Scala
+            ),
+            vec![
+                "C", "T", "O", "D", "E", "po", "Al", "f", "g", "v", "w", "ex"
+            ]
+        );
+    }
+
     #[test]
     fn a_dart_library_names_its_imports_exports_and_parts() {
         assert_eq!(
@@ -998,14 +1073,21 @@ module "ordinary-percent" { source = "./100%" }
             Language::TypeScript,
             "import a from \"./a\";\nimport r = require(\"./r\");\nexport * from \"./b\";\n",
         ),
-        (Language::Java, "package a.b;\nimport java.util.List;\n"),
+        (
+            Language::Java,
+            "package a.b;\nimport java.util.List;\nclass C {}\ninterface I {}\nenum E { A }\n\
+             record R(int x) {}\n@interface N {}\n",
+        ),
         (
             Language::Kotlin,
-            "package a.b\nimport kotlin.collections.List\n",
+            "package a.b\nimport kotlin.collections.List\nclass C\nobject O\ntypealias T = Int\n\
+             fun f() {}\nval p = 1\n",
         ),
         (
             Language::Scala,
-            "package a.b\nimport scala.collection.mutable\n",
+            "package a.b\nimport scala.collection.mutable\nclass C\ntrait T\nobject O\n\
+             enum E { case A }\npackage object po {}\ntype A = Int\ndef f = 1\ngiven g: Int = 1\n\
+             val v = 1\nvar w = 2\nextension (s: String) def x = 1\n",
         ),
         (
             Language::Dart,
