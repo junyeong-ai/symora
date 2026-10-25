@@ -64,36 +64,45 @@ pub(super) struct TsConfig {
     pub(super) paths_base: Vec<String>,
 }
 
+/// What the `paths` pattern a specifier matches maps it to.
+pub(super) struct Mapping {
+    /// The project paths its substitutions name, in the order written.
+    pub(super) paths: Vec<Vec<String>>,
+    /// Whether the pattern is `*`, which every specifier matches: one it maps
+    /// to no file is looked up as a package, as any unmapped one is.
+    pub(super) catch_all: bool,
+}
+
 impl TsConfig {
-    /// The project paths the `paths` pattern a specifier matches maps it to,
-    /// in the order its substitutions are written, or `None` where it matches
-    /// none. An exact pattern wins, then the one whose prefix before `*` is
-    /// longest, as TypeScript picks.
-    pub(super) fn mapped(&self, specifier: &str) -> Option<Vec<Vec<String>>> {
-        let (substitutions, star) = self
+    /// What the `paths` pattern a specifier matches maps it to, or `None`
+    /// where it matches none. An exact pattern wins, then the one whose
+    /// prefix before `*` is longest, as TypeScript picks.
+    pub(super) fn mapped(&self, specifier: &str) -> Option<Mapping> {
+        let (pattern, substitutions, star) = self
             .paths
             .iter()
             .find(|(pattern, _)| pattern == specifier)
-            .map(|(_, substitutions)| (substitutions, ""))
+            .map(|(pattern, substitutions)| (pattern, substitutions, ""))
             .or_else(|| {
                 self.paths
                     .iter()
                     .filter_map(|(pattern, substitutions)| {
                         let (prefix, suffix) = pattern.split_once('*')?;
                         let star = specifier.strip_prefix(prefix)?.strip_suffix(suffix)?;
-                        Some((prefix.len(), substitutions, star))
+                        Some((prefix.len(), pattern, substitutions, star))
                     })
-                    .max_by_key(|(prefix, _, _)| *prefix)
-                    .map(|(_, substitutions, star)| (substitutions, star))
+                    .max_by_key(|(prefix, ..)| *prefix)
+                    .map(|(_, pattern, substitutions, star)| (pattern, substitutions, star))
             })?;
-        Some(
-            substitutions
+        Some(Mapping {
+            paths: substitutions
                 .iter()
                 .filter_map(|substitution| {
                     project_path(&self.paths_base, &substitution.replacen('*', star, 1))
                 })
                 .collect(),
-        )
+            catch_all: pattern == "*",
+        })
     }
 }
 

@@ -607,12 +607,13 @@ impl ProjectIndex<'_> {
     /// package the project links in. Any other names a package outside the
     /// project, however a project file's path ends. One a `paths` pattern or
     /// a workspace package's name matches that names no file is disclosed
-    /// rather than dropped.
+    /// rather than dropped — except where only the catch-all `*` pattern
+    /// matches it, which maps every package name too.
     fn bare_specifier(&self, specifier: &str, importer: &Importer) -> Resolution {
         let language = importer.node.language;
         let config = importer.ts_config;
         let mapped = config.and_then(|config| config.mapped(specifier));
-        for path in mapped.iter().flatten() {
+        for path in mapped.iter().flat_map(|mapping| &mapping.paths) {
             if let Some(found) = self.script_target(path, language) {
                 return Resolution::Files(found);
             }
@@ -628,8 +629,8 @@ impl ProjectIndex<'_> {
             return package;
         }
         match mapped {
-            Some(_) => Resolution::Undetermined(specifier.to_string()),
-            None => Resolution::Files(Vec::new()),
+            Some(mapping) if !mapping.catch_all => Resolution::Undetermined(specifier.to_string()),
+            _ => Resolution::Files(Vec::new()),
         }
     }
 
@@ -1932,6 +1933,36 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["@/styles/missing".to_string()])
+        );
+    }
+
+    /// Every specifier matches the catch-all pattern `*`, and TypeScript looks
+    /// one it maps to no file up as a package, so that one is a package's,
+    /// not an alias naming nothing.
+    #[test]
+    fn a_specifier_only_the_catch_all_pattern_maps_is_a_package_where_it_names_no_file() {
+        let nodes = vec![
+            node_in(
+                0,
+                "src/app.ts",
+                "import React from \"react\";\nimport type { T } from \"shared\";\n\
+                 import x from \"@/missing\";\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "src/types/shared.ts", "", Language::TypeScript),
+        ];
+        let manifests = manifests_of(
+            &[(
+                "tsconfig.json",
+                "{ \"compilerOptions\": { \"paths\": { \"*\": [\"src/types/*\"], \"@/*\": [\"src/*\"] } } }",
+            )],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert_eq!(graph.edges[&0], vec![1]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["@/missing".to_string()])
         );
     }
 
