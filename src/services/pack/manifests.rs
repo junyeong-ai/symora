@@ -1193,7 +1193,9 @@ fn python_configurations(
 /// workspace member of that name, or `{ path = "…" }`; and a Poetry
 /// dependency written `{ path = "…" }`. Names compare as normalized
 /// distribution names. Installing a project installs these, so their
-/// packages are on its `sys.path` as well.
+/// packages are on its `sys.path` as well — those of a directory whichever
+/// build configuration makes a project (`python_configurations`), and none
+/// of one that is no project's.
 fn python_dependencies(
     directory: &[String],
     pyprojects: &HashMap<&[String], toml::Table>,
@@ -1259,7 +1261,6 @@ fn python_dependencies(
             project_path(directory, dependency.get("path")?.as_str()?)
         }),
     );
-    dependencies.retain(|dependency| pyprojects.contains_key(dependency.as_slice()));
     dependencies.sort();
     dependencies.dedup();
     dependencies
