@@ -3707,8 +3707,11 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 /// declarator the grammar set aside as an error right before the one it read
 /// is the declarator: its parameters complete it, so what it read after them
 /// is a macro written there (`int f(int x) G_GNUC_PURE;`, `name() const
-/// ABSL_ATTRIBUTE_LIFETIME_BOUND`). A macro's argument list stands for no name
-/// of its own ([`macro_argument_name`], [`macro_wrapped_name`]).
+/// ABSL_ATTRIBUTE_LIFETIME_BOUND`), unless only the one it read names its
+/// parameters, as a macro's arguments never do ([`names_a_parameter`]), so
+/// the set-aside one is a macro written before it (`GIT_EXTERN(int)
+/// git_blob_lookup(git_blob **blob)`). A macro's argument list stands for no
+/// name of its own ([`macro_argument_name`], [`macro_wrapped_name`]).
 fn declarator_name(declarator: Node) -> Node {
     let mut node = declarator;
     loop {
@@ -3719,7 +3722,10 @@ fn declarator_name(declarator: Node) -> Node {
             .prev_sibling()
             .filter(|before| before.is_error() && before.named_child_count() == 1)
             .and_then(|before| before.named_child(0))
-            .filter(|held| held.kind() == "function_declarator")
+            .filter(|held| {
+                held.kind() == "function_declarator"
+                    && (names_a_parameter(*held) || !names_a_parameter(node))
+            })
         {
             node = set_aside;
         }
@@ -6241,6 +6247,14 @@ region     = "us-central1"
                 "method:name",
             ],
             "a macro written after a declarator names nothing"
+        );
+        assert_eq!(
+            declared(
+                "GIT_BEGIN_DECL\n\nGIT_EXTERN(int) git_blob_lookup(\n\t\
+                 git_blob **blob, git_repository *repo, const git_oid *id);\n"
+            ),
+            ["function:git_blob_lookup"],
+            "a macro's arguments name nothing, so a macro is written before the function that names"
         );
         assert_eq!(
             declared(
