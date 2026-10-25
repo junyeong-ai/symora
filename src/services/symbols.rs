@@ -1719,7 +1719,7 @@ fn extract_declaration(
                     }
                     _ => node_kind(node),
                 };
-                (!names_nothing(text) && stated.insert(text))
+                (!names_nothing(text, language) && stated.insert(text))
                     .then(|| (text.to_string(), kind, name))
             })
             .collect()
@@ -2679,7 +2679,7 @@ fn extract_name_and_kind(
     let name = content
         .get(name_node.start_byte()..name_end_node(name_node).end_byte())?
         .to_string();
-    if names_nothing(&name) {
+    if names_nothing(&name, language) {
         return None;
     }
     Some((name, node_kind(node)))
@@ -2737,11 +2737,21 @@ fn name_end_node(name: Node) -> Node {
     name
 }
 
-/// Whether a declared name is no name at all: empty, or the blank `_` that
-/// discards what is bound to it.
-fn names_nothing(name: &str) -> bool {
-    name.is_empty() || name == "_"
+/// Whether a declared name is no name at all: empty, the blank `_` that
+/// discards what is bound to it, or in C and C++ a word both languages
+/// reserve, which a grammar recovering from a macro reads where a name goes
+/// (`PyAPI_FUNC(int) Py_IsInitialized(void)` declares `void`).
+fn names_nothing(name: &str, language: Language) -> bool {
+    name.is_empty() || name == "_" || language == Language::Cpp && C_KEYWORDS.contains(&name)
 }
+
+/// The keywords C and C++ both reserve.
+const C_KEYWORDS: &[&str] = &[
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "return",
+    "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned",
+    "void", "volatile", "while",
+];
 
 /// The first child of `node` with the given grammar kind. Grammars that wrap a
 /// declaration's name in unnamed intermediate nodes are read through this
@@ -3258,7 +3268,7 @@ fn member_kind(name: Node) -> SymbolKind {
     if name.kind() == "operator_cast" {
         return SymbolKind::Method;
     }
-    let mut node = name;
+    let mut node = macro_wrapper(name).unwrap_or(name);
     while let Some(parent) = node.parent() {
         match parent.kind() {
             "parenthesized_declarator" | "attributed_declarator" | "qualified_identifier" => {
@@ -3311,32 +3321,14 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 /// declarator the grammar set aside as an error right before the one it read
 /// is the declarator: its parameters complete it, so what it read after them
 /// is a macro written there (`int f(int x) G_GNUC_PURE;`, `name() const
-/// ABSL_ATTRIBUTE_LIFETIME_BOUND`). A name in parentheses that the grammar
-/// found another name after, and set that aside as an error, is a macro's
-/// argument, and the name after it the declarator (`typedef Array(T) Ts;`).
+/// ABSL_ATTRIBUTE_LIFETIME_BOUND`). A macro's argument list stands for no name
+/// of its own ([`macro_argument_name`], [`macro_wrapped_name`]).
 fn declarator_name(declarator: Node) -> Node {
-    if declarator.kind() == "parenthesized_declarator"
-        && declarator.named_child(0).is_some_and(|inside| {
-            matches!(
-                inside.kind(),
-                "identifier" | "type_identifier" | "field_identifier"
-            )
-        })
-        && let Some(named) = declarator
-            .next_sibling()
-            .filter(|after| after.is_error() && after.named_child_count() == 1)
-            .and_then(|after| after.named_child(0))
-            .filter(|held| {
-                matches!(
-                    held.kind(),
-                    "identifier" | "type_identifier" | "field_identifier"
-                )
-            })
-    {
-        return named;
-    }
     let mut node = declarator;
     loop {
+        if let Some(named) = macro_argument_name(node).or_else(|| macro_wrapped_name(node)) {
+            return named;
+        }
         if let Some(set_aside) = node
             .prev_sibling()
             .filter(|before| before.is_error() && before.named_child_count() == 1)
@@ -3364,6 +3356,67 @@ fn declarator_name(declarator: Node) -> Node {
             None => return node,
         }
     }
+}
+
+/// The name a C or C++ declarator writes after a macro's argument list: a
+/// name or type in parentheses that the grammar found another name after, and
+/// set that aside as an error, is the macro's argument, and the name after it
+/// the declarator (`typedef Array(T) Ts;`, `Array(uint32_t) ids[4];`).
+fn macro_argument_name(declarator: Node) -> Option<Node> {
+    let identifier = |node: &Node| {
+        matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        )
+    };
+    (declarator.kind() == "parenthesized_declarator"
+        && declarator
+            .named_child(0)
+            .is_some_and(|inside| identifier(&inside) || inside.kind() == "primitive_type"))
+    .then(|| declarator.next_sibling())
+    .flatten()
+    .filter(|after| after.is_error() && after.named_child_count() == 1)
+    .and_then(|after| after.named_child(0))
+    .filter(identifier)
+}
+
+/// The name a C or C++ function declarator applies to through a macro around
+/// it. Neither language lets a function return a function, so a function
+/// declarator applied to another whose one parameter is a name alone applies
+/// to that name: a macro wraps it (`GIT_CALLBACK(read)(void *)`), or, where
+/// what the grammar read as the inner function is a keyword, parentheses do
+/// (`int (lua_gettop)(lua_State *L)`).
+fn macro_wrapped_name(declarator: Node) -> Option<Node> {
+    if declarator.kind() != "function_declarator" {
+        return None;
+    }
+    let wrapper = declarator
+        .child_by_field_name("declarator")
+        .filter(|inner| inner.kind() == "function_declarator")?;
+    let parameters = wrapper.child_by_field_name("parameters")?;
+    let mut cursor = parameters.walk();
+    let mut held = parameters
+        .named_children(&mut cursor)
+        .filter(|held| !held.is_extra());
+    let parameter = held.next().filter(|parameter| {
+        parameter.kind() == "parameter_declaration"
+            && parameter.child_by_field_name("declarator").is_none()
+    })?;
+    if held.next().is_some() {
+        return None;
+    }
+    parameter
+        .child_by_field_name("type")
+        .filter(|name| matches!(name.kind(), "type_identifier" | "identifier"))
+}
+
+/// The function declarator that stands where a macro-wrapped name
+/// ([`macro_wrapped_name`]) would: the wrapper the macro is read as.
+fn macro_wrapper(name: Node) -> Option<Node> {
+    let wrapper = name.parent()?.parent()?.parent()?;
+    let applied = wrapper.parent()?;
+    (macro_wrapped_name(applied).is_some_and(|wrapped| wrapped.id() == name.id()))
+        .then_some(wrapper)
 }
 
 /// Classify a JS/TS `variable_declarator` by its initializer and keyword: a
@@ -5689,6 +5742,21 @@ region     = "us-central1"
                 "field:after_macro",
             ],
             "a macro's arguments name nothing, and what follows them is its declaration's name"
+        );
+        assert_eq!(
+            declared(
+                "PyAPI_FUNC(int) Py_IsInitialized(void);\nLUA_API int (lua_gettop) (lua_State *L);\n\
+                 typedef Array(uint32_t) IdList;\nstruct S {\n  Array(uint32_t) ids[4];\n  \
+                 int GIT_CALLBACK(read)(void *);\n};\n"
+            ),
+            [
+                "function:lua_gettop",
+                "class:IdList",
+                "struct:S",
+                "field:ids",
+                "method:read",
+            ],
+            "a keyword names nothing, and a macro's argument list stands for the name it wraps"
         );
         let begins = |content: &str, name: &str| {
             extractor
