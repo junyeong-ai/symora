@@ -34,9 +34,8 @@ pub(super) struct Manifests {
     pub(super) python_projects: HashMap<Vec<String>, PythonProject>,
     /// How pytest runs from each directory whose files configure it.
     pub(super) pytest_configurations: HashMap<Vec<String>, Pytest>,
-    /// The TypeScript project each `tsconfig.json`, or a `jsconfig.json`
-    /// where a directory holds none, describes, by its directory.
-    pub(super) ts_configs: HashMap<Vec<String>, TsProject>,
+    /// The TypeScript projects the tree's configurations describe.
+    pub(super) ts_projects: TsProjects,
     /// Each package a JavaScript workspace lists, by its directory.
     pub(super) js_packages: HashMap<Vec<String>, JsPackage>,
     /// Whether each `package.json` above a JavaScript or TypeScript file
@@ -58,14 +57,25 @@ pub(super) struct JsPackage {
     pub(super) main: Option<String>,
 }
 
+/// Every TypeScript project the tree's configurations describe, each read
+/// once however many `references` name it.
+#[derive(Debug, Default)]
+pub(super) struct TsProjects {
+    /// Each configuration file read, by its project path.
+    projects: Vec<TsProject>,
+    /// The project each directory's configuration describes: its
+    /// `tsconfig.json`, or a `jsconfig.json` where it holds none.
+    by_directory: HashMap<Vec<String>, usize>,
+}
+
 /// A TypeScript configuration as the project `tsc -b` builds from it: what
 /// it says about its files' specifiers, the files it compiles itself, and
-/// the projects its `references` name.
+/// the projects its `references` name, by their indices in `TsProjects`.
 #[derive(Debug, Clone, Default)]
-pub(super) struct TsProject {
-    pub(super) config: TsConfig,
+struct TsProject {
+    config: TsConfig,
     sources: TsSources,
-    references: Vec<TsProject>,
+    references: Vec<usize>,
 }
 
 /// The files a TypeScript project compiles itself (`ts_sources`).
@@ -92,31 +102,33 @@ pub(super) enum TsOwner<'a> {
     Undetermined,
 }
 
-impl TsProject {
-    /// The configurations `file` is compiled under in this project: its own
-    /// where it compiles the file itself — or has no `references`, a
-    /// configuration's files being whatever is below it — else those of the
-    /// projects it references that do, as `tsc -b` builds them.
-    fn owners<'a>(&'a self, file: &Path, owners: &mut Vec<&'a TsConfig>) {
-        if self.references.is_empty() || self.sources.covers(file) {
-            owners.push(&self.config);
-            return;
+impl TsProjects {
+    /// The configurations `file` is compiled under in the project at
+    /// `project`: its own where it compiles the file itself — or has no
+    /// `references`, a configuration's files being whatever is below it —
+    /// else those of the projects its references reach, each once, that
+    /// compile it, as `tsc -b` builds them; a project compiling the file
+    /// stands for those it references.
+    fn owners(&self, project: usize, file: &Path) -> Vec<&TsConfig> {
+        let own = &self.projects[project];
+        if own.references.is_empty() || own.sources.covers(file) {
+            return vec![&own.config];
         }
-        for reference in &self.references {
-            reference.compiling(file, owners);
+        let mut owners = Vec::new();
+        let mut visited = HashSet::from([project]);
+        let mut pending: Vec<usize> = own.references.iter().rev().copied().collect();
+        while let Some(at) = pending.pop() {
+            if !visited.insert(at) {
+                continue;
+            }
+            let referenced = &self.projects[at];
+            if referenced.sources.covers(file) {
+                owners.push(&referenced.config);
+            } else {
+                pending.extend(referenced.references.iter().rev());
+            }
         }
-    }
-
-    /// The configurations of this referenced project, and those it
-    /// references in turn, that compile `file` themselves.
-    fn compiling<'a>(&'a self, file: &Path, owners: &mut Vec<&'a TsConfig>) {
-        if self.sources.covers(file) {
-            owners.push(&self.config);
-            return;
-        }
-        for reference in &self.references {
-            reference.compiling(file, owners);
-        }
+        owners
     }
 }
 
@@ -277,7 +289,7 @@ impl Manifests {
             rust_packages,
             python_projects,
             pytest_configurations,
-            ts_configs: ts_configs(root, nodes),
+            ts_projects: ts_projects(root, nodes),
             js_packages: js_packages(root, nodes, &package_jsons),
             module_types,
         }
@@ -334,14 +346,14 @@ impl Manifests {
     /// The configuration a JavaScript or TypeScript file is compiled under:
     /// the nearest above it, or, where that one has `references` and does
     /// not compile the file itself, the one the referenced projects compiling
-    /// it agree on (`TsProject::owners`). Projects that say different things
+    /// it agree on (`TsProjects::owners`). Projects that say different things
     /// about specifiers, or none compiling it, leave it undetermined.
     pub(super) fn ts_owner(&self, from: &Node) -> TsOwner<'_> {
-        let Some((_, project)) = nearest(&self.ts_configs, &from.directory) else {
+        let projects = &self.ts_projects;
+        let Some((_, project)) = nearest(&projects.by_directory, &from.directory) else {
             return TsOwner::None;
         };
-        let mut owners = Vec::new();
-        project.owners(Path::new(&from.rel_path), &mut owners);
+        let owners = projects.owners(*project, Path::new(&from.rel_path));
         match owners.split_first() {
             Some((first, rest)) if rest.iter().all(|other| other == first) => {
                 TsOwner::Config(first)
@@ -549,57 +561,155 @@ fn cargo_package(
     Some(RustPackage { library, crates })
 }
 
-/// Every TypeScript configuration above a JavaScript or TypeScript file, by
-/// its directory: the `tsconfig.json` there, or else its `jsconfig.json`.
-fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsProject> {
-    let mut configs = HashMap::new();
+/// Every TypeScript configuration above a JavaScript or TypeScript file —
+/// the `tsconfig.json` of its directory, or else its `jsconfig.json` — with
+/// every project their `references` reach.
+fn ts_projects(root: &Path, nodes: &[Node]) -> TsProjects {
+    let mut reader = TsReader {
+        root,
+        parsed: HashMap::new(),
+        indices: HashMap::new(),
+        projects: TsProjects::default(),
+    };
     for file in ["tsconfig.json", "jsconfig.json"] {
         for (directory, contents) in manifests_above(root, nodes, is_javascript, file) {
-            if configs.contains_key(&directory) {
+            if reader.projects.by_directory.contains_key(&directory) {
                 continue;
             }
             let path = [directory.as_slice(), &[file.to_string()]].concat();
-            if let Some(project) = ts_project(root, &path, Some(&contents), 0) {
-                configs.insert(directory, project);
+            reader.parsed.entry(path.clone()).or_insert_with(|| {
+                count_parse();
+                jsonc(&contents)
+            });
+            if let Some(project) = reader.project(&path) {
+                reader.projects.by_directory.insert(directory, project);
             }
         }
     }
-    configs
+    reader.projects
 }
 
-/// The project the TypeScript configuration in `file` describes, with each
-/// project its `references` name — a configuration file, or a directory's
-/// `tsconfig.json` — read the same way. `references` is not inherited.
-fn ts_project(
-    root: &Path,
-    file: &[String],
-    contents: Option<&str>,
-    depth: usize,
-) -> Option<TsProject> {
-    // A project referencing itself through others would never end.
-    const DEPTH: usize = 16;
-    let mut chain = Vec::new();
-    ts_config_chain(root, file, contents, &mut chain);
-    let (directory, head) = chain.first()?;
-    let references = head
-        .get("references")
-        .and_then(|references| references.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|_| depth < DEPTH)
-        .filter_map(|reference| project_path(directory, reference.get("path")?.as_str()?))
-        .filter_map(|mut path| {
-            if !project_file(root, &path).is_file() {
-                path.push("tsconfig.json".to_string());
+/// The TypeScript configurations being read, each file parsed once and each
+/// project built once, by its project path.
+struct TsReader<'r> {
+    root: &'r Path,
+    parsed: HashMap<Vec<String>, Option<serde_json::Value>>,
+    indices: HashMap<Vec<String>, Option<usize>>,
+    projects: TsProjects,
+}
+
+impl TsReader<'_> {
+    /// The configuration in the file at `path`, parsed the first time it is
+    /// asked for; `None` where it is missing or no JSON with comments.
+    fn config(&mut self, path: &[String]) -> Option<&serde_json::Value> {
+        let root = self.root;
+        self.parsed
+            .entry(path.to_vec())
+            .or_insert_with(|| {
+                let text = std::fs::read_to_string(project_file(root, path)).ok()?;
+                count_parse();
+                jsonc(&text)
+            })
+            .as_ref()
+    }
+
+    /// The index of the project the configuration in the file at `path`
+    /// describes, with each project its `references` name — a
+    /// configuration file, or a directory's `tsconfig.json` — read the same
+    /// way, each once: a reference back to a project being read names it
+    /// without reading it again. `references` is not inherited.
+    fn project(&mut self, path: &[String]) -> Option<usize> {
+        if let Some(known) = self.indices.get(path) {
+            return *known;
+        }
+        let mut chain = Vec::new();
+        self.config_chain(path, &mut chain);
+        let Some((directory, head)) = chain.first() else {
+            self.indices.insert(path.to_vec(), None);
+            return None;
+        };
+        let referenced: Vec<Vec<String>> = head
+            .get("references")
+            .and_then(|references| references.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|reference| project_path(directory, reference.get("path")?.as_str()?))
+            .map(|mut path| {
+                if !project_file(self.root, &path).is_file() {
+                    path.push("tsconfig.json".to_string());
+                }
+                path
+            })
+            .collect();
+        let index = self.projects.projects.len();
+        self.projects.projects.push(TsProject {
+            config: ts_config(&chain),
+            sources: ts_sources(&chain),
+            references: Vec::new(),
+        });
+        self.indices.insert(path.to_vec(), Some(index));
+        let references = referenced
+            .iter()
+            .filter_map(|reference| self.project(reference))
+            .collect();
+        self.projects.projects[index].references = references;
+        Some(index)
+    }
+
+    /// The configuration in the file at `path`, then each it extends,
+    /// nearest first: what an extending configuration sets overrides what
+    /// it extends, and of several it extends at once the later wins. Only an
+    /// `extends` written as a relative path names a file in the project; a
+    /// package's configuration is not read.
+    fn config_chain(&mut self, path: &[String], chain: &mut Vec<(Vec<String>, serde_json::Value)>) {
+        // A configuration extending itself through others would never end.
+        const DEPTH: usize = 16;
+        if chain.len() >= DEPTH {
+            return;
+        }
+        let Some(config) = self.config(path).cloned() else {
+            return;
+        };
+        let directory = path[..path.len().saturating_sub(1)].to_vec();
+        let extends: Vec<String> = match config.get("extends") {
+            Some(serde_json::Value::String(extended)) => vec![extended.clone()],
+            Some(serde_json::Value::Array(extended)) => extended
+                .iter()
+                .filter_map(|extended| extended.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        };
+        chain.push((directory.clone(), config));
+        for extended in extends.iter().rev() {
+            if !(extended.starts_with("./") || extended.starts_with("../")) {
+                continue;
             }
-            ts_project(root, &path, None, depth + 1)
-        })
-        .collect();
-    Some(TsProject {
-        config: ts_config(&chain),
-        sources: ts_sources(&chain),
-        references,
-    })
+            let Some(mut path) = project_path(&directory, extended) else {
+                continue;
+            };
+            // TypeScript takes the name as written, then with `.json` added.
+            if !extended.ends_with(".json")
+                && !project_file(self.root, &path).is_file()
+                && let Some(last) = path.last_mut()
+            {
+                last.push_str(".json");
+            }
+            self.config_chain(&path, chain);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many TypeScript configuration files this thread has parsed, which
+    /// a test of what reading `references` costs counts.
+    static TS_CONFIG_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one parse of a TypeScript configuration file, in a test.
+fn count_parse() {
+    #[cfg(test)]
+    TS_CONFIG_PARSES.with(|parses| parses.set(parses.get() + 1));
 }
 
 /// What a configuration compiles itself, from the first configuration of
@@ -865,59 +975,6 @@ fn ts_config(chain: &[(Vec<String>, serde_json::Value)]) -> TsConfig {
         paths_base,
         module_resolution,
         custom_conditions,
-    }
-}
-
-/// The configuration in `file`, then each it extends, nearest first: what an
-/// extending configuration sets overrides what it extends, and of several it
-/// extends at once the later wins. Only an `extends` written as a relative
-/// path names a file in the project; a package's configuration is not read.
-fn ts_config_chain(
-    root: &Path,
-    file: &[String],
-    contents: Option<&str>,
-    chain: &mut Vec<(Vec<String>, serde_json::Value)>,
-) {
-    // A configuration extending itself through others would never end.
-    const DEPTH: usize = 16;
-    if chain.len() >= DEPTH {
-        return;
-    }
-    let text = match contents {
-        Some(contents) => contents.to_string(),
-        None => match std::fs::read_to_string(project_file(root, file)) {
-            Ok(text) => text,
-            Err(_) => return,
-        },
-    };
-    let Some(config) = jsonc(&text) else {
-        return;
-    };
-    let directory = file[..file.len().saturating_sub(1)].to_vec();
-    let extends: Vec<String> = match config.get("extends") {
-        Some(serde_json::Value::String(extended)) => vec![extended.clone()],
-        Some(serde_json::Value::Array(extended)) => extended
-            .iter()
-            .filter_map(|extended| extended.as_str().map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
-    };
-    chain.push((directory.clone(), config));
-    for extended in extends.iter().rev() {
-        if !(extended.starts_with("./") || extended.starts_with("../")) {
-            continue;
-        }
-        let Some(mut path) = project_path(&directory, extended) else {
-            continue;
-        };
-        // TypeScript takes the name as written, then with `.json` added.
-        if !extended.ends_with(".json")
-            && !project_file(root, &path).is_file()
-            && let Some(last) = path.last_mut()
-        {
-            last.push_str(".json");
-        }
-        ts_config_chain(root, &path, None, chain);
     }
 }
 
@@ -1738,6 +1795,74 @@ mod tests {
             pnpm_workspace_globs("packages:\n  - a/*\n\n  - \"b\"\ncatalog:\n  - c\n"),
             vec!["a/*", "b"]
         );
+    }
+
+    /// A TypeScript configuration is parsed once however many `references`
+    /// reach it: here each of fourteen packages references the three before
+    /// it, the first references the last, and a solution references them
+    /// all — paths whose number grows exponentially with the chain — yet
+    /// the reading parses fifteen files, and resolving a file's owner walks
+    /// the cycle to an end.
+    #[test]
+    fn a_typescript_configuration_is_parsed_once_whatever_references_reach_it() {
+        const PACKAGES: usize = 14;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let write = |path: &str, contents: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write");
+        };
+        let reference = |package: usize| format!("{{\"path\": \"../p{package}\"}}");
+        let mut nodes = Vec::new();
+        for package in 0..PACKAGES {
+            let earlier: Vec<String> = match package {
+                0 => vec![reference(PACKAGES - 1)],
+                _ => (package.saturating_sub(3)..package)
+                    .map(reference)
+                    .collect(),
+            };
+            write(
+                &format!("packages/p{package}/tsconfig.json"),
+                &format!(
+                    "{{\"compilerOptions\": {{\"paths\": {{\"#p{package}\": [\"./src/index.ts\"]}}}}, \
+                     \"include\": [\"src\"], \"references\": [{}]}}",
+                    earlier.join(", ")
+                ),
+            );
+            nodes.push(crate::services::pack::tests::node_in(
+                nodes.len(),
+                &format!("packages/p{package}/src/index.ts"),
+                "",
+                Language::TypeScript,
+            ));
+        }
+        let all: Vec<String> = (0..PACKAGES)
+            .map(|package| format!("{{\"path\": \"./packages/p{package}\"}}"))
+            .collect();
+        write(
+            "tsconfig.json",
+            &format!("{{\"files\": [], \"references\": [{}]}}", all.join(", ")),
+        );
+        nodes.push(crate::services::pack::tests::node_in(
+            nodes.len(),
+            "packages/p5/extra/x.ts",
+            "",
+            Language::TypeScript,
+        ));
+
+        TS_CONFIG_PARSES.with(|parses| parses.set(0));
+        let manifests = Manifests::read(dir.path(), &nodes);
+        assert_eq!(TS_CONFIG_PARSES.with(std::cell::Cell::get), PACKAGES + 1);
+        let last = &nodes[PACKAGES - 1];
+        assert!(matches!(
+            manifests.ts_owner(last),
+            TsOwner::Config(config) if config.paths[0].0 == format!("#p{}", PACKAGES - 1)
+        ));
+        // No project the references reach compiles the stray file.
+        assert!(matches!(
+            manifests.ts_owner(&nodes[PACKAGES]),
+            TsOwner::Undetermined
+        ));
     }
 
     /// `go.mod` is read by its own lexical rules, not as a line beginning
