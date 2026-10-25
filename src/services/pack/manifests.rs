@@ -165,10 +165,12 @@ pub(super) struct TsConfig {
     /// The module resolution its `moduleResolution`, or the `module` that
     /// implies one, selects, where that is one deciding how TypeScript reads
     /// a package's `exports`; `None` where the versions of TypeScript read
-    /// the configuration differently.
+    /// the configuration differently, or where a configuration its chain
+    /// extends that could not be read may set either.
     pub(super) module_resolution: Option<ModuleResolution>,
-    /// The conditions `customConditions` adds.
-    pub(super) custom_conditions: Vec<String>,
+    /// The conditions `customConditions` adds; `None` where a configuration
+    /// the chain extends that could not be read may add any.
+    pub(super) custom_conditions: Option<Vec<String>>,
 }
 
 /// A module resolution strategy that says how a package's `exports` is read.
@@ -309,6 +311,7 @@ impl Manifests {
             })
             .collect();
         let (python_projects, pytest_configurations) = python_configurations(root, nodes);
+        let workspaces = js_workspaces(root, nodes, &package_jsons);
         Self {
             root: Some(root.to_path_buf()),
             go_modules,
@@ -316,8 +319,8 @@ impl Manifests {
             rust_packages,
             python_projects,
             pytest_configurations,
-            ts_projects: ts_projects(root, nodes),
-            js_packages: js_packages(root, nodes, &package_jsons),
+            ts_projects: ts_projects(root, nodes, &workspaces),
+            js_packages: js_packages(&package_jsons, &workspaces),
             module_types,
         }
     }
@@ -593,9 +596,17 @@ fn cargo_package(
 /// Every TypeScript configuration above a JavaScript or TypeScript file —
 /// the `tsconfig.json` of its directory, or else its `jsconfig.json` — with
 /// every project their `references` reach.
-fn ts_projects(root: &Path, nodes: &[Node]) -> TsProjects {
+fn ts_projects(
+    root: &Path,
+    nodes: &[Node],
+    workspaces: &[(Vec<String>, Vec<String>)],
+) -> TsProjects {
+    let mut workspaces = workspaces.to_vec();
+    workspaces.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
     let mut reader = TsReader {
         root,
+        workspaces: &workspaces,
+        members: HashMap::new(),
         parsed: HashMap::new(),
         indices: HashMap::new(),
         projects: TsProjects::default(),
@@ -622,9 +633,22 @@ fn ts_projects(root: &Path, nodes: &[Node]) -> TsProjects {
 /// project built once, by its project path.
 struct TsReader<'r> {
     root: &'r Path,
+    /// The project's JavaScript workspaces, the deepest first.
+    workspaces: &'r [(Vec<String>, Vec<String>)],
+    /// The packages each workspace lists, by its root, found once.
+    members: HashMap<Vec<String>, Vec<(String, Vec<String>)>>,
     parsed: HashMap<Vec<String>, Option<serde_json::Value>>,
     indices: HashMap<Vec<String>, Option<usize>>,
     projects: TsProjects,
+}
+
+/// A configuration with each it extends, nearest first, and where in that
+/// order the first one that could not be read would stand: what it sets is
+/// unknown, and so is every option no configuration before it sets.
+#[derive(Default)]
+struct Chain {
+    configs: Vec<(Vec<String>, serde_json::Value)>,
+    unread: Option<usize>,
 }
 
 impl TsReader<'_> {
@@ -651,9 +675,9 @@ impl TsReader<'_> {
         if let Some(known) = self.indices.get(path) {
             return *known;
         }
-        let mut chain = Vec::new();
+        let mut chain = Chain::default();
         self.config_chain(path, &mut chain);
-        let Some((directory, head)) = chain.first() else {
+        let Some((directory, head)) = chain.configs.first() else {
             self.indices.insert(path.to_vec(), None);
             return None;
         };
@@ -673,7 +697,7 @@ impl TsReader<'_> {
         let index = self.projects.projects.len();
         self.projects.projects.push(TsProject {
             config: ts_config(&chain),
-            sources: ts_sources(&chain),
+            sources: ts_sources(&chain.configs),
             references: Vec::new(),
         });
         self.indices.insert(path.to_vec(), Some(index));
@@ -687,16 +711,18 @@ impl TsReader<'_> {
 
     /// The configuration in the file at `path`, then each it extends,
     /// nearest first: what an extending configuration sets overrides what
-    /// it extends, and of several it extends at once the later wins. Only an
-    /// `extends` written as a relative path names a file in the project; a
-    /// package's configuration is not read.
-    fn config_chain(&mut self, path: &[String], chain: &mut Vec<(Vec<String>, serde_json::Value)>) {
+    /// it extends, and of several it extends at once the later wins. A
+    /// configuration that cannot be read — one its `extends` names no file
+    /// for (`extended_path`), a file that is no JSON with comments, or a
+    /// chain extending itself — marks where it would stand.
+    fn config_chain(&mut self, path: &[String], chain: &mut Chain) {
         // A configuration extending itself through others would never end.
         const DEPTH: usize = 16;
-        if chain.len() >= DEPTH {
-            return;
-        }
-        let Some(config) = self.config(path).cloned() else {
+        let config = (chain.configs.len() < DEPTH)
+            .then(|| self.config(path).cloned())
+            .flatten();
+        let Some(config) = config else {
+            chain.unread.get_or_insert(chain.configs.len());
             return;
         };
         let directory = path[..path.len().saturating_sub(1)].to_vec();
@@ -708,24 +734,311 @@ impl TsReader<'_> {
                 .collect(),
             _ => Vec::new(),
         };
-        chain.push((directory.clone(), config));
+        chain.configs.push((directory.clone(), config));
         for extended in extends.iter().rev() {
-            if !(extended.starts_with("./") || extended.starts_with("../")) {
-                continue;
+            match self.extended_path(&directory, extended) {
+                Some(path) => self.config_chain(&path, chain),
+                None => {
+                    chain.unread.get_or_insert(chain.configs.len());
+                }
             }
-            let Some(mut path) = project_path(&directory, extended) else {
-                continue;
-            };
-            // TypeScript takes the name as written, then with `.json` added.
+        }
+    }
+
+    /// The configuration file an `extends` written in a configuration at
+    /// `directory` names, as TypeScript finds it: a relative path as written,
+    /// then with `.json` added; any other name as a module specifier, looked
+    /// up as Node looks up a package (`extended_package`). `None` where it
+    /// names no file in the project — a rooted path among them.
+    fn extended_path(&mut self, directory: &[String], extended: &str) -> Option<Vec<String>> {
+        let extended = extended.replace('\\', "/");
+        if extended.starts_with("./") || extended.starts_with("../") {
+            let mut path = project_path(directory, &extended)?;
             if !extended.ends_with(".json")
                 && !project_file(self.root, &path).is_file()
                 && let Some(last) = path.last_mut()
             {
                 last.push_str(".json");
             }
-            self.config_chain(&path, chain);
+            return Some(path);
+        }
+        if extended.starts_with('/') || extended.is_empty() {
+            return None;
+        }
+        self.extended_package(directory, &extended)
+    }
+
+    /// The configuration file a package specifier names for an `extends`,
+    /// as TypeScript resolves one (its `nodeNextJsonConfigResolver`): the
+    /// package is the first `node_modules/<name>` from the configuration's
+    /// directory up to the project root, or, where none is installed, the
+    /// workspace package of that name (`workspace_member`); in it, the file
+    /// its `exports` maps the subpath to under the conditions `require`,
+    /// `types`, `node` and `default`, and without `exports` the file the
+    /// subpath names, as written or with `.json` added, or else the directory
+    /// it names: the file the `package.json` `tsconfig` field names there,
+    /// else its `tsconfig.json`. An installed package is read where its real
+    /// path is, as TypeScript reads it.
+    fn extended_package(&mut self, directory: &[String], specifier: &str) -> Option<Vec<String>> {
+        let (name, subpath) = split_package_name(specifier);
+        let installed = (0..=directory.len()).rev().find_map(|depth| {
+            let at = &directory[..depth];
+            if at.last().is_some_and(|last| last == "node_modules") {
+                return None;
+            }
+            let package = [at, &["node_modules".to_string()], &split_components(name)].concat();
+            project_file(self.root, &package)
+                .is_dir()
+                .then_some(package)
+        });
+        let package = match installed {
+            Some(package) => package,
+            None => self.workspace_member(directory, name)?,
+        };
+        let manifest = self.package_manifest(&package);
+        let file = match manifest
+            .as_ref()
+            .and_then(|manifest| manifest.get("exports"))
+        {
+            Some(exports) => {
+                let target = config_export(exports, subpath)?;
+                let file = project_path(&package, &target)?;
+                (target.ends_with(".json") && self.is_file(&file)).then_some(file)?
+            }
+            None => {
+                let candidate = [package.as_slice(), &split_components(subpath)].concat();
+                let manifest = self.package_manifest(&candidate).or(manifest);
+                let field = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.get("tsconfig")?.as_str())
+                    .and_then(|field| project_path(&candidate, field));
+                self.json_file(&candidate)
+                    .or_else(|| {
+                        let field = field?;
+                        self.json_file(&field).or_else(|| self.tsconfig_in(&field))
+                    })
+                    .or_else(|| self.tsconfig_in(&candidate))?
+            }
+        };
+        self.real_path(&file)
+    }
+
+    /// The `package.json` in the directory at `directory`, where it holds
+    /// one that is JSON.
+    fn package_manifest(&self, directory: &[String]) -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(project_file(self.root, directory).join("package.json"));
+        serde_json::from_str(&text.ok()?).ok()
+    }
+
+    fn is_file(&self, path: &[String]) -> bool {
+        project_file(self.root, path).is_file()
+    }
+
+    /// The configuration file a path names as a file: itself where it ends
+    /// in `.json`, else with `.json` added.
+    fn json_file(&self, path: &[String]) -> Option<Vec<String>> {
+        let last = path.last()?;
+        if last.ends_with(".json") && self.is_file(path) {
+            return Some(path.to_vec());
+        }
+        let mut with_json = path.to_vec();
+        with_json.last_mut()?.push_str(".json");
+        self.is_file(&with_json).then_some(with_json)
+    }
+
+    /// The `tsconfig.json` in the directory a path names.
+    fn tsconfig_in(&self, directory: &[String]) -> Option<Vec<String>> {
+        let file = [directory, &["tsconfig.json".to_string()]].concat();
+        self.is_file(&file).then_some(file)
+    }
+
+    /// The project path of a file where its real path, symbolic links
+    /// resolved, lies below the project root.
+    fn real_path(&self, path: &[String]) -> Option<Vec<String>> {
+        let real = std::fs::canonicalize(project_file(self.root, path)).ok()?;
+        let root = std::fs::canonicalize(self.root).ok()?;
+        let below = real.strip_prefix(root).ok()?;
+        below
+            .components()
+            .map(|component| component.as_os_str().to_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The directory of the package named `name` that a workspace above
+    /// `directory` lists, the nearest workspace listing one deciding, as a
+    /// package manager links it into `node_modules`; `None` where none, or
+    /// several of the nearest, carry the name.
+    fn workspace_member(&mut self, directory: &[String], name: &str) -> Option<Vec<String>> {
+        for (workspace, globs) in self.workspaces {
+            if !directory.starts_with(workspace) {
+                continue;
+            }
+            let root = self.root;
+            let members = self
+                .members
+                .entry(workspace.clone())
+                .or_insert_with(|| workspace_members(root, workspace, globs));
+            let mut named = members.iter().filter(|(member, _)| member == name);
+            match (named.next(), named.next()) {
+                (Some((_, member)), None) => return Some(member.clone()),
+                (Some(_), Some(_)) => return None,
+                (None, _) => {}
+            }
+        }
+        None
+    }
+}
+
+/// A package specifier's package name — its first segment, or its first
+/// two where it is scoped (`@scope/name`) — and the subpath after it.
+pub(super) fn split_package_name(specifier: &str) -> (&str, &str) {
+    let segments = if specifier.starts_with('@') { 2 } else { 1 };
+    let end = specifier
+        .match_indices('/')
+        .nth(segments - 1)
+        .map_or(specifier.len(), |(at, _)| at);
+    (
+        &specifier[..end],
+        specifier.get(end + 1..).unwrap_or_default(),
+    )
+}
+
+/// The target a package's `exports` maps an `extends` subpath to, as
+/// TypeScript reads it for a configuration: the entry whose key is `.` or
+/// `./<subpath>`, or else the pattern key with one `*` matching it whose
+/// part before the `*` is longest (the longer key on a tie), its `*`
+/// replaced by what it matched; without subpath keys `exports` is what `.`
+/// maps to. Of a condition object, the first key in written order among
+/// `require`, `types`, `node` and `default` whose target resolves; of an
+/// array, the first entry that resolves. `None` where none does, a `null`
+/// target excludes the subpath, or a `types@<range>` key, which depends on
+/// the compiler's version, comes first.
+fn config_export(exports: &serde_json::Value, subpath: &str) -> Option<String> {
+    let key = if subpath.is_empty() {
+        ".".to_string()
+    } else {
+        format!("./{subpath}")
+    };
+    let (target, star) = match exports {
+        serde_json::Value::Object(map) if map.keys().any(|key| key.starts_with('.')) => {
+            match map.get(&key) {
+                Some(target) => (target, None),
+                None => map
+                    .iter()
+                    .filter_map(|(pattern, target)| {
+                        let (prefix, suffix) = pattern.split_once('*')?;
+                        if suffix.contains('*') || key.len() < prefix.len() + suffix.len() {
+                            return None;
+                        }
+                        let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                        Some(((prefix.len(), pattern.len()), target, star))
+                    })
+                    .max_by_key(|(rank, ..)| *rank)
+                    .map(|(_, target, star)| (target, Some(star)))?,
+            }
+        }
+        _ if key == "." => (exports, None),
+        _ => return None,
+    };
+    fn resolve(target: &serde_json::Value, star: Option<&str>) -> Result<Option<String>, ()> {
+        match target {
+            serde_json::Value::String(path) => Ok(path.strip_prefix("./").map(|path| match star {
+                Some(star) => path.replace('*', star),
+                None => path.to_string(),
+            })),
+            serde_json::Value::Array(entries) => {
+                for entry in entries {
+                    if let Some(found) = resolve(entry, star)? {
+                        return Ok(Some(found));
+                    }
+                }
+                Ok(None)
+            }
+            serde_json::Value::Object(conditions) => {
+                for (condition, target) in conditions {
+                    if condition.starts_with("types@") {
+                        return Err(());
+                    }
+                    if matches!(condition.as_str(), "require" | "types" | "node" | "default")
+                        && let Some(found) = resolve(target, star)?
+                    {
+                        return Ok(Some(found));
+                    }
+                }
+                Ok(None)
+            }
+            serde_json::Value::Null => Err(()),
+            _ => Ok(None),
         }
     }
+    resolve(target, star).ok().flatten()
+}
+
+/// The packages a JavaScript workspace rooted at `workspace` lists, found on
+/// disk as a package manager finds them: each directory below it whose path
+/// one of `globs` matches and none of its `!` globs does, holding a
+/// `package.json` with a `name` — `node_modules` and hidden directories
+/// never among them.
+fn workspace_members(
+    root: &Path,
+    workspace: &[String],
+    globs: &[String],
+) -> Vec<(String, Vec<String>)> {
+    let Some(listed) = WorkspaceGlobs::new(globs) else {
+        return Vec::new();
+    };
+    let deepest = globs
+        .iter()
+        .map(|glob| {
+            if glob.contains("**") {
+                usize::MAX
+            } else {
+                glob.trim_start_matches("./")
+                    .trim_end_matches('/')
+                    .split('/')
+                    .count()
+            }
+        })
+        .max()
+        .unwrap_or_default();
+    let mut members = Vec::new();
+    let mut pending = vec![Vec::<String>::new()];
+    while let Some(below) = pending.pop() {
+        let directory = [workspace, below.as_slice()].concat();
+        let Ok(entries) = std::fs::read_dir(project_file(root, &directory)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if name == "node_modules"
+                || name.starts_with('.')
+                || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            {
+                continue;
+            }
+            let mut member = below.clone();
+            member.push(name);
+            if listed.lists(&member.join("/")) {
+                let path = [workspace, member.as_slice()].concat();
+                let manifest =
+                    std::fs::read_to_string(project_file(root, &path).join("package.json"))
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+                if let Some(name) = manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.get("name")?.as_str())
+                {
+                    members.push((name.to_string(), path));
+                }
+            }
+            if member.len() < deepest {
+                pending.push(member);
+            }
+        }
+    }
+    members
 }
 
 #[cfg(test)]
@@ -815,15 +1128,14 @@ fn ts_sources(chain: &[(Vec<String>, serde_json::Value)]) -> TsSources {
     }
 }
 
-/// Every package a JavaScript workspace in the project lists: each
-/// `package.json` of `manifests` with a name below a workspace root — a
-/// `package.json` with `workspaces`, or a `pnpm-workspace.yaml` — whose
-/// directory one of the root's globs matches and none of its `!` globs does.
-fn js_packages(
+/// Each JavaScript workspace root in the project, with the globs listing
+/// its packages: a `package.json` of `manifests` with `workspaces`, or a
+/// `pnpm-workspace.yaml`.
+fn js_workspaces(
     root: &Path,
     nodes: &[Node],
     manifests: &[(Vec<String>, serde_json::Value)],
-) -> HashMap<Vec<String>, JsPackage> {
+) -> Vec<(Vec<String>, Vec<String>)> {
     let mut workspaces: Vec<(Vec<String>, Vec<String>)> = manifests
         .iter()
         .filter_map(|(directory, manifest)| {
@@ -844,8 +1156,18 @@ fn js_packages(
             .into_iter()
             .map(|(directory, yaml)| (directory, pnpm_workspace_globs(&yaml))),
     );
-    let mut packages = HashMap::new();
-    for (workspace, globs) in workspaces {
+    workspaces
+}
+
+/// What a workspace's globs list: a member path relative to its root that
+/// one of its globs matches and none of its `!` globs does.
+struct WorkspaceGlobs {
+    included: globset::GlobSet,
+    excluded: Option<globset::GlobSet>,
+}
+
+impl WorkspaceGlobs {
+    fn new(globs: &[String]) -> Option<Self> {
         let matcher = |globs: &mut dyn Iterator<Item = &str>| {
             let mut set = globset::GlobSetBuilder::new();
             for glob in globs {
@@ -859,26 +1181,43 @@ fn js_packages(
             }
             set.build().ok()
         };
-        let Some(included) = matcher(
+        let included = matcher(
             &mut globs
                 .iter()
                 .filter(|glob| !glob.starts_with('!'))
                 .map(String::as_str),
-        ) else {
+        )?;
+        let excluded = matcher(&mut globs.iter().filter_map(|glob| glob.strip_prefix('!')));
+        Some(Self { included, excluded })
+    }
+
+    fn lists(&self, member: &str) -> bool {
+        !member.is_empty()
+            && self.included.is_match(member)
+            && !self
+                .excluded
+                .as_ref()
+                .is_some_and(|excluded| excluded.is_match(member))
+    }
+}
+
+/// Every package a JavaScript workspace in the project lists: each
+/// `package.json` of `manifests` with a name below a workspace root whose
+/// globs list its directory (`WorkspaceGlobs`).
+fn js_packages(
+    manifests: &[(Vec<String>, serde_json::Value)],
+    workspaces: &[(Vec<String>, Vec<String>)],
+) -> HashMap<Vec<String>, JsPackage> {
+    let mut packages = HashMap::new();
+    for (workspace, globs) in workspaces {
+        let Some(listed) = WorkspaceGlobs::new(globs) else {
             continue;
         };
-        let excluded = matcher(&mut globs.iter().filter_map(|glob| glob.strip_prefix('!')));
         for (directory, manifest) in manifests {
             let Some(member) = directory.strip_prefix(workspace.as_slice()) else {
                 continue;
             };
-            let member = member.join("/");
-            if member.is_empty()
-                || !included.is_match(&member)
-                || excluded
-                    .as_ref()
-                    .is_some_and(|excluded| excluded.is_match(&member))
-            {
+            if !listed.lists(&member.join("/")) {
                 continue;
             }
             let field = |key: &str| {
@@ -943,16 +1282,35 @@ fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
 
 /// What the TypeScript configuration at the head of an `extends` chain
 /// says, with what it extends.
-fn ts_config(chain: &[(Vec<String>, serde_json::Value)]) -> TsConfig {
-    let directory = chain
+fn ts_config(chain: &Chain) -> TsConfig {
+    let configs = chain.configs.as_slice();
+    let directory = configs
         .first()
         .map(|(directory, _)| directory.as_slice())
         .unwrap_or_default();
     let option = |key: &str| {
-        chain.iter().find_map(|(directory, config)| {
+        configs.iter().find_map(|(directory, config)| {
             let value = config.get("compilerOptions")?.get(key)?;
             Some((directory, value))
         })
+    };
+    // The value of an option the chain decides: `Some(None)` where it sets
+    // none, `None` where a configuration it could not read may set it.
+    let read = chain.unread.unwrap_or(configs.len());
+    let decided = |key: &str| {
+        let value = configs[..read]
+            .iter()
+            .find_map(|(_, config)| config.get("compilerOptions")?.get(key));
+        match value {
+            Some(value) => Some(Some(value)),
+            None => chain.unread.is_none().then_some(None),
+        }
+    };
+    // A setting the chain decides, in lower case: `Some(None)` where it sets
+    // none; `None` where it is undecided or no string.
+    let setting = |key: &str| match decided(key)? {
+        Some(value) => value.as_str().map(|value| Some(value.to_ascii_lowercase())),
+        None => Some(None),
     };
     let base_url =
         option("baseUrl").and_then(|(directory, value)| project_path(directory, value.as_str()?));
@@ -975,35 +1333,40 @@ fn ts_config(chain: &[(Vec<String>, serde_json::Value)]) -> TsConfig {
         .clone()
         .or_else(|| declared.map(|(directory, _)| directory.clone()))
         .unwrap_or_else(|| directory.to_vec());
-    let setting = |key: &str| {
-        option(key)
-            .and_then(|(_, value)| value.as_str())
-            .map(str::to_ascii_lowercase)
-    };
     // An explicit `moduleResolution` anywhere in the chain overrides the one
     // a `module` implies. With neither, TypeScript 6 and 7 resolve as
     // `bundler` does (`--traceResolution`: "Module resolution kind is not
     // specified, using 'Bundler'"); a `module` that TypeScript 5 read as
     // implying `node10` or `classic` and 6 as implying `bundler` — `commonjs`,
-    // the `es` versions — leaves it open.
-    let module_resolution = match setting("moduleResolution").as_deref() {
-        Some("bundler") => Some(ModuleResolution::Bundler),
-        Some("node16" | "nodenext") => Some(ModuleResolution::Node16),
-        Some("node" | "node10") => Some(ModuleResolution::Node10),
-        Some("classic") => Some(ModuleResolution::Classic),
-        Some(_) => None,
-        None => match setting("module").as_deref() {
-            None | Some("preserve") => Some(ModuleResolution::Bundler),
-            Some("node16" | "node18" | "node20" | "nodenext") => Some(ModuleResolution::Node16),
+    // the `es` versions — leaves it open, as does an option the chain leaves
+    // undecided.
+    let module_resolution = match setting("moduleResolution") {
+        Some(Some(resolution)) => match resolution.as_str() {
+            "bundler" => Some(ModuleResolution::Bundler),
+            "node16" | "nodenext" => Some(ModuleResolution::Node16),
+            "node" | "node10" => Some(ModuleResolution::Node10),
+            "classic" => Some(ModuleResolution::Classic),
             _ => None,
         },
+        Some(None) => match setting("module") {
+            Some(None) => Some(ModuleResolution::Bundler),
+            Some(Some(module)) => match module.as_str() {
+                "preserve" => Some(ModuleResolution::Bundler),
+                "node16" | "node18" | "node20" | "nodenext" => Some(ModuleResolution::Node16),
+                _ => None,
+            },
+            None => None,
+        },
+        None => None,
     };
-    let custom_conditions = option("customConditions")
-        .and_then(|(_, conditions)| conditions.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|condition| condition.as_str().map(str::to_string))
-        .collect();
+    let custom_conditions = decided("customConditions").map(|conditions| {
+        conditions
+            .and_then(|conditions| conditions.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|condition| condition.as_str().map(str::to_string))
+            .collect()
+    });
     TsConfig {
         base_url,
         paths,
