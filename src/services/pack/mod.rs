@@ -80,8 +80,8 @@ pub struct PackResult {
     pub unsupported_import_languages: Vec<Language>,
     pub rust_relative_imports_omitted: bool,
     /// The specifiers the project's own configuration declares — a TypeScript
-    /// `paths` alias, a workspace package's name — that named no file pack
-    /// reads, so their edges are missing rather than absent.
+    /// `paths` alias, a workspace package's name — that named no file, so
+    /// their edges are missing rather than absent.
     pub undetermined_imports: Vec<String>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`

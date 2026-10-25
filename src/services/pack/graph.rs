@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    JsPackage, Manifests, TsConfig, nearest, own_or_only, python_project_roots, script_path,
+    JsPackage, Manifests, TsConfig, nearest, own_or_only, project_path, python_project_roots,
 };
 use crate::models::symbol::Language;
 
@@ -35,6 +35,13 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
             .entry(node.directory.as_slice())
             .or_default()
             .push(node.id);
+        if let Some(name) = Path::new(&node.rel_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            let file = [node.directory.as_slice(), &[name.to_string()]].concat();
+            exact.by_file.insert(file, node.id);
+        }
     }
     let index = ProjectIndex {
         nodes,
@@ -247,10 +254,7 @@ impl Reference {
                 Self::Bare(raw.to_string())
             };
         }
-        let mut components = split_components(rest);
-        if is_javascript(language) {
-            as_script_module(&mut components);
-        }
+        let components = split_components(rest);
         if relative {
             Self::Relative { up, components }
         } else {
@@ -369,6 +373,8 @@ pub(super) fn split_components(raw: &str) -> Vec<String> {
 struct PathIndex<'a> {
     by_module: HashMap<&'a [String], Vec<usize>>,
     by_directory: HashMap<&'a [String], Vec<usize>>,
+    /// Each file by its whole path, extension included.
+    by_file: HashMap<Vec<String>, usize>,
 }
 
 /// The project's files by the names a reference can give them. Every lookup
@@ -552,6 +558,8 @@ impl ProjectIndex<'_> {
                 path.extend_from_slice(components);
                 if package_is_directory(from.language) {
                     self.package(&path, from.language)
+                } else if is_javascript(from.language) {
+                    self.script_target(&path, from.language).unwrap_or_default()
                 } else {
                     self.module(&path, from.language)
                 }
@@ -598,46 +606,43 @@ impl ProjectIndex<'_> {
     /// substitution in turn, then below `baseUrl`, then as a workspace
     /// package the project links in. Any other names a package outside the
     /// project, however a project file's path ends. One a `paths` pattern or
-    /// a workspace package's name matches that names no file pack reads is
-    /// disclosed rather than dropped.
+    /// a workspace package's name matches that names no file is disclosed
+    /// rather than dropped.
     fn bare_specifier(&self, specifier: &str, importer: &Importer) -> Resolution {
         let language = importer.node.language;
         let config = importer.ts_config;
         let mapped = config.and_then(|config| config.mapped(specifier));
         for path in mapped.iter().flatten() {
-            let found = self.module(path, language);
-            if !found.is_empty() {
+            if let Some(found) = self.script_target(path, language) {
                 return Resolution::Files(found);
             }
         }
-        if let Some(path) = config
+        if let Some(found) = config
             .and_then(|config| config.base_url.as_ref())
-            .and_then(|base| script_path(base, specifier))
+            .and_then(|base| project_path(base, specifier))
+            .and_then(|path| self.script_target(&path, language))
         {
-            let found = self.module(&path, language);
-            if !found.is_empty() {
-                return Resolution::Files(found);
-            }
+            return Resolution::Files(found);
         }
-        let package = self.workspace_package(specifier, importer.node);
-        match (package, mapped) {
-            (Some(found), _) if !found.is_empty() => Resolution::Files(found),
-            (Some(_), _) | (None, Some(_)) => Resolution::Undetermined(specifier.to_string()),
-            (None, None) => Resolution::Files(Vec::new()),
+        if let Some(package) = self.workspace_package(specifier, importer.node) {
+            return package;
+        }
+        match mapped {
+            Some(_) => Resolution::Undetermined(specifier.to_string()),
+            None => Resolution::Files(Vec::new()),
         }
     }
 
-    /// The file a workspace package's name, or a subpath below it, stands
-    /// for, or `None` where the specifier names no package of a workspace
-    /// the importer is in. A package with `exports` exports only what it
-    /// maps: the name stands for the file `.` maps to, a subpath for the one
+    /// What a workspace package's name, or a subpath below it, stands for,
+    /// or `None` where the specifier names no package of a workspace the
+    /// importer is in. A package with `exports` exports only what it maps:
+    /// the name stands for the file `.` maps to, a subpath for the one
     /// `./<subpath>` maps to. Without `exports`, the name stands for the file
     /// its `types`, `typings` or `main` names, else its `index`, and a
-    /// subpath for the file below the package. An empty answer is a package
-    /// whose file pack cannot determine: a condition or pattern `exports`
-    /// maps, an entry naming no file pack reads, or a name two packages of
-    /// the workspace give.
-    fn workspace_package(&self, specifier: &str, from: &Node) -> Option<Vec<usize>> {
+    /// subpath for the file below the package. A package whose file pack
+    /// cannot determine is disclosed: a condition or pattern `exports` maps,
+    /// an entry naming no file, or a name two packages of the workspace give.
+    fn workspace_package(&self, specifier: &str, from: &Node) -> Option<Resolution> {
         let scoped = specifier.starts_with('@');
         let mut segments = specifier.splitn(if scoped { 3 } else { 2 }, '/');
         let name: Vec<&str> = segments.by_ref().take(if scoped { 2 } else { 1 }).collect();
@@ -646,6 +651,7 @@ impl ProjectIndex<'_> {
         let declares = |package: &JsPackage| {
             package.name == name && from.directory.starts_with(&package.workspace)
         };
+        let undetermined = || Resolution::Undetermined(specifier.to_string());
         let Some((directory, package)) = own_or_only(&self.manifests.js_packages, from, declares)
         else {
             return self
@@ -653,7 +659,7 @@ impl ProjectIndex<'_> {
                 .js_packages
                 .values()
                 .any(declares)
-                .then(Vec::new);
+                .then(undetermined);
         };
         let entries: Vec<&str> = match (&package.exports, subpath) {
             (None, "") => package
@@ -680,11 +686,28 @@ impl ProjectIndex<'_> {
         Some(
             entries
                 .into_iter()
-                .filter_map(|entry| script_path(directory, entry))
-                .map(|path| self.module(&path, language))
-                .find(|found| !found.is_empty())
-                .unwrap_or_default(),
+                .filter_map(|entry| project_path(directory, entry))
+                .find_map(|path| self.script_target(&path, language))
+                .map_or_else(undetermined, Resolution::Files),
         )
+    }
+
+    /// What a path a JavaScript or TypeScript specifier or configuration
+    /// writes names: the script module it spells, with its extension or
+    /// without, else the file it names whole, whatever its kind — an edge
+    /// where pack reads that file, none where it is only on disk (an image,
+    /// code pack does not read). `None` where it names no file at all.
+    fn script_target(&self, written: &[String], language: Language) -> Option<Vec<usize>> {
+        let mut module = written.to_vec();
+        as_script_module(&mut module);
+        let found = self.module(&module, language);
+        if !found.is_empty() {
+            return Some(found);
+        }
+        if let Some(file) = self.exact.by_file.get(written) {
+            return Some(vec![*file]);
+        }
+        self.manifests.is_script_on_disk(written).then(Vec::new)
     }
 
     /// What a Rust path from a name, rather than from `crate`, `self` or
@@ -1014,15 +1037,32 @@ mod tests {
     }
 
     /// The manifests a project holding these files declares, read from disk
-    /// as a pack over `nodes` would read them.
-    fn manifests_of(files: &[(&str, &str)], nodes: &[Node]) -> Manifests {
+    /// as a pack over `nodes` would read them, with the project directory
+    /// kept for as long as they are, since resolution looks files up in it.
+    fn manifests_of(files: &[(&str, &str)], nodes: &[Node]) -> ProjectManifests {
         let dir = tempfile::tempdir().expect("tempdir");
         for (path, contents) in files {
             let path = dir.path().join(path);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
             std::fs::write(path, contents).expect("write manifest");
         }
-        Manifests::read(dir.path(), nodes)
+        ProjectManifests {
+            manifests: Manifests::read(dir.path(), nodes),
+            _dir: dir,
+        }
+    }
+
+    struct ProjectManifests {
+        manifests: Manifests,
+        _dir: tempfile::TempDir,
+    }
+
+    impl std::ops::Deref for ProjectManifests {
+        type Target = Manifests;
+
+        fn deref(&self) -> &Manifests {
+            &self.manifests
+        }
     }
 
     fn edges_under(nodes: &[Node], id: usize, manifests: &Manifests) -> Vec<String> {
@@ -1828,7 +1868,9 @@ mod tests {
                 0,
                 "web/src/app.ts",
                 "import a from \"@/components/Button\";\nimport b from \"utils/format\";\n\
-                 import c from \"@/styles/missing\";\nimport d from \"~lib\";\n",
+                 import c from \"@/styles/missing\";\nimport d from \"~lib\";\n\
+                 import \"@/styles/app.css\";\nimport logo from \"@/assets/logo.svg\";\n\
+                 import tokens from \"@/generated/tokens\";\nimport \"./theme.css\";\n",
             ),
             ts(1, "web/src/components/Button.tsx", ""),
             ts(2, "web/src/utils/format.ts", ""),
@@ -1840,6 +1882,8 @@ mod tests {
             ),
             ts(5, "other/lib/x.ts", ""),
             ts(6, "plain/app.ts", "import a from \"utils/format\";\n"),
+            node_in(7, "web/src/styles/app.css", "", Language::Css),
+            node_in(8, "web/src/theme.css", "", Language::Css),
         ];
         let manifests = manifests_of(
             &[
@@ -1856,6 +1900,9 @@ mod tests {
                     "other/tsconfig.json",
                     "{ \"compilerOptions\": { \"paths\": { \"#lib/*\": [\"./lib/*\"] } } }",
                 ),
+                // Files on disk pack does not read: an asset, generated code.
+                ("web/src/assets/logo.svg", "<svg/>"),
+                ("web/src/generated/tokens.ts", ""),
             ],
             &nodes,
         );
@@ -1867,13 +1914,17 @@ mod tests {
                 .collect()
         };
         // `paths` resolve against the inherited `baseUrl`, `src/`, and a
-        // pattern's substitutions are tried in turn.
+        // pattern's substitutions are tried in turn. A file of any kind the
+        // specifier names is what it resolves to: an edge where pack reads
+        // it, none and nothing disclosed where it is only on disk.
         assert_eq!(
             edges(0),
             vec![
                 "web/src/components/Button.tsx",
                 "web/src/utils/format.ts",
-                "web/vendor/lib/index.ts"
+                "web/vendor/lib/index.ts",
+                "web/src/styles/app.css",
+                "web/src/theme.css"
             ]
         );
         assert_eq!(edges(4), vec!["other/lib/x.ts"]);
@@ -1922,7 +1973,8 @@ mod tests {
                  import e from \"@acme/built\";\nimport f from \"@acme/outside\";\n\
                  import g from \"@acme/ui/hidden\";\nimport h from \"@acme/cond\";\n\
                  import i from \"@acme/typed\";\nimport j from \"@acme/twin\";\n\
-                 import k from \"core-lib\";\n",
+                 import k from \"core-lib\";\nimport \"@acme/ui/styles.css\";\n\
+                 import icon from \"@acme/ui/icon.svg\";\n",
             ),
             ts(1, "packages/ui/src/index.ts", ""),
             ts(2, "packages/ui/src/button.ts", ""),
@@ -1943,6 +1995,7 @@ mod tests {
             ts(13, "packages/typed/src/entry.ts", ""),
             ts(14, "packages/twin-a/index.ts", ""),
             ts(15, "packages/twin-b/index.ts", ""),
+            node_in(16, "packages/ui/src/styles.css", "", Language::Css),
         ];
         let manifests = manifests_of(
             &[
@@ -1953,8 +2006,10 @@ mod tests {
                 (
                     "packages/ui/package.json",
                     "{\"name\": \"@acme/ui\", \"exports\": {\".\": \"./src/index.ts\", \
-                     \"./button\": \"./src/button.ts\"}}",
+                     \"./button\": \"./src/button.ts\", \"./styles.css\": \"./src/styles.css\", \
+                     \"./icon.svg\": \"./assets/icon.svg\"}}",
                 ),
+                ("packages/ui/assets/icon.svg", "<svg/>"),
                 ("packages/utils/package.json", "{\"name\": \"@acme/utils\"}"),
                 (
                     "packages/built/package.json",
@@ -1998,7 +2053,8 @@ mod tests {
                 "packages/ui/src/button.ts",
                 "packages/utils/index.ts",
                 "packages/utils/deep/x.ts",
-                "packages/typed/src/entry.ts"
+                "packages/typed/src/entry.ts",
+                "packages/ui/src/styles.css"
             ]
         );
         assert_eq!(edges(8), vec!["pn/libs/core/index.ts"]);

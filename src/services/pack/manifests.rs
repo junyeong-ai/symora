@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::Node;
-use super::graph::{as_script_module, is_javascript, split_components};
+use super::graph::{is_javascript, split_components};
 use crate::models::symbol::Language;
 
 /// What a project's build manifests declare about the names its own imports
@@ -14,6 +14,10 @@ use crate::models::symbol::Language;
 /// from the tree would be a guess about which components are real.
 #[derive(Default)]
 pub(super) struct Manifests {
+    /// The project directory the manifests were read in, where a file a
+    /// configuration names is looked for on disk; none where they were not
+    /// read from one.
+    pub(super) root: Option<PathBuf>,
     /// The module path each `go.mod` declares, by the directory it roots. Go
     /// has no relative import form in a module, so every import of a project
     /// package spells its module's path in full.
@@ -61,7 +65,7 @@ pub(super) struct TsConfig {
 }
 
 impl TsConfig {
-    /// The module paths the `paths` pattern a specifier matches maps it to,
+    /// The project paths the `paths` pattern a specifier matches maps it to,
     /// in the order its substitutions are written, or `None` where it matches
     /// none. An exact pattern wins, then the one whose prefix before `*` is
     /// longest, as TypeScript picks.
@@ -86,7 +90,7 @@ impl TsConfig {
             substitutions
                 .iter()
                 .filter_map(|substitution| {
-                    script_path(&self.paths_base, &substitution.replacen('*', star, 1))
+                    project_path(&self.paths_base, &substitution.replacen('*', star, 1))
                 })
                 .collect(),
         )
@@ -144,6 +148,7 @@ impl Manifests {
         })
         .collect();
         Self {
+            root: Some(root.to_path_buf()),
             go_modules,
             dart_packages,
             rust_packages,
@@ -225,6 +230,35 @@ impl Manifests {
             .keys()
             .any(|other| other.len() > root.len() && directory.starts_with(other));
         (!nested).then_some(directory)
+    }
+
+    /// Whether a file a JavaScript or TypeScript path names is on disk, as
+    /// TypeScript looks for one: the file as written, with a script
+    /// extension it leaves out or in place of the JavaScript one it writes,
+    /// or a directory's `index`.
+    pub(super) fn is_script_on_disk(&self, written: &[String]) -> bool {
+        const EXTENSIONS: [&str; 9] =
+            ["ts", "tsx", "d.ts", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+        let Some(root) = &self.root else {
+            return false;
+        };
+        let file = project_file(root, written);
+        let with_extension = |base: &Path| {
+            EXTENSIONS.iter().any(|extension| {
+                let mut name = base.as_os_str().to_owned();
+                name.push(".");
+                name.push(extension);
+                Path::new(&name).is_file()
+            })
+        };
+        let javascript = file
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "js" | "jsx" | "mjs" | "cjs"));
+        file.is_file()
+            || with_extension(&file)
+            || (javascript && with_extension(&file.with_extension("")))
+            || (file.is_dir() && with_extension(&file.join("index")))
     }
 
     /// The directory of the package a `package:name/…` URI written in `from`
@@ -608,15 +642,6 @@ fn project_file(root: &Path, path: &[String]) -> PathBuf {
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
-/// The module path a JavaScript or TypeScript specifier relative to
-/// `directory` names, without the script extension it may write; none where
-/// it is absolute or climbs out of the project.
-pub(super) fn script_path(directory: &[String], specifier: &str) -> Option<Vec<String>> {
-    let mut path = project_path(directory, specifier)?;
-    as_script_module(&mut path);
-    Some(path)
-}
-
 /// A JSON-with-comments document, as `tsconfig.json` is, read as JSON: its
 /// `//` and `/* */` comments, and the commas it allows before a closing
 /// bracket, removed wherever they stand outside a string.
@@ -891,7 +916,7 @@ fn root_of_package(package: &str, location: &str) -> Option<String> {
 
 /// A configuration's path, relative to the project directory, as a project
 /// path; none for an absolute one or one that climbs out of the project.
-fn project_path(directory: &[String], path: &str) -> Option<Vec<String>> {
+pub(super) fn project_path(directory: &[String], path: &str) -> Option<Vec<String>> {
     if path.starts_with('/') {
         return None;
     }
