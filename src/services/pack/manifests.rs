@@ -1011,6 +1011,9 @@ pub(super) struct PythonProject {
     pub(super) roots: Vec<Vec<String>>,
     /// How pytest runs, where a file of the project configures it.
     pub(super) pytest: Option<Pytest>,
+    /// The projects in the tree its dependencies install (`python_dependencies`),
+    /// by their directories.
+    pub(super) dependencies: Vec<Vec<String>>,
 }
 
 /// What a pytest configuration puts on `sys.path`: the directories its
@@ -1080,13 +1083,144 @@ fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, PythonPr
                 .push((file, contents));
         }
     }
+    let pyprojects: HashMap<&[String], toml::Table> = configurations
+        .iter()
+        .filter_map(|(directory, files)| {
+            let (_, contents) = files.iter().find(|(file, _)| *file == "pyproject.toml")?;
+            Some((directory.as_slice(), toml::from_str(contents).ok()?))
+        })
+        .collect();
     configurations
-        .into_iter()
+        .iter()
         .map(|(directory, files)| {
-            let project = python_project(&directory, &files);
-            (directory, project)
+            let mut project = python_project(directory, files);
+            project.dependencies = python_dependencies(directory, &pyprojects);
+            (directory.clone(), project)
         })
         .collect()
+}
+
+/// The projects in the tree that the project at `directory` declares a
+/// dependency on its tooling installs from there, by their directories: a
+/// `[project]` dependency whose `[tool.uv.sources]` entry — the project's
+/// own, else its uv workspace root's — is `{ workspace = true }`, naming the
+/// workspace member of that name, or `{ path = "…" }`; and a Poetry
+/// dependency written `{ path = "…" }`. Names compare as normalized
+/// distribution names. Installing a project installs these, so their
+/// packages are on its `sys.path` as well.
+fn python_dependencies(
+    directory: &[String],
+    pyprojects: &HashMap<&[String], toml::Table>,
+) -> Vec<Vec<String>> {
+    let Some(pyproject) = pyprojects.get(directory) else {
+        return Vec::new();
+    };
+    let workspace = (0..=directory.len())
+        .rev()
+        .map(|depth| &directory[..depth])
+        .find_map(|root| {
+            let workspace = toml_at(pyprojects.get(root)?, &["tool", "uv", "workspace"])?;
+            uv_member(root, workspace, directory).then_some(root)
+        });
+    let sources = |at: &[String]| {
+        pyprojects
+            .get(at)
+            .and_then(|pyproject| toml_at(pyproject, &["tool", "uv", "sources"]))
+            .into_iter()
+            .flatten()
+            .map(|(name, source)| (distribution_name(name), (at.to_vec(), source)))
+            .collect::<HashMap<_, _>>()
+    };
+    let mut declared = workspace.map(sources).unwrap_or_default();
+    declared.extend(sources(directory));
+    let named = toml_value(pyproject, &["project", "dependencies"])
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(|requirement| {
+            let end = requirement
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+                .unwrap_or(requirement.len());
+            distribution_name(&requirement[..end])
+        });
+    let mut dependencies: Vec<Vec<String>> = named
+        .filter_map(|name| {
+            let (at, source) = declared.get(&name)?;
+            if let Some(path) = source.get("path").and_then(toml::Value::as_str) {
+                return project_path(at, path);
+            }
+            if source.get("workspace").and_then(toml::Value::as_bool) != Some(true) {
+                return None;
+            }
+            let root = workspace?;
+            let workspace = toml_at(pyprojects.get(root)?, &["tool", "uv", "workspace"])?;
+            let mut members = pyprojects.iter().filter(|(member, pyproject)| {
+                uv_member(root, workspace, member)
+                    && toml_value(pyproject, &["project", "name"])
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|declared| distribution_name(declared) == name)
+            });
+            match (members.next(), members.next()) {
+                (Some((member, _)), None) => Some(member.to_vec()),
+                _ => None,
+            }
+        })
+        .collect();
+    let poetry = toml_at(pyproject, &["tool", "poetry", "dependencies"]);
+    dependencies.extend(
+        poetry.into_iter().flatten().filter_map(|(_, dependency)| {
+            project_path(directory, dependency.get("path")?.as_str()?)
+        }),
+    );
+    dependencies.retain(|dependency| pyprojects.contains_key(dependency.as_slice()));
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+/// Whether the directory `member` is a member of the uv workspace rooted at
+/// `root`: the root itself, or a directory below it one of its `members`
+/// globs matches and none of its `exclude` globs does.
+fn uv_member(root: &[String], workspace: &toml::Table, member: &[String]) -> bool {
+    let Some(below) = member.strip_prefix(root) else {
+        return false;
+    };
+    if below.is_empty() {
+        return true;
+    }
+    let below = below.join("/");
+    let matches = |key: &str| {
+        workspace
+            .get(key)
+            .map(toml_strings)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|glob| {
+                globset::GlobBuilder::new(glob.trim_start_matches("./").trim_end_matches('/'))
+                    .literal_separator(true)
+                    .build()
+                    .ok()
+            })
+            .any(|glob| glob.compile_matcher().is_match(&below))
+    };
+    matches("members") && !matches("exclude")
+}
+
+/// A distribution name as Python packaging compares them: in lower case,
+/// each run of `-`, `_` and `.` read as one `-`.
+fn distribution_name(name: &str) -> String {
+    let mut normalized = String::with_capacity(name.len());
+    for c in name.trim().chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !normalized.ends_with('-') {
+                normalized.push('-');
+            }
+        } else {
+            normalized.push(c.to_ascii_lowercase());
+        }
+    }
+    normalized
 }
 
 /// What a Python project at `directory` puts on `sys.path`, from its
@@ -1170,7 +1304,11 @@ pub(super) fn python_project(directory: &[String], files: &[(&str, String)]) -> 
             Pytest::new(pythonpath, &python_files, inserts_basedir)
         }
     });
-    PythonProject { roots, pytest }
+    PythonProject {
+        roots,
+        pytest,
+        dependencies: Vec::new(),
+    }
 }
 
 /// The options of the one configuration file pytest reads in a directory,

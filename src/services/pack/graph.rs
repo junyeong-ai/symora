@@ -830,22 +830,38 @@ impl<'a> PythonPath<'a> {
     }
 
     /// The directories on a Python file's `sys.path` that its own project
-    /// and pytest establish: the one above its top-level package; its own
-    /// project's roots; the `pythonpath` of the pytest configuration it runs
-    /// under; and, for a test module or `conftest.py` that configuration
-    /// imports by inserting its basedir, that basedir — the first directory
-    /// upward without `__init__.py`.
+    /// and pytest establish: the one above its top-level package; the roots
+    /// of its own project and of the projects in the tree that installing it
+    /// installs, its dependencies' dependencies included; the `pythonpath`
+    /// of the pytest configuration it runs under; and, for a test module or
+    /// `conftest.py` that configuration imports by inserting its basedir,
+    /// that basedir — the first directory upward without `__init__.py`.
     fn of_file<'s>(&'s self, from: &'s Node) -> Vec<&'s [String]> {
         let package_root = self.package_root_of(&from.directory);
-        let own = nearest(&self.projects, &from.directory).map(|(_, project)| project);
         let pytest = self.pytest_of(&from.directory);
         let basedir = (pytest.inserts_basedir && pytest.imports_as_test(Path::new(&from.rel_path)))
             .then(|| package_root.unwrap_or(&from.directory));
+        let mut installed = Vec::new();
+        let mut pending: Vec<&[String]> = nearest(&self.projects, &from.directory)
+            .map(|(directory, _)| directory.as_slice())
+            .into_iter()
+            .collect();
+        let mut seen = HashSet::new();
+        while let Some(directory) = pending.pop() {
+            if !seen.insert(directory) {
+                continue;
+            }
+            if let Some(project) = self.projects.get(directory) {
+                installed.push(project);
+                pending.extend(project.dependencies.iter().map(Vec::as_slice));
+            }
+        }
         package_root
             .into_iter()
             .chain(
-                own.into_iter()
-                    .flat_map(|own| own.roots.iter().map(Vec::as_slice)),
+                installed
+                    .into_iter()
+                    .flat_map(|project| project.roots.iter().map(Vec::as_slice)),
             )
             .chain(pytest.pythonpath.iter().map(Vec::as_slice))
             .chain(basedir)
@@ -2230,6 +2246,88 @@ mod tests {
         );
         assert_eq!(edges(12), vec!["outer/inner/t/near.py"]);
         assert!(edges(7).is_empty() && edges(10).is_empty() && edges(13).is_empty());
+    }
+
+    /// Installing a project installs the projects in the tree it depends on
+    /// through its tooling — a uv workspace member its sources mark
+    /// `{ workspace = true }`, a uv or Poetry `path` dependency — and theirs,
+    /// so their packages are on its `sys.path`; a member nothing it installs
+    /// depends on is not.
+    #[test]
+    fn a_python_project_imports_the_projects_its_dependencies_install() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "packages/app/src/fixture_app/__init__.py", ""),
+            python(
+                1,
+                "packages/app/src/fixture_app/report.py",
+                "from fixture_core.geometry import area\nimport fixture_util\nimport other_pkg\n",
+            ),
+            python(2, "packages/core/src/fixture_core/__init__.py", ""),
+            python(
+                3,
+                "packages/core/src/fixture_core/geometry.py",
+                "import fixture_util.text\nimport fixture_app\n",
+            ),
+            python(4, "libs/util/fixture_util/__init__.py", ""),
+            python(5, "libs/util/fixture_util/text.py", ""),
+            python(6, "packages/other/src/other_pkg/__init__.py", ""),
+            python(7, "poetry/app/main.py", "import poetry_lib\n"),
+            python(8, "poetry/lib/poetry_lib/__init__.py", ""),
+            // A project of the same name that is no workspace member.
+            python(9, "vendor/core/src/fixture_core/geometry.py", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "pyproject.toml",
+                    "[project]\nname = \"root\"\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n\
+                     [tool.uv.sources]\nfixture-core = { workspace = true }\n\
+                     other_pkg = { workspace = true }\n",
+                ),
+                (
+                    "packages/app/pyproject.toml",
+                    "[project]\nname = \"fixture-app\"\ndependencies = [\"Fixture_Core>=1.0\"]\n",
+                ),
+                (
+                    "packages/core/pyproject.toml",
+                    "[project]\nname = \"fixture.core\"\ndependencies = [\"fixture-util\"]\n\
+                     [tool.uv.sources]\nfixture-util = { path = \"../../libs/util\" }\n",
+                ),
+                (
+                    "packages/other/pyproject.toml",
+                    "[project]\nname = \"other-pkg\"\n",
+                ),
+                (
+                    "libs/util/pyproject.toml",
+                    "[project]\nname = \"fixture-util\"\n",
+                ),
+                (
+                    "poetry/app/pyproject.toml",
+                    "[tool.poetry.dependencies]\npython = \"^3.12\"\n\
+                     poetry-lib = { path = \"../lib\", develop = true }\n",
+                ),
+                (
+                    "poetry/lib/pyproject.toml",
+                    "[tool.poetry]\nname = \"poetry-lib\"\n",
+                ),
+                (
+                    "vendor/core/pyproject.toml",
+                    "[project]\nname = \"fixture-core\"\n",
+                ),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(
+            edges(1),
+            vec![
+                "packages/core/src/fixture_core/geometry.py",
+                "libs/util/fixture_util/__init__.py"
+            ]
+        );
+        assert_eq!(edges(3), vec!["libs/util/fixture_util/text.py"]);
+        assert_eq!(edges(7), vec!["poetry/lib/poetry_lib/__init__.py"]);
     }
 
     /// A name that is no path in the project — a JavaScript package
