@@ -121,6 +121,8 @@ impl ImportExtractor {
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), source);
         let mut rust = Vec::new();
+        let mut named_class = None;
+        let mut callables = false;
         while let Some(m) = matches.next() {
             let captured = |name| {
                 m.captures()
@@ -154,6 +156,11 @@ impl ImportExtractor {
                 imports
                     .declares
                     .push(backquoted_name(name.node, source).to_string());
+                callables |= captured("callable").is_some();
+                continue;
+            }
+            if let Some(name) = captured("jvm_name") {
+                named_class = named_class.or(Some(kotlin_string(name.node, source)));
                 continue;
             }
             if let Some(package) = captured("package") {
@@ -182,7 +189,29 @@ impl ImportExtractor {
             rust.into_iter()
                 .map(|reference| reference.relative_to_the_file(&imports.modules)),
         );
+        // A `@file:JvmName` whose string is no plain text names a class this
+        // reading cannot spell.
+        imports.file_class = match (callables, named_class) {
+            (false, _) | (true, Some(None)) => None,
+            (true, None) => Some(FileClass::OfFileName),
+            (true, Some(Some(name))) => Some(FileClass::Named(name)),
+        };
         imports
+    }
+}
+
+/// The value a Kotlin string literal spells, where it is plain text: no
+/// template, no escape.
+fn kotlin_string(literal: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = literal.walk();
+    let mut parts = literal.named_children(&mut cursor);
+    // The grammar keeps an escape inside the text it is part of.
+    match (parts.next(), parts.next()) {
+        (Some(part), None) if part.kind() == "string_content" => {
+            let text = text_of(part, source);
+            (!text.contains('\\')).then(|| text.to_string())
+        }
+        _ => None,
     }
 }
 
@@ -339,14 +368,26 @@ fn rust_string(literal: Node<'_>, source: &[u8]) -> Option<String> {
 /// What a file's imports say: the package it declares itself in, where its
 /// language names one in the file (`package com.acme.app`), the names it
 /// declares at its top level, which an import of that package names it by
-/// (a JVM class, object or top-level function), the modules it declares (a
-/// Rust `mod`), and the module references it makes, in source order.
+/// (a JVM class, object or top-level function), the class its top-level
+/// functions and properties compile into, the modules it declares (a Rust
+/// `mod`), and the module references it makes, in source order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileImports {
     pub package: Option<String>,
     pub declares: Vec<String>,
+    pub file_class: Option<FileClass>,
     pub modules: Vec<ModuleDeclaration>,
     pub references: Vec<String>,
+}
+
+/// The JVM class a Kotlin file's top-level functions and properties compile
+/// into, which Java imports them through; a file declaring none has none.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FileClass {
+    /// The one its `@file:JvmName("…")` names.
+    Named(String),
+    /// The one Kotlin names for the file.
+    OfFileName,
 }
 
 /// A module a Rust file declares, `mod name;` or `mod name { … }`, outside
@@ -734,14 +775,21 @@ const JAVA_QUERY: &str = r#"
 "#;
 
 /// A Kotlin file declares classes, objects and type aliases at its top
-/// level, and functions and properties, which are imported by name too.
+/// level, and functions and properties, which are imported by name too and
+/// compile into the class a `@file:JvmName` names.
 const KOTLIN_QUERY: &str = r#"
 (package_header (identifier) @package)
 (source_file (class_declaration (type_identifier) @declares))
 (source_file (object_declaration (type_identifier) @declares))
 (source_file (type_alias (type_identifier) @declares))
-(source_file (function_declaration (simple_identifier) @declares))
-(source_file (property_declaration (variable_declaration (simple_identifier) @declares)))
+(source_file (function_declaration (simple_identifier) @declares) @callable)
+(source_file (property_declaration (variable_declaration (simple_identifier) @declares)) @callable)
+(source_file
+  (file_annotation
+    (constructor_invocation
+      (user_type (type_identifier) @annotation)
+      (value_arguments . (value_argument (string_literal) @jvm_name) .)))
+  (#eq? @annotation "JvmName"))
 (import_header) @path
 "#;
 
@@ -1172,6 +1220,39 @@ mod tests {
         );
     }
 
+    /// A Kotlin file's top-level functions and properties compile into the
+    /// class its `@file:JvmName` names, or else one Kotlin names for the
+    /// file; a file declaring none has no such class.
+    #[test]
+    fn a_kotlin_file_class_holds_its_top_level_functions_and_properties() {
+        let class = |content: &str| {
+            ImportExtractor::shared()
+                .extract(content, Language::Kotlin)
+                .file_class
+        };
+        assert_eq!(
+            class("@file:Suppress(\"x\")\n@file:JvmName(\"Utils\")\npackage a\nfun f() = 1\n"),
+            Some(FileClass::Named("Utils".to_string()))
+        );
+        assert_eq!(
+            class("@file:Suppress(\"x\")\npackage a\nval p = 1\n"),
+            Some(FileClass::OfFileName)
+        );
+        assert_eq!(
+            class("@file:JvmName(\"Utils\")\npackage a\nclass C\n"),
+            None
+        );
+        for unspelled in ["\"U\\u0074ils\"", "\"U$x\""] {
+            assert_eq!(
+                class(&format!(
+                    "@file:JvmName({unspelled})\npackage a\nfun f() = 1\n"
+                )),
+                None,
+                "{unspelled}"
+            );
+        }
+    }
+
     #[test]
     fn a_dart_library_names_its_imports_exports_and_parts() {
         assert_eq!(
@@ -1329,8 +1410,8 @@ module "ordinary-percent" { source = "./100%" }
         ),
         (
             Language::Kotlin,
-            "package a.b\nimport kotlin.collections.List\nclass C\nobject O\ntypealias T = Int\n\
-             fun f() {}\nval p = 1\n",
+            "@file:JvmName(\"B\")\npackage a.b\nimport kotlin.collections.List\nclass C\nobject O\n\
+             typealias T = Int\nfun f() {}\nval p = 1\n",
         ),
         (
             Language::Scala,
