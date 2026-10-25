@@ -1300,7 +1300,7 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
 fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
     fn before(node: Node) -> Option<Node> {
         std::iter::successors(node.prev_sibling(), Node::prev_sibling)
-            .find(|before| !before.is_extra())
+            .find(|before| !before.is_extra() || before.is_error())
     }
     fn after(node: Node) -> Option<Node> {
         std::iter::successors(node.next_sibling(), Node::next_sibling)
@@ -1318,6 +1318,12 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
             .filter(|macro_| match macro_.kind() {
                 "call_expression" => true,
                 "function_declarator" => !names_a_parameter(*macro_),
+                "ERROR" => {
+                    let mut cursor = macro_.walk();
+                    let held: Vec<Node> = macro_.named_children(&mut cursor).collect();
+                    matches!(held[..], [invoked] if invoked.kind() == "function_declarator"
+                        && !names_a_parameter(invoked))
+                }
                 "expression_statement" => {
                     macro_.named_child_count() == 1
                         && macro_
@@ -7542,6 +7548,20 @@ region     = "us-central1"
                 "field:after",
             ],
             "a name before `::` qualifies a type, so what was read as the type is a macro"
+        );
+        assert_eq!(
+            declared(
+                "extern LZMA_API(uint64_t) lzma_index_memused(const lzma_index *i)\n\t\tlzma_nothrow;\n\n\
+                 /** doc */\nextern LZMA_API(lzma_index *) lzma_index_init(const lzma_allocator *allocator)\n\t\t\
+                 lzma_nothrow;\n\n/** doc */\nextern LZMA_API(void) lzma_index_end(\n\t\tlzma_index *i, \
+                 const lzma_allocator *allocator) lzma_nothrow;\n"
+            ),
+            [
+                "function:lzma_index_memused",
+                "function:lzma_index_init",
+                "function:lzma_index_end",
+            ],
+            "a prototype's type is the macro an error holds before it, however deep"
         );
     }
 
