@@ -3775,20 +3775,28 @@ fn a_short_answer_holds_the_best_matches_not_the_first_page() {
 
 #[cfg(unix)]
 #[test]
-fn symbol_search_rejects_invalid_kinds_before_selecting_a_backend() {
+fn an_unknown_kind_is_refused_before_any_source_is_consulted() {
     let dir = tempfile::tempdir().unwrap();
-    for route in [
-        vec!["Probe"],
-        vec!["*Probe*"],
-        vec!["Probe", "--workspace-symbols"],
+    std::fs::write(dir.path().join("lib.rs"), "fn probe() {}\n").unwrap();
+    for args in [
+        &[
+            "search", "symbols", "Probe", "--kind", "nonsense", "--lang", "rust",
+        ][..],
+        &[
+            "search", "symbols", "*Probe*", "--kind", "nonsense", "--lang", "rust",
+        ],
+        &[
+            "search",
+            "symbols",
+            "Probe",
+            "--workspace-symbols",
+            "--kind",
+            "nonsense",
+        ],
+        &["symbols", "lib.rs", "--kind", "function,nonsense"],
+        &["symbols", "lib.rs", "--exclude", "nonsense"],
     ] {
-        let args = [
-            &["search", "symbols"][..],
-            &route,
-            &["--kind", "nonsense", "--lang", "rust"],
-        ]
-        .concat();
-        let out = run_in(dir.path(), &args);
+        let out = run_in(dir.path(), args);
         assert!(!out.status.success(), "{args:?}");
         let response: serde_json::Value = common::parse_response(&out.stdout).unwrap();
         assert_eq!(response["error"]["code"], "invalid_argument", "{response}");
