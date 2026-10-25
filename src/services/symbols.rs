@@ -612,7 +612,9 @@ impl SymbolExtractor {
 ///   missing `;`, which holds the rest of it up to the `;` the source writes
 ///   (`MACRO_A MACRO_B;` after `int f(int x)`, read as a declaration of
 ///   `MACRO_B`), unless the declaration invoked a macro, whose rest holds
-///   what it names ([`continued_macro`]).
+///   what it names ([`continued_macro`]), or was a macro's invocation, which
+///   needs no `;` ([`misreads_a_macro_invocation`]), or the node begins a
+///   declaration of its own ([`begins_its_own_declaration`]).
 ///
 /// No other loose bracket opens anything: the grammar strands brackets whose
 /// partners it absorbed elsewhere (a macro body it failed to read as one),
@@ -691,7 +693,7 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
         }
         let mut lost_body_until = None;
         let mut left_open = Vec::new();
-        let mut continues = false;
+        let mut cut_short = None;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.is_extra() && !child.is_error() {
@@ -700,11 +702,15 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
             }
             let mut closed = left_open.clone();
             apply(&mut closed, child, node.is_error());
+            let head = std::mem::replace(
+                &mut cut_short,
+                (ends_on_a_supplied_semicolon(child)
+                    && !invokes_a_macro(child)
+                    && !misreads_a_macro_invocation(child, content))
+                .then_some(child),
+            );
             if left_open.contains(&true) && closed.len() < left_open.len()
-                || std::mem::replace(
-                    &mut continues,
-                    ends_on_a_supplied_semicolon(child) && !invokes_a_macro(child),
-                )
+                || head.is_some_and(|head| !begins_its_own_declaration(child, head, content))
             {
                 inside.insert(child.id());
             }
@@ -727,6 +733,91 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
         }
     }
     inside
+}
+
+/// Whether a C or C++ node after a declaration the grammar ended by supplying
+/// its `;` (`head`) begins a declaration of its own rather than holding the
+/// rest of that one: it opens with a word only a declaration opens with,
+/// which nothing written after a declarator can (`static`, `template`, a
+/// primitive type, a class key), or the head declares no function while the
+/// node's own syntax proves it one ([`proves_a_function`]), or the head
+/// leaves its function to the node ([`leaves_its_function_to_the_next`]). A
+/// macro written after a data member's declarator does neither
+/// (`idx_t parked_bytes DUCKDB_GUARDED_BY(glock) = 0;`).
+fn begins_its_own_declaration(node: Node, head: Node, content: &str) -> bool {
+    std::iter::successors(Some(node), |part| {
+        let mut cursor = part.walk();
+        part.children(&mut cursor).find(|child| !child.is_extra())
+    })
+    .last()
+    .is_some_and(|word| {
+        word.kind() == "primitive_type" || DECLARATION_OPENERS.contains(&word.kind())
+    }) || !declares_a_function(head) && proves_a_function(node)
+        || leaves_its_function_to_the_next(head, content)
+}
+
+/// Whether a C or C++ declaration the grammar ended by supplying its `;`
+/// writes a specifier only a function takes yet declares none, so the
+/// function is the declaration after it (`API explicit` before
+/// `Logger(Manager &m)`, `API virtual unique_ptr<X>` before `Copy() = 0;`).
+fn leaves_its_function_to_the_next(head: Node, content: &str) -> bool {
+    let mut parts = vec![head];
+    ends_on_a_supplied_semicolon(head)
+        && !declares_a_function(head)
+        && std::iter::from_fn(|| {
+            let part = parts.pop()?;
+            let mut cursor = part.walk();
+            parts.extend(part.children(&mut cursor));
+            Some(part)
+        })
+        .any(|part| {
+            matches!(
+                part.kind(),
+                "virtual" | "explicit" | "identifier" | "field_identifier" | "type_identifier"
+            ) && matches!(content.get(part.byte_range()), Some("virtual" | "explicit"))
+        })
+}
+
+/// The words a C or C++ declaration may open with that nothing written after
+/// a declarator can: a template or alias header, a storage class or
+/// function specifier, a cv-qualifier, a class key, an attribute, and the
+/// words that size a primitive type.
+const DECLARATION_OPENERS: &[&str] = &[
+    "template",
+    "typedef",
+    "using",
+    "namespace",
+    "static_assert",
+    "static",
+    "extern",
+    "register",
+    "thread_local",
+    "mutable",
+    "inline",
+    "constexpr",
+    "consteval",
+    "constinit",
+    "friend",
+    "virtual",
+    "explicit",
+    "const",
+    "volatile",
+    "class",
+    "struct",
+    "union",
+    "enum",
+    "[[",
+    "unsigned",
+    "signed",
+    "long",
+    "short",
+];
+
+/// Whether a C or C++ declaration's declarator declares a function
+/// ([`member_kind`]).
+fn declares_a_function(node: Node) -> bool {
+    node.child_by_field_name("declarator")
+        .is_some_and(|declarator| member_kind(declarator_name(declarator)) == SymbolKind::Method)
 }
 
 /// The macros of each C or C++ class definition the grammar read as a
@@ -855,8 +946,9 @@ fn invokes_a_macro(node: Node) -> bool {
 /// Whether the grammar read a macro's invocation as a C or C++ declaration
 /// (`Q_DISABLE_COPY(W);`): written without a type under a plain name, as only
 /// a constructor can be, yet not named for a class whose body holds it
-/// ([`named_for_its_class`]), and writing nothing only a function's
-/// declaration writes ([`proves_a_function`]).
+/// ([`named_for_its_class`]), writing nothing only a function's declaration
+/// writes ([`proves_a_function`]), and not the function a declaration cut
+/// short before it left ([`leaves_its_function_to_the_next`]).
 fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
     node.child_by_field_name("type").is_none()
         && node
@@ -867,6 +959,9 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
             .and_then(|name| content.get(name.byte_range()))
             .is_some_and(|name| !named_for_its_class(node, name, content))
         && !proves_a_function(node)
+        && !std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+            .find(|before| !before.is_extra())
+            .is_some_and(|head| leaves_its_function_to_the_next(head, content))
 }
 
 /// Whether a C++ declaration's own syntax proves it a function's, as a
@@ -1146,12 +1241,7 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 fn declares(node: Node, content: &str, language: Language) -> bool {
     if language == Language::Cpp
         && (ends_on_a_supplied_semicolon(node)
-            && (invokes_a_macro(node)
-                || !node
-                    .child_by_field_name("declarator")
-                    .is_some_and(|declarator| {
-                        member_kind(declarator_name(declarator)) == SymbolKind::Method
-                    }))
+            && (invokes_a_macro(node) || !declares_a_function(node))
             || lone_name(node).is_some() && continued_macro(node).is_none()
             || misreads_a_macro_invocation(node, content)
             || misreads_a_class_key(node, content)
@@ -4934,6 +5024,7 @@ auto [first_of, second_of] = pair_value;
                 "field:Exported/count_",
                 "method:Exported/inline_count",
                 "class:SpinLock",
+                "constructor:SpinLock/SpinLock",
                 "namespace:fsys",
                 "namespace:outer",
                 "namespace:inner",
@@ -6119,6 +6210,33 @@ region     = "us-central1"
                 "field:after_macro",
             ],
             "a macro's arguments name nothing, and what follows them is its declaration's name"
+        );
+        assert_eq!(
+            declared(
+                "class Logger {\n  API explicit Logger(Manager &m) : m_(m) {}\n  \
+                 API virtual unique_ptr<X> Copy() const = 0;\n  \
+                 API virtual unique_ptr<X> Make() = 0;\n  API virtual unique_ptr<X> Build();\n  \
+                 API unique_ptr<X> Get(int key) const;\n  API explicit operator bool() const;\n};\n\
+                 class Buffer {\n\tidx_t parked_bytes DUCKDB_GUARDED_BY(glock) = 0;\n\tint after;\n};\n\
+                 struct uv_pipe_s {\n  UV_HANDLE_FIELDS\n  UV_STREAM_FIELDS\n  int ipc;\n};\n\
+                 union Symbol {\n  DEFINE_MEMBERS(File, FULL, file)\n  Entry entry;\n};\n"
+            ),
+            [
+                "class:Logger",
+                "constructor:Logger",
+                "method:Copy",
+                "method:Make",
+                "method:Build",
+                "method:Get",
+                "method:operator bool",
+                "class:Buffer",
+                "field:after",
+                "struct:uv_pipe_s",
+                "field:ipc",
+                "struct:Symbol",
+                "field:entry",
+            ],
+            "a declaration the grammar cut short goes on only into what cannot begin one of its own"
         );
         assert_eq!(
             declared(
