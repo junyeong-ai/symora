@@ -805,12 +805,7 @@ impl Manifests {
     fn read(root: &Path, nodes: &[Node]) -> Self {
         let go_module = std::fs::read_to_string(root.join("go.mod"))
             .ok()
-            .and_then(|go_mod| {
-                go_mod
-                    .lines()
-                    .find_map(|line| line.trim().strip_prefix("module "))
-                    .map(|path| split_components(path.trim()))
-            })
+            .and_then(|go_mod| go_module_path(&go_mod))
             .unwrap_or_default();
         let dart_packages = manifests_above(root, nodes, Language::Dart, "pubspec.yaml")
             .into_iter()
@@ -892,6 +887,63 @@ fn dart_package_name(pubspec: &str) -> Option<String> {
                 .to_string()
         })
         .filter(|name| !name.is_empty())
+}
+
+/// The module path a `go.mod` declares, read by that file's lexical rules:
+/// tokens separated by whitespace, `//` comments to the end of a line, a path
+/// that may be written as an interpreted or a raw string, and the directive
+/// on one line or as a `module ( … )` block. A path whose string carries an
+/// escape is not decoded here, so it declares nothing.
+fn go_module_path(go_mod: &str) -> Option<Vec<String>> {
+    let mut lines = go_mod.lines().map(go_mod_tokens);
+    while let Some(tokens) = lines.next() {
+        let path = match tokens.as_slice() {
+            [Some(verb), Some(open)] if verb == "module" && open == "(" => lines
+                .find(|line| !line.is_empty())
+                .and_then(|line| match line.as_slice() {
+                    [path] => path.clone(),
+                    _ => None,
+                }),
+            [Some(verb), path] if verb == "module" => path.clone(),
+            _ => continue,
+        };
+        return path
+            .map(|path| split_components(&path))
+            .filter(|path| !path.is_empty());
+    }
+    None
+}
+
+/// The tokens of one `go.mod` line, `None` standing for a string whose value
+/// is not decoded here.
+fn go_mod_tokens(line: &str) -> Vec<Option<String>> {
+    const PUNCTUATION: [char; 7] = ['(', ')', '[', ']', '{', '}', ','];
+    let mut tokens = Vec::new();
+    let mut rest = line.trim_start();
+    while !rest.is_empty() && !rest.starts_with("//") {
+        let first = rest.chars().next().expect("a non-empty line");
+        if PUNCTUATION.contains(&first) {
+            tokens.push(Some(first.to_string()));
+            rest = &rest[1..];
+        } else if first == '"' || first == '`' {
+            let Some(end) = rest[1..].find(first) else {
+                tokens.push(None);
+                break;
+            };
+            let value = &rest[1..1 + end];
+            tokens.push((first == '`' || !value.contains('\\')).then(|| value.to_string()));
+            rest = &rest[end + 2..];
+        } else {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || PUNCTUATION.contains(&c))
+                .unwrap_or(rest.len());
+            let end = rest[..end].find("//").unwrap_or(end);
+            tokens.push(Some(rest[..end].to_string()));
+            rest = &rest[end..];
+        }
+        rest = rest.trim_start();
+    }
+    tokens
 }
 
 // --- PageRank --------------------------------------------------------------
@@ -1404,23 +1456,35 @@ mod tests {
         assert!(edges_of(&nodes, 0).is_empty());
     }
 
+    /// `go.mod` is read by its own lexical rules, not as a line beginning
+    /// `module `: the path may be quoted or followed by a comment, the
+    /// directive may be a block, and a commented-out directive is no
+    /// directive.
     #[test]
-    fn a_go_mod_module_line_yields_the_prefix() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("go.mod"),
+    fn a_go_mod_module_directive_is_read_as_go_mod_spells_it() {
+        for go_mod in [
             "module github.com/acme/widget\n\ngo 1.24\n",
-        )
-        .expect("write go.mod");
-        assert_eq!(
-            Manifests::read(dir.path(), &[]).go_module,
-            vec!["github.com", "acme", "widget"]
-        );
-        assert!(
-            Manifests::read(Path::new("/nonexistent"), &[])
-                .go_module
-                .is_empty()
-        );
+            "module github.com/acme/widget // the widget\n",
+            "module\tgithub.com/acme/widget\n",
+            "module \"github.com/acme/widget\"\n",
+            "module `github.com/acme/widget`\n",
+            "// module example.com/fake\nmodule (\n\t// the widget\n\tgithub.com/acme/widget\n)\n",
+            "  module github.com/acme/widget//vanity\r\n",
+        ] {
+            assert_eq!(
+                go_module_path(go_mod),
+                Some(split_components("github.com/acme/widget")),
+                "{go_mod:?}"
+            );
+        }
+        for go_mod in [
+            "module \"github.com/acme/wi\\x64get\"\n",
+            "// module example.com/fake\n",
+            "module\n",
+            "modules example.com/fake\n",
+        ] {
+            assert_eq!(go_module_path(go_mod), None, "{go_mod:?}");
+        }
     }
 
     /// A Dart file imports its own package's files as `package:name/…`, which
