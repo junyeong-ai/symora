@@ -12,7 +12,7 @@
 //! ## What counts as the policy
 //!
 //! Only the project's own, committed ignore sources, so the index is reproducible
-//! across machines and CI (a value `pack.rs` shares):
+//! across machines and CI (a value `services::pack` shares):
 //!
 //! - the per-directory `.gitignore` tree (root and nested), resolved with real
 //!   git precedence — a deeper file overrides a shallower one, `!` re-includes;
