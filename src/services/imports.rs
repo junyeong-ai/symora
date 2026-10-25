@@ -38,9 +38,10 @@ enum Dialect {
     /// A path wrapped in quotes.
     Quoted,
     Dart,
-    /// A Kotlin import, which spells its path as identifiers a backtick can
-    /// quote.
-    KotlinImport,
+    /// A Java or Kotlin import: a path of identifiers (which a Kotlin
+    /// backtick can quote), and a trailing `*` that imports all a package or
+    /// class holds.
+    JvmImport,
     /// A Scala import, which spells each path as its segments and can list
     /// several paths and select several names under one.
     ScalaImport,
@@ -100,30 +101,55 @@ impl ImportExtractor {
         crate::infra::hash_content(&described)
     }
 
-    /// The module references `content` makes, in source order.
-    pub fn extract(&self, content: &str, language: Language) -> Vec<String> {
+    /// The package `content` declares and the module references it makes.
+    pub fn extract(&self, content: &str, language: Language) -> FileImports {
+        let mut imports = FileImports::default();
         let Some(entry) = self.languages.get(&language) else {
-            return Vec::new();
+            return imports;
         };
         let tree = {
             let Ok(mut parser) = entry.parser.lock() else {
-                return Vec::new();
+                return imports;
             };
             match parser.parse(content, None) {
                 Some(tree) => tree,
-                None => return Vec::new(),
+                None => return imports,
             }
         };
 
         let source = content.as_bytes();
-        let mut references = Vec::new();
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&entry.query, tree.root_node(), source);
         while let Some(m) = matches.next() {
-            references.extend(references_of(m.captures(), source, entry));
+            let package = m
+                .captures()
+                .iter()
+                .find(|capture| entry.capture_name(capture) == Some("package"));
+            if let Some(package) = package {
+                // Scala chains its package clauses: `package a.b` then
+                // `package c` declares `a.b.c`.
+                let name = jvm_name(package.node, source);
+                imports.package = Some(match imports.package.take() {
+                    Some(outer) => format!("{outer}.{name}"),
+                    None => name,
+                });
+                continue;
+            }
+            imports
+                .references
+                .extend(references_of(m.captures(), source, entry));
         }
-        references
+        imports
     }
+}
+
+/// What a file's imports say: the package it declares itself in, where its
+/// language names one in the file (`package com.acme.app`), and the module
+/// references it makes, in source order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileImports {
+    pub package: Option<String>,
+    pub references: Vec<String>,
 }
 
 fn register(
@@ -176,14 +202,23 @@ fn references_of(
     };
     match entry.dialect {
         Dialect::RustUse => use_tree_targets(path, source),
-        Dialect::KotlinImport => {
+        Dialect::JvmImport => {
+            let mut name = None;
+            let mut wildcard = false;
             let mut cursor = path.walk();
-            let segments: Vec<&str> = path
-                .named_children(&mut cursor)
-                .filter(|segment| segment.kind() == "simple_identifier")
-                .map(|segment| backquoted_name(segment, source))
-                .collect();
-            vec![segments.join(".")]
+            for child in path.named_children(&mut cursor) {
+                match child.kind() {
+                    "scoped_identifier" | "identifier" if name.is_none() => {
+                        name = Some(jvm_name(child, source));
+                    }
+                    "asterisk" | "wildcard_import" => wildcard = true,
+                    _ => {}
+                }
+            }
+            name.filter(|name| !name.is_empty())
+                .map(|name| if wildcard { format!("{name}.*") } else { name })
+                .into_iter()
+                .collect()
         }
         Dialect::ScalaImport => scala_import_targets(path, source),
         Dialect::Plain => vec![text_of(path, source).to_string()],
@@ -213,9 +248,9 @@ fn references_of(
 
 /// The modules a Scala import names: each path it lists (`import a.b, c.d`),
 /// each name its braces select under a path (`import a.b.{C, D => E}`), the
-/// name it renames (`import a.b.C as D`), and the path itself where a
-/// wildcard or `given` takes what is in it. A leading `_root_` names the root
-/// package rather than a package in it.
+/// name it renames (`import a.b.C as D`), and everything under the path
+/// (`a.b.*`) where a wildcard or `given` takes what is in it. A leading
+/// `_root_` names the root package rather than a package in it.
 fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
     let mut targets = Vec::new();
     let mut path: Vec<&str> = Vec::new();
@@ -230,7 +265,7 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
         }
         match child.kind() {
             "," if !path.is_empty() => targets.push(path.join(".")),
-            "namespace_wildcard" => targets.push(path.join(".")),
+            "namespace_wildcard" => targets.push(format!("{}.*", path.join("."))),
             "as_renamed_identifier" => {
                 targets.extend(
                     child.child_by_field_name("name").map(|name| {
@@ -252,7 +287,7 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
                         Some(name) => {
                             format!("{}.{}", path.join("."), backquoted_name(name, source))
                         }
-                        None => path.join("."),
+                        None => format!("{}.*", path.join(".")),
                     });
                 }
             }
@@ -266,8 +301,28 @@ fn scala_import_targets(import: Node<'_>, source: &[u8]) -> Vec<String> {
     targets
 }
 
-/// The name a Scala identifier spells: backticks quote a name, so `` `type` ``
-/// is `type`.
+/// The dotted name a JVM identifier path spells, read from its identifiers so
+/// that neither whitespace nor a comment between them becomes part of a name.
+fn jvm_name(path: Node<'_>, source: &[u8]) -> String {
+    fn segments<'a>(node: Node<'_>, source: &'a [u8], out: &mut Vec<&'a str>) {
+        if matches!(node.kind(), "identifier" | "simple_identifier")
+            && node.named_child_count() == 0
+        {
+            out.push(backquoted_name(node, source));
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            segments(child, source, out);
+        }
+    }
+    let mut out = Vec::new();
+    segments(path, source, &mut out);
+    out.join(".")
+}
+
+/// The name a Kotlin or Scala identifier spells: backticks quote a name, so
+/// `` `type` `` is `type`.
 fn backquoted_name<'a>(identifier: Node<'_>, source: &'a [u8]) -> &'a str {
     let text = text_of(identifier, source);
     text.strip_prefix('`')
@@ -445,15 +500,21 @@ const TYPESCRIPT_QUERY: &str = r#"
 (export_statement source: (string) @path)
 "#;
 
+/// A JVM file declares the package it belongs to, which with its name is the
+/// class it holds, and imports classes and whole packages by those names.
 const JAVA_QUERY: &str = r#"
-(import_declaration (scoped_identifier) @path)
+(package_declaration [(scoped_identifier) (identifier)] @package)
+(import_declaration) @path
 "#;
 
 const KOTLIN_QUERY: &str = r#"
-(import_header (identifier) @path)
+(package_header (identifier) @package)
+(import_header) @path
 "#;
 
+/// A package clause with a body declares a package for that body alone.
 const SCALA_QUERY: &str = r#"
+(compilation_unit (package_clause name: (package_identifier) @package !body))
 (import_declaration) @path
 "#;
 
@@ -530,13 +591,13 @@ const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
         Language::Java,
         || tree_sitter_java::LANGUAGE.into(),
         JAVA_QUERY,
-        Dialect::Plain,
+        Dialect::JvmImport,
     ),
     (
         Language::Kotlin,
         || tree_sitter_kotlin_sg::LANGUAGE.into(),
         KOTLIN_QUERY,
-        Dialect::KotlinImport,
+        Dialect::JvmImport,
     ),
     (
         Language::Scala,
@@ -569,7 +630,9 @@ mod tests {
     use super::*;
 
     fn extract(content: &str, language: Language) -> Vec<String> {
-        ImportExtractor::shared().extract(content, language)
+        ImportExtractor::shared()
+            .extract(content, language)
+            .references
     }
 
     /// The defect the parse tree removes: a string that spells a package
@@ -703,10 +766,35 @@ mod tests {
         );
         assert_eq!(
             extract(
-                "import com.acme.core.Thing\nimport a.b.{C, D => E, given}, x.y._\n",
+                "import com.acme.util.*;\nimport static com.acme.util.Strings.*;\n\
+                 import static com.acme.util.Strings.join;\n",
+                Language::Java
+            ),
+            vec![
+                "com.acme.util.*",
+                "com.acme.util.Strings.*",
+                "com.acme.util.Strings.join"
+            ]
+        );
+        assert_eq!(
+            extract("import a.b.*\nimport a.b.C as D\n", Language::Kotlin),
+            vec!["a.b.*", "a.b.C"]
+        );
+        assert_eq!(
+            extract(
+                "import com.acme.core.Thing\nimport a.b.{C, D => E, given}, x.y._\n\
+                 import p.q.*\nimport p.q.given\n",
                 Language::Scala
             ),
-            vec!["com.acme.core.Thing", "a.b.C", "a.b.D", "a.b", "x.y"]
+            vec![
+                "com.acme.core.Thing",
+                "a.b.C",
+                "a.b.D",
+                "a.b.*",
+                "x.y.*",
+                "p.q.*",
+                "p.q.*"
+            ]
         );
         assert_eq!(
             extract(
@@ -716,6 +804,38 @@ mod tests {
             ),
             vec!["a.b.C", "a.b.E", "a.b.G", "scala.util", "a.type.H"]
         );
+    }
+
+    /// A JVM file's package is what its declaration names — Scala's chained
+    /// clauses together, a clause with a body declaring only for the body —
+    /// and a file without one is in the unnamed package.
+    #[test]
+    fn jvm_languages_read_the_package_a_file_declares() {
+        let package =
+            |content: &str, language| ImportExtractor::shared().extract(content, language).package;
+        for (language, content) in [
+            (
+                Language::Java,
+                "package com . acme /* app */ . app;\nimport a.B;\n",
+            ),
+            (Language::Kotlin, "package com.acme.`app`\n\nimport a.B\n"),
+            (
+                Language::Scala,
+                "package com.acme\npackage app\n\nimport a.B\npackage inner { class C }\n",
+            ),
+        ] {
+            assert_eq!(
+                package(content, language).as_deref(),
+                Some("com.acme.app"),
+                "{language:?}"
+            );
+        }
+        assert_eq!(
+            package("package app;\n", Language::Java).as_deref(),
+            Some("app")
+        );
+        assert_eq!(package("import a.B;\nclass C {}\n", Language::Java), None);
+        assert_eq!(package("package app\n", Language::Python), None);
     }
 
     #[test]
@@ -872,9 +992,15 @@ module "ordinary-percent" { source = "./100%" }
             Language::TypeScript,
             "import a from \"./a\";\nimport r = require(\"./r\");\nexport * from \"./b\";\n",
         ),
-        (Language::Java, "import java.util.List;\n"),
-        (Language::Kotlin, "import kotlin.collections.List\n"),
-        (Language::Scala, "import scala.collection.mutable\n"),
+        (Language::Java, "package a.b;\nimport java.util.List;\n"),
+        (
+            Language::Kotlin,
+            "package a.b\nimport kotlin.collections.List\n",
+        ),
+        (
+            Language::Scala,
+            "package a.b\nimport scala.collection.mutable\n",
+        ),
         (Language::Swift, "import Foundation\n"),
         (
             Language::Dart,
