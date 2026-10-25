@@ -452,8 +452,10 @@ const ELIXIR_QUERY: &str = r#"
 "#;
 
 /// A library names another through its imports and exports, and its parts
-/// and the library a part belongs to through `part` and `part of`.
+/// and the library a part belongs to through `part` and `part of`. The grammar
+/// writes a deferred import's URI without the `configurable_uri` around it.
 const DART_QUERY: &str = r#"
+(import_specification uri: (uri (string_literal) @path))
 (import_specification uri: (configurable_uri (uri (string_literal) @path)))
 (import_specification uri: (configurable_uri (configuration_uri (uri (string_literal) @path))))
 (library_export uri: (configurable_uri (uri (string_literal) @path)))
@@ -710,10 +712,10 @@ mod tests {
         assert_eq!(
             extract(
                 "import 'a.dart';\nimport 'b.dart' if (dart.library.io) 'c.dart';\n\
-                 export 'e.dart' show X;\npart 'p.dart';\n",
+                 import 'd.dart' deferred as d;\nexport 'e.dart' show X;\npart 'p.dart';\n",
                 Language::Dart
             ),
-            vec!["a.dart", "b.dart", "c.dart", "e.dart", "p.dart"]
+            vec!["a.dart", "b.dart", "c.dart", "d.dart", "e.dart", "p.dart"]
         );
         assert_eq!(
             extract("import r'raw.dart';\n", Language::Dart),
@@ -867,6 +869,7 @@ module "ordinary-percent" { source = "./100%" }
         (
             Language::Dart,
             "import 'package:a/a.dart' if (dart.library.io) 'io.dart';\n\
+             import 'd.dart' deferred as d;\n\
              export 'e.dart' if (x) 'f.dart';\npart 'p.dart';\npart of 'lib.dart';\n",
         ),
         (
