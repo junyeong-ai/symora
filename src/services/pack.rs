@@ -433,7 +433,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
         nodes,
         exact,
         manifests,
-        python: PythonPath::of(nodes),
+        python: PythonPath::of(nodes, manifests),
         jvm: JvmIndex::of(nodes),
     };
 
@@ -770,17 +770,22 @@ impl<'a> JvmIndex<'a> {
     }
 }
 
-/// The directories a Python tree puts on `sys.path`, as far as the tree says:
-/// a package is a directory holding `__init__.py`, and the directory above a
-/// top-level package is where it is imported from.
+/// The directories a Python tree puts on `sys.path`, as its own tooling
+/// establishes them: the directory above each top-level package (a package is
+/// a directory holding `__init__.py`), and those each project's configuration
+/// declares or its build backend discovers.
 struct PythonPath<'a> {
     packages: HashSet<&'a [String]>,
-    /// The directory above each top-level package, in path order.
-    roots: Vec<&'a [String]>,
+    /// The directory above each top-level package, where it is imported from.
+    package_roots: Vec<&'a [String]>,
+    /// The directories each project puts on `sys.path`, by the project's
+    /// directory. The project root is a project whether or not it holds a
+    /// configuration file of its own.
+    projects: HashMap<Vec<String>, Vec<Vec<String>>>,
 }
 
 impl<'a> PythonPath<'a> {
-    fn of(nodes: &'a [Node]) -> Self {
+    fn of(nodes: &'a [Node], manifests: &Manifests) -> Self {
         let packages: HashSet<&[String]> = nodes
             .iter()
             .filter(|node| {
@@ -791,21 +796,32 @@ impl<'a> PythonPath<'a> {
             })
             .map(|node| node.directory.as_slice())
             .collect();
-        let mut roots: Vec<&[String]> = packages
+        let mut package_roots: Vec<&[String]> = packages
             .iter()
             .filter_map(|package| package.split_last().map(|(_, parent)| parent))
             .filter(|parent| !packages.contains(parent))
             .collect();
-        roots.sort();
-        roots.dedup();
-        Self { packages, roots }
+        package_roots.sort();
+        package_roots.dedup();
+        let mut projects = manifests.python_projects.clone();
+        projects
+            .entry(Vec::new())
+            .or_insert_with(|| python_project_roots(&[], &[]));
+        Self {
+            packages,
+            package_roots,
+            projects,
+        }
     }
 
-    /// The directory `sys.path` holds for a file in `directory`: the nearest
-    /// one at or above it that is no package — where a script runs from, or
-    /// where its top-level package is imported from.
-    fn base_of(&self, directory: &'a [String]) -> Option<&'a [String]> {
-        (0..=directory.len())
+    /// The directory a file in `directory` is imported from where that
+    /// directory is a package: the one above its top-level package, which
+    /// has to be on `sys.path` for the file to run as part of its package.
+    fn package_root_of(&self, directory: &'a [String]) -> Option<&'a [String]> {
+        if !self.packages.contains(directory) {
+            return None;
+        }
+        (0..directory.len())
             .rev()
             .map(|depth| &directory[..depth])
             .find(|directory| !self.packages.contains(directory))
@@ -1009,26 +1025,37 @@ impl ProjectIndex<'_> {
     }
 
     /// The module an absolute Python import names: the file at that dotted
-    /// path below a directory on `sys.path`, searched in the order Python
-    /// would put them there — the importer's own (where it runs from as a
-    /// script, or where its top-level package is imported from), then the
-    /// project root, then the directory above each other top-level package.
-    /// Two files on one footing name neither. A path below none of them (the
-    /// standard library, an installed distribution) names nothing in the
-    /// project, however its last segments match a project file: `logging` is
-    /// not `app/util/logging.py`, whose name is `app.util.logging`.
+    /// path below a directory on `sys.path` (`PythonPath`), searched first
+    /// among the importer's own — the one above its top-level package, and
+    /// those of its own project — then among every other. Two files on one
+    /// footing name neither. A path below none of them (the standard library,
+    /// an installed distribution) names nothing in the project, however its
+    /// last segments match a project file: `logging` is not
+    /// `app/util/logging.py`, whose name is `app.util.logging`, and a
+    /// directory is on `sys.path` only where the tooling puts it there, never
+    /// because a script happens to sit in it.
     fn python_module(&self, module: &[String], from: &Node) -> Vec<usize> {
         if module.is_empty() {
             return Vec::new();
         }
-        let own = self.python.base_of(&from.directory);
-        let tiers = [
-            own.into_iter().collect(),
-            vec![&[][..]],
-            self.python.roots.clone(),
-        ];
+        let own_project = nearest(&self.python.projects, &from.directory)
+            .map(|(_, roots)| roots.as_slice())
+            .unwrap_or_default();
+        let own: Vec<&[String]> = self
+            .python
+            .package_root_of(&from.directory)
+            .into_iter()
+            .chain(own_project.iter().map(Vec::as_slice))
+            .collect();
+        let every: Vec<&[String]> = self
+            .python
+            .package_roots
+            .iter()
+            .copied()
+            .chain(self.python.projects.values().flatten().map(Vec::as_slice))
+            .collect();
         let mut searched = HashSet::new();
-        Found::first(tiers.into_iter().map(|tier: Vec<&[String]>| {
+        Found::first([own, every].into_iter().map(|tier| {
             let bases: Vec<&[String]> = tier
                 .into_iter()
                 .filter(|base| searched.insert(*base))
@@ -1114,6 +1141,9 @@ struct Manifests {
     /// The Cargo package each `Cargo.toml` with a `[package]` roots at its
     /// directory.
     rust_packages: HashMap<Vec<String>, RustPackage>,
+    /// The directories each Python project puts on `sys.path`, by the
+    /// directory of the configuration files that make it one.
+    python_projects: HashMap<Vec<String>, Vec<Vec<String>>>,
 }
 
 /// What Cargo builds of a package: its library, where it has one, and the
@@ -1159,6 +1189,7 @@ impl Manifests {
             go_modules,
             dart_packages,
             rust_packages,
+            python_projects: python_projects(root, nodes),
         }
     }
 
@@ -1373,6 +1404,302 @@ fn cargo_package(
     roots.sort();
     roots.dedup();
     Some(RustPackage { library, roots })
+}
+
+/// The files whose presence makes a directory a Python project's: its build
+/// configuration, and the files pytest takes its own from.
+const PYTHON_PROJECT_FILES: [&str; 5] = [
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "pytest.ini",
+    "tox.ini",
+];
+
+/// Every Python project above a Python file, with the directories it puts on
+/// `sys.path`.
+fn python_projects(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, Vec<Vec<String>>> {
+    let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
+    for file in PYTHON_PROJECT_FILES {
+        for (directory, contents) in manifests_above(root, nodes, Language::Python, file) {
+            configurations
+                .entry(directory)
+                .or_default()
+                .push((file, contents));
+        }
+    }
+    configurations
+        .into_iter()
+        .map(|(directory, files)| {
+            let roots = python_project_roots(&directory, &files);
+            (directory, roots)
+        })
+        .collect()
+}
+
+/// The directories a Python project at `directory` puts on `sys.path`, from
+/// its configuration `files`: the package locations its build configuration
+/// declares — setuptools' `package-dir` and `packages.find.where` (in
+/// `pyproject.toml` or `setup.cfg`), Poetry's `packages`, Hatch's `packages`
+/// and `sources`, PDM's `package-dir` — or, where it declares none,
+/// setuptools' automatic discovery: the directory itself (a flat layout) and
+/// its `src/` (a src layout). To those it adds what pytest's `pythonpath`
+/// does, read from the one configuration file pytest itself would read.
+fn python_project_roots(directory: &[String], files: &[(&str, String)]) -> Vec<Vec<String>> {
+    let file = |name: &str| {
+        files
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, contents)| contents.as_str())
+    };
+    let pyproject: Option<toml::Table> =
+        file("pyproject.toml").and_then(|contents| toml::from_str(contents).ok());
+    let setup_cfg = file("setup.cfg").map(ini_sections);
+    let mut declared: Vec<String> = Vec::new();
+    if let Some(pyproject) = &pyproject {
+        declared.extend(pyproject_package_roots(pyproject));
+    }
+    if let Some(package_dir) = setup_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.get("options"))
+        .and_then(|options| options.get("package_dir"))
+    {
+        declared.extend(package_dir.lines().filter_map(|line| {
+            let (package, location) = line.split_once('=')?;
+            root_of_package(package.trim(), location.trim())
+        }));
+    }
+    if let Some(find) = setup_cfg
+        .as_ref()
+        .and_then(|cfg| cfg.get("options.packages.find"))
+        .and_then(|find| find.get("where"))
+    {
+        declared.extend(find.split_whitespace().map(str::to_string));
+    }
+    if declared.is_empty() {
+        declared = vec![".".to_string(), "src".to_string()];
+    }
+    // pytest reads the first of these that configures it, and no other.
+    let pytest_ini = file("pytest.ini").map(ini_sections);
+    let tox_ini = file("tox.ini").map(ini_sections);
+    let pythonpath: Vec<String> = if let Some(ini) = &pytest_ini {
+        ini_list(
+            ini.get("pytest")
+                .and_then(|pytest| pytest.get("pythonpath")),
+        )
+    } else if let Some(options) = pyproject
+        .as_ref()
+        .and_then(|pyproject| toml_at(pyproject, &["tool", "pytest", "ini_options"]))
+    {
+        match options.get("pythonpath") {
+            Some(toml::Value::String(path)) => {
+                path.split_whitespace().map(str::to_string).collect()
+            }
+            Some(paths) => toml_strings(paths),
+            None => Vec::new(),
+        }
+    } else if let Some(pytest) = tox_ini.as_ref().and_then(|ini| ini.get("pytest")) {
+        ini_list(pytest.get("pythonpath"))
+    } else {
+        ini_list(
+            setup_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.get("tool:pytest"))
+                .and_then(|pytest| pytest.get("pythonpath")),
+        )
+    };
+    let mut roots: Vec<Vec<String>> = declared
+        .iter()
+        .chain(&pythonpath)
+        .filter_map(|path| project_path(directory, path))
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// The package locations a `pyproject.toml` declares, as paths relative to
+/// its directory.
+fn pyproject_package_roots(pyproject: &toml::Table) -> Vec<String> {
+    let mut roots = Vec::new();
+    let setuptools = toml_at(pyproject, &["tool", "setuptools"]);
+    let package_dir = setuptools
+        .and_then(|setuptools| setuptools.get("package-dir"))
+        .and_then(toml::Value::as_table);
+    for (package, location) in package_dir.into_iter().flatten() {
+        roots.extend(
+            location
+                .as_str()
+                .and_then(|location| root_of_package(package, location)),
+        );
+    }
+    if let Some(find) = setuptools.and_then(|setuptools| toml_at(setuptools, &["packages", "find"]))
+    {
+        match find.get("where") {
+            Some(places) => roots.extend(toml_strings(places)),
+            None => roots.push(".".to_string()),
+        }
+    } else if setuptools.is_some_and(|setuptools| setuptools.contains_key("packages"))
+        && roots.is_empty()
+    {
+        // An explicit package list without a `package-dir` sits at the root.
+        roots.push(".".to_string());
+    }
+    let poetry =
+        toml_value(pyproject, &["tool", "poetry", "packages"]).and_then(toml::Value::as_array);
+    roots.extend(poetry.into_iter().flatten().map(|package| {
+        package
+            .get("from")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(".")
+            .to_string()
+    }));
+    for hatch in [
+        &["tool", "hatch", "build"][..],
+        &["tool", "hatch", "build", "targets", "wheel"],
+    ] {
+        let Some(build) = toml_at(pyproject, hatch) else {
+            continue;
+        };
+        if let Some(packages) = build.get("packages") {
+            roots.extend(toml_strings(packages).iter().map(|package| {
+                match package.trim_end_matches('/').rsplit_once('/') {
+                    Some((parent, _)) => parent.to_string(),
+                    None => ".".to_string(),
+                }
+            }));
+        }
+        match build.get("sources") {
+            Some(toml::Value::Table(rewrites)) => roots.extend(
+                rewrites
+                    .iter()
+                    .filter(|(_, to)| to.as_str() == Some(""))
+                    .map(|(from, _)| from.clone()),
+            ),
+            Some(sources) => roots.extend(toml_strings(sources)),
+            None => {}
+        }
+    }
+    roots.extend(
+        toml_value(pyproject, &["tool", "pdm", "build", "package-dir"])
+            .and_then(toml::Value::as_str)
+            .map(str::to_string),
+    );
+    roots
+}
+
+/// The directory a package mapping (`package = location`) puts on
+/// `sys.path`: the location itself for the root mapping (`"" = "src"`), and
+/// the one above a top-level package that keeps its own name there. A
+/// mapping that renames a package is not one a directory on `sys.path`
+/// expresses.
+fn root_of_package(package: &str, location: &str) -> Option<String> {
+    if package.is_empty() {
+        return Some(location.to_string());
+    }
+    let location = location.trim_end_matches('/');
+    let (parent, name) = location.rsplit_once('/').unwrap_or((".", location));
+    (!package.contains('.') && name == package).then(|| parent.to_string())
+}
+
+/// A configuration's path, relative to the project directory, as a project
+/// path; none for an absolute one or one that climbs out of the project.
+fn project_path(directory: &[String], path: &str) -> Option<Vec<String>> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut resolved = directory.to_vec();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                resolved.pop()?;
+            }
+            part => resolved.push(part.to_string()),
+        }
+    }
+    Some(resolved)
+}
+
+/// The table a TOML table holds at a dotted path of keys.
+fn toml_at<'t>(table: &'t toml::Table, keys: &[&str]) -> Option<&'t toml::Table> {
+    keys.iter().try_fold(table, |table, key| {
+        table.get(*key).and_then(toml::Value::as_table)
+    })
+}
+
+/// The value a TOML table holds at a dotted path of keys.
+fn toml_value<'t>(table: &'t toml::Table, keys: &[&str]) -> Option<&'t toml::Value> {
+    let (last, path) = keys.split_last()?;
+    toml_at(table, path)?.get(*last)
+}
+
+/// The strings a TOML value holds: itself where it is one, its string items
+/// where it is an array.
+fn toml_strings(value: &toml::Value) -> Vec<String> {
+    match value {
+        toml::Value::String(value) => vec![value.clone()],
+        toml::Value::Array(values) => values
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The whitespace-separated items of an INI value.
+fn ini_list(value: Option<&String>) -> Vec<String> {
+    value
+        .map(|value| value.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// An INI file's sections as Python's configparser reads them: `[section]`
+/// headers, `key = value` or `key: value` entries (keys in lower case) whose
+/// indented lines continue the value, and `#` or `;` comment lines.
+fn ini_sections(text: &str) -> HashMap<String, HashMap<String, String>> {
+    let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut section: Option<String> = None;
+    let mut key: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(['#', ';']) {
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            if let (Some(section), Some(key)) = (&section, &key)
+                && let Some(value) = sections
+                    .get_mut(section)
+                    .and_then(|entries| entries.get_mut(key))
+            {
+                value.push('\n');
+                value.push_str(trimmed);
+            }
+            continue;
+        }
+        if let Some(name) = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            section = Some(name.trim().to_string());
+            sections.entry(name.trim().to_string()).or_default();
+            key = None;
+            continue;
+        }
+        key = None;
+        let (Some(current), Some(split)) = (&section, trimmed.find(['=', ':'])) else {
+            continue;
+        };
+        let name = trimmed[..split].trim().to_lowercase();
+        let value = trimmed[split + 1..].trim().to_string();
+        sections
+            .entry(current.clone())
+            .or_default()
+            .insert(name.clone(), value);
+        key = Some(name);
+    }
+    sections
 }
 
 /// The module path a `go.mod` declares, read by that file's lexical rules:
@@ -2339,8 +2666,9 @@ mod tests {
 
     /// An absolute Python import names a module below a directory on
     /// `sys.path`: `import logging` is the standard library's, not
-    /// `app/util/logging.py`, whose name is `app.util.logging`, and a script
-    /// finds the modules beside it where another directory's script does not.
+    /// `app/util/logging.py`, whose name is `app.util.logging`, nor a
+    /// `logging.py` beside the importer, since a directory is on `sys.path`
+    /// only where the tooling puts it there.
     #[test]
     fn an_absolute_python_import_names_a_module_on_sys_path_only() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -2362,30 +2690,95 @@ mod tests {
                 "import pkg.core\nimport conftest\n",
             ),
             python(7, "tests/conftest.py", ""),
-            python(8, "scripts/run.py", "import config\n"),
-            python(9, "scripts/config.py", ""),
-            python(10, "tools/lint.py", "import config\nimport core\n"),
-            python(11, "a/app/__init__.py", ""),
-            python(12, "a/app/db.py", ""),
-            python(13, "b/app/__init__.py", ""),
-            python(14, "b/app/db.py", ""),
-            python(15, "a/app/serve.py", "import app.db\n"),
-            python(16, "c/serve.py", "import app.db\n"),
+            python(8, "lib/util/a.py", "import logging\n"),
+            python(9, "lib/util/logging.py", ""),
+            python(10, "src/ns/a.py", "import ns.core\n"),
+            python(11, "src/ns/core.py", ""),
+            python(12, "a/app/__init__.py", ""),
+            python(13, "a/app/db.py", ""),
+            python(14, "b/app/__init__.py", ""),
+            python(15, "b/app/db.py", ""),
+            python(16, "a/app/serve.py", "import app.db\n"),
+            python(17, "c/serve.py", "import app.db\n"),
         ];
         assert_eq!(
             edges_of(&nodes, 1),
             vec!["app/util/logging.py", "app/util/__init__.py"]
         );
-        assert_eq!(
-            edges_of(&nodes, 6),
-            vec!["src/pkg/core.py", "tests/conftest.py"]
-        );
-        assert_eq!(edges_of(&nodes, 8), vec!["scripts/config.py"]);
-        assert!(edges_of(&nodes, 10).is_empty());
+        // `src/` is on `sys.path` by the src layout; the test's own directory
+        // is not, whatever the test runner does with it.
+        assert_eq!(edges_of(&nodes, 6), vec!["src/pkg/core.py"]);
+        assert!(edges_of(&nodes, 8).is_empty());
+        // A namespace package needs no `__init__.py` below a root, and `src/`
+        // is one by the src layout even where no package says so.
+        assert_eq!(edges_of(&nodes, 10), vec!["src/ns/core.py"]);
+        let namespace = vec![
+            python(0, "src/app/a.py", "import app.core\n"),
+            python(1, "src/app/core.py", ""),
+        ];
+        assert_eq!(edges_of(&namespace, 0), vec!["src/app/core.py"]);
         // An importer inside a top-level package finds that package first;
         // one outside every `app` cannot tell which of them it means.
-        assert_eq!(edges_of(&nodes, 15), vec!["a/app/db.py"]);
-        assert!(edges_of(&nodes, 16).is_empty());
+        assert_eq!(edges_of(&nodes, 16), vec!["a/app/db.py"]);
+        assert!(edges_of(&nodes, 17).is_empty());
+    }
+
+    /// A project's configuration says where its packages are imported from,
+    /// which replaces the layouts setuptools would discover, and pytest's
+    /// `pythonpath` adds to them.
+    #[test]
+    fn a_python_project_puts_on_sys_path_what_its_configuration_declares() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "svc/code/app/core.py", ""),
+            python(1, "svc/code/app/main.py", "import app.core\n"),
+            python(2, "svc/src/app/core.py", ""),
+            python(3, "svc/checks/helpers.py", ""),
+            python(
+                4,
+                "svc/checks/test_main.py",
+                "import helpers\nimport app.core\n",
+            ),
+            python(5, "poetry/source/pkg/a.py", "import pkg.b\n"),
+            python(6, "poetry/source/pkg/b.py", ""),
+            python(7, "cfg/lib/mod/a.py", "import mod.b\nimport shared\n"),
+            python(8, "cfg/lib/mod/b.py", ""),
+            python(9, "cfg/tools/shared.py", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "svc/pyproject.toml",
+                    "[tool.setuptools]\npackage-dir = {\"\" = \"code\"}\n\
+                     [tool.pytest.ini_options]\npythonpath = [\"checks\"]\n",
+                ),
+                (
+                    "poetry/pyproject.toml",
+                    "[tool.poetry]\npackages = [{ include = \"pkg\", from = \"source\" }]\n",
+                ),
+                (
+                    "cfg/setup.cfg",
+                    "[options]\npackage_dir =\n    =lib\n\n[tool:pytest]\npythonpath = tools\n",
+                ),
+            ],
+            &nodes,
+        );
+        assert_eq!(
+            edges_under(&nodes, 1, &manifests),
+            vec!["svc/code/app/core.py"]
+        );
+        assert_eq!(
+            edges_under(&nodes, 4, &manifests),
+            vec!["svc/checks/helpers.py", "svc/code/app/core.py"]
+        );
+        assert_eq!(
+            edges_under(&nodes, 5, &manifests),
+            vec!["poetry/source/pkg/b.py"]
+        );
+        assert_eq!(
+            edges_under(&nodes, 7, &manifests),
+            vec!["cfg/lib/mod/b.py", "cfg/tools/shared.py"]
+        );
     }
 
     /// A name that is no path in the project — a JavaScript package
