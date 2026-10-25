@@ -43,8 +43,9 @@ pub struct Wiring {
     /// Forward to a `symora daemon` rather than opening servers and the store
     /// in this process.
     pub use_daemon: bool,
-    /// Answer only from the index and the compiled-in grammars. The tier is
-    /// then an input rather than an outcome, which is what makes two machines
+    /// Never consult a language server: answer from the index, the
+    /// compiled-in grammars and file scans. The tier is then an input rather
+    /// than an outcome, which is what makes two machines
     /// with different servers installed agree on the same tree.
     pub deterministic: bool,
     /// Whether language servers started in this process follow the disk: on

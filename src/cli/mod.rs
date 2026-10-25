@@ -79,8 +79,8 @@ pub struct Cli {
     )]
     pub check_version: Option<String>,
 
-    /// Answer only from the index and compiled-in grammars, never a language
-    /// server; a command that needs one fails as `unsupported`
+    /// Never consult a language server: answer from the index, compiled-in
+    /// grammars and file scans; a command that needs one fails as `unsupported`
     #[arg(long, global = true, help_heading = GLOBAL)]
     pub deterministic: bool,
 
