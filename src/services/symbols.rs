@@ -571,7 +571,11 @@ impl SymbolExtractor {
 ///   C cannot nest, so the body has ended before it;
 /// - the node right after one that leaves a bracket open, which closes it
 ///   (the parameters a function-pointer return type writes after the
-///   function's own, read as a declaration ending in a stray `)`).
+///   function's own, read as a declaration ending in a stray `)`);
+/// - the node right after a declaration the grammar ended by supplying its
+///   missing `;`, which holds the rest of it up to the `;` the source writes
+///   (`MACRO_A MACRO_B;` after `int f(int x)`, read as a declaration of
+///   `MACRO_B`).
 ///
 /// No other loose bracket opens anything: the grammar strands brackets whose
 /// partners it absorbed elsewhere (a macro body it failed to read as one),
@@ -650,6 +654,7 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
         }
         let mut lost_body_until = None;
         let mut left_open = Vec::new();
+        let mut continues = false;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.is_extra() && !child.is_error() {
@@ -658,7 +663,9 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
             }
             let mut closed = left_open.clone();
             apply(&mut closed, child, node.is_error());
-            if left_open.contains(&true) && closed.len() < left_open.len() {
+            if left_open.contains(&true) && closed.len() < left_open.len()
+                || std::mem::replace(&mut continues, ends_on_a_supplied_semicolon(child))
+            {
                 inside.insert(child.id());
             }
             if node.is_error() {
@@ -680,6 +687,17 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
         }
     }
     inside
+}
+
+/// Whether the grammar ended a C or C++ declaration by supplying the `;` it
+/// is missing: the source goes on past where the grammar could read it.
+fn ends_on_a_supplied_semicolon(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "declaration" | "field_declaration" | "type_definition"
+    ) && node
+        .child(node.child_count().saturating_sub(1))
+        .is_some_and(|last| last.kind() == ";" && last.is_missing())
 }
 
 /// The byte after the `}` that closes the `{` at `open`, counted as one
@@ -855,15 +873,20 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// alias is a type, read wherever it is declared. A C or C++ declaration the
 /// grammar ended by supplying its missing `;` was cut short by a macro it
 /// cannot expand (`typedef Array(T) Ts;` reads `typedef Array(T)`), so what
-/// it would name is a guess. A class, struct, union or enum without a body
-/// declares only standing alone, a forward declaration: as the type of
-/// another declaration it names a type that declaration uses (`struct stat
-/// st`, `struct item *it`).
+/// it would name is a guess, unless it declares a function: its parameters
+/// complete its declarator, and what the grammar could not read after them
+/// is a macro written there (`int f(int x) G_GNUC_PURE;`). A class, struct,
+/// union or enum without a body declares only standing alone, a forward
+/// declaration: as the type of another declaration it names a type that
+/// declaration uses (`struct stat st`, `struct item *it`).
 fn declares(node: Node, content: &str, language: Language) -> bool {
     if language == Language::Cpp
-        && (node
-            .child(node.child_count().saturating_sub(1))
-            .is_some_and(|last| last.kind() == ";" && last.is_missing())
+        && (ends_on_a_supplied_semicolon(node)
+            && !node
+                .child_by_field_name("declarator")
+                .is_some_and(|declarator| {
+                    member_kind(declarator_name(declarator)) == SymbolKind::Method
+                })
             || misreads_a_class_key(node, content)
             || matches!(
                 node.kind(),
@@ -3038,10 +3061,44 @@ fn supplied_scope(name: Node) -> Option<Node> {
 /// those hold the declarator they wrap under no field, beside whatever the
 /// grammar set aside as an error (the `Repo::` of `(Repo::*member_fn)()`),
 /// and a conversion function's name holds the declarator of its own
-/// parameters. A qualified name is the name ([`supplied_scope`]).
+/// parameters. A qualified name is the name ([`supplied_scope`]). A function
+/// declarator the grammar set aside as an error right before the one it read
+/// is the declarator: its parameters complete it, so what it read after them
+/// is a macro written there (`int f(int x) G_GNUC_PURE;`, `name() const
+/// ABSL_ATTRIBUTE_LIFETIME_BOUND`). A name in parentheses that the grammar
+/// found another name after, and set that aside as an error, is a macro's
+/// argument, and the name after it the declarator (`typedef Array(T) Ts;`).
 fn declarator_name(declarator: Node) -> Node {
+    if declarator.kind() == "parenthesized_declarator"
+        && declarator.named_child(0).is_some_and(|inside| {
+            matches!(
+                inside.kind(),
+                "identifier" | "type_identifier" | "field_identifier"
+            )
+        })
+        && let Some(named) = declarator
+            .next_sibling()
+            .filter(|after| after.is_error() && after.named_child_count() == 1)
+            .and_then(|after| after.named_child(0))
+            .filter(|held| {
+                matches!(
+                    held.kind(),
+                    "identifier" | "type_identifier" | "field_identifier"
+                )
+            })
+    {
+        return named;
+    }
     let mut node = declarator;
     loop {
+        if let Some(set_aside) = node
+            .prev_sibling()
+            .filter(|before| before.is_error() && before.named_child_count() == 1)
+            .and_then(|before| before.named_child(0))
+            .filter(|held| held.kind() == "function_declarator")
+        {
+            node = set_aside;
+        }
         let inner = match node.kind() {
             "operator_cast" => None,
             "qualified_identifier" => supplied_scope(node),
@@ -5337,6 +5394,23 @@ region     = "us-central1"
                 "what follows a lost body is read: {expected} in {lost_body:?}"
             );
         }
+        assert_eq!(
+            declared(
+                "int f(int x) G_GNUC_PURE;\nint g(int a,\n      int b) G_GNUC_PURE;\n\
+                 static int k(int a) G_GNUC_CONST G_GNUC_WARN;\ntypedef Array(T) Ts;\n\
+                 int counter ATTR;\nclass M { const char& name() const BOUND { return n_; } };\n"
+            ),
+            [
+                "function:f",
+                "function:g",
+                "function:k",
+                "class:Ts",
+                "variable:counter",
+                "class:M",
+                "method:name",
+            ],
+            "a macro written after a declarator names nothing"
+        );
         assert_eq!(
             declared(
                 "EXPORT int (*verify_callback(const SSL *ssl))(\n    int ok, X509_STORE_CTX *ctx);\n\
