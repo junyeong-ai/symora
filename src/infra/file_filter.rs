@@ -37,6 +37,19 @@ use ignore::Match;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+/// Whether `path`'s extension is one of `extensions`, read without case the
+/// way [`Language::from_extension`](crate::models::symbol::Language::from_extension)
+/// reads one: `analysis.R` is an R file and `Widget.C` a C++ one.
+pub fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extensions
+                .iter()
+                .any(|listed| listed.eq_ignore_ascii_case(extension))
+        })
+}
+
 /// What a walk of the tree found, and what it could not see.
 ///
 /// A bare file list cannot distinguish "no such file" from "a directory that
@@ -208,11 +221,8 @@ impl FileFilter {
                 continue;
             }
             let path = entry.path();
-            if !extensions.is_empty() {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !extensions.contains(&ext) {
-                    continue;
-                }
+            if !extensions.is_empty() && !has_extension(path, extensions) {
+                continue;
             }
             files.push(path.to_path_buf());
         }
@@ -772,12 +782,15 @@ mod tests {
         fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
         touch(&root.join("a.rs"));
         touch(&root.join("b.ts"));
+        touch(&root.join("c.R"));
         touch(&root.join("node_modules/dep/index.js"));
 
         let filter = FileFilter::new(root);
         let rs = filter.discover_files(&["rs"]).files;
         assert_eq!(rs.len(), 1);
         assert!(rs[0].ends_with("a.rs"));
+        let r = filter.discover_files(&["r"]).files;
+        assert_eq!(r.len(), 1, "an extension is read without case");
 
         let all = filter.discover_files(&[]).files;
         assert!(all.iter().any(|p| p.ends_with("a.rs")));

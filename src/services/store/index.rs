@@ -9,7 +9,7 @@ use super::db::SqliteDb;
 use super::schema::*;
 use super::types::*;
 use crate::error::StoreError;
-use crate::infra::file_filter::{Discovery, FileFilter};
+use crate::infra::file_filter::{Discovery, FileFilter, has_extension};
 use crate::infra::file_lock::FileLock;
 use crate::models::symbol::{Language, SymbolKind};
 use crate::services::symbols::SymbolExtractor;
@@ -879,10 +879,7 @@ impl Store {
     /// the recorded build scope, not excluded by the project's ignore
     /// rules.
     fn is_indexable(path: &Path, scope_extensions: &[&str], filter: &FileFilter) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| scope_extensions.contains(&ext))
-            && !filter.is_ignored(path)
+        has_extension(path, scope_extensions) && !filter.is_ignored(path)
     }
 
     /// The languages this index answers authoritatively for.
@@ -1629,6 +1626,24 @@ fn delete_file_and_data(conn: &rusqlite::Connection, file_id: i64) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refresh keeps what a build would read, and a build reads an
+    /// extension without case.
+    #[test]
+    fn a_refresh_reads_an_extension_as_a_build_does() {
+        let root = tempfile::tempdir().unwrap();
+        let filter = FileFilter::new(root.path());
+        assert!(Store::is_indexable(
+            &root.path().join("Widget.C"),
+            &["c"],
+            &filter
+        ));
+        assert!(!Store::is_indexable(
+            &root.path().join("notes.txt"),
+            &["c"],
+            &filter
+        ));
+    }
 
     /// A refresh removes a file's rows for exactly one reason: the tree no
     /// longer has the file. An existence probe that FAILS is not that reason —
