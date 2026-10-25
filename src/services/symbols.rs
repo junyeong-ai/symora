@@ -2972,10 +2972,14 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if node.kind() == "spread_parameter" {
         return child_of_kind(node, "variable_declarator")?.child_by_field_name("name");
     }
-    // A Swift deinitializer and a Kotlin secondary constructor are named by
-    // their keyword alone.
+    // A Swift deinitializer and subscript and a Kotlin secondary constructor
+    // are named by their keyword alone; a subscript's return type carries the
+    // field a name would.
     if node.kind() == "deinit_declaration" {
         return child_of_kind(node, "deinit");
+    }
+    if node.kind() == "subscript_declaration" {
+        return child_of_kind(node, "subscript");
     }
     if node.kind() == "secondary_constructor" {
         return child_of_kind(node, "constructor");
@@ -3144,7 +3148,9 @@ fn node_kind(node: Node) -> SymbolKind {
         }
         "precedence_group_declaration" => SymbolKind::Operator,
         "operator_declaration" | "conversion_operator_declaration" => SymbolKind::Method,
-        "indexer_declaration" => SymbolKind::Property,
+        // A C# indexer, and a Swift subscript, read and write through accessors
+        // as a computed property does.
+        "indexer_declaration" | "subscript_declaration" => SymbolKind::Property,
         "local_function_statement" => SymbolKind::Function,
 
         // Swift states a struct, an enum, an actor, a class and an extension
@@ -3779,6 +3785,7 @@ const SWIFT_QUERY: &str = r#"
 (protocol_function_declaration) @symbol
 (init_declaration) @symbol
 (deinit_declaration) @symbol
+(subscript_declaration) @symbol
 (typealias_declaration) @symbol
 (associatedtype_declaration) @symbol
 (operator_declaration) @symbol
@@ -4862,6 +4869,7 @@ protocol P {
     associatedtype Item
     var required: Int { get }
     func pm()
+    subscript(key: String) -> Int { get }
 }
 
 class C {
@@ -4880,6 +4888,7 @@ enum Dir {
 
 struct Point {
     var x = 0
+    subscript(i: Int) -> Int { i }
 }
 
 extension Point {
@@ -4902,11 +4911,13 @@ prefix operator +++
                 "class:P/Item",
                 "property:P/required",
                 "method:P/pm",
+                "property:P/subscript",
                 "class:C/Pair",
                 "constructor:C/init",
                 "constructor:C/deinit",
                 "struct:Point",
                 "property:Point/x",
+                "property:Point/subscript",
                 "object:Point",
                 "method:Point/moved",
                 "enum:Dir",
@@ -6583,6 +6594,13 @@ region     = "us-central1"
                 "infix operator **: Pow\n",
                 "**",
                 Some("infix operator **: Pow"),
+            ),
+            (
+                "a.swift",
+                Language::Swift,
+                "struct S {\n  subscript<T>(at i: Int) -> T? {\n    get { nil }\n  }\n}\n",
+                "subscript",
+                Some("subscript<T>(at i: Int) -> T?"),
             ),
             (
                 "A.java",
