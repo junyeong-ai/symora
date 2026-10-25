@@ -1,12 +1,16 @@
 ---
 paths:
   - "src/cli/location.rs"
+  - "src/cli/analysis.rs"
+  - "src/cli/utils/symbol_nav.rs"
+  - "src/cli/response/mod.rs"
   - "src/cli/commands/**/*.rs"
   - "src/services/lsp/**/*.rs"
   - "src/services/ast_query.rs"
   - "src/services/symbols.rs"
   - "src/services/store/**/*.rs"
   - "src/services/daemon_lsp.rs"
+  - "src/daemon/wire.rs"
   - "src/infra/lsp/**/*.rs"
   - "src/models/lsp.rs"
   - "src/models/symbol/**/*.rs"
@@ -29,11 +33,9 @@ For pure ASCII the two collapse (scalar == byte == UTF-16 unit), which is why a 
 
 ## Where conversions live
 
-- `src/cli/location.rs` — parses `file:line[:column]` inputs (1-indexed scalar; an omitted column is tracked by `column_explicit`).
-- `src/services/lsp/position.rs` — the boundary transcoders. Free functions: `scalar_to_wire` (outbound scalar column → wire offset), `encoded_offset_to_scalar` / `encoded_offset_to_byte`, `floor_char_boundary` (clamp a stray offset to a char edge). `PositionConverter`, seeded per file with `with_content`: `scalar_column_disclosed` (inbound wire offset → 1-indexed scalar column **plus a `degraded` flag**), `scalar_offset` (inbound wire offset → 0-indexed scalar, for raw model `Position`s that carry no degradation flag).
-- `src/services/lsp/helpers.rs` — `to_lsp_position(line, column, content, encoding)` builds an outbound `Position`: `line - 1` plus `scalar_to_wire`.
-- `src/services/lsp/converters.rs` — inbound LSP range → model `Location`: every returned column is decoded through `PositionConverter::scalar_column_disclosed`, which yields the 1-indexed scalar column and whether it was degraded; the flag is threaded onto `Location::degraded_column`. Every new inbound reader that builds a `Location` follows this; an undecoded range, or a decoded one that drops the flag, is the bug below.
-- `src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs` — the wire adds no conversion: each position crosses in the units its model already carries. `Location` is 1-indexed scalar; native edit ranges are 0-indexed scalar after decoding at the LSP boundary. Do not transcode them again merely because their type is `Position` or `Range`.
+- `src/cli/location.rs` parses `file:line[:column]` (1-indexed scalar; an omitted column is tracked by `column_explicit`).
+- `src/services/lsp/position.rs` holds the only scalar ↔ wire transcoders. Outbound positions are built with `to_lsp_position` (`src/services/lsp/helpers.rs`). Every inbound range is decoded through `PositionConverter::scalar_column_disclosed` (`src/services/lsp/converters.rs`), which yields the scalar column and the `degraded` flag `Location::degraded_column` carries; a new inbound reader that builds a `Location` does the same. A raw model `Position`, which carries no flag, decodes through `scalar_offset`.
+- The daemon wire (`src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs`) adds no conversion: `Location` crosses 1-indexed scalar, native edit ranges 0-indexed scalar. Do not transcode them again because their type is `Position` or `Range`.
 
 ## Degradation is disclosed, never silently guessed
 
