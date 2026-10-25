@@ -523,9 +523,10 @@ impl SymbolExtractor {
     /// macros a class definition holds where the grammar took it for a function
     /// ([`misread_class_macros`]), those a class body writes alone before its
     /// closing brace ([`brace_swallowing_macros`]), those written after a
-    /// function declarator ([`trailing_declarator_macros`]) and those a
-    /// prototype wraps its parameters in ([`prototype_macros`]), each spelled
-    /// as blanks, so every offset still addresses `content`.
+    /// function declarator ([`trailing_declarator_macros`]), those a
+    /// prototype wraps its parameters in ([`prototype_macros`]) and those
+    /// written before a member's qualified type ([`qualified_type_macros`]),
+    /// each spelled as blanks, so every offset still addresses `content`.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
         let mut parser = entry.parser.lock().ok()?;
@@ -538,6 +539,7 @@ impl SymbolExtractor {
                 macros.extend(brace_swallowing_macros(tree.root_node()));
                 macros.extend(trailing_declarator_macros(tree.root_node(), source));
                 macros.extend(prototype_macros(tree.root_node()));
+                macros.extend(qualified_type_macros(tree.root_node(), source));
                 if macros.is_empty() {
                     break;
                 }
@@ -1170,6 +1172,36 @@ fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             && !close.is_missing()
         {
             macros.extend([name.byte_range(), open.byte_range(), close.byte_range()]);
+        }
+    }
+    macros
+}
+
+/// The macros a C++ class member writes before a qualified type, which the
+/// grammar took for the member's type and the qualifier for its name,
+/// reading the `::` after it as a bit-field's colon (`API std::string
+/// DebugString() const;` as a field `std`): `::` follows no declarator's
+/// name, so that name qualifies the type and what the grammar read as the
+/// type is a macro.
+fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+        if node.kind() != "field_declaration" || child_of_kind(node, "bitfield_clause").is_none() {
+            continue;
+        }
+        if let Some(written) = node
+            .child_by_field_name("type")
+            .filter(|written| written.kind() == "type_identifier")
+            && node
+                .child_by_field_name("declarator")
+                .filter(|declarator| declarator.kind() == "field_identifier")
+                .and_then(|declarator| source.get(declarator.end_byte()..))
+                .is_some_and(|rest| rest.trim_ascii_start().starts_with(b"::"))
+        {
+            macros.push(written.byte_range());
         }
     }
     macros
@@ -7495,6 +7527,21 @@ region     = "us-central1"
                 "variable:w",
             ],
             "a macro a prototype wraps its parameters in expands to them"
+        );
+        assert_eq!(
+            declared(
+                "class F {\n public:\n  API std::string DebugString() const;\n  \
+                 ONNX_API const std::string& GetName() const;\n  Flags mode : 2;\n  \
+                 int after;\n};\n"
+            ),
+            [
+                "class:F",
+                "method:DebugString",
+                "method:GetName",
+                "field:mode",
+                "field:after",
+            ],
+            "a name before `::` qualifies a type, so what was read as the type is a macro"
         );
     }
 
