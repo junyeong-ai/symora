@@ -3136,6 +3136,10 @@ fn node_kind(node: Node) -> SymbolKind {
             }
         }
 
+        // C#'s `record struct` is a value type, as `record` and `record class`
+        // are reference types.
+        "record_declaration" if child_of_kind(node, "struct").is_some() => SymbolKind::Struct,
+
         "class_declaration"
         | "abstract_class_declaration"
         | "record_declaration"
@@ -4416,6 +4420,7 @@ class C {
             source: r#"
 namespace N {
     public record Rec(int A);
+    public record struct Pt(int X);
     public delegate void D();
     public interface I { void M(); }
     public struct St { public int F; }
@@ -4436,6 +4441,8 @@ namespace N {
                 "namespace:N",
                 "class:Rec",
                 "property:Rec/A",
+                "struct:Pt",
+                "property:Pt/X",
                 "class:D",
                 "interface:I",
                 "method:I/M",
