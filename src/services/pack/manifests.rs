@@ -1995,7 +1995,7 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
     let mut pytest = HashMap::new();
     let mut rootdirs = HashMap::new();
     let mut pyprojects: HashMap<&[String], toml::Table> = HashMap::new();
-    let mut projects = Vec::new();
+    let mut projects: Vec<(&Vec<String>, PythonProject)> = Vec::new();
     for (directory, files) in &configurations {
         let mut configuration = PythonConfiguration::read(files);
         if let Some(options) = configuration.pytest(directory) {
@@ -2006,7 +2006,20 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
         } else if configuration.has_setup_py {
             rootdirs.insert(directory.clone(), Rootdir::SetupPy);
         }
-        if packages.contains(directory.as_slice()) || !configuration.configures_a_build() {
+        // A directory below a root an enclosing project puts on `sys.path`,
+        // other than that project's own directory, lies in the packages that
+        // root holds (PEP 420's namespace packages need no `__init__.py`).
+        let covered = projects.iter().any(|(enclosing, project)| {
+            directory.len() > enclosing.len()
+                && directory.starts_with(enclosing)
+                && project.roots.iter().any(|root| {
+                    root != *enclosing
+                        && directory.len() > root.len()
+                        && directory.starts_with(root)
+                })
+        });
+        if packages.contains(directory.as_slice()) || covered || !configuration.configures_a_build()
+        {
             continue;
         }
         projects.push((directory, python_project(directory, Some(&configuration))));
