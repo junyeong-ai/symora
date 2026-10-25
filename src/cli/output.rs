@@ -232,9 +232,17 @@ impl OutputContext {
         // print_success) is not a command failure and leaves this false.
         self.errored
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let mut response = serde_json::json!({ "error": err });
-        self.inject_config_errors(&mut response);
+        let response = self.error_response(err);
         self.emit(&response);
+    }
+
+    /// The response a failure is reported as, with what this layer adds to
+    /// every response, for a surface that reports it without this context's
+    /// sink (the MCP server's tool result).
+    pub(crate) fn error_response(&self, error: OutputError) -> serde_json::Value {
+        let mut response = serde_json::json!({ "error": error });
+        self.inject_config_errors(&mut response);
+        response
     }
 
     /// Surface captured whole-config load failures as a top-level

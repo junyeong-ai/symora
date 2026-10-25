@@ -7,7 +7,7 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{McpProfile, instructions, tools};
 use crate::app::App;
@@ -76,7 +76,7 @@ impl ServerHandler for McpServer {
                 result
             }
             Err(error) => {
-                let body = json!({ "error": error });
+                let body = self.app.output.error_response(error);
                 let mut result = CallToolResult::error(vec![ContentBlock::text(body.to_string())]);
                 result.structured_content = Some(body);
                 result

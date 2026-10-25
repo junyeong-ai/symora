@@ -181,6 +181,12 @@ impl App {
         self.output.errored()
     }
 
+    /// Report a failure a command returned rather than printed, through the
+    /// same output layer, for the binary crate's `main`.
+    pub fn report_error(&self, error: anyhow::Error) {
+        self.output.print_error(error);
+    }
+
     /// Return a clone of `self` with the output sink replaced.
     ///
     /// Used by the MCP adapter to capture command output into a buffer

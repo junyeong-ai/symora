@@ -56,6 +56,38 @@ fn config_show_daemon_scope() {
     assert_eq!(value["config_errors"].as_array().unwrap().len(), 1);
 }
 
+/// A failure a command returns, rather than prints, reaches the caller
+/// through the same output layer, so it still says which configuration was
+/// ignored.
+#[test]
+fn a_returned_failure_still_discloses_ignored_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join(".symora")).unwrap();
+    std::fs::write(
+        root.path().join(".symora/config.toml"),
+        "[project]\nlanguages = [\"rust\"]\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("lib.rs"), "fn f() {}\n").unwrap();
+    let out = Command::new(SYMORA)
+        .args(["symbols", "lib.rs", "--kind", "bogus"])
+        .current_dir(root.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("HOME", home.path())
+        .env("SYMORA_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_argument", "{value}");
+    assert_eq!(
+        value["config_errors"].as_array().unwrap().len(),
+        1,
+        "{value}"
+    );
+}
+
 #[test]
 fn config_init_respects_scope() {
     let root = tempfile::tempdir().unwrap();
