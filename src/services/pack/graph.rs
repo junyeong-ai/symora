@@ -3203,7 +3203,10 @@ mod tests {
     /// it: one it declares, and setuptools' discovered `src/` only where a
     /// build installs the project. A uv workspace's virtual root installs
     /// nothing (`uvsrc`, which uv 0.13.5 installs and imports as each member's
-    /// own), and a workspace's members are never covered by its root.
+    /// own), and a workspace's members are never covered by its root. Below a
+    /// root, a directory starts a project only where its own files install
+    /// one: a `pyproject.toml` that configures a tool there leaves it the
+    /// enclosing project's (`nobuild_nested`).
     #[test]
     fn only_a_root_a_project_puts_on_sys_path_covers_the_directories_below_it() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -3220,6 +3223,9 @@ mod tests {
             python(8, "bw/src/m/m/__init__.py", ""),
             python(9, "bw/src/m/m/x.py", ""),
             python(10, "bw/src/m/tests/test_m.py", "import m.x\n"),
+            python(11, "nb/src/app/core.py", ""),
+            python(12, "nb/src/app/main.py", "from app.core import x\n"),
+            python(13, "nb/tests/test_core.py", "from app.core import x\n"),
         ];
         let member = |name: &str, dependencies: &str| {
             format!(
@@ -3251,6 +3257,14 @@ mod tests {
                     .to_string(),
             ),
             ("bw/src/m/pyproject.toml", member("m", "")),
+            (
+                "nb/pyproject.toml",
+                "[tool.ruff]\nline-length = 100\n".to_string(),
+            ),
+            (
+                "nb/src/app/pyproject.toml",
+                "[tool.ruff]\nextend = \"../../pyproject.toml\"\n".to_string(),
+            ),
         ];
         let configs: Vec<(&str, &str)> = configs
             .iter()
@@ -3263,6 +3277,8 @@ mod tests {
         assert_eq!(edges(4), vec![core]);
         assert_eq!(edges(7), vec!["vr/src/tool/tool/x.py"]);
         assert_eq!(edges(10), vec!["bw/src/m/m/x.py"]);
+        assert_eq!(edges(12), vec!["nb/src/app/core.py"]);
+        assert_eq!(edges(13), vec!["nb/src/app/core.py"]);
     }
 
     /// pytest 9 reads, in each directory, the first of `pytest.toml`,

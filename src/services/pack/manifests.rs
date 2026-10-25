@@ -2127,9 +2127,9 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
     let mut rootdirs = HashMap::new();
     let mut pyprojects: HashMap<&[String], toml::Table> = HashMap::new();
     let mut projects: Vec<(&Vec<String>, PythonProject)> = Vec::new();
-    // Each project's directory, the roots below it that it puts on
-    // `sys.path`, and its uv workspace's table.
-    let mut enclosing: Vec<(&Vec<String>, Vec<Vec<String>>, Option<toml::Table>)> = Vec::new();
+    // Each project's directory, the roots below it, whether a build installs
+    // it, which puts those roots on `sys.path`, and its uv workspace's table.
+    let mut enclosing: Vec<Enclosing> = Vec::new();
     for (directory, files) in &configurations {
         let mut configuration = PythonConfiguration::read(files);
         if let Some(options) = configuration.pytest(directory) {
@@ -2143,26 +2143,38 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
         // A directory below a root an enclosing project puts on `sys.path`,
         // other than that project's own directory, lies in the packages that
         // root holds (PEP 420's namespace packages need no `__init__.py`) —
-        // unless the project's uv workspace lists it among its members.
-        let covered = enclosing.iter().any(|(at, roots, workspace)| {
-            roots
+        // unless the project's uv workspace lists it among its members. Below
+        // a root no build installs, or as such a member, it starts a project
+        // only where its own files install one: a file that only configures a
+        // tool there leaves it the enclosing project's.
+        let mut below_root = false;
+        let mut covered = false;
+        for project in &enclosing {
+            if project
+                .roots
                 .iter()
                 .any(|root| directory.len() > root.len() && directory.starts_with(root))
-                && !workspace
-                    .as_ref()
-                    .is_some_and(|workspace| uv_member(at, workspace, directory))
-        });
-        if packages.contains(directory.as_slice()) || covered || !configuration.configures_a_build()
+            {
+                below_root = true;
+                covered |= project.installed
+                    && !project.workspace.as_ref().is_some_and(|workspace| {
+                        uv_member(project.directory, workspace, directory)
+                    });
+            }
+        }
+        let installed = configuration.builds_its_packages();
+        if packages.contains(directory.as_slice())
+            || covered
+            || !configuration.configures_a_build()
+            || (below_root && !installed)
         {
             continue;
         }
         let project = python_project(directory, Some(&configuration));
-        // Its roots are on `sys.path` only where a build installs it.
-        let installed = configuration.builds_its_packages();
         let roots = project
             .roots
             .iter()
-            .filter(|root| installed && root.as_slice() != directory.as_slice())
+            .filter(|root| root.as_slice() != directory.as_slice())
             .cloned()
             .collect();
         let workspace = configuration
@@ -2170,7 +2182,12 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
             .as_ref()
             .and_then(|pyproject| toml_at(pyproject, &["tool", "uv", "workspace"]))
             .cloned();
-        enclosing.push((directory, roots, workspace));
+        enclosing.push(Enclosing {
+            directory,
+            roots,
+            installed,
+            workspace,
+        });
         projects.push((directory, project));
         if let Some(pyproject) = configuration.pyproject.take() {
             pyprojects.insert(directory.as_slice(), pyproject);
@@ -2188,6 +2205,17 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
         pytest,
         rootdirs,
     }
+}
+
+/// A Python project as the directories below it see it
+/// (`python_configurations`): its directory, the roots below it its
+/// configuration names, whether a build installs it — which is what puts
+/// those roots on `sys.path` — and its uv workspace's table.
+struct Enclosing<'d> {
+    directory: &'d [String],
+    roots: Vec<Vec<String>>,
+    installed: bool,
+    workspace: Option<toml::Table>,
 }
 
 /// What the Python configuration files of a tree say, each by its
