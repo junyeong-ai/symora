@@ -4157,9 +4157,19 @@ fn named_for_its_class(statement: Node, name: &str, content: &str) -> bool {
 /// (const lzo_bytep src, …)`). Otherwise the declarator is the function's and
 /// the error a macro written after it (`ngettext (const char *a) _INTL_ASM
 /// (libintl_ngettext)`, `newlocale (int, const char *, locale_t) _INTL_ASM
-/// (libintl_newlocale)`), and this gives none.
+/// (libintl_newlocale)`), and this gives none. Nor does one another function
+/// declarator applies to, since no function returns a function: the grammar
+/// read the declaration wrong there, a keyword among the words it took for a
+/// name (`typedef UChar (U_CALLCONV *F)(int32_t c)` after `U_CDECL_BEGIN`).
 fn name_before_parameters(declarator: Node) -> Option<Node> {
-    if declarator.kind() != "function_declarator" {
+    if declarator.kind() != "function_declarator"
+        || declarator.parent().is_some_and(|outer| {
+            outer.kind() == "function_declarator"
+                && outer
+                    .child_by_field_name("declarator")
+                    .is_some_and(|inner| inner.id() == declarator.id())
+        })
+    {
         return None;
     }
     declarator
@@ -7061,7 +7071,8 @@ region     = "us-central1"
                  va_list\t  args) G_GNUC_PRINTF(1, 0);\n\
                  extern char *ngettext (const char *a, const char *b) _INTL_ASM (libintl_ngettext);\n\
                  extern locale_t newlocale (int, const char *, locale_t)\n       \
-                 _INTL_ASM (libintl_newlocale);\n"
+                 _INTL_ASM (libintl_newlocale);\n\
+                 U_CDECL_BEGIN\ntypedef UChar (U_CALLCONV *UNESCAPE_CHAR_AT)(int32_t offset, void *context);\n"
             ),
             [
                 "function:g_printf_string_upper_bound",
