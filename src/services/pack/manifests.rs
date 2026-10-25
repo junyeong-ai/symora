@@ -163,14 +163,15 @@ pub(super) struct TsConfig {
     pub(super) paths: Vec<(String, Vec<String>)>,
     pub(super) paths_base: Vec<String>,
     /// The module resolution its `moduleResolution`, or the `module` that
-    /// implies one, selects, where that is one deciding which of the
-    /// `import`, `require` and `node` conditions TypeScript matches.
+    /// implies one, selects, where that is one deciding how TypeScript reads
+    /// a package's `exports`; `None` where the versions of TypeScript read
+    /// the configuration differently.
     pub(super) module_resolution: Option<ModuleResolution>,
     /// The conditions `customConditions` adds.
     pub(super) custom_conditions: Vec<String>,
 }
 
-/// A module resolution strategy that says which `exports` conditions apply.
+/// A module resolution strategy that says how a package's `exports` is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModuleResolution {
     /// `bundler`: an import matches `import`, never `require` or `node`.
@@ -178,6 +179,12 @@ pub(super) enum ModuleResolution {
     /// `node16` or `nodenext`: an import matches `node`, and `import` or
     /// `require` by the module format of the file writing it.
     Node16,
+    /// `node10`, or `node` as it was first named: `exports` is not read, and
+    /// a package's name stands for its `types`, `main` or `index`.
+    Node10,
+    /// `classic`: no package's `package.json` is read, so a package's name
+    /// names none of its files.
+    Classic,
 }
 
 /// What the `paths` pattern a specifier matches maps it to.
@@ -974,13 +981,19 @@ fn ts_config(chain: &[(Vec<String>, serde_json::Value)]) -> TsConfig {
             .map(str::to_ascii_lowercase)
     };
     // An explicit `moduleResolution` anywhere in the chain overrides the one
-    // a `module` implies.
+    // a `module` implies. With neither, TypeScript 6 and 7 resolve as
+    // `bundler` does (`--traceResolution`: "Module resolution kind is not
+    // specified, using 'Bundler'"); a `module` that TypeScript 5 read as
+    // implying `node10` or `classic` and 6 as implying `bundler` — `commonjs`,
+    // the `es` versions — leaves it open.
     let module_resolution = match setting("moduleResolution").as_deref() {
         Some("bundler") => Some(ModuleResolution::Bundler),
         Some("node16" | "nodenext") => Some(ModuleResolution::Node16),
+        Some("node" | "node10") => Some(ModuleResolution::Node10),
+        Some("classic") => Some(ModuleResolution::Classic),
         Some(_) => None,
         None => match setting("module").as_deref() {
-            Some("preserve") => Some(ModuleResolution::Bundler),
+            None | Some("preserve") => Some(ModuleResolution::Bundler),
             Some("node16" | "node18" | "node20" | "nodenext") => Some(ModuleResolution::Node16),
             _ => None,
         },
