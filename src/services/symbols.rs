@@ -398,6 +398,19 @@ impl SymbolExtractor {
             if let (Some(line), Some(column)) = (location.name_end_line, location.name_end_column) {
                 extents.by_end.insert((line, column), extent);
             }
+            // clangd names a structured binding `(anonymous)` at its `[`, where
+            // the grammar reads each name the binding writes.
+            if let Some(binding) =
+                std::iter::successors(node.child_by_field_name("declarator"), |declarator| {
+                    declarator.child_by_field_name("declarator")
+                })
+                .find(|declarator| declarator.kind() == "structured_binding_declarator")
+            {
+                extents.by_start.insert(
+                    scalar_position(content, binding.start_byte(), binding.start_position()),
+                    extent,
+                );
+            }
         }
         widen(symbols, &extents);
         self.describe(symbols, &tree, &LineStarts::new(content), language);
@@ -1853,13 +1866,7 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
                 node.child_by_field_name("name")
                     .filter(|name| name.kind() == "nested_namespace_specifier"),
             )
-            .flat_map(|name| match name.kind() {
-                "structured_binding_declarator" | "nested_namespace_specifier" => {
-                    let mut cursor = name.walk();
-                    name.named_children(&mut cursor).collect()
-                }
-                _ => vec![name],
-            })
+            .flat_map(cpp_bound_names)
             .collect(),
         Language::CSharp => child_of_kind(node, "variable_declaration")
             .map(|list| children_of_kind(list, "variable_declarator"))
@@ -3055,6 +3062,20 @@ fn supplied_scope(name: Node) -> Option<Node> {
         level = level
             .child_by_field_name("name")
             .filter(|inner| inner.kind() == "qualified_identifier")?;
+    }
+}
+
+/// Each name a C++ declarator or namespace name binds: every one a structured
+/// binding (`auto [a, b]`) or a nested namespace (`a::b::c`) writes.
+fn cpp_bound_names(name: Node) -> Vec<Node> {
+    match name.kind() {
+        "structured_binding_declarator" | "nested_namespace_specifier" => {
+            let mut cursor = name.walk();
+            name.named_children(&mut cursor)
+                .flat_map(cpp_bound_names)
+                .collect()
+        }
+        _ => vec![name],
     }
 }
 
@@ -4280,7 +4301,7 @@ void g() {
 }
 
 namespace fsys = N;
-namespace outer::inner { int nested_var; }
+namespace outer::inner::innermost { int nested_var; }
 template <class T> concept Small = sizeof(T) < 4;
 auto [first_of, second_of] = pair_value;
 "#,
@@ -4335,6 +4356,7 @@ auto [first_of, second_of] = pair_value;
                 "namespace:fsys",
                 "namespace:outer",
                 "namespace:inner",
+                "namespace:innermost",
                 "variable:nested_var",
                 "variable:Small",
                 "variable:first_of",
@@ -6288,6 +6310,13 @@ region     = "us-central1"
                 (3, 5),
                 ((3, 1), (6, 2)),
                 ((2, 1), (6, 2)),
+            ),
+            (
+                "auto [ka, kb] = make();\n",
+                "",
+                (1, 6),
+                ((1, 6), (1, 7)),
+                ((1, 1), (1, 24)),
             ),
         ] {
             let mut symbols = vec![Symbol::new(
