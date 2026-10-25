@@ -7,8 +7,9 @@ use std::path::Path;
 use super::Node;
 use super::manifests::{
     Basedir, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution, PackageType,
-    Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, nearest, own_or_only,
-    project_path, python_packages, python_project, reads_base_url, split_package_name,
+    Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, export_path, export_subpath,
+    nearest, own_or_only, project_path, python_packages, python_project, reads_base_url,
+    split_package_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -1404,17 +1405,17 @@ impl ProjectIndex<'_> {
     /// or `None` where the specifier names no package of a workspace the
     /// importer is in. A package with `exports` exports only what it maps:
     /// the name stands for the file `.` maps to, a subpath for the one
-    /// `./<subpath>` maps to, read through its conditions (`export_target`).
+    /// `./<subpath>` or the pattern key matching it maps to
+    /// (`export_subpath`), read through its conditions (`export_target`).
     /// Without `exports`, or under `node10`, which does not read it, the name
     /// stands for the file its `types`, `typings` or `main` names, else its
     /// `index` — for Node and the bundlers, which read no `types`, its `main`,
     /// else its `index`, where no `module` or `browser` field names another
     /// (`bundler_entry_differs`) — and a subpath for the file below the
-    /// package. Under
-    /// `classic`, which reads no `package.json`, no name is a package's. A
-    /// package whose file pack cannot determine is disclosed: a pattern
-    /// `exports` maps, a condition the importer's configuration leaves open,
-    /// an entry naming no file, or a name two packages of the workspace give.
+    /// package. Under `classic`, which reads no `package.json`, no name is a
+    /// package's. A package whose file pack cannot determine is disclosed: a
+    /// condition the importer's configuration leaves open, an entry naming no
+    /// file, or a name two packages of the workspace give.
     fn workspace_package(
         &self,
         specifier: &str,
@@ -1485,20 +1486,10 @@ impl ProjectIndex<'_> {
                 None => undetermined(),
             });
         };
-        let key = if subpath.is_empty() {
-            ".".to_string()
-        } else {
-            format!("./{subpath}")
-        };
-        // Without subpath keys, `exports` is what `.` maps to.
-        let target = match exports {
-            serde_json::Value::Object(map) if map.keys().any(|key| key.starts_with('.')) => {
-                map.get(&key)
-            }
-            _ => (key == ".").then_some(exports),
-        };
-        let exported = target
-            .map(|target| self.export_target(target, directory, importer, (conditions, form)));
+        let exported = export_subpath(exports, subpath).map(|(target, star)| {
+            let reading = (conditions, form, star.as_deref());
+            self.export_target(target, directory, importer, reading)
+        });
         Some(match exported {
             Some(Exported::Files(files)) => Resolution::Files(files),
             _ => undetermined(),
@@ -1535,7 +1526,8 @@ impl ProjectIndex<'_> {
     }
 
     /// What an `exports` target names for an importer: a path, which has to
-    /// start `./`, the file it spells; an array, what its first entry naming
+    /// start `./`, the file it spells, a pattern key's `*` match in place of
+    /// each `*` it holds; an array, what its first entry naming
     /// a file names; a condition object, what the target of the first of its
     /// keys, in their written order, that the importer matches names — nested
     /// objects read alike. TypeScript passes over a target naming no file to
@@ -1548,11 +1540,12 @@ impl ProjectIndex<'_> {
         target: &serde_json::Value,
         directory: &[String],
         importer: &Importer,
-        reading: (ExportConditions, ImportForm),
+        reading: (ExportConditions, ImportForm, Option<&str>),
     ) -> Exported {
         match target {
             serde_json::Value::String(path) if path.starts_with("./") => {
-                project_path(directory, path)
+                export_path(path, reading.2)
+                    .and_then(|path| project_path(directory, &path))
                     .and_then(|path| self.script_target(&path, importer.node.language))
                     .map_or(Exported::Missing, Exported::Files)
             }
@@ -1574,7 +1567,7 @@ impl ProjectIndex<'_> {
         conditions: &[(&String, &serde_json::Value)],
         directory: &[String],
         importer: &Importer,
-        reading: (ExportConditions, ImportForm),
+        reading: (ExportConditions, ImportForm, Option<&str>),
     ) -> Exported {
         for (at, (condition, target)) in conditions.iter().enumerate() {
             let matched = importer.matches(reading.0, reading.1, condition);
@@ -4170,10 +4163,12 @@ mod tests {
 
     /// A workspace package is imported by the name its `package.json` gives
     /// it, from anywhere below the workspace root that lists it. With
-    /// `exports` it exports only what that maps; without, the name stands for
-    /// the file `types` or `main` names, else its `index`, and a subpath for
-    /// the file below it. A listed name whose file pack cannot determine is
-    /// disclosed; a package no workspace lists is no workspace's.
+    /// `exports` it exports only what that maps, a subpath through its exact
+    /// key or else the pattern key with the longest prefix before `*`;
+    /// without, the name stands for the file `types` or `main` names, else
+    /// its `index`, and a subpath for the file below it. A listed name whose
+    /// file pack cannot determine is disclosed; a package no workspace lists
+    /// is no workspace's.
     #[test]
     fn a_workspace_package_resolves_by_the_name_its_package_json_gives_it() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
@@ -4187,7 +4182,8 @@ mod tests {
                  import g from \"@acme/ui/hidden\";\nimport h from \"@acme/cond\";\n\
                  import i from \"@acme/typed\";\nimport j from \"@acme/twin\";\n\
                  import k from \"core-lib\";\nimport \"@acme/ui/styles.css\";\n\
-                 import icon from \"@acme/ui/icon.svg\";\n",
+                 import icon from \"@acme/ui/icon.svg\";\nimport en from \"@acme/msg/messages/en\";\n\
+                 import card from \"@acme/msg/ui/card\";\nimport sx from \"@acme/msg/ui/special/x\";\n",
             ),
             ts(1, "packages/ui/src/index.ts", ""),
             ts(2, "packages/ui/src/button.ts", ""),
@@ -4209,6 +4205,9 @@ mod tests {
             ts(14, "packages/twin-a/index.ts", ""),
             ts(15, "packages/twin-b/index.ts", ""),
             node_in(16, "packages/ui/src/styles.css", "", Language::Css),
+            ts(17, "packages/msg/src/ui/card.ts", ""),
+            ts(18, "packages/msg/src/special/x.ts", ""),
+            ts(19, "packages/msg/src/ui/special/x.ts", ""),
         ];
         let manifests = manifests_of(
             &[
@@ -4224,6 +4223,12 @@ mod tests {
                      \"./icon.svg\": \"./assets/icon.svg\"}}",
                 ),
                 ("packages/ui/assets/icon.svg", "<svg/>"),
+                (
+                    "packages/msg/package.json",
+                    "{\"name\": \"@acme/msg\", \"exports\": {\"./messages/*\": \"./messages/*.json\", \
+                     \"./ui/*\": \"./src/ui/*.ts\", \"./ui/special/*\": \"./src/special/*.ts\"}}",
+                ),
+                ("packages/msg/messages/en.json", "{}"),
                 ("packages/utils/package.json", "{\"name\": \"@acme/utils\"}"),
                 (
                     "packages/built/package.json",
@@ -4272,7 +4277,9 @@ mod tests {
                 "packages/utils/index.ts",
                 "packages/utils/deep/x.ts",
                 "packages/typed/src/entry.ts",
-                "packages/ui/src/styles.css"
+                "packages/ui/src/styles.css",
+                "packages/msg/src/ui/card.ts",
+                "packages/msg/src/special/x.ts"
             ]
         );
         assert_eq!(edges(8), vec!["pn/libs/core/index.ts"]);
