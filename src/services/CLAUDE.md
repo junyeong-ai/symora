@@ -33,7 +33,7 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 - A name is what the grammar binds: an assignment declares only the names its targets bind, a destructuring pattern each name it binds, a C/C++ declarator its innermost name. The scan of a node's identifier children serves nodes named that way, never one whose own rule found no name.
 - A symbol's container is the nearest enclosing declaration the query captures, a namespace passed through. A declaration's parameters and type are its header and contain nothing, except a type's own, which hold its members, and a record type it defines without a name of its own (`typedef struct { … } T`, Go's `inner struct{ … }`), which takes its name.
 - A parameter declares a member only where its language says so: a modifier, `val`/`var`, a case class's first list, a promoted parameter, a record component.
-- C and C++ are read again past a macro the grammar cannot expand, spelled as blanks so every offset holds, only where the grammar's structure proves it one (a `::` after a declarator's name, a prototype's parameters in a second pair of parentheses, a class key before a block read as a function), never by its spelling (capitals, an `_API` suffix). The grammar's recovery is not local: a proved blank can still change the reading elsewhere, and what a file reads depends on the blanks taken together. The measures of the re-read tree tried (bytes held in errors, declarations kept) did not tell a better reading from a worse one, so the rule is a proof for each blank, not a check on the result.
+- C and C++ are read again past a macro the grammar cannot expand, spelled as blanks so every offset holds, only where the grammar's structure proves it one (a `::` after a declarator's name, a prototype's parameters in a second pair of parentheses, a class key before a block read as a function), never by its spelling (capitals, an `_API` suffix). The grammar's recovery is not local: a proved blank can still change the reading elsewhere, and what a file reads depends on the blanks taken together. Neither the bytes the re-read tree holds in errors nor the declarations it keeps tells a better reading from a worse one, so each blank needs a proof of its own rather than a check on the result.
 
 `DECLARATION_FIXTURES` is the contract per language: a form or a language joins it with the query that reads it, and every pattern of a query matches a form its fixtures write. Where a language server is installed, its document symbols are the reference to compare a change against.
 
@@ -48,7 +48,7 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 - `Default*` — in-process (direct LSP child processes; the store's SQLite opens lazily on first use).
 - `Daemon*` — forwards to a `symora daemon` over a Unix socket.
 
-Both implementations preserve the same result semantics and error contracts. Compare payloads under equivalent source and server state; indexing can change observations between calls (invariant #3). A read against a missing store reports `NotInitialized` so the caller falls back to a filesystem scan; a present-but-unopenable store surfaces the real error.
+Both implementations preserve the same result semantics and error contracts. Compare payloads under equivalent source and server state; indexing can change observations between calls (invariant #3). A read against a missing store reports `NotInitialized`, so the caller answers from its live source instead (a filesystem scan for content, language servers for symbols); a present-but-unopenable store surfaces the real error.
 
 Rename captures its request-document hash before the retry loop and retains it across all attempts and server restarts.
 
@@ -58,4 +58,4 @@ Rename captures its request-document hash before the retry loop and retains it a
 
 ## Fallback strategy
 
-When an LSP server lacks a capability, return a structured "unsupported" response from the service layer. Don't fabricate data and don't fall through to text heuristics silently. Position resolution follows the explicit anchor contract in the CLI guide; it must not select a nearby unrelated declaration. Pack signatures use the shared declaration parser, never line-pattern matching. Index answers disclose unconfirmed currency even when they contain matches.
+Position resolution follows the anchor contract in `src/cli/CLAUDE.md`; it must not select a nearby unrelated declaration.

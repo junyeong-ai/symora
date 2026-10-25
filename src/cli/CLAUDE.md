@@ -6,9 +6,7 @@ Suggested commands encode dynamic arguments with `utils::shell_arg`. Place optio
 
 ## Results and discovery
 
-Use `Section<T>` for enumerations. Shape lower bounds, coverage, currency, hints, and remedies through `response::disclosure`. These are distinct facts: unread input bounds the consulted sources; missing languages qualify coverage; stale rows and tree currency describe index freshness. Derive each from the source outcome rather than asserting it at a call site. Keep causes with their remedies when capping advice.
-
-Source-bearing responses use `OutputContext::print_source` with explicitly enumerated body paths. It omits whole bodies before dropping list items and never edits arbitrary nested data. Preserve declaration identity and signature; `body_omitted` names the budget. Context budgets target, callees, then types together. Recount `bodies_included` after response fitting.
+Shape lower bounds, coverage, currency, hints, and remedies through `response::disclosure`. These are distinct facts: unread input bounds the consulted sources; missing languages qualify coverage; stale rows and tree currency describe index freshness. Derive each from the source outcome rather than asserting it at a call site. Keep causes with their remedies when capping advice.
 
 Every search resolves `--path` through `search::common::resolve_search_paths`, confines each of its sources and the qualifiers they raise before counting, and carries the same paths into the follow-ups it advises. The resolver refuses a path the project's ignore rules exclude, so no search answers about one; symbol search also refuses a hidden one, since the index holds nothing under it.
 
@@ -33,6 +31,4 @@ All source writes go through `commands/edit/`: project-boundary validation, revi
 
 LSP edits from rename and code actions use `apply_text_edits` / `apply_workspace_edits`. Source writes use `write_file` with observed content and retain the edit lock through resolution/application. Preserve revision hashes and check them again before replacement. `atomic_write` without a source precondition is for host configuration. Dry runs hold no write lock; multi-file application preflights and reports earlier applied files on failure.
 
-Unsupported capabilities produce structured errors or explicitly qualified alternatives, never synthetic semantic results.
-
-Extend existing commands rather than adding parallel surfaces. Agent-facing options must stay aligned with the curated MCP catalog and handlers; lifecycle and config commands remain CLI-only, and `doctor` reaches MCP only as the read-only `check_language_support`. Remove obsolete paths cleanly.
+Agent-facing options must stay aligned with the curated MCP catalog and handlers; lifecycle and config commands remain CLI-only, and `doctor` reaches MCP only as the read-only `check_language_support`. Remove a superseded path in the change that replaces it.

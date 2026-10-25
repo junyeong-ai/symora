@@ -1,6 +1,6 @@
 # src/mcp — MCP Server Rules
 
-`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set — e.g. `get_context` exposes `with_bodies` and shares `body_tokens` across target/callees/types; `body_omitted` and `bodies_included` disclose omissions).
+`symora mcp serve` exposes a Model Context Protocol surface (stdio + HTTP) over the same in-process command layer the CLI uses. The catalog is a curated subset of the CLI — navigation, analysis, and edit tools — and each tool is backed by one CLI command, mirroring its input (a tool may omit or pin an option an agent shouldn't set — `get_context` pins the CLI's `--body` off and defaults `all` to true).
 
 ## Catalog and handlers must stay in lockstep
 
@@ -16,7 +16,7 @@ Every field the input struct deserializes must be an advertised property in the 
 
 `symora mcp tools` prints the visible catalog for a profile as CLI JSON. It is a pure view over `visible_catalog` — never a second tool list — so it tracks every catalog change for free.
 
-Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep in both directions through the test-only registries kept beside the input structs in `tools/handlers.rs`: the `input_fields` registry must equal the advertised catalog property set exactly (an advertised property no struct consumes would be silently dropped by serde), and an args object covering every advertised property must deserialize into the input struct (`deserialize_input`). Adding a tool means touching all five; removing one means removing all five. The tests will fail if the registries drift. Property names mirror the backing command's field (`path` on get_file_overview vs `file` on get_diagnostics and list_file_symbols is intentional, not drift).
+Tests in `tools/mod.rs` enumerate the required tool names and check the lockstep in both directions through the test-only registries kept beside the input structs in `tools/handlers.rs`: the `input_fields` registry must equal the advertised catalog property set exactly (an advertised property no struct consumes would be silently dropped by serde), and an args object covering every advertised property must deserialize into the input struct (`deserialize_input`). Property names mirror the backing command's field (`path` on get_file_overview vs `file` on get_diagnostics and list_file_symbols is intentional, not drift).
 
 ## Mutating tools advertise themselves — twice, in lockstep
 
@@ -24,7 +24,7 @@ Mutation is one fact stated two ways: the typed `annotations.read_only_hint` (co
 
 ## The instructions playbook stays honest by test
 
-The SDK exposes a usage playbook through the protocol-appropriate metadata flow. Hosts inject this playbook (`instructions.rs`) into the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the visible profile catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
+The SDK exposes a usage playbook through the protocol-appropriate metadata flow. Hosts that support server instructions place this playbook (`instructions.rs`) in the model's context. Backticks in that text are reserved for tool names; a test asserts every backtick-quoted token exists in the visible profile catalog, so renaming or removing a tool cannot leave the playbook stale. Mention new tools there when they change how an agent should sequence calls.
 
 ## Location input convention
 

@@ -28,7 +28,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-For documentation or comment-only changes, validate local links, rule path references, and changed examples or output claims against the matching binary. Check Rust formatting when Rust files are touched and skill frontmatter when a skill changes. Changes to bundled agent instructions also exercise the affected workflow. Rebuilds and full suites are needed when executable behavior changes, rather than for prose alone.
+For documentation or comment-only changes, validate local links, rule path references, and changed examples or output claims against the matching binary. Check Rust formatting when Rust files are touched and skill frontmatter when a skill changes. Changes to bundled agent instructions also exercise the affected workflow. The CLI skill (`.claude/skills/symora/SKILL.md`) and the MCP playbook (`src/mcp/instructions.rs`) tell agents the same things for their own surfaces, so a change to what one says is checked against the other. Rebuilds and full suites are needed when executable behavior changes, rather than for prose alone.
 
 A change to the language-server layer or daemon also runs real-server suites: install rust-analyzer, then prepare the Python fixture and its pinned pyright:
 
