@@ -132,9 +132,18 @@ pub const EXACT_MATCH_PRIORITY: i32 = 40;
 /// Relevance tier of a name/path against a query. The ladder is intentionally
 /// coarse — exact (40) > anchored path suffix (34) > prefix (24) > substring
 /// (16) > no match (0) — so penalties and bonuses (expressed relative to these
-/// steps) can reorder within a tier without crossing it.
+/// steps) can reorder within a tier without crossing it. A `*` pattern names a
+/// path whole or not at all, so a path it names is exact.
 pub fn symbol_match_priority(query: &str, name: &str, path: &str) -> i32 {
-    let q = query.trim().trim_start_matches('/').to_ascii_lowercase();
+    let query = query.trim();
+    if query.contains('*') {
+        return if PathPattern::names(query, path) {
+            EXACT_MATCH_PRIORITY
+        } else {
+            0
+        };
+    }
+    let q = query.trim_start_matches('/').to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
     let path = path.to_ascii_lowercase();
     let leaf = path.rsplit('/').next().unwrap_or(&path);
@@ -354,6 +363,25 @@ mod tests {
             symbol_rank("Cache/[method]", computed, &scope),
             EXACT_MATCH_PRIORITY
         );
+    }
+
+    #[test]
+    fn a_wildcard_ranks_a_path_it_names_as_exact() {
+        let scope = TestScope::new();
+        let member = RankedSymbol {
+            name_path: Some("Cart/new"),
+            ..ranked("new", "method", "src/cart.rs")
+        };
+        for query in ["*/new", "Cart/*", "/Cart/*", "C*t/n*", "*[method]"] {
+            assert_eq!(
+                symbol_rank(query, member, &scope),
+                EXACT_MATCH_PRIORITY,
+                "{query}"
+            );
+        }
+        for query in ["Order/*", "/*", "*/total"] {
+            assert_eq!(symbol_rank(query, member, &scope), 0, "{query}");
+        }
     }
 
     #[test]
