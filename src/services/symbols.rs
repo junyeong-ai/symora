@@ -1145,7 +1145,8 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
 /// do, so a list the grammar read as arguments without an error that holds a
 /// call or a literal is a C++ direct-initializer instead (`EXPORT Timer
 /// timer((Clock()));`). A lone function pointer written with type names
-/// alone reads as a call (`P_((T (*f)(U)))`), and so as an initializer. A
+/// alone reads as a call (`P_((T (*f)(U)))`), so its list stays an
+/// initializer and the declaration is named for the macro. A
 /// list of type names alone with a macro's invocation after it
 /// (`inflateUndermine OF((z_streamp, int)) __API_AVAILABLE(…);` in macOS's
 /// zlib) the grammar reads with no declarator at all, so nothing there shows
@@ -1268,6 +1269,7 @@ fn holds_a_value(node: Node) -> bool {
             "call_expression"
                 | "number_literal"
                 | "string_literal"
+                | "raw_string_literal"
                 | "char_literal"
                 | "true"
                 | "false"
@@ -7675,7 +7677,9 @@ region     = "us-central1"
                  ONIG_EXTERN\nvoid onig_regset_free P_((OnigRegSet* set));\n\
                  EXPORT Timer timer((Clock()));\nint Foo::count((limit));\n\
                  int *Codec::encode OF((const char *in, int n)) { return 0; }\n\
-                 EXPORT Widget pair((a), b);\n"
+                 EXPORT Widget pair((a), b);\nEXPORT Timer negative((-1));\n\
+                 EXPORT Timer letter(('c'));\nEXPORT Timer flag((true));\nEXPORT Timer none((NULL));\n\
+                 EXPORT Timer raw((R\"(x)\"));\nEXPORT Timer label((\"x\"));\nEXPORT Timer off((false));\n"
             ),
             [
                 "function:clnt_create",
@@ -7690,6 +7694,13 @@ region     = "us-central1"
                 "variable:Foo::count",
                 "function:Codec::encode",
                 "variable:pair",
+                "variable:negative",
+                "variable:letter",
+                "variable:flag",
+                "variable:none",
+                "variable:raw",
+                "variable:label",
+                "variable:off",
             ],
             "a macro a prototype wraps its parameters in expands to them"
         );
