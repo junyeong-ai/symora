@@ -553,7 +553,7 @@ impl SymbolExtractor {
                 macros.extend(prototype_macros(tree.root_node()));
                 macros.extend(qualified_type_macros(tree.root_node(), source));
                 macros.extend(access_specifier_macros(tree.root_node(), source));
-                macros.extend(unended_member_macros(tree.root_node()));
+                macros.extend(unended_member_macros(tree.root_node(), content));
                 if macros.is_empty() {
                     break;
                 }
@@ -898,14 +898,21 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// supplied. One that declares a function, a type with a body or a qualifier
 /// the next declaration begins with (`Q_DISABLE_COPY(W) const` before `int
 /// limit_;`) is left to the grammar's reading, and so is a run an error the
-/// grammar set aside interrupts, which may hold the rest of a member. Not
-/// read yet: such a member before a declaration with a type of its own
-/// (`Q_INVOKABLE Q_REVISION(6, 11)` before `QModelIndex mapToSource(…)
-/// const;`), macros whether they end a member or open that declaration.
-/// Left as read: one alone in a conditional's branch (`#ifndef
+/// grammar set aside interrupts, which may hold the rest of a member. Before
+/// a function's declaration, whose parameters name something, which no
+/// macro's arguments do but those of one taking a declaration
+/// (`Q_PRIVATE_SLOT(d_func(), void f())`), and which has a type of its own
+/// or is named for its class, as a constructor is and such an invocation is
+/// not, the invocation of such a member is a macro's alone: no declarator is
+/// followed by a function's, and no specifier is a name with arguments,
+/// while the name before it is left to the grammar
+/// (`Q_INVOKABLE Q_REVISION(6, 11)` before `QModelIndex mapToSource(const
+/// QModelIndex &i) const;`). Left as read: such an invocation before a
+/// function with no type of its own (`QString Q_DECL_X(1)` before `f(int
+/// x);`), and a member alone in a conditional's branch (`#ifndef
 /// QT_NO_QOBJECT Q_OBJECT #endif`), since a declaration may go on past a
 /// directive.
-fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
+fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize>> {
     fn macro_written(member: Node) -> bool {
         let mut cursor = member.walk();
         matches!(member.kind(), "field_declaration" | "declaration")
@@ -962,6 +969,28 @@ fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
                         || DECLARATION_OPENERS.contains(&word.kind()))
             })
     };
+    fn invocation(member: Node) -> Option<Node> {
+        member
+            .child_by_field_name("declarator")
+            .filter(|declarator| declarator.kind() == "function_declarator")
+            .filter(|_| macro_written(member))
+    }
+    let declares_a_function_of_its_own = |member: Node| {
+        matches!(
+            member.kind(),
+            "field_declaration" | "declaration" | "function_definition"
+        ) && member
+            .child_by_field_name("declarator")
+            .filter(|declarator| declarator.kind() == "function_declarator")
+            .is_some_and(|declarator| {
+                names_a_parameter(declarator)
+                    && (member.child_by_field_name("type").is_some()
+                        || declarator
+                            .child_by_field_name("declarator")
+                            .and_then(|name| content.get(name.byte_range()))
+                            .is_some_and(|name| named_for_its_class(member, name, content)))
+            })
+    };
     let mut macros = Vec::new();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
@@ -975,6 +1004,13 @@ fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             continue;
         }
         for (at, &next) in members.iter().enumerate() {
+            if let Some(invoked) = at
+                .checked_sub(1)
+                .and_then(|before| invocation(members[before]))
+                .filter(|_| declares_a_function_of_its_own(next))
+            {
+                macros.extend(written_words(invoked).iter().map(Node::byte_range));
+            }
             if !begins_after_a_member(next) {
                 continue;
             }
@@ -7934,6 +7970,54 @@ region     = "us-central1"
             ),
             ["class:Svg"],
             "nor before the body's closing brace"
+        );
+        assert_eq!(
+            declared(
+                "class R : public QObject {\n    Q_OBJECT\npublic:\n    \
+                 Q_INVOKABLE Q_REVISION(6, 11) QModelIndex mapFromSource(const QModelIndex &sourceIndex) const;\n    \
+                 Q_INVOKABLE Q_REVISION(6, 11) QModelIndex mapToSource(const QModelIndex &proxyIndex) const;\n    \
+                 Q_INVOKABLE Q_REVISION(1, 0) R(QObject *parent);\n    \
+                 Q_INVOKABLE Q_REVISION(1, 0) QString g(int x) const { return {}; }\n    \
+                 QString name(int)\n    Q_DECL_A Q_DECL_B() const;\n    \
+                 QString typo(int index)\n    QString other(int y);\n    \
+                 QVariant data(const QModelIndex &index) const;\n};\n"
+            ),
+            [
+                "class:R",
+                "method:mapFromSource",
+                "method:mapToSource",
+                "constructor:R",
+                "method:g",
+                "method:name",
+                "method:typo",
+                "method:data",
+            ],
+            "an invocation before a function whose parameters name something is a macro's alone"
+        );
+        assert_eq!(
+            declared(
+                "class Q_WIDGETS_EXPORT QGraphicsProxyWidget : public QGraphicsWidget\n{\n    \
+                 Q_DISABLE_COPY(QGraphicsProxyWidget)\n    \
+                 Q_DECLARE_PRIVATE_D(QGraphicsItem::d_ptr.data(), QGraphicsProxyWidget)\n    \
+                 Q_PRIVATE_SLOT(d_func(), void _q_removeWidgetSlot())\n};\n"
+            ),
+            ["class:QGraphicsProxyWidget"],
+            "nor before an invocation taking a declaration, which has no type"
+        );
+        assert_eq!(
+            extractor
+                .extract_with_signatures(
+                    Path::new("u.h"),
+                    "class U {\npublic:\n  int before;\n  Q_DECLARE_METATYPE_X (U)\n  \
+                     QString name(int index);\n  int after;\n};\n",
+                    Language::Cpp,
+                )
+                .iter()
+                .find(|symbol| symbol.name == "name")
+                .and_then(|symbol| symbol.signature.clone())
+                .as_deref(),
+            Some("QString name(int index)"),
+            "arguments in parentheses after a macro's name are no invocation to read past alone"
         );
         assert_eq!(
             declared(
