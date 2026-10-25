@@ -7,7 +7,7 @@ use std::path::Path;
 use super::Node;
 use super::manifests::{
     Basedir, JsPackage, Manifests, ModuleResolution, Pytest, PythonProject, TsConfig, TsOwner,
-    nearest, own_or_only, project_path, python_packages, python_project,
+    nearest, own_or_only, project_path, python_packages, python_project, split_package_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -196,13 +196,16 @@ impl<'a> Importer<'a> {
     /// `import` under `bundler` or for an ES module under `node16`; `require`
     /// for any other file under `node16`; `node` under `node16`; nothing
     /// else. A versioned `types@<range>` key depends on the compiler's own
-    /// version.
+    /// version, and any other key on a configuration whose
+    /// `customConditions` its chain leaves undecided.
     fn matches(&self, conditions: Option<ExportConditions>, condition: &str) -> Option<bool> {
-        if matches!(condition, "types" | "default")
-            || self
-                .ts_config
-                .is_some_and(|config| config.custom_conditions.iter().any(|c| c == condition))
-        {
+        if matches!(condition, "types" | "default") {
+            return Some(true);
+        }
+        let custom = self
+            .ts_config
+            .map_or(Some(&[][..]), |config| config.custom_conditions.as_deref());
+        if custom.is_some_and(|custom| custom.iter().any(|c| c == condition)) {
             return Some(true);
         }
         match condition {
@@ -214,7 +217,7 @@ impl<'a> Importer<'a> {
                     _ => true,
                 },
             }),
-            _ if condition.starts_with("types@") => None,
+            _ if condition.starts_with("types@") || custom.is_none() => None,
             _ => Some(false),
         }
     }
@@ -1096,11 +1099,7 @@ impl ProjectIndex<'_> {
             Some(ImportMode::Exports(conditions)) => Ok(Some(conditions)),
             None => Ok(None),
         };
-        let scoped = specifier.starts_with('@');
-        let mut segments = specifier.splitn(if scoped { 3 } else { 2 }, '/');
-        let name: Vec<&str> = segments.by_ref().take(if scoped { 2 } else { 1 }).collect();
-        let name = name.join("/");
-        let subpath = segments.next().unwrap_or_default();
+        let (name, subpath) = split_package_name(specifier);
         let declares = |package: &JsPackage| {
             package.name == name && from.directory.starts_with(&package.workspace)
         };
@@ -3308,6 +3307,124 @@ mod tests {
                 "@acme/modes".to_string(),
                 "@acme/nested".to_string()
             ])
+        );
+    }
+
+    /// A configuration `extends` a package's configuration as TypeScript
+    /// resolves the specifier (each case run under tsc 5.9.3, 6.0.3 and
+    /// 7.0.2): the file the package's `exports` maps the subpath to under
+    /// `require`, the package's `tsconfig.json` for its bare name, through
+    /// the workspace package of that name where none is installed, and at
+    /// its real path where one is linked. An `extends` that names no file
+    /// leaves the options it could set open, so an import their conditions
+    /// decide is disclosed; one the extending configuration sets itself is
+    /// read, and any condition the configuration could add stays open.
+    #[test]
+    fn a_configuration_extends_a_package_as_typescript_resolves_its_specifier() {
+        let ts = |id, rel: &str| {
+            let source =
+                "import { main } from 'p6'\nimport { gen } from '#gen'\nimport { x } from 'p7'\n";
+            node_in(id, rel, source, Language::TypeScript)
+        };
+        let nodes = vec![
+            ts(0, "apps/a/src/a.ts"),
+            ts(1, "apps/b/src/b.ts"),
+            ts(2, "apps/c/src/c.ts"),
+            ts(3, "apps/d/src/d.ts"),
+            ts(4, "apps/e/src/e.ts"),
+            ts(5, "apps/f/src/f.ts"),
+            node_in(6, "packages/p6/src/esm.ts", "", Language::TypeScript),
+            node_in(7, "packages/p6/src/cjs.ts", "", Language::TypeScript),
+            node_in(8, "packages/cfg2/gen.ts", "", Language::TypeScript),
+            node_in(9, "packages/p7/src/source.ts", "", Language::TypeScript),
+            node_in(10, "packages/p7/src/default.ts", "", Language::TypeScript),
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let files = [
+            (
+                "package.json",
+                "{\"workspaces\": [\"packages/*\", \"apps/*\"]}",
+            ),
+            (
+                "packages/cfg/package.json",
+                "{\"name\": \"@repo/cfg\", \"exports\": {\"./base\": {\"import\": \"./esm.json\", \
+                 \"require\": \"./node.json\"}}}",
+            ),
+            (
+                "packages/cfg/node.json",
+                "{\"compilerOptions\": {\"module\": \"nodenext\"}}",
+            ),
+            (
+                "packages/cfg/esm.json",
+                "{\"compilerOptions\": {\"moduleResolution\": \"bundler\"}}",
+            ),
+            (
+                "packages/p6/package.json",
+                "{\"name\": \"p6\", \"exports\": {\".\": {\"import\": \"./src/esm.ts\", \
+                 \"require\": \"./src/cjs.ts\"}}}",
+            ),
+            (
+                "packages/p7/package.json",
+                "{\"name\": \"p7\", \"exports\": {\".\": {\"source\": \"./src/source.ts\", \
+                 \"default\": \"./src/default.ts\"}}}",
+            ),
+            (
+                "node_modules/@tsconfig/node20/package.json",
+                "{\"name\": \"@tsconfig/node20\"}",
+            ),
+            (
+                "node_modules/@tsconfig/node20/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"node16\"}}",
+            ),
+            ("packages/cfg2/package.json", "{\"name\": \"@repo/cfg2\"}"),
+            (
+                "packages/cfg2/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"nodenext\", \
+                 \"paths\": {\"#gen\": [\"./gen.ts\"]}}}",
+            ),
+            ("apps/a/tsconfig.json", "{\"extends\": \"@repo/cfg/base\"}"),
+            (
+                "apps/b/tsconfig.json",
+                "{\"extends\": \"@tsconfig/node20\"}",
+            ),
+            (
+                "apps/c/tsconfig.json",
+                "{\"extends\": \"@repo/missing/base.json\"}",
+            ),
+            (
+                "apps/d/tsconfig.json",
+                "{\"extends\": \"@repo/missing/base.json\", \"compilerOptions\": \
+                 {\"module\": \"nodenext\", \"moduleResolution\": \"nodenext\"}}",
+            ),
+            ("apps/e/tsconfig.json", "{\"extends\": \"./base.json\"}"),
+            ("apps/f/tsconfig.json", "{\"extends\": \"@repo/cfg2\"}"),
+        ];
+        for (path, contents) in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write");
+        }
+        let linked = dir.path().join("apps/f/node_modules/@repo");
+        std::fs::create_dir_all(&linked).expect("mkdir");
+        std::os::unix::fs::symlink(dir.path().join("packages/cfg2"), linked.join("cfg2"))
+            .expect("symlink");
+        let manifests = Manifests::read(dir.path(), &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        let (cjs, default) = ("packages/p6/src/cjs.ts", "packages/p7/src/default.ts");
+        assert_eq!(edges(0), vec![cjs, default]);
+        assert_eq!(edges(1), vec![cjs, default]);
+        assert_eq!(edges(3), vec![cjs]);
+        assert_eq!(edges(5), vec![cjs, "packages/cfg2/gen.ts", default]);
+        assert!(edges(2).is_empty() && edges(4).is_empty());
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["p6".to_string(), "p7".to_string()])
         );
     }
 
