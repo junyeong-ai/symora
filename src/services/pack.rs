@@ -1204,17 +1204,20 @@ impl Manifests {
 
     /// The directory a Go import path names in the project, as the go command
     /// finds it. The module providing a package is the one with the longest
-    /// path the import path begins with, and the package is the directory as
-    /// far below that module's root — unless a `go.mod` of its own makes that
-    /// directory another module, which the first does not contain. An import
-    /// path under no module the project declares names a package the
-    /// importer's own module vendors, or nothing in the project.
+    /// path the import path begins with — where two `go.mod` files declare
+    /// that path, the one every manifest name means (`own_or_only`) — and the
+    /// package is the directory as far below that module's root, unless a
+    /// `go.mod` of its own makes that directory another module, which the
+    /// first does not contain. An import path under no module the project
+    /// declares names a package the importer's own module vendors, or nothing
+    /// in the project.
     fn go_package(&self, import: &[String], from: &Node) -> Option<Vec<String>> {
-        let providing = self
+        let longest = self
             .go_modules
-            .iter()
-            .filter(|(_, module)| import.starts_with(module));
-        let longest = providing.clone().map(|(_, module)| module.len()).max();
+            .values()
+            .filter(|module| import.starts_with(module))
+            .map(Vec::len)
+            .max();
         let Some(longest) = longest else {
             let (own, _) = nearest(&self.go_modules, &from.directory)?;
             let mut vendored = own.clone();
@@ -1222,12 +1225,9 @@ impl Manifests {
             vendored.extend_from_slice(import);
             return Some(vendored);
         };
-        // Two `go.mod` files declaring one path leave the import naming
-        // neither.
-        let mut providers = providing.filter(|(_, module)| module.len() == longest);
-        let (Some((root, _)), None) = (providers.next(), providers.next()) else {
-            return None;
-        };
+        let (root, _) = own_or_only(&self.go_modules, from, |module| {
+            module.len() == longest && import.starts_with(module)
+        })?;
         let mut directory = root.clone();
         directory.extend_from_slice(&import[longest..]);
         let nested = self
@@ -2101,6 +2101,29 @@ mod tests {
                 "tools/vendor/github.com/dep/lib/lib.go"
             ]
         );
+    }
+
+    /// Two `go.mod` files can declare one module path — a copied example, a
+    /// fork. A file of either imports its own module's packages; any other
+    /// importer cannot tell which of them it builds against.
+    #[test]
+    fn a_go_module_path_two_go_mods_declare_names_only_the_importers_own() {
+        let import = "package main\nimport \"example.com/app/lib\"\n";
+        let nodes = vec![
+            node_in(0, "a/cmd/main.go", import, Language::Go),
+            node_in(1, "a/lib/lib.go", "package lib\n", Language::Go),
+            node_in(2, "b/cmd/main.go", import, Language::Go),
+            node_in(3, "b/lib/lib.go", "package lib\n", Language::Go),
+            node_in(4, "c/main.go", import, Language::Go),
+        ];
+        let manifests = go_modules(&[
+            ("a", "example.com/app"),
+            ("b", "example.com/app"),
+            ("c", "example.com/c"),
+        ]);
+        assert_eq!(edges_under(&nodes, 0, &manifests), vec!["a/lib/lib.go"]);
+        assert_eq!(edges_under(&nodes, 2, &manifests), vec!["b/lib/lib.go"]);
+        assert!(edges_under(&nodes, 4, &manifests).is_empty());
     }
 
     /// `go.mod` is read by its own lexical rules, not as a line beginning
