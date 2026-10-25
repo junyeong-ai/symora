@@ -1607,7 +1607,7 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
             .find(|after| !after.is_extra())
     }
     let error = node.parent().filter(|error| error.is_error())?;
-    if !names_a_parameter(node) {
+    if !names_a_parameter(node) && !declares_unnamed_parameters(node) {
         return None;
     }
     let start = if name_before_parameters(node).is_some() {
@@ -1645,6 +1645,77 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
         .filter(|end| end.kind() == "expression_statement")
         .unwrap_or(node);
     Some((start, end))
+}
+
+/// Whether a C or C++ function declarator is a prototype's though its
+/// parameters name nothing: a storage class written right before it, or
+/// before the run of macros and type words written before it in the
+/// statement, begins no statement but a declaration, as no macro's
+/// invocation is (`extern NCURSES_EXPORT(WINDOW *) newwin
+/// (int,int,int,int);`). A syntax error ends the run, as it may hold the `;`
+/// of the statement before, whose storage class is not this one's
+/// (`NCURSES_EXPORT(WINDOW *) f (int);` after `extern …;`). Its list is empty
+/// or writes what no expression does, a type an expression cannot spell
+/// (`int`, `struct s`), a cv-qualifier, an abstract declarator or `...`, so
+/// it declares parameters rather than the arguments of a C++ variable's
+/// direct initializer (`extern T y(b);`). A list of type names alone
+/// (`(chtype)`) reads either way and is left unread.
+fn declares_unnamed_parameters(declarator: Node) -> bool {
+    fn before(node: Node) -> Option<Node> {
+        std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+            .find(|before| !before.is_extra() || before.is_error())
+    }
+    fn in_the_run(part: Node) -> bool {
+        match part.kind() {
+            "function_declarator" => !names_a_parameter(part),
+            "identifier" | "type_identifier" | "primitive_type" => true,
+            _ => false,
+        }
+    }
+    let mut written = before(declarator);
+    while let Some(part) = written.filter(|part| in_the_run(*part)) {
+        written = before(part);
+    }
+    declarator.kind() == "function_declarator"
+        && match written {
+            Some(part) => part.kind() == "storage_class_specifier",
+            None => declarator
+                .parent()
+                .filter(|error| error.is_error())
+                .and_then(before)
+                .is_some_and(|part| part.kind() == "storage_class_specifier"),
+        }
+        && declarator
+            .child_by_field_name("parameters")
+            .filter(|parameters| !parameters.has_error())
+            .is_some_and(|parameters| {
+                let mut cursor = parameters.walk();
+                let held: Vec<Node> = parameters
+                    .children(&mut cursor)
+                    .filter(|part| !part.is_extra() && !matches!(part.kind(), "(" | ")" | ","))
+                    .collect();
+                held.is_empty()
+                    || held.iter().any(|parameter| {
+                        parameter.kind() == "..."
+                            || parameter
+                                .child_by_field_name("type")
+                                .is_some_and(|written| {
+                                    matches!(
+                                        written.kind(),
+                                        "primitive_type"
+                                            | "sized_type_specifier"
+                                            | "struct_specifier"
+                                            | "union_specifier"
+                                            | "enum_specifier"
+                                            | "class_specifier"
+                                    )
+                                })
+                            || child_of_kind(*parameter, "type_qualifier").is_some()
+                            || parameter
+                                .child_by_field_name("declarator")
+                                .is_some_and(|named| named.kind().starts_with("abstract_"))
+                    })
+            })
 }
 
 /// Whether a C++ declaration's own syntax proves it a function's, as a
@@ -3860,8 +3931,11 @@ fn placed_kind(
 }
 
 /// Whether `inner`, a child of `outer`, is the header the declaration
-/// `outer` is written with rather than its body: its parameter list, or the
-/// type of what it declares. A type's own declaration holds its members
+/// `outer` is written with rather than its body: its parameter list, the
+/// type of what it declares, or a syntax error a function definition holds
+/// before its body (the C prototypes a misread definition's header runs
+/// through, `extern NCURSES_EXPORT(int) doupdate (void);` before a block a
+/// macro's body writes). A type's own declaration holds its members
 /// there instead: its definition (Go's `type S struct { … }`) or its
 /// components (Java's `record R(int a)`). A record type a declaration
 /// defines in its type without a name of its own is the declaration's, so
@@ -3876,6 +3950,14 @@ fn in_header_of(inner: Node, outer: Node) -> bool {
             .child_by_field_name(field)
             .is_some_and(|held| held.id() == inner.id())
     };
+    if inner.is_error()
+        && outer.kind() == "function_definition"
+        && outer
+            .child_by_field_name("body")
+            .is_some_and(|body| inner.end_byte() <= body.start_byte())
+    {
+        return true;
+    }
     if holds("type")
         && inner.child_by_field_name("name").is_none()
         && match inner.kind() {
@@ -4643,7 +4725,7 @@ fn name_before_parameters(declarator: Node) -> Option<Node> {
             matches!(named.kind(), "identifier" | "field_identifier")
                 || named.kind() == "function_declarator"
                     && !names_a_parameter(*named)
-                    && names_a_parameter(declarator)
+                    && (names_a_parameter(declarator) || declares_unnamed_parameters(declarator))
         })?;
     let error = declarator
         .child_by_field_name("parameters")?
@@ -4728,10 +4810,11 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 /// ABSL_ATTRIBUTE_LIFETIME_BOUND`, `API void Clear() PROTOBUF_FINAL;`),
 /// unless only the one it read names its parameters, as a macro's arguments
 /// never do ([`names_a_parameter`]), so the set-aside one is a macro written
-/// before it (`GIT_EXTERN(int) git_blob_lookup(git_blob **blob)`). A macro's
-/// argument list stands for no name of its own ([`macro_argument_name`],
-/// [`macro_wrapped_name`]), and a function's name is what its parameters
-/// follow ([`name_before_parameters`]).
+/// before it (`GIT_EXTERN(int) git_blob_lookup(git_blob **blob)`). A
+/// function's name is what its parameters follow ([`name_before_parameters`]),
+/// so a macro's argument before that name is no name (`NCURSES_EXPORT(chtype)
+/// getbkgd (WINDOW *)`); otherwise a macro's argument list stands for no name
+/// of its own ([`macro_argument_name`], [`macro_wrapped_name`]).
 fn declarator_name(declarator: Node) -> Node {
     if let Some(named) = typedef_name_before_macros(declarator) {
         return named;
@@ -4762,10 +4845,10 @@ fn declarator_name(declarator: Node) -> Node {
         {
             node = set_aside;
         }
-        if let Some(named) = macro_argument_name(node).or_else(|| macro_wrapped_name(node)) {
-            return named;
-        }
-        if let Some(named) = name_before_parameters(node) {
+        if let Some(named) = name_before_parameters(node)
+            .or_else(|| macro_argument_name(node))
+            .or_else(|| macro_wrapped_name(node))
+        {
             return named;
         }
         let inner = match node.kind() {
@@ -7574,6 +7657,68 @@ region     = "us-central1"
                 "function:f",
             ],
             "a prototype an error holds is the function its parameters name, after its type's macro"
+        );
+        assert_eq!(
+            declared(
+                "extern NCURSES_EXPORT(int) addch (const chtype);\n\
+                 extern NCURSES_EXPORT(WINDOW *) newwin (int,int,int,int);\n\
+                 extern NCURSES_EXPORT(WINDOW *) dupwin (WINDOW *);\n\
+                 extern NCURSES_EXPORT(WINDOW *) initscr ();\n\
+                 extern NCURSES_EXPORT(int) printw (chtype,...);\n\
+                 extern NCURSES_EXPORT(SCREEN *) set_term (struct screen);\n\
+                 extern NCURSES_EXPORT(int) noutrefresh (unsigned);\n\
+                 extern NCURSES_EXPORT(WINDOW *) attron (NCURSES_ATTR_T);\n\
+                 NCURSES_EXPORT(WINDOW *) nostorage (int,int);\n\
+                 extern NCURSES_EXPORT(WINDOW *) initialized (width, height);\n\
+                 extern NCURSES_EXPORT(int) wmove (WINDOW *win, int y, int x);\n"
+            ),
+            [
+                "function:addch",
+                "function:newwin",
+                "function:dupwin",
+                "function:initscr",
+                "function:printw",
+                "function:set_term",
+                "function:noutrefresh",
+                "function:wmove",
+            ],
+            "a storage class begins a declaration, and a list no expression writes declares parameters"
+        );
+        assert_eq!(
+            declared(
+                "extern NCURSES_EXPORT(const char *) curses_version (void);\n\
+                 extern NCURSES_EXPORT(int) assume_default_colors (int, int);\n\
+                 extern NCURSES_EXPORT(int) define_key (const char *, int);\n\
+                 extern NCURSES_EXPORT(WINDOW *) dup (const WINDOW);\n\
+                 extern NCURSES_EXPORT(chtype) getbkgd (WINDOW *);\n\
+                 extern NCURSES_EXPORT(int x) M(int) assume_function_names (int, int);\n\
+                 extern NCURSES_EXPORT(WINDOW *) attron (NCURSES_ATTR_T);\n\
+                 NCURSES_EXPORT(WINDOW *) nostorage (int,int);\n"
+            ),
+            [
+                "function:curses_version",
+                "function:assume_default_colors",
+                "function:define_key",
+                "function:dup",
+                "function:getbkgd",
+            ],
+            "the storage class is the statement's, written before the macros standing for its type"
+        );
+        let held: Vec<String> = extractor
+            .extract(
+                Path::new("e.h"),
+                "extern NCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);\n\
+                 extern NCURSES_EXPORT(int) doupdate (void);\n\
+                 #define getsyx(y,x) do { if (newscr) { \\\n\t\t\t} \\\n\t\t    } while(0)\n",
+                Language::Cpp,
+            )
+            .iter()
+            .map(|symbol| symbol.name_path.clone().unwrap_or(symbol.name.clone()))
+            .collect();
+        assert!(
+            held.iter().any(|path| path == "derwin"),
+            "what an error holds before a definition's body is its header and declares no \
+             member of it: {held:?}"
         );
         assert_eq!(
             declared(
