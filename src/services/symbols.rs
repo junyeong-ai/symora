@@ -553,6 +553,7 @@ impl SymbolExtractor {
                 macros.extend(prototype_macros(tree.root_node()));
                 macros.extend(qualified_type_macros(tree.root_node(), source));
                 macros.extend(access_specifier_macros(tree.root_node(), source));
+                macros.extend(unended_member_macros(tree.root_node()));
                 if macros.is_empty() {
                     break;
                 }
@@ -871,6 +872,82 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
                 before = macros_before;
             }
             macros.extend(before.iter().map(Node::byte_range));
+        }
+    }
+    macros
+}
+
+/// The macros a C++ class body writes as members of their own, which the
+/// grammar read as a member it ended by supplying the `;` the source does
+/// not write (`Q_OBJECT Q_PROPERTY(int x READ x)` before `public:`): a member
+/// ends with `;` or a body, so one ending with neither before what only
+/// begins after a member, the body's `}`, an access specifier or a
+/// declaration opening with a word only a declaration opens with
+/// ([`DECLARATION_OPENERS`]), is what macros write, and so is each member of
+/// such a run before it. A member is taken for one only where it is written
+/// as a macro is: a plain name for its type, if any, then arguments in
+/// parentheses or an invocation under a plain name whose arguments name
+/// nothing and no function's qualifier follows ([`names_a_parameter`],
+/// [`function_qualifiers`]), and nothing else but the `;` the grammar
+/// supplied. One that declares a function, a type with a body or a qualifier
+/// the next declaration begins with (`Q_DISABLE_COPY(W) const` before `int
+/// limit_;`) is left to the grammar's reading, and so is a run an error the
+/// grammar set aside interrupts, which may hold the rest of a member.
+fn unended_member_macros(root: Node) -> Vec<std::ops::Range<usize>> {
+    fn macro_written(member: Node) -> bool {
+        let mut cursor = member.walk();
+        matches!(member.kind(), "field_declaration" | "declaration")
+            && member
+                .children(&mut cursor)
+                .filter(|part| !part.is_extra() && !part.is_missing())
+                .all(|part| match part.kind() {
+                    "type_identifier" | "parenthesized_declarator" => true,
+                    "function_declarator" => {
+                        part.child_by_field_name("declarator").is_some_and(|name| {
+                            matches!(name.kind(), "identifier" | "field_identifier")
+                        }) && !names_a_parameter(part)
+                            && function_qualifiers(part).next().is_none()
+                    }
+                    _ => false,
+                })
+    }
+    let begins_after_a_member = |node: Node| {
+        node.kind() == "}" && !node.is_missing()
+            || node.kind() == "access_specifier"
+            || std::iter::successors(Some(node), |part| {
+                let mut cursor = part.walk();
+                part.children(&mut cursor).find(|child| !child.is_extra())
+            })
+            .last()
+            .is_some_and(|word| {
+                word.id() != node.id()
+                    && (word.kind() == "primitive_type"
+                        || DECLARATION_OPENERS.contains(&word.kind()))
+            })
+    };
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        let members: Vec<Node> = node
+            .children(&mut cursor)
+            .filter(|member| !member.is_extra() || member.is_error())
+            .collect();
+        pending.extend(members.iter().copied());
+        if node.kind() != "field_declaration_list" {
+            continue;
+        }
+        for (at, &next) in members.iter().enumerate() {
+            if !begins_after_a_member(next) {
+                continue;
+            }
+            for &member in members[..at]
+                .iter()
+                .rev()
+                .take_while(|member| macro_written(**member))
+            {
+                macros.extend(written_words(member).iter().map(Node::byte_range));
+            }
         }
     }
     macros
@@ -7622,6 +7699,56 @@ region     = "us-central1"
                 "field:x",
             ],
             "a member begins after an access specifier, so what a body writes before one unended is macros"
+        );
+        assert_eq!(
+            declared(
+                "class P {\n  Q_OBJECT\n  Q_PROPERTY(int x READ x)\n  Q_PROPERTY(int y READ y WRITE setY)\n\n\
+                 public:\n  /*! doc */\n  enum Mode { A };\n  P();\n};\n\
+                 namespace Foreign\n{\nQ_NAMESPACE\nQML_NAMED_ELEMENT(Options)\nQML_FOREIGN_NAMESPACE(Html)\n}\n\n\
+                 struct Release {\n    Q_GADGET\n    QML_VALUE_TYPE(release)\n    QML_FOREIGN(About)\n};\n\
+                 class S {\n  Q_OBJECT\n  Q_DECLARE_PRIVATE(S)\n  static S *instance();\n  Mode mode;\n  \
+                 QString name(int index)\n  int after;\n  Q_DISABLE_COPY(S)\n  const int limit_ = 3;\n};\n\
+                 class T : public Base\n{\n    Q_OBJECT\n    Q_DISABLE_COPY(T)\n    Q_DECLARE_PRIVATE(T)\n\
+                 public:\n    explicit T(QObject *parent = nullptr);\n};\n\
+                 class Typo {\n  int first;\n  Mode current() const\n  int count;\n  ~Typo()\n  int after;\n};\n"
+            ),
+            [
+                "class:P",
+                "enum:Mode",
+                "enum_member:A",
+                "constructor:P",
+                "namespace:Foreign",
+                "struct:Release",
+                "class:S",
+                "method:instance",
+                "field:mode",
+                "method:name",
+                "field:after",
+                "field:limit_",
+                "class:T",
+                "constructor:T",
+                "class:Typo",
+                "field:first",
+                "method:current",
+                "field:count",
+                "constructor:~Typo",
+                "field:after",
+            ],
+            "a member ending with neither `;` nor a body before what begins after one is macros"
+        );
+        assert_eq!(
+            declared(
+                "class Svg : public QObject, public Iface\n{\n    Q_OBJECT\n    Q_INTERFACES(Iface)\n\
+                 //! [0]\n};\n"
+            ),
+            ["class:Svg"],
+            "nor before the body's closing brace"
+        );
+        let defined =
+            declared("class E {\n  enum Mode { A, B }\n  Q_ENUM(Mode)\n  int count;\n};\n");
+        assert!(
+            defined.iter().any(|d| d == "enum:Mode"),
+            "a type a member defines is no macro: {defined:?}"
         );
         assert_eq!(
             declared(
