@@ -173,6 +173,9 @@ struct Importer<'a> {
     /// non-relative imports, each reading once: an import forms an edge only
     /// where they agree.
     readings: Vec<Reading>,
+    /// Whether the file's configuration is a `jsconfig.json`, a JavaScript
+    /// project's, which is never one to tell to install TypeScript.
+    javascript_project: bool,
 }
 
 /// How one TypeScript version that may compile a file reads a non-relative
@@ -250,15 +253,15 @@ impl<'a> Importer<'a> {
             .unwrap_or_default();
         let readings = match &owner {
             _ if !is_javascript(node.language) => Vec::new(),
-            TsOwner::Config(config) => vec![(&config.module_options, config.typescript.clone())],
+            TsOwner::Config(config) => vec![(&config.module_options, config.majors())],
             TsOwner::Undetermined(owners) => owners
                 .iter()
-                .map(|config| (&config.module_options, config.typescript.clone()))
+                .map(|config| (&config.module_options, config.majors()))
                 .collect(),
             TsOwner::None | TsOwner::Uncompiled(_)
                 if node.language == Language::TypeScript && typescript != TypeScript::Absent =>
             {
-                vec![(&unset, typescript)]
+                vec![(&unset, typescript.majors().to_vec())]
             }
             TsOwner::None | TsOwner::Uncompiled(_) => {
                 return Self {
@@ -266,6 +269,7 @@ impl<'a> Importer<'a> {
                     ts_config,
                     ts_owners: Vec::new(),
                     ts_uncompiled,
+                    javascript_project: false,
                     readings: vec![Reading {
                         major: None,
                         base_url: true,
@@ -279,8 +283,8 @@ impl<'a> Importer<'a> {
             }
         };
         let mut read = Vec::new();
-        for (options, typescript) in readings {
-            for major in typescript.majors() {
+        for (options, majors) in readings {
+            for major in &majors {
                 let reading = Reading {
                     major: Some(*major),
                     base_url: reads_base_url(*major),
@@ -300,6 +304,7 @@ impl<'a> Importer<'a> {
             },
             ts_uncompiled,
             readings: read,
+            javascript_project: ts_config.is_some_and(|config| config.javascript),
         }
     }
 
@@ -1374,7 +1379,7 @@ impl ProjectIndex<'_> {
                 .filter(|(other, _)| other == major)
                 .all(|(_, other)| other == reading)
         });
-        if each_major_agrees {
+        if each_major_agrees && !importer.javascript_project {
             Resolution::VersionUndetermined(specifier.to_string())
         } else {
             Resolution::Undetermined(specifier.to_string())
@@ -3802,8 +3807,10 @@ mod tests {
     /// TypeScript 7 reads no `baseUrl`: tsc 7.0.2 reports TS5102, resolves
     /// nothing below it and `paths` against the configuration's own
     /// directory, where 5.9.3 and 6.0.3 resolve both against `baseUrl`
-    /// (`baseurl7`). Where the major is unknown, a specifier `baseUrl`
-    /// decides is disclosed.
+    /// (`baseurl7`). So where no TypeScript is installed or declared, a
+    /// configuration setting `baseUrl` is read under 5 and 6 alone; where a
+    /// declared range fixes no major, 7 still reads it and a specifier
+    /// `baseUrl` decides is disclosed.
     #[test]
     fn typescript_7_reads_no_base_url() {
         let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
@@ -3812,7 +3819,8 @@ mod tests {
         for (app, range) in [
             ("six", Some("^6.0.3")),
             ("seven", Some("^7.0.2")),
-            ("any", None),
+            ("none", None),
+            ("latest", Some("latest")),
         ] {
             nodes.push(node_in(
                 nodes.len(),
@@ -3855,11 +3863,82 @@ mod tests {
         };
         assert_eq!(edges(0), vec!["six/src/lib/x.ts"]);
         assert_eq!(edges(3), vec!["seven/lib/x.ts"]);
-        assert!(edges(6).is_empty());
+        assert_eq!(edges(6), vec!["none/src/lib/x.ts"]);
+        assert!(edges(9).is_empty());
         assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
             BTreeSet::from(["@/lib/x".to_string(), "lib/x".to_string()])
+        );
+    }
+
+    /// A JavaScript project's `jsconfig.json`, as Create React App documents
+    /// absolute imports (`baseUrl: "src"`) and Next.js its aliases, is read
+    /// with its `baseUrl` (`cra_js`, `next_js`), as esbuild 0.28.2 and
+    /// Next.js 16.3.3 read it, and an import the TypeScript majors read
+    /// apart there is disclosed without advice to install TypeScript.
+    #[test]
+    fn a_javascript_projects_jsconfig_is_read_with_its_base_url() {
+        let js = |id, rel: &str, source: &str| node_in(id, rel, source, Language::JavaScript);
+        let mut nodes = vec![
+            js(
+                0,
+                "cra/src/pages/a.js",
+                "import Button from \"components/Button\";\nimport p from \"p6\";\n",
+            ),
+            js(1, "cra/src/components/Button.js", ""),
+            js(
+                2,
+                "next/pages/a.js",
+                "import Nav from \"@/components/Nav\";\nimport Nav2 from \"components/Nav\";\n",
+            ),
+            js(3, "next/components/Nav.js", ""),
+        ];
+        for file in ["types", "esm", "cjs"] {
+            nodes.push(node_in(
+                nodes.len(),
+                &format!("packages/p6/src/{file}.ts"),
+                "",
+                Language::TypeScript,
+            ));
+        }
+        let manifests = manifests_of(
+            &[
+                ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+                (
+                    "cra/package.json",
+                    "{\"dependencies\": {\"react-scripts\": \"5.0.1\"}}",
+                ),
+                (
+                    "cra/jsconfig.json",
+                    "{\"compilerOptions\": {\"baseUrl\": \"src\"}, \"include\": [\"src\"]}",
+                ),
+                (
+                    "next/jsconfig.json",
+                    "{\"compilerOptions\": {\"baseUrl\": \".\", \"paths\": \
+                     {\"@/components/*\": [\"components/*\"]}}}",
+                ),
+                (
+                    "packages/p6/package.json",
+                    "{\"name\": \"p6\", \"types\": \"./src/types.ts\", \"exports\": \
+                     {\".\": {\"import\": \"./src/esm.ts\", \"require\": \"./src/cjs.ts\"}}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(0), vec!["cra/src/components/Button.js"]);
+        assert_eq!(edges(2), vec!["next/components/Nav.js"]);
+        assert!(graph.version_undetermined_imports.is_empty());
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["p6".to_string()])
         );
     }
 
