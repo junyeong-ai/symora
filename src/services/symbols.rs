@@ -521,9 +521,10 @@ impl SymbolExtractor {
     /// `content` read by this language's grammar, or `None` where it has no
     /// grammar here or the parse failed. C and C++ are read again past the
     /// macros a class definition holds where the grammar took it for a function
-    /// ([`misread_class_macros`]) and those a class body writes alone before
-    /// its closing brace ([`brace_swallowing_macros`]), each spelled as blanks,
-    /// so every offset still addresses `content`.
+    /// ([`misread_class_macros`]), those a class body writes alone before its
+    /// closing brace ([`brace_swallowing_macros`]) and those written after a
+    /// function declarator ([`trailing_declarator_macros`]), each spelled as
+    /// blanks, so every offset still addresses `content`.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
         let mut parser = entry.parser.lock().ok()?;
@@ -534,6 +535,7 @@ impl SymbolExtractor {
                 let source = blanked.as_deref().unwrap_or(content.as_bytes());
                 let mut macros = misread_class_macros(tree.root_node(), source);
                 macros.extend(brace_swallowing_macros(tree.root_node()));
+                macros.extend(trailing_declarator_macros(tree.root_node(), source));
                 if macros.is_empty() {
                     break;
                 }
@@ -783,6 +785,66 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
         }
     }
     macros
+}
+
+/// The macros written after a C or C++ function declarator, where the grammar
+/// takes only its qualifiers and specifiers: the names standing between the
+/// declarator and the `;`, `=`, `{`, `override` or `final` that can follow it
+/// are attribute macros (`const U_LIFETIME_BOUND = 0;`, `lzma_nothrow
+/// lzma_attr_pure;`), which the grammar can recover from by taking the
+/// members after them into an error. The declarator must prove itself a
+/// function, by parameters that declare a name or qualifiers only a
+/// function's takes ([`function_qualifiers`]): a macro's invocation reads as
+/// one too, and the names after it are a declaration of their own
+/// (`_LIBC_COUNT(gl_matchc) gl_pathv;`, `Entry entry;` after
+/// `DEFINE_MEMBERS(File)`), which no function's declarator runs into.
+fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut leaves = Vec::new();
+    let mut declarators = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "function_declarator"
+            && (names_a_parameter(node) || function_qualifiers(node).next().is_some())
+        {
+            declarators.push(node.end_byte());
+        }
+        if node.child_count() == 0 {
+            if !node.is_missing() && node.kind() != "comment" {
+                leaves.push(node);
+            }
+            continue;
+        }
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.children(&mut cursor).collect();
+        pending.extend(children.into_iter().rev());
+    }
+    let text = |node: Node| source.get(node.byte_range()).unwrap_or_default();
+    let ends_the_declarator = |node: &Node| {
+        matches!(node.kind(), ";" | "=" | "{") || matches!(text(*node), b"override" | b"final")
+    };
+    let names_a_macro = |node: &Node| {
+        matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier"
+        ) && !ends_the_declarator(node)
+    };
+    declarators
+        .into_iter()
+        .flat_map(|end| {
+            let first = leaves.partition_point(|leaf| leaf.start_byte() < end);
+            let after = first
+                + leaves[first..]
+                    .iter()
+                    .take_while(|leaf| names_a_macro(leaf))
+                    .count();
+            let names = if leaves.get(after).is_some_and(ends_the_declarator) {
+                &leaves[first..after]
+            } else {
+                &[]
+            };
+            names.iter().map(Node::byte_range).collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Whether a C or C++ node after a declaration the grammar ended by supplying
@@ -1178,24 +1240,35 @@ fn only_a_function_writes(node: Node) -> bool {
     }
     let mut cursor = declarator.walk();
     declarator.kind() == "function_declarator"
-        && declarator.named_children(&mut cursor).any(|part| {
-            part.kind() == "type_qualifier"
-                && part
-                    .child(0)
-                    .is_some_and(|word| matches!(word.kind(), "const" | "volatile"))
-                && !ends_on_a_supplied_semicolon(node)
-                || matches!(
-                    part.kind(),
-                    "operator_name"
-                        | "destructor_name"
-                        | "ref_qualifier"
-                        | "noexcept"
-                        | "throw_specifier"
-                        | "virtual_specifier"
-                        | "trailing_return_type"
-                        | "requires_clause"
-                )
-        })
+        && (declarator
+            .named_children(&mut cursor)
+            .any(|part| matches!(part.kind(), "operator_name" | "destructor_name"))
+            || function_qualifiers(declarator).any(|qualifier| {
+                qualifier.kind() != "type_qualifier" || !ends_on_a_supplied_semicolon(node)
+            }))
+}
+
+/// What a C or C++ function declarator writes after its parameters that no
+/// other declarator can: a cv-qualifier, ref-qualifier, exception
+/// specification, virtual specifier, trailing return type or constraint.
+fn function_qualifiers(declarator: Node) -> impl Iterator<Item = Node> {
+    let mut cursor = declarator.walk();
+    let parts: Vec<Node> = declarator.named_children(&mut cursor).collect();
+    parts.into_iter().filter(|part| {
+        part.kind() == "type_qualifier"
+            && part
+                .child(0)
+                .is_some_and(|word| matches!(word.kind(), "const" | "volatile"))
+            || matches!(
+                part.kind(),
+                "ref_qualifier"
+                    | "noexcept"
+                    | "throw_specifier"
+                    | "virtual_specifier"
+                    | "trailing_return_type"
+                    | "requires_clause"
+            )
+    })
 }
 
 /// Whether a C or C++ function declarator's parameters declare a name
@@ -7218,6 +7291,21 @@ region     = "us-central1"
                 "QT_BEGIN_NAMESPACE\n\nclass QWidget;\nEXPORT struct stat st;\nAPI struct item *items;\n"
             ),
             ["class:QWidget", "variable:items"]
+        );
+        assert_eq!(
+            declared(
+                "class A {\n    API virtual CharacterIterator& getText() const U_LIFETIME_BOUND = 0;\n    \
+                 API void after();\n};\n\
+                 extern LZMA_API(lzma_ret) lzma_index_append(lzma_index *i)\n\t\t\
+                 lzma_nothrow lzma_attr_warn_unused_result;\n"
+            ),
+            [
+                "class:A",
+                "method:getText",
+                "method:after",
+                "function:lzma_index_append"
+            ],
+            "the names after a function's declarator are macros written there"
         );
     }
 
