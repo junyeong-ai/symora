@@ -586,9 +586,12 @@ impl SymbolExtractor {
                     .map(move |symbol| (node, symbol))
             })
             .filter(|(node, symbol)| {
-                language != Language::Python
-                    || node.kind() != "assignment"
-                    || bound.insert((binding_scope(*node), symbol.name.clone()))
+                let assigns = match language {
+                    Language::Python => node.kind() == "assignment",
+                    Language::Bash => node.kind() != "function_definition",
+                    _ => false,
+                };
+                !assigns || bound.insert((binding_scope(*node), symbol.name.clone()))
             })
             .collect()
     }
@@ -1032,10 +1035,11 @@ fn set_aside_class_kind(node: Node, content: &str) -> Option<SymbolKind> {
     }
 }
 
-/// The class or module whose namespace a Python assignment binds a name in.
-/// A namespace holds one variable per name, so only the first assignment to
-/// it declares it and the rest rebind it (`HAS_JSON = True` under `try:`,
-/// `HAS_JSON = False` under `except`), as pyright lists one.
+/// The class or module whose namespace a Python assignment binds a name in,
+/// or none for a shell script's, whose variables are the shell's. A namespace
+/// holds one variable per name, so only the first assignment to it declares
+/// it and the rest rebind it (`HAS_JSON = True` under `try:`, `HAS_JSON =
+/// False` under `except`), as pyright lists one.
 fn binding_scope(assignment: Node) -> Option<usize> {
     std::iter::successors(assignment.parent(), Node::parent)
         .find(|scope| matches!(scope.kind(), "class_definition" | "module"))
@@ -2113,6 +2117,12 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .unwrap_or_default(),
         Language::Python | Language::Ruby => assignment_targets(node)
             .filter(|target| binds_a_name(*target, language))
+            .collect(),
+        Language::Bash => children_of_kind(node, "variable_assignment")
+            .into_iter()
+            .filter(|assignment| child_of_kind(*assignment, "=").is_some())
+            .filter_map(|assignment| assignment.child_by_field_name("name"))
+            .filter(|name| name.kind() == "variable_name")
             .collect(),
         Language::PHP => children_of_kind(node, "property_element")
             .into_iter()
@@ -3289,6 +3299,9 @@ fn node_kind(node: Node) -> SymbolKind {
         "field_declaration" | "declaration" => field_kind(node),
         "extension_type_representation" => SymbolKind::Field,
         "top_level_variable_declaration" | "external_variable_declaration" => SymbolKind::Variable,
+        "variable_assignment" | "variable_assignments" | "declaration_command" => {
+            SymbolKind::Variable
+        }
         "getter_signature" | "setter_signature" => SymbolKind::Property,
         "operator_signature" => SymbolKind::Method,
         "variable_declaration" | "assignment_statement" if lua_function_value(node).is_some() => {
@@ -3761,8 +3774,15 @@ const RUBY_QUERY: &str = r#"
 (class (body_statement [(assignment) (operator_assignment operator: "||=")] @symbol))
 "#;
 
+// A script's variables are the ones its top level assigns, alone, under
+// `export`, `readonly` or `declare`, or several in one statement; a function's
+// are its own, and an assignment written before a command sets that
+// command's environment alone (`TRACE=1 run`). An element (`a[0]=1`) or an
+// append (`A+=1`) assigns to a variable rather than binding one.
 const BASH_QUERY: &str = r#"
 (function_definition) @symbol
+(program (variable_assignment name: (variable_name) "=") @symbol)
+(program [(variable_assignments) (declaration_command)] @symbol)
 "#;
 
 // Lua defines its function statement as the assignment of a function
@@ -4821,8 +4841,31 @@ end
 greet() { echo hi; }
 
 function other { echo hi; }
+
+VERSION=1
+VERSION=2
+readonly LIMIT=3
+export HOME_DIR="$HOME" CACHE_DIR=/tmp
+COUNT+=1
+items[0]=x
+TRACE=1 run_it
+setup() {
+  local scoped=1
+  IN_FUNCTION=2
+}
+FIRST=1 SECOND=2
 "#,
-            declares: &["function:greet", "function:other"],
+            declares: &[
+                "function:greet",
+                "function:other",
+                "variable:VERSION",
+                "variable:LIMIT",
+                "variable:HOME_DIR",
+                "variable:CACHE_DIR",
+                "variable:FIRST",
+                "variable:SECOND",
+                "function:setup",
+            ],
         },
         DeclarationFixture {
             language: Language::Lua,
@@ -5697,6 +5740,13 @@ region     = "us-central1"
                 "a.dart",
                 Language::Dart,
                 "class A {\n  int unused = 1, shared = 2;\n  int one = 1;\n}\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.sh",
+                Language::Bash,
+                "export unused=1 shared=2\nreadonly one=1\n",
                 &["unused", "shared"],
                 "one",
             ),
@@ -6762,6 +6812,13 @@ region     = "us-central1"
                 "function M.noop() end\n",
                 "M.noop",
                 Some("function M.noop()"),
+            ),
+            (
+                "a.sh",
+                Language::Bash,
+                "readonly LIMIT=\"$(compute)\"\n",
+                "LIMIT",
+                Some("readonly LIMIT"),
             ),
             (
                 "a.tf",
