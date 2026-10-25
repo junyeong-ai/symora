@@ -65,9 +65,9 @@ pub(super) enum TypeScript {
     /// Neither installed nor declared above the directory.
     #[default]
     Absent,
-    /// The majors it may be: the one installed or declared, or every major
-    /// whose defaults pack reads (`MAJORS`) where that is none of them or a
-    /// declared range fixes none.
+    /// The majors it may be: the one installed or declared (one below 5 read
+    /// as 5), or every major whose defaults pack reads (`MAJORS`) where that
+    /// is above them or a declared range fixes none (`of_major`).
     Majors(Vec<u8>),
 }
 
@@ -85,8 +85,13 @@ impl TypeScript {
         }
     }
 
+    /// The majors a known major is read as: one below 5 as 5, whose
+    /// `module` and `moduleResolution` defaults TypeScript's documentation
+    /// gives every earlier major too (`commonjs` resolving as `node10`, an
+    /// ES `module` as `classic`); one above 7 as any, its defaults unknown.
     fn of_major(major: Option<u64>) -> Self {
         match major.and_then(|major| u8::try_from(major).ok()) {
+            Some(major) if major < MAJORS[0] => Self::Majors(vec![MAJORS[0]]),
             Some(major) if MAJORS.contains(&major) => Self::Majors(vec![major]),
             _ => Self::Majors(MAJORS.to_vec()),
         }

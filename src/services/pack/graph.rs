@@ -4264,9 +4264,10 @@ mod tests {
     /// installed nearest above a configuration, else the range the nearest
     /// `package.json` declares — a pnpm catalog entry and an `npm:` alias
     /// among them; the defaults are each major's as tsc 5.9.3, 6.0.3 and
-    /// 7.0.2 apply them (`tsdef_none`, `tsdef_target`, `tsdef_cjs`). Where no
-    /// major is known, an import forms an edge only where every major's
-    /// reading agrees, and is disclosed where they differ.
+    /// 7.0.2 apply them (`tsdef_none`, `tsdef_target`, `tsdef_cjs`), a major
+    /// below 5 read as 5 (`ts4`). Where no major is known, or it is above 7,
+    /// an import forms an edge only where every major's reading agrees, and
+    /// is disclosed where they differ.
     #[test]
     fn the_defaults_follow_the_typescript_major_a_workspace_uses() {
         let node16 = "{\"compilerOptions\": {\"moduleResolution\": \"node16\"}}";
@@ -4299,6 +4300,9 @@ mod tests {
             ),
             ("named", "catalog:ts6", "", Some(node10), Some("types")),
             ("unknown", "latest", "", Some("{}"), None),
+            // A major below 5 reads 5's defaults; one above 7 is unknown.
+            ("ts4", "^4.9.5", "", Some("{}"), Some("types")),
+            ("ts8", "^8.0.0", "", Some("{}"), None),
             (
                 "nodenext",
                 ">=5",
