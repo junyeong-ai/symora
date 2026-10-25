@@ -7,7 +7,7 @@ use std::path::Path;
 use super::Node;
 use super::manifests::{
     JsPackage, Manifests, ModuleResolution, Pytest, PythonProject, TsConfig, TsOwner, nearest,
-    own_or_only, project_path, python_project,
+    own_or_only, project_path, python_packages, python_project,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -835,29 +835,22 @@ struct PythonPath<'a> {
     /// project root is a project whether or not it holds a configuration
     /// file of its own.
     projects: HashMap<Vec<String>, PythonProject>,
+    /// How pytest runs from each directory whose files configure it.
+    pytest: &'a HashMap<Vec<String>, Pytest>,
     /// How pytest runs where no configuration file says.
     default_pytest: Pytest,
 }
 
 impl<'a> PythonPath<'a> {
-    fn of(nodes: &'a [Node], manifests: &Manifests) -> Self {
-        let packages: HashSet<&[String]> = nodes
-            .iter()
-            .filter(|node| {
-                node.language == Language::Python
-                    && Path::new(&node.rel_path)
-                        .file_stem()
-                        .is_some_and(|stem| stem == "__init__")
-            })
-            .map(|node| node.directory.as_slice())
-            .collect();
+    fn of(nodes: &'a [Node], manifests: &'a Manifests) -> Self {
         let mut projects = manifests.python_projects.clone();
         projects
             .entry(Vec::new())
-            .or_insert_with(|| python_project(&[], &[]));
+            .or_insert_with(|| python_project(&[], None));
         Self {
-            packages,
+            packages: python_packages(nodes),
             projects,
+            pytest: &manifests.pytest_configurations,
             default_pytest: Pytest::default(),
         }
     }
@@ -875,13 +868,11 @@ impl<'a> PythonPath<'a> {
             .find(|directory| !self.packages.contains(directory))
     }
 
-    /// The pytest configuration a file in `directory` runs under: that of
-    /// the nearest project above it whose files configure pytest, as pytest
-    /// looks for one upward from where it runs.
+    /// The pytest configuration a file in `directory` runs under: the
+    /// nearest above it, as pytest looks for one upward from where it runs.
     fn pytest_of(&self, directory: &[String]) -> &Pytest {
-        (0..=directory.len())
-            .rev()
-            .find_map(|depth| self.projects.get(&directory[..depth])?.pytest.as_ref())
+        nearest(self.pytest, directory)
+            .map(|(_, pytest)| pytest)
             .unwrap_or(&self.default_pytest)
     }
 
@@ -2331,6 +2322,64 @@ mod tests {
             edges_under(&nodes, 7, &manifests),
             vec!["cfg/lib/mod/b.py", "cfg/tools/shared.py"]
         );
+    }
+
+    /// A Python project is a directory whose files configure a build — a
+    /// `setup.py`, a `pyproject.toml` or `setup.cfg` with more than pytest's
+    /// table — and that is no package: a package's `setup.py` is one of its
+    /// modules. A file that only configures pytest (`pytest.ini`,
+    /// `tox.ini`, a `pyproject.toml` or `setup.cfg` holding only pytest's
+    /// table) sets how pytest runs below it, and the files there stay the
+    /// enclosing project's.
+    #[test]
+    fn a_python_project_is_a_directory_whose_files_configure_a_build() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "src/app/__init__.py", ""),
+            python(1, "src/app/setup.py", "import logging\n"),
+            python(2, "src/app/a.py", "import core_pkg.m\n"),
+            python(3, "core/src/core_pkg/__init__.py", ""),
+            python(4, "core/src/core_pkg/m.py", ""),
+            python(5, "tests/test_a.py", "import core_pkg.m\nimport helper\n"),
+            python(6, "tests/helpers_dir/helper.py", ""),
+            python(7, "checks/test_b.py", "import core_pkg.m\nimport aid\n"),
+            python(8, "checks/support/aid.py", ""),
+            python(9, "more/test_c.py", "import core_pkg.m\nimport bit\n"),
+            python(10, "more/extra/bit.py", ""),
+            python(11, "side/run.py", "import core_pkg.m\nimport sidekick\n"),
+            python(12, "side/sidekick.py", ""),
+        ];
+        let core = "core/src/core_pkg/m.py";
+        let manifests = manifests_of(
+            &[
+                (
+                    "pyproject.toml",
+                    "[project]\nname = \"root\"\ndependencies = [\"core\"]\n\
+                     [tool.uv.sources]\ncore = { path = \"core\" }\n",
+                ),
+                ("core/pyproject.toml", "[project]\nname = \"core\"\n"),
+                ("src/app/setup.py", "import logging\n"),
+                ("tests/pytest.ini", "[pytest]\npythonpath = helpers_dir\n"),
+                (
+                    "checks/pyproject.toml",
+                    "[tool.pytest.ini_options]\npythonpath = [\"support\"]\n",
+                ),
+                ("more/setup.cfg", "[tool:pytest]\npythonpath = extra\n"),
+                (
+                    "side/setup.cfg",
+                    "[metadata]\nname = side\n\n[tool:pytest]\naddopts = -q\n",
+                ),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(2), vec![core]);
+        assert_eq!(edges(5), vec![core, "tests/helpers_dir/helper.py"]);
+        assert_eq!(edges(7), vec![core, "checks/support/aid.py"]);
+        assert_eq!(edges(9), vec![core, "more/extra/bit.py"]);
+        // A `setup.cfg` with build metadata makes a project of its own, which
+        // declares no dependency.
+        assert_eq!(edges(11), vec!["side/sidekick.py"]);
     }
 
     /// pytest's default import mode puts on `sys.path` the basedir of each
