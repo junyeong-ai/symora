@@ -883,7 +883,9 @@ fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<
 /// primitive type, a class key) but a K&R definition's declarations of its
 /// parameters, which the grammar reads as declarations of the file's (`int
 /// f(a) int a; {…}`, a form C23 removed), while its header, naming no
-/// parameter, declares no function `f`, or the head declares no function
+/// parameter, declares no function `f`, or it writes `virtual` among its
+/// specifiers, wherever (`__declspec(dllexport) virtual int g();` after
+/// `QML_ELEMENT`), or the head declares no function
 /// while the node's own syntax proves it one ([`proves_a_function`]), or the
 /// head leaves its function to the node ([`leaves_its_function_to_the_next`]).
 /// A macro written after a data member's declarator does neither (`idx_t
@@ -896,7 +898,8 @@ fn begins_its_own_declaration(node: Node, head: Node, content: &str) -> bool {
     .last()
     .is_some_and(|word| {
         word.kind() == "primitive_type" || DECLARATION_OPENERS.contains(&word.kind())
-    }) || !declares_a_function(head) && proves_a_function(node)
+    }) || child_of_kind(node, "virtual").is_some()
+        || !declares_a_function(head) && proves_a_function(node)
         || leaves_its_function_to_the_next(head, content)
 }
 
@@ -1447,11 +1450,11 @@ fn proves_a_function(node: Node) -> bool {
 /// the next declaration's among them (`ABSL_DEPRECATE_AND_INLINE()
 /// constexpr`), and `= 0` as a pure specifier, though an invocation may
 /// precede an initializer (`DUCKDB_GUARDED_BY(glock) = 0`); neither is one.
-/// Nor is `virtual`: a virtual function has a type, a destructor aside,
-/// whose name proves it, so one written without is an invocation (`virtual
-/// DECLARE_TRACE();`). Nor is a cv-qualifier after which the grammar supplied the `;`: the next
-/// declaration begins with it (`Q_DISABLE_COPY(Foo)` before `const int
-/// limit_`).
+/// Nor is `virtual`: a virtual function has a type, but for a destructor or
+/// a conversion function, whose name proves it, so one written without is an
+/// invocation (`virtual DECLARE_TRACE();`). Nor is a cv-qualifier after
+/// which the grammar supplied the `;`: the next declaration begins with it
+/// (`Q_DISABLE_COPY(Foo)` before `const int limit_`).
 fn only_a_function_writes(node: Node) -> bool {
     if [
         "default_method_clause",
@@ -7414,7 +7417,9 @@ region     = "us-central1"
                  class Buffer {\n\tidx_t parked_bytes DUCKDB_GUARDED_BY(glock) = 0;\n\tint after;\n};\n\
                  struct uv_pipe_s {\n  UV_HANDLE_FIELDS\n  UV_STREAM_FIELDS\n  int ipc;\n};\n\
                  union Symbol {\n  DEFINE_MEMBERS(File, FULL, file)\n  Entry entry;\n};\n\
-                 struct LogicalType {\n\tDUCKDB_API static LogicalType DECIMAL(uint8_t width, uint8_t scale);\n};\n"
+                 struct LogicalType {\n\tDUCKDB_API static LogicalType DECIMAL(uint8_t width, uint8_t scale);\n};\n\
+                 class Item {\n public:\n  Q_OBJECT\n  QML_ELEMENT\n  __declspec(dllexport) virtual int g();\n  \
+                 int after;\n};\n"
             ),
             [
                 "class:Logger",
@@ -7433,6 +7438,9 @@ region     = "us-central1"
                 "field:entry",
                 "struct:LogicalType",
                 "method:DECIMAL",
+                "class:Item",
+                "method:g",
+                "field:after",
             ],
             "a declaration the grammar cut short goes on only into what cannot begin one of its own"
         );
