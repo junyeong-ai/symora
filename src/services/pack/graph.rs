@@ -6,7 +6,8 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    JsPackage, Manifests, TsConfig, nearest, own_or_only, project_path, python_project_roots,
+    JsPackage, Manifests, ModuleResolution, TsConfig, nearest, own_or_only, project_path,
+    python_project_roots,
 };
 use crate::models::symbol::Language;
 
@@ -108,6 +109,18 @@ struct Importer<'a> {
     /// The TypeScript configuration a JavaScript or TypeScript file is
     /// compiled under: the nearest above it.
     ts_config: Option<&'a TsConfig>,
+    /// The module resolution the file's imports are read under, where it is
+    /// one deciding which mode-dependent `exports` conditions apply.
+    mode: Option<ImportMode>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImportMode {
+    Bundler,
+    /// `node16` or `nodenext`, for a file Node reads as an ES module or not.
+    Node16 {
+        esm: bool,
+    },
 }
 
 impl<'a> Importer<'a> {
@@ -122,12 +135,76 @@ impl<'a> Importer<'a> {
         } else {
             None
         };
+        let mode = ts_config
+            .and_then(|config| config.module_resolution)
+            .map(|resolution| match resolution {
+                ModuleResolution::Bundler => ImportMode::Bundler,
+                ModuleResolution::Node16 => ImportMode::Node16 {
+                    esm: is_es_module(node, manifests),
+                },
+            });
         Self {
             node,
             crate_root,
             ts_config,
+            mode,
         }
     }
+
+    /// Whether TypeScript matches an `exports` condition for this file's
+    /// imports, `None` where its configuration leaves that open: `types`,
+    /// `default` and the `customConditions` always; `import` under `bundler`
+    /// or for an ES module under `node16`; `require` for any other file under
+    /// `node16`; `node` under `node16`; nothing else. A versioned
+    /// `types@<range>` key depends on the compiler's own version.
+    fn matches(&self, condition: &str) -> Option<bool> {
+        if matches!(condition, "types" | "default")
+            || self
+                .ts_config
+                .is_some_and(|config| config.custom_conditions.iter().any(|c| c == condition))
+        {
+            return Some(true);
+        }
+        match condition {
+            "import" | "require" | "node" => Some(match self.mode? {
+                ImportMode::Bundler => condition == "import",
+                ImportMode::Node16 { esm } => match condition {
+                    "import" => esm,
+                    "require" => !esm,
+                    _ => true,
+                },
+            }),
+            _ if condition.starts_with("types@") => None,
+            _ => Some(false),
+        }
+    }
+}
+
+/// Whether Node reads a JavaScript or TypeScript file as an ES module: one
+/// whose extension says so (`.mjs`, `.mts`), or one with an ordinary
+/// extension below a `package.json` declaring `"type": "module"`, the nearest
+/// above it deciding.
+fn is_es_module(node: &Node, manifests: &Manifests) -> bool {
+    match Path::new(&node.rel_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("mjs" | "mts") => true,
+        Some("cjs" | "cts") => false,
+        _ => nearest(&manifests.module_types, &node.directory).is_some_and(|(_, module)| *module),
+    }
+}
+
+/// What a package's `exports` target names for one importer.
+#[derive(Debug, PartialEq, Eq)]
+enum Exported {
+    /// The files it resolves to: none where the file is only on disk.
+    Files(Vec<usize>),
+    /// No file: a target naming none, or no condition the importer matches.
+    Nothing,
+    /// Which file depends on a condition the importer's configuration leaves
+    /// open.
+    Undetermined,
 }
 
 /// What a set of candidate files names: one file, none, or several — which
@@ -625,7 +702,7 @@ impl ProjectIndex<'_> {
         {
             return Resolution::Files(found);
         }
-        if let Some(package) = self.workspace_package(specifier, importer.node) {
+        if let Some(package) = self.workspace_package(specifier, importer) {
             return package;
         }
         match mapped {
@@ -638,12 +715,15 @@ impl ProjectIndex<'_> {
     /// or `None` where the specifier names no package of a workspace the
     /// importer is in. A package with `exports` exports only what it maps:
     /// the name stands for the file `.` maps to, a subpath for the one
-    /// `./<subpath>` maps to. Without `exports`, the name stands for the file
-    /// its `types`, `typings` or `main` names, else its `index`, and a
-    /// subpath for the file below the package. A package whose file pack
-    /// cannot determine is disclosed: a condition or pattern `exports` maps,
-    /// an entry naming no file, or a name two packages of the workspace give.
-    fn workspace_package(&self, specifier: &str, from: &Node) -> Option<Resolution> {
+    /// `./<subpath>` maps to, read through its conditions (`export_target`).
+    /// Without `exports`, the name stands for the file its `types`, `typings`
+    /// or `main` names, else its `index`, and a subpath for the file below
+    /// the package. A package whose file pack cannot determine is disclosed:
+    /// a pattern `exports` maps, a condition the importer's configuration
+    /// leaves open, an entry naming no file, or a name two packages of the
+    /// workspace give.
+    fn workspace_package(&self, specifier: &str, importer: &Importer) -> Option<Resolution> {
+        let from = importer.node;
         let scoped = specifier.starts_with('@');
         let mut segments = specifier.splitn(if scoped { 3 } else { 2 }, '/');
         let name: Vec<&str> = segments.by_ref().take(if scoped { 2 } else { 1 }).collect();
@@ -662,35 +742,103 @@ impl ProjectIndex<'_> {
                 .any(declares)
                 .then(undetermined);
         };
-        let entries: Vec<&str> = match (&package.exports, subpath) {
-            (None, "") => package
-                .types
-                .as_deref()
-                .into_iter()
-                .chain(package.main.as_deref())
-                .chain(["index"])
-                .collect(),
-            (None, subpath) => vec![subpath],
-            (Some(serde_json::Value::String(entry)), "") => vec![entry.as_str()],
-            (Some(serde_json::Value::Object(map)), subpath) => map
-                .get(&if subpath.is_empty() {
-                    ".".to_string()
-                } else {
-                    format!("./{subpath}")
-                })
-                .and_then(|entry| entry.as_str())
-                .into_iter()
-                .collect(),
-            (Some(_), _) => Vec::new(),
+        let Some(exports) = &package.exports else {
+            let entries: Vec<&str> = if subpath.is_empty() {
+                package
+                    .types
+                    .as_deref()
+                    .into_iter()
+                    .chain(package.main.as_deref())
+                    .chain(["index"])
+                    .collect()
+            } else {
+                vec![subpath]
+            };
+            return Some(
+                entries
+                    .into_iter()
+                    .filter_map(|entry| project_path(directory, entry))
+                    .find_map(|path| self.script_target(&path, from.language))
+                    .map_or_else(undetermined, Resolution::Files),
+            );
         };
-        let language = from.language;
+        let key = if subpath.is_empty() {
+            ".".to_string()
+        } else {
+            format!("./{subpath}")
+        };
+        // Without subpath keys, `exports` is what `.` maps to.
+        let target = match exports {
+            serde_json::Value::Object(map) if map.keys().any(|key| key.starts_with('.')) => {
+                map.get(&key)
+            }
+            _ => (key == ".").then_some(exports),
+        };
         Some(
-            entries
-                .into_iter()
-                .filter_map(|entry| project_path(directory, entry))
-                .find_map(|path| self.script_target(&path, language))
-                .map_or_else(undetermined, Resolution::Files),
+            match target.map(|target| self.export_target(target, directory, importer)) {
+                Some(Exported::Files(files)) => Resolution::Files(files),
+                _ => undetermined(),
+            },
         )
+    }
+
+    /// What an `exports` target names for an importer, as TypeScript reads
+    /// one: a path, which has to start `./`, the file it spells; an array,
+    /// what its first entry naming a file names; a condition object, what the
+    /// target of the first of its keys, in their written order, that the
+    /// importer matches names, where that names a file — nested objects read
+    /// alike. Where a key the importer's configuration leaves open names a
+    /// file that the keys after it do not, the target is undetermined.
+    fn export_target(
+        &self,
+        target: &serde_json::Value,
+        directory: &[String],
+        importer: &Importer,
+    ) -> Exported {
+        match target {
+            serde_json::Value::String(path) if path.starts_with("./") => {
+                project_path(directory, path)
+                    .and_then(|path| self.script_target(&path, importer.node.language))
+                    .map_or(Exported::Nothing, Exported::Files)
+            }
+            serde_json::Value::Array(entries) => entries
+                .iter()
+                .map(|entry| self.export_target(entry, directory, importer))
+                .find(|exported| *exported != Exported::Nothing)
+                .unwrap_or(Exported::Nothing),
+            serde_json::Value::Object(conditions) => {
+                let conditions: Vec<_> = conditions.iter().collect();
+                self.conditional_target(&conditions, directory, importer)
+            }
+            _ => Exported::Nothing,
+        }
+    }
+
+    fn conditional_target(
+        &self,
+        conditions: &[(&String, &serde_json::Value)],
+        directory: &[String],
+        importer: &Importer,
+    ) -> Exported {
+        for (at, (condition, target)) in conditions.iter().enumerate() {
+            let matched = importer.matches(condition);
+            if matched == Some(false) {
+                continue;
+            }
+            match self.export_target(target, directory, importer) {
+                Exported::Nothing => {}
+                Exported::Files(files) if matched.is_none() => {
+                    let rest = self.conditional_target(&conditions[at + 1..], directory, importer);
+                    return if rest == Exported::Files(files) {
+                        rest
+                    } else {
+                        Exported::Undetermined
+                    };
+                }
+                exported => return exported,
+            }
+        }
+        Exported::Nothing
     }
 
     /// What a path a JavaScript or TypeScript specifier or configuration
@@ -2096,6 +2244,127 @@ mod tests {
                 "@acme/cond".to_string(),
                 "@acme/twin".to_string(),
                 "@acme/ui/hidden".to_string()
+            ])
+        );
+    }
+
+    /// A package's `exports` maps by conditions, read in their written order
+    /// as TypeScript matches them: `types`, `default` and the configured
+    /// `customConditions` always, `import` under `bundler` or for an ES
+    /// module under `node16`, `require` for any other file under `node16`,
+    /// `node` outside `bundler`. A key the importer's configuration leaves
+    /// open decides nothing unless the keys after it name the same file.
+    #[test]
+    fn a_conditional_export_names_the_file_of_the_conditions_typescript_matches() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let imports = "import a from \"@acme/typed\";\nimport b from \"@acme/modes\";\n\
+                       import c from \"@acme/nested\";\nimport d from \"@acme/same\";\n\
+                       import e from \"@acme/bare\";\n";
+        let nodes = vec![
+            ts(0, "bundler/app.ts", imports),
+            ts(1, "esm/app.ts", imports),
+            ts(2, "cjs/app.ts", imports),
+            ts(3, "plain/app.ts", imports),
+            ts(4, "packages/typed/src/index.ts", ""),
+            ts(5, "packages/modes/src/esm.ts", ""),
+            ts(6, "packages/modes/src/cjs.ts", ""),
+            ts(7, "packages/nested/src/node.ts", ""),
+            ts(8, "packages/nested/src/other.ts", ""),
+            ts(9, "packages/same/src/index.ts", ""),
+            ts(10, "packages/same/src/source.ts", ""),
+            ts(11, "packages/bare/src/index.ts", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+                (
+                    "packages/typed/package.json",
+                    "{\"name\": \"@acme/typed\", \"exports\": {\"types\": \"./src/index.ts\", \
+                     \"import\": \"./dist/index.mjs\"}}",
+                ),
+                (
+                    "packages/modes/package.json",
+                    "{\"name\": \"@acme/modes\", \"exports\": {\".\": {\"import\": \"./src/esm.ts\", \
+                     \"require\": \"./src/cjs.ts\"}}}",
+                ),
+                (
+                    "packages/nested/package.json",
+                    "{\"name\": \"@acme/nested\", \"exports\": {\".\": {\"node\": {\"import\": \
+                     \"./src/node.ts\"}, \"default\": \"./src/other.ts\"}}}",
+                ),
+                (
+                    "packages/same/package.json",
+                    "{\"name\": \"@acme/same\", \"exports\": {\".\": {\"source\": \"./src/source.ts\", \
+                     \"import\": \"./src/index.ts\", \"default\": \"./src/index.ts\"}}}",
+                ),
+                // A target has to start `./`.
+                (
+                    "packages/bare/package.json",
+                    "{\"name\": \"@acme/bare\", \"exports\": \"src/index.ts\"}",
+                ),
+                (
+                    "bundler/tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"Bundler\", \
+                     \"customConditions\": [\"source\"]}}",
+                ),
+                (
+                    "esm/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"NodeNext\"}}",
+                ),
+                ("esm/package.json", "{\"type\": \"module\"}"),
+                (
+                    "cjs/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"node16\", \"moduleResolution\": \"node16\"}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec![
+                "packages/typed/src/index.ts",
+                "packages/modes/src/esm.ts",
+                "packages/nested/src/other.ts",
+                "packages/same/src/source.ts"
+            ]
+        );
+        assert_eq!(
+            edges(1),
+            vec![
+                "packages/typed/src/index.ts",
+                "packages/modes/src/esm.ts",
+                "packages/nested/src/node.ts",
+                "packages/same/src/index.ts"
+            ]
+        );
+        assert_eq!(
+            edges(2),
+            vec![
+                "packages/typed/src/index.ts",
+                "packages/modes/src/cjs.ts",
+                "packages/nested/src/other.ts",
+                "packages/same/src/index.ts"
+            ]
+        );
+        // Without a configuration saying which of `import` and `require`
+        // applies, only what every reading agrees on is resolved.
+        assert_eq!(
+            edges(3),
+            vec!["packages/typed/src/index.ts", "packages/same/src/index.ts"]
+        );
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from([
+                "@acme/bare".to_string(),
+                "@acme/modes".to_string(),
+                "@acme/nested".to_string()
             ])
         );
     }
