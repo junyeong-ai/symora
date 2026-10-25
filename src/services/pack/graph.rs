@@ -2744,6 +2744,66 @@ mod tests {
         assert_eq!(edges(11), vec!["side/sidekick.py"]);
     }
 
+    /// A directory below a root an enclosing project puts on `sys.path` —
+    /// its `src/`, a package location it declares — holds that root's
+    /// packages, a namespace package needing no `__init__.py` (PEP 420), so
+    /// a `setup.py` module there makes no project of it (`pyns`). Below the
+    /// project's own directory, a flat layout's root, a directory whose files
+    /// configure a build is a project of its own, as a workspace member is,
+    /// and so is a root itself, which is not below it.
+    #[test]
+    fn a_directory_below_a_root_its_project_puts_on_sys_path_starts_no_project() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "src/acme/setup.py", "def configure():\n    pass\n"),
+            python(1, "src/acme/a.py", "from acme.core.model import M\n"),
+            python(2, "src/acme/core/__init__.py", ""),
+            python(3, "src/acme/core/model.py", ""),
+            python(4, "dl/lib/ns/setup.py", ""),
+            python(5, "dl/lib/ns/a.py", "from ns.b import B\n"),
+            python(6, "dl/lib/ns/b.py", ""),
+            python(7, "ws/packages/lib/tool.py", "import helper\n"),
+            python(8, "ws/packages/lib/helper.py", ""),
+            python(9, "dr/lib/tool.py", "import x\n"),
+            python(10, "dr/lib/inner/x.py", ""),
+            python(11, "dr/lib/x.py", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "pyproject.toml",
+                    "[project]\nname = \"acme\"\n[build-system]\nrequires = [\"setuptools\"]\n\
+                     build-backend = \"setuptools.build_meta\"\n",
+                ),
+                ("src/acme/setup.py", "def configure():\n    pass\n"),
+                (
+                    "dl/pyproject.toml",
+                    "[project]\nname = \"dl\"\n[tool.setuptools.packages.find]\nwhere = [\"lib\"]\n",
+                ),
+                ("dl/lib/ns/setup.py", ""),
+                ("ws/pyproject.toml", "[project]\nname = \"ws\"\n"),
+                (
+                    "ws/packages/lib/pyproject.toml",
+                    "[project]\nname = \"lib\"\n",
+                ),
+                (
+                    "dr/pyproject.toml",
+                    "[project]\nname = \"dr\"\n[tool.setuptools.packages.find]\nwhere = [\"lib\"]\n",
+                ),
+                (
+                    "dr/lib/pyproject.toml",
+                    "[project]\nname = \"inner\"\n[tool.setuptools.packages.find]\nwhere = [\"inner\"]\n",
+                ),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(1), vec!["src/acme/core/model.py"]);
+        assert_eq!(edges(5), vec!["dl/lib/ns/b.py"]);
+        assert_eq!(edges(7), vec!["ws/packages/lib/helper.py"]);
+        assert_eq!(edges(9), vec!["dr/lib/inner/x.py"]);
+    }
+
     /// pytest's default import mode puts on `sys.path` the basedir of each
     /// test module and `conftest.py` it imports — the first directory upward
     /// without `__init__.py` — so a test imports the helpers beside it; a
