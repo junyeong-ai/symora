@@ -97,12 +97,32 @@ pub(super) enum TsOwner<'a> {
     /// No configuration is above it.
     None,
     Config(&'a TsConfig),
-    /// The configuration above it has `references` naming no one project
-    /// that compiles it.
+    /// The configuration above it has `references`, and no project they
+    /// reach compiles it, so `tsc -b` builds it in none: the configurations
+    /// of the nearest project and of those it reaches are what an import's
+    /// writer could have meant.
+    Uncompiled(Vec<&'a TsConfig>),
+    /// The projects the `references` above it reach that compile it say
+    /// different things about specifiers.
     Undetermined,
 }
 
 impl TsProjects {
+    /// The configurations of the project at `project` and of every project
+    /// its references reach, each once.
+    fn reached(&self, project: usize) -> Vec<&TsConfig> {
+        let mut reached = Vec::new();
+        let mut visited = HashSet::new();
+        let mut pending = vec![project];
+        while let Some(at) = pending.pop() {
+            if visited.insert(at) {
+                reached.push(&self.projects[at].config);
+                pending.extend(self.projects[at].references.iter().rev());
+            }
+        }
+        reached
+    }
+
     /// The configurations `file` is compiled under in the project at
     /// `project`: its own where it compiles the file itself — or has no
     /// `references`, a configuration's files being whatever is below it —
@@ -347,7 +367,8 @@ impl Manifests {
     /// the nearest above it, or, where that one has `references` and does
     /// not compile the file itself, the one the referenced projects compiling
     /// it agree on (`TsProjects::owners`). Projects that say different things
-    /// about specifiers, or none compiling it, leave it undetermined.
+    /// about specifiers leave it undetermined; where none compiles it, no
+    /// configuration applies to it.
     pub(super) fn ts_owner(&self, from: &Node) -> TsOwner<'_> {
         let projects = &self.ts_projects;
         let Some((_, project)) = nearest(&projects.by_directory, &from.directory) else {
@@ -355,10 +376,11 @@ impl Manifests {
         };
         let owners = projects.owners(*project, Path::new(&from.rel_path));
         match owners.split_first() {
+            None => TsOwner::Uncompiled(projects.reached(*project)),
             Some((first, rest)) if rest.iter().all(|other| other == first) => {
                 TsOwner::Config(first)
             }
-            _ => TsOwner::Undetermined,
+            Some(_) => TsOwner::Undetermined,
         }
     }
 
@@ -1858,10 +1880,11 @@ mod tests {
             manifests.ts_owner(last),
             TsOwner::Config(config) if config.paths[0].0 == format!("#p{}", PACKAGES - 1)
         ));
-        // No project the references reach compiles the stray file.
+        // No project the references reach compiles the stray file, and each
+        // of those they reach could have been meant.
         assert!(matches!(
             manifests.ts_owner(&nodes[PACKAGES]),
-            TsOwner::Undetermined
+            TsOwner::Uncompiled(candidates) if candidates.len() == PACKAGES
         ));
     }
 
