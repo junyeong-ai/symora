@@ -3091,9 +3091,10 @@ fn node_kind(node: Node) -> SymbolKind {
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
 
-        // A Java interface's fields, which the grammar names constants for
-        // being implicitly `static final`, are fields as a class's `static
-        // final` ones are; an annotation's elements are methods it declares.
+        // A Java interface's or annotation's fields, which the grammar names
+        // constants for being implicitly `static final`, are fields as a
+        // class's `static final` ones are; an annotation's elements are
+        // methods it declares.
         "constant_declaration" => SymbolKind::Field,
         "annotation_type_element_declaration" => SymbolKind::Method,
 
@@ -3602,6 +3603,7 @@ const JAVA_QUERY: &str = r#"
 (method_declaration) @symbol
 (field_declaration) @symbol
 (interface_body (constant_declaration) @symbol)
+(annotation_type_body (constant_declaration) @symbol)
 (annotation_type_body (annotation_type_element_declaration) @symbol)
 "#;
 
@@ -4355,7 +4357,7 @@ record R(int a) {
     R {}
 }
 
-@interface Ann { String value() default ""; }
+@interface Ann { String value() default ""; int LIMIT = 1; }
 
 interface I { void im(); int VERSION = 1; }
 
@@ -4374,6 +4376,7 @@ class C {
                 "constructor:R/R",
                 "interface:Ann",
                 "method:Ann/value",
+                "field:Ann/LIMIT",
                 "interface:I",
                 "method:I/im",
                 "field:I/VERSION",
