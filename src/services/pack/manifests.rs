@@ -1121,26 +1121,26 @@ pub(super) fn split_package_name(specifier: &str) -> (&str, &str) {
     )
 }
 
-/// The target a package's `exports` maps an `extends` subpath to, as
-/// TypeScript reads it for a configuration: the entry whose key is `.` or
+/// The target a package's `exports` maps a subpath of the package to, as
+/// TypeScript and Node look it up: the entry whose key is `.` or
 /// `./<subpath>`, or else the pattern key with one `*` matching it whose
-/// part before the `*` is longest (the longer key on a tie), its `*`
-/// replaced by what it matched; without subpath keys `exports` is what `.`
-/// maps to. Of a condition object, the first key in written order among
-/// `require`, `types`, `node` and `default` whose target resolves; of an
-/// array, the first entry that resolves. `None` where none does, a `null`
-/// target excludes the subpath, or a `types@<range>` key, which depends on
-/// the compiler's version, comes first.
-fn config_export(exports: &serde_json::Value, subpath: &str) -> Option<String> {
+/// part before the `*` is longest (the longer key on a tie), with what its
+/// `*` matched, which replaces each `*` its target's paths hold. Without
+/// subpath keys `exports` is what `.` maps to. The caller reads the target's
+/// conditions.
+pub(super) fn export_subpath<'e>(
+    exports: &'e serde_json::Value,
+    subpath: &str,
+) -> Option<(&'e serde_json::Value, Option<String>)> {
     let key = if subpath.is_empty() {
         ".".to_string()
     } else {
         format!("./{subpath}")
     };
-    let (target, star) = match exports {
+    match exports {
         serde_json::Value::Object(map) if map.keys().any(|key| key.starts_with('.')) => {
             match map.get(&key) {
-                Some(target) => (target, None),
+                Some(target) => Some((target, None)),
                 None => map
                     .iter()
                     .filter_map(|(pattern, target)| {
@@ -1152,18 +1152,38 @@ fn config_export(exports: &serde_json::Value, subpath: &str) -> Option<String> {
                         Some(((prefix.len(), pattern.len()), target, star))
                     })
                     .max_by_key(|(rank, ..)| *rank)
-                    .map(|(_, target, star)| (target, Some(star)))?,
+                    .map(|(_, target, star)| (target, Some(star.to_string()))),
             }
         }
-        _ if key == "." => (exports, None),
-        _ => return None,
-    };
+        _ if key == "." => Some((exports, None)),
+        _ => None,
+    }
+}
+
+/// The path a target of `exports` names, `*` replaced by what a pattern
+/// key's `*` matched (`export_subpath`); `None` where it does not start
+/// `./`.
+pub(super) fn export_path(path: &str, star: Option<&str>) -> Option<String> {
+    let path = path.strip_prefix("./")?;
+    Some(match star {
+        Some(star) => path.replace('*', star),
+        None => path.to_string(),
+    })
+}
+
+/// The target a package's `exports` maps an `extends` subpath to
+/// (`export_subpath`), as TypeScript reads it for a configuration: of a
+/// condition object, the first key in written order among `require`,
+/// `types`, `node` and `default` whose target resolves; of an array, the
+/// first entry that resolves. `None` where none does, a `null` target
+/// excludes the subpath, or a `types@<range>` key, which depends on the
+/// compiler's version, comes first.
+fn config_export(exports: &serde_json::Value, subpath: &str) -> Option<String> {
+    let (target, star) = export_subpath(exports, subpath)?;
+    let star = star.as_deref();
     fn resolve(target: &serde_json::Value, star: Option<&str>) -> Result<Option<String>, ()> {
         match target {
-            serde_json::Value::String(path) => Ok(path.strip_prefix("./").map(|path| match star {
-                Some(star) => path.replace('*', star),
-                None => path.to_string(),
-            })),
+            serde_json::Value::String(path) => Ok(export_path(path, star)),
             serde_json::Value::Array(entries) => {
                 for entry in entries {
                     if let Some(found) = resolve(entry, star)? {
