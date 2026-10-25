@@ -96,7 +96,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     answers.insert(specifier.clone(), answer);
                     answer
                 });
-                if importer.ts_owner_undetermined || uncompiled_maps {
+                if !importer.ts_owners.is_empty() || uncompiled_maps {
                     ts_owner_undetermined.insert(node.rel_path.clone());
                 }
             }
@@ -146,9 +146,11 @@ struct Importer<'a> {
     /// The TypeScript configuration a JavaScript or TypeScript file is
     /// compiled under (`Manifests::ts_owner`).
     ts_config: Option<&'a TsConfig>,
-    /// Whether the projects compiling the file say different things about
-    /// specifiers, so that its specifiers are read without a configuration.
-    ts_owner_undetermined: bool,
+    /// The configurations of the projects compiling the file where they say
+    /// different things about specifiers, so that its specifiers are read
+    /// without a configuration and its conditions as they agree; empty
+    /// otherwise.
+    ts_owners: Vec<&'a TsConfig>,
     /// The project whose configuration, with those its references reach,
     /// could have been meant for a file no project those `references` reach
     /// compiles, which is read without one.
@@ -238,7 +240,7 @@ impl<'a> Importer<'a> {
                 return Self {
                     node,
                     ts_config,
-                    ts_owner_undetermined: false,
+                    ts_owners: Vec::new(),
                     ts_uncompiled,
                     modes: vec![ImportMode::Exports(ExportConditions {
                         typescript: false,
@@ -260,7 +262,10 @@ impl<'a> Importer<'a> {
         Self {
             node,
             ts_config,
-            ts_owner_undetermined: matches!(owner, TsOwner::Undetermined(_)),
+            ts_owners: match owner {
+                TsOwner::Undetermined(owners) => owners,
+                _ => Vec::new(),
+            },
             ts_uncompiled,
             modes,
         }
@@ -275,7 +280,10 @@ impl<'a> Importer<'a> {
     /// require()`; `node` under `node16`; nothing else, as TypeScript's
     /// `getModeForUsageLocation` selects them. A versioned `types@<range>`
     /// key depends on the compiler's own version, and any other key on a
-    /// configuration whose `customConditions` its chain leaves undecided.
+    /// configuration whose `customConditions` its chain leaves undecided. A
+    /// file several projects compile takes a custom condition all of their
+    /// configurations list, none that none lists, and leaves one some list
+    /// open.
     /// Where TypeScript does not resolve the file, Node and the bundlers
     /// agree on `default`, on `import` for a declaration and `require` for
     /// a `require`, and on never matching `types`; every other condition —
@@ -304,10 +312,25 @@ impl<'a> Importer<'a> {
         if matches!(condition, "types" | "default") {
             return Some(true);
         }
-        let custom = self
-            .ts_config
-            .map_or(Some(&[][..]), |config| config.custom_conditions.as_deref());
-        if custom.is_some_and(|custom| custom.iter().any(|c| c == condition)) {
+        let listed = |config: &TsConfig| {
+            config
+                .custom_conditions
+                .as_ref()
+                .map(|custom| custom.iter().any(|c| c == condition))
+        };
+        let custom = match (self.ts_config, self.ts_owners.as_slice()) {
+            (Some(config), _) => listed(config),
+            (None, []) => Some(false),
+            (None, owners) => {
+                let first = listed(owners[0]);
+                owners[1..]
+                    .iter()
+                    .all(|owner| listed(owner) == first)
+                    .then_some(first)
+                    .flatten()
+            }
+        };
+        if custom == Some(true) {
             return Some(true);
         }
         match condition {
@@ -3919,6 +3942,82 @@ mod tests {
             graph.ts_owner_undetermined,
             BTreeSet::from(["siblings/shared/s.ts".to_string()])
         );
+    }
+
+    /// A file several projects compile, saying different things about
+    /// specifiers, matches a custom condition all of their configurations
+    /// list, and none that none lists; one only some list leaves the target
+    /// open (`undet_custom`).
+    #[test]
+    fn a_file_several_projects_compile_matches_the_custom_conditions_they_agree_on() {
+        let shapes = [
+            ("both", "[\"source\"]", "[\"source\"]"),
+            ("some", "[\"source\"]", "[]"),
+            ("none", "[]", "[]"),
+        ];
+        let mut nodes = Vec::new();
+        let mut configs = vec![(
+            "package.json".to_string(),
+            "{\"workspaces\": [\"packages/*\"]}".to_string(),
+        )];
+        for (shape, a, b) in shapes {
+            nodes.push(node_in(
+                nodes.len(),
+                &format!("{shape}/shared/s.ts"),
+                "import p from 'p'\n",
+                Language::TypeScript,
+            ));
+            configs.push((
+                format!("{shape}/tsconfig.json"),
+                "{\"files\": [], \"references\": [{\"path\": \"./a\"}, {\"path\": \"./b\"}]}"
+                    .to_string(),
+            ));
+            for (project, custom) in [("a", a), ("b", b)] {
+                configs.push((
+                    format!("{shape}/{project}/tsconfig.json"),
+                    format!(
+                        "{{\"compilerOptions\": {{\"module\": \"esnext\", \
+                         \"moduleResolution\": \"bundler\", \"customConditions\": {custom}, \
+                         \"paths\": {{\"@x\": [\"./{project}x.ts\"]}}}}, \
+                         \"include\": [\"../shared\", \".\"]}}"
+                    ),
+                ));
+            }
+        }
+        for file in ["index", "other"] {
+            nodes.push(node_in(
+                nodes.len(),
+                &format!("packages/p/src/{file}.ts"),
+                "",
+                Language::TypeScript,
+            ));
+        }
+        configs.push((
+            "packages/p/package.json".to_string(),
+            "{\"name\": \"p\", \"exports\": {\".\": {\"source\": \"./src/index.ts\", \
+             \"default\": \"./src/other.ts\"}}}"
+                .to_string(),
+        ));
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(0), vec!["packages/p/src/index.ts"]);
+        assert!(edges(1).is_empty());
+        assert_eq!(edges(2), vec!["packages/p/src/other.ts"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["p".to_string()])
+        );
+        assert_eq!(graph.ts_owner_undetermined.len(), 3);
     }
 
     /// Every specifier matches the catch-all pattern `*`, and TypeScript looks
