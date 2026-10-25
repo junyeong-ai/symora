@@ -381,11 +381,13 @@ struct ProjectIndex<'a> {
     jvm: JvmIndex<'a>,
 }
 
-/// What a project's JVM files declare themselves to be. A file's class is
-/// named by the package its declaration states and the file's own name,
-/// wherever the file sits; its source root is its directory without the path
-/// that package spells, where the directory ends in that path, and its source
-/// set is what that root belongs to (`SourceSet`).
+/// What a project's JVM files declare themselves to be. Each name a file
+/// declares at its top level — a class, an object, a Kotlin or Scala
+/// function — is named by the package its declaration states and that name,
+/// whatever the file is called and wherever it sits; its source root is its
+/// directory without the path that package spells, where the directory ends
+/// in that path, and its source set is what that root belongs to
+/// (`SourceSet`).
 struct JvmIndex<'a> {
     by_class: HashMap<Vec<String>, Vec<usize>>,
     by_package: HashMap<Vec<String>, Vec<usize>>,
@@ -409,8 +411,8 @@ impl<'a> JvmIndex<'a> {
             if let Some(root) = node.directory.strip_suffix(package.as_slice()) {
                 index.sets.insert(node.id, SourceSet::of(root));
             }
-            if let Some(stem) = node.module_path.last() {
-                let class = [package.as_slice(), std::slice::from_ref(stem)].concat();
+            for name in &node.imports.declares {
+                let class = [package.as_slice(), std::slice::from_ref(name)].concat();
                 index.by_class.entry(class).or_default().push(node.id);
             }
             index.by_package.entry(package).or_default().push(node.id);
@@ -723,11 +725,11 @@ impl ProjectIndex<'_> {
         )
     }
 
-    /// The file an import of a JVM class names: the one whose declared package
-    /// and name spell the class — read whole, then without each trailing
-    /// segment in turn, which nested classes and members add to the class
-    /// their file declares. Scala imports a package by its name as well,
-    /// which names the files the package holds.
+    /// The file an import of a JVM class names: the one declaring, in the
+    /// package the import spells, the top-level name it spells — read whole,
+    /// then without each trailing segment in turn, which nested classes and
+    /// members add to what their file declares. Scala imports a package by
+    /// its name as well, which names the files the package holds.
     fn jvm_class(&self, name: &[String], from: &Node) -> Vec<usize> {
         for length in (1..=name.len()).rev() {
             if let Some(files) = self.jvm.by_class.get(&name[..length]) {
@@ -1434,8 +1436,13 @@ mod tests {
     /// share that one namespace.
     #[test]
     fn a_jvm_import_names_what_files_declare_in_the_source_sets_it_sees() {
-        let java = |id, rel, source| node_in(id, rel, source, Language::Java);
-        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        // Each file declares the class its name names, as Java has it.
+        let declaring = |id, rel: &str, source: &str, language| {
+            let class = Path::new(rel).file_stem().unwrap().to_str().unwrap();
+            node_in(id, rel, &format!("{source}class {class} {{}}\n"), language)
+        };
+        let java = |id, rel, source| declaring(id, rel, source, Language::Java);
+        let kotlin = |id, rel, source| declaring(id, rel, source, Language::Kotlin);
         let util = "package com.acme.util;\n";
         let nodes = vec![
             java(
@@ -1546,6 +1553,71 @@ mod tests {
                 "lib/src/main/java/com/lib/Lib.java",
                 "lib/src/main/java/com/lib/Twin.java"
             ]
+        );
+    }
+
+    /// A JVM import names a file by what it declares at its top level, not by
+    /// the file's own name: a Kotlin file holds several classes, functions
+    /// and properties, imported by their names, and a file named like a
+    /// class it does not declare is not that class.
+    #[test]
+    fn a_jvm_import_names_the_file_declaring_its_top_level_name() {
+        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        let nodes = vec![
+            kotlin(
+                0,
+                "src/main/kotlin/com/acme/app/Main.kt",
+                "package com.acme.app\nimport com.acme.model.Account\nimport com.acme.util.format\n\
+                 import com.acme.util.Strings\nimport com.acme.util.DEFAULT\n",
+            ),
+            kotlin(
+                1,
+                "src/main/kotlin/com/acme/model/Models.kt",
+                "package com.acme.model\nclass User\nclass Account\n",
+            ),
+            kotlin(
+                2,
+                "src/main/kotlin/com/acme/util/Text.kt",
+                "package com.acme.util\nfun format() = 1\nval DEFAULT = 1\n",
+            ),
+            kotlin(
+                3,
+                "src/main/kotlin/com/acme/util/Strings.kt",
+                "package com.acme.util\nobject StringUtils\n",
+            ),
+            node_in(
+                4,
+                "src/main/java/com/acme/j/J.java",
+                "package com.acme.j;\nimport com.acme.model.User;\nclass J {}\n",
+                Language::Java,
+            ),
+            node_in(
+                5,
+                "src/main/scala/com/acme/s/Defs.scala",
+                "package com.acme.s\ndef helper = 1\nobject Registry\n",
+                Language::Scala,
+            ),
+            node_in(
+                6,
+                "src/main/scala/com/acme/t/Use.scala",
+                "package com.acme.t\nimport com.acme.s.helper\nimport com.acme.s.Registry\n",
+                Language::Scala,
+            ),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 0),
+            vec![
+                "src/main/kotlin/com/acme/model/Models.kt",
+                "src/main/kotlin/com/acme/util/Text.kt"
+            ]
+        );
+        assert_eq!(
+            edges_of(&nodes, 4),
+            vec!["src/main/kotlin/com/acme/model/Models.kt"]
+        );
+        assert_eq!(
+            edges_of(&nodes, 6),
+            vec!["src/main/scala/com/acme/s/Defs.scala"]
         );
     }
 

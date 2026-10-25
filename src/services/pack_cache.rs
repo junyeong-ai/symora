@@ -24,7 +24,7 @@ use crate::services::pack::PackedSymbol;
 /// Bumped whenever the on-disk layout changes shape (new column, changed
 /// JSON shape inside a TEXT column, etc.). Mismatched versions recreate the
 /// table rather than risking stale-decode bugs at read time.
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 #[derive(Debug, Clone)]
 pub struct CachedEntry {
@@ -212,6 +212,7 @@ mod tests {
             language: Language::Rust,
             imports: FileImports {
                 package: Some("com.acme".into()),
+                declares: vec!["Baz".into()],
                 modules: vec!["baz".into()],
                 references: vec!["crate::baz".into()],
             },
