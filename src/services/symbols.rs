@@ -1763,6 +1763,16 @@ fn read_signature(
     {
         declaration = parent;
     }
+    // A run of shell assignments a newline ends is declared by that run
+    // ([`shell_line`]), which the grammar holds in the command after it.
+    if language == Language::Bash
+        && let Some(command) = std::iter::successors(Some(named), Node::parent)
+            .find(|node| node.kind() == "variable_assignment")
+            .filter(|assignment| shell_line(*assignment, content).is_some())
+            .and_then(|assignment| assignment.parent())
+    {
+        declaration = command;
+    }
     if language == Language::Cpp
         && (continued_macro(declaration).is_some()
             || std::iter::successors(Some(named), Node::parent)
@@ -6627,6 +6637,13 @@ region     = "us-central1"
                 "one",
             ),
             (
+                "a.sh",
+                Language::Bash,
+                "unused=1 shared=2\r\nPREFIX_A=1 PREFIX_B=2 \\\r\n  run_it\r\none=1\r\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
                 "a.dart",
                 Language::Dart,
                 "class A {\n  static const unused = 1, shared = 2;\n  static const one = 1;\n}\n",
@@ -6687,6 +6704,23 @@ region     = "us-central1"
             .map(|symbol| (symbol.name.as_str(), symbol.location.effective_start()))
             .collect();
         assert_eq!(names, [("only", (3, 1))]);
+
+        let commented = extractor.extract(
+            Path::new("a.sh"),
+            "FIRST=1 SECOND=2 # note\necho hi\n",
+            Language::Bash,
+        );
+        let ends: Vec<(&str, Option<u32>, Option<u32>)> = commented
+            .iter()
+            .map(|symbol| {
+                let location = &symbol.location;
+                (symbol.name.as_str(), location.end_line, location.end_column)
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            [("FIRST", Some(1), Some(17)), ("SECOND", Some(1), Some(17))]
+        );
     }
 
     #[test]
@@ -7993,6 +8027,13 @@ region     = "us-central1"
                 "readonly LIMIT=\"$(compute)\"\n",
                 "LIMIT",
                 Some("readonly LIMIT"),
+            ),
+            (
+                "a.sh",
+                Language::Bash,
+                "FIRST=1 SECOND=2 # note\necho hi\n",
+                "SECOND",
+                Some("FIRST SECOND"),
             ),
             (
                 "a.tf",
