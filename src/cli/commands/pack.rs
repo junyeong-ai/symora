@@ -154,7 +154,7 @@ fn build_json_output(
 fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
     let mut hints = Vec::new();
     if result.rust_relative_imports_omitted {
-        hints.push("Rust paths whose file the crate's module tree leaves open (from a file no crate's mod declarations reach, or through a module both x.rs and x/mod.rs could be, or whose path a cfg_attr sets) were omitted; use semantic references or inspect source.".to_string());
+        hints.push("Rust paths whose file the crate's module tree leaves open (from a file no crate's mod declarations reach, or through a module whose file its declarations do not determine) were omitted; use semantic references or inspect source.".to_string());
     }
     if !result.undetermined_imports.is_empty() {
         let specifiers: Vec<String> = result
