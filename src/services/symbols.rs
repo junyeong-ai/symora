@@ -918,7 +918,8 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// function with no type of its own (`QString Q_DECL_X(1)` before `f(int
 /// x);`), and a member alone in a conditional's branch (`#ifndef
 /// QT_NO_QOBJECT Q_OBJECT #endif`), since a declaration may go on past a
-/// directive.
+/// directive. Every such member ends on a supplied `;`, so a subtree the
+/// grammar read without an error holds none.
 fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize>> {
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
@@ -944,6 +945,9 @@ fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize
     let mut macros = Vec::new();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
+        if !node.has_error() {
+            continue;
+        }
         let mut cursor = node.walk();
         let members: Vec<Node> = node
             .children(&mut cursor)
@@ -1055,7 +1059,7 @@ fn run_before(boundary: Node, of_the_run: impl Fn(Node) -> Option<Vec<Node>>) ->
 /// the grammar set the invocation aside as an error's last words or read
 /// it as a call ending a statement whose `;` it supplied, the statement's
 /// written words ending with the `)`, and the next node opens with such a
-/// word. One on a directive's line is the directive's, which ends with its
+/// word; either is an error, so a subtree without one holds none. One on a directive's line is the directive's, which ends with its
 /// line (`#if QT_VERSION < QT_VERSION_CHECK(7,0,0)` before `struct`); a
 /// directive continued past that line is not seen. An empty list may be a
 /// declarator's, which `const` follows, and a keyword taking arguments is
@@ -1120,6 +1124,9 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
+        if !node.has_error() {
+            continue;
+        }
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
         if !holds_a_statement(node)
