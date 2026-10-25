@@ -2946,6 +2946,10 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     if node.kind() == "property_promotion_parameter" {
         return child_of_kind(node.child_by_field_name("name")?, "name");
     }
+    // A Java varargs parameter holds its name in a declarator under no field.
+    if node.kind() == "spread_parameter" {
+        return child_of_kind(node, "variable_declarator")?.child_by_field_name("name");
+    }
     // A Swift deinitializer and a Kotlin secondary constructor are named by
     // their keyword alone.
     if node.kind() == "deinit_declaration" {
@@ -3226,7 +3230,7 @@ fn node_kind(node: Node) -> SymbolKind {
         // A record's components: C# declares a property for each, Java a
         // field.
         "parameter" if is_record_component(node) => SymbolKind::Property,
-        "formal_parameter" if is_record_component(node) => SymbolKind::Field,
+        "formal_parameter" | "spread_parameter" if is_record_component(node) => SymbolKind::Field,
 
         "enum_assignment" => SymbolKind::EnumMember,
         "property_identifier" if node.parent().is_some_and(|body| body.kind() == "enum_body") => {
@@ -3249,11 +3253,13 @@ fn node_kind(node: Node) -> SymbolKind {
 }
 
 fn is_record_component(node: Node) -> bool {
-    matches!(node.kind(), "parameter" | "formal_parameter")
-        && node
-            .parent()
-            .and_then(|list| list.parent())
-            .is_some_and(|owner| owner.kind() == "record_declaration")
+    matches!(
+        node.kind(),
+        "parameter" | "formal_parameter" | "spread_parameter"
+    ) && node
+        .parent()
+        .and_then(|list| list.parent())
+        .is_some_and(|owner| owner.kind() == "record_declaration")
 }
 
 /// Classify a Go `type_spec` by its underlying type: `struct` → Struct,
@@ -3597,7 +3603,7 @@ const JAVA_QUERY: &str = r#"
 (annotation_type_declaration) @symbol
 (enum_declaration) @symbol
 (enum_body (enum_constant) @symbol)
-(record_declaration parameters: (formal_parameters (formal_parameter) @symbol))
+(record_declaration parameters: (formal_parameters [(formal_parameter) (spread_parameter)] @symbol))
 (constructor_declaration) @symbol
 (compact_constructor_declaration) @symbol
 (method_declaration) @symbol
@@ -4353,7 +4359,7 @@ export var exported = 2;
             source: r#"
 package p;
 
-record R(int a) {
+record R(int a, String... rest) {
     R {}
 }
 
@@ -4373,6 +4379,7 @@ class C {
                 "package:p",
                 "class:R",
                 "field:R/a",
+                "field:R/rest",
                 "constructor:R/R",
                 "interface:Ann",
                 "method:Ann/value",
