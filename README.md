@@ -65,7 +65,7 @@ symora search symbols AuthService           # 심볼 찾기
 
 LSP 기반 명령은 해당 언어의 language server가 필요합니다. `symora doctor <lang>`로 확인하고, 출력에 나온 명령으로 설치하세요.
 
-결과를 완전한 목록으로 취급하기 전에 `indexing`, `incomplete`, `coverage_gaps`를 확인하세요. `indexing: "unconfirmed"`는 요청 전체에 걸쳐 워크스페이스 준비 상태를 확인할 수 없었다는 뜻이며, 참조가 적거나 없어도 일부 결과일 수 있습니다.
+결과를 완전한 목록으로 취급하기 전에 `indexing`, `incomplete`, `coverage_gaps`를 확인하세요. 각각의 뜻은 [출력 계약](#출력-계약)에 있습니다.
 
 ---
 
@@ -377,11 +377,13 @@ symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 
 `pack --tokens`는 문자 수 기반 추정입니다. 모델별 실제 토큰 수도 아니고, JSON 응답 전체 크기의 상한도 아닙니다.
 
-`context`가 요청받은 본문들은 `--body-tokens`를 대상·피호출자·타입 순서로 나눠 쓰며, 각 본문은 통째로 넣거나 통째로 뺍니다. 예산 초과는 `body_omitted: "token_budget"`로 표시합니다. `pack`은 구문 기반 방향 파악 도구이며, 지원하지 않는 import 언어는 hint로 알립니다. escape 변환 등 지원하지 않는 문자열 해석이 필요한 모듈 경로는 연결을 생략합니다. JavaScript·TypeScript에서는 `import`·`export … from` 선언과 TypeScript의 `import x = require()`만 읽고, CommonJS `require()` 호출과 동적 `import()`는 읽지 않습니다. 상대 경로가 아닌 JavaScript·TypeScript 지정자는 가장 가까운 `tsconfig.json`(또는 `jsconfig.json`)의 `paths`와 `baseUrl`로, `extends`한 설정까지 포함해 해석합니다. 패키지 이름으로 적은 `extends`(`@tsconfig/node20`, `@repo/typescript-config/base.json`)는 TypeScript처럼 `node_modules`에서 찾고, 설치되어 있지 않으면 그 이름의 워크스페이스 패키지에서 찾습니다. 읽지 못한 `extends`가 정했을 수 있는 `moduleResolution`·`module`·`customConditions`는 정해지지 않은 것으로 봅니다. 그 설정에 `references`가 있으면 `tsc -b`처럼, 그 설정과 참조로 닿는 프로젝트 가운데 그 파일을 `files`·`include`·`exclude`로 포함하는 프로젝트의 설정을 씁니다(Vite 루트의 `"files": []`는 아무 파일도 포함하지 않습니다). 어떤 프로젝트와 그 프로젝트가 참조하는 프로젝트가 함께 포함하는 파일은 `tsc -b`처럼 참조되는 프로젝트가 컴파일하므로 그 프로젝트의 설정을 쓰며, 서로 다른 설정의 프로젝트가 함께 포함하면 그 파일을 hint로 알립니다. 그 설정도 참조 프로젝트도 포함하지 않는 파일은 `tsc -b`가 컴파일하지 않으므로 설정 없이 해석하며, 참조 프로젝트의 `paths`·`baseUrl`이 그 파일의 지정자를 매핑할 때만 hint로 알립니다. 그다음 npm·yarn `workspaces` 목록이나 `pnpm-workspace.yaml`이 지정한 패키지의 `package.json` `name`으로 해석해 `exports`가 매핑한 파일(`exports`가 없으면 `types`·`main`·`index`가 가리키는 파일)에 연결합니다. 조건부 `exports`는 TypeScript처럼 조건 키를 적힌 순서대로 읽습니다. `types`·`default`는 늘 맞추고, `node`는 `moduleResolution`이 `node16`·`nodenext`일 때 맞춥니다. `import`·`require`는 TypeScript처럼 import를 적은 형태와 파일의 모듈 형식에 따라 맞춥니다. `import x = require()`와, CommonJS로 출력하는 파일(`.cts`·`.cjs` 파일, `bundler`에서 `module`이 `commonjs`인 파일, `node16`·`nodenext`에서 Node가 CommonJS로 읽는 파일)의 import 선언은 `require`를, 나머지 import 선언은 `import`를 맞춥니다. 설정이 정하지 않는 조건 때문에 가리키는 파일이 갈리면 hint로 알립니다. `moduleResolution`이 `node10`(`node`)이면 TypeScript처럼 `exports`를 읽지 않고 `types`·`main`·`index`가 가리키는 파일에 연결하고, `classic`이면 `package.json`을 읽지 않으므로 패키지 이름을 어떤 파일에도 연결하지 않습니다. 설정이 정하지 않은 `moduleResolution`·`module`·`target`과, 어느 설정도 포함하지 않는 TypeScript 파일은 그 워크스페이스가 쓰는 TypeScript 주 버전의 기본값으로 읽습니다. 주 버전은 설정(설정이 없으면 파일)의 디렉터리에서 위로 가장 가까운 `node_modules/typescript`에 설치된 버전으로 정하고, 설치되어 있지 않으면 가장 가까운 `package.json`이 선언한 `typescript` 범위(pnpm `catalog:`, `npm:` 별칭 포함)의 하한으로 정합니다. TypeScript 5는 `module`이 없으면 `target`이 ES2015 이상일 때 `es2015`, 아니면 `commonjs`로 보고, `commonjs`는 `node10`으로, `es2015` 이후 버전은 `classic`으로 읽습니다. TypeScript 6·7은 이를 `bundler`로 읽습니다(6은 `amd`·`umd`·`system`을 `classic`으로 읽고, 7은 `node10`·`classic`도 `bundler`로 읽습니다). 주 버전을 알 수 없으면 5·6·7 각각의 기본값으로 읽어 모두 같은 파일을 가리킬 때만 연결하고, 갈리면 hint로 알립니다. TypeScript가 컴파일하지 않는 파일, 곧 어느 설정도 포함하지 않는 JavaScript 파일과 TypeScript가 설치되거나 선언되지 않은 곳의 파일은 Node나 번들러가 해석하므로 둘이 일치하는 조건만 맞춥니다. `default`는 맞추고 `types`는 맞추지 않으며, `import`·`require`는 import를 적은 형태에 따라 맞춥니다. `node`·`browser`·`module`처럼 Node와 번들러가 다르게 맞추는 조건은 정하지 않은 것으로 봅니다. 스타일시트·이미지처럼 다른 종류의 파일을 가리키는 지정자도 그 파일로 해석하며, `paths` 별칭이나 워크스페이스 패키지 이름과 맞지만 어떤 파일도 가리키지 않는 지정자는 hint로 알립니다. 모든 지정자와 맞는 `"*"` 패턴에만 맞고 파일을 가리키지 않는 지정자는 TypeScript처럼 패키지로 봅니다. Rust 경로는 Cargo가 빌드하는 crate(라이브러리, 바이너리, 테스트, 예제, 벤치, 빌드 스크립트)마다 그 루트 파일에서 `mod` 선언과 `#[path]` 속성을 따라 rustc처럼 만든 모듈 트리로 해석하므로, `self::`·`super::`·`crate::` 경로와 `mod` 선언, 선언된 모듈을 거치는 경로를 트리가 가리키는 파일에 연결합니다. 어느 crate의 `mod` 선언도 닿지 않는 파일의 경로나 `x.rs`와 `x/mod.rs`가 모두 있는 모듈, `cfg_attr`가 경로를 정하는 모듈을 거치는 경로처럼 트리가 정하지 않는 경로는 연결을 생략하고 hint로 알립니다. 프로젝트 라이브러리 이름은 `Cargo.toml`로 해석하고, 외부 crate는 프로젝트 파일로 연결하지 않습니다. `--focus`가 어느 파일과도 맞지 않으면 거부합니다.
+`context`는 요청받은 본문들에 `--body-tokens`를 대상, 피호출자, 타입 순서로 나눠 씁니다. 각 본문은 통째로 넣거나 통째로 빼며, 예산 때문에 뺀 본문은 `body_omitted: "token_budget"`로 표시합니다.
+
+`pack`은 저장소의 방향을 잡는 도구이며 의존성 분석 도구가 아닙니다. 각 파일의 import 선언을 구문 트리에서 읽고, 그 선언들이 이루는 그래프에 PageRank를 적용해 파일 순위를 매깁니다. 상대 경로 참조는 그 경로에 정확히 있는 프로젝트 파일에 연결합니다. 모듈 이름은 해당 언어와 프로젝트 설정이 해석하는 방식으로만 해석합니다. 근거가 되는 설정은 `tsconfig.json`이나 `jsconfig.json`과 JavaScript 워크스페이스, crate의 모듈 트리와 `Cargo.toml`, `go.mod`, `pubspec.yaml`, JVM 소스 세트, Python 프로젝트가 `sys.path`에 올리는 디렉터리이며, 파일 경로의 끝부분이 같다는 이유로 연결하지는 않습니다. 이 규칙으로 프로젝트 파일 하나가 정해지지 않는 참조와 외부 패키지를 가리키는 참조는 연결하지 않으므로, 연결이 없다는 사실이 의존성이 없다는 증거는 아닙니다. `files`의 `hints`는 pack이 import를 읽지 않는 언어와, 프로젝트 설정이나 모듈 구조 때문에 대상이 정해지지 않은 참조를 알려 주며, 읽지 못한 파일은 `unread_paths`에 나옵니다. JavaScript·TypeScript의 CommonJS `require()` 호출과 동적 `import()`는 읽지 않습니다. `--focus`는 일치하는 파일과 그 이웃 파일의 순위를 높이며, 어느 파일과도 맞지 않으면 거부합니다. 언어별 해석 규칙은 [`.claude/rules/import-resolution.md`](.claude/rules/import-resolution.md)에 있습니다.
 
 `lsp.timeout_secs`는 한 명령의 LSP 작업이 공유하는 예산입니다. 서버 시작·요청·재시도가 같은 예산을 소비하고 daemon에도 남은 시간이 전달됩니다. 소스 적용 도중의 강제 취소에 사용하지 않습니다.
 
-요청 전체에 걸쳐 워크스페이스 준비 상태를 확인하지 못하면 `indexing: "unconfirmed"`로 표시합니다. 로그 문구·진행 작업 종료·시간 경과는 전체 분석 완료의 증거가 아닙니다. 이 상태의 0건은 부재 증명이 아닙니다. rename은 `unconfirmed`와 `timed_out` 상태에서 실제 적용을 거부하며, `--dry-run`으로 현재 편집 집합을 확인할 수 있습니다. 검토한 `unconfirmed` 편집 집합은 `--accept-unconfirmed`로 적용하며, 응답에는 그 표지가 그대로 남습니다. `timed_out`은 재시도로 준비 완료가 확인될 수 있으므로 계속 거부합니다. 지원하는 서버 가운데 Symora가 인식하는 준비 완료 신호를 보내는 서버는 rust-analyzer뿐입니다(정상 상태와 작업 완료를 함께 나타내는 알림). 기본 Pyright처럼 지원하는 준비 완료 신호가 없는 서버는 미리보기가 완전해 보여도 미확인 상태로 남습니다.
+`indexing`은 language server가 낸 답을 한정합니다. `unconfirmed`는 요청 전체에 걸쳐 서버가 워크스페이스 분석 완료를 확인해 주지 않았다는 뜻이므로, 개수는 하한이고 0건은 부재의 증거가 아닙니다. 지원하는 서버 가운데 Symora가 인식하는 형태로 준비 상태를 알리는 서버는 rust-analyzer뿐입니다(정상 상태와 작업 완료를 함께 나타내는 알림). 따라서 다른 서버의 답에는 결과가 완전해 보여도 `unconfirmed`가 붙고, 재시도해도 사라지지 않습니다. `timed_out`은 준비 상태를 기다리는 시간이 먼저 끝났다는 뜻이며, 서버가 충분히 준비된 뒤 재시도하면 확인될 수 있습니다. `rename`은 확인된 편집 집합만 적용합니다. 두 상태 모두 `--dry-run`으로 미리 볼 수 있고, 검토한 `unconfirmed` 편집 집합은 `--accept-unconfirmed`로 적용하며 응답에는 그 표지가 남습니다. `timed_out`은 계속 거부합니다.
 
 ---
 
@@ -398,7 +400,7 @@ symora search index status              # languages(커버 언어), 심볼/파�
 symora search index clear
 ```
 
-인덱스가 없어도 검색은 파일시스템 스캔이나 라이브 LSP로 대신 답합니다. 다만 반복 사용에는 빌드된 인덱스가 가장 빠르고 안정적입니다. `--force`는 전체 재빌드에만 사용하세요.
+인덱스가 없으면 내용 검색은 파일을 스캔하고, 심볼 검색은 language server에 묻습니다. language server는 워크스페이스 분석을 마치기 전에는 아무것도 돌려주지 않을 수 있으며, 답이 그런 상태에 기대고 있으면 hints가 알려 줍니다. 반복해서 쓸 때는 인덱스를 빌드하세요. `--force`는 전체 재빌드에만 사용합니다.
 
 ---
 
