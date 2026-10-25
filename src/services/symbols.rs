@@ -614,7 +614,9 @@ impl SymbolExtractor {
 ///   `MACRO_B`), unless the declaration invoked a macro, whose rest holds
 ///   what it names ([`continued_macro`]), or was a macro's invocation, which
 ///   needs no `;` ([`misreads_a_macro_invocation`]), or the node begins a
-///   declaration of its own ([`begins_its_own_declaration`]).
+///   declaration of its own ([`begins_its_own_declaration`]); a directive is
+///   a line of its own, so the rest is what a conditional's branch writes
+///   first ([`written_first`]).
 ///
 /// No other loose bracket opens anything: the grammar strands brackets whose
 /// partners it absorbed elsewhere (a macro body it failed to read as one),
@@ -709,10 +711,14 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
                     && !misreads_a_macro_invocation(child, content))
                 .then_some(child),
             );
-            if left_open.contains(&true) && closed.len() < left_open.len()
-                || head.is_some_and(|head| !begins_its_own_declaration(child, head, content))
-            {
+            if left_open.contains(&true) && closed.len() < left_open.len() {
                 inside.insert(child.id());
+            }
+            if let Some(head) = head {
+                let rest = written_first(child);
+                if !begins_its_own_declaration(rest, head, content) {
+                    inside.insert(rest.id());
+                }
             }
             if node.is_error() {
                 match child.kind() {
@@ -754,6 +760,27 @@ fn begins_its_own_declaration(node: Node, head: Node, content: &str) -> bool {
         word.kind() == "primitive_type" || DECLARATION_OPENERS.contains(&word.kind())
     }) || !declares_a_function(head) && proves_a_function(node)
         || leaves_its_function_to_the_next(head, content)
+}
+
+/// The node a C or C++ node writes first: itself, or what a preprocessor
+/// conditional holds first after its condition.
+fn written_first(node: Node) -> Node {
+    let mut written = node;
+    while matches!(written.kind(), "preproc_if" | "preproc_ifdef") {
+        let condition = written
+            .child_by_field_name("condition")
+            .or_else(|| written.child_by_field_name("name"))
+            .map(|condition| condition.id());
+        let mut cursor = written.walk();
+        let Some(first) = written
+            .named_children(&mut cursor)
+            .find(|child| !child.is_extra() && Some(child.id()) != condition)
+        else {
+            break;
+        };
+        written = first;
+    }
+    written
 }
 
 /// Whether a C or C++ declaration the grammar ended by supplying its `;`
@@ -6237,6 +6264,15 @@ region     = "us-central1"
                 "field:entry",
             ],
             "a declaration the grammar cut short goes on only into what cannot begin one of its own"
+        );
+        assert_eq!(
+            declared(
+                "class P {\n public:\n  explicit P(int f)\n#ifdef CHECKER\n      \
+                 __attribute__((enable_if(f > 0, \"positive\")))\n#endif\n      : P(f, false) {\n  \
+                 }\n  static P* New(int f) { return 0; }\n  int tail;\n};\n"
+            ),
+            ["class:P", "constructor:P", "method:New", "field:tail"],
+            "a directive is a line of its own, so a declaration goes on inside the branch after it"
         );
         assert_eq!(
             declared(
