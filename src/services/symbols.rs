@@ -1145,7 +1145,11 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
 /// do, so a list the grammar read as arguments without an error that holds a
 /// call or a literal is a C++ direct-initializer instead (`EXPORT Timer
 /// timer((Clock()));`). A lone function pointer written with type names
-/// alone reads as a call (`P_((T (*f)(U)))`), and so as an initializer.
+/// alone reads as a call (`P_((T (*f)(U)))`), and so as an initializer. A
+/// list of type names alone with a macro's invocation after it
+/// (`inflateUndermine OF((z_streamp, int)) __API_AVAILABLE(…);` in macOS's
+/// zlib) the grammar reads with no declarator at all, so nothing there shows
+/// the macro.
 fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
@@ -4580,7 +4584,10 @@ fn destructor_named_apart(name: Node) -> Node {
 /// error with them and reading the last as the declarator (`typedef struct
 /// {…} SPAngle SPATIAL_SWIFT_NAME(Angle2D) __API_AVAILABLE(…);`): a type its
 /// class specifier ends takes no other type name, so the first word after it
-/// is the name, and what follows invocations naming nothing.
+/// is the name, and what follows invocations naming nothing. A typedef of a
+/// function type written after a macro the same way (`typedef struct S
+/// EXPORT handler(void);`) is the same tokens, with `handler(void)` the
+/// declarator: the first word is taken there too, so it is named `EXPORT`.
 fn typedef_name_before_macros(declarator: Node) -> Option<Node> {
     let definition = declarator
         .parent()
