@@ -519,10 +519,30 @@ impl SymbolExtractor {
     }
 
     /// `content` read by this language's grammar, or `None` where it has no
-    /// grammar here or the parse failed.
+    /// grammar here or the parse failed. C and C++ are read again past the
+    /// macros a class definition holds where the grammar took it for a function
+    /// ([`misread_class_macros`]), each spelled as blanks, so every offset
+    /// still addresses `content`.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
-        entry.parser.lock().ok()?.parse(content, None)
+        let mut parser = entry.parser.lock().ok()?;
+        let mut tree = parser.parse(content, None)?;
+        if language == Language::Cpp {
+            let mut blanked: Option<Vec<u8>> = None;
+            loop {
+                let source = blanked.as_deref().unwrap_or(content.as_bytes());
+                let macros = misread_class_macros(tree.root_node(), source);
+                if macros.is_empty() {
+                    break;
+                }
+                let bytes = blanked.get_or_insert_with(|| content.as_bytes().to_vec());
+                for spelled in macros {
+                    bytes[spelled].fill(b' ');
+                }
+                tree = parser.parse(&*bytes, None)?;
+            }
+        }
+        Some(tree)
     }
 
     /// Every declaration the grammar reads in `tree`, with the node it was
@@ -704,6 +724,109 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
         }
     }
     inside
+}
+
+/// The macros of each C or C++ class definition the grammar read as a
+/// function definition: one whose declarator names no function, as only a
+/// type's can, with a class key before its block (`class EXPORT Widget {`,
+/// `OPENSSL_EXPORT struct ssl_st {`, `ABSL_NAMESPACE_BEGIN class Clock {`). An
+/// identifier written before the key, or between the key and the name the
+/// class head ends with (qualified, specialized, then `final`), is no part of
+/// the grammar there, so it is a macro; one inside brackets is an argument
+/// (`__declspec(dllexport)`), and the head ends where a base clause begins.
+fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let text = |node: Node| source.get(node.byte_range()).unwrap_or_default();
+    let is_identifier = |node: Node| {
+        matches!(
+            node.kind(),
+            "identifier" | "type_identifier" | "field_identifier" | "namespace_identifier"
+        )
+    };
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+        if node.kind() != "function_definition"
+            || node
+                .child_by_field_name("declarator")
+                .is_none_or(|declarator| {
+                    member_kind(declarator_name(declarator)) == SymbolKind::Method
+                })
+        {
+            continue;
+        }
+        let Some(body) = node.child_by_field_name("body") else {
+            continue;
+        };
+        let mut leaves = Vec::new();
+        let mut walk = vec![node];
+        while let Some(part) = walk.pop() {
+            if part.start_byte() >= body.start_byte() || part.is_extra() && !part.is_error() {
+                continue;
+            }
+            if part.child_count() == 0 {
+                if !part.is_missing() {
+                    leaves.push(part);
+                }
+                continue;
+            }
+            let mut cursor = part.walk();
+            let children: Vec<_> = part.children(&mut cursor).collect();
+            walk.extend(children.into_iter().rev());
+        }
+        let mut depth = 0usize;
+        let mut outside = Vec::with_capacity(leaves.len());
+        for leaf in &leaves {
+            match leaf.kind() {
+                "(" | "[" => depth += 1,
+                ")" | "]" => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            outside.push(depth == 0 && !matches!(leaf.kind(), ")" | "]"));
+        }
+        let head_end = (0..leaves.len())
+            .find(|&at| outside[at] && leaves[at].kind() == ":")
+            .unwrap_or(leaves.len());
+        let Some(key) = (0..head_end)
+            .rev()
+            .find(|&at| outside[at] && matches!(text(leaves[at]), b"class" | b"struct" | b"union"))
+        else {
+            continue;
+        };
+        let mut name = head_end;
+        if name > key + 1 && text(leaves[name - 1]) == b"final" {
+            name -= 1;
+        }
+        if name > key + 1 && leaves[name - 1].kind() == ">" {
+            let mut open = 0usize;
+            while name > key + 1 {
+                name -= 1;
+                match leaves[name].kind() {
+                    ">" => open += 1,
+                    "<" => open -= 1,
+                    _ => {}
+                }
+                if open == 0 {
+                    break;
+                }
+            }
+        }
+        if name <= key + 1 || !is_identifier(leaves[name - 1]) {
+            continue;
+        }
+        name -= 1;
+        while name >= key + 3 && leaves[name - 1].kind() == "::" && is_identifier(leaves[name - 2])
+        {
+            name -= 2;
+        }
+        macros.extend(
+            (0..name)
+                .filter(|&at| at != key && outside[at] && is_identifier(leaves[at]))
+                .map(|at| leaves[at].byte_range()),
+        );
+    }
+    macros
 }
 
 /// Whether the grammar ended a C or C++ declaration by supplying the `;` it
@@ -898,9 +1021,8 @@ fn misreads_a_class_key(node: Node, content: &str) -> bool {
 }
 
 /// The kind of type a C or C++ declaration whose class key a macro set aside
-/// declares: the declarator names that type, with or without its members
-/// (`struct ssl_cipher_st { … }` read as a function), not a variable or a
-/// function.
+/// declares: the declarator names that type (`QT_BEGIN_NAMESPACE` before
+/// `class QWidget;`), not a variable or a function.
 fn set_aside_class_kind(node: Node, content: &str) -> Option<SymbolKind> {
     match stranded_class_key(node, content)? {
         (_, true) => None,
@@ -4399,6 +4521,12 @@ void g() {
     namespace lf = N;
 }
 
+class EXPORT Exported {
+    int size() const;
+    int count_;
+    int inline_count() const { return count_; }
+};
+
 namespace fsys = N;
 namespace outer::inner::innermost { int nested_var; }
 template <class T> concept Small = sizeof(T) < 4;
@@ -4452,6 +4580,10 @@ auto [first_of, second_of] = pair_value;
                 "struct:Forward",
                 "function:uses",
                 "function:g",
+                "class:Exported",
+                "method:Exported/size",
+                "field:Exported/count_",
+                "method:Exported/inline_count",
                 "namespace:fsys",
                 "namespace:outer",
                 "namespace:inner",
@@ -5603,6 +5735,63 @@ region     = "us-central1"
                 "QT_BEGIN_NAMESPACE\n\nclass QWidget;\nEXPORT struct stat st;\nAPI struct item *items;\n"
             ),
             ["class:QWidget", "variable:items"]
+        );
+    }
+
+    /// A class definition a macro made the grammar read as a function is read
+    /// again past the macro, so it is the class it defines, with its members
+    /// read as a class body holds them.
+    #[test]
+    fn a_class_a_macro_misread_as_a_function_is_read_past_it() {
+        let declared: Vec<String> = SymbolExtractor::new()
+            .extract(
+                Path::new("m.h"),
+                "class EXPORT Widget {\npublic:\n  Widget();\n  friend class ::ns::Access;\n  \
+                 virtual void clear() const = 0;\n  typedef int Size;\nprivate:\n  int count_;\n};\n\
+                 OPENSSL_EXPORT struct ssl_st { int version; };\n\
+                 NS_BEGIN\n\nclass Clock : public Base { int now_; };\n\
+                 class EXPORT W final { int z; };\n\
+                 class LOCKABLE WARN_UNUSED Mutex { int mu_; };\n\
+                 class EXPORT ns::Qualified { int q; };\n\
+                 template <> class EXPORT Spec<int> { int s; };\n\
+                 class __declspec(dllexport) DECL Declared { int d; };\n\
+                 struct S s{1};\nint plain(int a) { int inner = a; return inner; }\n",
+                Language::Cpp,
+            )
+            .iter()
+            .map(|symbol| {
+                format!(
+                    "{}:{}",
+                    symbol.kind,
+                    symbol.name_path.as_deref().unwrap_or(&symbol.name)
+                )
+            })
+            .collect();
+        assert_eq!(
+            declared,
+            [
+                "class:Widget",
+                "constructor:Widget/Widget",
+                "method:Widget/clear",
+                "class:Widget/Size",
+                "field:Widget/count_",
+                "struct:ssl_st",
+                "field:ssl_st/version",
+                "class:Clock",
+                "field:Clock/now_",
+                "class:W",
+                "field:W/z",
+                "class:Mutex",
+                "field:Mutex/mu_",
+                "class:ns::Qualified",
+                "field:ns::Qualified/q",
+                "class:Spec<int>",
+                "field:Spec<int>/s",
+                "class:Declared",
+                "field:Declared/d",
+                "variable:s",
+                "function:plain",
+            ]
         );
     }
 
