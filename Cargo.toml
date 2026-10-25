@@ -116,3 +116,9 @@ strip = true
 [profile.dev]
 opt-level = 0
 debug = true
+
+# The grammars, their query compiler, regex and SQLite do most of a command's
+# work: optimizing them alone makes each run of a debug binary, and so the
+# tests, faster while the crate itself still rebuilds unoptimized.
+[profile.dev.package."*"]
+opt-level = 2
