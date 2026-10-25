@@ -168,6 +168,13 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             name_some(&specifiers)
         ));
     }
+    if !result.undetermined_ts_projects.is_empty() {
+        hints.push(format!(
+            "{} file(s) sit below a tsconfig whose `references` name no one project compiling them ({}); their non-relative specifiers were read without a tsconfig's `paths`, `baseUrl` or conditions. Inspect the project references.",
+            result.undetermined_ts_projects.len(),
+            name_some(&result.undetermined_ts_projects)
+        ));
+    }
     if !result.unsupported_import_languages.is_empty() {
         let languages = result
             .unsupported_import_languages
@@ -313,6 +320,7 @@ mod tests {
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
+            undetermined_ts_projects: Vec::new(),
             unreadable_paths: Vec::new(),
         }
     }
@@ -387,6 +395,7 @@ mod tests {
         assert!(!partial.contains("Rust paths relative to a module"));
         result.rust_relative_imports_omitted = true;
         result.undetermined_imports = vec!["@/styles/app".to_string()];
+        result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
         assert!(
             render_markdown(&ctx(), &args, &result).contains("Rust paths relative to a module")
         );
@@ -402,6 +411,12 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("1 import specifier(s) matching a tsconfig `paths` alias or a workspace package name named no file the configuration determines (`@/styles/app`)")
+        );
+        assert!(
+            json["files"]["hints"][2]
+                .as_str()
+                .unwrap()
+                .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")
         );
     }
 

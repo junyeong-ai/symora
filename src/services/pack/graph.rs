@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    JsPackage, Manifests, ModuleResolution, TsConfig, nearest, own_or_only, project_path,
+    JsPackage, Manifests, ModuleResolution, TsConfig, TsOwner, nearest, own_or_only, project_path,
     python_project_roots,
 };
 use crate::models::symbol::Language;
@@ -21,6 +21,9 @@ pub(super) struct ImportGraph {
     pub(super) edges: Graph,
     pub(super) rust_relative_imports_omitted: bool,
     pub(super) undetermined_imports: BTreeSet<String>,
+    /// The files writing a non-relative specifier whose TypeScript
+    /// configuration the `references` above them leave undetermined.
+    pub(super) ts_owner_undetermined: BTreeSet<String>,
 }
 
 pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
@@ -55,12 +58,16 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut graph: Graph = BTreeMap::new();
     let mut rust_relative_imports_omitted = false;
     let mut undetermined_imports = BTreeSet::new();
+    let mut ts_owner_undetermined = BTreeSet::new();
     for node in nodes {
         graph.entry(node.id).or_default();
         let importer = Importer::of(node, manifests);
         let mut seen = HashSet::new();
         for target in &node.imports.references {
             let reference = Reference::parse(target, node.language);
+            if importer.ts_owner_undetermined && matches!(reference, Reference::Bare(_)) {
+                ts_owner_undetermined.insert(node.rel_path.clone());
+            }
             let files = match index.resolve(&reference, &importer) {
                 Resolution::Files(files) => files,
                 Resolution::NeedsOwnership => {
@@ -83,6 +90,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         edges: graph,
         rust_relative_imports_omitted,
         undetermined_imports,
+        ts_owner_undetermined,
     }
 }
 
@@ -107,8 +115,11 @@ struct Importer<'a> {
     /// the package layout determines it.
     crate_root: Option<&'a [String]>,
     /// The TypeScript configuration a JavaScript or TypeScript file is
-    /// compiled under: the nearest above it.
+    /// compiled under (`Manifests::ts_owner`).
     ts_config: Option<&'a TsConfig>,
+    /// Whether the configuration above the file names no one project
+    /// compiling it, so that its specifiers are read without one.
+    ts_owner_undetermined: bool,
     /// The module resolution the file's imports are read under, where it is
     /// one deciding which mode-dependent `exports` conditions apply.
     mode: Option<ImportMode>,
@@ -130,10 +141,14 @@ impl<'a> Importer<'a> {
         } else {
             None
         };
-        let ts_config = if is_javascript(node.language) {
-            nearest(&manifests.ts_configs, &node.directory).map(|(_, config)| config)
+        let owner = if is_javascript(node.language) {
+            manifests.ts_owner(node)
         } else {
-            None
+            TsOwner::None
+        };
+        let ts_config = match owner {
+            TsOwner::Config(config) => Some(config),
+            TsOwner::None | TsOwner::Undetermined => None,
         };
         let mode = ts_config
             .and_then(|config| config.module_resolution)
@@ -147,6 +162,7 @@ impl<'a> Importer<'a> {
             node,
             crate_root,
             ts_config,
+            ts_owner_undetermined: matches!(owner, TsOwner::Undetermined),
             mode,
         }
     }
@@ -2081,6 +2097,98 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["@/styles/missing".to_string()])
+        );
+    }
+
+    /// A configuration with `references` that does not compile a file itself
+    /// — a Vite root, `"files": []` — leaves it to the referenced project
+    /// whose `files`, `include` and `exclude` take it, as `tsc -b` builds
+    /// them; a reference names a configuration file or a directory's
+    /// `tsconfig.json`. Projects taking one file that say the same about
+    /// specifiers agree; ones that differ, or none taking it, leave the file
+    /// without a configuration, and that is disclosed.
+    #[test]
+    fn a_file_below_project_references_is_compiled_under_the_project_including_it() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let button = "import { Button } from \"@/components/Button\";\n";
+        let nodes = vec![
+            ts(0, "src/pages/a.tsx", button),
+            ts(1, "src/components/Button.tsx", ""),
+            ts(
+                2,
+                "src/a.test.ts",
+                &format!("import user from \"#fixtures/user\";\n{button}"),
+            ),
+            ts(3, "fixtures/user.ts", ""),
+            ts(4, "vite.config.ts", "import cfg from \"~cfg\";\n"),
+            ts(5, "cfg.ts", ""),
+            ts(6, "scripts/gen.ts", button),
+            ts(7, "src/lint/rule.ts", button),
+            ts(8, "src/test-utils/render.tsx", button),
+            // A configuration without `references` is that of every file
+            // below it.
+            ts(9, "plain/tools/x.ts", "import y from \"#y\";\n"),
+            ts(10, "plain/y.ts", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "tsconfig.json",
+                    "{\"files\": [], \"references\": [{\"path\": \"./tsconfig.app.json\"}, \
+                     {\"path\": \"./tsconfig.test.json\"}, {\"path\": \"./tsconfig.lint.json\"}, \
+                     {\"path\": \"./tools\"}]}",
+                ),
+                (
+                    "tsconfig.app.json",
+                    "{\"compilerOptions\": {\"paths\": {\"@/*\": [\"./src/*\"]}}, \
+                     \"include\": [\"src\"], \"exclude\": [\"src/**/*.test.ts\"]}",
+                ),
+                (
+                    "tsconfig.test.json",
+                    "{\"compilerOptions\": {\"paths\": {\"@/*\": [\"./src/*\"], \
+                     \"#fixtures/*\": [\"./fixtures/*\"]}}, \
+                     \"include\": [\"src/**/*.test.ts\", \"src/test-utils\"]}",
+                ),
+                (
+                    "tsconfig.lint.json",
+                    "{\"extends\": \"./tsconfig.app.json\", \"include\": [\"src/lint\"], \
+                     \"exclude\": []}",
+                ),
+                (
+                    "tools/tsconfig.json",
+                    "{\"compilerOptions\": {\"paths\": {\"~cfg\": [\"../cfg.ts\"]}}, \
+                     \"files\": [\"../vite.config.ts\"]}",
+                ),
+                (
+                    "plain/tsconfig.json",
+                    "{\"compilerOptions\": {\"paths\": {\"#y\": [\"./y.ts\"]}}, \
+                     \"include\": [\"src\"]}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(0), vec!["src/components/Button.tsx"]);
+        assert_eq!(
+            edges(2),
+            vec!["fixtures/user.ts", "src/components/Button.tsx"]
+        );
+        assert_eq!(edges(4), vec!["cfg.ts"]);
+        assert_eq!(edges(7), vec!["src/components/Button.tsx"]);
+        assert_eq!(edges(9), vec!["plain/y.ts"]);
+        assert!(edges(6).is_empty() && edges(8).is_empty());
+        assert_eq!(
+            graph.ts_owner_undetermined,
+            BTreeSet::from([
+                "scripts/gen.ts".to_string(),
+                "src/test-utils/render.tsx".to_string()
+            ])
         );
     }
 
