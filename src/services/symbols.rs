@@ -1618,7 +1618,11 @@ fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize
 
 /// The tokens a C or C++ node writes, in order, comments and the tokens the
 /// grammar supplied left out: what a macro is spelled with, blanked word by
-/// word so the lines between them hold.
+/// word so the lines between them hold. A directive's keyword is left out
+/// too, where the grammar held a conditional's `#endif` or `#else` in an
+/// error with a macro's words (`Q_OBJECT #endif Q_DECLARE_PRIVATE(X)`
+/// before `public:`): no macro is spelled with it, and blanking it would
+/// leave the conditional it closes open.
 fn written_words(node: Node) -> Vec<Node> {
     written_words_before(node, usize::MAX)
 }
@@ -1629,7 +1633,11 @@ fn written_words_before(node: Node, end: usize) -> Vec<Node> {
     let mut words = Vec::new();
     let mut walk = vec![node];
     while let Some(part) = walk.pop() {
-        if part.start_byte() >= end || part.is_extra() && !part.is_error() || part.is_missing() {
+        if part.start_byte() >= end
+            || part.is_extra() && !part.is_error()
+            || part.is_missing()
+            || part.kind().starts_with('#')
+        {
             continue;
         }
         if part.child_count() == 0 {
@@ -8107,6 +8115,16 @@ region     = "us-central1"
             ],
             "a member begins after an access specifier, so what a body writes before one unended is macros"
         );
+        for head in ["class X", "class Q_CORE_EXPORT X : public QFileDevice"] {
+            assert_eq!(
+                declared(&format!(
+                    "{head}\n{{\n#ifndef QT_NO_QOBJECT\n    Q_OBJECT\n#endif\n    \
+                     Q_DECLARE_PRIVATE(X)\n\npublic:\n    X();\n    int a;\n}};\n"
+                )),
+                ["class:X", "constructor:X", "field:a"],
+                "a directive the grammar read among a member's macros is no macro: {head}"
+            );
+        }
         assert_eq!(
             declared(
                 "class P {\n  Q_OBJECT\n  Q_PROPERTY(int x READ x)\n  Q_PROPERTY(int y READ y WRITE setY)\n\n\
