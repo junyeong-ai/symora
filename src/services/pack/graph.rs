@@ -1053,13 +1053,25 @@ impl<'a> SourceSet<'a> {
 /// test APK for the 'MyFlavor' variant of your app, Gradle combines the
 /// `src/androidTest/` and `src/androidTestMyFlavor/` source sets"
 /// (developer.android.com, Advanced test setup); the Android Gradle plugin
-/// names and builds a variant's local unit-test set alike. Gradle's
-/// `testFixtures` is none.
+/// names and builds a variant's local unit-test set alike. Kotlin
+/// Multiplatform names those sets `androidUnitTest<Variant>` and
+/// `androidInstrumentedTest<Variant>` and compiles each with
+/// `androidUnitTest` or `androidInstrumentedTest` (the Kotlin Gradle
+/// plugin's `MultiplatformLayoutV2KotlinAndroidSourceSetNaming`, and its
+/// `LanguageSettingsTests`, which compile `androidUnitTest` and
+/// `androidUnitTestDebug` in one task). Gradle's `testFixtures` is none.
 fn variant_test_base(name: &str) -> Option<&'static str> {
     if name.starts_with("testFixtures") {
         return None;
     }
-    ["androidTest", "test"].into_iter().find(|base| {
+    [
+        "androidInstrumentedTest",
+        "androidUnitTest",
+        "androidTest",
+        "test",
+    ]
+    .into_iter()
+    .find(|base| {
         name.strip_prefix(base)
             .is_some_and(|variant| variant.starts_with(|c: char| c.is_ascii_uppercase()))
     })
@@ -2522,6 +2534,56 @@ mod tests {
             edges_of(&nodes, 5),
             vec!["app/src/testFixtures/java/com/acme/fx/Fx.java"]
         );
+    }
+
+    /// Kotlin Multiplatform's Android variant test sets,
+    /// `androidUnitTest<Variant>` and `androidInstrumentedTest<Variant>`,
+    /// are test sets built with `androidUnitTest` and
+    /// `androidInstrumentedTest` (`kmp_variant`).
+    #[test]
+    fn a_kotlin_multiplatform_android_variant_test_set_is_built_with_its_test_set() {
+        let kotlin = |id, rel, source| node_in(id, rel, source, Language::Kotlin);
+        let nodes = vec![
+            kotlin(
+                0,
+                "shared/src/androidUnitTest/kotlin/com/acme/fake/FakeApi.kt",
+                "package com.acme.fake\nclass FakeApi\n",
+            ),
+            kotlin(
+                1,
+                "shared/src/androidUnitTestDebug/kotlin/com/acme/t/A.kt",
+                "package com.acme.t\nimport com.acme.fake.FakeApi\nclass A\n",
+            ),
+            kotlin(
+                2,
+                "shared/src/androidUnitTestDebug/kotlin/com/acme/t/DebugOnly.kt",
+                "package com.acme.t\nclass DebugOnly\n",
+            ),
+            kotlin(
+                3,
+                "shared/src/androidInstrumentedTest/kotlin/com/acme/it/Probe.kt",
+                "package com.acme.it\nclass Probe\n",
+            ),
+            kotlin(
+                4,
+                "shared/src/androidInstrumentedTestFree/kotlin/com/acme/it2/B.kt",
+                "package com.acme.it2\nimport com.acme.it.Probe\nclass B\n",
+            ),
+            kotlin(
+                5,
+                "app/src/main/kotlin/com/acme/app/App.kt",
+                "package com.acme.app\nimport com.acme.t.DebugOnly\nclass App\n",
+            ),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 1),
+            vec!["shared/src/androidUnitTest/kotlin/com/acme/fake/FakeApi.kt"]
+        );
+        assert_eq!(
+            edges_of(&nodes, 4),
+            vec!["shared/src/androidInstrumentedTest/kotlin/com/acme/it/Probe.kt"]
+        );
+        assert!(edges_of(&nodes, 5).is_empty());
     }
 
     /// A JVM file may see every source set of its own module but the test
