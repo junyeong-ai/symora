@@ -953,15 +953,18 @@ impl<'a> SourceSet<'a> {
     }
 
     /// Whether the set holds tests, by the names the build tools give test
-    /// sets: Maven's and Gradle's `test`, and a name ending in `Test` —
-    /// Kotlin Multiplatform's `<target>Test` (`commonTest`, `jvmTest`),
-    /// Android's `androidUnitTest` and `androidInstrumentedTest`, a Gradle
-    /// test suite's `integrationTest`. Gradle's `testFixtures` is no test
-    /// set: it is what tests build on.
+    /// sets: Maven's and Gradle's `test`, a name ending in `Test` — Kotlin
+    /// Multiplatform's `<target>Test` (`commonTest`, `jvmTest`), Android's
+    /// `androidTest`, `androidUnitTest` and `androidInstrumentedTest`, a
+    /// Gradle test suite's `integrationTest` — and an Android variant's test
+    /// set (`variant_test_base`). Gradle's `testFixtures` is no test set: it
+    /// is what tests build on.
     fn is_test(self) -> bool {
         match self {
             Self::Named { name, .. } => {
-                name == "test" || (name.len() > "Test".len() && name.ends_with("Test"))
+                name == "test"
+                    || (name.len() > "Test".len() && name.ends_with("Test"))
+                    || variant_test_base(name).is_some()
             }
             Self::Root(_) => false,
         }
@@ -971,12 +974,14 @@ impl<'a> SourceSet<'a> {
     /// tools' defaults: its own; in one module, a `test` set those of `main`
     /// and of `testFixtures`, and `testFixtures` those of `main`, which
     /// Maven, Gradle and its `java-test-fixtures` plugin put on their
-    /// classpaths.
+    /// classpaths, and an Android variant's test set those of the test set
+    /// it is built with (`variant_test_base`).
     fn sees(self, other: SourceSet<'_>) -> bool {
         match (self, other) {
             (Self::Named { module, name }, SourceSet::Named { module: a, name: b }) => {
                 module == a
                     && (name == b
+                        || variant_test_base(name) == Some(b)
                         || matches!(
                             (name, b),
                             ("test", "main" | "testFixtures") | ("testFixtures", "main")
@@ -1007,6 +1012,25 @@ impl<'a> SourceSet<'a> {
             _ => !other.is_test(),
         }
     }
+}
+
+/// The test set an Android variant's test set is built together with: its
+/// `test` for `test<Variant>` (`testDebug`), its `androidTest` for
+/// `androidTest<Variant>` (`androidTestFree`), a variant's name starting in
+/// upper case after the prefix. Android documents that "when building a
+/// test APK for the 'MyFlavor' variant of your app, Gradle combines the
+/// `src/androidTest/` and `src/androidTestMyFlavor/` source sets"
+/// (developer.android.com, Advanced test setup); the Android Gradle plugin
+/// names and builds a variant's local unit-test set alike. Gradle's
+/// `testFixtures` is none.
+fn variant_test_base(name: &str) -> Option<&'static str> {
+    if name.starts_with("testFixtures") {
+        return None;
+    }
+    ["androidTest", "test"].into_iter().find(|base| {
+        name.strip_prefix(base)
+            .is_some_and(|variant| variant.starts_with(|c: char| c.is_ascii_uppercase()))
+    })
 }
 
 /// The directories a Python tree puts on `sys.path`, as its own tooling
@@ -2335,6 +2359,84 @@ mod tests {
                 "lib/src/main/java/com/lib/Lib.java",
                 "lib/src/main/java/com/lib/Twin.java"
             ]
+        );
+    }
+
+    /// An Android variant's test set — `test` or `androidTest` and the
+    /// variant's name, `testDebug`, `androidTestFree` — is a test set, built
+    /// with its module's `test` or `androidTest` (`android_vt`), so it sees
+    /// what that set declares and another module never sees it; Gradle's
+    /// `testFixtures` stays visible to other modules.
+    #[test]
+    fn an_android_variant_test_set_is_built_with_its_modules_test_set() {
+        let java = |id, rel, source| node_in(id, rel, source, Language::Java);
+        let nodes = vec![
+            java(
+                0,
+                "app/src/test/java/com/acme/fake/FakeApi.java",
+                "package com.acme.fake; public class FakeApi {}\n",
+            ),
+            java(
+                1,
+                "app/src/testDebug/java/com/acme/t/A.java",
+                "package com.acme.t;\nimport com.acme.fake.FakeApi;\nimport com.acme.app.App;\n\
+                 import com.acme.dup.Dup;\nclass A {}\n",
+            ),
+            java(
+                2,
+                "app/src/main/java/com/acme/app/App.java",
+                "package com.acme.app; public class App {}\n",
+            ),
+            java(
+                3,
+                "app/src/androidTest/java/com/acme/it/Helper.java",
+                "package com.acme.it; public class Helper {}\n",
+            ),
+            java(
+                4,
+                "app/src/androidTestFree/java/com/acme/it2/B.java",
+                "package com.acme.it2;\nimport com.acme.it.Helper;\nimport com.acme.dup.Dup;\nclass B {}\n",
+            ),
+            java(
+                5,
+                "lib/src/main/java/com/acme/lib/L.java",
+                "package com.acme.lib;\nimport com.acme.t.A;\nimport com.acme.fx.Fx;\nclass L {}\n",
+            ),
+            java(
+                6,
+                "app/src/testFixtures/java/com/acme/fx/Fx.java",
+                "package com.acme.fx; public class Fx {}\n",
+            ),
+            // Declared by both test sets: each variant set sees its own base's.
+            java(
+                7,
+                "app/src/test/java/com/acme/dup/Dup.java",
+                "package com.acme.dup; public class Dup {}\n",
+            ),
+            java(
+                8,
+                "app/src/androidTest/java/com/acme/dup/Dup.java",
+                "package com.acme.dup; public class Dup {}\n",
+            ),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 1),
+            vec![
+                "app/src/test/java/com/acme/fake/FakeApi.java",
+                "app/src/main/java/com/acme/app/App.java",
+                "app/src/test/java/com/acme/dup/Dup.java"
+            ]
+        );
+        assert_eq!(
+            edges_of(&nodes, 4),
+            vec![
+                "app/src/androidTest/java/com/acme/it/Helper.java",
+                "app/src/androidTest/java/com/acme/dup/Dup.java"
+            ]
+        );
+        assert_eq!(
+            edges_of(&nodes, 5),
+            vec!["app/src/testFixtures/java/com/acme/fx/Fx.java"]
         );
     }
 
