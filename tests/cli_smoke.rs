@@ -2035,6 +2035,10 @@ fn a_cap_reached_on_removed_declarations_says_its_counts_are_a_lower_bound() {
         "{whole}"
     );
     assert_eq!(whole["incomplete"].as_bool(), None, "{whole}");
+    // `--deterministic` counts no reference, so there is no total to state,
+    // only the reason none was taken.
+    assert!(whole.get("total_references").is_none(), "{whole}");
+    assert_eq!(whole["refs_status"], "unavailable", "{whole}");
 }
 
 /// A diff's changed symbols are read through the same reader every other

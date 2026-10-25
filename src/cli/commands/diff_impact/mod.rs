@@ -47,7 +47,18 @@ pub struct DiffImpactOutput {
     pub revision: String,
     pub changed_files_count: usize,
     pub changed_symbols_count: usize,
-    pub total_references: usize,
+    /// The reference counts of the changed symbols whose counts were
+    /// measured, summed. Omitted when none was: a failed lookup counted
+    /// nothing, and a deleted symbol has no live references to count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_references: Option<usize>,
+    /// The strongest `refs_status` among the changes, which makes
+    /// `total_references` a lower bound: "unavailable" where a symbol's
+    /// lookup failed, so its references are not in the total, or
+    /// "indexing_degraded" where a count was taken under degraded analysis.
+    /// Omitted when every measured count is authoritative.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refs_status: Option<&'static str>,
     pub coverage: DiffCoverage,
     /// Files whose changes could not be measured in full: nothing could read
     /// the symbols of their changed lines (removed lines are read by the
@@ -245,8 +256,11 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
     // (Added/Modified). Deleted rows carry no refs — counting them as
     // "without tests" would pollute the ratio with symbols that have no live
     // references to test.
-    let total_refs: usize = changes.iter().filter_map(|c| c.refs).sum();
     let measurable = changes.iter().filter(|c| c.refs.is_some()).count();
+    let total_refs = (measurable > 0).then(|| changes.iter().filter_map(|c| c.refs).sum());
+    let refs_status = ["unavailable", "indexing_degraded"]
+        .into_iter()
+        .find(|status| changes.iter().any(|c| c.refs_status == Some(*status)));
     let with_tests = changes
         .iter()
         .filter(|c| c.test_refs.is_some_and(|t| t > 0))
@@ -263,6 +277,7 @@ pub async fn execute(args: DiffImpactArgs, app: &App) -> Result<()> {
         changed_files_count: changed_files.len(),
         changed_symbols_count: changes.len(),
         total_references: total_refs,
+        refs_status,
         coverage: DiffCoverage {
             with_tests,
             without_tests,
