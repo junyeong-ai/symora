@@ -1457,12 +1457,10 @@ fn declares(node: Node, content: &str, language: Language) -> bool {
             &["function_definition", "lambda"],
             &["class_definition", "module"],
         ),
+        // A `let` or `const` the query reads is one the program or a
+        // namespace holds, which reads the same.
         (Language::TypeScript | Language::JavaScript, kind)
-            if kind == "variable_declarator"
-                && node
-                    .parent()
-                    .is_some_and(|statement| statement.kind() == "variable_declaration")
-                || for_in_binding(node).is_some() =>
+            if kind == "variable_declarator" || for_in_binding(node).is_some() =>
         {
             (
                 &[
