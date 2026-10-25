@@ -801,14 +801,24 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
 /// function's takes ([`function_qualifiers`]): a macro's invocation reads as
 /// one too, and the names after it are a declaration of their own
 /// (`_LIBC_COUNT(gl_matchc) gl_pathv;`, `Entry entry;` after
-/// `DEFINE_MEMBERS(File)`), which no function's declarator runs into.
+/// `DEFINE_MEMBERS(File)`), which no function's declarator runs into. A
+/// cv-qualifier proves nothing where the grammar ended an untyped
+/// declaration after it, as an invocation is: it is the next declaration's
+/// (`Q_DISABLE_COPY(Q)` before `const QString title;`).
 fn trailing_declarator_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let mut leaves = Vec::new();
     let mut declarators = Vec::new();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         if node.kind() == "function_declarator"
-            && (names_a_parameter(node) || function_qualifiers(node).next().is_some())
+            && (names_a_parameter(node)
+                || function_qualifiers(node).any(|qualifier| {
+                    qualifier.kind() != "type_qualifier"
+                        || !node.parent().is_some_and(|declaration| {
+                            ends_on_a_supplied_semicolon(declaration)
+                                && declaration.child_by_field_name("type").is_none()
+                        })
+                }))
         {
             declarators.push(node.end_byte());
         }
@@ -7344,7 +7354,8 @@ region     = "us-central1"
                  ONNX_CATCH(const E& e) { handle(e); }\n  Cast() -> int;\n  Over() override;\n  \
                  Safe() noexcept;\n  Constrained() requires true;\n  operator bool();\n  \
                  Q_DISABLE_COPY(W)\n  const int limit_ = 3;\n  \
-                 Q_DECLARE_PRIVATE(X)\n  volatile int flag;\n  int after;\n};\n"
+                 Q_DECLARE_PRIVATE(X)\n  volatile int flag;\n  Q_DISABLE_COPY(V)\n  const QString title;\n  \
+                 int after;\n};\n"
             ),
             [
                 "class:W",
@@ -7361,6 +7372,7 @@ region     = "us-central1"
                 "method:operator bool",
                 "field:limit_",
                 "field:flag",
+                "field:title",
                 "field:after",
             ],
             "unless it writes what no macro's invocation can"
