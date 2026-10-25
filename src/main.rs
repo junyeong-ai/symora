@@ -170,13 +170,18 @@ async fn async_main() -> anyhow::Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to initialize: {}", e))?;
 
-    tokio::select! {
+    let result = tokio::select! {
         result = execute_command(cli.command, &app) => result,
         _ = shutdown_signal() => {
             tracing::debug!("Received shutdown signal");
             Ok(())
         }
-    }?;
+    };
+    // A failure a command returns is reported through the same output layer
+    // as one it prints, so both carry what that layer adds to a response.
+    if let Err(e) = result {
+        app.report_error(e);
+    }
 
     // A handler that hit a recoverable failure printed the `{error}` JSON to
     // stdout and returned Ok; surface that as a non-zero exit so a CI / `set
