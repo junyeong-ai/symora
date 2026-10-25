@@ -146,13 +146,15 @@ pub(super) enum TsOwner<'a> {
     /// No configuration is above it.
     None,
     Config(&'a TsConfig),
-    /// The configuration above it has `references`, and no project they
-    /// reach compiles it, so `tsc -b` builds it in none: the configurations
-    /// of that nearest project, by its index, and of those it reaches
-    /// (`Manifests::reached`) are what an import's writer could have meant.
+    /// The configuration above it has `references`, and neither it nor a
+    /// project they reach takes it, so `tsc -b` builds it in none: the
+    /// configurations of that nearest project, by its index, and of those it
+    /// reaches (`Manifests::reached`) are what an import's writer could have
+    /// meant.
     Uncompiled(usize),
-    /// The projects the `references` above it reach that compile it say
-    /// different things about specifiers: their configurations.
+    /// The projects that compile it, of that configuration and those its
+    /// `references` reach, say different things about specifiers: their
+    /// configurations.
     Undetermined(Vec<&'a TsConfig>),
 }
 
@@ -160,12 +162,21 @@ impl TsProjects {
     /// The configurations of the project at `project` and of every project
     /// its references reach, each once.
     fn reached(&self, project: usize) -> Vec<&TsConfig> {
+        self.reached_projects(project)
+            .into_iter()
+            .map(|at| &self.projects[at].config)
+            .collect()
+    }
+
+    /// The project at `project` and every project its references reach, by
+    /// their indices, each once.
+    fn reached_projects(&self, project: usize) -> Vec<usize> {
         let mut reached = Vec::new();
         let mut visited = HashSet::new();
         let mut pending = vec![project];
         while let Some(at) = pending.pop() {
             if visited.insert(at) {
-                reached.push(&self.projects[at].config);
+                reached.push(at);
                 pending.extend(self.projects[at].references.iter().rev());
             }
         }
@@ -173,31 +184,33 @@ impl TsProjects {
     }
 
     /// The configurations `file` is compiled under in the project at
-    /// `project`: its own where it compiles the file itself — or has no
-    /// `references`, a configuration's files being whatever is below it —
-    /// else those of the projects its references reach, each once, that
-    /// compile it, as `tsc -b` builds them; a project compiling the file
-    /// stands for those it references.
+    /// `project`: its own where it has no `references`, a configuration's
+    /// files being whatever is below it; else, as `tsc -b` builds them, those
+    /// of the projects among it and those its references reach, each once,
+    /// whose `files`, `include` and `exclude` take the file and that reach
+    /// no other project taking it. A project's program reads a file a
+    /// project it reaches compiles as that project's output declaration,
+    /// as tsc 5.9.3, 6.0.3 and 7.0.2 all build it.
     fn owners(&self, project: usize, file: &Path) -> Vec<&TsConfig> {
         let own = &self.projects[project];
-        if own.references.is_empty() || own.sources.covers(file) {
+        if own.references.is_empty() {
             return vec![&own.config];
         }
-        let mut owners = Vec::new();
-        let mut visited = HashSet::from([project]);
-        let mut pending: Vec<usize> = own.references.iter().rev().copied().collect();
-        while let Some(at) = pending.pop() {
-            if !visited.insert(at) {
-                continue;
-            }
-            let referenced = &self.projects[at];
-            if referenced.sources.covers(file) {
-                owners.push(&referenced.config);
-            } else {
-                pending.extend(referenced.references.iter().rev());
-            }
-        }
-        owners
+        let taking: Vec<usize> = self
+            .reached_projects(project)
+            .into_iter()
+            .filter(|at| self.projects[*at].sources.covers(file))
+            .collect();
+        taking
+            .iter()
+            .filter(|at| {
+                !self
+                    .reached_projects(**at)
+                    .into_iter()
+                    .any(|below| below != **at && taking.contains(&below))
+            })
+            .map(|at| &self.projects[*at].config)
+            .collect()
     }
 }
 
@@ -547,11 +560,11 @@ impl Manifests {
     }
 
     /// The configuration a JavaScript or TypeScript file is compiled under:
-    /// the nearest above it, or, where that one has `references` and does
-    /// not compile the file itself, the one the referenced projects compiling
-    /// it agree on (`TsProjects::owners`). Projects that say different things
-    /// about specifiers leave it undetermined; where none compiles it, no
-    /// configuration applies to it.
+    /// the nearest above it, or, where that one has `references`, the one
+    /// the projects compiling it, of that one and those its references
+    /// reach, agree on (`TsProjects::owners`). Projects that say different
+    /// things about specifiers leave it undetermined; where none compiles
+    /// it, no configuration applies to it.
     pub(super) fn ts_owner(&self, from: &Node) -> TsOwner<'_> {
         let projects = &self.ts_projects;
         let Some((_, project)) = nearest(&projects.by_directory, &from.directory) else {
