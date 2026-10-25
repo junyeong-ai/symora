@@ -3705,13 +3705,15 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 /// and a conversion function's name holds the declarator of its own
 /// parameters. A qualified name is the name ([`supplied_scope`]). A function
 /// declarator the grammar set aside as an error right before the one it read
-/// is the declarator: its parameters complete it, so what it read after them
-/// is a macro written there (`int f(int x) G_GNUC_PURE;`, `name() const
-/// ABSL_ATTRIBUTE_LIFETIME_BOUND`), unless only the one it read names its
-/// parameters, as a macro's arguments never do ([`names_a_parameter`]), so
-/// the set-aside one is a macro written before it (`GIT_EXTERN(int)
-/// git_blob_lookup(git_blob **blob)`). A macro's argument list stands for no
-/// name of its own ([`macro_argument_name`], [`macro_wrapped_name`]).
+/// is the declarator, after whatever words of its type the error holds
+/// before it: its parameters complete it, so what it read after them is a
+/// macro written there (`int f(int x) G_GNUC_PURE;`, `name() const
+/// ABSL_ATTRIBUTE_LIFETIME_BOUND`, `API void Clear() PROTOBUF_FINAL;`),
+/// unless only the one it read names its parameters, as a macro's arguments
+/// never do ([`names_a_parameter`]), so the set-aside one is a macro written
+/// before it (`GIT_EXTERN(int) git_blob_lookup(git_blob **blob)`). A macro's
+/// argument list stands for no name of its own ([`macro_argument_name`],
+/// [`macro_wrapped_name`]).
 fn declarator_name(declarator: Node) -> Node {
     let mut node = declarator;
     loop {
@@ -3720,8 +3722,21 @@ fn declarator_name(declarator: Node) -> Node {
         }
         if let Some(set_aside) = node
             .prev_sibling()
-            .filter(|before| before.is_error() && before.named_child_count() == 1)
-            .and_then(|before| before.named_child(0))
+            .filter(|before| before.is_error())
+            .and_then(|before| {
+                let mut cursor = before.walk();
+                let held: Vec<Node> = before.named_children(&mut cursor).collect();
+                let (last, words) = held.split_last()?;
+                words
+                    .iter()
+                    .all(|word| {
+                        matches!(
+                            word.kind(),
+                            "identifier" | "type_identifier" | "primitive_type"
+                        )
+                    })
+                    .then_some(*last)
+            })
             .filter(|held| {
                 held.kind() == "function_declarator"
                     && (names_a_parameter(*held) || !names_a_parameter(node))
@@ -6255,6 +6270,23 @@ region     = "us-central1"
             ),
             ["function:git_blob_lookup"],
             "a macro's arguments name nothing, so a macro is written before the function that names"
+        );
+        assert_eq!(
+            declared(
+                "GOBJECT_AVAILABLE_IN_ALL\n\
+                 gboolean\t g_type_check_instance          (GTypeInstance      *instance) G_GNUC_PURE;\n\
+                 class Plain2 {\n  ABSL_ATTRIBUTE_REINITIALIZES void Clear() PROTOBUF_FINAL;\n};\n\
+                 void f() {\n    explicit AnnotPath(std::vector<AnnotCoord> &&coords);\n    \
+                 ~AnnotPath();\n    AnnotPath(const AnnotPath &) = delete;\n}\n"
+            ),
+            [
+                "function:g_type_check_instance",
+                "class:Plain2",
+                "method:Clear",
+                "function:f",
+                "function:AnnotPath",
+            ],
+            "the words of its type the grammar set aside before a function are no declarator"
         );
         assert_eq!(
             declared(
