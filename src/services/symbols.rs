@@ -528,7 +528,7 @@ impl SymbolExtractor {
         let mut nodes = Vec::new();
         let mut declared = HashSet::new();
         let fragments = match language {
-            Language::Cpp => opened_by_an_error(tree.root_node()),
+            Language::Cpp => opened_by_an_error(tree.root_node(), content),
             _ => HashSet::new(),
         };
         let mut matches = cursor.matches(&entry.query, tree.root_node(), content.as_bytes());
@@ -577,9 +577,11 @@ impl SymbolExtractor {
 /// partners it absorbed elsewhere (a macro body it failed to read as one),
 /// and counting those would unread the rest of the file. The brace of
 /// `extern "C" {` or `namespace n {` encloses declarations of the file's
-/// scope. A body each preprocessor branch opens leaves what follows in the
-/// same error unread up to the next function definition, rather than misread.
-fn opened_by_an_error(root: Node) -> HashSet<usize> {
+/// scope. Where a lost body ends is read from the source (`body_end`), since
+/// the grammar lost it by giving its `}` to a brace a preprocessor branch
+/// opened; a body whose end the source does not settle either is unread up to
+/// the next function definition, rather than misread.
+fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
     /// What a bracket a syntax error holds does to the brackets open before
     /// it: opens one that holds fragments, opens one that holds the file's
     /// declarations, or closes the last.
@@ -646,7 +648,7 @@ fn opened_by_an_error(root: Node) -> HashSet<usize> {
         if !node.has_error() {
             continue;
         }
-        let mut in_lost_body = false;
+        let mut lost_body_until = None;
         let mut left_open = Vec::new();
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -661,12 +663,15 @@ fn opened_by_an_error(root: Node) -> HashSet<usize> {
             }
             if node.is_error() {
                 match child.kind() {
-                    "function_definition" => in_lost_body = false,
-                    "}" if !child.is_missing() => in_lost_body = false,
-                    _ if in_lost_body => {
+                    "function_definition" => lost_body_until = None,
+                    "}" if !child.is_missing() => lost_body_until = None,
+                    _ if lost_body_until.is_some_and(|end| child.start_byte() < end) => {
                         inside.insert(child.id());
                     }
-                    _ => in_lost_body = opens_a_body(child),
+                    _ => {
+                        lost_body_until = opens_a_body(child)
+                            .then(|| body_end(content, child.start_byte()).unwrap_or(usize::MAX));
+                    }
                 }
             }
             left_open.clear();
@@ -675,6 +680,120 @@ fn opened_by_an_error(root: Node) -> HashSet<usize> {
         }
     }
     inside
+}
+
+/// The byte after the `}` that closes the `{` at `open`, counted as one
+/// configuration of the preprocessor reads the source: each conditional's
+/// first branch, the others skipped. A program compiles in every
+/// configuration, so each balances its own brackets, where reading every
+/// branch at once counts a brace each of them opens. Comments and string and
+/// character literals hold no brackets, and a directive's own text is no
+/// part of the body. A `{` a directive writes (a `#define` body) belongs to
+/// that directive and ends with it at the latest. None where nothing closes
+/// the brace.
+fn body_end(content: &str, open: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let starts_line =
+        |at: usize| at == 0 || (bytes[at - 1] == b'\n' && (at < 2 || bytes[at - 2] != b'\\'));
+    let directive_at = |at: usize| {
+        let mut at = at;
+        while at < bytes.len() && matches!(bytes[at], b' ' | b'\t') {
+            at += 1;
+        }
+        (bytes.get(at) == Some(&b'#')).then_some(at + 1)
+    };
+    let logical_line_end = |from: usize| {
+        let mut at = from;
+        while at < bytes.len() {
+            if bytes[at] == b'\n' && (at == 0 || bytes[at - 1] != b'\\') {
+                return at;
+            }
+            at += 1;
+        }
+        at
+    };
+    // The identifier or number a quote follows: a raw string's prefix, or the
+    // number a digit separator stands inside.
+    let token_before = |at: usize| {
+        let start = content[..at]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |before| before + 1);
+        &content[start..at]
+    };
+    let mut line = open;
+    while !starts_line(line) {
+        line -= 1;
+    }
+    let directive_end = directive_at(line).map(|_| logical_line_end(open));
+    let end = directive_end.unwrap_or(bytes.len());
+    // One entry per open conditional: whether its taken branch has passed.
+    let mut conditionals: Vec<bool> = Vec::new();
+    let mut depth = 0usize;
+    let mut at = open;
+    while at < end {
+        if directive_end.is_none()
+            && starts_line(at)
+            && let Some(name) = directive_at(at)
+        {
+            let word: String = content[name..]
+                .trim_start_matches([' ', '\t'])
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            match word.as_str() {
+                "if" | "ifdef" | "ifndef" => conditionals.push(false),
+                "elif" | "elifdef" | "elifndef" | "else" => {
+                    if let Some(passed) = conditionals.last_mut() {
+                        *passed = true;
+                    }
+                }
+                "endif" => {
+                    conditionals.pop();
+                }
+                _ => {}
+            }
+            at = logical_line_end(at) + 1;
+            continue;
+        }
+        let skipped = conditionals.contains(&true);
+        match bytes[at] {
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                at = logical_line_end(at);
+                continue;
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at = content[at + 2..]
+                    .find("*/")
+                    .map_or(end, |close| at + 2 + close + 2);
+                continue;
+            }
+            b'"' if matches!(token_before(at), "R" | "u8R" | "uR" | "UR" | "LR") => {
+                let delimiter_end = content[at + 1..].find('(').map_or(end, |p| at + 1 + p);
+                let closing = format!("){}\"", &content[at + 1..delimiter_end.min(end)]);
+                at = content[delimiter_end..]
+                    .find(&closing)
+                    .map_or(end, |close| delimiter_end + close + closing.len());
+                continue;
+            }
+            b'\'' if token_before(at).starts_with(|c: char| c.is_ascii_digit()) => {}
+            quote @ (b'"' | b'\'') => {
+                at += 1;
+                while at < end && bytes[at] != quote && bytes[at] != b'\n' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'{' if !skipped => depth += 1,
+            b'}' if !skipped => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    directive_end
 }
 
 /// The class key of a C or C++ declaration, as the source writes it, where
@@ -5144,6 +5263,34 @@ region     = "us-central1"
     /// cuts a typedef short of its name. What the grammar read whole is read
     /// where it stands, as a function and a type; what it cut short names
     /// nothing.
+    /// A body ends where one configuration of the preprocessor closes it,
+    /// whatever brackets comments, literals and other branches hold, and a
+    /// brace a directive writes ends with that directive at the latest.
+    #[test]
+    fn a_body_ends_where_one_preprocessor_configuration_closes_it() {
+        fn end(content: &str) -> Option<&str> {
+            let open = content.find('{').unwrap();
+            body_end(content, open).map(|end| &content[..end])
+        }
+        assert_eq!(
+            end("{\n#if A\n  if (x) {\n#else\n  {\n#endif\n  }\n}\nint after;"),
+            Some("{\n#if A\n  if (x) {\n#else\n  {\n#endif\n  }\n}")
+        );
+        assert_eq!(
+            end("{ /* } */ \"}\" '}' // }\n int n = 1'000; }; tail"),
+            Some("{ /* } */ \"}\" '}' // }\n int n = 1'000; }")
+        );
+        assert_eq!(
+            end("{ auto s = R\"x( \"} )x\"; } tail"),
+            Some("{ auto s = R\"x( \"} )x\"; }")
+        );
+        assert_eq!(
+            end("#define OPEN(n) int n(void) \\\n  { \\\n  int v;\nint after(void);\n"),
+            Some("#define OPEN(n) int n(void) \\\n  { \\\n  int v;")
+        );
+        assert_eq!(end("{ int never_closed;\n"), None);
+    }
+
     #[test]
     fn a_recovered_header_declares_only_what_the_grammar_read_whole() {
         let extractor = SymbolExtractor::new();
@@ -5172,12 +5319,24 @@ region     = "us-central1"
         );
         let lost_body = declared(
             "int f(int x)\n{\n    int local = x;\n#if A\n    if (x) {\n#else\n    {\n#endif\n\
-             \x20       return local;\n    }\n}\n",
+             \x20       return local;\n    }\n}\n\nint proto(void);\nstruct S { int a; };\n\
+             int global_after = 3;\n",
         );
         assert!(
             !lost_body.iter().any(|d| d.ends_with(":local")),
             "a lost body's local is no declaration: {lost_body:?}"
         );
+        for expected in [
+            "function:proto",
+            "struct:S",
+            "field:a",
+            "variable:global_after",
+        ] {
+            assert!(
+                lost_body.iter().any(|d| d == expected),
+                "what follows a lost body is read: {expected} in {lost_body:?}"
+            );
+        }
         assert_eq!(
             declared(
                 "EXPORT int (*verify_callback(const SSL *ssl))(\n    int ok, X509_STORE_CTX *ctx);\n\
