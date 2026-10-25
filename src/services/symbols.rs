@@ -530,14 +530,15 @@ impl SymbolExtractor {
     /// The grammar's recovery from an error is not local, so a blank can
     /// change how it reads declarations far from it, for better or worse,
     /// however well proved, and what a file reads depends on the blanks taken
-    /// together: in ICU's `utfiterator.h`, the one after its first
-    /// `operator++` alone reads 28 declarations fewer than the grammar alone,
-    /// and all of them together read more, yet lose a namespace. The measures
-    /// of the re-read tree tried did not tell a better reading from a worse:
-    /// the bytes it holds in errors favour a misreading the grammar holds
-    /// without one, and keeping each declaration the first reading made
-    /// refuses the passes that remove its misread ones. So each blank needs a
-    /// proof of its own, and a file reads what its proved blanks give.
+    /// together: in ICU's `utfiterator.h`, the blank at its line 1318
+    /// (`UTFIterator`'s `operator++`) alone reads 28 declarations fewer than
+    /// the grammar alone, and all of them together read more, yet lose a
+    /// namespace. Neither the bytes the re-read tree holds in errors nor the
+    /// declarations it keeps tells a better reading from a worse: the first
+    /// favours a misreading the grammar holds without an error, and the second
+    /// refuses the passes that remove the first reading's misread
+    /// declarations. So each blank needs a proof of its own, and a file reads
+    /// what its proved blanks give.
     fn parse(&self, content: &str, language: Language) -> Option<Tree> {
         let entry = self.languages.get(&language)?;
         let mut parser = entry.parser.lock().ok()?;
@@ -1142,18 +1143,19 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
 /// as one, supplying a `::` between them, or as a declarator after a name it
 /// set aside as an error, where a declaration has its type. The macro
 /// expands to the list, so its name and its own parentheses are spelled as
-/// blanks. Read as an expression, a parameter list writes names and the
-/// operators its declarators spell (`OF((gzFile, z_off_t))`, `P_((OnigRegSet*
-/// set))`) or leaves an error, as its arrays' and function pointers' types
-/// do, so a list the grammar read as arguments without an error that holds a
-/// call or a literal is a C++ direct-initializer instead (`EXPORT Timer
-/// timer((Clock()));`). A lone function pointer written with type names
-/// alone reads as a call (`P_((T (*f)(U)))`), so its list stays an
-/// initializer and the declaration is named for the macro. A
-/// list of type names alone with a macro's invocation after it
+/// blanks. Read as an expression, a parameter list mostly writes names and
+/// the operators its declarators spell (`OF((gzFile, z_off_t))`,
+/// `P_((OnigRegSet* set))`) or leaves an error, as a primitive type does
+/// (`__P((char name[64]))`), so a list the grammar read as arguments without
+/// an error that holds a call or a literal is a C++ direct-initializer
+/// instead (`EXPORT Timer timer((Clock()));`). Written with type names alone,
+/// a parameter that holds one reads the same way, and its declaration is
+/// named for the macro: an array bound (`__P((T *argv[4]))`), a function
+/// type (`__P((T *f(U)))`), a lone function pointer (`P_((T (*f)(U)))`). In
+/// a list of type names alone with a macro's invocation after it
 /// (`inflateUndermine OF((z_streamp, int)) __API_AVAILABLE(…);` in macOS's
-/// zlib) the grammar reads with no declarator at all, so nothing there shows
-/// the macro.
+/// zlib), the grammar reads `OF` as the declarator and the list as an error,
+/// so no list shows the macro.
 fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
