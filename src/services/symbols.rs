@@ -613,7 +613,9 @@ impl SymbolExtractor {
 ///   (`MACRO_A MACRO_B;` after `int f(int x)`, read as a declaration of
 ///   `MACRO_B`), unless the declaration invoked a macro, whose rest holds
 ///   what it names ([`continued_macro`]), or was a macro's invocation, which
-///   needs no `;` ([`misreads_a_macro_invocation`]), or the node begins a
+///   needs no `;` ([`misreads_a_macro_invocation`]), or was a constructor's
+///   definition, which ends with its body ([`misread_member_initializers`]),
+///   or the node begins a
 ///   declaration of its own ([`begins_its_own_declaration`]); a directive is
 ///   a line of its own, so the rest is what a conditional's branch writes
 ///   first ([`written_first`]).
@@ -708,7 +710,8 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
                 &mut cut_short,
                 (ends_on_a_supplied_semicolon(child)
                     && !invokes_a_macro(child)
-                    && !misreads_a_macro_invocation(child, content))
+                    && !misreads_a_macro_invocation(child, content)
+                    && misread_member_initializers(child).is_none())
                 .then_some(child),
             );
             if left_open.contains(&true) && closed.len() < left_open.len() {
@@ -839,6 +842,19 @@ const DECLARATION_OPENERS: &[&str] = &[
     "long",
     "short",
 ];
+
+/// The member initializers of a C++ constructor the grammar read as a data
+/// member's bit-field: a bit-field's width follows only a data member's name,
+/// so a `:` after a function declarator opens the initializers, and the
+/// braces the declaration ends with are the constructor's body
+/// (`CONSTEXPR_M fields(year_t y, month_t m) : y(y), m(m) {}`).
+fn misread_member_initializers(node: Node) -> Option<Node> {
+    let clause = child_of_kind(node, "bitfield_clause")?;
+    std::iter::successors(clause.prev_sibling(), Node::prev_sibling)
+        .find(|before| !before.is_extra())
+        .filter(|before| before.kind() == "function_declarator")
+        .map(|_| clause)
+}
 
 /// Whether a C or C++ declaration's declarator declares a function
 /// ([`member_kind`]).
@@ -1556,13 +1572,17 @@ fn errs_within(node: Node, from: usize, to: usize) -> bool {
 /// function value's body (`const f = () => {}`), or the body of the
 /// declaration a wrapper holds (`export`, a decorated definition). A C++
 /// constructor's body begins at its member initializers, which the standard
-/// counts part of it (`F(int p) : a_(compute(p)) {}`). Only a function value
+/// counts part of it (`F(int p) : a_(compute(p)) {}`), those the grammar read
+/// as a bit-field too ([`misread_member_initializers`]). Only a function value
 /// opens its body after a header the variable shares: a `match` or `switch`
 /// value is a value like any other.
 fn body_of(node: Node, language: Language) -> Option<Node> {
     let held_as = |kinds: &[&str]| kinds.iter().find_map(|kind| child_of_kind(node, kind));
     (language == Language::Cpp)
-        .then(|| child_of_kind(node, "field_initializer_list"))
+        .then(|| {
+            child_of_kind(node, "field_initializer_list")
+                .or_else(|| misread_member_initializers(node))
+        })
         .flatten()
         .or_else(|| node.child_by_field_name("body"))
         .or_else(|| match language {
@@ -2323,6 +2343,10 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
             .collect(),
         Language::Cpp => fields("declarator")
             .into_iter()
+            .filter(|declarator| {
+                misread_member_initializers(node)
+                    .is_none_or(|initializers| declarator.end_byte() <= initializers.start_byte())
+            })
             .map(declarator_name)
             .chain(
                 node.child_by_field_name("name")
@@ -6276,6 +6300,23 @@ region     = "us-central1"
         );
         assert_eq!(
             declared(
+                "struct fields {\n  CONSTEXPR_M fields(year_t year, month_t month)\n      \
+                 : y(year), m(month) {}\n  std::int_least64_t y;\n  std::int_least8_t m;\n};\n\
+                 struct bits {\n  unsigned a : 3, b : 4;\n};\n"
+            ),
+            [
+                "struct:fields",
+                "constructor:fields",
+                "field:y",
+                "field:m",
+                "struct:bits",
+                "field:a",
+                "field:b",
+            ],
+            "a bit-field's width follows only a data member, so after a function it opens initializers"
+        );
+        assert_eq!(
+            declared(
                 "PyAPI_FUNC(int) Py_IsInitialized(void);\nLUA_API int (lua_gettop) (lua_State *L);\n\
                  typedef Array(uint32_t) IdList;\nstruct S {\n  Array(uint32_t) ids[4];\n  \
                  int GIT_CALLBACK(read)(void *);\n};\n"
@@ -6512,7 +6553,7 @@ region     = "us-central1"
             extractor
                 .extract_with_signatures(Path::new(file), content, language)
                 .into_iter()
-                .find(|symbol| symbol.name == name)
+                .find(|symbol| symbol.name == name || symbol.name_path.as_deref() == Some(name))
                 .unwrap_or_else(|| panic!("{file} declares {name}"))
                 .signature
         };
@@ -6604,6 +6645,14 @@ region     = "us-central1"
                 "struct F {\n  F(int);\n  int a_, b_;\n};\nF::F(int p) : a_(compute(p)), b_{p} {}\n",
                 "F::F",
                 Some("F::F(int p)"),
+            ),
+            (
+                "a.h",
+                Language::Cpp,
+                "struct fields {\n  CONSTEXPR_M fields(year_t year, month_t month)\n      \
+                 : y(year), m(month) {}\n  std::int_least64_t y;\n};\n",
+                "fields/fields",
+                Some("CONSTEXPR_M fields(year_t year, month_t month)"),
             ),
             (
                 "a.rs",
