@@ -2448,9 +2448,10 @@ mod tests {
 
     /// Installing a project installs the projects in the tree it depends on
     /// through its tooling — a uv workspace member its sources mark
-    /// `{ workspace = true }`, a uv or Poetry `path` dependency — and theirs,
-    /// so their packages are on its `sys.path`; a member nothing it installs
-    /// depends on is not.
+    /// `{ workspace = true }`, a uv or Poetry `path` dependency on a directory
+    /// any build configuration makes a project — and theirs, so their
+    /// packages are on its `sys.path`; a member nothing it installs depends
+    /// on is not, nor a directory that is no project.
     #[test]
     fn a_python_project_imports_the_projects_its_dependencies_install() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -2459,7 +2460,8 @@ mod tests {
             python(
                 1,
                 "packages/app/src/fixture_app/report.py",
-                "from fixture_core.geometry import area\nimport fixture_util\nimport other_pkg\n",
+                "from fixture_core.geometry import area\nimport fixture_util\nimport other_pkg\n\
+                 import legacy_pkg.thing\nimport loose_pkg\n",
             ),
             python(2, "packages/core/src/fixture_core/__init__.py", ""),
             python(
@@ -2474,6 +2476,9 @@ mod tests {
             python(8, "poetry/lib/poetry_lib/__init__.py", ""),
             // A project of the same name that is no workspace member.
             python(9, "vendor/core/src/fixture_core/geometry.py", ""),
+            python(10, "legacy/legacy_pkg/__init__.py", ""),
+            python(11, "legacy/legacy_pkg/thing.py", ""),
+            python(12, "loose/loose_pkg/__init__.py", ""),
         ];
         let manifests = manifests_of(
             &[
@@ -2485,7 +2490,10 @@ mod tests {
                 ),
                 (
                     "packages/app/pyproject.toml",
-                    "[project]\nname = \"fixture-app\"\ndependencies = [\"Fixture_Core>=1.0\"]\n",
+                    "[project]\nname = \"fixture-app\"\n\
+                     dependencies = [\"Fixture_Core>=1.0\", \"legacy\", \"loose\"]\n\
+                     [tool.uv.sources]\nlegacy = { path = \"../../legacy\" }\n\
+                     loose = { path = \"../../loose\" }\n",
                 ),
                 (
                     "packages/core/pyproject.toml",
@@ -2513,6 +2521,9 @@ mod tests {
                     "vendor/core/pyproject.toml",
                     "[project]\nname = \"fixture-core\"\n",
                 ),
+                // A project by its `setup.py` alone; a pytest file makes none.
+                ("legacy/setup.py", "from setuptools import setup\n"),
+                ("loose/pytest.ini", "[pytest]\n"),
             ],
             &nodes,
         );
@@ -2521,7 +2532,8 @@ mod tests {
             edges(1),
             vec![
                 "packages/core/src/fixture_core/geometry.py",
-                "libs/util/fixture_util/__init__.py"
+                "libs/util/fixture_util/__init__.py",
+                "legacy/legacy_pkg/thing.py"
             ]
         );
         assert_eq!(edges(3), vec!["libs/util/fixture_util/text.py"]);
