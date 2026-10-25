@@ -335,6 +335,55 @@ mod tests {
         }
     }
 
+    /// A declaration whose parameters or members begin on its own line is
+    /// what the line declares, whether the answer nests them (pyright lists
+    /// `def process_order(self, cart):` with `cart` under it) or lists them
+    /// beside it inside its range (a one-line struct's field). A statement
+    /// declaring several names gives each the same range, so it does not.
+    #[test]
+    fn line_addressing_takes_a_declaration_over_what_it_holds_on_its_line() {
+        let symbol = |name: &str, kind, at: (u32, u32), range: (u32, u32, u32, u32)| {
+            let path = PathBuf::from("/tmp/x");
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(path, at.0, at.1, range.0, range.1, range.2, range.3),
+            )
+        };
+        let nested = vec![
+            symbol(
+                "process_order",
+                SymbolKind::Method,
+                (12, 9),
+                (12, 5, 14, 37),
+            )
+            .with_children(vec![symbol(
+                "cart",
+                SymbolKind::Variable,
+                (12, 29),
+                (12, 29, 12, 33),
+            )]),
+        ];
+        let flat = vec![
+            symbol("P", SymbolKind::Struct, (1, 8), (1, 1, 1, 22)),
+            symbol("x", SymbolKind::Field, (1, 12), (1, 12, 1, 18)),
+        ];
+        for (symbols, line, name) in [(&nested, 12, "process_order"), (&flat, 1, "P")] {
+            match line_addressed_symbol(symbols, line) {
+                SymbolResolution::Match(symbol) => assert_eq!(symbol.name, name),
+                _ => panic!("line {line} declares {name}"),
+            }
+        }
+        let statement = vec![
+            symbol("a", SymbolKind::Variable, (3, 5), (3, 1, 3, 10)),
+            symbol("b", SymbolKind::Variable, (3, 8), (3, 1, 3, 10)),
+        ];
+        match line_addressed_symbol(&statement, 3) {
+            SymbolResolution::Ambiguous(declared) => assert_eq!(declared.len(), 2),
+            _ => panic!("`int a, b;` declares both names"),
+        }
+    }
+
     /// `file:line:col` is position-precise: the column must be on a symbol's
     /// declaration. The indent before a method and a line inside its body
     /// address nothing — resolving either to the enclosing impl would let a

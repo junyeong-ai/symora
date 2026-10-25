@@ -641,7 +641,8 @@ fn diff_impact_gives_a_class_the_lines_no_member_covers() {
 /// names is the whole declaration of each, so a declaration inserted after
 /// one goes after all of it, and deleting one is refused rather than taking
 /// the others, as is deleting a name an assignment binds along with an
-/// attribute.
+/// attribute. A parameter pyright lists under a function, on the function's
+/// own line, is part of it, so that line addresses the function.
 #[test]
 #[ignore = "requires pyright; run: cargo test --test lang_fixtures -- --ignored"]
 fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
@@ -659,7 +660,8 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     std::fs::write(
         repo.join("svc.py"),
         "class Service:\n    timeout = 30\n\n    def start(self):\n        return self.timeout\n\n\n\
-         LIMIT = 5\nunused = shared = dict(\n    a=1,\n)\nTOTAL = Service.timeout = 60\n",
+         LIMIT = 5\nunused = shared = dict(\n    a=1,\n)\nTOTAL = Service.timeout = 60\n\
+         def handle(cart):\n    return cart\n",
     )
     .unwrap();
     let run = |args: &[&str]| -> Value {
@@ -706,6 +708,15 @@ fn a_variable_pyright_answers_for_is_edited_as_its_whole_assignment() {
     assert!(message.contains("'shared'"), "{refused}");
     let refused = run(&["edit", "delete", "svc.py", "--symbol", "TOTAL", "--dry-run"]);
     assert_eq!(refused["error"]["code"], "unsupported", "{refused}");
+    let addressed = run(&[
+        "edit",
+        "insert-before",
+        "svc.py:13",
+        "--code",
+        "# x",
+        "--dry-run",
+    ]);
+    assert_eq!(addressed["target_symbol"], "handle", "{addressed}");
 }
 
 /// A path search over a file changed since the index build lists each
