@@ -1291,6 +1291,23 @@ fn read_signature(
         declaration = declaration_node(statement, language);
         start = start.min(declaration.start_byte());
     }
+    // A chained Python or Ruby assignment declares each name it binds, and
+    // each signs with the target that binds it: `d` in `c = d = 3` is `d`,
+    // where `c = d` would read as an assignment of `d` to `c`.
+    if matches!(language, Language::Python | Language::Ruby)
+        && let Some(target) = std::iter::successors(Some(named), Node::parent)
+            .take_while(|node| node.id() != declaration.id())
+            .find(|node| {
+                node.parent().is_some_and(|assignment| {
+                    assignment.kind() == "assignment"
+                        && assignment
+                            .child_by_field_name("left")
+                            .is_some_and(|left| left.id() == node.id())
+                })
+            })
+    {
+        start = start.max(target.start_byte());
+    }
     let mut node = named;
     let opens = loop {
         if let Some(body) = body_of(node, language).filter(|body| body.start_byte() > name) {
@@ -6605,6 +6622,22 @@ region     = "us-central1"
                 "X: int = {\n    \"a\": 1,\n}\n",
                 "X",
                 Some("X: int"),
+            ),
+            ("a.py", Language::Python, "c = d = 3\n", "c", Some("c")),
+            ("a.py", Language::Python, "c = d = 3\n", "d", Some("d")),
+            (
+                "a.py",
+                Language::Python,
+                "a, b = c, d = pair()\n",
+                "d",
+                Some("c, d"),
+            ),
+            (
+                "a.rb",
+                Language::Ruby,
+                "UNUSED = SHARED = 1\n",
+                "SHARED",
+                Some("SHARED"),
             ),
             (
                 "a.rs",
