@@ -552,6 +552,7 @@ impl SymbolExtractor {
                 macros.extend(trailing_declarator_macros(tree.root_node(), source));
                 macros.extend(prototype_macros(tree.root_node()));
                 macros.extend(qualified_type_macros(tree.root_node(), source));
+                macros.extend(access_specifier_macros(tree.root_node(), source));
                 if macros.is_empty() {
                     break;
                 }
@@ -798,6 +799,90 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             })
         {
             macros.push(written.byte_range());
+        }
+    }
+    macros
+}
+
+/// The macros a C++ class body writes before an access specifier, which the
+/// grammar read into a member, taking the specifier's colon for a
+/// bit-field's: a member ends with `;` or a body and a specifier begins after
+/// one, so what the member writes before the colon, ending none of it, is
+/// what macros write (`Q_OBJECT` and `Q_DECLARE_PRIVATE(W)` before
+/// `public:`), but for `public`, `protected` or `private` right before it,
+/// the specifier itself. The colon is a specifier's where that word, which
+/// C++ reserves, is read as a name in the body of a `class`, a key C lacks,
+/// since in C those words name members (`unsigned int public:1;`), or where
+/// what the grammar read as the width begins with a primitive type it set
+/// aside as an error, since a width is an expression, which a type begins
+/// only as a functional cast the grammar reads whole (`Pad : int(3);`): the
+/// name before the colon is then a macro standing for a specifier
+/// (`Q_SIGNALS:` before `void changed();`). A struct's body writing `public:`
+/// after a macro and before what reads as an expression is left as the
+/// grammar reads it, since C reads the same tokens as a bit-field.
+fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut macros = Vec::new();
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        let mut cursor = node.walk();
+        pending.extend(node.children(&mut cursor));
+        if !matches!(node.kind(), "field_declaration" | "function_definition") {
+            continue;
+        }
+        let Some(body) = class_body(node) else {
+            continue;
+        };
+        let Some(colon) = node
+            .children(&mut node.walk())
+            .flat_map(|child| {
+                if child.is_error() {
+                    let mut cursor = child.walk();
+                    child.children(&mut cursor).collect()
+                } else {
+                    vec![child]
+                }
+            })
+            .find(|clause| clause.kind() == "bitfield_clause")
+            .and_then(|clause| clause.child(0))
+        else {
+            continue;
+        };
+        let mut leaves = Vec::new();
+        let mut walk = vec![node];
+        while let Some(part) = walk.pop() {
+            if part.is_extra() && !part.is_error() || part.is_missing() {
+                continue;
+            }
+            if part.child_count() == 0 {
+                leaves.push(part);
+                continue;
+            }
+            let mut cursor = part.walk();
+            let children: Vec<_> = part.children(&mut cursor).collect();
+            walk.extend(children.into_iter().rev());
+        }
+        let at = leaves.partition_point(|leaf| leaf.start_byte() < colon.start_byte());
+        let (mut before, width) = leaves.split_at(at);
+        let specifier = before.split_last().filter(|(word, _)| {
+            matches!(word.kind(), "identifier" | "field_identifier")
+                && matches!(
+                    source.get(word.byte_range()),
+                    Some(b"public" | b"protected" | b"private")
+                )
+        });
+        let no_width = width.get(1).is_some_and(|first| {
+            first.kind() == "primitive_type" && first.parent().is_some_and(|error| error.is_error())
+        });
+        if specifier.is_some()
+            && body
+                .parent()
+                .is_some_and(|class| class.kind() == "class_specifier")
+            || no_width
+        {
+            if let Some((_, macros_before)) = specifier {
+                before = macros_before;
+            }
+            macros.extend(before.iter().map(Node::byte_range));
         }
     }
     macros
@@ -7497,6 +7582,37 @@ region     = "us-central1"
                 "field:after",
             ],
             "unless it writes what no macro's invocation can"
+        );
+        assert_eq!(
+            declared(
+                "class W {\n  Q_OBJECT\n  Q_DISABLE_COPY(W)\n  Q_DECLARE_PRIVATE(W)\n public:\n  \
+                 W(QObject *parent);\n  int after;\n};\n\
+                 class D {\n  Q_OBJECT\nprotected:\n  D() {}\n  Q_DECLARE_PUBLIC(D)\nprivate:\n  int y;\n};\n\
+                 class K {\n  void set(const QString &p);\n\nQ_SIGNALS:\n\n  /*!\n   * doc\n   */\n  \
+                 void dirty(const QString &p);\n  int z;\n};\n\
+                 class Bits {\n  Mode mode : int(3);\n  Pad : 4, flags : 3;\n  int tail;\n};\n\
+                 struct Flags {\n  apr_uint32_t public : 1;\n  int x;\n};\n"
+            ),
+            [
+                "class:W",
+                "constructor:W",
+                "field:after",
+                "class:D",
+                "constructor:D",
+                "field:y",
+                "class:K",
+                "method:set",
+                "method:dirty",
+                "field:z",
+                "class:Bits",
+                "field:mode",
+                "field:flags",
+                "field:tail",
+                "struct:Flags",
+                "field:public",
+                "field:x",
+            ],
+            "a member begins after an access specifier, so what a body writes before one unended is macros"
         );
         assert_eq!(
             declared(
