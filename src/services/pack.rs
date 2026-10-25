@@ -417,7 +417,6 @@ struct ImportGraph {
 
 fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
     let mut exact = PathIndex::default();
-    let mut suffixes = PathIndex::default();
     for node in nodes {
         exact
             .by_module
@@ -429,25 +428,10 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
             .entry(node.directory.as_slice())
             .or_default()
             .push(node.id);
-        for start in 0..node.module_path.len() {
-            suffixes
-                .by_module
-                .entry(&node.module_path[start..])
-                .or_default()
-                .push(node.id);
-        }
-        for start in 0..=node.directory.len() {
-            suffixes
-                .by_directory
-                .entry(&node.directory[start..])
-                .or_default()
-                .push(node.id);
-        }
     }
     let index = ProjectIndex {
         nodes,
         exact,
-        suffixes,
         manifests,
         python: PythonPath::of(nodes),
         jvm: JvmIndex::of(nodes),
@@ -478,8 +462,9 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
 }
 
 /// Syntactic reference anchors. Filesystem-relative paths retain their hops;
-/// absolute names contribute module-path candidates, without proving crate or
-/// build ownership. Rust relative module paths require ownership not held here.
+/// an absolute name is read as its language reads it, through what the tree
+/// and its manifests declare. Rust relative module paths require ownership
+/// not held here.
 #[derive(Debug, PartialEq, Eq)]
 enum Reference {
     /// Relative to the language's source/module context, retaining parent hops.
@@ -555,14 +540,7 @@ impl Reference {
                 break;
             }
         }
-        let mut components: Vec<String> = match language {
-            Language::Swift => rest
-                .split('.')
-                .filter(|part| !part.is_empty())
-                .map(str::to_string)
-                .collect(),
-            _ => split_components(rest),
-        };
+        let mut components = split_components(rest);
         if matches!(
             language,
             Language::JavaScript | Language::TypeScript | Language::Vue
@@ -677,12 +655,11 @@ struct PathIndex<'a> {
     by_directory: HashMap<&'a [String], Vec<usize>>,
 }
 
-/// Relative imports address exact project paths. Absolute module names can
-/// omit source-root prefixes, so their candidate index also contains suffixes.
+/// The project's files by the names a reference can give them. Every lookup
+/// is exact: a module path a reference only ends with is some other module's.
 struct ProjectIndex<'a> {
     nodes: &'a [Node],
     exact: PathIndex<'a>,
-    suffixes: PathIndex<'a>,
     manifests: &'a Manifests,
     python: PythonPath<'a>,
     jvm: JvmIndex<'a>,
@@ -782,7 +759,7 @@ impl ProjectIndex<'_> {
                 if package_is_directory(from.language) {
                     return self.package(&path, from.language);
                 }
-                self.at(&self.exact, &path, from.language, false)
+                self.module(&path, from.language)
             }
             Reference::Package {
                 package,
@@ -794,7 +771,7 @@ impl ProjectIndex<'_> {
                 let mut path = directory.to_vec();
                 path.push("lib".to_string());
                 path.extend_from_slice(components);
-                self.at(&self.exact, &path, from.language, false)
+                self.module(&path, from.language)
             }
             Reference::Unresolved => Vec::new(),
             Reference::Absolute(components) if from.language == Language::Go => self
@@ -819,10 +796,10 @@ impl ProjectIndex<'_> {
                 })
                 .unwrap_or_default(),
             Reference::Wildcard(name) => self.jvm_wildcard(name, from),
-            Reference::Absolute(components) => {
-                let directories = package_is_directory(from.language);
-                self.at(&self.suffixes, components, from.language, directories)
-            }
+            // Anywhere else an absolute name (a JavaScript package specifier,
+            // a Terraform registry source) names what the project's
+            // dependencies provide, never a project file by its spelling.
+            Reference::Absolute(_) => Vec::new(),
         }
     }
 
@@ -925,17 +902,11 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// A module candidate, or every compatible file in the directory it
-    /// names where `directories` lets a package be one.
-    fn at(
-        &self,
-        index: &PathIndex<'_>,
-        path: &[String],
-        language: Language,
-        directories: bool,
-    ) -> Vec<usize> {
-        let compatible = |id: &&usize| {
-            let target = self.nodes[**id].language;
+    /// The one file of a language compatible with `language` at the module
+    /// path `path`, or none where none or several are.
+    fn module(&self, path: &[String], language: Language) -> Vec<usize> {
+        let compatible = |id: &usize| {
+            let target = self.nodes[*id].language;
             target == language
                 || (matches!(
                     target,
@@ -945,18 +916,19 @@ impl ProjectIndex<'_> {
                     Language::JavaScript | Language::TypeScript | Language::Vue
                 ))
         };
-        if let Some(files) = index.by_module.get(path) {
-            let candidates: Vec<_> = files.iter().filter(compatible).copied().collect();
-            match candidates.as_slice() {
-                [only] => return vec![*only],
-                [] => {}
-                _ => return Vec::new(),
-            }
+        let candidates: Vec<usize> = self
+            .exact
+            .by_module
+            .get(path)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(compatible)
+            .collect();
+        match candidates.as_slice() {
+            [only] => vec![*only],
+            _ => Vec::new(),
         }
-        if directories && let Some(files) = index.by_directory.get(path) {
-            return files.iter().filter(compatible).copied().collect();
-        }
-        Vec::new()
     }
 
     /// The module an absolute Python import names: the file at that dotted
@@ -2331,6 +2303,34 @@ mod tests {
         // one outside every `app` cannot tell which of them it means.
         assert_eq!(edges_of(&nodes, 15), vec!["a/app/db.py"]);
         assert!(edges_of(&nodes, 16).is_empty());
+    }
+
+    /// A name that is no path in the project — a JavaScript package
+    /// specifier, a Terraform registry source — names what the project's
+    /// dependencies provide, however a project file's path ends.
+    #[test]
+    fn a_package_specifier_never_lands_on_a_project_file_it_spells() {
+        let nodes = vec![
+            node_in(
+                0,
+                "src/app.ts",
+                "import React from \"react\";\nimport merge from \"lodash/merge\";\n\
+                 import { util } from \"./util\";\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "src/react.ts", "", Language::TypeScript),
+            node_in(2, "src/lodash/merge.ts", "", Language::TypeScript),
+            node_in(3, "src/util.ts", "", Language::TypeScript),
+            node_in(
+                4,
+                "main.tf",
+                "module \"vpc\" { source = \"terraform-aws-modules/vpc/aws\" }\n",
+                Language::Terraform,
+            ),
+            node_in(5, "modules/vpc/aws/main.tf", "", Language::Terraform),
+        ];
+        assert_eq!(edges_of(&nodes, 0), vec!["src/util.ts"]);
+        assert!(edges_of(&nodes, 4).is_empty());
     }
 
     /// Four files can share a basename; a reference short enough to fit all
