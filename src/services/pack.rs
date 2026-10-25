@@ -75,8 +75,8 @@ pub struct PackResult {
     pub unsupported_import_languages: Vec<Language>,
     pub rust_relative_imports_omitted: bool,
     /// The specifiers the project's own configuration declares — a TypeScript
-    /// `paths` alias — that named no file pack reads, so their edges are
-    /// missing rather than absent.
+    /// `paths` alias, a workspace package's name — that named no file pack
+    /// reads, so their edges are missing rather than absent.
     pub undetermined_imports: Vec<String>,
     /// Paths the walk behind this pack could not read. A pack is a selection,
     /// so a file's absence never meant it does not exist — but `graph_size`
@@ -980,16 +980,15 @@ impl ProjectIndex<'_> {
 
     /// What a non-relative JavaScript or TypeScript specifier names, as
     /// TypeScript resolves one: through the `paths` pattern it matches, each
-    /// substitution in turn, then below `baseUrl`. Any other names a package
-    /// outside the project, however a project file's path ends. One a `paths`
-    /// pattern matches whose substitutions name no file pack reads is
+    /// substitution in turn, then below `baseUrl`, then as a workspace
+    /// package the project links in. Any other names a package outside the
+    /// project, however a project file's path ends. One a `paths` pattern or
+    /// a workspace package's name matches that names no file pack reads is
     /// disclosed rather than dropped.
     fn bare_specifier(&self, specifier: &str, importer: &Importer) -> Resolution {
         let language = importer.node.language;
-        let Some(config) = importer.ts_config else {
-            return Resolution::Files(Vec::new());
-        };
-        let mapped = config.mapped(specifier);
+        let config = importer.ts_config;
+        let mapped = config.and_then(|config| config.mapped(specifier));
         for path in mapped.iter().flatten() {
             let found = self.module(path, language);
             if !found.is_empty() {
@@ -997,8 +996,7 @@ impl ProjectIndex<'_> {
             }
         }
         if let Some(path) = config
-            .base_url
-            .as_ref()
+            .and_then(|config| config.base_url.as_ref())
             .and_then(|base| script_path(base, specifier))
         {
             let found = self.module(&path, language);
@@ -1006,10 +1004,72 @@ impl ProjectIndex<'_> {
                 return Resolution::Files(found);
             }
         }
-        match mapped {
-            Some(_) => Resolution::Undetermined(specifier.to_string()),
-            None => Resolution::Files(Vec::new()),
+        let package = self.workspace_package(specifier, importer.node);
+        match (package, mapped) {
+            (Some(found), _) if !found.is_empty() => Resolution::Files(found),
+            (Some(_), _) | (None, Some(_)) => Resolution::Undetermined(specifier.to_string()),
+            (None, None) => Resolution::Files(Vec::new()),
         }
+    }
+
+    /// The file a workspace package's name, or a subpath below it, stands
+    /// for, or `None` where the specifier names no package of a workspace
+    /// the importer is in. A package with `exports` exports only what it
+    /// maps: the name stands for the file `.` maps to, a subpath for the one
+    /// `./<subpath>` maps to. Without `exports`, the name stands for the file
+    /// its `types`, `typings` or `main` names, else its `index`, and a
+    /// subpath for the file below the package. An empty answer is a package
+    /// whose file pack cannot determine: a condition or pattern `exports`
+    /// maps, an entry naming no file pack reads, or a name two packages of
+    /// the workspace give.
+    fn workspace_package(&self, specifier: &str, from: &Node) -> Option<Vec<usize>> {
+        let scoped = specifier.starts_with('@');
+        let mut segments = specifier.splitn(if scoped { 3 } else { 2 }, '/');
+        let name: Vec<&str> = segments.by_ref().take(if scoped { 2 } else { 1 }).collect();
+        let name = name.join("/");
+        let subpath = segments.next().unwrap_or_default();
+        let declares = |package: &JsPackage| {
+            package.name == name && from.directory.starts_with(&package.workspace)
+        };
+        let Some((directory, package)) = own_or_only(&self.manifests.js_packages, from, declares)
+        else {
+            return self
+                .manifests
+                .js_packages
+                .values()
+                .any(declares)
+                .then(Vec::new);
+        };
+        let entries: Vec<&str> = match (&package.exports, subpath) {
+            (None, "") => package
+                .types
+                .as_deref()
+                .into_iter()
+                .chain(package.main.as_deref())
+                .chain(["index"])
+                .collect(),
+            (None, subpath) => vec![subpath],
+            (Some(serde_json::Value::String(entry)), "") => vec![entry.as_str()],
+            (Some(serde_json::Value::Object(map)), subpath) => map
+                .get(&if subpath.is_empty() {
+                    ".".to_string()
+                } else {
+                    format!("./{subpath}")
+                })
+                .and_then(|entry| entry.as_str())
+                .into_iter()
+                .collect(),
+            (Some(_), _) => Vec::new(),
+        };
+        let language = from.language;
+        Some(
+            entries
+                .into_iter()
+                .filter_map(|entry| script_path(directory, entry))
+                .map(|path| self.module(&path, language))
+                .find(|found| !found.is_empty())
+                .unwrap_or_default(),
+        )
     }
 
     /// What a Rust path from a name, rather than from `crate`, `self` or
@@ -1291,6 +1351,21 @@ struct Manifests {
     /// The TypeScript configuration each `tsconfig.json`, or a
     /// `jsconfig.json` where a directory holds none, gives the files below it.
     ts_configs: HashMap<Vec<String>, TsConfig>,
+    /// Each package a JavaScript workspace lists, by its directory.
+    js_packages: HashMap<Vec<String>, JsPackage>,
+}
+
+/// A package of a JavaScript workspace: the name its `package.json` gives
+/// it, the workspace root whose `workspaces` (or `pnpm-workspace.yaml`) makes
+/// it a member, and the fields that say which file the name and its
+/// subpaths stand for.
+#[derive(Debug, Clone)]
+struct JsPackage {
+    name: String,
+    workspace: Vec<String>,
+    exports: Option<serde_json::Value>,
+    types: Option<String>,
+    main: Option<String>,
 }
 
 /// What a TypeScript configuration, with every configuration it extends,
@@ -1394,6 +1469,7 @@ impl Manifests {
             rust_packages,
             python_projects: python_projects(root, nodes),
             ts_configs: ts_configs(root, nodes),
+            js_packages: js_packages(root, nodes),
         }
     }
 
@@ -1625,6 +1701,133 @@ fn ts_configs(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, TsConfig> {
         }
     }
     configs
+}
+
+/// Every package a JavaScript workspace in the project lists: each
+/// `package.json` with a name below a workspace root — a `package.json` with
+/// `workspaces`, or a `pnpm-workspace.yaml` — whose directory one of the
+/// root's globs matches and none of its `!` globs does.
+fn js_packages(root: &Path, nodes: &[Node]) -> HashMap<Vec<String>, JsPackage> {
+    let manifests: Vec<(Vec<String>, serde_json::Value)> =
+        manifests_above(root, nodes, is_javascript, "package.json")
+            .into_iter()
+            .filter_map(|(directory, text)| Some((directory, serde_json::from_str(&text).ok()?)))
+            .collect();
+    let mut workspaces: Vec<(Vec<String>, Vec<String>)> = manifests
+        .iter()
+        .filter_map(|(directory, manifest)| {
+            let globs = match manifest.get("workspaces")? {
+                serde_json::Value::Object(workspaces) => workspaces.get("packages")?,
+                globs => globs,
+            };
+            let globs = globs
+                .as_array()?
+                .iter()
+                .filter_map(|glob| glob.as_str().map(str::to_string))
+                .collect();
+            Some((directory.clone(), globs))
+        })
+        .collect();
+    workspaces.extend(
+        manifests_above(root, nodes, is_javascript, "pnpm-workspace.yaml")
+            .into_iter()
+            .map(|(directory, yaml)| (directory, pnpm_workspace_globs(&yaml))),
+    );
+    let mut packages = HashMap::new();
+    for (workspace, globs) in workspaces {
+        let matcher = |globs: &mut dyn Iterator<Item = &str>| {
+            let mut set = globset::GlobSetBuilder::new();
+            for glob in globs {
+                let glob = glob.trim_start_matches("./").trim_end_matches('/');
+                if let Ok(glob) = globset::GlobBuilder::new(glob)
+                    .literal_separator(true)
+                    .build()
+                {
+                    set.add(glob);
+                }
+            }
+            set.build().ok()
+        };
+        let Some(included) = matcher(
+            &mut globs
+                .iter()
+                .filter(|glob| !glob.starts_with('!'))
+                .map(String::as_str),
+        ) else {
+            continue;
+        };
+        let excluded = matcher(&mut globs.iter().filter_map(|glob| glob.strip_prefix('!')));
+        for (directory, manifest) in &manifests {
+            let Some(member) = directory.strip_prefix(workspace.as_slice()) else {
+                continue;
+            };
+            let member = member.join("/");
+            if member.is_empty()
+                || !included.is_match(&member)
+                || excluded
+                    .as_ref()
+                    .is_some_and(|excluded| excluded.is_match(&member))
+            {
+                continue;
+            }
+            let field = |key: &str| {
+                manifest
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            };
+            let Some(name) = field("name") else {
+                continue;
+            };
+            packages.insert(
+                directory.clone(),
+                JsPackage {
+                    name,
+                    workspace: workspace.clone(),
+                    exports: manifest.get("exports").cloned(),
+                    types: field("types").or_else(|| field("typings")),
+                    main: field("main"),
+                },
+            );
+        }
+    }
+    packages
+}
+
+/// The package globs a `pnpm-workspace.yaml` lists under `packages:`, as a
+/// block sequence (`- 'packages/*'`) or a flow one (`['packages/*']`).
+fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
+    let unquote = |item: &str| {
+        let item = item.trim();
+        let item = match item.find(" #") {
+            Some(comment) => item[..comment].trim_end(),
+            None => item,
+        };
+        item.trim_matches(['\'', '"']).to_string()
+    };
+    let mut lines = yaml.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("packages:") else {
+            continue;
+        };
+        if let Some(flow) = rest
+            .trim()
+            .strip_prefix('[')
+            .and_then(|flow| flow.split(']').next())
+        {
+            return flow
+                .split(',')
+                .map(unquote)
+                .filter(|glob| !glob.is_empty())
+                .collect();
+        }
+        return lines
+            .take_while(|line| line.trim().is_empty() || line.starts_with([' ', '\t', '-', '#']))
+            .filter_map(|line| line.trim().strip_prefix('-').map(unquote))
+            .filter(|glob| !glob.is_empty())
+            .collect();
+    }
+    Vec::new()
 }
 
 /// What the TypeScript configuration in `file` says, with what it extends.
@@ -3327,6 +3530,123 @@ mod tests {
         assert_eq!(
             edges_of(&nodes, 0),
             vec!["web/components/index.ts", "web/lib/index.ts"]
+        );
+    }
+
+    /// A workspace package is imported by the name its `package.json` gives
+    /// it, from anywhere below the workspace root that lists it. With
+    /// `exports` it exports only what that maps; without, the name stands for
+    /// the file `types` or `main` names, else its `index`, and a subpath for
+    /// the file below it. A listed name whose file pack cannot determine is
+    /// disclosed; a package no workspace lists is no workspace's.
+    #[test]
+    fn a_workspace_package_resolves_by_the_name_its_package_json_gives_it() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "apps/web/src/app.ts",
+                "import a from \"@acme/ui\";\nimport b from \"@acme/ui/button\";\n\
+                 import c from \"@acme/utils\";\nimport d from \"@acme/utils/deep/x\";\n\
+                 import e from \"@acme/built\";\nimport f from \"@acme/outside\";\n\
+                 import g from \"@acme/ui/hidden\";\nimport h from \"@acme/cond\";\n\
+                 import i from \"@acme/typed\";\nimport j from \"@acme/twin\";\n\
+                 import k from \"core-lib\";\n",
+            ),
+            ts(1, "packages/ui/src/index.ts", ""),
+            ts(2, "packages/ui/src/button.ts", ""),
+            ts(3, "packages/ui/hidden.ts", ""),
+            ts(4, "packages/utils/index.ts", ""),
+            ts(5, "packages/utils/deep/x.ts", ""),
+            ts(6, "packages/built/src/lib.ts", ""),
+            ts(7, "tools/outside/index.ts", ""),
+            ts(
+                8,
+                "pn/app.ts",
+                "import a from \"core-lib\";\nimport b from \"legacy-lib\";\n",
+            ),
+            ts(9, "pn/libs/core/index.ts", ""),
+            ts(10, "pn/libs/legacy/index.ts", ""),
+            ts(11, "packages/cond/index.ts", ""),
+            ts(12, "packages/typed/index.ts", ""),
+            ts(13, "packages/typed/src/entry.ts", ""),
+            ts(14, "packages/twin-a/index.ts", ""),
+            ts(15, "packages/twin-b/index.ts", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"name\": \"root\", \"workspaces\": [\"packages/*\", \"apps/*\"]}",
+                ),
+                (
+                    "packages/ui/package.json",
+                    "{\"name\": \"@acme/ui\", \"exports\": {\".\": \"./src/index.ts\", \
+                     \"./button\": \"./src/button.ts\"}}",
+                ),
+                ("packages/utils/package.json", "{\"name\": \"@acme/utils\"}"),
+                (
+                    "packages/built/package.json",
+                    "{\"name\": \"@acme/built\", \"main\": \"dist/index.js\"}",
+                ),
+                ("apps/web/package.json", "{\"name\": \"web\"}"),
+                (
+                    "tools/outside/package.json",
+                    "{\"name\": \"@acme/outside\"}",
+                ),
+                (
+                    "packages/cond/package.json",
+                    "{\"name\": \"@acme/cond\", \"exports\": {\".\": {\"import\": \"./dist/index.mjs\"}}}",
+                ),
+                (
+                    "packages/typed/package.json",
+                    "{\"name\": \"@acme/typed\", \"types\": \"./src/entry.ts\", \"main\": \"dist/index.js\"}",
+                ),
+                ("packages/twin-a/package.json", "{\"name\": \"@acme/twin\"}"),
+                ("packages/twin-b/package.json", "{\"name\": \"@acme/twin\"}"),
+                (
+                    "pn/pnpm-workspace.yaml",
+                    "packages:\n- 'libs/*' # the libraries\n- '!libs/legacy'\n",
+                ),
+                ("pn/libs/core/package.json", "{\"name\": \"core-lib\"}"),
+                ("pn/libs/legacy/package.json", "{\"name\": \"legacy-lib\"}"),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec![
+                "packages/ui/src/index.ts",
+                "packages/ui/src/button.ts",
+                "packages/utils/index.ts",
+                "packages/utils/deep/x.ts",
+                "packages/typed/src/entry.ts"
+            ]
+        );
+        assert_eq!(edges(8), vec!["pn/libs/core/index.ts"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from([
+                "@acme/built".to_string(),
+                "@acme/cond".to_string(),
+                "@acme/twin".to_string(),
+                "@acme/ui/hidden".to_string()
+            ])
+        );
+        assert_eq!(
+            pnpm_workspace_globs("packages: ['a/*', \"b/**\"]\n"),
+            vec!["a/*", "b/**"]
+        );
+        assert_eq!(
+            pnpm_workspace_globs("packages:\n  - a/*\n\n  - \"b\"\ncatalog:\n  - c\n"),
+            vec!["a/*", "b"]
         );
     }
 

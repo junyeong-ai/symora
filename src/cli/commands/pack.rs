@@ -163,7 +163,7 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             .map(|specifier| format!("`{specifier}`"))
             .collect();
         hints.push(format!(
-            "{} import specifier(s) matching a tsconfig `paths` alias named no file pack reads ({}); their dependencies do not contribute to ranking. Inspect the configuration or source.",
+            "{} import specifier(s) matching a tsconfig `paths` alias or a workspace package name named no file pack reads ({}); their dependencies do not contribute to ranking. Inspect the configuration or source.",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -401,7 +401,7 @@ mod tests {
             json["files"]["hints"][1]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) matching a tsconfig `paths` alias named no file pack reads (`@/styles/app`)")
+                .contains("1 import specifier(s) matching a tsconfig `paths` alias or a workspace package name named no file pack reads (`@/styles/app`)")
         );
     }
 
