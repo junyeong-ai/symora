@@ -1362,6 +1362,9 @@ fn body_of(node: Node, language: Language) -> Option<Node> {
             Language::Rust if node.kind() == "macro_definition" => {
                 node.child_by_field_name("name")?.next_sibling()
             }
+            Language::Dart if node.kind() == "local_function_declaration" => {
+                child_of_kind(node, "function_body")
+            }
             Language::Lua => lua_function_value(node)
                 .and_then(|function| {
                     function
@@ -2019,7 +2022,10 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
                 | "getter_declaration"
                 | "setter_declaration",
             ) => holds("signature"),
-            (Language::Dart, "method_signature" | "class_member") => true,
+            (
+                Language::Dart,
+                "method_signature" | "class_member" | "local_function_declaration",
+            ) => true,
             _ => false,
         };
         if !wraps {
@@ -2445,8 +2451,8 @@ fn extract_container_path(
     // declares: a TypeScript constructor's parameter property is its class's,
     // and the members of an unnamed C++ enum a field is typed with are what
     // encloses the field's.
-    std::iter::successors(enclosing_declaration(node, declared), |outer| {
-        enclosing_declaration(*outer, declared)
+    std::iter::successors(enclosing_declaration(node, declared, language), |outer| {
+        enclosing_declaration(*outer, declared, language)
     })
     .find_map(|outer| {
         extract_name_and_kind(outer, content, language)
@@ -2456,18 +2462,45 @@ fn extract_container_path(
 }
 
 /// The nearest declaration the query read that encloses `node`, other than
-/// through its header ([`in_header_of`]).
-fn enclosing_declaration<'t>(node: Node<'t>, declared: &HashSet<usize>) -> Option<Node<'t>> {
+/// through its header ([`in_header_of`]). A Dart function holds its body
+/// beside the signature the query reads ([`declaration_node`]), so what the
+/// body declares is enclosed by that signature ([`signature_beside`]).
+fn enclosing_declaration<'t>(
+    node: Node<'t>,
+    declared: &HashSet<usize>,
+    language: Language,
+) -> Option<Node<'t>> {
     let mut inner = node;
     let mut ancestor = node.parent();
     while let Some(outer) = ancestor {
         if declared.contains(&outer.id()) && !in_header_of(inner, outer) {
             return Some(outer);
         }
+        if language == Language::Dart
+            && let Some(signature) = signature_beside(inner, declared)
+        {
+            return Some(signature);
+        }
         inner = outer;
         ancestor = outer.parent();
     }
     None
+}
+
+/// The signature the query read for the Dart function whose body is `body`:
+/// the one written before it, or the one a method's signature holds.
+fn signature_beside<'t>(body: Node<'t>, declared: &HashSet<usize>) -> Option<Node<'t>> {
+    if body.kind() != "function_body" {
+        return None;
+    }
+    let written = std::iter::successors(body.prev_named_sibling(), Node::prev_named_sibling)
+        .find(|before| !before.is_extra())?;
+    std::iter::successors(Some(written), |signature| {
+        (signature.kind() == "method_signature")
+            .then(|| signature.named_child(0))
+            .flatten()
+    })
+    .find(|signature| declared.contains(&signature.id()))
 }
 
 /// The kind a declaration's place settles beyond its own node: a function a
@@ -2491,14 +2524,15 @@ fn placed_kind(
     content: &str,
     language: Language,
 ) -> SymbolKind {
-    let container = std::iter::successors(enclosing_declaration(node, declared), |outer| {
-        enclosing_declaration(*outer, declared)
-    })
-    .find_map(|outer| {
-        extract_name_and_kind(outer, content, language)
-            .filter(|(name, _)| !name.is_empty())
-            .map(|(_, kind)| (outer, kind))
-    });
+    let container =
+        std::iter::successors(enclosing_declaration(node, declared, language), |outer| {
+            enclosing_declaration(*outer, declared, language)
+        })
+        .find_map(|outer| {
+            extract_name_and_kind(outer, content, language)
+                .filter(|(name, _)| !name.is_empty())
+                .map(|(_, kind)| (outer, kind))
+        });
     let enclosing = container.map(|(_, kind)| kind);
     if language == Language::Cpp
         && let Some(kind) = set_aside_class_kind(node, content).or_else(|| {
@@ -4897,7 +4931,9 @@ class C {
   C.named();
   factory C.make() => C();
   factory C.alias() = C.named;
-  void cm() {}
+  void cm() {
+    void inner() {}
+  }
   int get size => 1;
   set size(int v) {}
   bool operator ==(Object o) => true;
@@ -4910,7 +4946,9 @@ extension Ext on String {
 
 extension type Meters(int value) {}
 
-void top() {}
+void top() {
+  int helper() => 1;
+}
 
 final topLevel = 1;
 
@@ -4932,6 +4970,7 @@ typedef Callback = void Function();
                 "constructor:C/C.make",
                 "constructor:C/C.alias",
                 "method:C/cm",
+                "function:cm/inner",
                 "property:C/size",
                 "property:C/size",
                 "method:C/==",
@@ -4941,6 +4980,7 @@ typedef Callback = void Function();
                 "class:Meters",
                 "field:Meters/value",
                 "function:top",
+                "function:top/helper",
                 "variable:topLevel",
                 "class:Callback",
             ],
@@ -5249,7 +5289,8 @@ region     = "us-central1"
         );
 
         let dart = "class Shape {\n  @override\n  String toString() {\n    return \"s\";\n  }\n}\n\n\
-                    int top() {\n  return 2;\n}\n\nint get answer {\n  return 42;\n}\n";
+                    int top() {\n  int local() {\n    return 1;\n  }\n  return local();\n}\n\n\
+                    int get answer {\n  return 42;\n}\n";
         let spans = |name: &str| {
             extractor
                 .extract(Path::new("a.dart"), dart, Language::Dart)
@@ -5259,8 +5300,9 @@ region     = "us-central1"
                 .unwrap()
         };
         assert_eq!(spans("toString"), ((2, 3), Some(5)));
-        assert_eq!(spans("top"), ((8, 1), Some(10)));
-        assert_eq!(spans("answer"), ((12, 1), Some(14)));
+        assert_eq!(spans("top"), ((8, 1), Some(13)));
+        assert_eq!(spans("local"), ((9, 3), Some(11)));
+        assert_eq!(spans("answer"), ((15, 1), Some(17)));
     }
 
     #[test]
@@ -6178,6 +6220,13 @@ region     = "us-central1"
                 "class C {\n  C.named();\n  factory C.alias() = C.named;\n}\n",
                 "C.alias",
                 Some("factory C.alias()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "void outer() {\n  int helper() => 1;\n}\n",
+                "helper",
+                Some("int helper()"),
             ),
             (
                 "a.dart",
