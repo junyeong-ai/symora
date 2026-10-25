@@ -3644,6 +3644,29 @@ fn named_for_its_class(statement: Node, name: &str, content: &str) -> bool {
     })
 }
 
+/// The name of a C or C++ function declarator whose words between its plain
+/// name and its parameters the grammar set aside as an error: a function's
+/// name is what its parameter list follows, so it is the error's last word,
+/// and what the grammar read as the name is a macro written before the type
+/// (`GLIB_AVAILABLE_IN_ALL gsize g_printf_string_upper_bound (…)`). After a
+/// declarator of its own, the error is a macro written after it
+/// (`ngettext (…) _INTL_ASM (libintl_ngettext)`), and this gives none.
+fn name_before_parameters(declarator: Node) -> Option<Node> {
+    if declarator.kind() != "function_declarator" {
+        return None;
+    }
+    declarator
+        .child_by_field_name("declarator")
+        .filter(|named| matches!(named.kind(), "identifier" | "field_identifier"))?;
+    let error = declarator
+        .child_by_field_name("parameters")?
+        .prev_sibling()
+        .filter(|before| before.is_error())?;
+    error
+        .child(error.child_count().checked_sub(1)?)
+        .filter(|last| matches!(last.kind(), "identifier" | "field_identifier"))
+}
+
 /// Whether the C or C++ declarator around `name` declares a method or a data
 /// member. A declarator wraps its name in what makes its type and is read
 /// inside out, so a name declares a function where a function declarator is
@@ -3651,7 +3674,14 @@ fn named_for_its_class(statement: Node, name: &str, content: &str) -> bool {
 /// and `int (*fp)(int)` a member pointing to a function. A conversion
 /// function's name holds its function declarator itself.
 fn member_kind(name: Node) -> SymbolKind {
-    if name.kind() == "operator_cast" {
+    if name.kind() == "operator_cast"
+        || name
+            .parent()
+            .filter(|error| error.is_error())
+            .and_then(|error| error.parent())
+            .and_then(name_before_parameters)
+            .is_some_and(|named| named.id() == name.id())
+    {
         return SymbolKind::Method;
     }
     let mut node = macro_wrapper(name).unwrap_or(name);
@@ -3713,11 +3743,15 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 /// never do ([`names_a_parameter`]), so the set-aside one is a macro written
 /// before it (`GIT_EXTERN(int) git_blob_lookup(git_blob **blob)`). A macro's
 /// argument list stands for no name of its own ([`macro_argument_name`],
-/// [`macro_wrapped_name`]).
+/// [`macro_wrapped_name`]), and a function's name is what its parameters
+/// follow ([`name_before_parameters`]).
 fn declarator_name(declarator: Node) -> Node {
     let mut node = declarator;
     loop {
         if let Some(named) = macro_argument_name(node).or_else(|| macro_wrapped_name(node)) {
+            return named;
+        }
+        if let Some(named) = name_before_parameters(node) {
             return named;
         }
         if let Some(set_aside) = node
@@ -6287,6 +6321,16 @@ region     = "us-central1"
                 "function:AnnotPath",
             ],
             "the words of its type the grammar set aside before a function are no declarator"
+        );
+        assert_eq!(
+            declared(
+                "G_BEGIN_DECLS\n\n/* c */\nGLIB_AVAILABLE_IN_ALL\n\
+                 gsize\tg_printf_string_upper_bound (const gchar* format,\n\t\t\t\t     \
+                 va_list\t  args) G_GNUC_PRINTF(1, 0);\n\
+                 extern char *ngettext (const char *a, const char *b) _INTL_ASM (libintl_ngettext);\n"
+            ),
+            ["function:g_printf_string_upper_bound", "function:ngettext"],
+            "a function's name is what its parameters follow"
         );
         assert_eq!(
             declared(
