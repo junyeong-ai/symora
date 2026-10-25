@@ -35,8 +35,8 @@ pub enum CoverageReason {
     /// index alone and so cannot ask anything else.
     NotIndexed,
     ServerNotInstalled,
-    /// The run confined itself to the index and the compiled-in grammars, so
-    /// no server was asked for the languages they do not reach. The remedy is
+    /// The run confined itself to sources that need no language server, so
+    /// none was asked for the languages they do not reach. The remedy is
     /// the caller's own constraint, not the environment.
     NotConsulted,
     TimedOut,

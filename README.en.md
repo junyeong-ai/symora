@@ -270,7 +270,7 @@ symora impact src/services/checkout.ts:48 --depth 2
   ]
 }
 ```
-> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. `dynamic_dispatch` marks a method whose overrides the implementation lookup could not establish, so callers reached through them may be missing. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
+> `test_caller_ratio` describes the discovered callers; it does not measure executed test coverage. With `max_depth_reached: true`, the transitive count is a lower bound. `dynamic_dispatch` qualifies a dynamically dispatched method: `incomplete` when the implementation lookup found overrides (`implementations` counts them) whose callers the counts leave out, `unavailable` when it could not establish them (`implementations` is absent when the lookup failed). Either way, callers reached through an override may be missing. Static references and call graphs do not prove runtime dispatch, external consumers, or configuration-based connections. Assess this evidence and its limits rather than an arbitrary risk or confidence score. `--depth 3` expands the graph by one level.
 
 ### ⑥ Make the change — preview before you write
 
@@ -357,7 +357,7 @@ symora doctor                # language servers: verified serving / missing + in
 symora diagnostics src/services/checkout.ts --with-context --with-suggestions
 ```
 
-Global flags work before or after the subcommand: `symora --format pretty search symbols X` (indented JSON), `symora -q rename …` (errors only), `symora -v doctor` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` answers from the index and the compiled-in grammars alone, so the answer does not depend on which language servers are installed, and a command with no such source fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.35`, `>=0.35,<0.36`), so a caller that parses the output never has to compare `--version` strings itself.
+Global flags work before or after the subcommand: `symora --format pretty search symbols X` (indented JSON), `symora -q rename …` (errors only), `symora -v doctor` (verbose). `--deterministic` and `--check-version <REQ>` are global too. `--deterministic` never consults a language server: it answers from the index, the compiled-in grammars, and file scans, so the answer does not depend on which servers are installed, and a command that needs a server fails with `unsupported`. `--check-version` refuses to run unless this binary satisfies the requirement (`0.35`, `>=0.35,<0.36`), so a caller that parses the output never has to compare `--version` strings itself.
 
 ---
 
@@ -389,7 +389,7 @@ Results carry `indexing: "unconfirmed"` unless workspace readiness is confirmed 
 
 Symora keeps a persistent SQLite index at `.symora/store.db` in each project. The `.gitignore` it writes in `.symora/` keeps the index, its caches and locks out of commits, while a `config.toml` or `ignore` kept there stays committable.
 
-The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Results also carry currency hints naming the languages whose files changed since the build, with `symora search index build` in `next_commands`; an empty result carries them unless a language server with confirmed readiness answered for that language.
+The index is a snapshot of the last build. Currency checks compare the file-size policy, paths, sizes, and modification times; rebuild after changes preserving that metadata. A list's `stale` flag marks rows read from files changed since the build; no row can reveal a file the build never saw. Results the index answered, empty ones included, also carry currency hints naming the languages whose files changed since the build, with `symora search index build` in `next_commands`.
 
 ```bash
 symora search index build               # incremental: only changed files, prunes deleted

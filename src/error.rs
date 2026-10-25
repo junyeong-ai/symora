@@ -93,8 +93,8 @@ pub enum LspError {
     /// is the same on a machine that has the server and one that does not,
     /// which is the property the caller asked for.
     #[error(
-        "No language server was consulted: --deterministic confines the answer to the index \
-         and the compiled-in grammars"
+        "No language server was consulted: --deterministic answers from the index, the \
+         compiled-in grammars and file scans"
     )]
     ServerNotConsulted,
 
