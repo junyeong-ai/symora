@@ -2292,7 +2292,7 @@ fn extract_declaration(
                 declaration_end(declaration, language),
             )
         });
-    let own_name = assigns_beyond_its_names(node, language);
+    let own_name = assigns_beyond_its_names(node, language, statement);
 
     named
         .into_iter()
@@ -2651,23 +2651,10 @@ fn declared_names(node: Node, language: Language) -> Vec<Node> {
         Language::Python | Language::Ruby => assignment_targets(node)
             .filter(|target| binds_a_name(*target, language))
             .collect(),
-        // `declare` and `typeset` declare a name they give no value (`declare
-        // -A MAP`), where `export` and `readonly` mark one, for the
-        // environment of the commands the script runs or against assignment.
         Language::Bash => {
-            let declares_alone = matches!(
-                node.child(0).map(|keyword| keyword.kind()),
-                Some("declare" | "typeset")
-            );
             let mut cursor = node.walk();
             node.children(&mut cursor)
-                .filter_map(|argument| match argument.kind() {
-                    "variable_assignment" => child_of_kind(argument, "=")
-                        .and(argument.child_by_field_name("name"))
-                        .filter(|name| name.kind() == "variable_name"),
-                    "variable_name" if declares_alone => Some(argument),
-                    _ => None,
-                })
+                .filter_map(|part| shell_bound_name(part, node))
                 .collect()
         }
         Language::PHP => children_of_kind(node, "property_element")
@@ -2868,17 +2855,66 @@ fn binds_a_name(target: Node, language: Language) -> bool {
     }
 }
 
-/// Whether `node` assigns to something besides the names it declares: an
-/// attribute, a subscript, an instance variable or a Ruby local it assigns
-/// as well (`LIMIT = obj.attr = 5`, `@cache = TABLE = {}`, `a, B = 1, 2`).
-/// Such a statement is no declaration of its names alone, and nothing in the
-/// answer stands for the rest of it, so each name's range is the name itself:
-/// a whole-line edit of it is refused rather than taking the other assignment
-/// with it.
-fn assigns_beyond_its_names(node: Node, language: Language) -> bool {
-    matches!(language, Language::Python | Language::Ruby)
-        && node.kind() == "assignment"
-        && assignment_targets(node).any(|target| !binds_a_name(target, language))
+/// Whether `node`, written from `statement`'s first node to its last,
+/// assigns to something besides the names it declares: an attribute, a
+/// subscript, an instance variable or a Ruby local it assigns as well (`LIMIT
+/// = obj.attr = 5`, `@cache = TABLE = {}`, `a, B = 1, 2`), or a shell append,
+/// element, redirection or name it only marks (`COUNT+=1 TOTAL=2`, `export
+/// KEEP=1 OTHER`). Such a statement is no declaration of its names alone, and
+/// nothing in the answer stands for the rest of it, so each name's range is
+/// the name itself: a whole-line edit of it is refused rather than taking
+/// the other assignment with it.
+fn assigns_beyond_its_names(node: Node, language: Language, statement: (Node, Node)) -> bool {
+    match language {
+        Language::Python | Language::Ruby => {
+            node.kind() == "assignment"
+                && assignment_targets(node).any(|target| !binds_a_name(target, language))
+        }
+        // An option (`-A`) is no assignment.
+        Language::Bash => {
+            let parts: Vec<Node> = match node.kind() {
+                "variable_assignments" | "declaration_command" => {
+                    let mut cursor = node.walk();
+                    node.children(&mut cursor).collect()
+                }
+                "variable_assignment" => {
+                    std::iter::successors(Some(statement.0), Node::next_sibling)
+                        .take_while(|part| part.start_byte() <= statement.1.start_byte())
+                        .collect()
+                }
+                _ => return false,
+            };
+            parts.into_iter().any(|part| {
+                part.is_named()
+                    && !part.is_extra()
+                    && part.kind() != "word"
+                    && shell_bound_name(part, node).is_none()
+            })
+        }
+        _ => false,
+    }
+}
+
+/// The name a part of the shell statement `statement` declares: an
+/// assignment's where it binds one (`A=1`, not the append `A+=1` or the
+/// element `a[0]=1`), or a name `declare` or `typeset` writes without a value
+/// (`declare -A MAP`), where `export` and `readonly` mark one, for the
+/// environment of the commands the script runs or against assignment.
+fn shell_bound_name<'t>(part: Node<'t>, statement: Node) -> Option<Node<'t>> {
+    match part.kind() {
+        "variable_assignment" => child_of_kind(part, "=")
+            .and(part.child_by_field_name("name"))
+            .filter(|name| name.kind() == "variable_name"),
+        "variable_name"
+            if matches!(
+                statement.child(0).map(|keyword| keyword.kind()),
+                Some("declare" | "typeset")
+            ) =>
+        {
+            Some(part)
+        }
+        _ => None,
+    }
 }
 
 /// Where a declaration's text begins: its node ([`declaration_node`]), or
@@ -5553,6 +5589,8 @@ local OUTSIDE=1
 declare -p PRINTED
 declare -F greet
 declare -fx NO_FUNCTION=1
+export PATH+=":/opt/bin" EXTRA=1
+declare -a ITEMS[0]=x ITEM_COUNT=1
 FIRST=1 SECOND=2
 echo "$FIRST"
 PREFIX_A=1 PREFIX_B=2 \
@@ -5583,6 +5621,8 @@ run_it &
                 "variable:NOW",
                 "variable:REGISTRY",
                 "variable:LIST",
+                "variable:EXTRA",
+                "variable:ITEM_COUNT",
                 "variable:PIPED_A",
                 "variable:PIPED_B",
                 "variable:BEFORE_A",
@@ -6475,6 +6515,13 @@ region     = "us-central1"
             (
                 "a.sh",
                 Language::Bash,
+                "declare -i unused shared=2\nreadonly one=1\n",
+                &["unused", "shared"],
+                "one",
+            ),
+            (
+                "a.sh",
+                Language::Bash,
                 "echo start\nunused=1 shared=2\necho hi\none=1\n",
                 &["unused", "shared"],
                 "one",
@@ -6543,14 +6590,21 @@ region     = "us-central1"
     }
 
     #[test]
-    fn a_chained_assignment_to_more_than_names_is_none_of_its_names_alone() {
+    fn an_assignment_to_more_than_names_is_none_of_its_names_alone() {
         let extractor = SymbolExtractor::new();
         for (path, language, content, names) in [
+            (
+                "a.sh",
+                Language::Bash,
+                "COUNT+=1 TOTAL=2;\nexport PATH+=\":/opt/bin\" EXTRA=1\nexport KEEP=1 OTHER\n\
+                 echo start\nPREFIXED=2 REST+=1\necho hi\n",
+                &["TOTAL", "EXTRA", "KEEP", "PREFIXED"][..],
+            ),
             (
                 "a.py",
                 Language::Python,
                 "LIMIT = obj.attr = 5\nobj.flag = COUNT = 7\nTABLE = cache['k'] = {}\n",
-                &["LIMIT", "COUNT", "TABLE"][..],
+                &["LIMIT", "COUNT", "TABLE"],
             ),
             (
                 "a.rb",
