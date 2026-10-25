@@ -1370,7 +1370,8 @@ fn misreads_a_macro_invocation(node: Node, content: &str) -> bool {
 /// and ends, where a C or C++ function declarator a syntax error holds is
 /// one: its parameters name something ([`names_a_parameter`]), and it is
 /// written after a macro whose arguments name nothing, standing for its
-/// return type, or a run of them (`LZMA_API(int) DEPRECATED(x)`), whether
+/// return type, or a run of them and the words of a type
+/// (`LZMA_API(int) LZMA_X DEPRECATED(x)`, `static int WIN_CDECL`), whether
 /// the error holds that macro (`GIT_EXTERN(int)
 /// git_blob_lookup_prefix(git_blob **blob, size_t len);`) or the statement
 /// before it does (`FT_EXPORT( FT_Error )` before `FT_Init( FT_Library
@@ -1402,8 +1403,10 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
                     let mut cursor = macro_.walk();
                     let held: Vec<Node> = macro_.named_children(&mut cursor).collect();
                     !held.is_empty()
-                        && held.iter().all(|invoked| {
-                            invoked.kind() == "function_declarator" && !names_a_parameter(*invoked)
+                        && held.iter().all(|written| match written.kind() {
+                            "function_declarator" => !names_a_parameter(*written),
+                            "identifier" | "type_identifier" | "primitive_type" => true,
+                            _ => false,
                         })
                 }
                 "expression_statement" => {
@@ -7759,10 +7762,18 @@ region     = "us-central1"
         assert_eq!(
             declared(
                 "extern LZMA_API(lzma_index *) LZMA_DEPRECATED(5.4) \
-                 lzma_index_init(const lzma_allocator *allocator)\n\t\tlzma_nothrow;\n"
+                 lzma_index_init(const lzma_allocator *allocator)\n\t\tlzma_nothrow;\n\
+                 extern LZMA_API(lzma_index *) LZMA_X LZMA_DEPRECATED(5.4) \
+                 lzma_b(const lzma_allocator *allocator)\n\t\tlzma_nothrow;\n\
+                 extern LZMA_API(lzma_index *) LZMA_DEPRECATED(5.4)\n\
+                 int lzma_r(const lzma_allocator *allocator)\n\t\tlzma_nothrow;\n"
             ),
-            ["function:lzma_index_init"],
-            "and so does a run of such macros"
+            [
+                "function:lzma_index_init",
+                "function:lzma_b",
+                "function:lzma_r"
+            ],
+            "and so does a run of such macros and the words of a type"
         );
     }
 
