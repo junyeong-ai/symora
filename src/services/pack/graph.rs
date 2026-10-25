@@ -6,8 +6,8 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    JsPackage, Manifests, ModuleResolution, Pytest, PythonProject, TsConfig, TsOwner, nearest,
-    own_or_only, project_path, python_packages, python_project,
+    Basedir, JsPackage, Manifests, ModuleResolution, Pytest, PythonProject, TsConfig, TsOwner,
+    nearest, own_or_only, project_path, python_packages, python_project,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -882,11 +882,15 @@ impl<'a> PythonPath<'a> {
     /// installs, its dependencies' dependencies included; the `pythonpath`
     /// of the pytest configuration it runs under; and, for a test module or
     /// `conftest.py` that configuration imports by inserting its basedir,
-    /// that basedir — the first directory upward without `__init__.py`.
-    fn of_file<'s>(&'s self, from: &'s Node) -> Vec<&'s [String]> {
+    /// that basedir — the first directory upward without `__init__.py`. They
+    /// come in the tiers a lookup tries in turn: the basedir alone first
+    /// where pytest prepends it, as it does by default, or last where it
+    /// appends it, and the rest as one.
+    fn of_file<'s>(&'s self, from: &'s Node) -> Vec<Vec<&'s [String]>> {
         let package_root = self.package_root_of(&from.directory);
         let pytest = self.pytest_of(&from.directory);
-        let basedir = (pytest.inserts_basedir && pytest.imports_as_test(Path::new(&from.rel_path)))
+        let basedir = pytest
+            .imports_as_test(Path::new(&from.rel_path))
             .then(|| package_root.unwrap_or(&from.directory));
         let mut installed = Vec::new();
         let mut pending: Vec<&[String]> = nearest(&self.projects, &from.directory)
@@ -903,7 +907,7 @@ impl<'a> PythonPath<'a> {
                 pending.extend(project.dependencies.iter().map(Vec::as_slice));
             }
         }
-        package_root
+        let rest: Vec<&[String]> = package_root
             .into_iter()
             .chain(
                 installed
@@ -911,8 +915,12 @@ impl<'a> PythonPath<'a> {
                     .flat_map(|project| project.roots.iter().map(Vec::as_slice)),
             )
             .chain(pytest.pythonpath.iter().map(Vec::as_slice))
-            .chain(basedir)
-            .collect()
+            .collect();
+        match (basedir, pytest.basedir) {
+            (Some(basedir), Basedir::First) => vec![vec![basedir], rest],
+            (Some(basedir), Basedir::Last) => vec![rest, vec![basedir]],
+            (None, _) | (_, Basedir::Nowhere) => vec![rest],
+        }
     }
 }
 
@@ -1352,7 +1360,9 @@ impl ProjectIndex<'_> {
     /// project and pytest establish (`PythonPath::of_file`). Another
     /// project's roots, and the directory above some other top-level
     /// package, are on it only where an installation puts them, which pack
-    /// does not read, so they name nothing. Two files on that footing name
+    /// does not read, so they name nothing. A test module's basedir is looked
+    /// in before or after the rest, where pytest's import mode puts it at
+    /// the start or the end of `sys.path`; two files on the same footing name
     /// neither. A path below none of them (the standard library, an
     /// installed distribution) names nothing in the project, however its
     /// last segments match a project file: `logging` is not
@@ -1363,11 +1373,12 @@ impl ProjectIndex<'_> {
         if module.is_empty() {
             return Vec::new();
         }
-        let bases = self.python.of_file(from);
-        Found::first([self.modules_at(
-            bases.into_iter().map(|base| [base, module].concat()),
-            |language| language == Language::Python,
-        )])
+        Found::first(self.python.of_file(from).into_iter().map(|bases| {
+            self.modules_at(
+                bases.into_iter().map(|base| [base, module].concat()),
+                |language| language == Language::Python,
+            )
+        }))
     }
 
     /// The files of the package that is the directory at `path`, in a
@@ -2444,6 +2455,48 @@ mod tests {
         );
         assert_eq!(edges(12), vec!["outer/inner/t/near.py"]);
         assert!(edges(7).is_empty() && edges(10).is_empty() && edges(13).is_empty());
+    }
+
+    /// pytest's default `prepend` import mode puts a test module's basedir at
+    /// `sys.path[0]`, so a module there wins over every other directory's;
+    /// `append` puts it after them, and `importlib` nowhere.
+    #[test]
+    fn a_test_modules_basedir_comes_first_or_last_by_pytests_import_mode() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "utils.py", ""),
+            python(1, "tests/utils.py", ""),
+            python(2, "tests/test_a.py", "from utils import u\n"),
+            python(3, "tests/helper.py", "from utils import u\n"),
+            python(4, "app/utils.py", ""),
+            python(5, "app/tests/utils.py", ""),
+            python(6, "app/tests/test_b.py", "import utils\nimport only_here\n"),
+            python(7, "app/tests/only_here.py", ""),
+            python(8, "iso/utils.py", ""),
+            python(9, "iso/tests/utils.py", ""),
+            python(10, "iso/tests/test_c.py", "import utils\n"),
+        ];
+        let manifests = manifests_of(
+            &[
+                ("app/pyproject.toml", "[project]\nname = \"app\"\n"),
+                (
+                    "app/pytest.ini",
+                    "[pytest]\naddopts = --import-mode=append\n",
+                ),
+                ("iso/pyproject.toml", "[project]\nname = \"iso\"\n"),
+                (
+                    "iso/pytest.ini",
+                    "[pytest]\naddopts = --import-mode importlib\n",
+                ),
+            ],
+            &nodes,
+        );
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(edges(2), vec!["tests/utils.py"]);
+        // A module pytest does not import as a test has no basedir inserted.
+        assert_eq!(edges(3), vec!["utils.py"]);
+        assert_eq!(edges(6), vec!["app/utils.py", "app/tests/only_here.py"]);
+        assert_eq!(edges(10), vec!["iso/utils.py"]);
     }
 
     /// Installing a project installs the projects in the tree it depends on

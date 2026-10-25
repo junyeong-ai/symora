@@ -1019,8 +1019,8 @@ pub(super) struct PythonProject {
 }
 
 /// What a pytest configuration puts on `sys.path`: the directories its
-/// `pythonpath` names, and, unless its import mode is `importlib`, the
-/// basedir of each test module and `conftest.py` it imports — test modules
+/// `pythonpath` names, and the basedir of each test module and
+/// `conftest.py` it imports, where its import mode puts that — test modules
 /// being the files its `python_files` patterns match (`test_*.py` and
 /// `*_test.py` by default), by name, or by path for a pattern holding `/`.
 #[derive(Debug, Clone)]
@@ -1028,11 +1028,24 @@ pub(super) struct Pytest {
     pub(super) pythonpath: Vec<Vec<String>>,
     test_names: globset::GlobSet,
     test_paths: globset::GlobSet,
-    pub(super) inserts_basedir: bool,
+    pub(super) basedir: Basedir,
+}
+
+/// Where pytest's `--import-mode` puts a test module's basedir on
+/// `sys.path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Basedir {
+    /// `prepend`, the default: at `sys.path[0]`, so a module there is found
+    /// before any other directory's.
+    First,
+    /// `append`: at the end, after every other directory.
+    Last,
+    /// `importlib`: nowhere.
+    Nowhere,
 }
 
 impl Pytest {
-    fn new(pythonpath: Vec<Vec<String>>, python_files: &[&str], inserts_basedir: bool) -> Self {
+    fn new(pythonpath: Vec<Vec<String>>, python_files: &[&str], basedir: Basedir) -> Self {
         let mut names = globset::GlobSetBuilder::new();
         let mut paths = globset::GlobSetBuilder::new();
         for pattern in python_files {
@@ -1051,7 +1064,7 @@ impl Pytest {
             pythonpath,
             test_names: names.build().unwrap_or_default(),
             test_paths: paths.build().unwrap_or_default(),
-            inserts_basedir,
+            basedir,
         }
     }
 
@@ -1067,7 +1080,7 @@ impl Pytest {
 
 impl Default for Pytest {
     fn default() -> Self {
-        Self::new(Vec::new(), &["test_*.py", "*_test.py"], true)
+        Self::new(Vec::new(), &["test_*.py", "*_test.py"], Basedir::First)
     }
 }
 
@@ -1384,15 +1397,19 @@ impl PythonConfiguration<'_> {
                 mode = Some(value);
             }
         }
-        let inserts_basedir = mode != Some("importlib");
+        let basedir = match mode {
+            Some("importlib") => Basedir::Nowhere,
+            Some("append") => Basedir::Last,
+            _ => Basedir::First,
+        };
         Some(if python_files.is_empty() {
             Pytest {
                 pythonpath,
-                inserts_basedir,
+                basedir,
                 ..Pytest::default()
             }
         } else {
-            Pytest::new(pythonpath, &python_files, inserts_basedir)
+            Pytest::new(pythonpath, &python_files, basedir)
         })
     }
 }
