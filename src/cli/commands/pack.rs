@@ -335,12 +335,18 @@ mod tests {
         );
         let output = serde_json::to_value(build_json_output(&ctx(), &args, result)).unwrap();
         assert_eq!(output["files"]["count"], 0);
-        assert!(
-            output["files"]["hints"][0]
-                .as_str()
-                .unwrap()
-                .contains("No declaration extractor for elixir")
-        );
+        let hints = output["files"]["hints"].as_array().unwrap();
+        for disclosed in [
+            "No import extractor for elixir",
+            "No declaration extractor for elixir",
+        ] {
+            assert!(
+                hints
+                    .iter()
+                    .any(|hint| hint.as_str().unwrap().contains(disclosed)),
+                "{disclosed}: {hints:?}"
+            );
+        }
     }
 
     #[test]

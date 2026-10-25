@@ -461,10 +461,6 @@ const SWIFT_QUERY: &str = r#"
 (import_declaration (identifier) @path)
 "#;
 
-const ELIXIR_QUERY: &str = r#"
-(alias) @path
-"#;
-
 /// A library names another through its imports and exports, and its parts
 /// and the library a part belongs to through `part` and `part of`. The grammar
 /// writes a deferred import's URI without the `configurable_uri` around it.
@@ -495,6 +491,10 @@ type ImportExtractorDefinition = (
     Dialect,
 );
 
+/// Elixir is absent on purpose: a module's name says nothing about the file
+/// that defines it — Mix compiles every file under `lib/` — so a reference to
+/// one could only land on a file by a guess, and pack discloses the language
+/// as one whose imports it does not read.
 const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
     (
         Language::Rust,
@@ -548,12 +548,6 @@ const IMPORT_EXTRACTORS: &[ImportExtractorDefinition] = &[
         Language::Swift,
         || tree_sitter_swift::LANGUAGE.into(),
         SWIFT_QUERY,
-        Dialect::Plain,
-    ),
-    (
-        Language::Elixir,
-        || tree_sitter_elixir::LANGUAGE.into(),
-        ELIXIR_QUERY,
         Dialect::Plain,
     ),
     (
@@ -882,7 +876,6 @@ module "ordinary-percent" { source = "./100%" }
         (Language::Kotlin, "import kotlin.collections.List\n"),
         (Language::Scala, "import scala.collection.mutable\n"),
         (Language::Swift, "import Foundation\n"),
-        (Language::Elixir, "alias Foo.Bar\n"),
         (
             Language::Dart,
             "import 'package:a/a.dart' if (dart.library.io) 'io.dart';\n\
@@ -943,7 +936,6 @@ module "ordinary-percent" { source = "./100%" }
             Language::Kotlin,
             Language::Scala,
             Language::Swift,
-            Language::Elixir,
             Language::Dart,
             Language::Terraform,
         ] {

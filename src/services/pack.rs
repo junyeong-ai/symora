@@ -573,11 +573,7 @@ impl Reference {
                 .filter(|part| !part.is_empty())
                 .map(str::to_string)
                 .collect(),
-            Language::Java
-            | Language::Kotlin
-            | Language::Scala
-            | Language::Swift
-            | Language::Elixir => rest
+            Language::Java | Language::Kotlin | Language::Scala | Language::Swift => rest
                 .split('.')
                 .filter(|part| !part.is_empty())
                 .map(str::to_string)
