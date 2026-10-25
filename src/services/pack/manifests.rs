@@ -1994,8 +1994,11 @@ impl<'f> PythonConfiguration<'f> {
 
     /// Whether the directory's files configure a build, which is what makes
     /// it a project's: a `setup.py`, or a `pyproject.toml` or `setup.cfg`
-    /// holding more than pytest's own table. `pytest.toml`, `pytest.ini`,
-    /// their dotted names and `tox.ini` configure tools, never a build.
+    /// other than one holding pytest's own table and nothing else. One that
+    /// pytest reads no table from — an empty file or `[tool]` table, a
+    /// `pyproject.toml` that cannot be parsed — is no pytest configuration,
+    /// so it configures a build. `pytest.toml`, `pytest.ini`, their dotted
+    /// names and `tox.ini` configure tools, never a build.
     fn configures_a_build(&self) -> bool {
         let pytest_only_toml = self.pyproject.as_ref().is_some_and(|pyproject| {
             pyproject.keys().all(|key| key == "tool")
