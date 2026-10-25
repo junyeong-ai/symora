@@ -3789,12 +3789,6 @@ fn cpp_bound_names(name: Node) -> Vec<Node> {
 fn declarator_name(declarator: Node) -> Node {
     let mut node = declarator;
     loop {
-        if let Some(named) = macro_argument_name(node).or_else(|| macro_wrapped_name(node)) {
-            return named;
-        }
-        if let Some(named) = name_before_parameters(node) {
-            return named;
-        }
         if let Some(set_aside) = node
             .prev_sibling()
             .filter(|before| before.is_error())
@@ -3818,6 +3812,12 @@ fn declarator_name(declarator: Node) -> Node {
             })
         {
             node = set_aside;
+        }
+        if let Some(named) = macro_argument_name(node).or_else(|| macro_wrapped_name(node)) {
+            return named;
+        }
+        if let Some(named) = name_before_parameters(node) {
+            return named;
         }
         let inner = match node.kind() {
             "operator_cast" => None,
@@ -6362,6 +6362,14 @@ region     = "us-central1"
                 "function:AnnotPath",
             ],
             "the words of its type the grammar set aside before a function are no declarator"
+        );
+        assert_eq!(
+            declared(
+                "STATIC_INLINE void ABSL_INTERNAL_C_SYMBOL(\n    AbslInternalAnnotateIgnoreReadsBegin)()\n    \
+                 ABSL_INTERNAL_IGNORE_READS_BEGIN_ATTRIBUTE {}\n"
+            ),
+            ["function:AbslInternalAnnotateIgnoreReadsBegin"],
+            "a set-aside declarator is read as any other, through a macro wrapping its name"
         );
         assert_eq!(
             declared(
