@@ -1201,17 +1201,19 @@ fn prototype_macros(root: Node) -> Vec<std::ops::Range<usize>> {
 
 /// The macros a C++ class member writes before a qualified type, which the
 /// grammar took for the member's type and the qualifier for its name,
-/// reading the `::` after it as a bit-field's colon (`API std::string
-/// DebugString() const;` as a field `std`): `::` follows no declarator's
-/// name, so that name qualifies the type and what the grammar read as the
-/// type is a macro.
+/// reading the `::` after it as two colons, the first a bit-field's (`API
+/// std::string DebugString() const;` as a field `std`, `INLINE const
+/// std::string& Get() const {…}` as a function `std`): `::` follows no
+/// declarator's name, so that name qualifies the type and what the grammar
+/// read as the type is a macro. A bit-field's width written right after its
+/// colon (`Flags w:::ns::kWidth;`) is a `::` token of its own.
 fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
     while let Some(node) = pending.pop() {
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
-        if node.kind() != "field_declaration" || child_of_kind(node, "bitfield_clause").is_none() {
+        if !matches!(node.kind(), "field_declaration" | "function_definition") {
             continue;
         }
         if let Some(written) = node
@@ -1220,8 +1222,16 @@ fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize
             && node
                 .child_by_field_name("declarator")
                 .filter(|declarator| declarator.kind() == "field_identifier")
-                .and_then(|declarator| source.get(declarator.end_byte()..))
-                .is_some_and(|rest| rest.trim_ascii_start().starts_with(b"::"))
+                .and_then(|declarator| {
+                    let rest = source.get(declarator.end_byte()..)?;
+                    Some(declarator.end_byte() + rest.len() - rest.trim_ascii_start().len())
+                })
+                .is_some_and(|colon| {
+                    [colon, colon + 1].into_iter().all(|at| {
+                        node.descendant_for_byte_range(at, at + 1)
+                            .is_some_and(|token| token.kind() == ":")
+                    })
+                })
         {
             macros.push(written.byte_range());
         }
@@ -7638,13 +7648,16 @@ region     = "us-central1"
             declared(
                 "class F {\n public:\n  API std::string DebugString() const;\n  \
                  ONNX_API const std::string& GetName() const;\n  Flags mode : 2;\n  \
-                 int after;\n};\n"
+                 INLINE const std::string& Get() const {\n    return name_;\n  }\n  \
+                 Flags width:::ns::kWidth;\n  int after;\n};\n"
             ),
             [
                 "class:F",
                 "method:DebugString",
                 "method:GetName",
                 "field:mode",
+                "method:Get",
+                "field:width",
                 "field:after",
             ],
             "a name before `::` qualifies a type, so what was read as the type is a macro"
