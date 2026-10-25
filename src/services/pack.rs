@@ -3,7 +3,7 @@
 //! Imports are cached per file. Signatures are loaded in rank order and
 //! admitted whole within the caller's approximate token budget.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -449,6 +449,7 @@ fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> ImportGraph {
         exact,
         suffixes,
         manifests,
+        python: PythonPath::of(nodes),
     };
 
     let mut graph: Graph = BTreeMap::new();
@@ -666,6 +667,49 @@ struct ProjectIndex<'a> {
     exact: PathIndex<'a>,
     suffixes: PathIndex<'a>,
     manifests: &'a Manifests,
+    python: PythonPath<'a>,
+}
+
+/// The directories a Python tree puts on `sys.path`, as far as the tree says:
+/// a package is a directory holding `__init__.py`, and the directory above a
+/// top-level package is where it is imported from.
+struct PythonPath<'a> {
+    packages: HashSet<&'a [String]>,
+    /// The directory above each top-level package, in path order.
+    roots: Vec<&'a [String]>,
+}
+
+impl<'a> PythonPath<'a> {
+    fn of(nodes: &'a [Node]) -> Self {
+        let packages: HashSet<&[String]> = nodes
+            .iter()
+            .filter(|node| {
+                node.language == Language::Python
+                    && Path::new(&node.rel_path)
+                        .file_stem()
+                        .is_some_and(|stem| stem == "__init__")
+            })
+            .map(|node| node.directory.as_slice())
+            .collect();
+        let mut roots: Vec<&[String]> = packages
+            .iter()
+            .filter_map(|package| package.split_last().map(|(_, parent)| parent))
+            .filter(|parent| !packages.contains(parent))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        Self { packages, roots }
+    }
+
+    /// The directory `sys.path` holds for a file in `directory`: the nearest
+    /// one at or above it that is no package — where a script runs from, or
+    /// where its top-level package is imported from.
+    fn base_of(&self, directory: &'a [String]) -> Option<&'a [String]> {
+        (0..=directory.len())
+            .rev()
+            .map(|depth| &directory[..depth])
+            .find(|directory| !self.packages.contains(directory))
+    }
 }
 
 impl ProjectIndex<'_> {
@@ -703,6 +747,9 @@ impl ProjectIndex<'_> {
                 .go_package(components, from)
                 .map(|directory| self.package(&directory, Language::Go))
                 .unwrap_or_default(),
+            Reference::Absolute(components) if from.language == Language::Python => {
+                self.python_module(components, from)
+            }
             Reference::Absolute(components) => {
                 // `use a::b::Item` names a module and an item in one path;
                 // read it whole, then without the item.
@@ -760,6 +807,49 @@ impl ProjectIndex<'_> {
         }
         if directories && let Some(files) = index.by_directory.get(path) {
             return files.iter().filter(compatible).copied().collect();
+        }
+        Vec::new()
+    }
+
+    /// The module an absolute Python import names: the file at that dotted
+    /// path below a directory on `sys.path`, searched in the order Python
+    /// would put them there — the importer's own (where it runs from as a
+    /// script, or where its top-level package is imported from), then the
+    /// project root, then the directory above each other top-level package.
+    /// Two files on one footing name neither. A path below none of them (the
+    /// standard library, an installed distribution) names nothing in the
+    /// project, however its last segments match a project file: `logging` is
+    /// not `app/util/logging.py`, whose name is `app.util.logging`.
+    fn python_module(&self, module: &[String], from: &Node) -> Vec<usize> {
+        if module.is_empty() {
+            return Vec::new();
+        }
+        let own = self.python.base_of(&from.directory);
+        let tiers = [
+            own.into_iter().collect(),
+            vec![&[][..]],
+            self.python.roots.clone(),
+        ];
+        let mut searched = HashSet::new();
+        for tier in tiers {
+            let mut found = BTreeSet::new();
+            for base in tier.into_iter().filter(|base| searched.insert(*base)) {
+                let path = [base, module].concat();
+                found.extend(
+                    self.exact
+                        .by_module
+                        .get(path.as_slice())
+                        .into_iter()
+                        .flatten()
+                        .copied()
+                        .filter(|id| self.nodes[*id].language == Language::Python),
+                );
+            }
+            match found.len() {
+                0 => continue,
+                1 => return found.into_iter().collect(),
+                _ => return Vec::new(),
+            }
         }
         Vec::new()
     }
@@ -1817,6 +1907,57 @@ mod tests {
             node(1, "src/services/dist/process.rs", ""),
         ];
         assert!(edges_of(&nodes, 0).is_empty());
+    }
+
+    /// An absolute Python import names a module below a directory on
+    /// `sys.path`: `import logging` is the standard library's, not
+    /// `app/util/logging.py`, whose name is `app.util.logging`, and a script
+    /// finds the modules beside it where another directory's script does not.
+    #[test]
+    fn an_absolute_python_import_names_a_module_on_sys_path_only() {
+        let python = |id, rel, source| node_in(id, rel, source, Language::Python);
+        let nodes = vec![
+            python(0, "app/__init__.py", ""),
+            python(
+                1,
+                "app/main.py",
+                "import logging\nimport util.logging\nimport app.util.logging\n\
+                 from app.util import helpers\n",
+            ),
+            python(2, "app/util/__init__.py", ""),
+            python(3, "app/util/logging.py", ""),
+            python(4, "src/pkg/__init__.py", ""),
+            python(5, "src/pkg/core.py", ""),
+            python(
+                6,
+                "tests/test_core.py",
+                "import pkg.core\nimport conftest\n",
+            ),
+            python(7, "tests/conftest.py", ""),
+            python(8, "scripts/run.py", "import config\n"),
+            python(9, "scripts/config.py", ""),
+            python(10, "tools/lint.py", "import config\nimport core\n"),
+            python(11, "a/app/__init__.py", ""),
+            python(12, "a/app/db.py", ""),
+            python(13, "b/app/__init__.py", ""),
+            python(14, "b/app/db.py", ""),
+            python(15, "a/app/serve.py", "import app.db\n"),
+            python(16, "c/serve.py", "import app.db\n"),
+        ];
+        assert_eq!(
+            edges_of(&nodes, 1),
+            vec!["app/util/logging.py", "app/util/__init__.py"]
+        );
+        assert_eq!(
+            edges_of(&nodes, 6),
+            vec!["src/pkg/core.py", "tests/conftest.py"]
+        );
+        assert_eq!(edges_of(&nodes, 8), vec!["scripts/config.py"]);
+        assert!(edges_of(&nodes, 10).is_empty());
+        // An importer inside a top-level package finds that package first;
+        // one outside every `app` cannot tell which of them it means.
+        assert_eq!(edges_of(&nodes, 15), vec!["a/app/db.py"]);
+        assert!(edges_of(&nodes, 16).is_empty());
     }
 
     /// Four files can share a basename; a reference short enough to fit all
