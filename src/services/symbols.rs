@@ -1706,13 +1706,23 @@ fn binding_scope(assignment: Node) -> Option<usize> {
 /// otherwise (`PADDING;`), since no declaration is a name alone. A class, struct,
 /// union or enum without a body declares only standing alone, a forward
 /// declaration: as the type of another declaration it names a type that
-/// declaration uses (`struct stat st`, `struct item *it`).
+/// declaration uses (`struct stat st`, `struct item *it`). Nor does a
+/// deduction guide (`Inner(T) -> Inner<T>;`), written without a type and with
+/// a trailing return type, as a function with one is not: it is the class
+/// template's, which declares that name.
 fn declares(node: Node, content: &str, language: Language) -> bool {
     if language == Language::Cpp
         && (ends_on_a_supplied_semicolon(node)
             && (invokes_a_macro(node) || !declares_a_function(node))
             || lone_name(node).is_some() && continued_macro(node).is_none()
             || misreads_a_macro_invocation(node, content)
+            || node.kind() == "declaration"
+                && node.child_by_field_name("type").is_none()
+                && node
+                    .child_by_field_name("declarator")
+                    .is_some_and(|declarator| {
+                        child_of_kind(declarator, "trailing_return_type").is_some()
+                    })
             || node.kind() == "function_declarator" && error_held_prototype(node).is_none()
             || misreads_a_class_key(node, content)
             || matches!(
@@ -7391,7 +7401,7 @@ region     = "us-central1"
             declared(
                 "class W {\n  int first;\n  Copy() const;\n  Gone() = delete;\n  It() : base_(0) {}\n  \
                  Value(int&& v) && { return v; }\n  explicit Reporter(Printer* p);\n  \
-                 ONNX_CATCH(const E& e) { handle(e); }\n  Cast() -> int;\n  Over() override;\n  \
+                 ONNX_CATCH(const E& e) { handle(e); }\n  Over() override;\n  \
                  Safe() noexcept;\n  Constrained() requires true;\n  operator bool();\n  \
                  Q_DISABLE_COPY(W)\n  const int limit_ = 3;\n  \
                  Q_DECLARE_PRIVATE(X)\n  volatile int flag;\n  Q_DISABLE_COPY(V)\n  const QString title;\n  \
@@ -7405,7 +7415,6 @@ region     = "us-central1"
                 "method:It",
                 "method:Value",
                 "method:Reporter",
-                "method:Cast",
                 "method:Over",
                 "method:Safe",
                 "method:Constrained",
@@ -7416,6 +7425,21 @@ region     = "us-central1"
                 "field:after",
             ],
             "unless it writes what no macro's invocation can"
+        );
+        assert_eq!(
+            declared(
+                "struct Outer {\n  template <class T> struct Inner { Inner(T); };\n  \
+                 template <class T> Inner(T) -> Inner<T>;\n  Inner(const char *) -> Inner<int>;\n  \
+                 auto Cast() -> int;\n  int after;\n};\n"
+            ),
+            [
+                "struct:Outer",
+                "struct:Inner",
+                "constructor:Inner",
+                "method:Cast",
+                "field:after",
+            ],
+            "a deduction guide names the class template it guides, which declares the name"
         );
         assert_eq!(
             declared(
