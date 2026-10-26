@@ -164,8 +164,8 @@ mod tests {
         // SAFETY: `getsid` only reads the session of a pid this test started.
         let sessions = unsafe { (libc::getsid(leader.unwrap()), libc::getsid(child)) };
         server.kill().await.unwrap();
-        assert_eq!(sessions, (leader.unwrap(), leader.unwrap()));
         assert!(stops(child).await, "pid {child} outlived the server");
+        assert_eq!(sessions, (leader.unwrap(), leader.unwrap()));
     }
 
     #[tokio::test]
