@@ -65,10 +65,12 @@ pub(super) enum TypeScript {
     /// Neither installed nor declared above the directory.
     #[default]
     Absent,
-    /// The majors it may be: the one installed or declared (one below 5 read
-    /// as 5), or every major whose defaults pack reads (`MAJORS`) where that
-    /// is above them or a declared range fixes none (`of_major`).
-    Majors(Vec<u8>),
+    /// The major installed or declared, one below 5 read as 5 (`of_major`).
+    Major(u8),
+    /// Installed or declared at no major whose defaults pack reads
+    /// (`MAJORS`) — a version above them, a range fixing none — so any of
+    /// them; the declared range where one is written.
+    Unknown(Option<String>),
 }
 
 /// The TypeScript majors whose defaults pack reads, measured with tsc
@@ -85,20 +87,21 @@ impl TypeScript {
     /// none is known.
     pub(super) fn majors(&self) -> &[u8] {
         match self {
-            Self::Majors(majors) => majors,
-            Self::Absent => &MAJORS,
+            Self::Major(major) => std::slice::from_ref(major),
+            Self::Absent | Self::Unknown(_) => &MAJORS,
         }
     }
 
-    /// The majors a known major is read as: one below 5 as 5, whose
-    /// `module` and `moduleResolution` defaults TypeScript's documentation
-    /// gives every earlier major too (`commonjs` resolving as `node10`, an
-    /// ES `module` as `classic`); one above 7 as any, its defaults unknown.
-    fn of_major(major: Option<u64>) -> Self {
+    /// What the version installed, or the `range` declared, is read as: one
+    /// below 5 as 5, whose `module` and `moduleResolution` defaults
+    /// TypeScript's documentation gives every earlier major too (`commonjs`
+    /// resolving as `node10`, an ES `module` as `classic`); one above 7, or
+    /// none, as unknown.
+    fn of_major(major: Option<u64>, range: Option<String>) -> Self {
         match major.and_then(|major| u8::try_from(major).ok()) {
-            Some(major) if major < MAJORS[0] => Self::Majors(vec![MAJORS[0]]),
-            Some(major) if MAJORS.contains(&major) => Self::Majors(vec![major]),
-            _ => Self::Majors(MAJORS.to_vec()),
+            Some(major) if major < MAJORS[0] => Self::Major(MAJORS[0]),
+            Some(major) if MAJORS.contains(&major) => Self::Major(major),
+            _ => Self::Unknown(range),
         }
     }
 }
@@ -1632,7 +1635,7 @@ fn ts_config(chain: &Chain, typescript: TypeScript, javascript: bool) -> TsConfi
 struct TypeScriptVersions {
     root: PathBuf,
     installed: HashMap<Vec<String>, Option<Option<u64>>>,
-    declared: HashMap<Vec<String>, Option<Option<u64>>>,
+    declared: HashMap<Vec<String>, Option<String>>,
 }
 
 impl TypeScriptVersions {
@@ -1645,11 +1648,11 @@ impl TypeScriptVersions {
     }
 
     fn of(&mut self, directory: &[String]) -> TypeScript {
-        match self
-            .installed(directory)
-            .or_else(|| self.declared(directory))
-        {
-            Some(major) => TypeScript::of_major(major),
+        if let Some(major) = self.installed(directory) {
+            return TypeScript::of_major(major, None);
+        }
+        match self.declared(directory) {
+            Some(range) => TypeScript::of_major(typescript_major(&range), Some(range)),
             None => TypeScript::Absent,
         }
     }
@@ -1679,19 +1682,21 @@ impl TypeScriptVersions {
         found
     }
 
-    /// The major the `typescript` range declared nearest above `directory`
-    /// fixes (`typescript_major`); `Some(None)` where it fixes none.
-    fn declared(&mut self, directory: &[String]) -> Option<Option<u64>> {
+    /// The `typescript` range declared nearest above `directory`
+    /// (`declared_typescript`).
+    fn declared(&mut self, directory: &[String]) -> Option<String> {
         if let Some(known) = self.declared.get(directory) {
-            return *known;
+            return known.clone();
         }
-        let here = declared_typescript(&self.root, directory).map(|range| typescript_major(&range));
-        let found = match (here, directory.split_last()) {
+        let found = match (
+            declared_typescript(&self.root, directory),
+            directory.split_last(),
+        ) {
             (Some(found), _) => Some(found),
             (None, Some((_, parent))) => self.declared(parent),
             (None, None) => None,
         };
-        self.declared.insert(directory.to_vec(), found);
+        self.declared.insert(directory.to_vec(), found.clone());
         found
     }
 }
@@ -1743,24 +1748,67 @@ fn declared_typescript(root: &Path, directory: &[String]) -> Option<String> {
     })
 }
 
-/// The major a version range fixes by its lower bound: a caret, tilde or
-/// exact version, or an x-range (`^5.9.0`, `~6.0`, `6.x`, `5`), each of the
-/// alternatives `||` joins agreeing. `None` for any other range — an open
-/// one (`>=5`, `*`), a set of comparators, a tag (`latest`).
+/// The major a version range fixes, its lower bound's where every version
+/// it takes shares that major, as npm's semver reads its comparators: a
+/// caret, tilde or exact version, an x-range (`^5.9.0`, `~6.0`, `6.x`,
+/// `5`), or a set of comparators bounded within one major (`>=5.0.0
+/// <6.0.0`), each of the alternatives `||` joins agreeing. `None` for any
+/// other range — an open one (`>=5`, `*`), one spanning majors (`>=5 <7`),
+/// a tag (`latest`).
 fn typescript_major(range: &str) -> Option<u64> {
-    let mut majors = range.split("||").map(|alternative| {
-        let alternative = alternative.trim();
-        if alternative.contains(char::is_whitespace) {
-            return None;
-        }
-        let version = alternative
-            .strip_prefix(['^', '~', '='])
-            .unwrap_or(alternative);
-        let version = version.strip_prefix('v').unwrap_or(version);
-        version.split(['.', '-']).next()?.parse::<u64>().ok()
-    });
+    let mut majors = range.split("||").map(alternative_major);
     let first = majors.next()??;
     majors.all(|major| major == Some(first)).then_some(first)
+}
+
+/// The major one alternative of a range fixes (`typescript_major`): the
+/// greatest major its comparators' lower bounds allow, where it is the
+/// least their upper bounds allow. An operator may stand apart from its
+/// version (`>= 5.0.0`).
+fn alternative_major(alternative: &str) -> Option<u64> {
+    let operator = |c: char| matches!(c, '<' | '>' | '=' | '^' | '~');
+    let mut lowest: Option<u64> = None;
+    let mut highest: Option<u64> = None;
+    let mut pending = String::new();
+    for token in alternative.split_whitespace() {
+        if token.chars().all(operator) {
+            pending.push_str(token);
+            continue;
+        }
+        let comparator = std::mem::take(&mut pending) + token;
+        let version_at = comparator.find(|c: char| !operator(c))?;
+        let (op, version) = comparator.split_at(version_at);
+        let version = version.strip_prefix('v').unwrap_or(version);
+        let release = version
+            .split_once('-')
+            .map_or(version, |(release, _)| release);
+        let mut parts = release.split('.');
+        let major = parts.next()?.parse::<u64>().ok()?;
+        let rest: Vec<&str> = parts.collect();
+        // Whether it is at or below its major's first release (`6`,
+        // `6.0.0`, `6.0.0-0`), below which a `<` bound ends with the major
+        // before it.
+        let first = rest
+            .iter()
+            .all(|part| matches!(*part, "0" | "x" | "X" | "*"));
+        let (low, high) = match op {
+            "" | "=" | "^" | "~" => (Some(major), Some(major)),
+            ">=" | ">" => (Some(major), None),
+            "<=" => (None, Some(major)),
+            "<" if first => (None, Some(major.checked_sub(1)?)),
+            "<" => (None, Some(major)),
+            _ => return None,
+        };
+        lowest = lowest.max(low);
+        highest = match (highest, high) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+    match (lowest, highest) {
+        (Some(low), Some(high)) if low == high => Some(low),
+        _ => None,
+    }
 }
 
 /// The value a `pnpm-workspace.yaml` catalog gives a package: the default
@@ -2802,8 +2850,8 @@ mod tests {
         );
     }
 
-    /// A declared `typescript` range gives a major only where its lower
-    /// bound fixes one, every alternative agreeing.
+    /// A declared `typescript` range gives a major only where every version
+    /// it takes shares one, its lower bound's, every alternative agreeing.
     #[test]
     fn a_typescript_range_fixes_a_major_only_by_its_lower_bound() {
         for (range, major) in [
@@ -2816,7 +2864,13 @@ mod tests {
             ("^5.9 || 5.x", Some(5)),
             ("^5.0.0 || ^6.0.0", None),
             (">=5", None),
-            (">=5.0.0 <6.0.0", None),
+            (">=5.0.0 <6.0.0", Some(5)),
+            (">= 6.0.0 < 7", Some(6)),
+            (">=6.0.0 <=6.0.3", Some(6)),
+            (">=5.0.0 <6.0.0-0", Some(5)),
+            (">=5.9 <6.1", None),
+            (">=5 <7", None),
+            ("<6", None),
             ("*", None),
             ("latest", None),
             ("workspace:*", None),

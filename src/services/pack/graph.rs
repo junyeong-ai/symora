@@ -25,9 +25,12 @@ pub(super) struct ImportGraph {
     pub(super) rust_relative_imports_omitted: bool,
     pub(super) undetermined_imports: BTreeSet<String>,
     /// The specifiers the TypeScript majors that may compile an importer
-    /// read as different files, where no installed or declared version
-    /// fixes one major.
+    /// read as different files under its one configuration, where no
+    /// installed or declared version fixes one major.
     pub(super) version_undetermined_imports: BTreeSet<String>,
+    /// The declared `typescript` ranges, fixing no major pack reads, of the
+    /// importers of those specifiers.
+    pub(super) typescript_ranges: BTreeSet<String>,
     /// The files writing a non-relative specifier whose TypeScript
     /// configuration the `references` above them leave undetermined: the
     /// projects compiling the file disagree, or none compiles it and one
@@ -69,6 +72,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut rust_relative_imports_omitted = false;
     let mut undetermined_imports = BTreeSet::new();
     let mut version_undetermined_imports = BTreeSet::new();
+    let mut typescript_ranges = BTreeSet::new();
     let mut ts_owner_undetermined = BTreeSet::new();
     // The configurations each TypeScript project's references reach, and
     // whether one of them maps a specifier, each worked out once for every
@@ -118,6 +122,9 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                 }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
+                    if let Some(TypeScript::Unknown(Some(range))) = importer.typescript {
+                        typescript_ranges.insert(range.clone());
+                    }
                     continue;
                 }
             };
@@ -133,6 +140,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         rust_relative_imports_omitted,
         undetermined_imports,
         version_undetermined_imports,
+        typescript_ranges,
         ts_owner_undetermined,
     }
 }
@@ -148,8 +156,9 @@ enum Resolution {
     /// A specifier the project's own configuration declares that names no
     /// file pack reads.
     Undetermined(String),
-    /// A specifier the TypeScript majors that may compile the importer, no
-    /// installed or declared version fixing one, read as different files.
+    /// A specifier the TypeScript majors that may compile the importer read
+    /// as different files under its one configuration, no installed or
+    /// declared version fixing one.
     VersionUndetermined(String),
 }
 
@@ -173,9 +182,13 @@ struct Importer<'a> {
     /// non-relative imports, each reading once: an import forms an edge only
     /// where they agree.
     readings: Vec<Reading>,
-    /// Whether the file's configuration is a `jsconfig.json`, a JavaScript
-    /// project's, which is never one to tell to install TypeScript.
-    javascript_project: bool,
+    /// What TypeScript is installed or declared for the file where its
+    /// readings can differ only by major: one configuration, or the
+    /// defaults, read under each major that may compile it. `None` where
+    /// several projects' configurations read it, where Node or a bundler
+    /// does, and in a `jsconfig.json`'s JavaScript project, which is never
+    /// one to tell to install TypeScript.
+    typescript: Option<&'a TypeScript>,
 }
 
 /// How one TypeScript version that may compile a file reads a non-relative
@@ -246,30 +259,36 @@ impl<'a> Importer<'a> {
         // it, and any file where no TypeScript is installed or declared, is
         // Node's or a bundler's to resolve.
         let unset = ModuleOptions::default();
-        let typescript = manifests
+        let compiled = manifests
             .typescript
             .get(&node.directory)
-            .cloned()
-            .unwrap_or_default();
-        let readings = match &owner {
-            _ if !is_javascript(node.language) => Vec::new(),
-            TsOwner::Config(config) => vec![(&config.module_options, config.majors())],
-            TsOwner::Undetermined(owners) => owners
-                .iter()
-                .map(|config| (&config.module_options, config.majors()))
-                .collect(),
-            TsOwner::None | TsOwner::Uncompiled(_)
-                if node.language == Language::TypeScript && typescript != TypeScript::Absent =>
-            {
-                vec![(&unset, typescript.majors().to_vec())]
-            }
-            TsOwner::None | TsOwner::Uncompiled(_) => {
+            .filter(|typescript| {
+                node.language == Language::TypeScript && **typescript != TypeScript::Absent
+            });
+        let (readings, typescript) = match (&owner, compiled) {
+            _ if !is_javascript(node.language) => (Vec::new(), None),
+            (TsOwner::Config(config), _) => (
+                vec![(&config.module_options, config.majors())],
+                (!config.javascript).then_some(&config.typescript),
+            ),
+            (TsOwner::Undetermined(owners), _) => (
+                owners
+                    .iter()
+                    .map(|config| (&config.module_options, config.majors()))
+                    .collect(),
+                None,
+            ),
+            (TsOwner::None | TsOwner::Uncompiled(_), Some(typescript)) => (
+                vec![(&unset, typescript.majors().to_vec())],
+                Some(typescript),
+            ),
+            (TsOwner::None | TsOwner::Uncompiled(_), None) => {
                 return Self {
                     node,
                     ts_config,
                     ts_owners: Vec::new(),
                     ts_uncompiled,
-                    javascript_project: false,
+                    typescript: None,
                     readings: vec![Reading {
                         major: None,
                         base_url: true,
@@ -304,7 +323,7 @@ impl<'a> Importer<'a> {
             },
             ts_uncompiled,
             readings: read,
-            javascript_project: ts_config.is_some_and(|config| config.javascript),
+            typescript,
         }
     }
 
@@ -1358,31 +1377,19 @@ impl ProjectIndex<'_> {
     /// matches it, which maps every package name too. Each TypeScript
     /// version that may compile the importer reads it (`Reading`), 7 without
     /// `baseUrl`; where they name different files, it is disclosed, as one
-    /// the TypeScript version decides where each major's readings agree.
+    /// the TypeScript version decides where they read one configuration.
     fn bare_specifier(&self, specifier: &str, importer: &Importer, form: ImportForm) -> Resolution {
-        let read: Vec<(Option<u8>, Resolution)> = importer
+        let mut read = importer
             .readings
             .iter()
-            .map(|reading| {
-                let resolution = self.read_bare_specifier(specifier, importer, *reading, form);
-                (reading.major, resolution)
-            })
-            .collect();
-        if read.windows(2).all(|pair| pair[0].1 == pair[1].1) {
-            return read
-                .into_iter()
-                .next()
-                .map_or(Resolution::Files(Vec::new()), |(_, first)| first);
+            .map(|reading| self.read_bare_specifier(specifier, importer, *reading, form));
+        let first = read.next().unwrap_or(Resolution::Files(Vec::new()));
+        if read.all(|other| other == first) {
+            return first;
         }
-        let each_major_agrees = read.iter().all(|(major, reading)| {
-            read.iter()
-                .filter(|(other, _)| other == major)
-                .all(|(_, other)| other == reading)
-        });
-        if each_major_agrees && !importer.javascript_project {
-            Resolution::VersionUndetermined(specifier.to_string())
-        } else {
-            Resolution::Undetermined(specifier.to_string())
+        match importer.typescript {
+            Some(_) => Resolution::VersionUndetermined(specifier.to_string()),
+            None => Resolution::Undetermined(specifier.to_string()),
         }
     }
 
@@ -3881,7 +3888,8 @@ mod tests {
     /// (`baseurl7`). So where no TypeScript is installed or declared, a
     /// configuration setting `baseUrl` is read under 5 and 6 alone; where a
     /// declared range fixes no major, 7 still reads it and a specifier
-    /// `baseUrl` decides is disclosed.
+    /// `baseUrl` decides is disclosed with that range. A set of comparators
+    /// within one major fixes it (`ts_range`).
     #[test]
     fn typescript_7_reads_no_base_url() {
         let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
@@ -3892,6 +3900,7 @@ mod tests {
             ("seven", Some("^7.0.2")),
             ("none", None),
             ("latest", Some("latest")),
+            ("range", Some(">=5.0.0 <6.0.0")),
         ] {
             nodes.push(node_in(
                 nodes.len(),
@@ -3936,10 +3945,79 @@ mod tests {
         assert_eq!(edges(3), vec!["seven/lib/x.ts"]);
         assert_eq!(edges(6), vec!["none/src/lib/x.ts"]);
         assert!(edges(9).is_empty());
+        assert_eq!(edges(12), vec!["range/src/lib/x.ts"]);
         assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
             BTreeSet::from(["@/lib/x".to_string(), "lib/x".to_string()])
+        );
+        assert_eq!(
+            graph.typescript_ranges,
+            BTreeSet::from(["latest".to_string()])
+        );
+    }
+
+    /// A file several projects compile under different majors and module
+    /// options is disclosed as their configurations disagreeing, which no
+    /// installed or declared version settles, not as one the TypeScript
+    /// version decides (`owners_majors`).
+    #[test]
+    fn a_file_projects_of_different_majors_read_apart_is_no_version_disagreement() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(0, "apps/web/a/ax.ts", ""),
+            ts(1, "apps/web/b/bx.ts", ""),
+            ts(2, "apps/web/shared/s.ts", "import { p } from 'p'\n"),
+            ts(3, "packages/p/src/index.ts", ""),
+            ts(4, "packages/p/src/other.ts", ""),
+        ];
+        let project = |major: &str, options: &str| {
+            [
+                format!("{{\"devDependencies\": {{\"typescript\": \"{major}\"}}}}"),
+                format!(
+                    "{{\"compilerOptions\": {{\"composite\": true, {options}}}, \
+                     \"include\": [\"../shared/**/*.ts\", \"./*.ts\"]}}"
+                ),
+            ]
+        };
+        let [a_package, a_config] = project("^5.9.0", "\"module\": \"commonjs\"");
+        let [b_package, b_config] = project(
+            "^7.0.2",
+            "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"",
+        );
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"workspaces\": [\"packages/*\", \"apps/*\"]}",
+                ),
+                ("apps/web/package.json", "{\"name\": \"web\"}"),
+                (
+                    "apps/web/tsconfig.json",
+                    "{\"files\": [], \"references\": [{\"path\": \"./a\"}, {\"path\": \"./b\"}]}",
+                ),
+                ("apps/web/a/package.json", a_package.as_str()),
+                ("apps/web/a/tsconfig.json", a_config.as_str()),
+                ("apps/web/b/package.json", b_package.as_str()),
+                ("apps/web/b/tsconfig.json", b_config.as_str()),
+                (
+                    "packages/p/package.json",
+                    "{\"name\": \"p\", \"types\": \"./src/index.ts\", \"exports\": \
+                     {\".\": {\"import\": \"./src/other.ts\", \"default\": \"./src/index.ts\"}}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.edges[&2].is_empty());
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["p".to_string()])
+        );
+        assert!(graph.version_undetermined_imports.is_empty());
+        assert_eq!(
+            graph.ts_owner_undetermined,
+            BTreeSet::from(["apps/web/shared/s.ts".to_string()])
         );
     }
 
@@ -4949,11 +5027,16 @@ mod tests {
             .collect();
         assert_eq!(edges, expected);
         // Where the majors disagree (`unknown`, `ts8`), the import is
-        // disclosed as one the TypeScript version decides.
+        // disclosed as one the TypeScript version decides, with the ranges
+        // declared there.
         assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
             BTreeSet::from(["p6".to_string()])
+        );
+        assert_eq!(
+            graph.typescript_ranges,
+            BTreeSet::from(["^8.0.0".to_string(), "latest".to_string()])
         );
     }
 
