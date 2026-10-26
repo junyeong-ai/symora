@@ -1190,6 +1190,7 @@ mod tests {
                 Language::Css,
                 LspError::ServerNotInstalled {
                     name: "css".to_string(),
+                    searched: Vec::new(),
                     install_hint: "npm".to_string(),
                 },
             ),
@@ -1197,6 +1198,7 @@ mod tests {
                 Language::Html,
                 LspError::ServerNotInstalled {
                     name: "html".to_string(),
+                    searched: Vec::new(),
                     install_hint: "npm".to_string(),
                 },
             ),
@@ -1596,6 +1598,7 @@ mod tests {
         assert_eq!(
             reason(LspError::ServerNotInstalled {
                 name: "x".to_string(),
+                searched: Vec::new(),
                 install_hint: "y".to_string(),
             }),
             "server_not_installed"

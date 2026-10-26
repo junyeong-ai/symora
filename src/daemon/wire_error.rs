@@ -22,6 +22,7 @@ pub enum WireLspError {
     },
     ServerNotInstalled {
         name: String,
+        searched: Vec<String>,
         install_hint: String,
     },
     UnsupportedLanguage {
@@ -79,8 +80,13 @@ impl From<&LspError> for WireLspError {
             LspError::ConnectionLost(method) => Self::ConnectionLost {
                 method: method.clone(),
             },
-            LspError::ServerNotInstalled { name, install_hint } => Self::ServerNotInstalled {
+            LspError::ServerNotInstalled {
+                name,
+                searched,
+                install_hint,
+            } => Self::ServerNotInstalled {
                 name: name.clone(),
+                searched: searched.clone(),
                 install_hint: install_hint.clone(),
             },
             LspError::UnsupportedLanguage(lang) => Self::UnsupportedLanguage {
@@ -148,9 +154,15 @@ impl From<WireLspError> for LspError {
             WireLspError::ServerStart { message } => LspError::ServerStart(message),
             WireLspError::NotConnected => LspError::NotConnected,
             WireLspError::ConnectionLost { method } => LspError::ConnectionLost(method),
-            WireLspError::ServerNotInstalled { name, install_hint } => {
-                LspError::ServerNotInstalled { name, install_hint }
-            }
+            WireLspError::ServerNotInstalled {
+                name,
+                searched,
+                install_hint,
+            } => LspError::ServerNotInstalled {
+                name,
+                searched,
+                install_hint,
+            },
             WireLspError::UnsupportedLanguage { language } => {
                 LspError::UnsupportedLanguage(language)
             }
@@ -209,11 +221,17 @@ mod tests {
     fn server_not_installed_round_trips_with_install_hint() {
         let recovered = round_trip(LspError::ServerNotInstalled {
             name: "rust-analyzer".into(),
+            searched: vec!["/usr/bin".into()],
             install_hint: "rustup component add rust-analyzer".into(),
         });
         match recovered {
-            LspError::ServerNotInstalled { name, install_hint } => {
+            LspError::ServerNotInstalled {
+                name,
+                searched,
+                install_hint,
+            } => {
                 assert_eq!(name, "rust-analyzer");
+                assert_eq!(searched, ["/usr/bin"]);
                 assert_eq!(install_hint, "rustup component add rust-analyzer");
             }
             other => panic!("expected ServerNotInstalled, got {other:?}"),
@@ -346,6 +364,7 @@ mod tests {
     fn json_shape_uses_kind_discriminator() {
         let wire = WireLspError::from(&LspError::ServerNotInstalled {
             name: "rust-analyzer".into(),
+            searched: Vec::new(),
             install_hint: "x".into(),
         });
         let json = serde_json::to_value(&wire).unwrap();

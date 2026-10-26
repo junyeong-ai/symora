@@ -539,7 +539,9 @@ impl LspManager {
         };
 
         let install = match config.resolve() {
-            Err(LspError::ServerNotInstalled { name, install_hint }) => Some((name, install_hint)),
+            Err(LspError::ServerNotInstalled {
+                name, install_hint, ..
+            }) => Some((name, install_hint)),
             _ => None,
         };
         let critical = self.critical_failure_reason(language).await;

@@ -330,6 +330,7 @@ mod tests {
     fn lsp_error_maps_to_install_hint() {
         let err: OutputError = LspError::ServerNotInstalled {
             name: "rust-analyzer".into(),
+            searched: Vec::new(),
             install_hint: "rustup component add rust-analyzer".into(),
         }
         .into();
@@ -373,6 +374,7 @@ mod tests {
         // Origin (daemon side): typed variant.
         let origin = LspError::ServerNotInstalled {
             name: "rust-analyzer".into(),
+            searched: Vec::new(),
             install_hint: "rustup component add rust-analyzer".into(),
         };
 

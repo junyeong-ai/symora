@@ -2270,6 +2270,7 @@ mod tests {
             Language::Lua,
             LspError::ServerNotInstalled {
                 name: "lua-language-server".to_string(),
+                searched: Vec::new(),
                 install_hint: "brew install lua-language-server".to_string(),
             },
         )];
@@ -2304,6 +2305,7 @@ mod tests {
             Language::Rust,
             LspError::ServerNotInstalled {
                 name: "rust-analyzer".to_string(),
+                searched: Vec::new(),
                 install_hint: "rustup component add rust-analyzer".to_string(),
             },
         )];
@@ -2328,6 +2330,7 @@ mod tests {
             Language::Go,
             LspError::ServerNotInstalled {
                 name: "gopls".to_string(),
+                searched: Vec::new(),
                 install_hint: "go install golang.org/x/tools/gopls@latest".to_string(),
             },
         )];
@@ -2355,6 +2358,7 @@ mod tests {
             Language::Rust,
             LspError::ServerNotInstalled {
                 name: "rust-analyzer".to_string(),
+                searched: Vec::new(),
                 install_hint: "rustup component add rust-analyzer".to_string(),
             },
         )];
@@ -2406,6 +2410,7 @@ mod tests {
             language,
             LspError::ServerNotInstalled {
                 name: "server".to_string(),
+                searched: Vec::new(),
                 install_hint: "install it".to_string(),
             },
         )
