@@ -9028,6 +9028,92 @@ mod tests {
         assert!(graph.undetermined_imports.is_empty());
     }
 
+    /// A path option starting with `${configDir}`, wherever in the `extends`
+    /// chain it is set, names a path below the directory of the
+    /// configuration the chain starts from, as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace it (`zc_*`, `c*_*`): a `paths` substitution (`@/y`, where one
+    /// without it resolves against the configuration declaring it, `~/s`),
+    /// `typeRoots` (`foo`), `outDir` and `rootDir`, which map a package's own
+    /// name to its input before the built output (`a/o`), `baseUrl` (`c`'s
+    /// `y`), and `include` and `exclude`, which decide that a project of
+    /// `references` compiles `b/src/x.ts` and none `b/src/skip/k.ts`.
+    #[test]
+    fn a_config_dir_template_names_the_directory_a_chain_starts_from() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "packages/a/src/x.ts",
+                "import \"@/y\";\nimport \"~/s\";\nimport \"foo\";\nimport \"a/o\";\n",
+            ),
+            ts(1, "packages/a/src/y.ts", ""),
+            ts(2, "packages/a/src/o.ts", ""),
+            ts(3, "packages/a/types/foo/index.d.ts", ""),
+            ts(4, "shared/s.ts", ""),
+            ts(5, "packages/b/src/x.ts", "import \"@/y\";\n"),
+            ts(6, "packages/b/src/y.ts", ""),
+            ts(7, "packages/b/src/skip/k.ts", "import \"@/y\";\n"),
+            ts(8, "packages/c/src/x.ts", "import \"y\";\n"),
+            ts(9, "packages/c/src/y.ts", ""),
+        ];
+        let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
+        let base = format!(
+            "{{\"compilerOptions\": {{{bundler}, \"paths\": {{\"@/*\": [\"${{configDir}}/src/*\"], \
+             \"~/*\": [\"./shared/*\"]}}, \"typeRoots\": [\"${{configDir}}/types\"], \
+             \"outDir\": \"${{configDir}}/dist\", \"rootDir\": \"${{configDir}}/src\"}}, \
+             \"include\": [\"${{configDir}}/src\"], \"exclude\": [\"${{configDir}}/src/skip\"]}}"
+        );
+        let url =
+            format!("{{\"compilerOptions\": {{{bundler}, \"baseUrl\": \"${{configDir}}/src\"}}}}");
+        let extends = "{\"extends\": \"../../tsconfig.base.json\"}";
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                ("tsconfig.base.json", &base),
+                ("tsconfig.url.json", &url),
+                ("packages/a/tsconfig.json", extends),
+                (
+                    "packages/a/package.json",
+                    "{\"name\": \"a\", \"exports\": {\"./o\": {\"types\": \"./dist/o.d.ts\", \
+                     \"default\": \"./dist/o.js\"}}}",
+                ),
+                ("packages/a/dist/o.d.ts", ""),
+                (
+                    "packages/b/tsconfig.json",
+                    "{\"files\": [], \"references\": [{\"path\": \"./tsconfig.lib.json\"}]}",
+                ),
+                ("packages/b/tsconfig.lib.json", extends),
+                (
+                    "packages/c/tsconfig.json",
+                    "{\"extends\": \"../../tsconfig.url.json\", \"include\": [\"src\"]}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(
+            edges(0),
+            [
+                "packages/a/src/y.ts",
+                "shared/s.ts",
+                "packages/a/types/foo/index.d.ts",
+                "packages/a/src/o.ts"
+            ]
+        );
+        assert_eq!(edges(5), ["packages/b/src/y.ts"]);
+        assert!(edges(7).is_empty());
+        assert_eq!(edges(8), ["packages/c/src/y.ts"]);
+        assert_eq!(
+            graph.ts_owner_undetermined,
+            BTreeSet::from(["packages/b/src/skip/k.ts".to_string()])
+        );
+        assert!(graph.undetermined_imports.is_empty());
+    }
+
     /// A package's `exports` maps by conditions, read in their written order
     /// as TypeScript 6 matches them: `types`, `default` and the configured
     /// `customConditions` always, `import` under `bundler` or for an ES

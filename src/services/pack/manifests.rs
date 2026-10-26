@@ -289,6 +289,10 @@ impl TsProjects {
     }
 }
 
+/// A `paths` substitution as written, `${configDir}` replaced, with the
+/// directory that template fixes it against (`below_config_dir`).
+pub(super) type Substitution = (Option<Vec<String>>, String);
+
 /// What a TypeScript configuration, with every configuration it extends,
 /// says about the specifiers its files import: the directory `baseUrl`
 /// names, each `paths` pattern with its substitutions, which resolve
@@ -299,7 +303,7 @@ impl TsProjects {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct TsConfig {
     pub(super) base_url: Option<Vec<String>>,
-    pub(super) paths: Vec<(String, Vec<String>)>,
+    pub(super) paths: Vec<(String, Vec<Substitution>)>,
     pub(super) paths_base: Vec<String>,
     /// The directory of the configuration declaring `paths`, which its
     /// substitutions resolve against where `baseUrl` is not read.
@@ -538,7 +542,8 @@ impl TsConfig {
         Some(Mapping {
             paths: substitutions
                 .iter()
-                .filter_map(|substitution| {
+                .filter_map(|(fixed, substitution)| {
+                    let base = fixed.as_ref().unwrap_or(base);
                     Some(Substituted {
                         path: project_path(base, &substitution.replacen('*', star, 1))?,
                         extension: SCRIPT_EXTENSIONS
@@ -1972,7 +1977,10 @@ fn ts_sources(chain: &[(Vec<String>, serde_json::Value)]) -> TsSources {
             let paths = config.get(key)?.as_array()?;
             let paths: Vec<Vec<String>> = paths
                 .iter()
-                .filter_map(|path| project_path(directory, path.as_str()?))
+                .filter_map(|path| {
+                    let (directory, path) = option_path(head, directory, path.as_str()?);
+                    project_path(directory, &path)
+                })
                 .collect();
             Some(paths)
         })
@@ -2205,8 +2213,10 @@ fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: boo
         Some(None) => Setting::Unset,
         None => Setting::Unknown,
     };
-    let base_url =
-        option("baseUrl").and_then(|(directory, value)| project_path(directory, value.as_str()?));
+    let base_url = option("baseUrl").and_then(|(at, value)| {
+        let (at, written) = option_path(directory, at, value.as_str()?);
+        project_path(at, &written)
+    });
     let declared = option("paths");
     let paths = declared
         .and_then(|(_, paths)| paths.as_object())
@@ -2217,7 +2227,11 @@ fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: boo
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|substitution| substitution.as_str().map(str::to_string))
+                .filter_map(|substitution| substitution.as_str())
+                .map(|substitution| match below_config_dir(substitution) {
+                    Some(below) => (Some(directory.to_vec()), below),
+                    None => (None, substitution.to_string()),
+                })
                 .collect();
             (pattern.clone(), substitutions)
         })
@@ -2232,12 +2246,13 @@ fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: boo
         target: setting("target"),
     };
     let type_roots = option("typeRoots")
-        .and_then(|(directory, roots)| Some((directory, roots.as_array()?)))
+        .and_then(|(at, roots)| Some((at, roots.as_array()?)))
         .into_iter()
-        .flat_map(|(directory, roots)| {
-            roots
-                .iter()
-                .filter_map(|written| Some(configured_path(root, directory, written.as_str()?)))
+        .flat_map(|(at, roots)| {
+            roots.iter().filter_map(move |written| {
+                let (at, written) = option_path(directory, at, written.as_str()?);
+                Some(configured_path(root, at, &written))
+            })
         })
         .collect();
     let custom_conditions = decided("customConditions").map(|conditions| {
@@ -2266,11 +2281,13 @@ fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: boo
 /// the configuration setting it, and `allowJs` set by default in a
 /// `jsconfig.json`, as tsc's `getDefaultCompilerOptions` sets it.
 fn self_name(root: &Path, chain: &Chain, javascript: bool) -> SelfName {
+    let head = chain.configs.first().map(|(head, _)| head.as_slice());
     let path = |key: &str| {
         chain.decided(key).map(|set| {
             let (directory, written) = set?;
             let written = written.as_str().filter(|written| !written.is_empty())?;
-            Some(configured_path(root, directory, written))
+            let (directory, written) = option_path(head.unwrap_or_default(), directory, written);
+            Some(configured_path(root, directory, &written))
         })
     };
     let flag = |key: &str| {
@@ -2285,17 +2302,40 @@ fn self_name(root: &Path, chain: &Chain, javascript: bool) -> SelfName {
         None => None,
     };
     SelfName {
-        directory: chain
-            .configs
-            .first()
-            .map(|(directory, _)| directory.clone())
-            .unwrap_or_default(),
+        directory: head.unwrap_or_default().to_vec(),
         declaration_dir: path("declarationDir"),
         out_dir: path("outDir"),
         root_dir: path("rootDir"),
         composite: flag("composite"),
         allow_js,
     }
+}
+
+/// The directory a path option written in the configuration at `directory`
+/// resolves against, with the path it names there: `head`, the directory of
+/// the configuration its chain starts from, where it starts with
+/// `${configDir}` (`below_config_dir`), else `directory`.
+fn option_path<'p>(
+    head: &'p [String],
+    directory: &'p [String],
+    written: &str,
+) -> (&'p [String], String) {
+    match below_config_dir(written) {
+        Some(below) => (head, below),
+        None => (directory, written.to_string()),
+    }
+}
+
+/// What a path option starting with `${configDir}` names below the
+/// directory of the configuration its chain starts from: the option with
+/// that template replaced by `./`, as tsc 5.9.3, 6.0.3 and 7.0.2
+/// substitute it in `baseUrl`, `paths`, `typeRoots`, `rootDir`, `outDir`,
+/// `declarationDir`, `files`, `include` and `exclude`, wherever in the
+/// chain it is set (`getSubstitutedPathWithConfigDirTemplate`; `zc_*`,
+/// `c*_*`). `None` for any other path.
+fn below_config_dir(written: &str) -> Option<String> {
+    let below = written.strip_prefix("${configDir}")?;
+    Some(format!("./{below}"))
 }
 
 /// A path a configuration writes, against the directory holding it, as
