@@ -329,13 +329,13 @@ impl LocationAnalysis {
 fn member_reach(name: &str, declaring: &DeclaringType) -> String {
     match declaring.references {
         0 => format!(
-            "Nothing names `{name}`, and nothing names `{}`, which declares it",
+            "No reference to `{name}` was found, nor to `{}`, which declares it",
             declaring.name
         ),
         n => format!(
-            "Nothing names `{name}`, but `{}`, which declares it, is used {n} time(s) — a call \
-             through the type does not name the member, so this is not evidence that `{name}` \
-             is unreachable",
+            "No reference to `{name}` was found, but `{}`, which declares it, is used {n} \
+             time(s) — a call made through the type is not always found as a reference to the \
+             member, so this is not evidence that `{name}` is unreachable",
             declaring.name
         ),
     }
@@ -1200,7 +1200,7 @@ mod tests {
             member_reach_hint_of(&stub, &lib, &render, Path::new(""))
                 .await
                 .as_deref(),
-            Some("Nothing names `render`, and nothing names `Widget`, which declares it")
+            Some("No reference to `render` was found, nor to `Widget`, which declares it")
         );
     }
 
