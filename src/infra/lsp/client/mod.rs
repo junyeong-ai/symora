@@ -914,7 +914,11 @@ impl LspClient {
         }
     }
 
-    /// Request shutdown, then wait for an acknowledged exit or terminate the process.
+    /// Ask the server to shut down and exit, and wait for it to. One that
+    /// does not answer within 2 s, or does not exit within 5 s of the exit
+    /// notification (less where a deadline the caller runs under ends
+    /// sooner), is killed with its group, and what it started in a session
+    /// of its own outlives it.
     pub async fn shutdown(&self) -> Result<(), LspError> {
         *self.shutdown.write().await = true;
 
