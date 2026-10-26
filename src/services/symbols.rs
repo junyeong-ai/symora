@@ -4544,6 +4544,12 @@ fn extract_name_and_kind(
         return (!name.is_empty()).then(|| (name.to_string(), kind));
     }
 
+    if language == Language::Dart
+        && let Some(name) = dart_constructor_name(node, content)
+    {
+        return Some((name, node_kind(node)));
+    }
+
     // Resolve the name first: nameless parents (blocks, lists, the source
     // root) are walked during container resolution and must be skipped
     // before a kind is ever assigned to them.
@@ -4555,6 +4561,42 @@ fn extract_name_and_kind(
         return None;
     }
     Some((name, node_kind(node)))
+}
+
+/// The name a Dart constructor declares where it does not write its class's
+/// name before its own. A constructor is named for its class, so `new
+/// named()`, like `factory named()` in a class not named `named`, declares
+/// what `C.named()` does, and `new()` and `factory()` what `C()` does, as the
+/// analyzer names them; one that writes its class's name (`C.named()`,
+/// `factory C()`) is read as written. Only `new` marks a generative
+/// constructor so, as the grammar also reads a method written without a
+/// return type (`run() {}`) as one.
+fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
+    let may_omit_its_class = match node.kind() {
+        "constructor_signature" | "constant_constructor_signature" => {
+            child_of_kind(node, "new").is_some()
+        }
+        "factory_constructor_signature" | "redirecting_factory_constructor_signature" => true,
+        _ => false,
+    };
+    if !may_omit_its_class {
+        return None;
+    }
+    let class = std::iter::successors(node.parent(), Node::parent).find(|holder| {
+        matches!(
+            holder.kind(),
+            "class_declaration" | "enum_declaration" | "extension_type_declaration"
+        )
+    })?;
+    let class = content.get(find_name_node(class, Language::Dart)?.byte_range())?;
+    match children_of_field(node, "name")[..] {
+        [] => Some(class.to_string()),
+        [own] => {
+            let own = content.get(own.byte_range())?;
+            (own != class).then(|| format!("{class}.{own}"))
+        }
+        _ => None,
+    }
 }
 
 /// The node a declared name ends with: its own, the name a Dart named
@@ -4797,6 +4839,19 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     }
     if node.kind() == "secondary_constructor" {
         return child_of_kind(node, "constructor");
+    }
+    // A Dart constructor that writes no name, which is named for its class
+    // ([`dart_constructor_name`]), is placed at the keyword it is declared
+    // with (`new()`, `factory()`), as the analyzer places it.
+    if matches!(
+        node.kind(),
+        "constructor_signature"
+            | "constant_constructor_signature"
+            | "factory_constructor_signature"
+            | "redirecting_factory_constructor_signature"
+    ) && node.child_by_field_name("name").is_none()
+    {
+        return child_of_kind(node, "new").or_else(|| child_of_kind(node, "factory"));
     }
     // An operator is named by its symbol (Dart's `operator ==`, C#'s
     // `operator +`, the one Swift declares after its keyword and any comment
@@ -7213,6 +7268,20 @@ class C {
   bool operator ==(Object o) => true;
 }
 
+class Short {
+  final int v;
+  const new() : v = 0;
+  new named(this.v);
+  const new fixed() : v = 1;
+  factory make() => Short.named(2);
+  factory alias(int v) = Short.named;
+}
+
+class Made {
+  Made._();
+  factory() => Made._();
+}
+
 extension Ext on String {
   static const limit = 1;
   void ext() {}
@@ -7255,6 +7324,16 @@ external final int topExternal, otherExternal;
                 "property:C/size",
                 "property:C/size",
                 "method:C/==",
+                "class:Short",
+                "field:Short/v",
+                "constructor:Short/Short",
+                "constructor:Short/Short.named",
+                "constructor:Short/Short.fixed",
+                "constructor:Short/Short.make",
+                "constructor:Short/Short.alias",
+                "class:Made",
+                "constructor:Made/Made._",
+                "constructor:Made/Made",
                 "class:Ext",
                 "field:Ext/limit",
                 "method:Ext/ext",
@@ -7404,11 +7483,27 @@ region     = "us-central1"
                         )
                     });
                 let column = (symbol.location.column - 1) as usize;
-                let at_name = line
-                    .chars()
-                    .skip(column)
-                    .take(symbol.name.chars().count())
-                    .eq(symbol.name.chars());
+                let written_at = |text: &str| {
+                    line.chars()
+                        .skip(column)
+                        .take(text.chars().count())
+                        .eq(text.chars())
+                };
+                // A Dart constructor is named for its class whether or not it
+                // writes the class's name, and one that does not is anchored
+                // at what it writes in its place: the name after the class's
+                // (`new named()` declares `C.named`), or the keyword it is
+                // declared with (`new()` declares `C`).
+                let at_name = written_at(&symbol.name)
+                    || fixture.language == Language::Dart
+                        && symbol.kind == SymbolKind::Constructor
+                        && symbol.container.as_deref().is_some_and(|class| {
+                            match symbol.name.strip_prefix(class) {
+                                Some("") => written_at("new") || written_at("factory"),
+                                Some(own) => own.strip_prefix('.').is_some_and(written_at),
+                                None => false,
+                            }
+                        });
                 assert!(
                     at_name,
                     "{:?} anchors {} off its name: {}:{} is {line:?}",
@@ -10071,6 +10166,20 @@ region     = "us-central1"
             (
                 "a.dart",
                 Language::Dart,
+                "class S {\n  final int v;\n  new named() : v = 0;\n}\n",
+                "S.named",
+                Some("new named() : v = 0"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class S {\n  S._();\n  factory() = S._;\n}\n",
+                "S/S",
+                Some("factory()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
                 "void outer() {\n  int helper() => 1;\n}\n",
                 "helper",
                 Some("int helper()"),
@@ -11033,6 +11142,30 @@ void topLevel() {}
         assert_eq!(found("Status"), Some(SymbolKind::Enum));
         assert_eq!(found("Loggable"), Some(SymbolKind::Interface));
         assert_eq!(found("topLevel"), Some(SymbolKind::Function));
+    }
+
+    /// A Dart constructor is named for its class whether or not it writes the
+    /// class's name, and one that writes it is read as written: `factory F()`
+    /// is `F`'s unnamed factory, and a method written without a return type,
+    /// which the grammar reads as a constructor's signature, keeps the name
+    /// it writes, as no `new` marks it.
+    #[test]
+    fn a_dart_constructor_is_named_for_its_class() {
+        let content = "class C {\n  C();\n  run() {}\n}\n\n\
+                       class F {\n  F._();\n  factory F() => F._();\n  factory from() => F._();\n}\n\n\
+                       extension type E<T>._(T v) {\n  new wrap(this.v);\n}\n";
+        let mut paths: Vec<String> = SymbolExtractor::new()
+            .extract(Path::new("a.dart"), content, Language::Dart)
+            .into_iter()
+            .filter_map(|symbol| symbol.name_path)
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "C", "C/C", "C/run", "E", "E/E.wrap", "E/v", "F", "F/F", "F/F._", "F/F.from"
+            ]
+        );
     }
 
     /// A Swift function's return type carries the field its name does, and is
