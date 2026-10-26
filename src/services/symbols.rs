@@ -1924,7 +1924,11 @@ fn in_a_prototype_run(part: Node) -> bool {
 /// declaration does (`static int WIN_CDECL cmp(…)`, `extern
 /// NCURSES_EXPORT(int) PAIR_NUMBER (int);`), and ends with the statement
 /// after it, which holds its `;` and any macro written before that, or
-/// with the `;` itself.
+/// with the `;` itself. Where the grammar reads the macro standing for the
+/// type apart from an attribute written after it (`XMLPARSEAPI(void *)`
+/// before `XML_ATTR_ALLOC_SIZE(3) XML_MemRealloc(…);` in expat.h), the
+/// prototype begins at the attribute, so its range and signature leave the
+/// type's macro out.
 fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
     let error = node.parent().filter(|error| error.is_error())?;
     if !names_a_parameter(node) && !declares_unnamed_parameters(node) {
