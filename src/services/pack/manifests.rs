@@ -122,7 +122,8 @@ pub(super) struct JsPackage {
     pub(super) name: String,
     pub(super) workspace: Vec<String>,
     pub(super) exports: Option<serde_json::Value>,
-    pub(super) types: Option<String>,
+    /// The `main` Node and the bundlers take; TypeScript reads the fields
+    /// of the package's `package.json` on disk (`directory_module`).
     pub(super) main: Option<String>,
     /// The bundlers' `module` field, and their `browser` field: a path, or
     /// an object replacing the package's own paths.
@@ -560,7 +561,7 @@ fn holds_types(directory: &Path, specifier: &str) -> bool {
 /// on disk finds a file with a set of extensions, as tsc 5.9.3, 6.0.3 and
 /// 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`): the
 /// file the specifier's path names, but for a package's name under an ES
-/// import, then the directory (`finds_in_directory`). `None` where the
+/// import, then the directory (`directory_module`). `None` where the
 /// package's `exports`, which the lookup reads, or the `typesVersions` a
 /// subpath goes through decides.
 fn finds_package(
@@ -576,33 +577,80 @@ fn finds_package(
     if (exports && declares("exports")) || (!subpath.is_empty() && declares("typesVersions")) {
         return None;
     }
-    let candidate = modules.join(specifier);
-    if (add || !subpath.is_empty()) && finds_file(&candidate, extensions, add) {
+    let on_disk = |file: &[String]| project_file(modules, file).is_file().then(Vec::new);
+    let candidate = split_components(specifier);
+    if (add || !subpath.is_empty()) && module_file(&candidate, extensions, add, &on_disk).is_some()
+    {
         return Some(true);
     }
     let manifest = match subpath.is_empty() {
         true => root,
-        false => package_json(&candidate.join("package.json")),
+        false => package_json(&modules.join(specifier).join("package.json")),
     };
-    finds_in_directory(&candidate, manifest.as_ref(), extensions, add)
+    match directory_module(&candidate, manifest.as_ref(), extensions, add, &on_disk) {
+        Some(Hit::Files(_)) => Some(true),
+        Some(Hit::Open) => None,
+        None => Some(false),
+    }
 }
 
-/// Whether a directory on disk holds the file TypeScript takes for it, as
-/// `ProjectIndex::directory_module` reads a project's: the first of
+/// What a lookup of a path finds (`directory_module`,
+/// `ProjectIndex::typescript_path`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Hit {
+    /// The files: the project's file where pack reads it, none where it is
+    /// only on disk.
+    Files(Vec<usize>),
+    /// A `package.json` pack does not follow (`typesVersions`) decides it.
+    Open,
+}
+
+/// What a path names where a lookup checks for it (`module_file`,
+/// `directory_module`): the project's file where pack reads it, none where
+/// it is only on disk; `None` where it names no file.
+pub(super) type Existing<'e> = &'e dyn Fn(&[String]) -> Option<Vec<usize>>;
+
+/// The file TypeScript takes for a path with a set of extensions: the first
+/// of the names `module_names` gives in the path's directory that
+/// `existing` finds. `None` where none of them exists.
+pub(super) fn module_file(
+    path: &[String],
+    extensions: Extensions,
+    add: bool,
+    existing: Existing,
+) -> Option<Vec<usize>> {
+    let (name, directory) = path.split_last()?;
+    module_names(name, extensions, add)
+        .into_iter()
+        .find_map(|candidate| existing(&[directory, &[candidate]].concat()))
+}
+
+/// The file TypeScript takes for a directory a path names, by the
+/// `package.json` it holds, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
+/// (`dir_*`, `req_fields_*`): where that names one, the file the first of
 /// `typings` and `types`, where the extensions hold declarations, and
-/// `main` that its `package.json` sets, or that directory's `index`; else
-/// its own `index`. `None` where it holds `typesVersions`.
-fn finds_in_directory(
-    directory: &Path,
+/// `main` that is set names, with the extensions in place of the one it
+/// writes (`lib/m.js` as `lib/m.ts`), or that directory's `index`; else, a
+/// field naming no file included, its own `index`. A `typesVersions` there
+/// leaves it open: 5.9.3 and 6.0.3 resolve none where 7.0.2 takes the
+/// `index`. Its `exports` is not read. A field's file is looked up with an
+/// extension added and, for declarations alone, as a TypeScript file too
+/// (`named_extensions`); the `index` with one added where `add`, which an
+/// ES import under `node16` does not.
+pub(super) fn directory_module(
+    directory: &[String],
     manifest: Option<&serde_json::Value>,
     extensions: Extensions,
     add: bool,
-) -> Option<bool> {
-    let index =
-        |directory: &Path, extensions, add| finds_file(&directory.join("index"), extensions, add);
+    existing: Existing,
+) -> Option<Hit> {
+    let index = |directory: &[String], extensions, add| {
+        let index = [directory, &["index".to_string()]].concat();
+        module_file(&index, extensions, add, existing)
+    };
     if let Some(manifest) = manifest {
         if manifest.get("typesVersions").is_some() {
-            return None;
+            return Some(Hit::Open);
         }
         let declarations = extensions != Extensions::JavaScript;
         let field = ["typings", "types"]
@@ -616,38 +664,25 @@ fn finds_in_directory(
                     .filter(|path| !path.is_empty())?;
                 Some((field, named))
             });
-        if let Some((field, named)) = field {
-            let path = directory.join(named);
+        let found = field.and_then(|(field, named)| {
+            let path = project_path(directory, named)?;
+            let exact = (field != "main").then(|| existing(&path)).flatten();
             let extensions = named_extensions(extensions);
-            if (field != "main" && path.is_file())
-                || finds_file(&path, extensions, true)
-                || index(&path, extensions, true)
-            {
-                return Some(true);
-            }
+            exact
+                .or_else(|| module_file(&path, extensions, true, existing))
+                .or_else(|| index(&path, extensions, true))
+        });
+        if let Some(files) = found {
+            return Some(Hit::Files(files));
         }
     }
-    Some(index(directory, extensions, add))
-}
-
-/// Whether a file a path names with a set of extensions is on disk, trying
-/// the names `module_names` gives.
-fn finds_file(path: &Path, extensions: Extensions, add: bool) -> bool {
-    let named = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .zip(path.parent());
-    named.is_some_and(|(name, parent)| {
-        module_names(name, extensions, add)
-            .iter()
-            .any(|candidate| parent.join(candidate).is_file())
-    })
+    index(directory, extensions, add).map(Hit::Files)
 }
 
 /// The extensions TypeScript looks the file a `package.json` field names
 /// up with: a lookup for declarations alone takes a TypeScript file there
 /// too.
-pub(super) fn named_extensions(extensions: Extensions) -> Extensions {
+fn named_extensions(extensions: Extensions) -> Extensions {
     match extensions {
         Extensions::Declaration => Extensions::TypeScript,
         other => other,
@@ -1940,7 +1975,6 @@ fn js_packages(
                     name,
                     workspace: workspace.clone(),
                     exports: manifest.get("exports").cloned(),
-                    types: field("types").or_else(|| field("typings")),
                     main: field("main"),
                     module: field("module"),
                     browser: manifest.get("browser").cloned(),
