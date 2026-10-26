@@ -85,9 +85,14 @@ pub struct PackResult {
     pub undetermined_imports: Vec<String>,
     /// The specifiers `classic` resolution names a JavaScript file in the
     /// project for where a declaration in `node_modules/@types` or a
-    /// `typeRoots` directory, which it takes first and pack does not look up,
-    /// may stand for them.
+    /// `typeRoots` directory, which it takes first, may stand for them: one
+    /// outside the project, which pack checks on disk without reading it, or
+    /// one a `typesVersions` pack does not follow maps.
     pub declaration_undetermined_imports: Vec<String>,
+    /// The specifiers a declaration in a `typeRoots` directory may stand
+    /// for outside `classic`, where pack cannot tell whether TypeScript takes
+    /// it over a `node_modules` package or a file in the project.
+    pub type_root_undetermined_imports: Vec<String>,
     /// The specifiers the TypeScript majors that may compile an importer
     /// read as different files under its one configuration, because no
     /// installed `typescript` or declared version range fixes one major.
@@ -144,6 +149,7 @@ pub fn build_pack(
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
             declaration_undetermined_imports: Vec::new(),
+            type_root_undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
@@ -222,6 +228,7 @@ pub fn build_pack(
             .declaration_undetermined_imports
             .into_iter()
             .collect(),
+        type_root_undetermined_imports: graph.type_root_undetermined_imports.into_iter().collect(),
         version_undetermined_imports: graph.version_undetermined_imports.into_iter().collect(),
         typescript_ranges: graph.typescript_ranges.into_iter().collect(),
         typescript_not_installed: graph.typescript_not_installed,
