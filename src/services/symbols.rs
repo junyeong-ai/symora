@@ -8836,6 +8836,21 @@ region     = "us-central1"
             ],
             "nor is one with other arguments, or before a word a declarator may have after it"
         );
+        // A reduction of qlocale.h.
+        assert!(
+            extractor
+                .extract(
+                    Path::new("q.h"),
+                    "class Q_CORE_EXPORT QLocale\n{\n    Q_DECLARE_FLAGS(DataSizeFormats, DataSizeFormat)\n    \
+                     Q_FLAG(DataSizeFormats)\n\n    QLocale();\n    QT_CORE_INLINE_SINCE(6, 4)\n    \
+                     void swap(QLocale &other) noexcept { d.swap(other.d); }\n};\n",
+                    Language::Cpp,
+                )
+                .iter()
+                .flat_map(|symbol| std::iter::once(symbol).chain(&symbol.children))
+                .any(|symbol| symbol.kind == SymbolKind::Constructor && symbol.location.line == 6),
+            "a statement before such an invocation is of its run only where its words are all invocations"
+        );
         assert_eq!(
             declared(
                 "class A {\n    Q_OBJECT\n    Q_DECLARE_PRIVATE(A)\n\n    Q_PROPERTY(bool on READ on)\n\
