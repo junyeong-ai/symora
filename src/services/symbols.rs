@@ -1809,11 +1809,12 @@ fn conditional(keyword: &str) -> Option<Conditional> {
 
 /// Whether the preprocessor splices a C or C++ source line, its `\n`
 /// excluded, onto the next: it ends with a backslash, before a `\r` and, as
-/// GCC and Clang read it with a warning, before blanks.
+/// GCC and Clang read it with a warning, before spaces, tabs, form feeds and
+/// vertical tabs.
 fn splices(line: &[u8]) -> bool {
     line.iter()
         .rev()
-        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r'))
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\x0b' | b'\x0c' | b'\r'))
         == Some(&b'\\')
 }
 
@@ -9492,7 +9493,7 @@ region     = "us-central1"
             "static int WIN_CDECL\n#define X 1\ng(int y) { if (y) { return 1; } return y; }";
         let branches = "#ifdef WIN\nstatic int WIN_CDECL\n#else\nstatic int\n#endif\n";
         let continued = "#define NCURSES_ATTR_SHIFT \\\n     8\n";
-        let continued_after_blanks = "#define NCURSES_ATTR_SHIFT \\ \t\n     8\n";
+        let continued_after_blanks = "#define NCURSES_ATTR_SHIFT \\ \t\x0b\x0c\n     8\n";
         for (newline, before, between, definition, after) in [
             ("\n", "", continued, g, ""),
             ("\r\n", "", continued, g, ""),
