@@ -26,6 +26,25 @@ def server_status(health="ok", quiescent=True):
                   "params": {"health": health, "quiescent": quiescent}})
 
 
+def clangd_range(start, end):
+    return {"start": {"line": start[0], "character": start[1]},
+            "end": {"line": end[0], "character": end[1]}}
+
+
+# What clangd 21 answers for each name of the `clangd-outline` source: the
+# tokens that name it, its declaration first, which is where a definition
+# request at any of them lands. A qualifier (`Widget::`) names the class.
+CLANGD_NAMES = [
+    [((0, 7), (0, 13)), ((1, 3), (1, 9)), ((2, 24), (2, 30)), ((7, 0), (7, 6)),
+     ((7, 9), (7, 15)), ((8, 5), (8, 11)), ((8, 30), (8, 36)), ((9, 0), (9, 6)),
+     ((10, 5), (10, 11)), ((12, 9), (12, 15))],
+    [((1, 2), (1, 3)), ((7, 8), (7, 9))],
+    [((2, 7), (2, 15)), ((8, 13), (8, 21)), ((12, 41), (12, 43))],
+    [((3, 11), (3, 19)), ((9, 8), (9, 16)), ((12, 54), (12, 55))],
+    [((4, 7), (4, 10)), ((10, 13), (10, 16)), ((12, 24), (12, 27))],
+]
+
+
 def workspace_edit():
     line, start, end = (1, 5, 8) if concurrent else (0, 0, 3)
     return {"changes": {source.as_uri(): [{
@@ -54,7 +73,8 @@ while True:
             "hoverProvider": True,
             "renameProvider": {"prepareProvider": True},
             "workspaceSymbolProvider": mode in ("ranked-symbols", "computed-members"),
-            "documentSymbolProvider": mode in ("computed-members", "dart-outline")
+            "documentSymbolProvider": mode in ("computed-members", "dart-outline",
+                                               "clangd-outline")
         }}
     elif method == "initialized":
         if mode in ("unrelated-hover", "busy-rename", "ranked-symbols", "computed-members",
@@ -101,6 +121,36 @@ while True:
                 symbol("N.named", 6, (8, 6), (8, 26), ((8, 7), (8, 13))),
                 symbol("n", 8, (8, 14), (8, 25), ((8, 24), (8, 25)))]),
         ]
+    elif method == "textDocument/documentSymbol" and mode == "clangd-outline":
+        # clangd's outline of out-of-line members: a destructor is selected
+        # at its `~` and an operator or a conversion operator at its
+        # `operator` keyword alone, a member function at its last name.
+        def symbol(name, kind, start, end, selection, children=()):
+            return {"name": name, "kind": kind, "range": clangd_range(start, end),
+                    "selectionRange": clangd_range(*selection),
+                    "children": list(children)}
+        result = [
+            symbol("Widget", 5, (0, 0), (5, 1), ((0, 7), (0, 13)), [
+                symbol("~Widget", 9, (1, 2), (1, 11), ((1, 2), (1, 3))),
+                symbol("operator==", 6, (2, 2), (2, 39), ((2, 7), (2, 15))),
+                symbol("operator bool", 12, (3, 2), (3, 32), ((3, 11), (3, 19))),
+                symbol("set", 6, (4, 2), (4, 15), ((4, 7), (4, 10)))]),
+            symbol("Widget::~Widget", 9, (7, 0), (7, 20), ((7, 8), (7, 9))),
+            symbol("Widget::operator==", 6, (8, 0), (8, 62), ((8, 13), (8, 21))),
+            symbol("Widget::operator bool", 12, (9, 0), (9, 46), ((9, 8), (9, 16))),
+            symbol("Widget::set", 6, (10, 0), (10, 24), ((10, 13), (10, 16))),
+            symbol("use", 12, (12, 0), (12, 59), ((12, 5), (12, 8))),
+        ]
+    elif method in ("textDocument/definition", "textDocument/references") \
+            and mode == "clangd-outline":
+        at = message["params"]["position"]
+        at = (at["line"], at["character"])
+        named = next((tokens for tokens in CLANGD_NAMES
+                      if any(start <= at < end for start, end in tokens)), [])
+        result = [{"uri": source.as_uri(), "range": clangd_range(start, end)}
+                  for start, end in named]
+        if method == "textDocument/definition":
+            result = result[:1]
     elif method == "textDocument/documentSymbol":
         result = []
     elif method == "workspace/symbol" and mode == "computed-members":

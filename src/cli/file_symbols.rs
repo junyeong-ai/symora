@@ -97,10 +97,9 @@ pub async fn declared_addressing(
 /// enum, and the grammar places one where the type's name ends, which the
 /// server's tree reads as the type itself: an edit there would address the
 /// whole type. A symbol of the server's names the grammar's declaration
-/// where the two names begin or end alike, as
-/// [`SymbolExtractor::complete_from_declarations`] joins them, so a C++
-/// definition the grammar places at its qualifier (`Widget::set`) stays the
-/// server's.
+/// where the two names share a character ([`names_alike`]), so a C++
+/// definition the grammar places at its qualifier stays clangd's, whatever
+/// part of the name clangd selects.
 pub async fn declared_at(
     app: &App,
     file: &Path,
@@ -126,17 +125,35 @@ pub async fn declared_at(
     )
 }
 
-/// Whether two readings' symbols name one declaration: their names begin,
-/// or end, at one position.
+/// Whether two readings' symbols name one declaration: their names share a
+/// character.
+///
+/// A server can select any part of a name the grammar reads whole. clangd
+/// selects the last part of a qualified name (`set` in `Widget::set`), the
+/// `~` of an out-of-line destructor (`Widget::~Widget`, `Box<T>::~Box`) and
+/// the keyword of an operator or a conversion operator
+/// (`Widget::operator==`, `Widget::operator bool`), where the grammar's
+/// name runs from the qualifier to the end. A name that ends where another
+/// begins shares no character with it: the analyzer's name of a Dart type,
+/// and the primary constructor the grammar places at the `(` or `<` after
+/// it.
 fn names_alike(one: &Symbol, other: &Symbol) -> bool {
-    let start = |symbol: &Symbol| (symbol.location.line, symbol.location.column);
-    let end = |symbol: &Symbol| {
-        symbol
-            .location
-            .name_end_line
-            .zip(symbol.location.name_end_column)
-    };
-    start(one) == start(other) || end(one).is_some() && end(one) == end(other)
+    let (one, other) = (name_span(one), name_span(other));
+    one.0 < other.1 && other.0 < one.1
+}
+
+/// Where a symbol's name begins and where it ends, exclusive. A reading
+/// that states no end for a name, or one at its start, places only its
+/// first character.
+fn name_span(symbol: &Symbol) -> ((u32, u32), (u32, u32)) {
+    let location = &symbol.location;
+    let start = (location.line, location.column);
+    let end = location
+        .name_end_line
+        .zip(location.name_end_column)
+        .filter(|&end| end > start)
+        .unwrap_or((location.line, location.column + 1));
+    (start, end)
 }
 
 /// The declarations the grammar compiled into this binary reads in a file:
@@ -164,4 +181,57 @@ pub async fn read_by_grammar(
         symbols,
         backend: SymbolBackend::Ast,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::models::symbol::{Location, SymbolKind};
+
+    /// A name a reading places at `line:column`, ending at `end` where the
+    /// reading states an end.
+    fn named(line: u32, column: u32, end: Option<u32>) -> Symbol {
+        let location = Location::full(PathBuf::from("w.cpp"), line, column, line, 1, line, 80);
+        let location = match end {
+            Some(end) => location.with_name_end(line, end),
+            None => location,
+        };
+        Symbol::new("name".to_string(), SymbolKind::Function, location)
+    }
+
+    /// The grammar reads a qualified C++ definition's name from its
+    /// qualifier, and clangd selects a part of it; a name that ends where
+    /// another begins, as the Dart analyzer's enum name does where the
+    /// grammar places the enum's primary constructor, is another one's.
+    #[test]
+    fn two_readings_name_one_declaration_where_their_names_share_a_character() {
+        for (grammar, server) in [
+            // `Widget::~Widget` and clangd's `~`.
+            (named(7, 1, Some(16)), named(7, 9, Some(10))),
+            // `Widget::operator==` and clangd's `operator`.
+            (named(13, 6, Some(24)), named(13, 14, Some(22))),
+            // `Widget::set` and clangd's `set`.
+            (named(9, 6, Some(17)), named(9, 14, Some(17))),
+            // A name whose reading states no end, placed inside another,
+            // and one whose end is at its start, placed where another
+            // begins.
+            (named(5, 3, Some(8)), named(5, 7, None)),
+            (named(5, 3, Some(8)), named(5, 3, Some(3))),
+        ] {
+            assert!(names_alike(&grammar, &server), "{grammar:?} {server:?}");
+            assert!(names_alike(&server, &grammar), "{grammar:?} {server:?}");
+        }
+        for (grammar, server) in [
+            // `P11/P11` at its `(`, and the analyzer's enum `P11` before it.
+            (named(25, 9, Some(10)), named(25, 6, Some(9))),
+            // A name whose reading states no end, placed where another ends.
+            (named(5, 3, Some(8)), named(5, 8, None)),
+            (named(5, 3, Some(8)), named(6, 3, Some(8))),
+        ] {
+            assert!(!names_alike(&grammar, &server), "{grammar:?} {server:?}");
+            assert!(!names_alike(&server, &grammar), "{grammar:?} {server:?}");
+        }
+    }
 }
