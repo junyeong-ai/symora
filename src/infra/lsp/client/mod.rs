@@ -1859,6 +1859,7 @@ mod tests {
     #[test]
     fn registration_batches_reject_unsupported_methods_before_mutating_watchers() {
         use super::super::protocol::FileChangeType;
+        use super::super::watch::PathKind;
 
         let client = LspClient::new(
             Language::Python,
@@ -1881,6 +1882,7 @@ mod tests {
                 .select(&[FileChange {
                     path: PathBuf::from("/w/main.py"),
                     change: FileChangeType::Changed,
+                    kind: PathKind::File,
                 }])
                 .len()
         };

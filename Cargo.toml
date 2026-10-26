@@ -84,6 +84,9 @@ globset = "0.4.20"
 
 # Workspace file watching: the client half of `workspace/didChangeWatchedFiles`.
 notify = "8.2.1"
+# Reads a watcher's glob as an automaton, to ask whether it matches a path
+# below a directory that went away. globset already builds it with these.
+regex-automata = { version = "0.4.18", default-features = false, features = ["std", "syntax", "hybrid"] }
 tempfile = "3.27"
 rmcp = { version = "3.7.0", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
 
