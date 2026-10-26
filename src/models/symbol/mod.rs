@@ -46,6 +46,10 @@ impl Symbol {
     /// `Symbol` fills it the same way, from the same two ends of the same
     /// location.
     pub fn attach_bodies(symbols: &mut [Symbol], content: &str) {
+        Self::attach_bodies_from(symbols, &content.lines().collect::<Vec<_>>());
+    }
+
+    fn attach_bodies_from(symbols: &mut [Symbol], lines: &[&str]) {
         for symbol in symbols {
             let start = symbol.location.effective_start().0.saturating_sub(1) as usize;
             let end = symbol
@@ -53,11 +57,12 @@ impl Symbol {
                 .end_line
                 .unwrap_or(symbol.location.line)
                 .saturating_sub(1) as usize;
-            let lines: Vec<&str> = content.lines().skip(start).take(end - start + 1).collect();
-            if !lines.is_empty() {
-                symbol.body = Some(lines.join("\n"));
+            let from_start = lines.get(start..).unwrap_or_default();
+            let body = &from_start[..from_start.len().min(end.saturating_sub(start) + 1)];
+            if !body.is_empty() {
+                symbol.body = Some(body.join("\n"));
             }
-            Self::attach_bodies(&mut symbol.children, content);
+            Self::attach_bodies_from(&mut symbol.children, lines);
         }
     }
 
