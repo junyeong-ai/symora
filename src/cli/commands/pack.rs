@@ -175,7 +175,7 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             .map(|specifier| format!("`{specifier}`"))
             .collect();
         hints.push(format!(
-            "{} import specifier(s) that `classic` module resolution reads name a JavaScript file in the project, but a declaration in `node_modules/@types` or a `typeRoots` directory, which TypeScript takes first, may stand for them: one outside the project, which pack does not read, or one a `typesVersions` maps, which pack does not follow ({}); their dependencies do not contribute to ranking. Inspect the declaration or source.",
+            "{} import specifier(s) that `classic` module resolution reads name a file in the project, but a declaration in `node_modules/@types` or a `typeRoots` directory, which TypeScript takes first, may stand for them: one outside the project, which pack does not read, or one a `typesVersions` maps, which pack does not follow ({}); their dependencies do not contribute to ranking. Inspect the declaration or source.",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -532,7 +532,7 @@ mod tests {
             json["files"]["hints"][2]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) that `classic` module resolution reads name a JavaScript file in the project, but a declaration in `node_modules/@types` or a `typeRoots` directory, which TypeScript takes first, may stand for them: one outside the project, which pack does not read, or one a `typesVersions` maps, which pack does not follow (`jq`); their dependencies do not contribute to ranking.")
+                .contains("1 import specifier(s) that `classic` module resolution reads name a file in the project, but a declaration in `node_modules/@types` or a `typeRoots` directory, which TypeScript takes first, may stand for them: one outside the project, which pack does not read, or one a `typesVersions` maps, which pack does not follow (`jq`); their dependencies do not contribute to ranking.")
         );
         assert!(
             json["files"]["hints"][3]
