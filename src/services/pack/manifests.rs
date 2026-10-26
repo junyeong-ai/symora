@@ -559,13 +559,12 @@ fn holds_types(directory: &Path, specifier: &str) -> bool {
 
 /// Whether TypeScript's lookup of a package in one `node_modules` directory
 /// on disk finds a file with a set of extensions, as tsc 5.9.3, 6.0.3 and
-/// 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`): the
-/// file the specifier's path names, but for a package's name under an ES
-/// import, then the directory (`directory_module`), whose `index` an ES
-/// import reads only for a package's name whose `package.json` exists, as
-/// tsc's `index.js` fallback does (`p1c_*`, `q1b_*`, `q1e_*`). `None`
-/// where the package's `exports`, which the lookup reads, or the
-/// `typesVersions` a subpath goes through decides.
+/// 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`): where
+/// a name is given an extension, as all but an ES import's is, the file the
+/// package's name names beside its directory (`node_modules/x.d.ts`), then
+/// what the package holds (`package_module`). `None` where the package's
+/// `exports`, which the lookup reads, or the `typesVersions` a subpath goes
+/// through decides.
 fn finds_package(
     modules: &Path,
     specifier: &str,
@@ -574,27 +573,68 @@ fn finds_package(
     add: bool,
 ) -> Option<bool> {
     let (package, subpath) = split_package_name(specifier);
-    let root = package_json(&modules.join(package).join("package.json"));
-    let declares = |field: &str| root.as_ref().is_some_and(|root| root.get(field).is_some());
-    if (exports && declares("exports")) || (!subpath.is_empty() && declares("typesVersions")) {
+    let package = split_components(package);
+    let root = package_json(&project_file(modules, &package).join("package.json"));
+    if exports
+        && root
+            .as_ref()
+            .is_some_and(|root| root.get("exports").is_some())
+    {
         return None;
     }
     let on_disk = |file: &[String]| project_file(modules, file).is_file().then(Vec::new);
-    let candidate = split_components(specifier);
-    if (add || !subpath.is_empty()) && module_file(&candidate, extensions, add, &on_disk).is_some()
-    {
+    if add && subpath.is_empty() && module_file(&package, extensions, add, &on_disk).is_some() {
         return Some(true);
     }
-    let manifest = match subpath.is_empty() {
-        true => root,
-        false => package_json(&modules.join(specifier).join("package.json")),
-    };
-    let index = add || (subpath.is_empty() && modules.join(package).join("package.json").is_file());
-    match directory_module(&candidate, manifest.as_ref(), extensions, index, &on_disk) {
+    let found = package_module(
+        modules,
+        &package,
+        root.as_ref(),
+        subpath,
+        extensions,
+        add,
+        &on_disk,
+    );
+    match found {
         Some(Hit::Files(_)) => Some(true),
         Some(Hit::Open) => None,
         None => Some(false),
     }
+}
+
+/// The file TypeScript's lookup of a package in a `node_modules` directory
+/// takes below the package's directory, its `exports` not read, as tsc
+/// 5.9.3, 6.0.3 and 7.0.2 look one up
+/// (`loadModuleFromSpecificNodeModulesDirectory`), `package` being that
+/// directory's path below `base`, `root` its `package.json` and `add`
+/// whether a name is given an extension: for its name, the directory by
+/// that `package.json` (`directory_module`), whose `index` an ES import
+/// reads only where the `package.json` exists, as tsc's `index.js` fallback
+/// does (`p1c_*`, `q1b_*`, `q1e_*`); for a subpath, the file it names, then
+/// the directory by its own `package.json`, whose `index` an ES import does
+/// not read. Open where the `typesVersions` a subpath goes through decides.
+/// `existing` says what a path below `base` names.
+pub(super) fn package_module(
+    base: &Path,
+    package: &[String],
+    root: Option<&serde_json::Value>,
+    subpath: &str,
+    extensions: Extensions,
+    add: bool,
+    existing: Existing,
+) -> Option<Hit> {
+    if subpath.is_empty() {
+        let index = add || project_file(base, package).join("package.json").is_file();
+        return directory_module(package, root, extensions, index, existing);
+    }
+    if root.is_some_and(|root| root.get("typesVersions").is_some()) {
+        return Some(Hit::Open);
+    }
+    let path = project_path(package, subpath)?;
+    let manifest = package_json(&project_file(base, &path).join("package.json"));
+    module_file(&path, extensions, add, existing)
+        .map(Hit::Files)
+        .or_else(|| directory_module(&path, manifest.as_ref(), extensions, add, existing))
 }
 
 /// Whether TypeScript's lookup in one directory's `node_modules` on disk
