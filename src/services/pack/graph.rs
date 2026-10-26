@@ -7,11 +7,11 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    Basedir, Extensions, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution,
-    PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, export_path,
-    export_subpath, mangle_scope, module_names, named_extensions, nearest, own_or_only,
-    project_path, python_packages, python_project, reads_base_url, split_package_name,
-    type_root_holds, type_root_name,
+    self, Basedir, Extensions, Hit, JsPackage, Manifests, ModuleKind, ModuleOptions,
+    ModuleResolution, PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript,
+    export_path, export_subpath, mangle_scope, module_names, nearest, own_or_only, project_path,
+    python_packages, python_project, reads_base_url, split_package_name, type_root_holds,
+    type_root_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -662,16 +662,6 @@ impl Declared {
             Hit::Open => Self::Open,
         }
     }
-}
-
-/// What a lookup of a path finds (`ProjectIndex::typescript_path`).
-#[derive(Debug, PartialEq, Eq)]
-enum Hit {
-    /// The files: the project's file where pack reads it, none where it is
-    /// only on disk.
-    Files(Vec<usize>),
-    /// A `package.json` pack does not follow (`typesVersions`) decides it.
-    Open,
 }
 
 /// How a specifier the readings of its importer name different files for
@@ -2114,76 +2104,28 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// The file TypeScript takes for a directory a path names, as tsc 5.9.3,
-    /// 6.0.3 and 7.0.2 trace it (`dir_*`, `req_fields_*`): where its
-    /// `package.json` names one, the file the first of `typings` and
-    /// `types`, where the extensions hold declarations, and `main` that is
-    /// set names, with the extensions in place of the one it writes
-    /// (`lib/m.js` as `lib/m.ts`), or that directory's `index`; else, a
-    /// field naming no file included, its own `index`. A `typesVersions`
-    /// there leaves it open: 5.9.3 and 6.0.3 resolve none where 7.0.2 takes
-    /// the `index`. Its `exports` is not read. A field's file is looked up
-    /// with an extension added and, for declarations alone, as a TypeScript
-    /// file too (`named_extensions`); the `index` with one added where
-    /// `add`, which an ES import under `node16` does not.
+    /// The file TypeScript takes for a project directory a path names, by
+    /// the `package.json` it holds on disk (`manifests::directory_module`).
     fn directory_module(
         &self,
         directory: &[String],
         extensions: Extensions,
         add: bool,
     ) -> Option<Hit> {
-        let index = |directory: &[String], extensions, add| {
-            let index = [directory, &["index".to_string()]].concat();
-            self.module_file(&index, extensions, add)
-        };
-        if let Some(manifest) = self.manifests.package_json_at(directory) {
-            if manifest.get("typesVersions").is_some() {
-                return Some(Hit::Open);
-            }
-            let declarations = extensions != Extensions::JavaScript;
-            let field = ["typings", "types"]
-                .into_iter()
-                .filter(|_| declarations)
-                .chain(["main"])
-                .find_map(|field| {
-                    let named = manifest
-                        .get(field)?
-                        .as_str()
-                        .filter(|path| !path.is_empty())?;
-                    Some((field, named))
-                });
-            let found = field.and_then(|(field, named)| {
-                let path = project_path(directory, named)?;
-                let exact = (field != "main").then(|| self.existing(&path)).flatten();
-                let extensions = named_extensions(extensions);
-                exact
-                    .or_else(|| self.module_file(&path, extensions, true))
-                    .or_else(|| index(&path, extensions, true))
-            });
-            if let Some(files) = found {
-                return Some(Hit::Files(files));
-            }
-        }
-        index(directory, extensions, add).map(Hit::Files)
+        let manifest = self.manifests.package_json_at(directory);
+        let existing = |file: &[String]| self.existing(file);
+        manifests::directory_module(directory, manifest.as_ref(), extensions, add, &existing)
     }
 
     /// The file TypeScript takes for a project path with a set of
-    /// extensions, trying the names `module_names` gives in the path's
-    /// directory: where one exists, the project's file where pack reads it,
-    /// none where it is only on disk. `None` where none of them exists.
+    /// extensions (`manifests::module_file`).
     fn module_file(
         &self,
         path: &[String],
         extensions: Extensions,
         add: bool,
     ) -> Option<Vec<usize>> {
-        let (name, directory) = path.split_last()?;
-        module_names(name, extensions, add)
-            .into_iter()
-            .find_map(|candidate| {
-                let file = [directory, &[candidate]].concat();
-                self.existing(&file)
-            })
+        manifests::module_file(path, extensions, add, &|file| self.existing(file))
     }
 
     /// The `index` script module of a directory a relative specifier spells
@@ -2290,9 +2232,13 @@ impl ProjectIndex<'_> {
     /// `./<subpath>` or the pattern key matching it maps to
     /// (`export_subpath`), read through its conditions (`export_target`).
     /// Without `exports`, or under `node10`, which does not read it, the name
-    /// stands for the file its `types`, `typings` or `main` names, else its
-    /// `index` — for Node and the bundlers, which read no `types`, its `main`,
-    /// else its `index`, where no `module` or `browser` field names another
+    /// stands for the file TypeScript's `node_modules` lookup takes for the
+    /// package's directory with TypeScript's extensions, else with
+    /// JavaScript's (`directory_module`), as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace it: by the first of `typings`, `types` and `main` it sets, else
+    /// its `index`, a `typesVersions` leaving it open — for Node and the
+    /// bundlers, which read no `types`, its `main`, else its `index`, where
+    /// no `module` or `browser` field names another
     /// (`bundler_entry_differs`) — and a subpath for the file below the
     /// package. Under `classic`, which reads no `package.json`, no name is a
     /// package's. A package whose file pack cannot determine is disclosed: a
@@ -2329,16 +2275,18 @@ impl ProjectIndex<'_> {
         let typescript = reading.major.is_some();
         let exports = package.exports.as_ref().zip(conditions);
         let Some((exports, conditions)) = exports else {
+            if typescript && subpath.is_empty() {
+                let found = [Extensions::TypeScript, Extensions::JavaScript]
+                    .into_iter()
+                    .find_map(|extensions| self.directory_module(directory, extensions, true));
+                return Some(match found {
+                    Some(Hit::Files(files)) => Resolution::Files(files),
+                    Some(Hit::Open) => Resolution::TypesVersionsUndetermined(specifier.to_string()),
+                    None => undetermined(),
+                });
+            }
             let entries: Vec<&str> = if !subpath.is_empty() {
                 vec![subpath]
-            } else if typescript {
-                package
-                    .types
-                    .as_deref()
-                    .into_iter()
-                    .chain(package.main.as_deref())
-                    .chain(["index"])
-                    .collect()
             } else {
                 package
                     .main
@@ -7430,6 +7378,91 @@ mod tests {
                 "@acme/twin".to_string(),
                 "@acme/ui/hidden".to_string()
             ])
+        );
+    }
+
+    /// TypeScript reads a workspace package without `exports` as its
+    /// `node_modules` lookup reads the package's directory, as tsc 5.9.3,
+    /// 6.0.3 and 7.0.2 trace it: with TypeScript's extensions by the first of
+    /// `typings` and `types` it sets, else `main`, then its `index`, and
+    /// only then with JavaScript's by `main`. A `types` naming no file falls
+    /// to the `index`, never to `main` (`p4_*`), and a `typesVersions` leaves
+    /// the name open.
+    #[test]
+    fn a_workspace_package_without_exports_is_read_by_the_first_field_it_sets() {
+        let ts = |id, rel| node_in(id, rel, "", Language::TypeScript);
+        let nodes = vec![
+            node_in(
+                0,
+                "src/app.ts",
+                "import a from \"typed\";\nimport b from \"unbuilt\";\n\
+                 import c from \"script\";\nimport d from \"built\";\nimport e from \"versioned\";\n",
+                Language::TypeScript,
+            ),
+            ts(1, "packages/typed/a.d.ts"),
+            ts(2, "packages/typed/b.d.ts"),
+            ts(3, "packages/unbuilt/src/main.ts"),
+            node_in(4, "packages/script/lib/index.js", "", Language::JavaScript),
+            node_in(5, "packages/built/dist/index.js", "", Language::JavaScript),
+            ts(6, "packages/built/dist/index.d.ts"),
+            ts(7, "packages/built/src/index.ts"),
+            ts(8, "packages/versioned/index.d.ts"),
+            ts(9, "packages/versioned/ts/index.d.ts"),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"esnext\", \"moduleResolution\": \"bundler\"}}",
+                ),
+                (
+                    "packages/typed/package.json",
+                    "{\"name\": \"typed\", \"types\": \"./b.d.ts\", \"typings\": \"./a.d.ts\"}",
+                ),
+                (
+                    "packages/unbuilt/package.json",
+                    "{\"name\": \"unbuilt\", \"types\": \"./dist/index.d.ts\", \"main\": \"./src/main.ts\"}",
+                ),
+                (
+                    "packages/script/package.json",
+                    "{\"name\": \"script\", \"types\": \"./dist/index.d.ts\", \"main\": \"./lib/index.js\"}",
+                ),
+                (
+                    "packages/built/package.json",
+                    "{\"name\": \"built\", \"main\": \"./dist/index.js\"}",
+                ),
+                (
+                    "packages/versioned/package.json",
+                    "{\"name\": \"versioned\", \"types\": \"./index.d.ts\", \
+                     \"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(
+            edges,
+            vec![
+                "packages/typed/a.d.ts",
+                "packages/script/lib/index.js",
+                "packages/built/dist/index.d.ts"
+            ]
+        );
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["unbuilt".to_string()])
+        );
+        assert_eq!(
+            graph.types_versions_undetermined_imports,
+            BTreeSet::from(["versioned".to_string()])
         );
     }
 
