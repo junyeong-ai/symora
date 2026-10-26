@@ -4640,6 +4640,13 @@ fn extract_name_and_kind(
 /// one written with `new` leaves the class's name out, as the grammar also
 /// reads a method written without a return type (`run() {}`) as a generative
 /// constructor ([`dart_method_without_a_return_type`]).
+///
+/// These are the forms of language version 3.13. Below it, as a `// @dart=`
+/// comment or the package's SDK constraint sets it (the latter through the
+/// `.dart_tool/package_config.json` that `pub get` writes), `factory() {}` is
+/// a method named `factory`, which this reads as a constructor. The version is
+/// not read: a file's declarations are read from its own text, which is what
+/// the index and the pack cache key them by.
 fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
     let factory = match node.kind() {
         "constructor_signature" | "constant_constructor_signature"
