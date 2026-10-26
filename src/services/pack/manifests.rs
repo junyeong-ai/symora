@@ -677,14 +677,17 @@ pub(super) fn module_file(
 /// `package.json` it holds, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
 /// (`dir_*`, `req_fields_*`): where that names one, the file the first of
 /// `typings` and `types`, where the extensions hold declarations, and
-/// `main` that is set names, with the extensions in place of the one it
-/// writes (`lib/m.js` as `lib/m.ts`), or that directory's `index`; else, a
-/// field naming no file included, its own `index`. A `typesVersions` there,
-/// which pack does not follow, leaves it open, since it may map the
-/// directory to another file. Its `exports` is not read. A field's file is
-/// looked up with an extension added and, for declarations alone, as a
-/// TypeScript file too (`named_extensions`); the `index` with one added
-/// where `add`, which an ES import under `node16` does not.
+/// `main` that is set names — a declaration as it is written where they
+/// hold declarations, as `loadFileNameFromPackageJsonField` tries it before
+/// its TypeScript twin, any other file with the extensions in place of the
+/// one it writes (`lib/m.js` as `lib/m.ts`, not as written) — or that
+/// directory's `index`; else, a field naming no file included, its own
+/// `index`. A `typesVersions` there, which pack does not follow, leaves it
+/// open, since it may map the directory to another file. Its `exports` is
+/// not read. A field's file is looked up with an extension added and, for
+/// declarations alone, as a TypeScript file too (`named_extensions`); the
+/// `index` with one added where `add`, which an ES import under `node16`
+/// does not.
 pub(super) fn directory_module(
     directory: &[String],
     manifest: Option<&serde_json::Value>,
@@ -701,20 +704,24 @@ pub(super) fn directory_module(
             return Some(Hit::Open);
         }
         let declarations = extensions != Extensions::JavaScript;
-        let field = ["typings", "types"]
+        let named = ["typings", "types"]
             .into_iter()
             .filter(|_| declarations)
             .chain(["main"])
             .find_map(|field| {
-                let named = manifest
+                manifest
                     .get(field)?
                     .as_str()
-                    .filter(|path| !path.is_empty())?;
-                Some((field, named))
+                    .filter(|path| !path.is_empty())
             });
-        let found = field.and_then(|(field, named)| {
+        let found = named.and_then(|named| {
             let path = project_path(directory, named)?;
-            let exact = (field != "main").then(|| existing(&path)).flatten();
+            let declaration = [".d.ts", ".d.mts", ".d.cts"]
+                .iter()
+                .any(|extension| has_extension(named, extension));
+            let exact = (declarations && declaration)
+                .then(|| existing(&path))
+                .flatten();
             let extensions = named_extensions(extensions);
             exact
                 .or_else(|| module_file(&path, extensions, true, existing))
