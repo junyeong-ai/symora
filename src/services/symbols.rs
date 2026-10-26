@@ -1807,11 +1807,22 @@ fn conditional(keyword: &str) -> Option<Conditional> {
     }
 }
 
+/// Whether the preprocessor splices a C or C++ source line, its `\n`
+/// excluded, onto the next: it ends with a backslash, before a `\r` and, as
+/// GCC and Clang read it with a warning, before blanks.
+fn splices(line: &[u8]) -> bool {
+    line.iter()
+        .rev()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r'))
+        == Some(&b'\\')
+}
+
 /// Where the line of a C or C++ preprocessor directive whose keyword is at
-/// byte `from` ends: at the first line end no backslash splices onto the
-/// next line, as the preprocessor splices a directive's lines before it
-/// reads it (`#define SHIFT \` with `8` on the line after). A block comment
-/// that carries the directive onto a later line is not seen.
+/// byte `from` ends, before its `\r\n` or `\n`: at the first line end the
+/// preprocessor does not splice onto the next line ([`splices`]), as it
+/// splices a directive's lines before it reads it (`#define SHIFT \` with
+/// `8` on the line after). A block comment that carries the directive onto
+/// a later line is not seen.
 fn directive_line_end(source: &[u8], from: usize) -> usize {
     let mut at = from;
     while let Some(offset) = source
@@ -1819,9 +1830,12 @@ fn directive_line_end(source: &[u8], from: usize) -> usize {
         .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
     {
         let end = at + offset;
-        let line = &source[..end];
-        if !line.strip_suffix(b"\r").unwrap_or(line).ends_with(b"\\") {
-            return end;
+        if !splices(&source[at..end]) {
+            return if source[at..end].ends_with(b"\r") {
+                end - 1
+            } else {
+                end
+            };
         }
         at = end + 1;
     }
@@ -2310,25 +2324,15 @@ fn continued_macro(node: Node) -> Option<Node> {
 /// the brace.
 fn body_end(content: &str, open: usize) -> Option<usize> {
     let bytes = content.as_bytes();
-    let starts_line =
-        |at: usize| at == 0 || (bytes[at - 1] == b'\n' && (at < 2 || bytes[at - 2] != b'\\'));
+    let starts_line = |at: usize| at == 0 || (bytes[at - 1] == b'\n' && !splices(&bytes[..at - 1]));
     let directive_at = |at: usize| {
         let mut at = at;
         while at < bytes.len() && matches!(bytes[at], b' ' | b'\t') {
             at += 1;
         }
-        (bytes.get(at) == Some(&b'#')).then_some(at + 1)
+        (bytes.get(at) == Some(&b'#')).then_some(at)
     };
-    let logical_line_end = |from: usize| {
-        let mut at = from;
-        while at < bytes.len() {
-            if bytes[at] == b'\n' && (at == 0 || bytes[at - 1] != b'\\') {
-                return at;
-            }
-            at += 1;
-        }
-        at
-    };
+    let logical_line_end = |from: usize| directive_line_end(bytes, from);
     // The identifier or number a quote follows: a raw string's prefix, or the
     // number a digit separator stands inside.
     let token_before = |at: usize| {
@@ -2350,24 +2354,24 @@ fn body_end(content: &str, open: usize) -> Option<usize> {
     while at < end {
         if directive_end.is_none()
             && starts_line(at)
-            && let Some(name) = directive_at(at)
+            && let Some(hash) = directive_at(at)
         {
-            let word: String = content[name..]
-                .trim_start_matches([' ', '\t'])
-                .chars()
-                .take_while(|c| c.is_ascii_alphabetic())
-                .collect();
-            match word.as_str() {
-                "if" | "ifdef" | "ifndef" => conditionals.push(false),
-                "elif" | "elifdef" | "elifndef" | "else" => {
+            let name = content[hash + 1..].trim_start_matches([' ', '\t']);
+            let word = name.len()
+                - name
+                    .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+                    .len();
+            match conditional(&content[hash..content.len() - name.len() + word]) {
+                Some(Conditional::Opens) => conditionals.push(false),
+                Some(Conditional::Branches) => {
                     if let Some(passed) = conditionals.last_mut() {
                         *passed = true;
                     }
                 }
-                "endif" => {
+                Some(Conditional::Closes) => {
                     conditionals.pop();
                 }
-                _ => {}
+                None => {}
             }
             at = logical_line_end(at) + 1;
             continue;
@@ -8021,6 +8025,20 @@ region     = "us-central1"
             end("#define OPEN(n) int n(void) \\\n  { \\\n  int v;\nint after(void);\n"),
             Some("#define OPEN(n) int n(void) \\\n  { \\\n  int v;")
         );
+        for newline in ["\n", "\r\n"] {
+            let crlf = |text: &str| text.replace('\n', newline);
+            let conditional = crlf("{\n#if A\n  if (x) {\n#else\n  {\n#endif\n  }\n}\nint after;");
+            assert_eq!(
+                end(&conditional),
+                Some(crlf("{\n#if A\n  if (x) {\n#else\n  {\n#endif\n  }\n}").as_str())
+            );
+            let spliced_after_blanks =
+                crlf("#define OPEN(n) int n(void) \\ \n  { \\\t\n  int v;\nint after(void);\n");
+            assert_eq!(
+                end(&spliced_after_blanks),
+                Some(crlf("#define OPEN(n) int n(void) \\ \n  { \\\t\n  int v;").as_str())
+            );
+        }
         assert_eq!(end("{ int never_closed;\n"), None);
     }
 
@@ -9467,13 +9485,23 @@ region     = "us-central1"
             "static int WIN_CDECL\n#define X 1\ng(int y) { if (y) { return 1; } return y; }";
         let branches = "#ifdef WIN\nstatic int WIN_CDECL\n#else\nstatic int\n#endif\n";
         let continued = "#define NCURSES_ATTR_SHIFT \\\n     8\n";
+        let continued_after_blanks = "#define NCURSES_ATTR_SHIFT \\ \t\n     8\n";
         for (newline, before, between, definition, after) in [
             ("\n", "", continued, g, ""),
             ("\r\n", "", continued, g, ""),
+            ("\n", "", continued_after_blanks, g, ""),
+            ("\r\n", "", continued_after_blanks, g, ""),
             ("\n", "", "#ifdef X\nEXTRA_WORD\n#endif\n", g, ""),
             ("\n", "", "#  ifdef X\nEXTRA_WORD\n#  endif\n", g, ""),
             ("\n", "", "EXTRA_WORD\n#ifdef X\n", g, "#endif\n"),
             ("\n", "#ifdef A\n", "EXTRA_WORD\n#else\n", g, "#endif\n"),
+            (
+                "\n",
+                "#ifdef A\n",
+                "EXTRA_WORD\n#elifdef B\n",
+                g,
+                "#endif\n",
+            ),
             ("\n", "", "", in_head, ""),
             ("\n", "", "", define_in_head, ""),
             (
