@@ -1471,6 +1471,7 @@ dependencies = [
  "insta",
  "libc",
  "notify",
+ "regex-automata",
  "rmcp",
  "rusqlite",
  "semver",

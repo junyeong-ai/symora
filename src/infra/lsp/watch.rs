@@ -9,8 +9,11 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
-use notify::event::{EventKind, ModifyKind};
+use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use regex_automata::Anchored;
+use regex_automata::hybrid::dfa::DFA;
+use regex_automata::util::{start, syntax};
 use tokio::sync::mpsc;
 
 use super::protocol::{
@@ -50,6 +53,29 @@ const STATE_DIR: &str = ".symora";
 pub struct FileChange {
     pub path: PathBuf,
     pub change: FileChangeType,
+    pub kind: PathKind,
+}
+
+impl FileChange {
+    /// Whether this is a directory gone from the tree, or a path gone that
+    /// might have been one. The files it held went with it unreported: a
+    /// rename or a move out of the tree reports the directory alone.
+    fn may_have_held_files(&self) -> bool {
+        self.change == FileChangeType::Deleted && self.kind != PathKind::File
+    }
+}
+
+/// What a changed path is, or was until it went away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathKind {
+    File,
+    Directory,
+    /// Gone, and nothing said which it was: notify reports a rename as
+    /// neither, and on Windows any removal. On Linux the directories the
+    /// watch keeps settle it (`WorkspaceWatcher::follow`); elsewhere it is
+    /// taken for a directory, so a file renamed away may reach a watcher
+    /// for paths below it, which finds nothing there.
+    Unknown,
 }
 
 /// The file watchers one server has registered, by registration id.
@@ -62,22 +88,68 @@ struct FileWatcher {
     /// Set for a relative pattern, which matches paths below this base.
     base: Option<PathBuf>,
     glob: GlobMatcher,
+    /// The glob as an automaton read a byte at a time, which says whether
+    /// a path that begins a certain way can still match.
+    prefixes: DFA,
     kinds: u8,
 }
 
 impl FileWatcher {
+    /// Whether the watcher asked for `change`. A directory that went away
+    /// is reported as itself, as the protocol and the reference client
+    /// report one, so it goes to a watcher that matches it or a path it
+    /// could have held. Its files are not listed — they are no longer on
+    /// disk to list. A server that tracks files below a directory drops
+    /// them on hearing it went away; one that reads each event as a single
+    /// path keeps them, as it does under the reference client.
     fn wants(&self, change: &FileChange) -> bool {
         if self.kinds & change.change.watch_kind() == 0 {
             return false;
         }
-        match &self.base {
-            Some(base) => change
-                .path
-                .strip_prefix(base)
-                .is_ok_and(|relative| self.glob.is_match(relative)),
-            None => self.glob.is_match(&change.path),
-        }
+        let path = match &self.base {
+            Some(base) => match change.path.strip_prefix(base) {
+                Ok(relative) => relative,
+                // The base itself went with a directory above it.
+                Err(_) => return change.may_have_held_files() && base.starts_with(&change.path),
+            },
+            None => &change.path,
+        };
+        self.glob.is_match(path) || (change.may_have_held_files() && self.matches_below(path))
     }
+
+    /// Whether the glob matches some path below `dir`: whether, having read
+    /// `dir` and a separator, it can still reach a match.
+    fn matches_below(&self, dir: &Path) -> bool {
+        let mut prefix = glob_bytes(dir);
+        if !prefix.is_empty() {
+            prefix.push(b'/');
+        }
+        let mut cache = self.prefixes.create_cache();
+        let anchored = start::Config::new().anchored(Anchored::Yes);
+        let state = self
+            .prefixes
+            .start_state(&mut cache, &anchored)
+            .ok()
+            .and_then(|state| {
+                prefix.iter().try_fold(state, |state, &byte| {
+                    self.prefixes.next_state(&mut cache, state, byte).ok()
+                })
+            });
+        // An automaton that gave up has not ruled the directory out.
+        state.is_none_or(|state| !state.is_dead())
+    }
+}
+
+/// A path as a glob reads it: its bytes, with `/` between components.
+#[cfg(unix)]
+fn glob_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn glob_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().replace('\\', "/").into_bytes()
 }
 
 impl WatchRegistry {
@@ -102,14 +174,22 @@ impl WatchRegistry {
                                 (Some(uri_to_path(relative.base_uri.uri())), relative.pattern)
                             }
                         };
+                        let invalid = |error: &dyn std::fmt::Display| {
+                            format!("Invalid watcher glob {pattern:?}: {error}")
+                        };
                         let glob = GlobBuilder::new(&pattern)
                             .literal_separator(true)
                             .build()
-                            .map_err(|error| format!("Invalid watcher glob {pattern:?}: {error}"))?
-                            .compile_matcher();
+                            .map_err(|error| invalid(&error))?;
+                        // The syntax globset compiles its own regex with.
+                        let prefixes = DFA::builder()
+                            .syntax(syntax::Config::new().utf8(false).dot_matches_new_line(true))
+                            .build(glob.regex())
+                            .map_err(|error| invalid(&error))?;
                         Ok(FileWatcher {
                             base,
-                            glob,
+                            glob: glob.compile_matcher(),
+                            prefixes,
                             kinds: watcher.kind.unwrap_or(7),
                         })
                     })
@@ -232,18 +312,27 @@ impl WorkspaceWatcher {
     /// created before a watch covered it, is reported as the directory
     /// alone, and a server that registered for its files would not hear of
     /// them. Its watch is extended first and its files listed after, so a
-    /// file written in between is seen by one or the other.
+    /// file written in between is seen by one or the other. A path that
+    /// went away with no event saying what it was is settled by the
+    /// directories the watch keeps, where it keeps them.
     pub fn follow(&mut self, changes: &mut Vec<FileChange>, watch_root: &Path, root: &Path) {
         let mut reported: HashSet<(PathBuf, FileChangeType)> =
             changes.iter().map(|c| (c.path.clone(), c.change)).collect();
         let mut found = Vec::new();
-        for change in changes.iter() {
+        for change in changes.iter_mut() {
             let Ok(relative) = change.path.strip_prefix(root) else {
                 continue;
             };
             let path = watch_root.join(relative);
             if change.change == FileChangeType::Deleted {
-                self.retract(&path);
+                let watched = self.retract(&path);
+                if let (PathKind::Unknown, Some(watched)) = (change.kind, watched) {
+                    change.kind = if watched {
+                        PathKind::Directory
+                    } else {
+                        PathKind::File
+                    };
+                }
             } else if change.change == FileChangeType::Created
                 && path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
             {
@@ -257,6 +346,7 @@ impl WorkspaceWatcher {
                             found.push(FileChange {
                                 path: path.clone(),
                                 change,
+                                kind: PathKind::File,
                             });
                         }
                     }
@@ -274,8 +364,12 @@ impl WorkspaceWatcher {
     #[cfg(not(target_os = "linux"))]
     fn extend(&mut self, _dir: &Path, _watch_root: &Path) {}
 
+    /// A recursive watch keeps no list of directories, so it cannot say
+    /// whether a path that went away was one.
     #[cfg(not(target_os = "linux"))]
-    fn retract(&mut self, _dir: &Path) {}
+    fn retract(&mut self, _dir: &Path) -> Option<bool> {
+        None
+    }
 
     #[cfg(target_os = "linux")]
     fn watch_root(&mut self, watch_root: &Path) -> notify::Result<()> {
@@ -312,9 +406,12 @@ impl WorkspaceWatcher {
         }
     }
 
-    /// Drop the watches at and below `dir`, which is gone from that path.
+    /// Drop the watches at and below `dir`, which is gone from that path,
+    /// and say whether it was a directory the watch covered: each has a
+    /// watch of its own.
     #[cfg(target_os = "linux")]
-    fn retract(&mut self, dir: &Path) {
+    fn retract(&mut self, dir: &Path) -> Option<bool> {
+        let was_directory = self.watched.contains(dir);
         let stale: Vec<PathBuf> = self
             .watched
             .range(dir.to_path_buf()..)
@@ -325,6 +422,7 @@ impl WorkspaceWatcher {
             let _ = self.watcher.unwatch(&path);
             self.watched.remove(&path);
         }
+        Some(was_directory)
     }
 }
 
@@ -371,6 +469,21 @@ struct Seen {
     appeared: bool,
     modified: bool,
     removed: bool,
+    /// An event created or removed a directory at the path.
+    folder: bool,
+    /// An event created or removed a file at the path.
+    file: bool,
+}
+
+impl Seen {
+    /// What a path that went away was, by the events that said.
+    fn kind(&self) -> PathKind {
+        match (self.folder, self.file) {
+            (true, false) => PathKind::Directory,
+            (false, true) => PathKind::File,
+            _ => PathKind::Unknown,
+        }
+    }
 }
 
 /// Reduce raw events under `watch_root` to protocol changes reported under
@@ -408,6 +521,15 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
             }
             EventKind::Modify(_) | EventKind::Any => |s| s.modified = true,
         };
+        let said: fn(&mut Seen) = match event.kind {
+            EventKind::Create(CreateKind::Folder) | EventKind::Remove(RemoveKind::Folder) => {
+                |s| s.folder = true
+            }
+            EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => {
+                |s| s.file = true
+            }
+            _ => |_| {},
+        };
         for path in event.paths {
             let Ok(relative) = path.strip_prefix(watch_root) else {
                 continue;
@@ -421,6 +543,7 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
                 Seen::default()
             });
             mark(entry);
+            said(entry);
         }
     }
 
@@ -430,22 +553,30 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
         let path = root.join(&relative);
         match watch_root.join(&relative).symlink_metadata() {
             Ok(meta) => {
+                let kind = if meta.is_dir() {
+                    PathKind::Directory
+                } else {
+                    PathKind::File
+                };
                 if touched.appeared || touched.removed {
                     changes.push(FileChange {
                         path: path.clone(),
                         change: FileChangeType::Created,
+                        kind,
                     });
                 }
-                if !meta.is_dir() {
+                if kind == PathKind::File {
                     changes.push(FileChange {
                         path,
                         change: FileChangeType::Changed,
+                        kind,
                     });
                 }
             }
             Err(_) => changes.push(FileChange {
                 path,
                 change: FileChangeType::Deleted,
+                kind: touched.kind(),
             }),
         }
     }
@@ -489,6 +620,7 @@ mod tests {
         FileChange {
             path: PathBuf::from(path),
             change,
+            kind: PathKind::File,
         }
     }
 
@@ -598,6 +730,69 @@ mod tests {
         );
     }
 
+    fn gone(path: &str, kind: PathKind) -> FileChange {
+        FileChange {
+            path: PathBuf::from(path),
+            change: FileChangeType::Deleted,
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_directory_that_went_away_reaches_a_watcher_for_the_files_it_held() {
+        let registry = registry(serde_json::json!({
+            "watchers": [{ "globPattern": "**/*.go" }]
+        }));
+        assert_eq!(
+            selected(
+                &registry,
+                &[
+                    gone("/w/pkg", PathKind::Directory),
+                    gone("/w/renamed", PathKind::Unknown),
+                    gone("/w/notes.txt", PathKind::File),
+                    // One that appeared brings its files instead (`follow`).
+                    FileChange {
+                        path: PathBuf::from("/w/new"),
+                        change: FileChangeType::Created,
+                        kind: PathKind::Directory,
+                    },
+                ]
+            ),
+            ["file:///w/pkg:Deleted", "file:///w/renamed:Deleted"]
+        );
+    }
+
+    #[test]
+    fn a_directory_that_went_away_reaches_only_a_watcher_that_could_match_below_it() {
+        use PathKind::Directory;
+        let registry = registry(serde_json::json!({
+            "watchers": [
+                { "globPattern": { "baseUri": "file:///w/src", "pattern": "*.py" } },
+                { "globPattern": "/v/lib/*/mod.rs" },
+            ]
+        }));
+        assert_eq!(
+            selected(
+                &registry,
+                &[
+                    gone("/w/src/deep", Directory),
+                    gone("/w/src", Directory),
+                    gone("/w", Directory),
+                    gone("/w/other", Directory),
+                    gone("/v/lib/a", Directory),
+                    gone("/v/lib/a/b", Directory),
+                    gone("/v", Directory),
+                ]
+            ),
+            [
+                "file:///w/src:Deleted",
+                "file:///w:Deleted",
+                "file:///v/lib/a:Deleted",
+                "file:///v:Deleted",
+            ]
+        );
+    }
+
     fn event(kind: EventKind, path: &Path) -> RawEvent {
         Ok(notify::Event::new(kind).add_path(path.to_path_buf()))
     }
@@ -687,6 +882,52 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_went_away_is_what_its_events_said_it_was() {
+        use FileChangeType::*;
+        use PathKind::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("kept")).unwrap();
+        let Batch::Changes(changes) = reduce(
+            vec![
+                event(
+                    EventKind::Remove(RemoveKind::Folder),
+                    &root.join("removed_dir"),
+                ),
+                event(
+                    EventKind::Remove(RemoveKind::File),
+                    &root.join("removed_file"),
+                ),
+                event(
+                    EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+                    &root.join("renamed_away"),
+                ),
+                event(EventKind::Create(CreateKind::Folder), &root.join("kept")),
+            ],
+            root,
+            root,
+        ) else {
+            panic!("unexpected rescan");
+        };
+        let kinds: Vec<(String, FileChangeType, PathKind)> = changes
+            .into_iter()
+            .map(|c| {
+                let name = c.path.strip_prefix(root).unwrap().display().to_string();
+                (name, c.change, c.kind)
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("removed_dir".to_string(), Deleted, Directory),
+                ("removed_file".to_string(), Deleted, File),
+                ("renamed_away".to_string(), Deleted, Unknown),
+                ("kept".to_string(), Created, Directory),
+            ]
+        );
+    }
+
+    #[test]
     fn vcs_stores_and_symora_state_are_never_reported() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -753,6 +994,7 @@ mod tests {
             Batch::Changes(vec![FileChange {
                 path: alias.join("a.py"),
                 change: FileChangeType::Changed,
+                kind: PathKind::File,
             }])
         );
     }
@@ -779,6 +1021,7 @@ mod tests {
             Batch::Changes(vec![FileChange {
                 path: root.join("a.py"),
                 change: FileChangeType::Changed,
+                kind: PathKind::File,
             }])
         );
     }
@@ -837,6 +1080,51 @@ mod tests {
             .map(|c| c.change)
             .collect();
         assert_eq!(file, [Changed, Created]);
+    }
+
+    #[test]
+    fn a_directory_renamed_away_reaches_a_watcher_for_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("pkg/sub")).unwrap();
+        std::fs::write(root.join("pkg/p.go"), "").unwrap();
+        std::fs::write(root.join("pkg/sub/q.go"), "").unwrap();
+        let (mut watcher, _events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::rename(root.join("pkg"), root.join("pkg2")).unwrap();
+
+        // A rename reports both paths, and neither as a file or a directory.
+        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
+        let Batch::Changes(mut changes) = reduce(
+            vec![
+                event(renamed, &watch_root.join("pkg")),
+                event(renamed, &watch_root.join("pkg2")),
+            ],
+            &watch_root,
+            &root,
+        ) else {
+            panic!("unexpected rescan");
+        };
+        watcher.follow(&mut changes, &watch_root, &root);
+
+        let registry = registry(serde_json::json!({
+            "watchers": [{ "globPattern": "**/*.go" }]
+        }));
+        let under = format!("{}/", path_to_uri(&root));
+        let mut events: Vec<String> = selected(&registry, &changes)
+            .into_iter()
+            .map(|event| event.replace(&under, ""))
+            .collect();
+        events.sort();
+        assert_eq!(
+            events,
+            [
+                "pkg2/p.go:Changed",
+                "pkg2/p.go:Created",
+                "pkg2/sub/q.go:Changed",
+                "pkg2/sub/q.go:Created",
+                "pkg:Deleted",
+            ]
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -953,5 +1241,29 @@ mod tests {
                 .iter()
                 .any(|path| path.starts_with(root.join("old")))
         );
+    }
+
+    /// inotify reports a path moved away without saying what it was; the
+    /// directories watched say it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_was_moved_away_is_told_by_the_directories_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let away = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+        std::fs::write(root.join("notes.txt"), "").unwrap();
+        let (mut watcher, _events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::rename(root.join("pkg"), away.path().join("pkg")).unwrap();
+        std::fs::rename(root.join("notes.txt"), away.path().join("notes.txt")).unwrap();
+
+        let mut changes = vec![
+            gone(root.join("pkg").to_str().unwrap(), PathKind::Unknown),
+            gone(root.join("notes.txt").to_str().unwrap(), PathKind::Unknown),
+        ];
+        watcher.follow(&mut changes, &watch_root, &root);
+
+        let kinds: Vec<PathKind> = changes.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [PathKind::Directory, PathKind::File]);
     }
 }
