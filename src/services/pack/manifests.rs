@@ -1057,11 +1057,15 @@ impl Manifests {
     /// and 7.0.2 look before a `typeRoots` directory: in each directory from
     /// `directory` up to the filesystem's root, its `node_modules` package
     /// (`finds_package`), then, where the extensions hold declarations, its
-    /// `node_modules/@types` one under the scope-mangled name. `add` is
-    /// whether the lookup adds an extension to a name (not for an ES import
-    /// under `node16`), `exports` whether it reads a package's `exports`
-    /// (not `node10`). `None` where a `package.json` pack does not follow
-    /// decides: `exports` the lookup reads, or `typesVersions`.
+    /// `node_modules/@types` one under the scope-mangled name. With every
+    /// extension, as `bundler` and `node16` look, tsc looks in every
+    /// directory for TypeScript's and then for JavaScript's
+    /// (`loadModuleFromNearestNodeModulesDirectoryWorker`), so a package's
+    /// `main` is read for JavaScript where its `types` names no file. `add`
+    /// is whether the lookup adds an extension to a name (not for an ES
+    /// import under `node16`), `exports` whether it reads a package's
+    /// `exports` (not `node10`). `None` where a `package.json` pack does
+    /// not follow decides: `exports` the lookup reads, or `typesVersions`.
     pub(super) fn node_modules_finds(
         &self,
         directory: &[String],
@@ -1084,7 +1088,14 @@ impl Manifests {
             if !modules.is_dir() {
                 continue;
             }
-            let mut found = vec![finds_package(&modules, specifier, extensions, exports, add)];
+            let passes = match extensions {
+                Extensions::All => &[Extensions::TypeScript, Extensions::JavaScript][..],
+                _ => std::slice::from_ref(&extensions),
+            };
+            let mut found: Vec<_> = passes
+                .iter()
+                .map(|pass| finds_package(&modules, specifier, *pass, exports, add))
+                .collect();
             if extensions != Extensions::JavaScript {
                 let types = modules.join("@types");
                 found.push(finds_package(

@@ -5418,8 +5418,11 @@ mod tests {
     /// (`tf`) gives way under `node10` alike (`tf_*`). A package with its own
     /// declaration (`tl`, `tt` through its `types`) or one in `@types`
     /// (`at`) comes first in every mode. A `types` naming a TypeScript file
-    /// names it (`tn`). `node16` for an ES import adds no extension and
-    /// reads no `index` there, so only `pk` and `tn` name one.
+    /// names it (`tn`). A package whose `types` names no file is read by its
+    /// `main` in JavaScript's pass, which `bundler` and `node16` make before
+    /// the type root and `node10` after it (`tm`, `q3c_*`). `node16` for
+    /// an ES import adds no extension and reads no `index` there, so only
+    /// `pk` and `tn` name one.
     #[test]
     fn a_type_root_declaration_outside_classic_comes_after_node_modules() {
         let specifiers = [
@@ -5436,6 +5439,7 @@ mod tests {
             "tt",
             "tv",
             "tn",
+            "tm",
         ];
         let source: String = specifiers
             .iter()
@@ -5455,6 +5459,7 @@ mod tests {
             "tt/index.d.ts",
             "tv/index.d.ts",
             "tn/lib/t.ts",
+            "tm/index.d.ts",
         ];
         let modes = [
             (
@@ -5526,6 +5531,12 @@ mod tests {
                     ),
                     ("node_modules/tv/index.js", ""),
                     ("typings/tn/package.json", "{\"types\": \"lib/t.ts\"}"),
+                    ("typings/tm/package.json", "{\"types\": \"index.d.ts\"}"),
+                    (
+                        "node_modules/tm/package.json",
+                        "{\"name\": \"tm\", \"types\": \"./dist/index.d.ts\", \"main\": \"./lib/index.js\"}",
+                    ),
+                    ("node_modules/tm/lib/index.js", ""),
                 ],
                 &nodes,
             );
@@ -5558,7 +5569,12 @@ mod tests {
         ];
         let node10 = [
             &common[..],
-            &["ul/index.d.ts", "ex/index.d.ts", "tf/index.d.ts"],
+            &[
+                "ul/index.d.ts",
+                "ex/index.d.ts",
+                "tf/index.d.ts",
+                "tm/index.d.ts",
+            ],
         ]
         .concat();
         assert_eq!(read[0], (set(&node10), set(&["tv"])));
