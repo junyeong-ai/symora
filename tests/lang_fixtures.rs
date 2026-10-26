@@ -454,7 +454,29 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
         ])
     };
 
-    let constructor = at("__init__", 1);
+    // Each run starts pyright cold, and a cold pyright can answer before it
+    // has read the package that imports this one. What each check rests on,
+    // the references pyright finds there, is asked again until pyright gives
+    // it, and fails if it never does.
+    let settled = |ident: &str, found: &dyn Fn(&Value) -> bool, what: &str| {
+        (0..5)
+            .map(|_| at(ident, 1))
+            .find(|page| found(page))
+            .unwrap_or_else(|| panic!("{what}"))
+    };
+    let counted = |page: &Value| page["count"].as_u64().is_some_and(|n| n > 0);
+
+    let constructor = settled(
+        "__init__",
+        &|page| {
+            page["hints"].as_array().is_some_and(|hints| {
+                hints
+                    .iter()
+                    .any(|h| h.as_str().is_some_and(|h| h.contains("is used")))
+            })
+        },
+        "the fixture builds a `Circle`",
+    );
     assert_eq!(
         constructor["count"], 0,
         "the fixture never names the constructor: {constructor}"
@@ -468,13 +490,13 @@ fn an_empty_reference_set_says_what_kind_of_empty_it_is() {
         "a member of a referenced type must say its zero is not reachability: {constructor}"
     );
 
-    let free_function = at("area", 1);
-    assert!(
-        free_function["count"].as_u64().is_some_and(|n| n > 0),
-        "the fixture calls `area` across the package boundary: {free_function}"
+    settled(
+        "area",
+        &counted,
+        "the fixture calls `area` across the package boundary",
     );
 
-    let class = at("Circle", 1);
+    let class = settled("Circle", &counted, "the fixture builds a `Circle`");
     assert!(
         class["hints"].as_array().is_none_or(|h| h
             .iter()
