@@ -112,7 +112,7 @@ pub fn load_merged_config_sync(root: &Path) -> Result<SymoraConfig, ConfigError>
     let project = load_raw_sync(&service.project_config_path(), ConfigScope::Project)?;
     let ignored_keys = [global.ignored_keys, project.ignored_keys].concat();
     let merged = merge_raw_config(global.config, project.config);
-    Ok(apply_env_overrides(resolve_config(merged, ignored_keys)))
+    Ok(resolve_config(merged, ignored_keys))
 }
 
 #[async_trait]
@@ -130,9 +130,7 @@ impl ConfigService for DefaultConfigService {
             Self::load_raw_from_path(&self.project_config_path(), ConfigScope::Project).await?;
         let ignored_keys = [global.ignored_keys, project.ignored_keys].concat();
         let merged = merge_raw_config(global.config, project.config);
-        let mut config = resolve_config(merged, ignored_keys);
-        config = apply_env_overrides(config);
-        Ok(config)
+        Ok(resolve_config(merged, ignored_keys))
     }
 
     fn config_path(&self, global: bool) -> PathBuf {
@@ -529,20 +527,6 @@ fn merge_vec(base: Vec<String>, overlay: Vec<String>) -> Vec<String> {
         }
         merged
     }
-}
-
-fn apply_env_overrides(mut config: SymoraConfig) -> SymoraConfig {
-    if let Ok(val) = std::env::var("SYMORA_SEARCH_LIMIT")
-        && let Ok(limit) = val.parse()
-    {
-        config.search.limit = limit;
-    }
-    if let Ok(val) = std::env::var("SYMORA_LSP_TIMEOUT")
-        && let Ok(timeout) = val.parse()
-    {
-        config.lsp.timeout_secs = timeout;
-    }
-    config
 }
 
 #[cfg(test)]
