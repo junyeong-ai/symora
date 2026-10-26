@@ -4500,7 +4500,9 @@ mod tests {
     /// A workspace package is imported by the name its `package.json` gives
     /// it, from anywhere below the workspace root that lists it. With
     /// `exports` it exports only what that maps, a subpath through its exact
-    /// key or else the pattern key with the longest prefix before `*`;
+    /// key or else the pattern key with the longest prefix before `*`, the
+    /// longer key on a tie (`./*.js` over `./*` written after it, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 and Node 26.12.1 take it);
     /// without, the name stands for the file `types` or `main` names, else
     /// its `index`, and a subpath for the file below it. A listed name whose
     /// file pack cannot determine is disclosed; a package no workspace lists
@@ -4519,7 +4521,8 @@ mod tests {
                  import i from \"@acme/typed\";\nimport j from \"@acme/twin\";\n\
                  import k from \"core-lib\";\nimport \"@acme/ui/styles.css\";\n\
                  import icon from \"@acme/ui/icon.svg\";\nimport en from \"@acme/msg/messages/en\";\n\
-                 import card from \"@acme/msg/ui/card\";\nimport sx from \"@acme/msg/ui/special/x\";\n",
+                 import card from \"@acme/msg/ui/card\";\nimport sx from \"@acme/msg/ui/special/x\";\n\
+                 import util from \"@acme/msg/util.js\";\n",
             ),
             ts(1, "packages/ui/src/index.ts", ""),
             ts(2, "packages/ui/src/button.ts", ""),
@@ -4544,6 +4547,7 @@ mod tests {
             ts(17, "packages/msg/src/ui/card.ts", ""),
             ts(18, "packages/msg/src/special/x.ts", ""),
             ts(19, "packages/msg/src/ui/special/x.ts", ""),
+            ts(20, "packages/msg/lib/util.ts", ""),
         ];
         let manifests = manifests_of(
             &[
@@ -4562,7 +4566,8 @@ mod tests {
                 (
                     "packages/msg/package.json",
                     "{\"name\": \"@acme/msg\", \"exports\": {\"./messages/*\": \"./messages/*.json\", \
-                     \"./ui/*\": \"./src/ui/*.ts\", \"./ui/special/*\": \"./src/special/*.ts\"}}",
+                     \"./ui/*\": \"./src/ui/*.ts\", \"./ui/special/*\": \"./src/special/*.ts\", \
+                     \"./*.js\": \"./lib/*.ts\", \"./*\": \"./src/*.ts\"}}",
                 ),
                 ("packages/msg/messages/en.json", "{}"),
                 ("packages/utils/package.json", "{\"name\": \"@acme/utils\"}"),
@@ -4615,7 +4620,8 @@ mod tests {
                 "packages/typed/src/entry.ts",
                 "packages/ui/src/styles.css",
                 "packages/msg/src/ui/card.ts",
-                "packages/msg/src/special/x.ts"
+                "packages/msg/src/special/x.ts",
+                "packages/msg/lib/util.ts"
             ]
         );
         assert_eq!(edges(8), vec!["pn/libs/core/index.ts"]);
@@ -5128,24 +5134,27 @@ mod tests {
     /// Node and the bundlers take a package without `exports` for its
     /// `main`, else its `index`, never its `types` (Node 26.12.1 resolves
     /// each). A bundler's `module` or `browser` field naming another file
-    /// leaves which one open. They stop at the first `exports` key that
-    /// matches, whatever its target names, where tsc 5.9.3, 6.0.3 and 7.0.2
-    /// pass over a target naming no file to the next key.
+    /// leaves which one open, but not a subpath's file, which esbuild 0.28.2
+    /// takes on either platform as Node does. They stop at the first
+    /// `exports` key that matches, whatever its target names, where tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 pass over a target naming no file to the next
+    /// key, and so to an array's next entry, where Node stops at the first.
     #[test]
     fn node_and_the_bundlers_take_a_packages_main_and_stop_at_its_first_matched_export() {
         let names = [
-            "pm", "pmi", "pmod", "same", "pbs", "pbo", "pfs", "pdist", "pend",
+            "pm", "pmi", "pmod", "same", "pbs", "pbo", "pfs", "pdist", "pend", "parr",
         ];
         let imports: String = names
             .iter()
             .map(|name| format!("import {name} from '{name}'\n"))
+            .chain(["import format from 'pmod/src/format.js'\n".to_string()])
             .collect();
         let mut nodes = vec![
             node_in(0, "app/a.js", &imports, Language::JavaScript),
             node_in(
                 1,
                 "ts/b.ts",
-                "import pend from 'pend'\n",
+                "import pend from 'pend'\nimport parr from 'parr'\n",
                 Language::TypeScript,
             ),
         ];
@@ -5155,6 +5164,7 @@ mod tests {
             "pmi/index.js",
             "pmod/src/main.js",
             "pmod/src/esm.js",
+            "pmod/src/format.js",
             "same/src/main.js",
             "pbs/src/main.js",
             "pbs/src/browser.js",
@@ -5163,6 +5173,7 @@ mod tests {
             "pfs/src/main.js",
             "pdist/src/index.ts",
             "pend/src/index.js",
+            "parr/src/index.ts",
         ] {
             let language = if file.ends_with(".ts") {
                 Language::TypeScript
@@ -5216,6 +5227,10 @@ mod tests {
                 "\"exports\": {\".\": {\"import\": \"./dist/index.mjs\", \
                  \"default\": \"./src/index.js\"}}",
             ),
+            package(
+                "parr",
+                "\"exports\": {\".\": [\"./dist/index.js\", \"./src/index.ts\"]}",
+            ),
         ];
         let configs: Vec<(&str, &str)> = configs
             .iter()
@@ -5235,13 +5250,17 @@ mod tests {
                 "packages/pm/src/main.js",
                 "packages/pmi/index.js",
                 "packages/same/src/main.js",
-                "packages/pfs/src/main.js"
+                "packages/pfs/src/main.js",
+                "packages/pmod/src/format.js"
             ]
         );
-        assert_eq!(edges(1), vec!["packages/pend/src/index.js"]);
+        assert_eq!(
+            edges(1),
+            vec!["packages/pend/src/index.js", "packages/parr/src/index.ts"]
+        );
         assert_eq!(
             graph.undetermined_imports,
-            ["pbo", "pbs", "pdist", "pend", "pmod"]
+            ["parr", "pbo", "pbs", "pdist", "pend", "pmod"]
                 .into_iter()
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
