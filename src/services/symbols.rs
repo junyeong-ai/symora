@@ -3713,7 +3713,10 @@ fn declaration_node(mut node: Node, language: Language) -> Node {
             ) => holds("signature"),
             (
                 Language::Dart,
-                "method_signature" | "class_member" | "declaration" | "local_function_declaration",
+                "method_signature"
+                | "member_declaration"
+                | "declaration"
+                | "local_function_declaration",
             ) => true,
             _ => false,
         };
@@ -5797,7 +5800,7 @@ const SCALA_QUERY: &str = r#"
 const DART_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_declaration) @symbol
-(enum_body (enum_constant) @symbol)
+(enum_body (enum_entry) @symbol)
 (mixin_declaration) @symbol
 (extension_declaration) @symbol
 (extension_type_declaration) @symbol
