@@ -3218,12 +3218,15 @@ mod tests {
     /// build installs the project. A uv workspace's virtual root installs
     /// nothing (`uvsrc`, which uv 0.13.5 installs and imports as each member's
     /// own), and a workspace's members are never covered by its root. Below a
-    /// root, a directory starts a project only where its own files install
+    /// root, a directory starts a project only where its own files declare
     /// one: a `pyproject.toml` that configures a tool there leaves it the
     /// enclosing project's (`nobuild_nested`). A `[project]` uv manages
     /// without `[build-system]` installs nothing (`uvapp_pathdep`, whose `path`
     /// dependency below `src/` uv 0.13.5 installs and imports as its own), nor
-    /// one whose `tool.uv.package` is `false`.
+    /// one whose `tool.uv.package` is `false`, but it is still a project,
+    /// whose dependencies uv 0.13.5 installs: a workspace member below `src/`
+    /// (`uvsrc_app`), or an application below a root configuring only ruff
+    /// (`ruffroot_uvapp`), imports its uv dependency.
     #[test]
     fn only_a_root_a_project_puts_on_sys_path_covers_the_directories_below_it() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -3327,6 +3330,49 @@ mod tests {
                 member("plugin", ""),
             ));
         }
+        let mut dependents = Vec::new();
+        for (root, root_config, app, source) in [
+            (
+                "us",
+                "[tool.uv.workspace]\nmembers = [\"src/*\"]\n",
+                "api",
+                "lib = { workspace = true }",
+            ),
+            (
+                "rr",
+                "[tool.ruff]\nline-length = 100\n",
+                "service",
+                "lib = { path = \"../lib\", editable = true }",
+            ),
+        ] {
+            let core = format!("{root}/src/lib/lib/core.py");
+            for (rel, source) in [
+                (format!("{root}/src/lib/lib/__init__.py"), ""),
+                (core.clone(), ""),
+                (
+                    format!("{root}/src/{app}/main.py"),
+                    "from lib.core import x\n",
+                ),
+                (
+                    format!("{root}/src/{app}/tests/test_main.py"),
+                    "from lib.core import x\n",
+                ),
+            ] {
+                if !source.is_empty() {
+                    dependents.push((nodes.len(), core.clone()));
+                }
+                nodes.push(node_in(nodes.len(), &rel, source, Language::Python));
+            }
+            configs.push((format!("{root}/pyproject.toml"), root_config.to_string()));
+            configs.push((format!("{root}/src/lib/pyproject.toml"), member("lib", "")));
+            configs.push((
+                format!("{root}/src/{app}/pyproject.toml"),
+                format!(
+                    "[project]\nname = \"{app}\"\ndependencies = [\"lib\"]\n\
+                     [tool.uv.sources]\n{source}\n"
+                ),
+            ));
+        }
         let configs: Vec<(&str, &str)> = configs
             .iter()
             .map(|(path, text)| (path.as_str(), text.as_str()))
@@ -3340,7 +3386,7 @@ mod tests {
         assert_eq!(edges(10), vec!["bw/src/m/m/x.py"]);
         assert_eq!(edges(12), vec!["nb/src/app/core.py"]);
         assert_eq!(edges(13), vec!["nb/src/app/core.py"]);
-        for (importer, core) in &plugins {
+        for (importer, core) in plugins.iter().chain(&dependents) {
             assert_eq!(
                 edges(*importer),
                 vec![core.as_str()],

@@ -2131,27 +2131,40 @@ impl<'f> PythonConfiguration<'f> {
             || (self.setup_cfg.is_some() && !pytest_only_cfg)
     }
 
+    /// Whether the directory's files declare a project: a `setup.py`, a
+    /// `pyproject.toml` with `[project]` or `[build-system]`, a `setup.cfg`
+    /// with `[metadata]` or `[options]`. Its dependencies are installed
+    /// whether or not a build installs it, as uv installs those of a
+    /// project it does not build.
+    fn declares_a_project(&self) -> bool {
+        self.declared_by(|pyproject| {
+            pyproject.contains_key("project") || pyproject.contains_key("build-system")
+        })
+    }
+
     /// Whether a build installs the directory's packages, which is where
     /// setuptools' automatic discovery puts its flat or `src/` layout on
-    /// `sys.path`: a `setup.py`, a `pyproject.toml` with `[project]` or
-    /// `[build-system]`, a `setup.cfg` with `[metadata]` or `[options]`. A
-    /// `pyproject.toml` uv manages, holding `[tool.uv]`, is installed only
-    /// with `[build-system]` unless `tool.uv.package` says otherwise, as uv
-    /// documents and uv 0.13.5 installs it; so a uv workspace's virtual
-    /// root, holding `[tool.uv.workspace]` alone, installs nothing.
+    /// `sys.path`: a project its files declare (`declares_a_project`), but
+    /// a `pyproject.toml` uv manages — one holding `[tool.uv]`, pack's mark
+    /// of it — only with `[build-system]` unless `tool.uv.package` says
+    /// otherwise, as uv documents and uv 0.13.5 installs it; so a uv
+    /// workspace's virtual root, holding `[tool.uv.workspace]` alone,
+    /// installs nothing.
     fn builds_its_packages(&self) -> bool {
+        self.declared_by(|pyproject| match toml_at(pyproject, &["tool", "uv"]) {
+            Some(uv) => uv
+                .get("package")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or_else(|| pyproject.contains_key("build-system")),
+            None => pyproject.contains_key("project") || pyproject.contains_key("build-system"),
+        })
+    }
+
+    /// Whether a `setup.py`, a `setup.cfg` with `[metadata]` or `[options]`,
+    /// or a `pyproject.toml` that `pyproject` accepts is in the directory.
+    fn declared_by(&self, pyproject: impl FnOnce(&toml::Table) -> bool) -> bool {
         self.has_setup_py
-            || self.pyproject.as_ref().is_some_and(|pyproject| {
-                match toml_at(pyproject, &["tool", "uv"]) {
-                    Some(uv) => uv
-                        .get("package")
-                        .and_then(toml::Value::as_bool)
-                        .unwrap_or_else(|| pyproject.contains_key("build-system")),
-                    None => {
-                        pyproject.contains_key("project") || pyproject.contains_key("build-system")
-                    }
-                }
-            })
+            || self.pyproject.as_ref().is_some_and(pyproject)
             || self.setup_cfg.as_ref().is_some_and(|sections| {
                 sections.contains_key("metadata") || sections.contains_key("options")
             })
@@ -2168,6 +2181,8 @@ impl<'f> PythonConfiguration<'f> {
 /// module like any other, and so is one below a root that an enclosing
 /// project, which a build installs (`builds_its_packages`), puts on
 /// `sys.path`, unless that project's uv workspace lists it as a member.
+/// Below any root, a directory is a project's only where its files declare
+/// one (`declares_a_project`).
 fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
     let packages = python_packages(nodes);
     let mut configurations: BTreeMap<Vec<String>, Vec<(&str, String)>> = BTreeMap::new();
@@ -2203,8 +2218,9 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
         // root holds (PEP 420's namespace packages need no `__init__.py`) —
         // unless the project's uv workspace lists it among its members. Below
         // a root no build installs, or as such a member, it starts a project
-        // only where its own files install one: a file that only configures a
-        // tool there leaves it the enclosing project's.
+        // only where its own files declare one, whether or not a build
+        // installs it: a file that only configures a tool there leaves it the
+        // enclosing project's.
         let mut below_root = false;
         let mut covered = false;
         for project in &enclosing {
@@ -2220,14 +2236,14 @@ fn python_configurations(root: &Path, nodes: &[Node]) -> PythonConfigurations {
                     });
             }
         }
-        let installed = configuration.builds_its_packages();
         if packages.contains(directory.as_slice())
             || covered
             || !configuration.configures_a_build()
-            || (below_root && !installed)
+            || (below_root && !configuration.declares_a_project())
         {
             continue;
         }
+        let installed = configuration.builds_its_packages();
         let project = python_project(directory, Some(&configuration));
         let roots = project
             .roots
