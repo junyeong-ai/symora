@@ -496,7 +496,7 @@ impl SymbolExtractor {
             (Some(line), Some(column)) => lines.byte(line, column)?,
             _ => name,
         };
-        match read_signature(tree.root_node(), content, language, name, start, end)? {
+        match read_signature(tree.root_node(), content, language, name, start, end, false)? {
             Read::AsWritten(text) => Some(text),
             Read::Recovered => {
                 let opening = code_opening(language);
@@ -510,6 +510,7 @@ impl SymbolExtractor {
                     name - start + at,
                     at,
                     own.len(),
+                    true,
                 )? {
                     Read::AsWritten(text) => Some(text),
                     Read::Recovered => None,
@@ -2631,7 +2632,8 @@ enum Read {
 }
 
 /// The signature of the declaration named at byte `name` in the tree under
-/// `root`, whose range runs from `start` to `end`.
+/// `root`, whose range runs from `start` to `end`; `alone` where the tree
+/// reads that range's text by itself rather than the file.
 ///
 /// The declaration is the outermost node over its name that ends within the
 /// range, or past it only by a terminator (`;`, `,`) a server leaves out or
@@ -2643,10 +2645,13 @@ enum Read {
 /// any size, so every value the statement writes before that stays out as
 /// well ([`declared_text`]). The rest of a C or C++ declaration that invoked
 /// a macro was read apart from where it begins ([`continued_macro`]), so it
-/// is a recovered reading. A prototype an error holds is signed with the
-/// text its range writes, from the macro it is written after to its `;`
-/// ([`error_held_prototype`]): that rule proves the span, and no reading of
-/// it, in the file or alone, holds it without an error. A prototype the
+/// is a recovered reading. A prototype an error holds in the file's reading
+/// is signed with the text its range writes, from the macro it is written
+/// after to its `;` ([`error_held_prototype`]): that rule proves the span
+/// there. Read alone, the text has lost what the file writes around it, and
+/// a member's macros read there as the macro of a prototype's type
+/// (`Q_ENUM(Type) QEasingCurve(Type type = Linear);` in a class body), so
+/// a prototype an error holds alone is a recovered reading. A prototype the
 /// grammar read as a declaration with its macro's arguments in an error
 /// (`extern NCURSES_EXPORT(int) addch (const chtype);`) is no such one, and
 /// signs as null.
@@ -2657,6 +2662,7 @@ fn read_signature(
     name: usize,
     start: usize,
     end: usize,
+    alone: bool,
 ) -> Option<Read> {
     let first = name + content.get(name..)?.chars().next()?.len_utf8();
     let named = root.named_descendant_for_byte_range(name, first)?;
@@ -2697,6 +2703,9 @@ fn read_signature(
             )
             .any(|node| error_held_prototype(node).is_some())
     {
+        if alone {
+            return Some(Read::Recovered);
+        }
         let text = content
             .get(start..end)?
             .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ';' | ','))
@@ -8224,6 +8233,27 @@ region     = "us-central1"
                     .and_then(|symbol| symbol.signature.as_deref()),
                 Some(expected),
                 "a prototype an error holds signs with the text its range writes: {name}"
+            );
+        }
+        // Reductions of qeasingcurve.h and qfiledialog.h.
+        let members = extractor.extract_with_signatures(
+            Path::new("q.h"),
+            "class Q_CORE_EXPORT QEasingCurve\n{\n    Q_GADGET\npublic:\n    \
+             enum Type { Linear, InQuad };\n    Q_ENUM(Type)\n\n    QEasingCurve(Type type = Linear);\n    \
+             ~QEasingCurve();\n};\n\
+             class Q_CORE_EXPORT E\n{\n    Q_GADGET\npublic:\n    enum Type { Linear, InQuad };\n    \
+             Q_FLAG(Type)\n    E(int a, int b);\n};\n",
+            Language::Cpp,
+        );
+        for name in ["QEasingCurve/QEasingCurve", "E/E"] {
+            let member = members
+                .iter()
+                .flat_map(|symbol| std::iter::once(symbol).chain(&symbol.children))
+                .find(|symbol| symbol.name_path.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("no {name} in {members:?}"));
+            assert_eq!(
+                member.signature, None,
+                "a member read as written only alone, past the macros before it, signs as null: {name}"
             );
         }
         // Reductions of qsurface.h, zstd's cover.c and qabstractitemmodel.h.
