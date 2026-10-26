@@ -1089,14 +1089,15 @@ type ClassicKey = (Option<*const TsConfig>, Vec<String>, String);
 
 /// What a `node_modules` lookup depends on (`ProjectIndex::node_modules`):
 /// the directory it starts in (`None` above the project's root), the
-/// specifier, the pass's extensions, the lookup, and the workspace package
-/// the caller looked in.
+/// specifier, the pass's extensions, the lookup, the workspace package the
+/// caller looked in, and whether the walk stops at a link to it.
 type NodeModulesKey = (
     Option<Vec<String>>,
     String,
     Extensions,
     PathLookup,
     Option<Vec<String>>,
+    bool,
 );
 
 /// Each crate's module tree, as Rust builds it from the crate's root file
@@ -1857,9 +1858,9 @@ impl ProjectIndex<'_> {
                         // again (`p3*`).
                         if lookup == PathLookup::Node10 && *extensions == Extensions::JavaScript {
                             let typescript = Extensions::TypeScript;
-                            match self
-                                .node_modules_finds(directory, specifier, lookup, typescript, None)
-                            {
+                            match self.node_modules_finds(
+                                directory, specifier, lookup, typescript, None, false,
+                            ) {
                                 Some(true) => break 'found packaged(),
                                 None => break 'found types_versions(),
                                 Some(false) => {}
@@ -1933,7 +1934,8 @@ impl ProjectIndex<'_> {
         let add = lookup != PathLookup::Esm;
         let declared = self.type_root_declaration(specifier, importer, add)?;
         let directory = Some(importer.node.directory.as_slice());
-        let packaged = self.node_modules_finds(directory, specifier, lookup, extensions, None);
+        let packaged =
+            self.node_modules_finds(directory, specifier, lookup, extensions, None, false);
         let undetermined = || Resolution::TypeRootUndetermined(specifier.to_string());
         Some(match (declared, packaged) {
             (_, Some(true)) => TypeRooted::Packaged,
@@ -1952,9 +1954,11 @@ impl ProjectIndex<'_> {
     /// `directory`, `None` standing for those above the project's root, up to
     /// the filesystem's (`manifests::node_modules_in`): `node10` reads no
     /// `exports`, and `node16` adds no extension for an ES import. `package`
-    /// is a workspace package's directory the caller looked the specifier up
-    /// in with these extensions and found nothing in, as tsc finds nothing
-    /// in a link to it there, which it reads as the same package.
+    /// is a workspace package's directory the caller looks the specifier up
+    /// in with these extensions: where `to_link`, the walk stops at the first
+    /// `node_modules` holding a link to it, where tsc reads that package;
+    /// else it walks past such a link, which finds nothing, as the caller
+    /// found nothing in the package.
     fn node_modules_finds(
         &self,
         directory: Option<&[String]>,
@@ -1962,10 +1966,18 @@ impl ProjectIndex<'_> {
         lookup: PathLookup,
         extensions: Extensions,
         package: Option<&[String]>,
+        to_link: bool,
     ) -> Option<bool> {
         let from = directory.map(<[String]>::to_vec);
         let looked = package.map(<[String]>::to_vec);
-        let key = (from, specifier.to_string(), extensions, lookup, looked);
+        let key = (
+            from,
+            specifier.to_string(),
+            extensions,
+            lookup,
+            looked,
+            to_link,
+        );
         if let Some(known) = self.node_modules.borrow().get(&key) {
             return *known;
         }
@@ -1977,14 +1989,29 @@ impl ProjectIndex<'_> {
             let looked_up = looked_up.as_deref();
             node_modules_in(directory, specifier, extensions, exports, add, looked_up)
         };
+        let name = split_components(split_package_name(specifier).0);
+        let linked = |directory: &Path| {
+            let installed = project_file(&directory.join("node_modules"), &name);
+            let real = looked_up.as_deref().filter(|_| to_link);
+            real.is_some_and(|real| installed.canonicalize().is_ok_and(|at| at == real))
+        };
         let found = match (directory, &self.manifests.root) {
             (_, None) => Some(false),
             (Some(directory), Some(root)) => {
+                let here = project_file(root, directory);
                 let parent = directory.split_last().map(|(_, parent)| parent);
-                let up = self.node_modules_finds(parent, specifier, lookup, extensions, package);
-                either(&[finds(&project_file(root, directory)), up])
+                let up = || {
+                    self.node_modules_finds(parent, specifier, lookup, extensions, package, to_link)
+                };
+                match linked(&here) {
+                    true => Some(false),
+                    false => either(&[finds(&here), up()]),
+                }
             }
-            (None, Some(root)) => either(&root.ancestors().skip(1).map(finds).collect::<Vec<_>>()),
+            (None, Some(root)) => {
+                let above = root.ancestors().skip(1).take_while(|at| !linked(at));
+                either(&above.map(finds).collect::<Vec<_>>())
+            }
         };
         self.node_modules.borrow_mut().insert(key, found);
         found
@@ -2606,13 +2633,17 @@ impl ProjectIndex<'_> {
 
     /// What TypeScript's lookup of a workspace package takes, `pass`
     /// reading the package with a pass's extensions, `None` where it reads
-    /// no file: what its pass with TypeScript's extensions finds, else, as
-    /// tsc looks in every `node_modules` from the importer's directory up,
-    /// `@types` included, between the passes (`node_modules_finds`), no
-    /// edge where one holds a declaration or TypeScript file for the
-    /// specifier and a disclosure where one may, else what its pass with
-    /// JavaScript's finds. `between` is whether tsc looks there, which it
-    /// does not for a package's own name read from inside it
+    /// no file. tsc looks in every `node_modules` from the importer's
+    /// directory up, `@types` included, with TypeScript's extensions, then
+    /// with JavaScript's (`node_modules_finds`), and reads the package where
+    /// that walk reaches a link to it, or, where none is installed, as a
+    /// package manager links it, after every `node_modules` on disk: in each
+    /// pass, no edge where a `node_modules` before the link holds a file for
+    /// the specifier and a disclosure where one may (a registry copy of the
+    /// package, `@types/<name>`; `n_*`, `zn_near_*`), else what the pass
+    /// finds in the package; and between the passes the same past the link.
+    /// `between` is whether tsc looks there, which it does not for a
+    /// package's own name read from inside it
     /// (`loadModuleFromSelfNameReference`), nor pack where the module
     /// resolution is left open.
     fn workspace_passes(
@@ -2624,18 +2655,22 @@ impl ProjectIndex<'_> {
         between: bool,
         pass: &dyn Fn(Extensions) -> Option<Resolution>,
     ) -> Option<Resolution> {
-        if let Some(found) = pass(Extensions::TypeScript) {
-            return Some(found);
-        }
         let at = Some(importer.node.directory.as_slice());
-        let typescript = Extensions::TypeScript;
-        let elsewhere =
-            |lookup| self.node_modules_finds(at, specifier, lookup, typescript, Some(package));
-        match lookup.filter(|_| between).map_or(Some(false), elsewhere) {
-            Some(true) => Some(Resolution::Files(Vec::new())),
-            None => Some(Resolution::Undetermined(specifier.to_string())),
-            Some(false) => pass(Extensions::JavaScript),
-        }
+        let elsewhere = |extensions, to_link| {
+            let lookup = lookup.filter(|_| between)?;
+            match self.node_modules_finds(at, specifier, lookup, extensions, Some(package), to_link)
+            {
+                Some(true) => Some(Resolution::Files(Vec::new())),
+                None => Some(Resolution::Undetermined(specifier.to_string())),
+                Some(false) => None,
+            }
+        };
+        let (typescript, javascript) = (Extensions::TypeScript, Extensions::JavaScript);
+        elsewhere(typescript, true)
+            .or_else(|| pass(typescript))
+            .or_else(|| elsewhere(typescript, false))
+            .or_else(|| elsewhere(javascript, true))
+            .or_else(|| pass(javascript))
     }
 
     /// Whether a bundler can take a package without `exports` for another
@@ -3105,11 +3140,27 @@ mod tests {
     /// as a pack over `nodes` would read them, with the project directory
     /// kept for as long as they are, since resolution looks files up in it.
     fn manifests_of(files: &[(&str, &str)], nodes: &[Node]) -> ProjectManifests {
+        linked_manifests_of(files, &[], nodes)
+    }
+
+    /// `manifests_of`, with a symbolic link at the first path of each of
+    /// `links` to the project directory the second names, as a package
+    /// manager links a workspace package into `node_modules`.
+    fn linked_manifests_of(
+        files: &[(&str, &str)],
+        links: &[(&str, &str)],
+        nodes: &[Node],
+    ) -> ProjectManifests {
         let dir = tempfile::tempdir().expect("tempdir");
         for (path, contents) in files {
             let path = dir.path().join(path);
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
             std::fs::write(path, contents).expect("write manifest");
+        }
+        for (link, target) in links {
+            let link = dir.path().join(link);
+            std::fs::create_dir_all(link.parent().expect("a parent")).expect("mkdir");
+            std::os::unix::fs::symlink(dir.path().join(target), link).expect("symlink");
         }
         ProjectManifests {
             manifests: Manifests::read(dir.path(), nodes),
@@ -7063,7 +7114,7 @@ mod tests {
             let config = format!(
                 "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \"baseUrl\": \"./src\"}}}}"
             );
-            let manifests = manifests_of(
+            let manifests = linked_manifests_of(
                 &[
                     (
                         "package.json",
@@ -7078,11 +7129,7 @@ mod tests {
                         "packages/w/package.json",
                         "{\"name\": \"w\", \"main\": \"./src/index.ts\"}",
                     ),
-                    (
-                        "node_modules/w/package.json",
-                        "{\"name\": \"w\", \"main\": \"./src/index.ts\"}",
-                    ),
-                    ("node_modules/w/src/index.ts", ""),
+                    ("packages/w/src/index.ts", ""),
                     (
                         "node_modules/tv/package.json",
                         "{\"name\": \"tv\", \"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
@@ -7094,6 +7141,7 @@ mod tests {
                     ),
                     ("node_modules/plain/index.js", ""),
                 ],
+                &[("node_modules/w", "packages/w")],
                 &nodes,
             );
             let graph = build_import_graph(&nodes, &manifests);
@@ -8267,7 +8315,7 @@ mod tests {
             let config = format!("{{\"compilerOptions\": {{{options}}}}}");
             let package =
                 |name: &str| format!("{{\"name\": \"{name}\", \"main\": \"./index.js\"}}");
-            let manifests = manifests_of(
+            let manifests = linked_manifests_of(
                 &[
                     (
                         "package.json",
@@ -8278,6 +8326,7 @@ mod tests {
                     ("packages/p/package.json", &package("p")),
                     ("packages/v/package.json", &package("v")),
                     ("packages/plain/package.json", &package("plain")),
+                    ("packages/plain/index.js", ""),
                     ("node_modules/@types/w/package.json", "{}"),
                     ("node_modules/@types/w/index.d.ts", ""),
                     ("node_modules/@types/w/sub.d.ts", ""),
@@ -8287,9 +8336,8 @@ mod tests {
                         "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
                     ),
                     ("node_modules/@types/v/index.d.ts", ""),
-                    ("node_modules/plain/package.json", &package("plain")),
-                    ("node_modules/plain/index.js", ""),
                 ],
+                &[("node_modules/plain", "packages/plain")],
                 &nodes,
             );
             let graph = build_import_graph(&nodes, &manifests);
@@ -8310,6 +8358,124 @@ mod tests {
                 graph.undetermined_imports,
                 BTreeSet::from(["v".to_string()]),
                 "{importer} {options}"
+            );
+        }
+    }
+
+    /// TypeScript reads a workspace package where its walk up the
+    /// `node_modules` directories from the importer reaches a link to it, as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler` and `node16`
+    /// (`n_*`, `zn_near_*`): a nearer `node_modules` holding the name takes
+    /// it first — a registry copy whose `exports` pack does not follow
+    /// (`w`, `w/sub`, disclosed), a copy's JavaScript in the pass for
+    /// JavaScript (`j`), an `@types` declaration (`t`) — but a copy holding
+    /// no file for the specifier leaves it to the link (`j/sub`), and a
+    /// link nearer than anything else is read first (`b`'s `w`), as is one
+    /// above a copy holding only JavaScript in the pass for TypeScript, and
+    /// before the `@types` beside it (`b`'s `t`). A declaration past the
+    /// link comes before the package's JavaScript (`b`'s `j`).
+    #[test]
+    fn a_nearer_node_modules_takes_a_workspace_packages_name_before_its_link() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let js = |id, rel| node_in(id, rel, "", Language::JavaScript);
+        let node16 = "\"module\": \"node16\", \"moduleResolution\": \"node16\"";
+        let modes = [
+            (
+                "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"",
+                "ts",
+            ),
+            (node16, "cts"),
+        ];
+        for (options, extension) in modes {
+            let (app, b) = (
+                format!("packages/app/src/main.{extension}"),
+                format!("packages/b/src/main.{extension}"),
+            );
+            let nodes = vec![
+                node_in(
+                    0,
+                    &app,
+                    "import \"w\";\nimport \"w/sub\";\nimport \"j\";\nimport \"j/sub\";\n\
+                     import \"t\";\n",
+                    Language::TypeScript,
+                ),
+                node_in(
+                    1,
+                    &b,
+                    "import \"w\";\nimport \"t\";\nimport \"j\";\n",
+                    Language::TypeScript,
+                ),
+                ts(2, "packages/w/src/index.ts", ""),
+                ts(3, "packages/w/src/sub.ts", ""),
+                js(4, "packages/j/src/index.js"),
+                js(5, "packages/j/src/sub.js"),
+                ts(6, "packages/t/src/index.ts", ""),
+            ];
+            let config = format!("{{\"compilerOptions\": {{{options}}}}}");
+            let manifests = linked_manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                    (
+                        "packages/w/package.json",
+                        "{\"name\": \"w\", \"exports\": {\".\": \"./src/index.ts\", \
+                         \"./sub\": \"./src/sub.ts\"}}",
+                    ),
+                    (
+                        "packages/j/package.json",
+                        "{\"name\": \"j\", \"exports\": {\".\": \"./src/index.js\", \
+                         \"./sub\": \"./src/sub.js\"}}",
+                    ),
+                    (
+                        "packages/t/package.json",
+                        "{\"name\": \"t\", \"types\": \"./src/index.ts\"}",
+                    ),
+                    (
+                        "packages/app/node_modules/w/package.json",
+                        "{\"name\": \"w\", \"exports\": {\".\": {\"types\": \"./dist/index.d.ts\"}, \
+                         \"./sub\": {\"types\": \"./dist/sub.d.ts\"}}}",
+                    ),
+                    ("packages/app/node_modules/w/dist/index.d.ts", ""),
+                    ("packages/app/node_modules/w/dist/sub.d.ts", ""),
+                    (
+                        "packages/app/node_modules/j/package.json",
+                        "{\"name\": \"j\", \"main\": \"./dist/index.js\"}",
+                    ),
+                    ("packages/app/node_modules/j/dist/index.js", ""),
+                    ("packages/app/node_modules/@types/t/index.d.ts", ""),
+                    (
+                        "packages/b/node_modules/t/package.json",
+                        "{\"name\": \"t\", \"main\": \"./index.js\"}",
+                    ),
+                    ("packages/b/node_modules/t/index.js", ""),
+                    ("packages/b/node_modules/@types/j/index.d.ts", ""),
+                    ("node_modules/@types/w/index.d.ts", ""),
+                    ("node_modules/@types/t/index.d.ts", ""),
+                ],
+                &[
+                    ("node_modules/w", "packages/w"),
+                    ("node_modules/j", "packages/j"),
+                    ("node_modules/t", "packages/t"),
+                    ("packages/b/node_modules/w", "packages/w"),
+                    ("packages/b/node_modules/j", "packages/j"),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let edges = |id| edges_under(&nodes, id, &manifests);
+            assert_eq!(edges(0), ["packages/j/src/sub.js"], "{options}");
+            assert_eq!(
+                edges(1),
+                ["packages/w/src/index.ts", "packages/t/src/index.ts"],
+                "{options}"
+            );
+            assert_eq!(
+                graph.undetermined_imports,
+                BTreeSet::from(["w".to_string(), "w/sub".to_string()]),
+                "{options}"
             );
         }
     }
