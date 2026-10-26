@@ -678,11 +678,21 @@ impl Manifests {
             .is_some_and(|root| project_file(root, written).is_file())
     }
 
-    /// Whether a `node_modules/@types` from `directory` up to the project
-    /// root holds a package by the name a specifier's first components give
-    /// (`@scope/name` as `scope__name`), as a directory or a `.d.ts` file,
-    /// which TypeScript's `classic` resolution looks in before it takes a
-    /// JavaScript file.
+    /// Whether a directory above the project's root, up to the filesystem's,
+    /// holds on disk the file a path names below it.
+    pub(super) fn is_file_above_root(&self, written: &[String]) -> bool {
+        self.root.as_ref().is_some_and(|root| {
+            root.ancestors()
+                .skip(1)
+                .any(|ancestor| project_file(ancestor, written).is_file())
+        })
+    }
+
+    /// Whether a `node_modules/@types` from `directory` up to the
+    /// filesystem's root holds a package by the name a specifier's first
+    /// components give (`@scope/name` as `scope__name`), as a directory or a
+    /// `.d.ts` file, which TypeScript's `classic` resolution looks in before
+    /// it takes a JavaScript file.
     pub(super) fn types_package_above(&self, directory: &[String], specifier: &str) -> bool {
         let Some(root) = &self.root else {
             return false;
@@ -691,10 +701,12 @@ impl Manifests {
         let package = name
             .strip_prefix('@')
             .map_or_else(|| name.to_string(), |scoped| scoped.replacen('/', "__", 1));
-        (0..=directory.len()).any(|depth| {
-            let types = project_file(root, &directory[..depth]).join("node_modules/@types");
+        let holds = |directory: &Path| {
+            let types = directory.join("node_modules/@types");
             types.join(&package).is_dir() || types.join(format!("{package}.d.ts")).is_file()
-        })
+        };
+        (0..=directory.len()).any(|depth| holds(&project_file(root, &directory[..depth])))
+            || root.ancestors().skip(1).any(holds)
     }
 
     /// Whether a file a JavaScript or TypeScript path names is on disk, as

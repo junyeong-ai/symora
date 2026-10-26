@@ -1449,13 +1449,16 @@ impl ProjectIndex<'_> {
     /// does it look in each `node_modules/@types` above the importer, and
     /// last walks again with `.js` and `.jsx`, `allowJs` set or not; a
     /// directory's `index`, `.mts` and `.cts` it never tries. So a TypeScript
-    /// file the walk finds in the project is the one, and a JavaScript file
-    /// is the one unless an `@types` package by the specifier's name sits in
-    /// a `node_modules` above the importer, which pack does not read, so the
-    /// specifier is disclosed there. A specifier writing another script
-    /// extension (`.ts`, `.jsx`) is disclosed, its lookup not measured. What
-    /// the walk finds outside the project, or nowhere, is no file pack reads;
-    /// like `node_modules`, the walk is read only up to the project's root.
+    /// file the walk finds in the project is the one, one past the project's
+    /// root comes before any JavaScript file in it, and a JavaScript file is
+    /// the one unless an `@types` package by the specifier's name sits in a
+    /// `node_modules` above the importer, which pack does not read, so the
+    /// specifier is disclosed there. Past the root pack checks the disk
+    /// alone, reading nothing: a TypeScript file there ends the walk with no
+    /// edge, as one on disk in the project that pack does not read does. A
+    /// specifier writing another script extension (`.ts`, `.jsx`) is
+    /// disclosed, its lookup not measured. What the JavaScript pass finds
+    /// outside the project, or nowhere, is no file pack reads.
     fn classic_lookup(&self, specifier: &str, from: &Node) -> Resolution {
         let mut directory = split_components(specifier);
         let Some(name) = directory.pop() else {
@@ -1486,8 +1489,18 @@ impl ProjectIndex<'_> {
                 })
             })
         };
-        if let Some(found) = walk(&["ts", "tsx", "d.ts"]) {
+        let typescript = ["ts", "tsx", "d.ts"];
+        if let Some(found) = walk(&typescript) {
             return Resolution::Files(found);
+        }
+        let above_root = stems.iter().any(|stem| {
+            typescript.iter().any(|extension| {
+                let path = [&directory[..], &[format!("{stem}.{extension}")]].concat();
+                self.manifests.is_file_above_root(&path)
+            })
+        });
+        if above_root {
+            return Resolution::Files(Vec::new());
         }
         match walk(&["js", "jsx"]).unwrap_or_default() {
             found
@@ -4331,6 +4344,63 @@ mod tests {
             BTreeSet::from(["jq".to_string(), "lib/util.ts".to_string()])
         );
         assert!(graph.version_undetermined_imports.is_empty());
+    }
+
+    /// `classic` resolution walks on past the project's root with `.ts`,
+    /// `.tsx` and `.d.ts` before it looks in `@types` or for JavaScript, and
+    /// looks in every `node_modules/@types` up to the filesystem's root, as
+    /// tsc 5.9.3 and 6.0.3 trace it (`classic3`), the project at
+    /// `outer/repo`: `lib/x` resolves to the `lib/x.ts` two directories
+    /// above the root and `lib/y` to the `outer/lib/y.d.ts` one above it,
+    /// not to the `.js` files in it, and `jz` to the `@types/jz` two above
+    /// it. So `lib/x` and `lib/y` form no edge and `jz` is disclosed. A `.js`
+    /// file above the root comes after the project's: `lib/w` keeps its
+    /// edge.
+    #[test]
+    fn classic_resolution_walks_past_the_projects_root_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (path, contents) in [
+            ("lib/x.ts", "export const x = 1;"),
+            ("outer/lib/y.d.ts", "export declare const y: number;"),
+            (
+                "node_modules/@types/jz/index.d.ts",
+                "export declare const jz: string;",
+            ),
+            ("lib/w.js", "export const w = 1;"),
+            (
+                "outer/repo/package.json",
+                "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+            ),
+            (
+                "outer/repo/tsconfig.json",
+                "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\"}}",
+            ),
+        ] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write");
+        }
+        let js = |id, rel: &str| node_in(id, rel, "", Language::JavaScript);
+        let imports = "import x from \"lib/x\";\nimport y from \"lib/y\";\n\
+                       import jz from \"jz\";\nimport w from \"lib/w\";\n";
+        let nodes = vec![
+            node_in(0, "src/app/main.ts", imports, Language::TypeScript),
+            js(1, "src/lib/x.js"),
+            js(2, "src/lib/y.js"),
+            js(3, "src/jz.js"),
+            js(4, "src/lib/w.js"),
+        ];
+        let manifests = Manifests::read(&dir.path().join("outer/repo"), &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(edges, vec!["src/lib/w.js"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["jz".to_string()])
+        );
     }
 
     /// A JavaScript project's `jsconfig.json`, as Create React App documents
