@@ -221,6 +221,9 @@ fn installations_run_independent_daemons_and_leave_legacy_files_untouched() {
     for status in [&after, &other] {
         let pid = status["pid"].as_u64().unwrap();
         assert_eq!(unsafe { libc::kill(pid.try_into().unwrap(), 0) }, 0);
+        // What a terminal signals the job that started it stays off the daemon.
+        let pid: libc::pid_t = pid.try_into().unwrap();
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
         let socket = Path::new(status["socket_path"].as_str().unwrap());
         assert_eq!(socket.parent().unwrap(), base);
         assert!(socket.as_os_str().as_bytes().len() < 104);
