@@ -2840,6 +2840,22 @@ fn read_signature(
 ) -> Option<Read> {
     let first = name + content.get(name..)?.chars().next()?.len_utf8();
     let named = root.named_descendant_for_byte_range(name, first)?;
+    // A Dart primary constructor is written in its class's header, from the
+    // name the class gives it to the parameters its range ends with, and
+    // holds no body there, so it signs with its whole range, though the name
+    // it is placed at may be its class's ([`find_name_node`]).
+    if language == Language::Dart
+        && let Some(class) = std::iter::successors(Some(named), Node::parent)
+            .find(|node| matches!(node.kind(), "class_declaration" | "enum_declaration"))
+        && child_of_kind(class, "primary_constructor")
+            .is_some_and(|constructor| constructor.end_byte() == end)
+    {
+        if errs_within(class, start, end) {
+            return Some(Read::Recovered);
+        }
+        let text = content.get(start..end)?.trim();
+        return (!text.is_empty()).then(|| Read::AsWritten(text.to_string()));
+    }
     let within = |node: Node| {
         node.end_byte() <= end.max(first)
             || content.get(end..node.end_byte()).is_some_and(|past| {
@@ -4102,9 +4118,12 @@ fn shell_sets_beyond_its_name(part: Node, statement: Node) -> bool {
 /// Where a declaration's text begins: its node ([`declaration_node`]), or
 /// the lines before it among its siblings that belong to it — a TypeScript
 /// class member's decorators, a Rust item's outer attributes and doc comments
-/// (`///` is `#[doc]`) — or the `var` a loop binds it with (`for (var k in
-/// o)`, see [`for_in_binding`]). A comment between those lines is inside the
-/// declaration; one above them is not. The rest of a C or C++ declaration that
+/// (`///` is `#[doc]`), a Dart named parameter's annotations and `required`,
+/// the name, type parameters and `const` a Dart class writes before its
+/// primary constructor (`class const P<T>.named(T x)`) — or the `var` a loop
+/// binds it with (`for (var k in o)`, see [`for_in_binding`]). A comment
+/// between those lines is inside the declaration; one above them is not. The
+/// rest of a C or C++ declaration that
 /// invoked a macro begins where that declaration does ([`continued_macro`]),
 /// a prototype an error holds where [`error_held_prototype`] begins it, and
 /// a declaration the grammar read with such prototypes in its node after the
@@ -4126,6 +4145,10 @@ fn declaration_start<'t>(node: Node<'t>, content: &str, language: Language) -> N
             (Language::Rust, "attribute_item") => true,
             (Language::Rust, "line_comment" | "block_comment") => {
                 sibling.child_by_field_name("outer").is_some()
+            }
+            (Language::Dart, "annotation" | "required") => node.kind() == "formal_parameter",
+            (Language::Dart, "identifier" | "type_parameters" | "const") => {
+                node.kind() == "primary_constructor"
             }
             _ => false,
         };
@@ -4200,7 +4223,8 @@ fn errs_before(node: Node, limit: usize) -> bool {
 /// Where a declaration's text ends: its node ([`declaration_node`]), or the
 /// token right after it that ends it — a C++ type's `;`, a TypeScript or
 /// JavaScript member's `;` or `,`, a Rust field's or variant's `,`, the `;`
-/// after a prototype an error holds ([`error_held_prototype`]).
+/// after a prototype an error holds ([`error_held_prototype`]) — or the
+/// default value a Dart parameter's list writes after it (`{int x = 0}`).
 fn declaration_end(node: Node, language: Language) -> Node {
     if language == Language::Cpp
         && let Some((_, end)) = error_held_prototype(node)
@@ -4210,6 +4234,14 @@ fn declaration_end(node: Node, language: Language) -> Node {
     let Some(next) = node.next_sibling() else {
         return node;
     };
+    if language == Language::Dart
+        && node.kind() == "formal_parameter"
+        && matches!(next.kind(), "=" | ":")
+        && let Some(value) =
+            std::iter::successors(next.next_sibling(), Node::next_sibling).find(|v| !v.is_extra())
+    {
+        return value;
+    }
     let ends = match (language, next.kind()) {
         (Language::Cpp, ";") => matches!(
             node.kind(),
@@ -4565,18 +4597,21 @@ fn extract_name_and_kind(
 
 /// The name a Dart constructor declares where it does not write its class's
 /// name before its own. A constructor is named for its class, so `new
-/// named()`, like `factory named()` in a class not named `named`, declares
-/// what `C.named()` does, and `new()` and `factory()` what `C()` does, as the
-/// analyzer names them; one that writes its class's name (`C.named()`,
-/// `factory C()`) is read as written. Only `new` marks a generative
-/// constructor so, as the grammar also reads a method written without a
-/// return type (`run() {}`) as one.
+/// named()`, like `factory named()` in a class not named `named` and the
+/// primary constructor of `class C.named(int x)`, declares what `C.named()`
+/// does, and `new()`, `factory()` and the primary constructor of `class
+/// C(int x)` what `C()` does, as the analyzer names them; one that writes its
+/// class's name (`C.named()`, `factory C()`) is read as written. Only `new`
+/// marks a generative constructor so, as the grammar also reads a method
+/// written without a return type (`run() {}`) as one.
 fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
     let may_omit_its_class = match node.kind() {
         "constructor_signature" | "constant_constructor_signature" => {
             child_of_kind(node, "new").is_some()
         }
-        "factory_constructor_signature" | "redirecting_factory_constructor_signature" => true,
+        "factory_constructor_signature"
+        | "redirecting_factory_constructor_signature"
+        | "primary_constructor" => true,
         _ => false,
     };
     if !may_omit_its_class {
@@ -4853,6 +4888,14 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     {
         return child_of_kind(node, "new").or_else(|| child_of_kind(node, "factory"));
     }
+    // A Dart primary constructor, written in its class's header, is placed
+    // at the name it writes after the class's (`class C.named(int x)`), or
+    // at the class's where it writes none.
+    if language == Language::Dart && node.kind() == "primary_constructor" {
+        return node
+            .child_by_field_name("name")
+            .or_else(|| node.parent()?.child_by_field_name("name"));
+    }
     // An operator is named by its symbol (Dart's `operator ==`, C#'s
     // `operator +`, the one Swift declares after its keyword and any comment
     // there), a C# conversion
@@ -5015,6 +5058,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "constant_constructor_signature"
         | "factory_constructor_signature"
         | "redirecting_factory_constructor_signature"
+        | "primary_constructor"
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
 
@@ -5172,7 +5216,10 @@ fn node_kind(node: Node) -> SymbolKind {
             SymbolKind::EnumMember
         }
         "field_declaration" | "declaration" => field_kind(node),
+        // A Dart extension type's representation declares a field, and so
+        // does a primary constructor's parameter the query reads.
         "extension_type_representation" => SymbolKind::Field,
+        "formal_parameter" if in_a_dart_primary_constructor(node) => SymbolKind::Field,
         "top_level_variable_declaration" | "external_variable_declaration" => SymbolKind::Variable,
         "variable_assignment" | "variable_assignments" | "declaration_command" => {
             SymbolKind::Variable
@@ -5198,6 +5245,25 @@ fn is_record_component(node: Node) -> bool {
         .parent()
         .and_then(|list| list.parent())
         .is_some_and(|owner| owner.kind() == "record_declaration")
+}
+
+/// Whether a Dart formal parameter is one of a primary constructor's: a
+/// class's or an enum's, or an extension type's representation, which is
+/// one too.
+fn in_a_dart_primary_constructor(parameter: Node) -> bool {
+    std::iter::successors(parameter.parent(), Node::parent)
+        .find(|holder| {
+            !matches!(
+                holder.kind(),
+                "formal_parameter_list" | "optional_formal_parameters"
+            )
+        })
+        .is_some_and(|holder| {
+            matches!(
+                holder.kind(),
+                "primary_constructor" | "extension_type_representation"
+            )
+        })
 }
 
 /// Classify a Go `type_spec` by its underlying type: `struct` → Struct,
@@ -5861,7 +5927,10 @@ const SCALA_QUERY: &str = r#"
 "#;
 
 // Dart names a function on its signature, not on the declaration that
-// wraps it, and a method's signature nests the same node.
+// wraps it, and a method's signature nests the same node. A parameter of a
+// class's or an enum's primary constructor declares a field where `final` or
+// `var` marks it, and every parameter of an extension type's representation
+// does.
 const DART_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_declaration) @symbol
@@ -5870,6 +5939,10 @@ const DART_QUERY: &str = r#"
 (extension_declaration) @symbol
 (extension_type_declaration) @symbol
 (extension_type_representation) @symbol
+(extension_type_representation (optional_formal_parameters (formal_parameter) @symbol))
+(primary_constructor) @symbol
+(primary_constructor parameters: (formal_parameter_list (formal_parameter ["final" "var"]) @symbol))
+(primary_constructor parameters: (formal_parameter_list (optional_formal_parameters (formal_parameter ["final" "var"]) @symbol)))
 (source_file [(type_alias) (top_level_variable_declaration) (external_variable_declaration)] @symbol)
 (function_signature) @symbol
 (getter_signature) @symbol
@@ -7282,6 +7355,22 @@ class Made {
   factory() => Made._();
 }
 
+class Point(final int x, var int y, int scale) {
+  int get sum => x + y;
+}
+
+class const Pair<T>.named(final T first, {required final T second, final int rank = 0, int? hint});
+
+class User(this.name) {
+  final String name;
+}
+
+enum const Unit(final String symbol) {
+  meter('m');
+}
+
+class N.new(final int n);
+
 extension Ext on String {
   static const limit = 1;
   void ext() {}
@@ -7290,6 +7379,8 @@ extension Ext on String {
 extension type Meters(int value) {}
 
 extension type const Id<T>._(T raw) {}
+
+extension type Opt({int? raw}) {}
 
 void top() {
   int helper() => 1;
@@ -7334,6 +7425,26 @@ external final int topExternal, otherExternal;
                 "class:Made",
                 "constructor:Made/Made._",
                 "constructor:Made/Made",
+                "class:Point",
+                "constructor:Point/Point",
+                "field:Point/x",
+                "field:Point/y",
+                "property:Point/sum",
+                "class:Pair",
+                "constructor:Pair/Pair.named",
+                "field:Pair/first",
+                "field:Pair/second",
+                "field:Pair/rank",
+                "class:User",
+                "constructor:User/User",
+                "field:User/name",
+                "enum:Unit",
+                "constructor:Unit/Unit",
+                "field:Unit/symbol",
+                "enum_member:Unit/meter",
+                "class:N",
+                "constructor:N/N.new",
+                "field:N/n",
                 "class:Ext",
                 "field:Ext/limit",
                 "method:Ext/ext",
@@ -7341,6 +7452,8 @@ external final int topExternal, otherExternal;
                 "field:Meters/value",
                 "class:Id",
                 "field:Id/raw",
+                "class:Opt",
+                "field:Opt/raw",
                 "function:top",
                 "function:top/helper",
                 "variable:topLevel",
@@ -7683,6 +7796,33 @@ region     = "us-central1"
         assert_eq!(spans("top"), ((8, 1), Some(13)));
         assert_eq!(spans("local"), ((9, 3), Some(11)));
         assert_eq!(spans("answer"), ((15, 1), Some(17)));
+    }
+
+    /// A Dart primary constructor is written in its class's header: it spans
+    /// from the name the class gives it, with the class's type parameters and
+    /// the `const` before them, to its parameters, and a field one of them
+    /// declares spans from the annotations and `required` a named one is
+    /// written with to its default value, as the analyzer reads them.
+    #[test]
+    fn a_dart_primary_constructor_spans_what_its_class_header_writes_for_it() {
+        let content = "@immutable\nclass const Pair<T>.named(\n  final T first, {\n  \
+                       @Deprecated('x') required final T second,\n  final int rank = 0,\n});\n";
+        let symbols = SymbolExtractor::new().extract(Path::new("a.dart"), content, Language::Dart);
+        let extent = |path: &str| {
+            let location = &symbols
+                .iter()
+                .find(|symbol| symbol.name_path.as_deref() == Some(path))
+                .unwrap_or_else(|| panic!("{path} is declared"))
+                .location;
+            (
+                location.effective_start(),
+                (location.end_line.unwrap(), location.end_column.unwrap()),
+            )
+        };
+        assert_eq!(extent("Pair/Pair.named"), ((2, 7), (6, 3)));
+        assert_eq!(extent("Pair/first"), ((3, 3), (3, 16)));
+        assert_eq!(extent("Pair/second"), ((4, 3), (4, 43)));
+        assert_eq!(extent("Pair/rank"), ((5, 3), (5, 21)));
     }
 
     #[test]
@@ -10176,6 +10316,41 @@ region     = "us-central1"
                 "class S {\n  S._();\n  factory() = S._;\n}\n",
                 "S/S",
                 Some("factory()"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P(final int x) extends B {}\n",
+                "P/P",
+                Some("P(final int x)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P(final int x) extends B {}\n",
+                "P",
+                Some("class P(final int x) extends B"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class const P<T>.named(final T x);\n",
+                "P.named",
+                Some("const P<T>.named(final T x)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P(final int x int y) {}\n",
+                "P/P",
+                None,
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P({required final int x = 0});\n",
+                "x",
+                Some("final int x"),
             ),
             (
                 "a.dart",
