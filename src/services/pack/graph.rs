@@ -1862,7 +1862,9 @@ impl ProjectIndex<'_> {
 
     /// The `index` script module of a directory a relative specifier spells
     /// as one, where Node and the bundlers rather than TypeScript read it:
-    /// the one file named `index` there, none where several are.
+    /// the one file named `index` there, none where several are. A file in
+    /// the directory whose module path is the directory's is its `index`,
+    /// which the module path folds.
     fn directory_index(&self, directory: &[String], language: Language) -> Vec<usize> {
         let found = self
             .exact
@@ -1873,11 +1875,7 @@ impl ProjectIndex<'_> {
             .copied()
             .filter(|id| {
                 let node = &self.nodes[*id];
-                imports_across(language, node.language)
-                    && Path::new(&node.rel_path)
-                        .file_stem()
-                        .is_some_and(|stem| stem == "index")
-                    && node.directory.as_slice() == directory
+                imports_across(language, node.language) && node.directory.as_slice() == directory
             });
         Found::first([Found::of(found)])
     }
