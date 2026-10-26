@@ -263,15 +263,25 @@ pub(super) struct TsConfig {
 
 impl TsConfig {
     /// The TypeScript majors that may compile the configuration's files.
-    /// Where no major pack reads is installed or declared — none, a range
-    /// fixing none, a version above 7 — a chain setting an option tsc 7.0.2
-    /// rejects as an error is one no TypeScript 7 compiles, so it is read
-    /// under 5 and 6 alone: `baseUrl` (TS5102), or a module option 7 rejects
-    /// that pack reads apart under 6 and 7 (`ModuleOptions::removed_in_7`).
-    /// `outFile` (TS5102) is rejected too, but changes no option pack reads.
+    /// A chain setting an option tsc 7.0.2 rejects as an error is one no
+    /// TypeScript 7 compiles: `baseUrl` (TS5102), or a module option 7
+    /// rejects that pack reads apart under 6 and 7
+    /// (`ModuleOptions::removed_in_7`); `outFile` (TS5102) is rejected too,
+    /// but changes no option pack reads. Where no major pack reads is
+    /// installed or declared and one below 7 is admissible — none installed
+    /// or declared, a version above 7 installed, a declared range admitting
+    /// one (`range_admits_below_7`) — such a chain is read under 5 and 6
+    /// alone. A declared range admitting only 7 and above (`>=7`) keeps 7, so
+    /// what the majors read apart there is disclosed: no major it admits
+    /// builds the project.
     pub(super) fn majors(&self) -> Vec<u8> {
-        let refused = !matches!(self.typescript, TypeScript::Major(_))
-            && (self.base_url.is_some() || self.module_options.removed_in_7());
+        let rejected_by_7 = self.base_url.is_some() || self.module_options.removed_in_7();
+        let refused = rejected_by_7
+            && match &self.typescript {
+                TypeScript::Major(_) => false,
+                TypeScript::Absent | TypeScript::Unknown(None) => true,
+                TypeScript::Unknown(Some(range)) => range_admits_below_7(range),
+            };
         self.typescript
             .majors()
             .iter()
@@ -1784,10 +1794,32 @@ fn typescript_major(range: &str) -> Option<u64> {
 
 /// The major pack reads from one alternative of a range
 /// (`typescript_major`): the greatest major its comparators' lower bounds
-/// name, a `>` bound read as admitting its own, where it is the least their
-/// upper bounds allow. An operator may stand apart from its version (`>=
-/// 5.0.0`).
+/// name, where it is the least their upper bounds allow
+/// (`alternative_bounds`).
 fn alternative_major(alternative: &str) -> Option<u64> {
+    match alternative_bounds(alternative)? {
+        (Some(low), Some(high)) if low == high => Some(low),
+        _ => None,
+    }
+}
+
+/// Whether a declared range admits a major below 7: an alternative of it
+/// whose comparators set no lower bound or one below 7
+/// (`alternative_bounds`), or one pack reads no bound from (`latest`, `*`).
+fn range_admits_below_7(range: &str) -> bool {
+    range.split("||").any(|alternative| {
+        alternative_bounds(alternative)
+            .is_none_or(|(lowest, _)| lowest.is_none_or(|lowest| lowest < 7))
+    })
+}
+
+/// The bounds one alternative of a range sets on the major: the greatest
+/// major its comparators' lower bounds name, a `>` bound read as admitting
+/// its own, and the least their upper bounds allow, each `None` where none
+/// sets it. `None` where the alternative is no set of comparators pack
+/// reads (`latest`, `*`, a hyphen range). An operator may stand apart from
+/// its version (`>= 5.0.0`).
+fn alternative_bounds(alternative: &str) -> Option<(Option<u64>, Option<u64>)> {
     let operator = |c: char| matches!(c, '<' | '>' | '=' | '^' | '~');
     let mut lowest: Option<u64> = None;
     let mut highest: Option<u64> = None;
@@ -1827,10 +1859,7 @@ fn alternative_major(alternative: &str) -> Option<u64> {
             (a, b) => a.or(b),
         };
     }
-    match (lowest, highest) {
-        (Some(low), Some(high)) if low == high => Some(low),
-        _ => None,
-    }
+    Some((lowest, highest))
 }
 
 /// The value a `pnpm-workspace.yaml` catalog gives a package: the default
@@ -2920,6 +2949,26 @@ mod tests {
             ("", None),
         ] {
             assert_eq!(typescript_major(range), major, "{range:?}");
+        }
+    }
+
+    /// A declared range admits a major below 7 where an alternative of it is
+    /// bounded below under 7 or not at all, or is no set of comparators pack
+    /// reads; one whose every alternative starts at 7 or above admits none.
+    #[test]
+    fn a_typescript_range_admits_a_major_below_7_by_its_alternatives_lower_bounds() {
+        for (range, admits) in [
+            (">=7", false),
+            (">=7.0.0", false),
+            ("7.x || 8.x", false),
+            ("^7.0.2 || ^8.0.0", false),
+            (">=6", true),
+            ("<8", true),
+            ("^7.0.2 || ^6.0.3", true),
+            ("latest", true),
+            ("*", true),
+        ] {
+            assert_eq!(range_admits_below_7(range), admits, "{range:?}");
         }
     }
 

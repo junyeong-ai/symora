@@ -4005,8 +4005,10 @@ mod tests {
     /// directory, where 5.9.3 and 6.0.3 resolve both against `baseUrl`
     /// (`baseurl7`). So where no TypeScript major is installed or declared —
     /// none, or a range fixing none (`latest`) — a configuration setting
-    /// `baseUrl` is read under 5 and 6 alone. A set of comparators within one
-    /// major fixes it (`ts_range`).
+    /// `baseUrl` is read under 5 and 6 alone, but under a range admitting
+    /// only 7 and above (`>=7`, `7.x || 8.x`) it keeps 7 and a specifier
+    /// `baseUrl` decides is disclosed with that range. A set of comparators
+    /// within one major fixes it (`ts_range`).
     #[test]
     fn typescript_7_reads_no_base_url() {
         let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
@@ -4018,6 +4020,8 @@ mod tests {
             ("none", None),
             ("latest", Some("latest")),
             ("range", Some(">=5.0.0 <6.0.0")),
+            ("ge7", Some(">=7")),
+            ("ge7or8", Some("7.x || 8.x")),
         ] {
             nodes.push(node_in(
                 nodes.len(),
@@ -4063,8 +4067,16 @@ mod tests {
         assert_eq!(edges(6), vec!["none/src/lib/x.ts"]);
         assert_eq!(edges(9), vec!["latest/src/lib/x.ts"]);
         assert_eq!(edges(12), vec!["range/src/lib/x.ts"]);
+        assert!(edges(15).is_empty() && edges(18).is_empty());
         assert!(graph.undetermined_imports.is_empty());
-        assert!(graph.version_undetermined_imports.is_empty());
+        assert_eq!(
+            graph.version_undetermined_imports,
+            BTreeSet::from(["@/lib/x".to_string(), "lib/x".to_string()])
+        );
+        assert_eq!(
+            graph.typescript_ranges,
+            BTreeSet::from([">=7".to_string(), "7.x || 8.x".to_string()])
+        );
     }
 
     /// A file several projects compile under different majors and module
@@ -4514,7 +4526,10 @@ mod tests {
     /// `moduleResolution: "node"` tsc 5.9.3 and 6.0.3 take the package's
     /// `types` (`node10_absent`), and with `moduleResolution: "classic"` or
     /// `module` `amd`, `umd`, `system` or `none` (TS6046) they resolve no
-    /// file for it, where 7.0.2 takes its `import` file in each.
+    /// file for it, where 7.0.2 takes its `import` file in each. A declared
+    /// range admitting only 7 and above keeps 7, and what it reads apart from
+    /// 5 and 6 is disclosed, as no major the range admits builds such a
+    /// configuration (`ge7_node`).
     #[test]
     fn a_specifier_only_the_typescript_version_decides_is_disclosed_as_such() {
         let ts = |id, rel: &str, source: &str| node_in(id, rel, source, Language::TypeScript);
@@ -4537,12 +4552,22 @@ mod tests {
                 "import r from 'r6'\n",
             ));
         }
+        let ge7 = nodes.len();
+        nodes.push(ts(ge7, "ge7/src/a.ts", "import s from 's6'\n"));
         let mut configs = vec![
             (
                 "package.json".to_string(),
                 "{\"workspaces\": [\"packages/*\"]}".to_string(),
             ),
             ("ver/tsconfig.json".to_string(), "{}".to_string()),
+            (
+                "ge7/package.json".to_string(),
+                "{\"devDependencies\": {\"typescript\": \">=7\"}}".to_string(),
+            ),
+            (
+                "ge7/tsconfig.json".to_string(),
+                "{\"compilerOptions\": {\"moduleResolution\": \"node\"}}".to_string(),
+            ),
             (
                 "n10/tsconfig.json".to_string(),
                 "{\"compilerOptions\": {\"moduleResolution\": \"node\", \"module\": \"esnext\"}}"
@@ -4573,7 +4598,7 @@ mod tests {
                 ),
             ));
         }
-        for package in ["p6", "q6", "r6"] {
+        for package in ["p6", "q6", "r6", "s6"] {
             for file in ["types", "esm", "cjs"] {
                 nodes.push(ts(
                     nodes.len(),
@@ -4602,10 +4627,12 @@ mod tests {
             .collect();
         assert_eq!(n10, vec!["packages/p6/src/types.ts"]);
         assert!((3..3 + removed.len()).all(|id| graph.edges[&id].is_empty()));
+        assert!(graph.edges[&ge7].is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
-            BTreeSet::from(["p6".to_string()])
+            BTreeSet::from(["p6".to_string(), "s6".to_string()])
         );
+        assert_eq!(graph.typescript_ranges, BTreeSet::from([">=7".to_string()]));
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["q6".to_string()])
