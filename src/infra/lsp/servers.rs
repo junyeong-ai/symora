@@ -361,12 +361,13 @@ pub fn defaults() -> HashMap<Language, ServerConfig> {
         ServerConfig {
             display_name: "clangd",
             command: "clangd".to_string(),
+            // Preambles kept in memory leave no file behind a stopped server;
+            // on disk, clangd's default, every killed server leaves one per
+            // file in the temp directory. An option taking a value is written
+            // `--name=value`: written bare, clangd reads the next argument as
+            // its value.
             args: vec![
                 "--background-index".to_string(),
-                "--header-insertion=iwyu".to_string(),
-                "--clang-tidy".to_string(),
-                "--completion-style=detailed".to_string(),
-                "--function-arg-placeholders".to_string(),
                 "--pch-storage=memory".to_string(),
             ],
             env: BTreeMap::new(),
