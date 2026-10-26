@@ -5407,8 +5407,11 @@ mod tests {
     /// names it (`tn`). A package whose `types` names no file is read by its
     /// `main` in JavaScript's pass, which `bundler` and `node16` make before
     /// the type root and `node10` after it (`tm`, `q3c_*`). `node16` for
-    /// an ES import adds no extension and reads no `index` there, so only
-    /// `pk` and `tn` name one.
+    /// an ES import adds no extension and reads no `index` there, nor in
+    /// `node_modules` but for a package's name whose `package.json` exists,
+    /// which tsc's `index.js` fallback reads (`ei`, `p1c_*`), not for one
+    /// without (`en`, `q1b_*`) or for a subpath (`es/sub`, `q1e_*`), so
+    /// only `pk`, `tn`, `en` and `es/sub` name one.
     #[test]
     fn a_type_root_declaration_outside_classic_comes_after_node_modules() {
         let specifiers = [
@@ -5426,6 +5429,9 @@ mod tests {
             "tv",
             "tn",
             "tm",
+            "ei",
+            "en",
+            "es/sub",
         ];
         let source: String = specifiers
             .iter()
@@ -5446,6 +5452,9 @@ mod tests {
             "tv/index.d.ts",
             "tn/lib/t.ts",
             "tm/index.d.ts",
+            "ei/index.d.ts",
+            "en/index.d.ts",
+            "es/sub/index.d.ts",
         ];
         let modes = [
             (
@@ -5523,6 +5532,14 @@ mod tests {
                         "{\"name\": \"tm\", \"types\": \"./dist/index.d.ts\", \"main\": \"./lib/index.js\"}",
                     ),
                     ("node_modules/tm/lib/index.js", ""),
+                    ("typings/ei/package.json", "{\"types\": \"index.d.ts\"}"),
+                    ("node_modules/ei/package.json", "{\"name\": \"ei\"}"),
+                    ("node_modules/ei/index.js", ""),
+                    ("typings/en/package.json", "{\"types\": \"index.d.ts\"}"),
+                    ("node_modules/en/index.js", ""),
+                    ("typings/es/sub/package.json", "{\"types\": \"index.d.ts\"}"),
+                    ("node_modules/es/package.json", "{\"name\": \"es\"}"),
+                    ("node_modules/es/sub/index.js", ""),
                 ],
                 &nodes,
             );
@@ -5560,13 +5577,22 @@ mod tests {
                 "ex/index.d.ts",
                 "tf/index.d.ts",
                 "tm/index.d.ts",
+                "ei/index.d.ts",
+                "en/index.d.ts",
+                "es/sub/index.d.ts",
             ],
         ]
         .concat();
         assert_eq!(read[0], (set(&node10), set(&["tv"])));
         assert_eq!(read[1], (set(&common), set(&["ex", "tv"])));
         assert_eq!(read[2], (set(&common), set(&["ex", "tv"])));
-        assert_eq!(read[3], (set(&["pk/main.d.ts", "tn/lib/t.ts"]), set(&[])));
+        let esm = [
+            "pk/main.d.ts",
+            "tn/lib/t.ts",
+            "en/index.d.ts",
+            "es/sub/index.d.ts",
+        ];
+        assert_eq!(read[3], (set(&esm), set(&[])));
     }
 
     /// A `paths` substitution naming a directory whose `package.json` holds
