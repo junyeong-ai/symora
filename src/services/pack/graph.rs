@@ -1,6 +1,7 @@
 //! The import graph pack ranks: each file's references, resolved to the
 //! project files they name by each language's own rules.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -74,6 +75,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         jvm: JvmIndex::of(nodes),
         rust: RustModules::of(nodes, manifests, &exact.by_file),
         exact,
+        classic: RefCell::default(),
     };
 
     let mut graph: Graph = BTreeMap::new();
@@ -166,7 +168,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
 }
 
 /// What a reference resolves to.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Resolution {
     /// The files it names: none where it names nothing in the project, or
     /// nothing unambiguous.
@@ -789,7 +791,18 @@ struct ProjectIndex<'a> {
     python: PythonPath<'a>,
     jvm: JvmIndex<'a>,
     rust: RustModules,
+    /// What `classic` resolution named for each non-relative specifier,
+    /// once per configuration, `baseUrl` read or not, importer's directory
+    /// and specifier, all its lookup depends on (`classic_specifier`): the
+    /// files of a directory import the same names, and each lookup checks
+    /// the disk in every directory up to the filesystem's root.
+    classic: RefCell<HashMap<ClassicKey, Resolution>>,
 }
+
+/// What a `classic` lookup depends on (`ProjectIndex::classic`): the
+/// configuration, by its place in the manifests, which outlive the index;
+/// whether `baseUrl` is read; the importer's directory; the specifier.
+type ClassicKey = (Option<*const TsConfig>, bool, Vec<String>, String);
 
 /// Each crate's module tree, as Rust builds it from the crate's root file
 /// through the `mod` declarations its files make. A module declared without
@@ -1498,6 +1511,22 @@ impl ProjectIndex<'_> {
         importer: &Importer,
         base_url: bool,
     ) -> Resolution {
+        let key = (
+            importer.ts_config.map(std::ptr::from_ref),
+            base_url,
+            importer.node.directory.clone(),
+            specifier.to_string(),
+        );
+        if let Some(known) = self.classic.borrow().get(&key) {
+            return known.clone();
+        }
+        let found = self.classic_lookup(specifier, importer, base_url);
+        self.classic.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    /// The lookup `classic_specifier` makes once for what it depends on.
+    fn classic_lookup(&self, specifier: &str, importer: &Importer, base_url: bool) -> Resolution {
         let from = importer.node;
         let config = importer.ts_config;
         let mapped = config.and_then(|config| config.mapped(specifier, base_url));
@@ -4651,6 +4680,46 @@ mod tests {
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    /// A `classic` lookup is made once for each configuration, importer's
+    /// directory and specifier (`ProjectIndex::classic`): two files of one
+    /// directory that projects of different `paths` compile read one
+    /// specifier each through its own.
+    #[test]
+    fn classic_lookups_are_kept_apart_per_configuration() {
+        let nodes = vec![
+            node_in(0, "mk/src/a.ts", "import \"@x/m\";\n", Language::TypeScript),
+            node_in(1, "mk/src/b.ts", "import \"@x/m\";\n", Language::TypeScript),
+            node_in(2, "mk/one/m.ts", "", Language::TypeScript),
+            node_in(3, "mk/two/m.ts", "", Language::TypeScript),
+        ];
+        let project = |file: &str, target: &str| {
+            format!(
+                "{{\"compilerOptions\": {{\"composite\": true, \"module\": \"amd\", \
+                 \"paths\": {{\"@x/*\": [\"./{target}/*\"]}}}}, \"files\": [\"{file}\"]}}"
+            )
+        };
+        let (a, b) = (project("src/a.ts", "one"), project("src/b.ts", "two"));
+        let manifests = manifests_of(
+            &[
+                (
+                    "mk/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "mk/tsconfig.json",
+                    "{\"files\": [], \"references\": [{\"path\": \"./tsconfig.a.json\"}, \
+                     {\"path\": \"./tsconfig.b.json\"}]}",
+                ),
+                ("mk/tsconfig.a.json", a.as_str()),
+                ("mk/tsconfig.b.json", b.as_str()),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert_eq!(graph.edges[&0], vec![2]);
+        assert_eq!(graph.edges[&1], vec![3]);
     }
 
     /// Under `classic`, a relative specifier and the paths `paths` and
