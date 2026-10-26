@@ -25,6 +25,10 @@ pub(super) struct ImportGraph {
     pub(super) edges: Graph,
     pub(super) rust_relative_imports_omitted: bool,
     pub(super) undetermined_imports: BTreeSet<String>,
+    /// The specifiers `classic` resolution names a JavaScript file in the
+    /// project for where a declaration it takes first, which pack does not
+    /// look up, may stand for them.
+    pub(super) declaration_undetermined_imports: BTreeSet<String>,
     /// The specifiers the TypeScript majors that may compile an importer
     /// read as different files under its one configuration, where no
     /// installed or declared version fixes one major.
@@ -81,6 +85,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut graph: Graph = BTreeMap::new();
     let mut rust_relative_imports_omitted = false;
     let mut undetermined_imports = BTreeSet::new();
+    let mut declaration_undetermined_imports = BTreeSet::new();
     let mut version_undetermined_imports = BTreeSet::new();
     let mut typescript_ranges = BTreeSet::new();
     let mut typescript_not_installed = false;
@@ -132,6 +137,10 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     undetermined_imports.insert(specifier);
                     continue;
                 }
+                Resolution::DeclarationUndetermined(specifier) => {
+                    declaration_undetermined_imports.insert(specifier);
+                    continue;
+                }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
                     match importer.typescript {
@@ -159,6 +168,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         edges: graph,
         rust_relative_imports_omitted,
         undetermined_imports,
+        declaration_undetermined_imports,
         version_undetermined_imports,
         typescript_ranges,
         typescript_not_installed,
@@ -178,6 +188,11 @@ enum Resolution {
     /// A specifier the project's own configuration declares that names no
     /// file pack reads.
     Undetermined(String),
+    /// A specifier `classic` resolution names a JavaScript file in the
+    /// project for, where a declaration in `node_modules/@types` or a
+    /// `typeRoots` directory, which it takes first and pack does not look up,
+    /// may stand for it.
+    DeclarationUndetermined(String),
     /// A specifier the TypeScript majors that may compile the importer read
     /// as different files under its one configuration, no installed or
     /// declared version fixing one.
@@ -1589,7 +1604,7 @@ impl ProjectIndex<'_> {
                         config.map_or(&[], |config| config.type_roots.as_slice()),
                     ) =>
             {
-                Resolution::Undetermined(specifier.to_string())
+                Resolution::DeclarationUndetermined(specifier.to_string())
             }
             Some(found) => Resolution::Files(found),
             None => {
@@ -4495,8 +4510,9 @@ mod tests {
                 "cw/src/js/thing.js"
             ]
         );
+        assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.declaration_undetermined_imports,
             BTreeSet::from(["jq".to_string()])
         );
         assert!(graph.version_undetermined_imports.is_empty());
@@ -4596,8 +4612,9 @@ mod tests {
                 "ts/src/pkgonly.js"
             ]
         );
+        assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.declaration_undetermined_imports,
             ["fd/sub", "flat", "dd/sub", "pj/sub", "tv/sub"]
                 .into_iter()
                 .map(str::to_string)
@@ -4673,8 +4690,9 @@ mod tests {
             .map(|dst| nodes[*dst].rel_path.as_str())
             .collect();
         assert_eq!(edges, vec!["src/@sc/y.js", "src/emp.js"]);
+        assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.declaration_undetermined_imports,
             ["jq", "lib2/util", "@sc/x", "up", "@sc/z"]
                 .into_iter()
                 .map(str::to_string)
@@ -4892,7 +4910,11 @@ mod tests {
         );
         assert_eq!(
             graph.undetermined_imports,
-            BTreeSet::from(["@x/x".to_string(), "jq2".to_string()])
+            BTreeSet::from(["@x/x".to_string()])
+        );
+        assert_eq!(
+            graph.declaration_undetermined_imports,
+            BTreeSet::from(["jq2".to_string()])
         );
         assert!(graph.version_undetermined_imports.is_empty());
     }
@@ -4993,7 +5015,7 @@ mod tests {
             .collect();
         assert_eq!(edges, vec!["src/lib/w.js", "src/lib/v.ts"]);
         assert_eq!(
-            graph.undetermined_imports,
+            graph.declaration_undetermined_imports,
             BTreeSet::from(["jz".to_string()])
         );
     }

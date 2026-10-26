@@ -168,6 +168,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             name_some(&specifiers)
         ));
     }
+    if !result.declaration_undetermined_imports.is_empty() {
+        let specifiers: Vec<String> = result
+            .declaration_undetermined_imports
+            .iter()
+            .map(|specifier| format!("`{specifier}`"))
+            .collect();
+        hints.push(format!(
+            "{} import specifier(s) that `classic` module resolution reads name a JavaScript file in the project, but a declaration in `node_modules/@types` or a `typeRoots` directory, which TypeScript takes first and pack does not look up, may stand for them ({}); their dependencies do not contribute to ranking. Inspect the declaration or source.",
+            specifiers.len(),
+            name_some(&specifiers)
+        ));
+    }
     if !result.version_undetermined_imports.is_empty() {
         let specifiers: Vec<String> = result
             .version_undetermined_imports
@@ -358,6 +370,7 @@ mod tests {
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
+            declaration_undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
@@ -437,6 +450,7 @@ mod tests {
         assert!(!partial.contains("Rust paths whose file the crate's module tree leaves open"));
         result.rust_relative_imports_omitted = true;
         result.undetermined_imports = vec!["@/styles/app".to_string()];
+        result.declaration_undetermined_imports = vec!["jq".to_string()];
         result.version_undetermined_imports = vec!["p6".to_string()];
         result.typescript_ranges = vec![">=5".to_string()];
         result.typescript_not_installed = true;
@@ -462,10 +476,16 @@ mod tests {
             json["files"]["hints"][2]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`): pack reads no major from 5 to 7 from the `typescript` installed or declared (declared: `>=5`); their dependencies do not contribute to ranking. Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.")
+                .contains("1 import specifier(s) that `classic` module resolution reads name a JavaScript file in the project, but a declaration in `node_modules/@types` or a `typeRoots` directory, which TypeScript takes first and pack does not look up, may stand for them (`jq`); their dependencies do not contribute to ranking.")
         );
         assert!(
             json["files"]["hints"][3]
+                .as_str()
+                .unwrap()
+                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`): pack reads no major from 5 to 7 from the `typescript` installed or declared (declared: `>=5`); their dependencies do not contribute to ranking. Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.")
+        );
+        assert!(
+            json["files"]["hints"][4]
                 .as_str()
                 .unwrap()
                 .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")
