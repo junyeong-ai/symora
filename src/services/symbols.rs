@@ -1362,12 +1362,17 @@ fn declares_a_function(node: Node) -> bool {
 /// fast ? a : Opts{};`), or as the start of an error holding the block, the
 /// members after the head read as fragments of its (`class Q_CORE_EXPORT
 /// QPauseAnimation : public QAbstractAnimation {`), where the head shows the
-/// same. An
-/// identifier written before the key, or between the key and the name the
-/// class head ends with (qualified, specialized, then `final`), is no part of
-/// the grammar there, so it is a macro; one inside brackets is an argument or
-/// an attribute (`__declspec(dllexport)`, `[[nodiscard]]`), and the head ends
-/// where a base clause begins.
+/// same. An identifier written before the key, or between the key and the
+/// name the class head ends with (qualified, specialized, then `final`), is
+/// no part of the grammar there, so it is a macro; one inside brackets is an
+/// argument or an attribute (`__declspec(dllexport)`, `[[nodiscard]]`), one
+/// in a template header a parameter (`template <typename T>`), and the head
+/// ends where a base clause begins. What the grammar read before the block
+/// may hold other heads, each ending with a `;` or the `{` of its body
+/// (`QT_BEGIN_NAMESPACE template <typename T> class Outer {` before a member
+/// `struct Inner {`), and each is read alone, from the end of the one before;
+/// in one with no body of its own, the name after the key may be a type's
+/// (`struct stat st;`), so only what is written before the key is taken.
 fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let text = |node: Node| source.get(node.byte_range()).unwrap_or_default();
     let is_identifier = |node: Node| {
@@ -1413,8 +1418,26 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         };
         let leaves = written_words_before(node, opens);
         let mut depth = 0usize;
+        let mut header: Option<usize> = None;
         let mut outside = Vec::with_capacity(leaves.len());
-        for leaf in &leaves {
+        for (at, leaf) in leaves.iter().enumerate() {
+            if header.is_none()
+                && depth == 0
+                && text(*leaf) == b"template"
+                && leaves.get(at + 1).is_some_and(|next| next.kind() == "<")
+            {
+                header = Some(0);
+            }
+            if let Some(open) = header {
+                let open = match leaf.kind() {
+                    "<" => open + 1,
+                    ">" => open.saturating_sub(1),
+                    _ => open,
+                };
+                header = (open > 0 || leaf.kind() != ">").then_some(open);
+                outside.push(false);
+                continue;
+            }
             match leaf.kind() {
                 "(" | "[" | "[[" => depth += 1,
                 ")" | "]" | "]]" => depth = depth.saturating_sub(1),
@@ -1422,49 +1445,64 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
             }
             outside.push(depth == 0 && !matches!(leaf.kind(), ")" | "]" | "]]"));
         }
-        let head_end = (0..leaves.len())
-            .find(|&at| outside[at] && leaves[at].kind() == ":")
-            .unwrap_or(leaves.len());
-        let Some(key) = (0..head_end)
-            .rev()
-            .find(|&at| outside[at] && matches!(text(leaves[at]), b"class" | b"struct" | b"union"))
-        else {
-            continue;
-        };
-        let mut name = head_end;
-        if name > key + 1 && text(leaves[name - 1]) == b"final" {
-            name -= 1;
-        }
-        if read_as_a_variable && name == leaves.len() {
-            continue;
-        }
-        if name > key + 1 && leaves[name - 1].kind() == ">" {
-            let mut open = 0usize;
-            while name > key + 1 {
+        let mut start = 0;
+        for end in (0..leaves.len())
+            .filter(|&at| outside[at] && matches!(leaves[at].kind(), "{" | ";"))
+            .chain([leaves.len()])
+        {
+            let head = start;
+            start = end + 1;
+            let closes = leaves.get(end).map(|leaf| leaf.kind());
+            let head_end = (head..end)
+                .find(|&at| outside[at] && leaves[at].kind() == ":")
+                .unwrap_or(end);
+            let Some(key) = (head..head_end).rev().find(|&at| {
+                outside[at] && matches!(text(leaves[at]), b"class" | b"struct" | b"union")
+            }) else {
+                continue;
+            };
+            let mut name = head_end;
+            if name > key + 1 && text(leaves[name - 1]) == b"final" {
                 name -= 1;
-                match leaves[name].kind() {
-                    ">" => open += 1,
-                    "<" => open -= 1,
-                    _ => {}
-                }
-                if open == 0 {
-                    break;
+            }
+            if read_as_a_variable && name == leaves.len() {
+                continue;
+            }
+            if name > key + 1 && leaves[name - 1].kind() == ">" {
+                let mut open = 0usize;
+                while name > key + 1 {
+                    name -= 1;
+                    match leaves[name].kind() {
+                        ">" => open += 1,
+                        "<" => open -= 1,
+                        _ => {}
+                    }
+                    if open == 0 {
+                        break;
+                    }
                 }
             }
+            if name <= key + 1 || !is_identifier(leaves[name - 1]) {
+                continue;
+            }
+            name -= 1;
+            while name >= key + 3
+                && leaves[name - 1].kind() == "::"
+                && is_identifier(leaves[name - 2])
+            {
+                name -= 2;
+            }
+            let upto = if matches!(closes, None | Some("{")) {
+                name
+            } else {
+                key
+            };
+            macros.extend(
+                (head..upto)
+                    .filter(|&at| at != key && outside[at] && is_identifier(leaves[at]))
+                    .map(|at| leaves[at].byte_range()),
+            );
         }
-        if name <= key + 1 || !is_identifier(leaves[name - 1]) {
-            continue;
-        }
-        name -= 1;
-        while name >= key + 3 && leaves[name - 1].kind() == "::" && is_identifier(leaves[name - 2])
-        {
-            name -= 2;
-        }
-        macros.extend(
-            (0..name)
-                .filter(|&at| at != key && outside[at] && is_identifier(leaves[at]))
-                .map(|at| leaves[at].byte_range()),
-        );
     }
     macros
 }
@@ -8753,6 +8791,90 @@ region     = "us-central1"
                 "function:plain",
             ]
         );
+        for (content, expected) in [
+            (
+                "QT_BEGIN_NAMESPACE\n\ntemplate <typename T, size_t Prealloc = 32>\nclass Tracker {\n    \
+                 template <typename HT>\n    struct Hasher {\n        size_t seed = 1;\n    };\n    \
+                 int a;\n};\n",
+                &[
+                    "class:Tracker",
+                    "struct:Tracker/Hasher",
+                    "field:Hasher/seed",
+                    "field:Tracker/a",
+                ][..],
+            ),
+            (
+                "ABSL_NAMESPACE_BEGIN\ntemplate <typename T, size_t N, typename A = std::allocator<T>>\n\
+                 class ABSL_ATTRIBUTE_WARN_UNUSED InlinedVector {\n  int size_;\n};\n",
+                &["class:InlinedVector", "field:InlinedVector/size_"][..],
+            ),
+            (
+                "BSSL_NAMESPACE_BEGIN\n\ntemplate <typename T>\nclass Span;\n\nnamespace internal {\n\
+                 template <typename T>\nclass SpanBase {\n  int a;\n};\n}\n",
+                &[
+                    "class:Span",
+                    "namespace:internal",
+                    "class:SpanBase",
+                    "field:SpanBase/a",
+                ][..],
+            ),
+        ] {
+            let declared: Vec<String> = SymbolExtractor::new()
+                .extract(Path::new("t.h"), content, Language::Cpp)
+                .iter()
+                .map(|symbol| {
+                    format!(
+                        "{}:{}",
+                        symbol.kind,
+                        symbol.name_path.as_deref().unwrap_or(&symbol.name)
+                    )
+                })
+                .collect();
+            assert_eq!(
+                declared, expected,
+                "a template header and what a head follows hold no macro of it"
+            );
+        }
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("the C++ grammar loads");
+        for (content, expected) in [
+            (
+                "QT_BEGIN_NAMESPACE\n\ntemplate <typename T, size_t Prealloc = 32>\n\
+                 class Q_EXPORT Tracker {\n    template <typename HT>\n    struct Hasher {\n        \
+                 size_t seed = 1;\n    };\n    int a;\n};\n",
+                &["QT_BEGIN_NAMESPACE", "Q_EXPORT"][..],
+            ),
+            (
+                "namespace absl {\nABSL_NAMESPACE_BEGIN\n\ntemplate <typename T, size_t BLo = 0, \
+                 size_t BHi = BLo,\n          typename Allocator = std::allocator<T>>\n\
+                 class chunked_queue {\n public:\n  \
+                 static constexpr size_t kMin = (BLo == 0 && BHi == 0) ? 1 : BLo;\n  int a;\n};\n}\n",
+                &["ABSL_NAMESPACE_BEGIN"][..],
+            ),
+            (
+                "QT_BEGIN_NAMESPACE\n\ntemplate <typename T>\nstruct stat st;\n\nnamespace internal {\n\
+                 template <typename T>\nclass SpanBase {\n  int a;\n};\n}\n",
+                &["QT_BEGIN_NAMESPACE"][..],
+            ),
+            (
+                "extern template class Base</*b=*/false>;\nextern template class Base</*b=*/true>;\n\n\
+                 class EXPORT It final\n    : public Base</*b=*/false> {\n  friend class internal::F;\n\n \
+                 public:\n  It(const Message* m) : Base(m) {}\n};\n",
+                &["EXPORT"][..],
+            ),
+        ] {
+            let tree = parser.parse(content, None).expect("the source parses");
+            let blanked: Vec<&str> = misread_class_macros(tree.root_node(), content.as_bytes())
+                .into_iter()
+                .map(|range| &content[range])
+                .collect();
+            assert_eq!(
+                blanked, expected,
+                "each head is read alone, past its template header: {content:?}"
+            );
+        }
         let held: Vec<String> = SymbolExtractor::new()
             .extract(
                 Path::new("m.h"),
