@@ -6,10 +6,10 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    Basedir, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution, PackageType,
-    Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, export_path, export_subpath,
-    nearest, own_or_only, project_path, python_packages, python_project, reads_base_url,
-    split_package_name,
+    Basedir, ClassicPass, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution,
+    PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, classic_names,
+    export_path, export_subpath, nearest, own_or_only, project_path, python_packages,
+    python_project, reads_base_url, split_package_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -120,7 +120,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     ts_owner_undetermined.insert(node.rel_path.clone());
                 }
             }
-            let files = match index.resolve(&reference, &importer, form) {
+            let files = match index.resolve(target, &reference, &importer, form) {
                 Resolution::Files(files) => files,
                 Resolution::NeedsOwnership => {
                     rust_relative_imports_omitted = true;
@@ -494,6 +494,17 @@ fn declares_es_imports(
         },
     };
     Some(emitted.unwrap_or(resolution == ModuleResolution::Bundler))
+}
+
+/// How a specifier the readings of its importer name different files for
+/// is disclosed: as one the TypeScript version decides where they read one
+/// configuration under several majors, else as one the configuration does
+/// not determine.
+fn read_apart(specifier: &str, importer: &Importer) -> Resolution {
+    match importer.typescript {
+        Some(_) => Resolution::VersionUndetermined(specifier.to_string()),
+        None => Resolution::Undetermined(specifier.to_string()),
+    }
 }
 
 /// What a package's `exports` target names for one importer.
@@ -1334,7 +1345,13 @@ impl<'a> PythonPath<'a> {
 impl ProjectIndex<'_> {
     /// What a reference names, nothing where it names something outside the
     /// project or nothing unambiguous.
-    fn resolve(&self, reference: &Reference, importer: &Importer, form: ImportForm) -> Resolution {
+    fn resolve(
+        &self,
+        written: &str,
+        reference: &Reference,
+        importer: &Importer,
+        form: ImportForm,
+    ) -> Resolution {
         let from = importer.node;
         let files = match reference {
             Reference::Relative { up, components } if from.language == Language::Rust => {
@@ -1350,7 +1367,7 @@ impl ProjectIndex<'_> {
                 if package_is_directory(from.language) {
                     self.package(&path, from.language)
                 } else if is_javascript(from.language) {
-                    self.script_target(&path, from.language).unwrap_or_default()
+                    return self.relative_script(written, &path, importer);
                 } else {
                     self.module(&path, from.language)
                 }
@@ -1409,10 +1426,7 @@ impl ProjectIndex<'_> {
         if read.all(|other| other == first) {
             return first;
         }
-        match importer.typescript {
-            Some(_) => Resolution::VersionUndetermined(specifier.to_string()),
-            None => Resolution::Undetermined(specifier.to_string()),
-        }
+        read_apart(specifier, importer)
     }
 
     /// What a non-relative specifier names under one reading of it
@@ -1431,9 +1445,12 @@ impl ProjectIndex<'_> {
         // do with 7.0.2, which reads none.
         let base_url = reading.major.is_some_and(reads_base_url)
             || config.is_some_and(|config| config.javascript);
+        if reading.mode == ImportMode::Classic {
+            return self.classic_specifier(specifier, importer, base_url);
+        }
         let mapped = config.and_then(|config| config.mapped(specifier, base_url));
-        for path in mapped.iter().flat_map(|mapping| &mapping.paths) {
-            if let Some(found) = self.script_target(path, language) {
+        for substituted in mapped.iter().flat_map(|mapping| &mapping.paths) {
+            if let Some(found) = self.script_target(&substituted.path, language) {
                 return Resolution::Files(found);
             }
         }
@@ -1445,11 +1462,7 @@ impl ProjectIndex<'_> {
         {
             return Resolution::Files(found);
         }
-        let declared = mapped.as_ref().is_some_and(|mapping| !mapping.catch_all);
-        if reading.mode == ImportMode::Classic && !declared {
-            return self.classic_lookup(specifier, importer.node);
-        }
-        let unmapped = || match declared {
+        let unmapped = || match mapped.as_ref().is_some_and(|mapping| !mapping.catch_all) {
             true => Resolution::Undetermined(specifier.to_string()),
             false => Resolution::Files(Vec::new()),
         };
@@ -1458,70 +1471,87 @@ impl ProjectIndex<'_> {
     }
 
     /// What `classic` resolution, which reads no `package.json`, names for
-    /// a non-relative specifier past `paths` and `baseUrl`, as tsc 5.9.3 and
-    /// 6.0.3 look it up. In the importer's directory and each one above it
-    /// — past the project's root, to the filesystem's — it tries the
-    /// specifier with `.ts`, `.tsx` and `.d.ts`, a `.js` extension it writes
-    /// first stripped and then kept (`lib/util.js` as `lib/util.ts`, then
-    /// `lib/util.js.ts`), and takes the first file that exists. Only then
-    /// does it look in each `node_modules/@types` above the importer, and
-    /// last walks again with `.js` and `.jsx`, `allowJs` set or not; a
-    /// directory's `index`, `.mts` and `.cts` it never tries. So a TypeScript
-    /// file the walk finds in the project is the one, one past the project's
-    /// root comes before any JavaScript file in it, and a JavaScript file is
-    /// the one unless an `@types` package by the specifier's name sits in a
-    /// `node_modules` above the importer, which pack does not read, so the
-    /// specifier is disclosed there. Past the root pack checks the disk
-    /// alone, reading nothing: a TypeScript file there ends the walk with no
-    /// edge, as one on disk in the project that pack does not read does. A
-    /// specifier writing another script extension (`.ts`, `.jsx`) is
-    /// disclosed, its lookup not measured. What the JavaScript pass finds
-    /// outside the project, or nowhere, is no file pack reads.
-    fn classic_lookup(&self, specifier: &str, from: &Node) -> Resolution {
+    /// a non-relative specifier, as tsc 5.9.3 and 6.0.3 look it up: in two
+    /// passes, TypeScript's files and declarations and then JavaScript's
+    /// (`ClassicPass`), each trying the names `classic_names` gives. Each
+    /// pass looks at each path a `paths` substitution names in turn — the
+    /// file it names first where the substitution writes an extension of its
+    /// own — then at the one below `baseUrl`, then in the importer's
+    /// directory and each one above it, past the project's root to the
+    /// filesystem's; a `paths` pattern naming no file is passed over. Between
+    /// the passes it looks in each `node_modules/@types` above the importer.
+    /// So a TypeScript file any of them holds comes before every JavaScript
+    /// file, and a JavaScript file is the one unless an `@types` package by
+    /// the specifier's name sits in a `node_modules` above the importer,
+    /// which pack does not read, so the specifier is disclosed there. Past
+    /// the root pack checks the disk alone, reading nothing: a TypeScript
+    /// file there ends the lookup with no edge, as one on disk in the project
+    /// that pack does not read does, and what the JavaScript pass would find
+    /// there is no file pack reads. Where neither pass finds a file, one of
+    /// any kind a substitution or `baseUrl` spells exactly is the one, as
+    /// elsewhere, and a specifier a `paths` pattern other than `*` declares
+    /// is disclosed.
+    fn classic_specifier(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        base_url: bool,
+    ) -> Resolution {
+        let from = importer.node;
+        let config = importer.ts_config;
+        let mapped = config.and_then(|config| config.mapped(specifier, base_url));
+        let substitutions = || mapped.iter().flat_map(|mapping| &mapping.paths);
+        let below_base = config
+            .and_then(|config| config.base_url.as_ref())
+            .filter(|_| base_url)
+            .and_then(|base| project_path(base, specifier));
         let mut directory = split_components(specifier);
         let Some(name) = directory.pop() else {
             return Resolution::Files(Vec::new());
         };
-        let stems: Vec<&str> = match name.rsplit_once('.') {
-            Some((stem, "js")) => vec![stem, &name],
-            Some((_, "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")) => {
-                return Resolution::Undetermined(specifier.to_string());
-            }
-            _ => vec![&name],
-        };
-        let walk = |extensions: &[&str]| {
-            (0..=from.directory.len()).rev().find_map(|depth| {
-                stems.iter().find_map(|stem| {
-                    extensions.iter().find_map(|extension| {
-                        let path = [
-                            &from.directory[..depth],
-                            &directory,
-                            &[format!("{stem}.{extension}")],
-                        ]
-                        .concat();
-                        match self.exact.by_file.get(&path) {
-                            Some(file) => Some(vec![*file]),
-                            None => self.manifests.is_file_on_disk(&path).then(Vec::new),
-                        }
-                    })
+        let configured = |pass| {
+            substitutions()
+                .find_map(|substituted| {
+                    substituted
+                        .extension
+                        .then(|| self.existing(&substituted.path))
+                        .flatten()
+                        .or_else(|| self.classic_file(&substituted.path, pass))
                 })
+                .or_else(|| {
+                    below_base
+                        .as_ref()
+                        .and_then(|path| self.classic_file(path, pass))
+                })
+        };
+        let walk = |pass| {
+            (0..=from.directory.len()).rev().find_map(|depth| {
+                let path = [
+                    &from.directory[..depth],
+                    &directory,
+                    std::slice::from_ref(&name),
+                ]
+                .concat();
+                self.classic_file(&path, pass)
             })
         };
-        let typescript = ["ts", "tsx", "d.ts"];
-        if let Some(found) = walk(&typescript) {
+        if let Some(found) =
+            configured(ClassicPass::TypeScript).or_else(|| walk(ClassicPass::TypeScript))
+        {
             return Resolution::Files(found);
         }
-        let above_root = stems.iter().any(|stem| {
-            typescript.iter().any(|extension| {
-                let path = [&directory[..], &[format!("{stem}.{extension}")]].concat();
+        let above_root = classic_names(&name, ClassicPass::TypeScript)
+            .into_iter()
+            .any(|candidate| {
+                let path = [&directory[..], &[candidate]].concat();
                 self.manifests.is_file_above_root(&path)
-            })
-        });
+            });
         if above_root {
             return Resolution::Files(Vec::new());
         }
-        match walk(&["js", "jsx"]).unwrap_or_default() {
-            found
+        let found = configured(ClassicPass::JavaScript).or_else(|| walk(ClassicPass::JavaScript));
+        match found {
+            Some(found)
                 if !found.is_empty()
                     && self
                         .manifests
@@ -1529,8 +1559,82 @@ impl ProjectIndex<'_> {
             {
                 Resolution::Undetermined(specifier.to_string())
             }
-            found => Resolution::Files(found),
+            Some(found) => Resolution::Files(found),
+            None => {
+                let spelled = substitutions()
+                    .find_map(|substituted| self.existing(&substituted.path))
+                    .or_else(|| below_base.as_ref().and_then(|path| self.existing(path)));
+                match spelled {
+                    Some(found) => Resolution::Files(found),
+                    None if mapped.as_ref().is_some_and(|mapping| !mapping.catch_all) => {
+                        Resolution::Undetermined(specifier.to_string())
+                    }
+                    None => Resolution::Files(Vec::new()),
+                }
+            }
         }
+    }
+
+    /// What a relative specifier names under `classic` resolution, `path`
+    /// being the project path it spells: the first file its two passes take
+    /// (`classic_specifier`) for that path alone, else a file of any kind
+    /// the path spells exactly. Nothing where it names no file in the project.
+    fn classic_relative(&self, path: &[String]) -> Resolution {
+        let found = self
+            .classic_file(path, ClassicPass::TypeScript)
+            .or_else(|| self.classic_file(path, ClassicPass::JavaScript))
+            .or_else(|| self.existing(path));
+        Resolution::Files(found.unwrap_or_default())
+    }
+
+    /// The file `classic` resolution takes for a project path in one pass,
+    /// trying the names `classic_names` gives in the path's directory: where
+    /// one exists, the project's file where pack reads it, none where it is
+    /// only on disk. `None` where none of them exists.
+    fn classic_file(&self, path: &[String], pass: ClassicPass) -> Option<Vec<usize>> {
+        let (name, directory) = path.split_last()?;
+        classic_names(name, pass).into_iter().find_map(|candidate| {
+            let file = [directory, &[candidate]].concat();
+            self.existing(&file)
+        })
+    }
+
+    /// The file a project path names whole, whatever its kind: the
+    /// project's where pack reads it, none where it is only on disk. `None`
+    /// where it names no file.
+    fn existing(&self, file: &[String]) -> Option<Vec<usize>> {
+        match self.exact.by_file.get(file) {
+            Some(found) => Some(vec![*found]),
+            None => self.manifests.is_file_on_disk(file).then(Vec::new),
+        }
+    }
+
+    /// What a relative JavaScript or TypeScript specifier names, `path` being
+    /// the project path it spells: under `classic` the file that resolution
+    /// takes (`classic_relative`), under any other the script module it
+    /// spells (`script_target`). Where the importer's readings read it under
+    /// both and those name different files, it is disclosed, as a
+    /// non-relative one is (`bare_specifier`).
+    fn relative_script(&self, written: &str, path: &[String], importer: &Importer) -> Resolution {
+        let script = || {
+            Resolution::Files(
+                self.script_target(path, importer.node.language)
+                    .unwrap_or_default(),
+            )
+        };
+        let classic = importer
+            .readings
+            .iter()
+            .filter(|reading| reading.mode == ImportMode::Classic)
+            .count();
+        if classic == 0 {
+            return script();
+        }
+        let found = self.classic_relative(path);
+        if classic == importer.readings.len() || found == script() {
+            return found;
+        }
+        read_apart(written, importer)
     }
 
     /// Whether a TypeScript configuration maps a non-relative specifier:
@@ -1542,7 +1646,7 @@ impl ProjectIndex<'_> {
             || mapped
                 .iter()
                 .flat_map(|mapping| &mapping.paths)
-                .any(|path| self.script_target(path, language).is_some())
+                .any(|substituted| self.script_target(&substituted.path, language).is_some())
             || config
                 .base_url
                 .as_ref()
@@ -4297,9 +4401,9 @@ mod tests {
     /// (`lib/other.js`), never a directory's `index` or `.mts`; then, past
     /// `node_modules/@types`, `.js` and `.jsx`, so a JavaScript file is
     /// disclosed where an `@types` package of its name is installed (`jq`).
-    /// Another written script extension is disclosed (`lib/util.ts`). A
-    /// file on disk that pack does not read ends the walk with no edge
-    /// (`lib/gen`, for which tsc takes `src/app/lib/gen.d.ts`).
+    /// A written `.ts` is stripped alike (`lib/util.ts`). A file on disk that
+    /// pack does not read ends the walk with no edge (`lib/gen`, for which
+    /// tsc takes `src/app/lib/gen.d.ts`).
     #[test]
     fn classic_resolution_walks_the_importers_directories() {
         let ts = |id, rel: &str| node_in(id, rel, "", Language::TypeScript);
@@ -4361,9 +4465,223 @@ mod tests {
         );
         assert_eq!(
             graph.undetermined_imports,
-            BTreeSet::from(["jq".to_string(), "lib/util.ts".to_string()])
+            BTreeSet::from(["jq".to_string()])
         );
         assert!(graph.version_undetermined_imports.is_empty());
+    }
+
+    /// Under `classic`, a relative specifier and the paths `paths` and
+    /// `baseUrl` name are looked up as the walk is, as tsc 5.9.3 and 6.0.3
+    /// trace them (`rel_js`, `paths`, `baseurl`): TypeScript's files in every
+    /// place first, `.ts`, `.tsx`, `.d.ts`, then `node_modules/@types`, then
+    /// JavaScript's, never a directory's `index` or an `.mts` for no
+    /// extension. A written extension gives way to those of the pass:
+    /// `./w3.js` names `w3.js.ts` before `w3.js`, `./w4.ts` the `w4.js`
+    /// alone there, `./w7.mjs` `w7.mts`. A `paths` substitution writing an
+    /// extension names that file first (`@e/foo`), one naming no file is
+    /// passed over for the next (`@y/thing`) or the walk (`@n/q`), and a
+    /// pattern naming none at all is disclosed (`@x/x`). Below `baseUrl` a
+    /// TypeScript file comes before the walk's (`bt`), the walk's before a
+    /// JavaScript file there (`lib/x`), `@types` before it too (`jq2`), and a
+    /// JavaScript file there before the walk's (`bj`). A file of another
+    /// kind a specifier spells exactly is still the one (`./x.vue`).
+    #[test]
+    fn classic_resolution_reads_relative_paths_and_base_url_specifiers_alike() {
+        let file = |id, rel: &str| {
+            let language = match rel.rsplit_once('.').map(|(_, extension)| extension) {
+                Some("js" | "jsx" | "mjs" | "cjs") => Language::JavaScript,
+                Some("vue") => Language::Vue,
+                _ => Language::TypeScript,
+            };
+            node_in(id, rel, "", language)
+        };
+        let main = |id, rel: &str, specifiers: &[&str]| {
+            let source: String = specifiers
+                .iter()
+                .map(|specifier| format!("import \"{specifier}\";\n"))
+                .collect();
+            node_in(id, rel, &source, Language::TypeScript)
+        };
+        let relative = [
+            "../components",
+            "../m/n",
+            "./both",
+            "./tsxjs",
+            "./dts",
+            "./jsxjs",
+            "./w3.js",
+            "./w4.ts",
+            "./w7.mjs",
+            "./w10.d.ts",
+            "./x.vue",
+        ];
+        let mapped = [
+            "@x/x",
+            "@y/thing",
+            "@e/foo",
+            "@n/q",
+            "@x/foo.js",
+            "zed",
+            "@t/tsx",
+        ];
+        let based = ["lib/x", "jq2", "bt", "bj", "components", "m/n"];
+        let mut nodes = vec![
+            main(0, "rel/src/app/main.ts", &relative),
+            main(1, "paths/src/app/main.ts", &mapped),
+            main(2, "base/src/app/main.ts", &based),
+        ];
+        for rel in [
+            "rel/src/components/index.ts",
+            "rel/src/m/n.mts",
+            "rel/src/app/both.ts",
+            "rel/src/app/both.js",
+            "rel/src/app/tsxjs.tsx",
+            "rel/src/app/tsxjs.js",
+            "rel/src/app/dts.d.ts",
+            "rel/src/app/dts.js",
+            "rel/src/app/jsxjs.jsx",
+            "rel/src/app/jsxjs.js",
+            "rel/src/app/w3.js.ts",
+            "rel/src/app/w3.js",
+            "rel/src/app/w4.js",
+            "rel/src/app/w7.mts",
+            "rel/src/app/w7.mjs",
+            "rel/src/app/w10.ts",
+            "rel/src/app/w10.d.ts",
+            "rel/src/app/x.vue",
+            "paths/src/x/index.ts",
+            "paths/src/y/thing.js",
+            "paths/src/app/y/thing.ts",
+            "paths/src/e/foo.js",
+            "paths/src/e/foo.ts",
+            "paths/src/@n/q.ts",
+            "paths/src/foo.ts",
+            "paths/src/foo.js",
+            "paths/types/zed.ts",
+            "paths/src/zed.js",
+            "paths/src/t/tsx.tsx",
+            "paths/src/t/tsx.d.ts",
+            "base/src/lib/x.js",
+            "base/src/app/lib/x.ts",
+            "base/src/jq2.js",
+            "base/src/bt.ts",
+            "base/src/app/bt.ts",
+            "base/src/bj.js",
+            "base/src/app/bj.jsx",
+            "base/src/components/index.ts",
+            "base/src/m/n.mts",
+        ] {
+            nodes.push(file(nodes.len(), rel));
+        }
+        let package = "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}";
+        let manifests = manifests_of(
+            &[
+                ("rel/package.json", package),
+                (
+                    "rel/tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\"}}",
+                ),
+                ("paths/package.json", package),
+                (
+                    "paths/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"amd\", \"paths\": {\
+                     \"@y/*\": [\"./src/y/*\", \"./src/app/y/*\"], \"@x/*\": [\"./src/*\"], \
+                     \"@e/*\": [\"./src/e/*.js\"], \"@n/*\": [\"./src/nothing/*\"], \
+                     \"*\": [\"./types/*\"], \"@t/*\": [\"./src/t/*\"]}}}",
+                ),
+                ("base/package.json", package),
+                (
+                    "base/tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\", \
+                     \"baseUrl\": \"src\"}}",
+                ),
+                (
+                    "base/node_modules/@types/jq2/index.d.ts",
+                    "export declare const jq2: string;",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph.edges[&id]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec![
+                "rel/src/app/both.ts",
+                "rel/src/app/tsxjs.tsx",
+                "rel/src/app/dts.d.ts",
+                "rel/src/app/jsxjs.js",
+                "rel/src/app/w3.js.ts",
+                "rel/src/app/w4.js",
+                "rel/src/app/w7.mts",
+                "rel/src/app/w10.ts",
+                "rel/src/app/x.vue",
+            ]
+        );
+        assert_eq!(
+            edges(1),
+            vec![
+                "paths/src/app/y/thing.ts",
+                "paths/src/e/foo.js",
+                "paths/src/@n/q.ts",
+                "paths/src/foo.ts",
+                "paths/types/zed.ts",
+                "paths/src/t/tsx.tsx",
+            ]
+        );
+        assert_eq!(
+            edges(2),
+            vec!["base/src/app/lib/x.ts", "base/src/bt.ts", "base/src/bj.js"]
+        );
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["@x/x".to_string(), "jq2".to_string()])
+        );
+        assert!(graph.version_undetermined_imports.is_empty());
+    }
+
+    /// A relative specifier is read under each module resolution the
+    /// TypeScript majors that may compile its importer read it under: with
+    /// `module` `esnext` and nothing installed or declared, 5 reads
+    /// `classic`, which tries no directory's `index`, and 6 and 7 `bundler`,
+    /// which do, so `../components` is disclosed as one the TypeScript
+    /// version decides, while `./util`, a file each reads alike, keeps its
+    /// edge.
+    #[test]
+    fn a_relative_specifier_the_majors_read_apart_is_disclosed() {
+        let nodes = vec![
+            node_in(
+                0,
+                "app/src/app/main.ts",
+                "import \"../components\";\nimport \"./util\";\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "app/src/components/index.ts", "", Language::TypeScript),
+            node_in(2, "app/src/app/util.ts", "", Language::TypeScript),
+        ];
+        let manifests = manifests_of(
+            &[(
+                "app/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"esnext\"}}",
+            )],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(edges, vec!["app/src/app/util.ts"]);
+        assert_eq!(
+            graph.version_undetermined_imports,
+            BTreeSet::from(["../components".to_string()])
+        );
+        assert!(graph.undetermined_imports.is_empty());
     }
 
     /// `classic` resolution walks on past the project's root with `.ts`,
