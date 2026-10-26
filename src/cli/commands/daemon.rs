@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::app::App;
-use crate::cli::OutputError;
+use crate::cli::{OutputContext, OutputError};
+use crate::daemon::client::SocketPathTooLong;
 use crate::daemon::wire::ProjectRestartStatus;
 use crate::daemon::{DaemonClient, DaemonRuntimeConfig, DaemonServer, DaemonStart};
 use crate::error::LspError;
@@ -12,6 +13,47 @@ fn start_message(outcome: DaemonStart) -> &'static str {
         DaemonStart::AlreadyRunning => "Daemon is already running",
         DaemonStart::Started => "Daemon started",
         DaemonStart::Replaced => "Daemon from a different binary was replaced",
+    }
+}
+
+/// What a daemon command answers where this installation's socket path is
+/// too long to address: no daemon can be running for it, so there is nothing
+/// to report, stop or unload, and starting or serving one needs a shorter
+/// home. Every other command already runs in process.
+fn answer_unaddressable(command: DaemonCommand, too_long: &SocketPathTooLong, ctx: &OutputContext) {
+    match command {
+        DaemonCommand::Status => ctx.print_success(serde_json::json!({
+            "running": false,
+            "message": format!(
+                "Daemon is not running: none can listen for this installation, as {too_long}; \
+                 commands run in process"
+            ),
+        })),
+        DaemonCommand::Stop => ctx.print_success(serde_json::json!({
+            "stopped": false,
+            "message": format!(
+                "Daemon was not running: none can listen for this installation, as {too_long}"
+            ),
+        })),
+        DaemonCommand::Restart { project: true } => ctx.print_success(serde_json::json!({
+            "restarted": false,
+            "message": format!(
+                "Project was not loaded: no daemon can hold it, as {too_long}; every command runs \
+                 in process and starts its language servers with the current configuration"
+            ),
+        })),
+        DaemonCommand::Start | DaemonCommand::Restart { project: false } | DaemonCommand::Serve => {
+            let error = OutputError::precondition_failed(format!(
+                "No daemon can run for this installation: {too_long}"
+            ))
+            .with_hint(format!(
+                "A daemon runs under a HOME at least {} bytes shorter. Until then every command \
+                 runs in process with the current configuration and environment, answering the \
+                 same without reusing language servers between invocations.",
+                too_long.excess()
+            ));
+            ctx.print_error(error);
+        }
     }
 }
 
@@ -66,10 +108,14 @@ async fn start_server() -> Result<()> {
 
 pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
     let ctx = &app.output;
+    let client = DaemonClient::new(app.root())?;
+    if let Some(too_long) = client.socket_path_too_long() {
+        answer_unaddressable(args.command, &too_long, ctx);
+        return Ok(());
+    }
 
     match args.command {
         DaemonCommand::Start => {
-            let client = DaemonClient::new(app.root())?;
             match client.ensure_running().await {
                 Ok(outcome) => ctx.print_success(serde_json::json!({
                     "started": outcome != DaemonStart::AlreadyRunning,
@@ -81,8 +127,6 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         }
 
         DaemonCommand::Stop => {
-            let client = DaemonClient::new(app.root())?;
-
             match client.shutdown().await {
                 Ok(true) => ctx.print_success(serde_json::json!({
                     "stopped": true,
@@ -98,7 +142,6 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         }
 
         DaemonCommand::Restart { project: true } => {
-            let client = DaemonClient::new(app.root())?;
             match client.restart_project().await {
                 Ok(ProjectRestartStatus::Restarted) => ctx.print_success(serde_json::json!({
                     "restarted": true,
@@ -118,7 +161,6 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         }
 
         DaemonCommand::Restart { project: false } => {
-            let client = DaemonClient::new(app.root())?;
             let restarted = match client.shutdown().await {
                 Ok(_) => client.ensure_running().await.map(|_| ()),
                 Err(e) => Err(e),
@@ -137,8 +179,6 @@ pub async fn execute(args: DaemonArgs, app: &App) -> Result<()> {
         DaemonCommand::Serve => start_server().await,
 
         DaemonCommand::Status => {
-            let client = DaemonClient::new(app.root())?;
-
             match client.status().await {
                 Ok(status) => {
                     ctx.print_success(status);
