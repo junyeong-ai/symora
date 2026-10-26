@@ -265,6 +265,11 @@ pub(super) struct TsConfig {
     /// Whether a `jsconfig.json` holds it: a JavaScript project, which a
     /// bundler builds whatever TypeScript is installed.
     pub(super) javascript: bool,
+    /// The directories `typeRoots` names, each against the directory of the
+    /// configuration declaring it, as paths on disk: `classic` resolution
+    /// looks a specifier up in them after `node_modules/@types`. Empty where
+    /// the chain sets none, as tsc then looks in none.
+    pub(super) type_roots: Vec<PathBuf>,
 }
 
 impl TsConfig {
@@ -827,8 +832,15 @@ impl Manifests {
     /// holding an `index.d.ts` or a `package.json` that names one, which
     /// pack does not follow (`declares_types`); or the specifier is a
     /// subpath of a package whose `package.json` holds `typesVersions`,
-    /// which may map it to another file.
-    pub(super) fn declaration_above(&self, directory: &[String], specifier: &str) -> bool {
+    /// which may map it to another file. Then below each of `type_roots`,
+    /// the configuration's `typeRoots`, the specifier's path alike, a scope
+    /// mangled only where the root is itself a `node_modules/@types`.
+    pub(super) fn declaration_above(
+        &self,
+        directory: &[String],
+        specifier: &str,
+        type_roots: &[PathBuf],
+    ) -> bool {
         let Some(root) = &self.root else {
             return false;
         };
@@ -846,6 +858,10 @@ impl Manifests {
         };
         (0..=directory.len()).any(|depth| holds(&project_file(root, &directory[..depth])))
             || root.ancestors().skip(1).any(holds)
+            || type_roots.iter().any(|type_root| {
+                let at_types = type_root.ends_with("node_modules/@types");
+                holds_declaration(type_root, if at_types { &mangled } else { specifier })
+            })
     }
 
     /// Whether a file a JavaScript or TypeScript path names is on disk, as
@@ -1154,6 +1170,7 @@ impl TsReader<'_> {
         let index = self.projects.projects.len();
         self.projects.projects.push(TsProject {
             config: ts_config(
+                self.root,
                 &chain,
                 self.versions.of(directory),
                 path.last().is_some_and(|file| file == "jsconfig.json"),
@@ -1766,7 +1783,7 @@ fn pnpm_workspace_globs(yaml: &str) -> Vec<String> {
 /// What the TypeScript configuration at the head of an `extends` chain
 /// says, with what it extends, for the TypeScript versions that may
 /// compile it.
-fn ts_config(chain: &Chain, typescript: TypeScript, javascript: bool) -> TsConfig {
+fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: bool) -> TsConfig {
     let configs = chain.configs.as_slice();
     let directory = configs
         .first()
@@ -1823,6 +1840,15 @@ fn ts_config(chain: &Chain, typescript: TypeScript, javascript: bool) -> TsConfi
         module_resolution: setting("moduleResolution"),
         target: setting("target"),
     };
+    let type_roots = option("typeRoots")
+        .and_then(|(directory, roots)| Some((directory, roots.as_array()?)))
+        .into_iter()
+        .flat_map(|(directory, roots)| {
+            roots
+                .iter()
+                .filter_map(|written| Some(configured_path(root, directory, written.as_str()?)))
+        })
+        .collect();
     let custom_conditions = decided("customConditions").map(|conditions| {
         conditions
             .and_then(|conditions| conditions.as_array())
@@ -1840,7 +1866,25 @@ fn ts_config(chain: &Chain, typescript: TypeScript, javascript: bool) -> TsConfi
         typescript,
         custom_conditions,
         javascript,
+        type_roots,
     }
+}
+
+/// A path a configuration writes, against the directory holding it, as
+/// TypeScript normalizes one: `.` and `..` read by name, never through a
+/// link, so it may name a directory above the project's root.
+fn configured_path(root: &Path, directory: &[String], written: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for component in project_file(root, directory).join(written).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                path.pop();
+            }
+            component => path.push(component),
+        }
+    }
+    path
 }
 
 /// The TypeScript versions each directory's files may be compiled by, each
