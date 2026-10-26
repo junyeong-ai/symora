@@ -4228,7 +4228,8 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
 /// What a language server started stops with it when a command run without
 /// the daemon ends: when it answers, when it reports a failure, and when a
 /// hangup stops it; and one it started in a session of its own, which only
-/// the server can stop, stops as the server is asked to exit.
+/// the server can stop, stops as the server is asked to exit, by a command
+/// or by a daemon a signal stops.
 #[test]
 #[cfg(unix)]
 fn a_command_stops_what_its_language_server_started() {
@@ -4391,6 +4392,51 @@ fn a_command_stops_what_its_language_server_started() {
             "the server or its child outlived the command"
         );
     }
+
+    // The daemon runs a private copy of the binary under a home of its own,
+    // so no daemon another run left behind answers.
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join("symora");
+    assert!(
+        Command::new("cp")
+            .arg(SYMORA)
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let root = served(&in_session, "code_action_server.py", &|root| {
+        vec![json!(root.join("main.go")), json!("keep")]
+    });
+    let through_daemon = |args: &[&str]| {
+        Command::new(&exe)
+            .args(args)
+            .args(["--format", "compact"])
+            .current_dir(root.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env_remove("SYMORA_NO_DAEMON")
+            .output()
+            .unwrap()
+    };
+    let output = through_daemon(&["actions", "apply", "main.go:1:1", "Rename first token"]);
+    let status: serde_json::Value =
+        serde_json::from_slice(&through_daemon(&["daemon", "status"]).stdout).unwrap();
+    assert_eq!(status["running"], true, "{status}");
+    let daemon: libc::pid_t = status["pid"].as_u64().unwrap().try_into().unwrap();
+    // SAFETY: the pid is the daemon this test's command started.
+    unsafe { libc::kill(daemon, libc::SIGTERM) };
+    let stopped = [
+        stops(pid_in(&root.path().join("helper.pid"))),
+        stops(daemon),
+    ];
+    let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
+    assert!(output.status.success(), "{payload}");
+    assert_eq!(
+        stopped,
+        [true, true],
+        "the server's child or the daemon outlived the signal"
+    );
 }
 
 /// A path query's live answer is cut to its limit after the ranking every
