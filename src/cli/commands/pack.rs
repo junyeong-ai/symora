@@ -230,6 +230,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             name_some(&specifiers)
         ));
     }
+    if !result.projects_undetermined_imports.is_empty() {
+        let specifiers: Vec<String> = result
+            .projects_undetermined_imports
+            .iter()
+            .map(|specifier| format!("`{specifier}`"))
+            .collect();
+        hints.push(format!(
+            "{} import specifier(s) name different files under the projects of a tsconfig's `references` that compile their importers ({}): pack reads such a file under each one's module options; their dependencies do not contribute to ranking. Inspect the project references.",
+            specifiers.len(),
+            name_some(&specifiers)
+        ));
+    }
     if !result.undetermined_ts_projects.is_empty() {
         hints.push(format!(
             "{} file(s) sit below a tsconfig whose `references` name no one project compiling them ({}); their non-relative specifiers were read without a tsconfig's `paths`, `baseUrl` or conditions. Inspect the project references.",
@@ -385,6 +397,7 @@ mod tests {
             declaration_undetermined_imports: Vec::new(),
             type_root_undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
+            projects_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
             typescript_installed_unread: false,
@@ -466,6 +479,7 @@ mod tests {
         result.declaration_undetermined_imports = vec!["jq".to_string()];
         result.type_root_undetermined_imports = vec!["ex".to_string()];
         result.version_undetermined_imports = vec!["p6".to_string()];
+        result.projects_undetermined_imports = vec!["../components".to_string()];
         result.typescript_ranges = vec![">=5".to_string()];
         result.typescript_not_installed = true;
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
@@ -506,6 +520,12 @@ mod tests {
         );
         assert!(
             json["files"]["hints"][5]
+                .as_str()
+                .unwrap()
+                .contains("1 import specifier(s) name different files under the projects of a tsconfig's `references` that compile their importers (`../components`): pack reads such a file under each one's module options; their dependencies do not contribute to ranking. Inspect the project references.")
+        );
+        assert!(
+            json["files"]["hints"][6]
                 .as_str()
                 .unwrap()
                 .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")

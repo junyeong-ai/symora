@@ -38,6 +38,9 @@ pub(super) struct ImportGraph {
     /// read as different files under its one configuration, where no
     /// installed or declared version fixes one major.
     pub(super) version_undetermined_imports: BTreeSet<String>,
+    /// The specifiers the projects of a tsconfig's `references` compiling
+    /// an importer read as different files.
+    pub(super) projects_undetermined_imports: BTreeSet<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of those specifiers.
     pub(super) typescript_ranges: BTreeSet<String>,
@@ -94,6 +97,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut declaration_undetermined_imports = BTreeSet::new();
     let mut type_root_undetermined_imports = BTreeSet::new();
     let mut version_undetermined_imports = BTreeSet::new();
+    let mut projects_undetermined_imports = BTreeSet::new();
     let mut typescript_ranges = BTreeSet::new();
     let mut typescript_not_installed = false;
     let mut typescript_installed_unread = false;
@@ -152,6 +156,10 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     type_root_undetermined_imports.insert(specifier);
                     continue;
                 }
+                Resolution::ProjectsUndetermined(specifier) => {
+                    projects_undetermined_imports.insert(specifier);
+                    continue;
+                }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
                     match importer.typescript {
@@ -182,6 +190,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         declaration_undetermined_imports,
         type_root_undetermined_imports,
         version_undetermined_imports,
+        projects_undetermined_imports,
         typescript_ranges,
         typescript_not_installed,
         typescript_installed_unread,
@@ -217,6 +226,9 @@ enum Resolution {
     /// as different files under its one configuration, no installed or
     /// declared version fixing one.
     VersionUndetermined(String),
+    /// A specifier the projects of a tsconfig's `references` that compile
+    /// the importer, saying different things, read as different files.
+    ProjectsUndetermined(String),
 }
 
 /// What resolving a file's references needs to know about where the file
@@ -638,10 +650,14 @@ enum Hit {
 }
 
 /// How a specifier the readings of its importer name different files for
-/// is disclosed: as one the TypeScript version decides where they read one
-/// configuration under several majors, else as one the configuration does
-/// not determine.
+/// is disclosed: as one the projects compiling it read apart where several
+/// saying different things take it, as one the TypeScript version decides
+/// where they read one configuration under several majors, else as one the
+/// configuration does not determine.
 fn read_apart(specifier: &str, importer: &Importer) -> Resolution {
+    if !importer.ts_owners.is_empty() {
+        return Resolution::ProjectsUndetermined(specifier.to_string());
+    }
     match importer.typescript {
         Some(_) => Resolution::VersionUndetermined(specifier.to_string()),
         None => Resolution::Undetermined(specifier.to_string()),
@@ -4955,10 +4971,67 @@ mod tests {
         assert!(graph.typescript_not_installed && graph.typescript_installed_unread);
     }
 
+    /// A relative specifier the projects compiling a file read apart is
+    /// disclosed as one they read apart, not as a `paths` alias or a
+    /// workspace package naming no file, as tsc 5.9.3 and 6.0.3 trace it
+    /// (`owners`): `tsconfig.a.json`, whose `module` `amd` reads `classic`,
+    /// finds no file for `../components`, which `tsconfig.b.json`'s
+    /// `bundler` reads as `components/index.ts`; `./util`, which both read
+    /// as `util.ts`, keeps its edge.
+    #[test]
+    fn a_relative_specifier_the_projects_read_apart_names_its_cause() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(0, "src/a/a.ts", ""),
+            ts(1, "src/b/b.ts", ""),
+            ts(
+                2,
+                "src/shared/s.ts",
+                "import * as m0 from \"../components\";\nimport * as m1 from \"./util\";\n",
+            ),
+            ts(3, "src/shared/util.ts", ""),
+            ts(4, "src/components/index.ts", ""),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"files\": [], \"references\": [{\"path\": \"./tsconfig.a.json\"}, \
+                     {\"path\": \"./tsconfig.b.json\"}]}",
+                ),
+                (
+                    "tsconfig.a.json",
+                    "{\"compilerOptions\": {\"composite\": true, \"module\": \"amd\", \"outDir\": \"out/a\"}, \
+                     \"include\": [\"src/shared/**/*.ts\", \"src/a/**/*.ts\"]}",
+                ),
+                (
+                    "tsconfig.b.json",
+                    "{\"compilerOptions\": {\"composite\": true, \"module\": \"esnext\", \
+                     \"moduleResolution\": \"bundler\", \"outDir\": \"out/b\"}, \
+                     \"include\": [\"src/shared/**/*.ts\", \"src/b/**/*.ts\"]}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert_eq!(edges_under(&nodes, 2, &manifests), ["src/shared/util.ts"]);
+        assert_eq!(
+            graph.projects_undetermined_imports,
+            BTreeSet::from(["../components".to_string()])
+        );
+        assert!(graph.undetermined_imports.is_empty());
+        assert!(graph.version_undetermined_imports.is_empty());
+    }
+
     /// A file several projects compile under different majors and module
     /// options is disclosed as their configurations disagreeing, which no
     /// installed or declared version settles, not as one the TypeScript
-    /// version decides (`owners_majors`).
+    /// version decides (`owners_majors`): the specifier as one the projects
+    /// read apart.
     #[test]
     fn a_file_projects_of_different_majors_read_apart_is_no_version_disagreement() {
         let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
@@ -5009,9 +5082,10 @@ mod tests {
         let graph = build_import_graph(&nodes, &manifests);
         assert!(graph.edges[&2].is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.projects_undetermined_imports,
             BTreeSet::from(["p".to_string()])
         );
+        assert!(graph.undetermined_imports.is_empty());
         assert!(graph.version_undetermined_imports.is_empty());
         assert_eq!(
             graph.ts_owner_undetermined,
@@ -6896,7 +6970,7 @@ mod tests {
     /// A specifier that each TypeScript major reads alike but the majors
     /// read differently is disclosed as one the unknown version decides;
     /// one that projects compiling the file read differently under one
-    /// major is disclosed as undetermined whatever the version. Where no
+    /// major is disclosed as one they read apart whatever the version. Where no
     /// TypeScript is installed or declared, a configuration setting a module
     /// option tsc 7.0.2 removed (TS5108) is read under 5 and 6 alone: with
     /// `moduleResolution: "node"` or `"node10"` tsc 5.9.3 and 6.0.3 take the
@@ -7030,9 +7104,10 @@ mod tests {
         );
         assert_eq!(graph.typescript_ranges, BTreeSet::from([">=7".to_string()]));
         assert_eq!(
-            graph.undetermined_imports,
+            graph.projects_undetermined_imports,
             BTreeSet::from(["q6".to_string()])
         );
+        assert!(graph.undetermined_imports.is_empty());
     }
 
     /// Every specifier matches the catch-all pattern `*`, and TypeScript looks
