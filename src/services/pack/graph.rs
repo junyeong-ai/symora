@@ -122,7 +122,9 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                 }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
-                    if let Some(TypeScript::Unknown(Some(range))) = importer.typescript {
+                    if let Some(TypeScript::Above(Some(range)) | TypeScript::Unknown(Some(range))) =
+                        importer.typescript
+                    {
                         typescript_ranges.insert(range.clone());
                     }
                     continue;
@@ -4099,23 +4101,28 @@ mod tests {
     /// directory, where 5.9.3 and 6.0.3 resolve both against `baseUrl`
     /// (`baseurl7`). So where no TypeScript major is installed or declared —
     /// none, or a range fixing none (`latest`) — a configuration setting
-    /// `baseUrl` is read under 5 and 6 alone, but under a range admitting
-    /// only 7 and above (`>=7`, `7.x || 8.x`) it keeps 7 and a specifier
-    /// `baseUrl` decides is disclosed with that range. A set of comparators
-    /// within one major fixes it (`ts_range`).
+    /// `baseUrl` is read under 5 and 6 alone, as it is where the version
+    /// installed is no number (`nonumber`). Under a major above 7, installed
+    /// (`inst8`) or declared (`caret8`), and a range admitting only 7 and
+    /// above (`>=7`, `7.x || 8.x`), it keeps 7, and a specifier `baseUrl`
+    /// decides is disclosed, with the range where one is declared. A set of
+    /// comparators within one major fixes it (`ts_range`).
     #[test]
     fn typescript_7_reads_no_base_url() {
         let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
         let mut nodes = Vec::new();
         let mut configs = Vec::new();
-        for (app, range) in [
-            ("six", Some("^6.0.3")),
-            ("seven", Some("^7.0.2")),
-            ("none", None),
-            ("latest", Some("latest")),
-            ("range", Some(">=5.0.0 <6.0.0")),
-            ("ge7", Some(">=7")),
-            ("ge7or8", Some("7.x || 8.x")),
+        for (app, range, installed) in [
+            ("six", Some("^6.0.3"), None),
+            ("seven", Some("^7.0.2"), None),
+            ("none", None, None),
+            ("latest", Some("latest"), None),
+            ("range", Some(">=5.0.0 <6.0.0"), None),
+            ("ge7", Some(">=7"), None),
+            ("ge7or8", Some("7.x || 8.x"), None),
+            ("caret8", Some("^8.0.0"), None),
+            ("inst8", None, Some("8.0.0")),
+            ("nonumber", None, Some("next")),
         ] {
             nodes.push(node_in(
                 nodes.len(),
@@ -4143,6 +4150,12 @@ mod tests {
                     format!("{{\"devDependencies\": {{\"typescript\": \"{range}\"}}}}"),
                 ));
             }
+            if let Some(version) = installed {
+                configs.push((
+                    format!("{app}/node_modules/typescript/package.json"),
+                    format!("{{\"name\": \"typescript\", \"version\": \"{version}\"}}"),
+                ));
+            }
         }
         let configs: Vec<(&str, &str)> = configs
             .iter()
@@ -4161,7 +4174,10 @@ mod tests {
         assert_eq!(edges(6), vec!["none/src/lib/x.ts"]);
         assert_eq!(edges(9), vec!["latest/src/lib/x.ts"]);
         assert_eq!(edges(12), vec!["range/src/lib/x.ts"]);
-        assert!(edges(15).is_empty() && edges(18).is_empty());
+        for kept in [15, 18, 21, 24] {
+            assert!(edges(kept).is_empty(), "{}", nodes[kept].rel_path);
+        }
+        assert_eq!(edges(27), vec!["nonumber/src/lib/x.ts"]);
         assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
@@ -4169,7 +4185,11 @@ mod tests {
         );
         assert_eq!(
             graph.typescript_ranges,
-            BTreeSet::from([">=7".to_string(), "7.x || 8.x".to_string()])
+            BTreeSet::from([
+                ">=7".to_string(),
+                "7.x || 8.x".to_string(),
+                "^8.0.0".to_string()
+            ])
         );
     }
 
