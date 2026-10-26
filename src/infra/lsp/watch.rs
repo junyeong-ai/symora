@@ -9,7 +9,7 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
-use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind};
+use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use regex_automata::Anchored;
 use regex_automata::hybrid::dfa::DFA;
@@ -71,10 +71,12 @@ pub enum PathKind {
     File,
     Directory,
     /// Gone, and nothing said which it was: notify reports a rename as
-    /// neither, and on Windows any removal. On Linux the directories the
-    /// watch keeps settle it (`WorkspaceWatcher::follow`); elsewhere it is
-    /// taken for a directory, so a file renamed away may reach a watcher
-    /// for paths below it, which finds nothing there.
+    /// neither, and on Windows any removal, and what left a path that a
+    /// directory took in the same batch is not told apart from that
+    /// directory. On Linux the directories the watch keeps settle it
+    /// (`WorkspaceWatcher::follow`); elsewhere it is taken for a directory,
+    /// so a file renamed away may reach a watcher for paths below it, which
+    /// finds nothing there.
     Unknown,
 }
 
@@ -314,13 +316,16 @@ impl WorkspaceWatcher {
     /// them. Its watch is extended first and its files listed after, so a
     /// file written in between is seen by one or the other. A path that
     /// went away with no event saying what it was is settled by the
-    /// directories the watch keeps, where it keeps them.
+    /// directories the watch keeps, where it keeps them, and a file created
+    /// where the watch kept a directory is reported to have replaced it.
     pub fn follow(&mut self, changes: &mut Vec<FileChange>, watch_root: &Path, root: &Path) {
         let mut reported: HashSet<(PathBuf, FileChangeType)> =
             changes.iter().map(|c| (c.path.clone(), c.change)).collect();
+        let mut followed = Vec::with_capacity(changes.len());
         let mut found = Vec::new();
-        for change in changes.iter_mut() {
+        for mut change in std::mem::take(changes) {
             let Ok(relative) = change.path.strip_prefix(root) else {
+                followed.push(change);
                 continue;
             };
             let path = watch_root.join(relative);
@@ -351,9 +356,21 @@ impl WorkspaceWatcher {
                         }
                     }
                 }
+            } else if change.change == FileChangeType::Created && self.retract(&path) == Some(true)
+            {
+                // The watch kept a directory where a file is now, and has let
+                // it go: one renamed away, of which inotify says neither that
+                // it was a directory nor that it held files.
+                followed.push(FileChange {
+                    path: change.path.clone(),
+                    change: FileChangeType::Deleted,
+                    kind: PathKind::Directory,
+                });
             }
+            followed.push(change);
         }
-        changes.extend(found);
+        followed.extend(found);
+        *changes = followed;
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -468,7 +485,9 @@ fn files_under(dir: &Path, watch_root: &Path) -> Vec<PathBuf> {
 struct Seen {
     appeared: bool,
     modified: bool,
-    removed: bool,
+    /// An event took what was at the path away: removed it, or renamed it
+    /// elsewhere or without saying which way.
+    left: bool,
     /// An event created or removed a directory at the path.
     folder: bool,
     /// An event created or removed a file at the path.
@@ -484,6 +503,22 @@ impl Seen {
             _ => PathKind::Unknown,
         }
     }
+
+    /// What left a path that is `now` there after the batch, when it may
+    /// have held files the path no longer holds: whatever left a path that
+    /// is a directory now, which the events do not tell apart from that
+    /// directory, or a directory whose path a file took.
+    fn replaced(&self, now: PathKind) -> Option<PathKind> {
+        if !self.left {
+            None
+        } else if now == PathKind::Directory {
+            Some(PathKind::Unknown)
+        } else if self.folder {
+            Some(PathKind::Directory)
+        } else {
+            None
+        }
+    }
 }
 
 /// Reduce raw events under `watch_root` to protocol changes reported under
@@ -495,7 +530,15 @@ impl Seen {
 /// whether it exists once the batch is read. One that exists after being
 /// created, renamed onto, or removed and recreated is reported as both
 /// created and changed, so a server learns of it whether or not it was
-/// already tracking that path.
+/// already tracking that path. One that something left and a directory
+/// took, or that the events say a directory left and a file took, is
+/// reported deleted first: what left may have held files the path no
+/// longer holds, and the files it holds now are reported created
+/// (`WorkspaceWatcher::follow`).
+/// A rename that does not say which way it went — FSEvents reports both of
+/// its ends alike — is taken to have left the path, so a directory merely
+/// renamed onto one is reported deleted as well, which costs the server a
+/// look below a path that held nothing.
 pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
     let mut order: Vec<PathBuf> = Vec::new();
     let mut seen: HashMap<PathBuf, Seen> = HashMap::new();
@@ -512,8 +555,17 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
             }
         };
         let mark: fn(&mut Seen) = match event.kind {
-            EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => |s| s.appeared = true,
-            EventKind::Remove(_) => |s| s.removed = true,
+            // The end a rename left, which a `Both` names first, is also
+            // reported in a `From` of its own.
+            EventKind::Create(_)
+            | EventKind::Modify(ModifyKind::Name(RenameMode::To | RenameMode::Both)) => {
+                |s| s.appeared = true
+            }
+            EventKind::Modify(ModifyKind::Name(_)) => |s| {
+                s.appeared = true;
+                s.left = true;
+            },
+            EventKind::Remove(_) => |s| s.left = true,
             EventKind::Modify(ModifyKind::Metadata(_))
             | EventKind::Access(_)
             | EventKind::Other => {
@@ -558,7 +610,14 @@ pub fn reduce(events: Vec<RawEvent>, watch_root: &Path, root: &Path) -> Batch {
                 } else {
                     PathKind::File
                 };
-                if touched.appeared || touched.removed {
+                if let Some(gone) = touched.replaced(kind) {
+                    changes.push(FileChange {
+                        path: path.clone(),
+                        change: FileChangeType::Deleted,
+                        kind: gone,
+                    });
+                }
+                if touched.appeared || touched.left {
                     changes.push(FileChange {
                         path: path.clone(),
                         change: FileChangeType::Created,
@@ -928,6 +987,105 @@ mod tests {
     }
 
     #[test]
+    fn a_path_replaced_in_one_batch_is_reported_gone_where_it_may_have_held_files() {
+        use FileChangeType::*;
+        use PathKind::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in [
+            "renamed_away",
+            "swapped",
+            "remade",
+            "was_file",
+            "made",
+            "moved_in",
+        ] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        for name in [
+            "was_dir",
+            "saved.go",
+            "rewritten.go",
+            "renamed_over.go",
+            "edited.go",
+        ] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        let at = |name: &str| root.join(name);
+        let renamed = |mode| EventKind::Modify(ModifyKind::Name(mode));
+        let Batch::Changes(changes) = reduce(
+            vec![
+                // inotify: renamed away, and a directory made in its place.
+                event(renamed(RenameMode::From), &at("renamed_away")),
+                event(EventKind::Create(CreateKind::Folder), &at("renamed_away")),
+                // FSEvents: both ends of a swap, said alike.
+                event(renamed(RenameMode::Any), &at("swapped")),
+                event(EventKind::Remove(RemoveKind::Folder), &at("remade")),
+                event(EventKind::Create(CreateKind::Folder), &at("remade")),
+                event(EventKind::Remove(RemoveKind::File), &at("was_file")),
+                event(EventKind::Create(CreateKind::Folder), &at("was_file")),
+                event(EventKind::Remove(RemoveKind::Folder), &at("was_dir")),
+                event(EventKind::Create(CreateKind::File), &at("was_dir")),
+                // Nothing left these that held what they no longer hold.
+                event(EventKind::Create(CreateKind::Folder), &at("made")),
+                event(renamed(RenameMode::From), &at("gen")),
+                event(renamed(RenameMode::To), &at("moved_in")),
+                Ok(notify::Event::new(renamed(RenameMode::Both))
+                    .add_path(at("gen"))
+                    .add_path(at("moved_in"))),
+                // FSEvents: a file saved by renaming another onto it.
+                event(renamed(RenameMode::Any), &at("saved.go")),
+                event(EventKind::Remove(RemoveKind::File), &at("rewritten.go")),
+                event(EventKind::Create(CreateKind::File), &at("rewritten.go")),
+                event(renamed(RenameMode::From), &at("renamed_over.go")),
+                event(EventKind::Create(CreateKind::File), &at("renamed_over.go")),
+                event(
+                    EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                    &at("edited.go"),
+                ),
+            ],
+            root,
+            root,
+        ) else {
+            panic!("unexpected rescan");
+        };
+        let kinds: Vec<(String, FileChangeType, PathKind)> = changes
+            .into_iter()
+            .map(|c| {
+                let name = c.path.strip_prefix(root).unwrap().display().to_string();
+                (name, c.change, c.kind)
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("renamed_away", Deleted, Unknown),
+                ("renamed_away", Created, Directory),
+                ("swapped", Deleted, Unknown),
+                ("swapped", Created, Directory),
+                ("remade", Deleted, Unknown),
+                ("remade", Created, Directory),
+                ("was_file", Deleted, Unknown),
+                ("was_file", Created, Directory),
+                ("was_dir", Deleted, Directory),
+                ("was_dir", Created, File),
+                ("was_dir", Changed, File),
+                ("made", Created, Directory),
+                ("gen", Deleted, Unknown),
+                ("moved_in", Created, Directory),
+                ("saved.go", Created, File),
+                ("saved.go", Changed, File),
+                ("rewritten.go", Created, File),
+                ("rewritten.go", Changed, File),
+                ("renamed_over.go", Created, File),
+                ("renamed_over.go", Changed, File),
+                ("edited.go", Changed, File),
+            ]
+            .map(|(name, change, kind)| (name.to_string(), change, kind))
+        );
+    }
+
+    #[test]
     fn vcs_stores_and_symora_state_are_never_reported() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1115,14 +1273,87 @@ mod tests {
             .map(|event| event.replace(&under, ""))
             .collect();
         events.sort();
+        let mut expected = vec![
+            "pkg2/p.go:Changed",
+            "pkg2/p.go:Created",
+            "pkg2/sub/q.go:Changed",
+            "pkg2/sub/q.go:Created",
+            "pkg:Deleted",
+        ];
+        // Neither end says which it is, so the end a directory arrived at
+        // may have been left as well; only on Linux do the directories
+        // watched say it held nothing.
+        if !cfg!(target_os = "linux") {
+            expected.insert(4, "pkg2:Deleted");
+        }
+        assert_eq!(events, expected);
+    }
+
+    #[test]
+    fn a_directory_replaced_in_one_batch_reaches_a_watcher_for_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let away = tempfile::tempdir().unwrap();
+        for held in ["pkg/old.go", "pkg/keep.go", "lib/l.go"] {
+            std::fs::create_dir_all(root.join(held).parent().unwrap()).unwrap();
+            std::fs::write(root.join(held), "").unwrap();
+        }
+        std::fs::create_dir(away.path().join("gen")).unwrap();
+        std::fs::write(away.path().join("gen/g.go"), "").unwrap();
+        let (mut watcher, _events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        // `mv pkg out; mkdir pkg`, and a swap, `mv lib out; mv gen lib`.
+        std::fs::rename(root.join("pkg"), away.path().join("pkg")).unwrap();
+        std::fs::create_dir(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/keep.go"), "").unwrap();
+        std::fs::write(root.join("pkg/new.go"), "").unwrap();
+        std::fs::rename(root.join("lib"), away.path().join("lib")).unwrap();
+        std::fs::rename(away.path().join("gen"), root.join("lib")).unwrap();
+
+        // As inotify reports `pkg`, and FSEvents `lib` and a file it saw
+        // written in the new `pkg`.
+        let renamed = |mode| EventKind::Modify(ModifyKind::Name(mode));
+        let Batch::Changes(mut changes) = reduce(
+            vec![
+                event(renamed(RenameMode::From), &watch_root.join("pkg")),
+                event(
+                    EventKind::Create(CreateKind::Folder),
+                    &watch_root.join("pkg"),
+                ),
+                event(renamed(RenameMode::Any), &watch_root.join("lib")),
+                event(
+                    EventKind::Create(CreateKind::File),
+                    &watch_root.join("pkg/new.go"),
+                ),
+            ],
+            &watch_root,
+            &root,
+        ) else {
+            panic!("unexpected rescan");
+        };
+        watcher.follow(&mut changes, &watch_root, &root);
+
+        let registry = registry(serde_json::json!({
+            "watchers": [{ "globPattern": "**/*.go" }]
+        }));
+        let under = format!("{}/", path_to_uri(&root));
+        let events: Vec<String> = selected(&registry, &changes)
+            .into_iter()
+            .map(|event| event.replace(&under, ""))
+            .collect();
+        // Each directory is reported gone before any file it holds now.
+        let (gone, files) = events.split_at(2.min(events.len()));
+        assert_eq!(gone, ["pkg:Deleted", "lib:Deleted"]);
+        let mut files = files.to_vec();
+        files.sort();
         assert_eq!(
-            events,
+            files,
             [
-                "pkg2/p.go:Changed",
-                "pkg2/p.go:Created",
-                "pkg2/sub/q.go:Changed",
-                "pkg2/sub/q.go:Created",
-                "pkg:Deleted",
+                "lib/g.go:Changed",
+                "lib/g.go:Created",
+                "pkg/keep.go:Changed",
+                "pkg/keep.go:Created",
+                "pkg/new.go:Changed",
+                "pkg/new.go:Created",
             ]
         );
     }
@@ -1265,5 +1496,96 @@ mod tests {
 
         let kinds: Vec<PathKind> = changes.iter().map(|c| c.kind).collect();
         assert_eq!(kinds, [PathKind::Directory, PathKind::File]);
+    }
+
+    /// inotify says neither what left a path nor what took its place; the
+    /// directories watched say which of them was a directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_a_replaced_path_held_is_told_by_the_directories_watched() {
+        use FileChangeType::*;
+        use PathKind::*;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let away = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.join("d/sub")).unwrap();
+        std::fs::write(root.join("f"), "").unwrap();
+        let (mut watcher, _events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        // A directory replaced by a file, and a file by a directory.
+        std::fs::rename(root.join("d"), away.path().join("d")).unwrap();
+        std::fs::write(root.join("d"), "").unwrap();
+        std::fs::rename(root.join("f"), away.path().join("f")).unwrap();
+        std::fs::create_dir(root.join("f")).unwrap();
+
+        let from = EventKind::Modify(ModifyKind::Name(RenameMode::From));
+        let Batch::Changes(mut changes) = reduce(
+            vec![
+                event(from, &root.join("d")),
+                event(EventKind::Create(CreateKind::File), &root.join("d")),
+                event(from, &root.join("f")),
+                event(EventKind::Create(CreateKind::Folder), &root.join("f")),
+            ],
+            &watch_root,
+            &root,
+        ) else {
+            panic!("unexpected rescan");
+        };
+        watcher.follow(&mut changes, &watch_root, &root);
+
+        let kinds: Vec<(String, FileChangeType, PathKind)> = changes
+            .into_iter()
+            .map(|c| {
+                let name = c.path.strip_prefix(&root).unwrap().display().to_string();
+                (name, c.change, c.kind)
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("d".to_string(), Deleted, Directory),
+                ("d".to_string(), Created, File),
+                ("d".to_string(), Changed, File),
+                ("f".to_string(), Deleted, File),
+                ("f".to_string(), Created, Directory),
+            ]
+        );
+        assert!(
+            !watcher
+                .watched
+                .iter()
+                .any(|path| path.starts_with(root.join("d")))
+        );
+        assert!(watcher.watched.contains(&root.join("f")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_replaced_in_one_batch_is_watched_anew() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let away = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.join("pkg/old")).unwrap();
+        let (mut watcher, mut events, watch_root) = WorkspaceWatcher::start(&root).unwrap();
+        std::fs::rename(root.join("pkg"), away.path().join("pkg")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/new")).unwrap();
+
+        let Batch::Changes(mut changes) = reduce(
+            vec![
+                event(
+                    EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                    &root.join("pkg"),
+                ),
+                event(EventKind::Create(CreateKind::Folder), &root.join("pkg")),
+            ],
+            &watch_root,
+            &root,
+        ) else {
+            panic!("unexpected rescan");
+        };
+        watcher.follow(&mut changes, &watch_root, &root);
+        std::fs::write(root.join("pkg/new/a.go"), "").unwrap();
+
+        assert!(arrives(&mut events, &root.join("pkg/new/a.go")));
+        assert!(!watcher.watched.contains(&root.join("pkg/old")));
     }
 }
