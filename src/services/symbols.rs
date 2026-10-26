@@ -3965,12 +3965,11 @@ fn shell_sets_beyond_its_name(part: Node, statement: Node) -> bool {
 /// o)`, see [`for_in_binding`]). A comment between those lines is inside the
 /// declaration; one above them is not. The rest of a C or C++ declaration that
 /// invoked a macro begins where that declaration does ([`continued_macro`]),
-/// and a prototype an error holds with the macro it is written after
-/// ([`error_held_prototype`]).
+/// and a prototype an error holds where [`error_held_prototype`] begins it.
 fn declaration_start(node: Node, language: Language) -> Node {
     if language == Language::Cpp
         && let Some(head) =
-            continued_macro(node).or_else(|| error_held_prototype(node).map(|(macro_, _)| macro_))
+            continued_macro(node).or_else(|| error_held_prototype(node).map(|(start, _)| start))
     {
         return head;
     }
