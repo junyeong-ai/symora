@@ -5618,6 +5618,43 @@ mod tests {
         assert_eq!(read[3], (set(&["pk/main.d.ts", "tn/lib/t.ts"]), set(&[])));
     }
 
+    /// A `paths` substitution naming a directory whose `package.json` holds
+    /// `typesVersions` is disclosed as such, as a relative path naming one
+    /// is: tsc 5.9.3 and 6.0.3 resolve none for `@/pv` and 7.0.2 its `index`
+    /// (`pvp_bundler`).
+    #[test]
+    fn a_paths_substitution_naming_a_types_versions_directory_names_its_cause() {
+        let nodes = vec![
+            node_in(0, "src/main.ts", "import \"@/pv\";\n", Language::TypeScript),
+            node_in(1, "src/pv/index.ts", "", Language::TypeScript),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"bundler\", \
+                     \"module\": \"esnext\", \"paths\": {\"@/*\": [\"./src/*\"]}}}",
+                ),
+                (
+                    "src/pv/package.json",
+                    "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.edges[&0].is_empty());
+        assert_eq!(
+            graph.types_versions_undetermined_imports,
+            BTreeSet::from(["@/pv".to_string()])
+        );
+        assert!(graph.undetermined_imports.is_empty());
+    }
+
     /// A `package.json` field a declaration lookup reads names a TypeScript
     /// file too, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`tm_bundler`): a
     /// type root's `types` of `lib/t` names `lib/t.ts`.
