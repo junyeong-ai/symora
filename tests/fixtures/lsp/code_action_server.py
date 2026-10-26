@@ -54,10 +54,11 @@ while True:
             "hoverProvider": True,
             "renameProvider": {"prepareProvider": True},
             "workspaceSymbolProvider": mode in ("ranked-symbols", "computed-members"),
-            "documentSymbolProvider": mode == "computed-members"
+            "documentSymbolProvider": mode in ("computed-members", "dart-outline")
         }}
     elif method == "initialized":
-        if mode in ("unrelated-hover", "busy-rename", "ranked-symbols", "computed-members"):
+        if mode in ("unrelated-hover", "busy-rename", "ranked-symbols", "computed-members",
+                    "dart-outline"):
             server_status()
         elif mode in ("warning-rename", "error-rename"):
             server_status(health=mode.split("-")[0])
@@ -79,6 +80,27 @@ while True:
                 "selectionRange": span((2, 2), (2, 7))
             }]
         }]
+    elif method == "textDocument/documentSymbol" and mode == "dart-outline":
+        # The Dart analyzer's outline: an extension type is a namespace, and
+        # neither it nor the enum lists its primary constructor or the fields
+        # that constructor's parameters declare. The named constructor is
+        # selected from its `.`, and kind 6 marks it as this server's answer.
+        def symbol(name, kind, start, end, selection, children=()):
+            def at(position):
+                return {"line": position[0], "character": position[1]}
+            return {"name": name, "kind": kind,
+                    "range": {"start": at(start), "end": at(end)},
+                    "selectionRange": {"start": at(selection[0]), "end": at(selection[1])},
+                    "children": list(children)}
+        result = [
+            symbol("X", 3, (0, 0), (2, 1), ((0, 15), (0, 16)), [
+                symbol("twice", 7, (1, 2), (1, 27), ((1, 10), (1, 15)))]),
+            symbol("E", 10, (4, 0), (6, 1), ((4, 5), (4, 6)), [
+                symbol("a", 22, (5, 2), (5, 6), ((5, 2), (5, 3)))]),
+            symbol("N", 5, (8, 0), (8, 27), ((8, 6), (8, 7)), [
+                symbol("N.named", 6, (8, 6), (8, 26), ((8, 7), (8, 13))),
+                symbol("n", 8, (8, 14), (8, 25), ((8, 24), (8, 25)))]),
+        ]
     elif method == "textDocument/documentSymbol":
         result = []
     elif method == "workspace/symbol" and mode == "computed-members":

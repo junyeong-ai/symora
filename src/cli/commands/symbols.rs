@@ -92,16 +92,27 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
         SymbolSource::Signature | SymbolSource::Body => options.with_body(),
     };
 
-    match crate::cli::declared_in(app, &abs_path, options).await {
+    let filter = SymbolFilter {
+        pattern: args.symbol.as_deref(),
+        substring: args.substring,
+        include_kinds: include_kinds.as_deref(),
+        exclude_kinds: exclude_kinds.as_deref(),
+        structural: args.structural,
+    };
+    // A path names declarations whichever reading holds them; a listing
+    // without one lists the tree the server gives, in its own kinds.
+    let answer = match args.symbol {
+        Some(_) => {
+            crate::cli::declared_addressing(app, &abs_path, options, |symbols| {
+                !filter.matches(symbols).is_empty()
+            })
+            .await
+        }
+        None => crate::cli::declared_in(app, &abs_path, options).await,
+    };
+    match answer {
         Ok(answer) => {
-            let declarations = SymbolFilter {
-                pattern: args.symbol.as_deref(),
-                substring: args.substring,
-                include_kinds: include_kinds.as_deref(),
-                exclude_kinds: exclude_kinds.as_deref(),
-                structural: args.structural,
-            }
-            .outermost(answer.symbols);
+            let declarations = filter.outermost(answer.symbols);
 
             let total = declarations.len();
             let listed = &declarations[..total.min(limit)];

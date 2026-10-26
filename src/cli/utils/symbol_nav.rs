@@ -123,6 +123,22 @@ pub fn find_named_at_position(symbols: &[Symbol], line: u32, column: u32) -> Opt
     innermost(symbols, line, column, names_position)
 }
 
+/// The symbol, at any depth, whose name begins at a position: where its
+/// reading places it, which is the position no other declaration of the
+/// file takes. [`find_named_at_position`] also reads a position past a
+/// name's first character, up to where the name ends.
+pub fn placed_at(symbols: &[Symbol], line: u32, column: u32) -> Option<&Symbol> {
+    symbols.iter().find_map(|symbol| {
+        if symbol.kind != SymbolKind::File
+            && (symbol.location.line, symbol.location.column) == (line, column)
+        {
+            Some(symbol)
+        } else {
+            placed_at(&symbol.children, line, column)
+        }
+    })
+}
+
 /// The innermost symbol whose declaration header a position is on — see
 /// [`declares_position`]. A position inside a body, on a usage, or on
 /// nothing addresses no symbol here, whatever encloses it.
@@ -563,6 +579,33 @@ mod tests {
             column_addressed_symbol(&symbols, 45, 12),
             SymbolResolution::NotFound
         ));
+    }
+
+    /// A name is placed where it begins: a member is found below its holder,
+    /// a position past a name's first character places nothing, and a
+    /// file-level symbol stands for the file, not for its first position.
+    #[test]
+    fn a_name_is_placed_where_it_begins() {
+        let mut holder = func("Holder", 1, 8, 9);
+        holder.children.push(func("member", 3, 12, 5));
+        let file = Symbol::new(
+            "x.rs".to_string(),
+            SymbolKind::File,
+            Location::point(std::path::PathBuf::from("x.rs"), 1, 1),
+        );
+        let symbols = vec![file, holder];
+
+        assert_eq!(
+            placed_at(&symbols, 3, 12).map(|s| s.name.as_str()),
+            Some("member")
+        );
+        assert_eq!(
+            placed_at(&symbols, 1, 8).map(|s| s.name.as_str()),
+            Some("Holder")
+        );
+        assert!(placed_at(&symbols, 3, 13).is_none());
+        assert!(placed_at(&symbols, 3, 18).is_none());
+        assert!(placed_at(&symbols, 1, 1).is_none());
     }
 
     /// The attributes, decorators, and doc comments a declaration's range

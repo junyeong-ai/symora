@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 
 use crate::app::App;
 use crate::cli::ParsedLocation;
-use crate::cli::declared_in;
 use crate::cli::response::LineRange;
 use crate::cli::utils::{declared_with, shell_arg};
+use crate::cli::{declared_addressing, declared_at, declared_in};
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::Symbol;
 
@@ -114,9 +114,14 @@ pub(crate) fn resolve_file_path(app: &App, target: impl AsRef<Path>) -> Result<P
 /// resolution stays unit-tested without an LSP round-trip.
 async fn find_symbol_by_path(app: &App, file: PathBuf, pattern: &str) -> Result<Addressed> {
     let expected_hash = crate::infra::hash_content(&fs::read_to_string(&file)?);
-    let symbols = declared_in(app, &file, FindSymbolsOptions::default().with_depth(10))
-        .await?
-        .symbols;
+    let symbols = declared_addressing(
+        app,
+        &file,
+        FindSymbolsOptions::default().with_depth(10),
+        |symbols| !Symbol::filter_by_path(symbols, pattern).is_empty(),
+    )
+    .await?
+    .symbols;
     let symbol = unique_symbol_by_path(&symbols, pattern, &app.output.relative_path(&file))?;
     Ok(Addressed::among(file, symbol, &symbols, expected_hash))
 }
@@ -151,9 +156,11 @@ async fn find_symbol_at_location(
     use crate::cli::utils::{SymbolResolution, column_addressed_symbol, line_addressed_symbol};
     let expected_hash = crate::infra::hash_content(&fs::read_to_string(&file)?);
 
-    let symbols = declared_in(app, &file, FindSymbolsOptions::default())
-        .await?
-        .symbols;
+    let symbols = match column {
+        Some(col) => declared_at(app, &file, FindSymbolsOptions::default(), line, col).await?,
+        None => declared_in(app, &file, FindSymbolsOptions::default()).await?,
+    }
+    .symbols;
 
     let resolution = match column {
         Some(col) => column_addressed_symbol(&symbols, line, col),
