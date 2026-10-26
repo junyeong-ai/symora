@@ -808,10 +808,9 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             after = part.next_sibling();
         }
         if after.is_some_and(|error| {
-            error.child_count() == 1
-                && error
-                    .child(0)
-                    .is_some_and(|brace| brace.kind() == "}" && !brace.is_missing())
+            error
+                .child(0)
+                .is_some_and(|brace| brace.kind() == "}" && !brace.is_missing())
         }) {
             macros.extend(written);
             for member in run_before(node, macro_written_members) {
@@ -829,7 +828,7 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
 /// what macros write (`Q_OBJECT` and `Q_DECLARE_PRIVATE(W)` before
 /// `public:`), but for `public`, `protected` or `private` right before it,
 /// the specifier itself. The colon is a specifier's where that word, which
-/// C++ reserves, is read as a name in the body of a `class`, a key C lacks,
+/// C++ reserves, is written in the body of a `class`, a key C lacks,
 /// since in C those words name members (`unsigned int public:1;`), or where
 /// what the grammar read as the width begins with a primitive type it set
 /// aside as an error, since a width is an expression, which a type begins
@@ -869,11 +868,10 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
         let at = leaves.partition_point(|leaf| leaf.start_byte() < colon.start_byte());
         let (mut before, width) = leaves.split_at(at);
         let specifier = before.split_last().filter(|(word, _)| {
-            matches!(word.kind(), "identifier" | "field_identifier")
-                && matches!(
-                    source.get(word.byte_range()),
-                    Some(b"public" | b"protected" | b"private")
-                )
+            matches!(
+                source.get(word.byte_range()),
+                Some(b"public" | b"protected" | b"private")
+            )
         });
         let no_width = width.get(1).is_some_and(|first| {
             first.kind() == "primitive_type" && first.parent().is_some_and(|error| error.is_error())
@@ -935,7 +933,7 @@ fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
             || node.kind() == "access_specifier"
-            || node.child_count() > 0 && opens_with_a_declaration_word(node)
+            || opens_with_a_declaration_word(node)
     };
     let declares_a_function_of_its_own = |member: Node| {
         matches!(
@@ -1073,16 +1071,18 @@ fn run_before(boundary: Node, of_the_run: impl Fn(Node) -> Option<Vec<Node>>) ->
 /// statement's written words ending with the `)`, and the next node opens
 /// with such a word; either is an error, so a subtree without one holds
 /// none. One on a directive's line is the directive's ([`written_words`]).
-/// An empty list may be a declarator's, which `const` follows, and a keyword
-/// taking arguments is a specifier (`__declspec(…)`). Of the two specifiers,
-/// one written before a cv-qualifier or a storage class in a member list is
-/// taken (`_BitInt(8) const z;`, `typeof(1) static w;`), a member the
-/// grammar reads in neither case. Left as read: such an invocation before a
-/// type's name (`QT_DEPRECATED_X("…") QString f();`), since `typeof(1) x;`
-/// declares `x`, though the grammar holds it in an error. Not reached: an
-/// invocation the grammar read as a member's
-/// type, with its arguments for the declarator and the members after it in
-/// an error there (`Q_REVISION(6, 12) void f(const QCollator &c);` before
+/// No arguments are taken too (`_LIBC_SINGLE_BY_DEFAULT()` before
+/// `typedef`): the empty list a member function writes before `const`,
+/// which this would take, the grammar read with its `const` in every input
+/// probed. A keyword taking arguments is a specifier (`__declspec(8)`). Of
+/// the two specifiers, one written before a cv-qualifier or a storage class
+/// in a member list is taken (`_BitInt(8) const z;`, `typeof(1) static
+/// w;`), a member the grammar reads in neither case. Left as read: such an
+/// invocation before a type's name (`QT_DEPRECATED_X("…") QString f();`),
+/// since `typeof(1) x;` declares `x`, though the grammar holds it in an
+/// error. Not reached: an invocation the grammar read as a member's type,
+/// with its arguments for the declarator and the members after it in an
+/// error there (`Q_REVISION(6, 12) void f(const QCollator &c);` before
 /// another such line, of which only the last reads, signed with both).
 fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     fn literal(word: &Node) -> bool {
@@ -1108,7 +1108,6 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
             let name = words[at];
             if close.kind() != ")"
                 || words[at + 1].kind() != "("
-                || !before[at + 2..].iter().any(|word| word.kind() != ",")
                 || !matches!(
                     name.kind(),
                     "identifier" | "type_identifier" | "field_identifier"
@@ -1810,14 +1809,13 @@ fn sibling_before(node: Node) -> Option<Node> {
         .find(|before| !before.is_extra() || before.is_error())
 }
 
-/// Whether a C or C++ node is a word of the run of macros and type words a
-/// prototype the grammar could not read is written after: an invocation
-/// whose arguments name nothing ([`names_a_parameter`]), a plain name or a
-/// primitive type.
+/// Whether a C or C++ node is a word of the run of macros a prototype the
+/// grammar could not read is written after: an invocation whose arguments
+/// name nothing ([`names_a_parameter`]) or a plain name.
 fn in_a_prototype_run(part: Node) -> bool {
     match part.kind() {
         "function_declarator" => !names_a_parameter(part),
-        "identifier" | "type_identifier" | "primitive_type" => true,
+        "identifier" => true,
         _ => false,
     }
 }
@@ -1826,8 +1824,8 @@ fn in_a_prototype_run(part: Node) -> bool {
 /// and ends, where a C or C++ function declarator a syntax error holds is
 /// one: its parameters name something ([`names_a_parameter`]), and it is
 /// written after a macro whose arguments name nothing, standing for its
-/// return type, or a run of them and the words of a type
-/// (`LZMA_API(int) LZMA_X DEPRECATED(x)`, `static int WIN_CDECL`), whether
+/// return type, or a run of them and plain names (`LZMA_API(int) LZMA_X
+/// DEPRECATED(x)`, `WIN_CDECL` after `static int`), whether
 /// the error holds that macro (`GIT_EXTERN(int)
 /// git_blob_lookup_prefix(git_blob **blob, size_t len);`) or the statement
 /// before it does (`FT_EXPORT( FT_Error )` before `FT_Init( FT_Library
@@ -1877,7 +1875,7 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
 
 /// Whether a C or C++ function declarator is a prototype's though its
 /// parameters name nothing: a storage class written right before it, or
-/// before the run of macros and type words written before it in the
+/// before the run of macros written before it in the
 /// statement, begins no statement but a declaration, as no macro's
 /// invocation is (`extern NCURSES_EXPORT(WINDOW *) newwin
 /// (int,int,int,int);`). A syntax error ends the run, as it may hold the `;`
@@ -4168,10 +4166,11 @@ fn placed_kind(
 
 /// Whether `inner`, a child of `outer`, is the header the declaration
 /// `outer` is written with rather than its body: its parameter list, the
-/// type of what it declares, or a syntax error a function definition holds
-/// before its body (the C prototypes a misread definition's header runs
-/// through, `extern NCURSES_EXPORT(int) doupdate (void);` before a block a
-/// macro's body writes). A type's own declaration holds its members
+/// type of what it declares, or a syntax error a function definition holds,
+/// which comes before its body, the definition's last part (the C
+/// prototypes a misread definition's header runs through, `extern
+/// NCURSES_EXPORT(int) doupdate (void);` before a block a macro's body
+/// writes). A type's own declaration holds its members
 /// there instead: its definition (Go's `type S struct { … }`) or its
 /// components (Java's `record R(int a)`). A record type a declaration
 /// defines in its type without a name of its own is the declaration's, so
@@ -4186,12 +4185,7 @@ fn in_header_of(inner: Node, outer: Node) -> bool {
             .child_by_field_name(field)
             .is_some_and(|held| held.id() == inner.id())
     };
-    if inner.is_error()
-        && outer.kind() == "function_definition"
-        && outer
-            .child_by_field_name("body")
-            .is_some_and(|body| inner.end_byte() <= body.start_byte())
-    {
+    if inner.is_error() && outer.kind() == "function_definition" {
         return true;
     }
     if holds("type")
@@ -7827,6 +7821,35 @@ region     = "us-central1"
                 !blanked.contains(macro_),
                 "one pass blanks the whole run: {blanked:?}"
             );
+        }
+    }
+
+    /// An invocation the literal rule takes has literal arguments, `true` and
+    /// `false` among them, or none, under a name, which a keyword taking
+    /// arguments is not (`__declspec(8)`).
+    #[test]
+    fn a_literal_invocation_is_a_name_with_literal_arguments() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("the C++ grammar loads");
+        for (content, expected) in [
+            (
+                "class D {\n  int a;\n  QT_X(1, false)\n  virtual void g();\n};\n",
+                &["QT_X", "(", "1", ",", "false", ")"][..],
+            ),
+            ("__declspec(8)\nstatic int x;\nint after;\n", &[][..]),
+            (
+                "_LIBC_SINGLE_BY_DEFAULT()\n\ntypedef long fpos_t;\n",
+                &["_LIBC_SINGLE_BY_DEFAULT", "(", ")"][..],
+            ),
+        ] {
+            let tree = parser.parse(content, None).expect("the source parses");
+            let blanked: Vec<&str> = literal_argument_macros(tree.root_node())
+                .into_iter()
+                .map(|range| &content[range])
+                .collect();
+            assert_eq!(blanked, expected, "{content:?}");
         }
     }
 
