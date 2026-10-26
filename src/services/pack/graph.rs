@@ -2265,12 +2265,16 @@ impl ProjectIndex<'_> {
     /// (`export_subpath`), read through its conditions (`export_target`).
     /// Without `exports`, or under `node10`, which does not read it, the name
     /// or a subpath stands for the file TypeScript's `node_modules` lookup
-    /// takes below the package's directory with TypeScript's extensions,
-    /// else with JavaScript's (`manifests::package_module`), as tsc 5.9.3,
-    /// 6.0.3 and 7.0.2 trace it: the name by the first of `typings`, `types`
-    /// and `main` it sets, else its `index`, a subpath as the file it names,
-    /// then as a directory, an ES import adding no extension, and a
-    /// `typesVersions` leaving either open; else a file of any kind a subpath
+    /// takes below the package's directory (`manifests::package_module`), as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it: the name by the first of
+    /// `typings`, `types` and `main` it sets, else its `index`, a subpath as
+    /// the file it names, then as a directory, an ES import adding no
+    /// extension, and a `typesVersions` leaving either open. It looks with
+    /// TypeScript's extensions, then with JavaScript's, unless a
+    /// `node_modules` from the importer's directory up, which tsc looks in
+    /// between, holds a declaration or TypeScript file for the specifier,
+    /// which forms no edge, or may hold one, which is disclosed
+    /// (`node_modules_finds`); else a subpath stands for a file of any kind it
     /// spells exactly. Where the module resolution is left open, a subpath
     /// stands for the file below the package it spells, as for Node and the
     /// bundlers, for which the name stands for its `main`, else its `index`,
@@ -2317,14 +2321,27 @@ impl ProjectIndex<'_> {
                 let manifest = self.manifests.package_json_at(directory);
                 let existing = |file: &[String]| self.existing(file);
                 let add = lookup != Some(PathLookup::Esm);
-                let found = [Extensions::TypeScript, Extensions::JavaScript]
-                    .into_iter()
-                    .find_map(|extensions| {
-                        let manifest = manifest.as_ref();
-                        package_module(
-                            root, directory, manifest, subpath, extensions, add, &existing,
-                        )
-                    });
+                let read = |extensions| {
+                    let manifest = manifest.as_ref();
+                    package_module(
+                        root, directory, manifest, subpath, extensions, add, &existing,
+                    )
+                };
+                // tsc looks in every `node_modules` from the importer's
+                // directory up, `@types` included, for TypeScript's files
+                // before it looks for JavaScript's.
+                let elsewhere = |lookup| {
+                    let at = Some(from.directory.as_slice());
+                    self.node_modules_finds(at, specifier, lookup, Extensions::TypeScript)
+                };
+                let found = match read(Extensions::TypeScript) {
+                    Some(hit) => Some(hit),
+                    None => match lookup.map_or(Some(false), elsewhere) {
+                        Some(true) => return Some(Resolution::Files(Vec::new())),
+                        None => return Some(undetermined()),
+                        Some(false) => read(Extensions::JavaScript),
+                    },
+                };
                 let spelled = || {
                     let path = project_path(directory, subpath).filter(|_| !subpath.is_empty())?;
                     self.existing(&path)
@@ -7906,6 +7923,102 @@ mod tests {
                 _ => BTreeSet::new(),
             };
             assert_eq!(graph.undetermined_imports, unnamed, "{importer} {options}");
+        }
+    }
+
+    /// Where TypeScript's pass over a workspace package without `exports`
+    /// finds no declaration or TypeScript file, it looks in every
+    /// `node_modules` from the importer's directory up, `@types` included,
+    /// before the package's JavaScript, as tsc 5.9.3, 6.0.3 and 7.0.2 trace
+    /// it: a declaration there stands for the name or a subpath and forms no
+    /// edge. An ES import under `node16` reads an `@types` directory's
+    /// `index` only where its `package.json` exists, and a `typesVersions`
+    /// there leaves the specifier open. `node10` reaches the package past a
+    /// `paths` JavaScript file its TypeScript pass comes before. The
+    /// package's own JavaScript, installed in `node_modules` as its link
+    /// puts it, holds no declaration, and keeps its edge (`plain`).
+    #[test]
+    fn a_declaration_in_node_modules_comes_before_a_workspace_packages_javascript() {
+        let js = |id, rel| node_in(id, rel, "", Language::JavaScript);
+        let node16 = "\"module\": \"node16\", \"moduleResolution\": \"node16\"";
+        let modes = [
+            (
+                "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"",
+                "src/app.ts",
+                &[][..],
+            ),
+            (
+                "\"module\": \"commonjs\", \"moduleResolution\": \"node10\", \
+                 \"paths\": {\"*\": [\"./third/*\"]}",
+                "src/app.ts",
+                &[],
+            ),
+            (node16, "src/app.cts", &[]),
+            (node16, "src/app.mts", &["packages/p/index.js"]),
+        ];
+        for (options, importer, esm) in modes {
+            let nodes = vec![
+                node_in(
+                    0,
+                    importer,
+                    "import \"w\";\nimport \"w/sub.js\";\nimport \"p\";\n\
+                     import \"v\";\nimport \"plain\";\n",
+                    Language::TypeScript,
+                ),
+                js(1, "packages/w/index.js"),
+                js(2, "packages/w/sub.js"),
+                js(3, "packages/p/index.js"),
+                js(4, "packages/v/index.js"),
+                js(5, "packages/plain/index.js"),
+                js(6, "third/w.js"),
+            ];
+            let config = format!("{{\"compilerOptions\": {{{options}}}}}");
+            let package =
+                |name: &str| format!("{{\"name\": \"{name}\", \"main\": \"./index.js\"}}");
+            let manifests = manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                    ("packages/w/package.json", &package("w")),
+                    ("packages/p/package.json", &package("p")),
+                    ("packages/v/package.json", &package("v")),
+                    ("packages/plain/package.json", &package("plain")),
+                    ("node_modules/@types/w/package.json", "{}"),
+                    ("node_modules/@types/w/index.d.ts", ""),
+                    ("node_modules/@types/w/sub.d.ts", ""),
+                    ("node_modules/@types/p/index.d.ts", ""),
+                    (
+                        "node_modules/@types/v/package.json",
+                        "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                    ),
+                    ("node_modules/@types/v/index.d.ts", ""),
+                    ("node_modules/plain/package.json", &package("plain")),
+                    ("node_modules/plain/index.js", ""),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let edges: Vec<&str> = graph
+                .edges
+                .get(&0)
+                .into_iter()
+                .flatten()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect();
+            let expected: Vec<&str> = esm
+                .iter()
+                .copied()
+                .chain(["packages/plain/index.js"])
+                .collect();
+            assert_eq!(edges, expected, "{importer} {options}");
+            assert_eq!(
+                graph.undetermined_imports,
+                BTreeSet::from(["v".to_string()]),
+                "{importer} {options}"
+            );
         }
     }
 
