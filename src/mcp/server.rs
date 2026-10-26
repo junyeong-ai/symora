@@ -88,8 +88,40 @@ impl ServerHandler for McpServer {
 
 pub async fn serve_stdio(app: App, profile: McpProfile) -> Result<()> {
     let service = McpServer::new(Arc::new(app), profile)
-        .serve(rmcp::transport::stdio())
+        .serve((stdin()?, tokio::io::stdout()))
         .await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Standard input, read on a thread of its own rather than on the runtime's
+/// blocking pool. A read of stdin cannot be cancelled, and dropping the
+/// runtime waits for its blocking work, so a read pending there would hold
+/// the exit until the client wrote again or closed the stream; a thread
+/// outside the runtime ends with the process.
+fn stdin() -> std::io::Result<impl tokio::io::AsyncRead + Send + Unpin + 'static> {
+    use std::io::Read;
+
+    let (sender, mut chunks) = tokio::sync::mpsc::channel(16);
+    std::thread::Builder::new()
+        .name("mcp-stdin".into())
+        .spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = vec![0; 64 * 1024];
+            loop {
+                let chunk = match stdin.read(&mut buffer) {
+                    Ok(0) => return,
+                    Ok(read) => Ok(std::io::Cursor::new(buffer[..read].to_vec())),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => Err(e),
+                };
+                let failed = chunk.is_err();
+                if sender.blocking_send(chunk).is_err() || failed {
+                    return;
+                }
+            }
+        })?;
+    Ok(tokio_util::io::StreamReader::new(futures::stream::poll_fn(
+        move |cx| chunks.poll_recv(cx),
+    )))
 }
