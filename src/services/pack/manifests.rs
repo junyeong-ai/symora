@@ -1815,13 +1815,12 @@ fn declared_typescript(root: &Path, directory: &[String]) -> Option<String> {
 }
 
 /// The major pack reads from a version range: that of a caret, tilde or
-/// exact version, an x-range (`^5.9.0`, `~6.0`, `6.x`, `5`), or a set of
-/// comparators whose written bounds lie within one major (`>=5.0.0
-/// <6.0.0`), each of the alternatives `||` joins agreeing. `None` for any
-/// other range — an open one (`>=5`, `*`), one spanning majors (`>=5 <7`),
-/// a tag (`latest`) — and for two forms that fix a major as npm's semver
-/// reads them, which pack does not: a `>` bound on a bare major (`>5 <7`
-/// takes only 6.x) and a hyphen range (`5.0.0 - 5.9.9`).
+/// exact version, an x-range (`^5.9.0`, `~6.0`, `6.x`, `5`), a set of
+/// comparators whose bounds lie within one major (`>=5.0.0 <6.0.0`, `>5
+/// <7`) or a hyphen range whose ends do (`5.0.0 - 5.9.9`), as node-semver
+/// reads them (`alternative_bounds`), each of the alternatives `||` joins
+/// agreeing. `None` for any other range: an open one (`>=5`, `*`), one
+/// spanning majors (`>=5 <7`, `5 - 6`), a tag (`latest`).
 fn typescript_major(range: &str) -> Option<u64> {
     let mut majors = range.split("||").map(alternative_major);
     let first = majors.next()??;
@@ -1849,13 +1848,26 @@ fn range_admits_below_7(range: &str) -> bool {
     })
 }
 
-/// The bounds one alternative of a range sets on the major: the greatest
-/// major its comparators' lower bounds name, a `>` bound read as admitting
-/// its own, and the least their upper bounds allow, each `None` where none
-/// sets it. `None` where the alternative is no set of comparators pack
-/// reads (`latest`, `*`, a hyphen range). An operator may stand apart from
-/// its version (`>= 5.0.0`).
+/// The bounds one alternative of a range sets on the major, as node-semver
+/// 7.8.5 expands it: the greatest major its comparators' lower bounds name
+/// and the least their upper bounds allow, each `None` where none sets it.
+/// A `>` bound on a version naming no minor starts at the next major (`>6`
+/// as `>=7.0.0`), and one naming a minor stays in its major (`>6.2` as
+/// `>=6.3.0`, `>6.0.0`). A hyphen range is bounded by the majors its two
+/// ends name: node-semver reads the left end as `>=` it, what it leaves out
+/// as zeros, and the right end as `<=` it, or where it leaves a part out as
+/// below the next release of what it names (`5.0.0 - 5` as `>=5.0.0
+/// <6.0.0-0`). `None` where the alternative is no set of comparators or
+/// hyphen range of versions pack reads (`latest`, `*`, `* - 5`). An
+/// operator may stand apart from its version (`>= 5.0.0`).
 fn alternative_bounds(alternative: &str) -> Option<(Option<u64>, Option<u64>)> {
+    if let [from, "-", to] = alternative.split_whitespace().collect::<Vec<_>>()[..] {
+        let major = |end: &str| {
+            let major = end.trim_start_matches(['v', '=']).split('.').next()?;
+            major.parse::<u64>().ok()
+        };
+        return Some((Some(major(from)?), Some(major(to)?)));
+    }
     let operator = |c: char| matches!(c, '<' | '>' | '=' | '^' | '~');
     let mut lowest: Option<u64> = None;
     let mut highest: Option<u64> = None;
@@ -1881,8 +1893,14 @@ fn alternative_bounds(alternative: &str) -> Option<(Option<u64>, Option<u64>)> {
         let first = rest
             .iter()
             .all(|part| matches!(*part, "0" | "x" | "X" | "*"));
+        // Whether it names no minor (`6`, `6.x`), past which a `>` bound
+        // starts with the next major.
+        let bare = rest
+            .first()
+            .is_none_or(|minor| matches!(*minor, "x" | "X" | "*"));
         let (low, high) = match op {
             "" | "=" | "^" | "~" => (Some(major), Some(major)),
+            ">" if bare => (Some(major.checked_add(1)?), None),
             ">=" | ">" => (Some(major), None),
             "<=" => (None, Some(major)),
             "<" if first => (None, Some(major.checked_sub(1)?)),
@@ -2955,9 +2973,11 @@ mod tests {
 
     /// A declared `typescript` range gives a major only where its form is
     /// one pack reads and every version it takes shares one, its lower
-    /// bound's, every alternative agreeing; a `>` bound on a bare major and a
-    /// hyphen range, which npm reads as 6.x and 5.x, give none rather than
-    /// another.
+    /// bound's, every alternative agreeing. A `>` bound and a hyphen range
+    /// are read as node-semver 7.8.5 expands them: `>5 <7` as
+    /// `>=6.0.0 <7.0.0-0`, `>6.2 <7` as `>=6.3.0 <7.0.0-0`, `5.0.0 - 5.9.9`
+    /// as `>=5.0.0 <=5.9.9`, `5.0.0 - 5` as `>=5.0.0 <6.0.0-0`; a wildcard
+    /// end (`* - 5`) is not read, and `5.0.0 -5.9.9` is no range it reads.
     #[test]
     fn a_typescript_range_fixes_a_major_only_by_its_lower_bound() {
         for (range, major) in [
@@ -2977,8 +2997,20 @@ mod tests {
             (">=5.9 <6.1", None),
             (">=5 <7", None),
             ("<6", None),
-            (">5 <7", None),
-            ("5.0.0 - 5.9.9", None),
+            (">5 <7", Some(6)),
+            (">6 <8", Some(7)),
+            (">6.x <8", Some(7)),
+            (">6.2 <7", Some(6)),
+            (">5.0.0 <6", Some(5)),
+            (">= 5 > 5", None),
+            ("5.0.0 - 5.9.9", Some(5)),
+            ("5.0.0 - 5", Some(5)),
+            ("5.2 - 5.9", Some(5)),
+            ("v5.0.0 - v5.9.9", Some(5)),
+            ("5 - 6", None),
+            ("* - 5", None),
+            ("5 - *", None),
+            ("5.0.0 -5.9.9", None),
             ("*", None),
             ("latest", None),
             ("workspace:*", None),
@@ -2998,6 +3030,14 @@ mod tests {
             (">=7.0.0", false),
             ("7.x || 8.x", false),
             ("^7.0.2 || ^8.0.0", false),
+            (">6", false),
+            (">6.x", false),
+            ("^7.0.2 || >6", false),
+            ("7 - 8", false),
+            (">6.2", true),
+            (">6.0.0", true),
+            ("6 - 7", true),
+            ("* - 8", true),
             (">=6", true),
             ("<8", true),
             ("^7.0.2 || ^6.0.3", true),
