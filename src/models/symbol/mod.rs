@@ -794,6 +794,27 @@ mod tests {
     }
 
     #[test]
+    fn a_member_takes_its_body_from_the_same_lines_as_its_type() {
+        let content = "class Shop:\r\n    def open(self):\r\n        return 1\r\n";
+        let at = |name: &str, kind, line, end| {
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(PathBuf::from("m.py"), line, 5, line, 1, end, 17),
+            )
+        };
+        let mut class = at("Shop", SymbolKind::Class, 1, 3);
+        class.children = vec![at("open", SymbolKind::Method, 2, 3)];
+        let mut symbols = vec![class];
+        Symbol::attach_bodies(&mut symbols, content);
+
+        assert_eq!(
+            symbols[0].children[0].body.as_deref(),
+            Some("    def open(self):\n        return 1")
+        );
+    }
+
+    #[test]
     fn compute_paths_chains_parent_to_children() {
         let mut class = build_symbol("MyClass", SymbolKind::Class);
         class.children = vec![
