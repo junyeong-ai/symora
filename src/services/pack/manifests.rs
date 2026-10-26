@@ -60,6 +60,8 @@ pub(super) struct PackageScope {
     /// through, whether or not a workspace lists the package.
     pub(super) name: Option<String>,
     pub(super) exports: Option<serde_json::Value>,
+    /// Its `imports`, which a file reads a `#` specifier through.
+    pub(super) imports: Option<serde_json::Value>,
 }
 
 /// The `"type"` a `package.json` declares.
@@ -1076,6 +1078,7 @@ impl Manifests {
                     kind,
                     name: name.map(str::to_string),
                     exports: manifest.get("exports").cloned(),
+                    imports: manifest.get("imports").cloned(),
                 };
                 (directory.clone(), scope)
             })
@@ -1790,12 +1793,10 @@ pub(super) fn split_package_name(specifier: &str) -> (&str, &str) {
 }
 
 /// The target a package's `exports` maps a subpath of the package to, as
-/// TypeScript and Node look it up: the entry whose key is `.` or
-/// `./<subpath>`, or else the pattern key with one `*` matching it whose
-/// part before the `*` is longest (the longer key on a tie), with what its
-/// `*` matched, which replaces each `*` its target's paths hold. Without
-/// subpath keys `exports` is what `.` maps to. The caller reads the target's
-/// conditions.
+/// TypeScript and Node look it up: the entry for the key `.` or
+/// `./<subpath>` (`mapped_key`), with what a pattern key's `*` matched,
+/// which replaces each `*` its target's paths hold. Without subpath keys
+/// `exports` is what `.` maps to. The caller reads the target's conditions.
 pub(super) fn export_subpath<'e>(
     exports: &'e serde_json::Value,
     subpath: &str,
@@ -1807,24 +1808,35 @@ pub(super) fn export_subpath<'e>(
     };
     match exports {
         serde_json::Value::Object(map) if map.keys().any(|key| key.starts_with('.')) => {
-            match map.get(&key) {
-                Some(target) => Some((target, None)),
-                None => map
-                    .iter()
-                    .filter_map(|(pattern, target)| {
-                        let (prefix, suffix) = pattern.split_once('*')?;
-                        if suffix.contains('*') || key.len() < prefix.len() + suffix.len() {
-                            return None;
-                        }
-                        let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
-                        Some(((prefix.len(), pattern.len()), target, star))
-                    })
-                    .max_by_key(|(rank, ..)| *rank)
-                    .map(|(_, target, star)| (target, Some(star.to_string()))),
-            }
+            mapped_key(map, &key)
         }
         _ if key == "." => Some((exports, None)),
         _ => None,
+    }
+}
+
+/// The target a map of `exports` subpaths or `imports` specifiers holds
+/// for a key: its exact entry, else the pattern key with one `*` matching
+/// it whose part before the `*` is longest, the longer key on a tie, with
+/// what its `*` matched.
+pub(super) fn mapped_key<'e>(
+    map: &'e serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<(&'e serde_json::Value, Option<String>)> {
+    match map.get(key) {
+        Some(target) => Some((target, None)),
+        None => map
+            .iter()
+            .filter_map(|(pattern, target)| {
+                let (prefix, suffix) = pattern.split_once('*')?;
+                if suffix.contains('*') || key.len() < prefix.len() + suffix.len() {
+                    return None;
+                }
+                let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                Some(((prefix.len(), pattern.len()), target, star))
+            })
+            .max_by_key(|(rank, ..)| *rank)
+            .map(|(_, target, star)| (target, Some(star.to_string()))),
     }
 }
 

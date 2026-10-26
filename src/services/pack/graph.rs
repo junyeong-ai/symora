@@ -9,9 +9,10 @@ use super::Node;
 use super::manifests::{
     self, Basedir, Extensions, Hit, JsPackage, Manifests, ModuleKind, ModuleOptions,
     ModuleResolution, PackageType, Pytest, PythonProject, Rootdir, SelfName, TsConfig, TsOwner,
-    TypeScript, either, export_path, export_subpath, mangle_scope, module_names, nearest,
-    node_modules_in, own_or_only, package_module, project_file, project_path, python_packages,
-    python_project, reads_base_url, split_package_name, type_root_holds, type_root_name,
+    TypeScript, either, export_path, export_subpath, mangle_scope, mapped_key, module_names,
+    nearest, node_modules_in, own_or_only, package_module, project_file, project_path,
+    python_packages, python_project, reads_base_url, split_package_name, type_root_holds,
+    type_root_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -328,9 +329,10 @@ struct ExportConditions {
 /// (`export_target`): how it reads a target's path, which says whether
 /// TypeScript reads it, where Node and the bundlers otherwise do
 /// (`Importer::matches`), the conditions it matches, how the import is
-/// written, what a pattern key's `*` matched, and, for a package's own name
-/// read from inside it under a configuration, what that configuration says
-/// of it.
+/// written, what a pattern key's `*` matched, for a package's own name or
+/// an import read from inside it under a configuration, what that
+/// configuration says of it, and for an `imports` map, the reading a target
+/// naming a package is looked up under (`ProjectIndex::package_target`).
 #[derive(Debug, Clone, Copy)]
 struct Lookup<'s> {
     read: TargetRead,
@@ -338,6 +340,7 @@ struct Lookup<'s> {
     form: ImportForm,
     star: Option<&'s str>,
     own: Option<Own<'s>>,
+    imports: Option<Reading>,
 }
 
 /// A package's own name read from inside it under a configuration, by the
@@ -1897,7 +1900,8 @@ impl ProjectIndex<'_> {
                 true => Resolution::Undetermined(specifier.to_string()),
                 false => Resolution::Files(Vec::new()),
             };
-            self.workspace_package(specifier, importer, reading, form)
+            self.package_import(specifier, importer, reading, form)
+                .or_else(|| self.workspace_package(specifier, importer, reading, form))
                 .unwrap_or_else(unmapped)
         };
         let disclosed: fn(String) -> Resolution = match lookup {
@@ -2504,6 +2508,7 @@ impl ProjectIndex<'_> {
                 form,
                 star,
                 own,
+                imports: None,
             };
             self.export_target(target, directory, importer, lookup)
         };
@@ -2550,18 +2555,147 @@ impl ProjectIndex<'_> {
                 }
             }
         };
+        let found = self.under_projects(specifier, from, &read);
+        found.or_else(spelled).unwrap_or_else(undetermined)
+    }
+
+    /// What `read` finds under the options of each project compiling the
+    /// importer (`Manifests::self_names`), with none where no configuration
+    /// compiles it: disclosed where the projects read it apart.
+    fn under_projects(
+        &self,
+        specifier: &str,
+        from: &Node,
+        read: &dyn Fn(Option<&SelfName>) -> Option<Resolution>,
+    ) -> Option<Resolution> {
         let projects = self.manifests.self_names(from);
-        let found = match projects.split_first() {
-            None => read(None),
-            Some((first, rest)) => {
-                let found = read(Some(first));
-                if rest.iter().any(|other| read(Some(other)) != found) {
-                    return Resolution::ProjectsUndetermined(specifier.to_string());
-                }
-                found
+        let Some((first, rest)) = projects.split_first() else {
+            return read(None);
+        };
+        let found = read(Some(first));
+        match rest.iter().all(|other| read(Some(other)) == found) {
+            true => found,
+            false => Some(Resolution::ProjectsUndetermined(specifier.to_string())),
+        }
+    }
+
+    /// What a `#` specifier names through the `imports` of the importer's
+    /// package scope, its nearest `package.json` of any package, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`, `node16` and
+    /// `nodenext` (`zi_*`, `i*_*`), which read it after `paths`; `None` where
+    /// the specifier is no `#` one, the scope has no `imports`, or the
+    /// module resolution, `node10` or `classic`, reads none. Its exact key,
+    /// else the pattern key matching it (`mapped_key`), maps it through the
+    /// conditions TypeScript matches, as `exports` does, in one walk with
+    /// every extension (`#p`) under the options of the project compiling the
+    /// importer, so a target in an output directory is read as its input
+    /// (`zi_imports_outdir_*`; `output_input`), and a target naming a package
+    /// as that package (`package_target`); where it finds none, the file of
+    /// any kind a target spells exactly is the one. Node and the bundlers
+    /// read a target as the script module it spells. `#` names nothing, nor
+    /// does `#/…` under 5; 6 and 7 read it under `bundler` and `nodenext` but
+    /// not `node16`, which pack does not tell apart, nor which Node reads it,
+    /// so it is disclosed there, as is a specifier no key maps.
+    fn package_import(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        reading: Reading,
+        form: ImportForm,
+    ) -> Option<Resolution> {
+        let ImportMode::Exports(conditions) = reading.mode else {
+            return None;
+        };
+        let from = importer.node;
+        let (directory, scope) = nearest(&self.manifests.package_scopes, &from.directory)?;
+        let imports = scope
+            .imports
+            .as_ref()
+            .filter(|_| specifier.starts_with('#'))?;
+        let undetermined = || Resolution::Undetermined(specifier.to_string());
+        let rooted = specifier.starts_with("#/");
+        if specifier == "#" || (rooted && reading.major == Some(5)) {
+            return Some(Resolution::Files(Vec::new()));
+        }
+        if rooted && (reading.major.is_none() || conditions.node != Some(false)) {
+            return Some(undetermined());
+        }
+        let mapped = imports
+            .as_object()
+            .and_then(|imports| mapped_key(imports, specifier));
+        let Some((target, star)) = mapped else {
+            return Some(undetermined());
+        };
+        let walk = |read, options: Option<&SelfName>| {
+            let own = options
+                .zip(reading.major)
+                .map(|(options, major)| Own { options, major });
+            let lookup = Lookup {
+                read,
+                conditions,
+                form,
+                star: star.as_deref(),
+                own,
+                imports: Some(reading),
+            };
+            self.export_target(target, directory, importer, lookup)
+        };
+        let found = |exported| match exported {
+            Exported::Files(files) => Some(Resolution::Files(files)),
+            Exported::Undetermined => Some(undetermined()),
+            Exported::Nothing | Exported::Missing => None,
+        };
+        let read = match reading.major {
+            None => found(walk(TargetRead::Script, None)),
+            Some(_) => {
+                let pass = |options: Option<&SelfName>| {
+                    found(walk(TargetRead::Pass(Extensions::All), options))
+                };
+                let spelled = || found(walk(TargetRead::Spelled, None));
+                self.under_projects(specifier, from, &pass).or_else(spelled)
             }
         };
-        found.or_else(spelled).unwrap_or_else(undetermined)
+        Some(read.unwrap_or_else(undetermined))
+    }
+
+    /// What a target naming a package, which an `imports` map may hold,
+    /// names, `*` replaced by what a pattern key's matched: the file the
+    /// importer's own lookup of that specifier takes
+    /// (`lookup_bare_specifier`), as tsc resolves it from the package's
+    /// directory above the importer (`#dep`, `#self`); else none outside
+    /// the project where a `node_modules` package takes it, and where none
+    /// does, nothing, so that TypeScript reads the next condition or entry.
+    /// A target that is itself a `#` specifier is left undetermined.
+    fn package_target(
+        &self,
+        name: &str,
+        importer: &Importer,
+        lookup: Lookup,
+        reading: Reading,
+    ) -> Exported {
+        let specifier = match lookup.star {
+            Some(star) => name.replace('*', star),
+            None => name.to_string(),
+        };
+        if specifier.starts_with('#') {
+            return Exported::Undetermined;
+        }
+        match self.lookup_bare_specifier(&specifier, importer, reading, lookup.form) {
+            Resolution::Files(files) if !files.is_empty() => Exported::Files(files),
+            Resolution::Files(_) => {
+                let at = Some(importer.node.directory.as_slice());
+                let all = Extensions::All;
+                let installed = path_lookup(reading, lookup.form).and_then(|path| {
+                    self.node_modules_finds(at, &specifier, path, all, None, false)
+                });
+                match installed {
+                    Some(true) => Exported::Files(Vec::new()),
+                    Some(false) => Exported::Missing,
+                    None => Exported::Undetermined,
+                }
+            }
+            _ => Exported::Undetermined,
+        }
     }
 
     /// The input tsc reads in place of an `exports` target a package's own
@@ -2734,16 +2868,17 @@ impl ProjectIndex<'_> {
             }
     }
 
-    /// What an `exports` target names for an importer: a path, which has to
-    /// start `./`, the file the lookup reads it as (`TargetRead`), a pattern
-    /// key's `*` match in place of each `*` it holds; an array, what its
-    /// first entry naming a file names; a condition object, what the target
-    /// of the first of its keys, in their written order, that the importer
-    /// matches names — nested objects read alike. TypeScript passes over a
-    /// target naming no file to the next entry or key; Node and the bundlers
-    /// stop at it, so where they resolve the file, the lookup ends there.
-    /// Where a key the importer's configuration leaves open names a file
-    /// that the keys after it do not, the target is undetermined.
+    /// What an `exports` or `imports` target names for an importer: a path,
+    /// which has to start `./`, the file the lookup reads it as
+    /// (`TargetRead`), a pattern key's `*` match in place of each `*` it
+    /// holds; in `imports`, a package's name (`package_target`); an array,
+    /// what its first entry naming a file names; a condition object, what
+    /// the target of the first of its keys, in their written order, that the
+    /// importer matches names — nested objects read alike. TypeScript passes
+    /// over a target naming no file to the next entry or key; Node and the
+    /// bundlers stop at it, so where they resolve the file, the lookup ends
+    /// there. Where a key the importer's configuration leaves open names a
+    /// file that the keys after it do not, the target is undetermined.
     fn export_target(
         &self,
         target: &serde_json::Value,
@@ -2772,6 +2907,14 @@ impl ProjectIndex<'_> {
                     TargetRead::Spelled => self.existing(&path),
                 };
                 found.map_or(Exported::Missing, Exported::Files)
+            }
+            serde_json::Value::String(name)
+                if !name.starts_with("../") && !name.starts_with('/') =>
+            {
+                match lookup.imports {
+                    Some(reading) => self.package_target(name, importer, lookup, reading),
+                    None => Exported::Nothing,
+                }
             }
             serde_json::Value::Array(entries) => entries
                 .iter()
@@ -9112,6 +9255,188 @@ mod tests {
             BTreeSet::from(["packages/b/src/skip/k.ts".to_string()])
         );
         assert!(graph.undetermined_imports.is_empty());
+    }
+
+    /// A `#` specifier is read through the `imports` of the importer's
+    /// nearest `package.json`, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under
+    /// `bundler`, `node16` and `nodenext` (`zi_*`, `i*_*`): an exact or a
+    /// pattern key (`#cfg`, `#u/a`), its conditions as `exports` reads them
+    /// (`#c`), in one walk with every extension (`#p`), a target naming a
+    /// package as that package's name (`#dep`, `#self`), a target in an
+    /// output directory as its input (`#o`). One no key maps, whose package
+    /// is not installed, or whose target climbs out of the package, which
+    /// names no package even beside a `node_modules` (`outside.ts`), is
+    /// disclosed (`#missing`, `#lost`, `#up`), as is one whose target is a
+    /// `#` specifier, which tsc follows and 5.9.3 overflows its stack on
+    /// where it names itself (`#chain`; `i_loop`); `#`
+    /// names nothing, nor does `#/slash` under 5, where 6 reads it under
+    /// `bundler` but under `nodenext` alone of the `node16` family, which
+    /// pack discloses. `node10` reads no `imports`, nor does a file below a
+    /// nearer `package.json` holding none (`esm`). Node reads a JavaScript
+    /// file's as the script module a target spells (`js`; `i_js`), and
+    /// `#/r` as its version decides, which pack does not know.
+    #[test]
+    fn a_hash_specifier_is_read_through_the_imports_of_its_package_scope() {
+        let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
+        let main = [
+            "packages/w/src/u/a.ts",
+            "packages/w/src/cfg.ts",
+            "packages/w/src/p.js",
+        ];
+        let modes = [
+            ("5.9.3", bundler, "ts", "c-esm", None, false),
+            (
+                "5.9.3",
+                "\"module\": \"node16\", \"moduleResolution\": \"node16\"",
+                "cts",
+                "c-cjs",
+                None,
+                false,
+            ),
+            (
+                "5.9.3",
+                "\"module\": \"commonjs\", \"moduleResolution\": \"node10\"",
+                "ts",
+                "",
+                None,
+                false,
+            ),
+            (
+                "^6.0.3",
+                bundler,
+                "ts",
+                "c-esm",
+                Some("packages/w/src/slash.ts"),
+                false,
+            ),
+            (
+                "^6.0.3",
+                "\"module\": \"nodenext\", \"moduleResolution\": \"nodenext\"",
+                "mts",
+                "c-esm",
+                None,
+                true,
+            ),
+        ];
+        for (typescript, options, extension, condition, slash, rooted) in modes {
+            let source = "import \"#u/a\";\nimport \"#cfg\";\nimport \"#p\";\nimport \"#c\";\n\
+                          import \"#dep\";\nimport \"#self\";\nimport \"#lost\";\n\
+                          import \"#missing\";\nimport \"#/slash\";\nimport \"#\";\n\
+                          import \"#up\";\nimport \"#chain\";\n";
+            let importer = format!("packages/w/src/main.{extension}");
+            let ts = |id, rel: &'static str| node_in(id, rel, "", Language::TypeScript);
+            let nodes = vec![
+                node_in(0, &importer, source, Language::TypeScript),
+                ts(1, "packages/w/src/u/a.ts"),
+                ts(2, "packages/w/src/cfg.ts"),
+                node_in(3, "packages/w/src/p.js", "", Language::JavaScript),
+                ts(4, "packages/w/types/p.d.ts"),
+                ts(5, "packages/w/src/c-esm.ts"),
+                ts(6, "packages/w/src/c-cjs.ts"),
+                ts(7, "packages/w/src/sub.ts"),
+                ts(8, "packages/w/src/slash.ts"),
+                ts(9, "packages/d/index.ts"),
+                node_in(
+                    10,
+                    "packages/w/src/esm/m.ts",
+                    "import \"#cfg\";\n",
+                    Language::TypeScript,
+                ),
+                node_in(
+                    11,
+                    "packages/o/src/main.ts",
+                    "import \"#o\";\n",
+                    Language::TypeScript,
+                ),
+                ts(12, "packages/o/src/o.ts"),
+                node_in(
+                    13,
+                    "packages/js/src/main.js",
+                    "import \"#cfg\";\nimport \"#/r\";\n",
+                    Language::JavaScript,
+                ),
+                node_in(14, "packages/js/src/cfg.js", "", Language::JavaScript),
+            ];
+            let root = format!(
+                "{{\"workspaces\": [\"packages/*\"], \"devDependencies\": {{\"typescript\": \"{typescript}\"}}}}"
+            );
+            let config = format!("{{\"compilerOptions\": {{{options}}}}}");
+            let built = format!(
+                "{{\"compilerOptions\": {{{bundler}, \"outDir\": \"dist\", \"rootDir\": \"src\"}}}}"
+            );
+            let manifests = manifests_of(
+                &[
+                    ("package.json", &root),
+                    (
+                        "packages/w/package.json",
+                        "{\"name\": \"w\", \"exports\": {\"./sub\": \"./src/sub.ts\"}, \"imports\": \
+                         {\"#u/*\": \"./src/u/*.js\", \"#cfg\": \"./src/cfg.js\", \"#p\": \
+                         {\"default\": \"./src/p.js\", \"types\": \"./types/p.d.ts\"}, \"#c\": \
+                         {\"import\": \"./src/c-esm.js\", \"require\": \"./src/c-cjs.js\"}, \
+                         \"#dep\": \"d\", \"#self\": \"w/sub\", \"#lost\": \"lodash\", \
+                         \"#/slash\": \"./src/slash.js\", \"#up\": \"../outside.js\", \
+                         \"#chain\": \"#cfg\"}}",
+                    ),
+                    ("packages/w/tsconfig.json", &config),
+                    ("packages/w/src/esm/package.json", "{\"type\": \"module\"}"),
+                    (
+                        "packages/d/package.json",
+                        "{\"name\": \"d\", \"exports\": {\".\": \"./index.ts\"}}",
+                    ),
+                    (
+                        "packages/o/package.json",
+                        "{\"name\": \"o\", \"imports\": {\"#o\": \"./dist/o.js\"}}",
+                    ),
+                    ("packages/o/tsconfig.json", &built),
+                    ("node_modules/.package-lock.json", "{}"),
+                    ("outside.ts", ""),
+                    (
+                        "packages/js/package.json",
+                        "{\"type\": \"module\", \"imports\": {\"#cfg\": \"./src/cfg.js\", \
+                         \"#/r\": \"./src/cfg.js\"}}",
+                    ),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let edges = |id| edges_under(&nodes, id, &manifests);
+            assert_eq!(
+                edges(13),
+                ["packages/js/src/cfg.js"],
+                "{typescript} {options}"
+            );
+            let expected: Vec<String> = match condition {
+                "" => Vec::new(),
+                _ => main
+                    .iter()
+                    .map(|file| file.to_string())
+                    .chain([
+                        format!("packages/w/src/{condition}.ts"),
+                        "packages/d/index.ts".to_string(),
+                        "packages/w/src/sub.ts".to_string(),
+                    ])
+                    .chain(slash.map(str::to_string))
+                    .collect(),
+            };
+            assert_eq!(edges(0), expected, "{typescript} {options}");
+            assert!(edges(10).is_empty(), "{typescript} {options}");
+            assert_eq!(edges(11), ["packages/o/src/o.ts"], "{typescript} {options}");
+            let unresolved: &[&str] = match condition {
+                "" => &[],
+                _ => &["#chain", "#lost", "#missing", "#up"],
+            };
+            let disclosed: BTreeSet<String> = ["#/r"]
+                .iter()
+                .chain(unresolved)
+                .copied()
+                .chain(rooted.then_some("#/slash"))
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                graph.undetermined_imports, disclosed,
+                "{typescript} {options}"
+            );
+        }
     }
 
     /// A package's `exports` maps by conditions, read in their written order
