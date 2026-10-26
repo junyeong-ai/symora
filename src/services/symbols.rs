@@ -1059,29 +1059,15 @@ fn run_before(boundary: Node, of_the_run: impl Fn(Node) -> Option<Vec<Node>>) ->
 /// the grammar set the invocation aside as an error's last words or read
 /// it as a call ending a statement whose `;` it supplied, the statement's
 /// written words ending with the `)`, and the next node opens with such a
-/// word; either is an error, so a subtree without one holds none. One on a directive's line is the directive's, which ends with its
-/// line (`#if QT_VERSION < QT_VERSION_CHECK(7,0,0)` before `struct`); a
-/// directive continued past that line is not seen. An empty list may be a
-/// declarator's, which `const` follows, and a keyword taking arguments is
-/// a specifier (`__declspec(…)`). Left as read: such an invocation before a
+/// word; either is an error, so a subtree without one holds none. One on a
+/// directive's line is the directive's ([`written_words`]). An empty list
+/// may be a declarator's, which `const` follows, and a keyword taking
+/// arguments is a specifier (`__declspec(…)`). Left as read: such an invocation before a
 /// type's name (`QT_DEPRECATED_X("…") QString f();`), since the grammar
 /// reads GNU `typeof` as a name, and `typeof(1) x;` declares `x`; that one
 /// written before a cv-qualifier or storage class (`typeof(1) const x;`)
 /// would be taken.
 fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
-    fn leaf_before(node: Node) -> Option<Node> {
-        let mut at = node;
-        let mut before = loop {
-            if let Some(before) = at.prev_sibling() {
-                break before;
-            }
-            at = at.parent()?;
-        };
-        while let Some(last) = before.child(before.child_count().wrapping_sub(1)) {
-            before = last;
-        }
-        Some(before)
-    }
     fn literal(word: &Node) -> bool {
         matches!(word.kind(), "," | "number_literal" | "true" | "false")
             || word.parent().is_some_and(|literal| {
@@ -1110,9 +1096,6 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
                     name.kind(),
                     "identifier" | "type_identifier" | "field_identifier"
                 )
-                || std::iter::successors(leaf_before(name), |leaf| leaf_before(*leaf))
-                    .take_while(|leaf| leaf.start_position().row == name.start_position().row)
-                    .any(|leaf| leaf.kind().starts_with('#') || leaf.kind() == "preproc_directive")
             {
                 break;
             }
@@ -1618,11 +1601,13 @@ fn qualified_type_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize
 
 /// The tokens a C or C++ node writes, in order, comments and the tokens the
 /// grammar supplied left out: what a macro is spelled with, blanked word by
-/// word so the lines between them hold. A directive's keyword is left out
-/// too, where the grammar held a conditional's `#endif` or `#else` in an
-/// error with a macro's words (`Q_OBJECT #endif Q_DECLARE_PRIVATE(X)`
-/// before `public:`): no macro is spelled with it, and blanking it would
-/// leave the conditional it closes open.
+/// word so the lines between them hold. A directive's tokens are left out
+/// too, its keyword and the rest of its line, wherever the grammar held
+/// them: no macro is spelled with them, and blanking one changes the
+/// directive, as an `#endif` the grammar held in an error with a macro's
+/// words leaves the conditional it closes open (`Q_OBJECT #endif
+/// Q_DECLARE_PRIVATE(X)` before `public:`). A directive continued past its
+/// line is not seen, nor one whose keyword is written before the node.
 fn written_words(node: Node) -> Vec<Node> {
     written_words_before(node, usize::MAX)
 }
@@ -1632,16 +1617,19 @@ fn written_words(node: Node) -> Vec<Node> {
 fn written_words_before(node: Node, end: usize) -> Vec<Node> {
     let mut words = Vec::new();
     let mut walk = vec![node];
+    let mut directive = None;
     while let Some(part) = walk.pop() {
-        if part.start_byte() >= end
-            || part.is_extra() && !part.is_error()
-            || part.is_missing()
-            || part.kind().starts_with('#')
-        {
+        if part.start_byte() >= end || part.is_extra() && !part.is_error() || part.is_missing() {
             continue;
         }
         if part.child_count() == 0 {
-            words.push(part);
+            let row = part.start_position().row;
+            if directs(part) {
+                directive = Some(row);
+            }
+            if directive != Some(row) {
+                words.push(part);
+            }
             continue;
         }
         let mut cursor = part.walk();
@@ -1649,6 +1637,12 @@ fn written_words_before(node: Node, end: usize) -> Vec<Node> {
         walk.extend(children.into_iter().rev());
     }
     words
+}
+
+/// Whether a C or C++ token is a preprocessor directive's keyword
+/// (`#endif`, `#define`, `#pragma`).
+fn directs(token: Node) -> bool {
+    token.kind().starts_with('#') || token.kind() == "preproc_directive"
 }
 
 /// Whether a C or C++ expression holds a call or a literal.
@@ -7758,6 +7752,57 @@ region     = "us-central1"
             assert!(
                 !blanked.contains(macro_),
                 "one pass blanks the whole run: {blanked:?}"
+            );
+        }
+    }
+
+    /// A directive the grammar held among a macro's words is no word of it:
+    /// a rule neither blanks its line nor reads it as the end of a run.
+    #[test]
+    fn a_directive_among_macro_words_keeps_its_line() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .expect("the C++ grammar loads");
+        for (content, kept, blanked_names) in [
+            (
+                "FOO(1)\n#define B 2\nBAR(2)\n#ifdef A\nBAZ(3)\n#endif\n#pragma pack(1)\nQUX(4)\n\
+                 int f(void);\n",
+                &[
+                    "#define B 2\n",
+                    "#ifdef A\n",
+                    "#endif\n",
+                    "#pragma pack(1)\n",
+                ][..],
+                &["FOO", "BAR", "BAZ", "QUX"][..],
+            ),
+            (
+                "QT_BEGIN_NAMESPACE\n\ntemplate <typename T>\nclass Outer {\n#ifdef HAS_HASHER\n    \
+                 template <typename HT>\n    struct Inner {\n        int x = 1;\n    };\n#endif\n    \
+                 int a;\n};\n",
+                &["#ifdef HAS_HASHER\n", "#endif\n"][..],
+                &["QT_BEGIN_NAMESPACE"][..],
+            ),
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n#endif\n{\n    int a;\n};\n",
+                &["class QList\n", "#ifndef Q_QDOC\n"][..],
+                &[][..],
+            ),
+        ] {
+            let tree = parser.parse(content, None).expect("the source parses");
+            let root = tree.root_node();
+            let mut bytes = content.as_bytes().to_vec();
+            for range in misread_class_macros(root, content.as_bytes())
+                .into_iter()
+                .chain(literal_argument_macros(root))
+            {
+                bytes[range].fill(b' ');
+            }
+            let blanked = String::from_utf8(bytes).expect("blanks keep the source UTF-8");
+            assert!(
+                kept.iter().all(|line| blanked.contains(line))
+                    && blanked_names.iter().all(|name| !blanked.contains(name)),
+                "a directive's line is kept, and a run goes on past it: {blanked:?}"
             );
         }
     }
