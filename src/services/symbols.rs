@@ -1382,15 +1382,19 @@ fn declares_a_function(node: Node) -> bool {
 /// name the class head ends with (qualified, specialized, then `final`), is
 /// no part of the grammar there, so it is a macro; one inside brackets is an
 /// argument or an attribute (`__declspec(dllexport)`, `[[nodiscard]]`), one
-/// in a template header a parameter (`template <typename T>`), and the head
-/// ends where a base clause begins. What the grammar read before the block
-/// may hold other heads, each ending with a `;` or the `{` of its body
-/// (`QT_BEGIN_NAMESPACE template <typename T> class Outer {` before a member
-/// `struct Inner {`), and each is read alone, from the end of the one before;
-/// in one with no body of its own, the name after the key may be a type's
-/// (`struct stat st;`), so only what is written before the key is taken. A
-/// preprocessor conditional between a head's name and the `{` or `;` after
-/// it is read through its first branch ([`head_conditional`]).
+/// in a template header a parameter (`template <typename T>`), one in the
+/// requires-clause after it, to the class key, a constraint's (`requires
+/// std::integral<T>`), and the head ends where a base clause begins. A
+/// clause the grammar reads as an expression running into the class
+/// (`requires (sizeof(T) > 1) && C<T> class EXPORT Foo {`) is not reached.
+/// What the grammar read before the block may hold other heads, each ending
+/// with a `;` or the `{` of its body (`QT_BEGIN_NAMESPACE template <typename
+/// T> class Outer {` before a member `struct Inner {`), and each is read
+/// alone, from the end of the one before; in one with no body of its own,
+/// the name after the key may be a type's (`struct stat st;`), so only what
+/// is written before the key is taken. A preprocessor conditional between a
+/// head's name and the `{` or `;` after it is read through its first branch
+/// ([`head_conditional`]).
 fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let text = |node: Node| source.get(node.byte_range()).unwrap_or_default();
     let is_identifier = |node: Node| {
@@ -1437,6 +1441,7 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         let leaves = written_words_before(node, opens);
         let mut depth = 0usize;
         let mut header: Option<usize> = None;
+        let mut clause = false;
         let mut outside = Vec::with_capacity(leaves.len());
         for (at, leaf) in leaves.iter().enumerate() {
             if header.is_none()
@@ -1452,6 +1457,15 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
                     _ => open,
                 };
                 header = (open > 0 || leaf.kind() != ">").then_some(open);
+                clause = header.is_none()
+                    && leaves
+                        .get(at + 1)
+                        .is_some_and(|next| text(*next) == b"requires");
+                outside.push(false);
+                continue;
+            }
+            clause &= !matches!(text(*leaf), b"class" | b"struct" | b"union");
+            if clause {
                 outside.push(false);
                 continue;
             }
@@ -9328,6 +9342,11 @@ region     = "us-central1"
                  class EXPORT It final\n    : public Base</*b=*/false> {\n  friend class internal::F;\n\n \
                  public:\n  It(const Message* m) : Base(m) {}\n};\n",
                 &["EXPORT"][..],
+            ),
+            (
+                "QT_BEGIN_NAMESPACE\n\ntemplate <typename T> requires std::integral<T>\n\
+                 class Q_EXPORT Foo {\n  int a;\n};\nint after(int x);\n",
+                &["QT_BEGIN_NAMESPACE", "Q_EXPORT"][..],
             ),
         ] {
             let tree = parser.parse(content, None).expect("the source parses");
