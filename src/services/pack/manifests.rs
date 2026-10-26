@@ -690,12 +690,12 @@ pub(super) fn module_file(
 /// `typings` and `types`, where the extensions hold declarations, and
 /// `main` that is set names, with the extensions in place of the one it
 /// writes (`lib/m.js` as `lib/m.ts`), or that directory's `index`; else, a
-/// field naming no file included, its own `index`. A `typesVersions` there
-/// leaves it open: 5.9.3 and 6.0.3 resolve none where 7.0.2 takes the
-/// `index`. Its `exports` is not read. A field's file is looked up with an
-/// extension added and, for declarations alone, as a TypeScript file too
-/// (`named_extensions`); the `index` with one added where `add`, which an
-/// ES import under `node16` does not.
+/// field naming no file included, its own `index`. A `typesVersions` there,
+/// which pack does not follow, leaves it open, since it may map the
+/// directory to another file. Its `exports` is not read. A field's file is
+/// looked up with an extension added and, for declarations alone, as a
+/// TypeScript file too (`named_extensions`); the `index` with one added
+/// where `add`, which an ES import under `node16` does not.
 pub(super) fn directory_module(
     directory: &[String],
     manifest: Option<&serde_json::Value>,
