@@ -42,32 +42,9 @@ pub async fn serve_http(app: App, addr: SocketAddr, profile: McpProfile) -> Resu
     tracing::info!("Symora MCP listening on http://{addr}");
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+            crate::infra::signal::stop_requested().await;
             cancellation.cancel();
         })
         .await?;
     Ok(())
-}
-
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(_) => return tokio::signal::ctrl_c().await.unwrap_or(()),
-        };
-        let mut sigint = match signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        tokio::select! {
-            _ = sigterm.recv() => {}
-            _ = sigint.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }

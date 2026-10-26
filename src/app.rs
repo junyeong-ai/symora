@@ -187,6 +187,12 @@ impl App {
         self.output.print_error(error);
     }
 
+    /// Ask the language servers this process started to exit, for the
+    /// binary crate's `main` once the command has answered.
+    pub async fn shutdown(&self) {
+        self.lsp.shutdown().await;
+    }
+
     /// Return a clone of `self` with the output sink replaced.
     ///
     /// Used by the MCP adapter to capture command output into a buffer
