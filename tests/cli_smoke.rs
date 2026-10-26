@@ -184,6 +184,88 @@ fn mcp_initialize_returns_protocol_version() {
     assert_eq!(json["result"]["serverInfo"]["name"], "symora");
 }
 
+/// A client that signals `mcp serve` rather than closing its input still
+/// sees it exit: the read of stdin, which nothing can cancel, does not hold
+/// the exit.
+#[test]
+#[cfg(unix)]
+fn mcp_serve_exits_on_a_signal_while_its_input_is_open() {
+    use std::io::BufRead;
+    use std::time::{Duration, Instant};
+
+    let mut child = symora()
+        .args(["mcp", "serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn symora mcp serve");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    let mut answer = || {
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        assert!(line.contains(r#""result""#), "{line}");
+    };
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"symora-tests","version":"1"}}}}}}"#
+    )
+    .unwrap();
+    answer();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"ping"}}"#).unwrap();
+    answer();
+
+    // SAFETY: the pid is the child this test started.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let exited = child.try_wait().unwrap().is_some();
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        exited,
+        "mcp serve outlived a SIGTERM while its input stayed open"
+    );
+}
+
+/// A read of stdin that fails ends the session as a failure, rather than
+/// being tried again.
+#[test]
+#[cfg(unix)]
+fn mcp_serve_ends_when_its_input_cannot_be_read() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = symora()
+        .args(["mcp", "serve"])
+        .stdin(std::fs::File::open(dir.path()).unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn symora mcp serve");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let status = child.try_wait().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        status.and_then(|status| status.code()),
+        Some(2),
+        "mcp serve did not end as a failure on a stdin it cannot read"
+    );
+}
+
 #[test]
 fn mcp_tools_list_advertises_pack_and_search() {
     let mut child = symora()

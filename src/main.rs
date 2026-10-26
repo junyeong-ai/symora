@@ -50,8 +50,12 @@ fn main() {
     };
 
     match runtime.block_on(async_main()) {
-        // Exiting skips destructors, so the runtime goes first: dropping it
-        // stops the language servers this process started.
+        // Exiting skips destructors, so the runtime is dropped first, which
+        // waits for the work it holds: its tasks are dropped, stopping the
+        // language servers this process started, and a handler writing
+        // source files, which it does without yielding, finishes. A read of
+        // stdin there would hold the exit until the client wrote again, so
+        // `mcp serve` reads stdin outside it.
         Ok(errored) => {
             drop(runtime);
             if errored {
