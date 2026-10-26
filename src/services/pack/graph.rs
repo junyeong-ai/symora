@@ -532,6 +532,19 @@ enum PathLookup {
     Esm,
 }
 
+impl PathLookup {
+    /// The passes the lookup makes, each with its extensions: `classic` and
+    /// `node10` TypeScript's, then JavaScript's, over every path a
+    /// specifier may name before the next pass; `bundler` and `node16` one
+    /// with both.
+    fn passes(self) -> &'static [Extensions] {
+        match self {
+            Self::Classic | Self::Node10 => &[Extensions::TypeScript, Extensions::JavaScript],
+            Self::Bundler | Self::Esm => &[Extensions::All],
+        }
+    }
+}
+
 /// How TypeScript of one reading looks a path an import spells up
 /// (`PathLookup`): `node16` as CommonJS for a `require` and for a
 /// declaration in a file emitted as CommonJS, as an ES import for one in a
@@ -1601,36 +1614,51 @@ impl ProjectIndex<'_> {
             return self.classic_specifier(specifier, importer, base_url);
         }
         let mapped = config.and_then(|config| config.mapped(specifier, base_url));
-        // TypeScript looks the paths `paths` and `baseUrl` name up as it
-        // does a relative one, a substitution writing an extension naming
-        // that file first.
-        let lookup = path_lookup(reading, form);
-        let configured = |path: &[String], extension: bool| match lookup {
-            None => self.script_target(path, language).map(Resolution::Files),
-            Some(lookup) => extension
-                .then(|| self.existing(path))
-                .flatten()
-                .map(Resolution::Files)
-                .or_else(
-                    || match self.typescript_path(path, PathEnd::Name, lookup)? {
-                        Hit::Files(files) => Some(Resolution::Files(files)),
-                        Hit::Open => Some(Resolution::Undetermined(specifier.to_string())),
-                    },
-                )
-                .or_else(|| self.existing(path).map(Resolution::Files)),
-        };
-        for substituted in mapped.iter().flat_map(|mapping| &mapping.paths) {
-            if let Some(found) = configured(&substituted.path, substituted.extension) {
-                return found;
-            }
-        }
-        if let Some(found) = config
+        let substitutions = || mapped.iter().flat_map(|mapping| &mapping.paths);
+        let below_base = config
             .and_then(|config| config.base_url.as_ref())
             .filter(|_| base_url)
-            .and_then(|base| project_path(base, specifier))
-            .and_then(|path| configured(&path, false))
-        {
+            .and_then(|base| project_path(base, specifier));
+        // TypeScript looks the paths `paths` and `baseUrl` name up as it
+        // does a relative one, each pass over all of them before the next,
+        // a substitution writing an extension naming that file first; then
+        // a file of any kind one spells exactly is the one.
+        let lookup = path_lookup(reading, form);
+        let configured = |extensions| {
+            let lookup = lookup?;
+            let hit = substitutions()
+                .find_map(|substituted| {
+                    substituted
+                        .extension
+                        .then(|| self.existing(&substituted.path))
+                        .flatten()
+                        .map(Hit::Files)
+                        .or_else(|| {
+                            self.path_in_pass(&substituted.path, PathEnd::Name, lookup, extensions)
+                        })
+                })
+                .or_else(|| {
+                    let path = below_base.as_ref()?;
+                    self.path_in_pass(path, PathEnd::Name, lookup, extensions)
+                })?;
+            Some(match hit {
+                Hit::Files(files) => Resolution::Files(files),
+                Hit::Open => Resolution::Undetermined(specifier.to_string()),
+            })
+        };
+        let passes = lookup.map_or(&[][..], PathLookup::passes);
+        if let Some(found) = passes.iter().find_map(|extensions| configured(*extensions)) {
             return found;
+        }
+        let spelled = |path: &[String]| match lookup {
+            None => self.script_target(path, language),
+            Some(_) => self.existing(path),
+        };
+        let found = substitutions()
+            .find_map(|substituted| spelled(&substituted.path))
+            .or_else(|| below_base.as_ref().and_then(|path| spelled(path)));
+        if let Some(found) = found {
+            return Resolution::Files(found);
         }
         let unmapped = || match mapped.as_ref().is_some_and(|mapping| !mapping.catch_all) {
             true => Resolution::Undetermined(specifier.to_string()),
@@ -1775,14 +1803,27 @@ impl ProjectIndex<'_> {
     /// make one pass with both, taking `x.js` over it. `None` where no file
     /// is found.
     fn typescript_path(&self, path: &[String], end: PathEnd, lookup: PathLookup) -> Option<Hit> {
-        let named = end == PathEnd::Name;
-        let file = |extensions, add| {
-            named
+        lookup
+            .passes()
+            .iter()
+            .find_map(|extensions| self.path_in_pass(path, end, lookup, *extensions))
+    }
+
+    /// What one pass of a lookup (`PathLookup::passes`) takes for a path:
+    /// the file, then the directory, as `typescript_path` reads them.
+    fn path_in_pass(
+        &self,
+        path: &[String],
+        end: PathEnd,
+        lookup: PathLookup,
+        extensions: Extensions,
+    ) -> Option<Hit> {
+        let file = |add| {
+            (end == PathEnd::Name)
                 .then(|| self.module_file(path, extensions, add))
                 .flatten()
                 .map(Hit::Files)
         };
-        let directory = |extensions| self.directory_module(path, extensions);
         match lookup {
             PathLookup::Classic => {
                 // `classic` reads a path ending in `/` as naming a file
@@ -1791,18 +1832,12 @@ impl ProjectIndex<'_> {
                     PathEnd::Name | PathEnd::Dot => path.to_vec(),
                     PathEnd::Slash => [path, &[String::new()]].concat(),
                 };
-                self.module_file(&path, Extensions::TypeScript, true)
-                    .or_else(|| self.module_file(&path, Extensions::JavaScript, true))
-                    .map(Hit::Files)
+                self.module_file(&path, extensions, true).map(Hit::Files)
             }
-            PathLookup::Node10 => file(Extensions::TypeScript, true)
-                .or_else(|| directory(Extensions::TypeScript))
-                .or_else(|| file(Extensions::JavaScript, true))
-                .or_else(|| directory(Extensions::JavaScript)),
-            PathLookup::Bundler => {
-                file(Extensions::All, true).or_else(|| directory(Extensions::All))
+            PathLookup::Node10 | PathLookup::Bundler => {
+                file(true).or_else(|| self.directory_module(path, extensions))
             }
-            PathLookup::Esm => file(Extensions::All, false),
+            PathLookup::Esm => file(false),
         }
     }
 
@@ -5646,6 +5681,68 @@ mod tests {
                 "{options}"
             );
             assert!(graph.undetermined_imports.is_empty(), "{options}");
+        }
+    }
+
+    /// `node10` looks every path `paths` and `baseUrl` name up with
+    /// TypeScript's extensions before any with JavaScript's, as tsc 5.9.3 and
+    /// 6.0.3 trace it (`tq_node10`): `@/x` takes the second substitution's
+    /// `b/x.ts` over the first's `a/x.js`, which `bundler` and `node16` for a
+    /// CommonJS import take in their one pass, and `node16` for an ES import
+    /// only where the specifier writes an extension.
+    #[test]
+    fn paths_substitutions_are_looked_up_in_each_pass_before_the_next() {
+        let modes = [
+            (
+                "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+                None,
+                ["b/x.ts", "b/x.ts"],
+            ),
+            (
+                "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+                None,
+                ["a/x.js", "a/x.js"],
+            ),
+            (
+                "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+                None,
+                ["a/x.js", "a/x.js"],
+            ),
+            (
+                "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+                Some("module"),
+                ["", "a/x.js"],
+            ),
+        ];
+        for (options, kind, expected) in modes {
+            let nodes = vec![
+                node_in(0, "src/m0.ts", "import \"@/x\";\n", Language::TypeScript),
+                node_in(1, "src/m1.ts", "import \"@/x.js\";\n", Language::TypeScript),
+                node_in(2, "a/x.js", "", Language::JavaScript),
+                node_in(3, "b/x.ts", "", Language::TypeScript),
+            ];
+            let package = match kind {
+                Some(kind) => format!(
+                    "{{\"type\": \"{kind}\", \"devDependencies\": {{\"typescript\": \"^5.9.0\"}}}}"
+                ),
+                None => "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}".to_string(),
+            };
+            let config = format!(
+                "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \
+                 \"paths\": {{\"@/*\": [\"./a/*\", \"./b/*\"]}}}}}}"
+            );
+            let manifests = manifests_of(
+                &[("package.json", &package), ("tsconfig.json", &config)],
+                &nodes,
+            );
+            for (id, file) in expected.iter().enumerate() {
+                let found = edges_under(&nodes, id, &manifests);
+                let want: Vec<String> = (!file.is_empty())
+                    .then(|| file.to_string())
+                    .into_iter()
+                    .collect();
+                assert_eq!(found, want, "{options} {kind:?} {id}");
+            }
         }
     }
 
