@@ -285,7 +285,7 @@ impl SymbolExtractor {
                     continue;
                 }
                 let body = type_body(*node, language);
-                let opens = declaration_start(declaration_node(*node, language), language);
+                let opens = declaration_start(declaration_node(*node, language), content, language);
                 headers.lines.extend(
                     opens.start_position().row as u32 + 1..=node.start_position().row as u32 + 1,
                 );
@@ -382,7 +382,7 @@ impl SymbolExtractor {
             by_end: HashMap::new(),
         };
         for (node, declared) in self.declarations_in(&tree, path, content, language) {
-            let written = read_as_written(node, language);
+            let written = read_as_written(node, content, language);
             let location = declared.location;
             let (Some(end_line), Some(end_column)) = (location.end_line, location.end_column)
             else {
@@ -1572,17 +1572,17 @@ fn head_conditional(node: Node, from: usize, end: usize) -> Vec<std::ops::Range<
     {
         let row = token.start_position().row;
         if directs(token) {
-            match token.kind() {
-                "#if" | "#ifdef" | "#ifndef" => branches.push(false),
-                "#elif" | "#elifdef" | "#elifndef" | "#else" => {
+            match conditional(token.kind()) {
+                Some(Conditional::Opens) => branches.push(false),
+                Some(Conditional::Branches) => {
                     if let Some(later) = branches.last_mut() {
                         *later = true;
                     }
                 }
-                "#endif" => {
+                Some(Conditional::Closes) => {
                     branches.pop();
                 }
-                _ => return Vec::new(),
+                None => return Vec::new(),
             }
             directive = Some(row);
         }
@@ -1780,6 +1780,52 @@ fn written_tokens_before(node: Node, end: usize) -> Vec<Node> {
 /// (`#endif`, `#define`, `#pragma`).
 fn directs(token: Node) -> bool {
     token.kind().starts_with('#') || token.kind() == "preproc_directive"
+}
+
+/// What a C or C++ preprocessor directive does to a conditional.
+enum Conditional {
+    /// `#if`, `#ifdef`, `#ifndef`.
+    Opens,
+    /// `#elif`, `#elifdef`, `#elifndef`, `#else`: a later branch of the
+    /// conditional open.
+    Branches,
+    /// `#endif`.
+    Closes,
+}
+
+/// What a C or C++ preprocessor directive does to a conditional, by its
+/// keyword as the grammar names its kind (`#ifdef`) or as it is written
+/// (`#  endif`), which the grammar reads as a directive of no kind of its
+/// own where it cannot read it in a conditional: `None` for one that opens,
+/// branches or closes none.
+fn conditional(keyword: &str) -> Option<Conditional> {
+    match keyword.strip_prefix('#')?.trim_start() {
+        "if" | "ifdef" | "ifndef" => Some(Conditional::Opens),
+        "elif" | "elifdef" | "elifndef" | "else" => Some(Conditional::Branches),
+        "endif" => Some(Conditional::Closes),
+        _ => None,
+    }
+}
+
+/// Where the line of a C or C++ preprocessor directive whose keyword is at
+/// byte `from` ends: at the first line end no backslash splices onto the
+/// next line, as the preprocessor splices a directive's lines before it
+/// reads it (`#define SHIFT \` with `8` on the line after). A block comment
+/// that carries the directive onto a later line is not seen.
+fn directive_line_end(source: &[u8], from: usize) -> usize {
+    let mut at = from;
+    while let Some(offset) = source
+        .get(at..)
+        .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
+    {
+        let end = at + offset;
+        let line = &source[..end];
+        if !line.strip_suffix(b"\r").unwrap_or(line).ends_with(b"\\") {
+            return end;
+        }
+        at = end + 1;
+    }
+    source.len()
 }
 
 /// Whether a C or C++ expression holds a call or a literal.
@@ -1989,23 +2035,33 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
 
 /// Where a C or C++ declaration's own text begins when the grammar read
 /// prototypes an error holds ([`error_held_prototype`]) into its node before
-/// its declarator: at the first word written after the last of them
-/// ([`written_words_before`]), or at the declarator where none is. Each of
-/// them is a declaration of its own, from its own start to its own end, so
-/// what the declaration writes begins after them, as it would after a
-/// prototype the grammar read whole (`extern NCURSES_EXPORT(int) doupdate
-/// (void);` before `static int WIN_CDECL g(…) {…}`, which the grammar reads
-/// as one function definition from the first prototype's `extern`), and the
-/// error that holds the last of them can hold the words it begins with
-/// (`int WIN_CDECL` before `g(…)`). A comment there is no word of it, nor is
-/// a directive's line the grammar held in that error (the `#endif` and
-/// `#define` lines curses.h writes between its prototypes and a macro the
-/// grammar read as a function). `None` where its node holds none. Such
-/// prototypes come before the declarator: the grammar reads a later function
-/// declarator whose parameters name something as one of the node's own
-/// declarators, not in an error, and reads no K&R definition, whose
-/// parameters are declared after its declarator, as a function definition.
-fn past_held_prototypes(node: Node) -> Option<Node> {
+/// its declarator: at the first token written after the last of them that
+/// can begin it, or at the declarator where none can. Each of them is a
+/// declaration of its own, from its own start to its own end, so what the
+/// declaration writes begins after them, as it would after a prototype the
+/// grammar read whole (`extern NCURSES_EXPORT(int) doupdate (void);` before
+/// `static int WIN_CDECL g(…) {…}`, which the grammar reads as one function
+/// definition from the first prototype's `extern`), and the error that holds
+/// the last of them can hold the words it begins with (`int WIN_CDECL`
+/// before `g(…)`). A comment there begins nothing, nor does a token on a
+/// directive's line, the lines a backslash splices onto it counted as its
+/// own ([`directive_line_end`]): the `#endif` and `#define` lines curses.h
+/// writes between its prototypes and a macro the grammar read as a function,
+/// the `8` on the line after `#define SHIFT \`. Nor does a token followed,
+/// before the declarator, by a directive of a conditional opened before the
+/// token or closed after the declarator, so a conditional around words
+/// before the declaration stays out of it (`#ifdef X EXTRA_WORD #endif`
+/// before `static int WIN_CDECL g(…)`), and one between its words stays in
+/// it whole (`static int #ifdef WIN WIN_CDECL #endif g(…)`), as a
+/// directive's line does (`static int WIN_CDECL #define X 1 g(…)`). A
+/// declaration whose branches each write its words (`#ifdef WIN static int
+/// WIN_CDECL #else static int #endif g(…)`) begins at the declarator.
+/// `None` where its node holds none. Such prototypes come before the
+/// declarator: the grammar reads a later function declarator whose
+/// parameters name something as one of the node's own declarators, not in
+/// an error, and reads no K&R definition, whose parameters are declared
+/// after its declarator, as a function definition.
+fn past_held_prototypes<'t>(node: Node<'t>, content: &str) -> Option<Node<'t>> {
     let declarator = node.child_by_field_name("declarator")?;
     let mut cursor = node.walk();
     let last = node
@@ -2017,10 +2073,36 @@ fn past_held_prototypes(node: Node) -> Option<Node> {
         .filter_map(error_held_prototype)
         .map(|(_, end)| end.end_byte())
         .max()?;
-    written_words_before(node, declarator.start_byte())
+    let mut line_end = 0;
+    let written: Vec<(Node, bool)> = written_tokens_before(node, declarator.start_byte())
         .into_iter()
-        .find(|word| word.start_byte() >= last)
-        .or(Some(declarator))
+        .map(|token| {
+            if directs(token) {
+                line_end = directive_line_end(content.as_bytes(), token.start_byte());
+            }
+            (token, token.start_byte() < line_end)
+        })
+        .filter(|(token, _)| token.start_byte() >= last)
+        .collect();
+    // Read back from the declarator, `closed` counting the conditionals
+    // closed between the token and it whose opening directive is not read
+    // yet: one opened or branched there and not closed before the
+    // declarator holds every token before it as well.
+    let mut start = declarator;
+    let mut closed = 0usize;
+    for (token, directive) in written.into_iter().rev() {
+        let keyword = directs(token).then(|| content.get(token.byte_range()));
+        match keyword.flatten().and_then(conditional) {
+            Some(Conditional::Opens | Conditional::Branches) if closed == 0 => break,
+            Some(Conditional::Opens) => closed -= 1,
+            Some(Conditional::Closes) => closed += 1,
+            Some(Conditional::Branches) | None => {}
+        }
+        if !directive && closed == 0 {
+            start = token;
+        }
+    }
+    Some(start)
 }
 
 /// Whether a C or C++ function declarator is a prototype's though its
@@ -3342,7 +3424,7 @@ fn extract_declaration(
         .flatten()
         .unwrap_or_else(|| {
             (
-                declaration_start(declaration, language),
+                declaration_start(declaration, content, language),
                 declaration_end(declaration, language),
             )
         });
@@ -4012,11 +4094,11 @@ fn shell_sets_beyond_its_name(part: Node, statement: Node) -> bool {
 /// a prototype an error holds where [`error_held_prototype`] begins it, and
 /// a declaration the grammar read with such prototypes in its node after the
 /// last of them ([`past_held_prototypes`]).
-fn declaration_start(node: Node, language: Language) -> Node {
+fn declaration_start<'t>(node: Node<'t>, content: &str, language: Language) -> Node<'t> {
     if language == Language::Cpp
         && let Some(head) = continued_macro(node)
             .or_else(|| error_held_prototype(node).map(|(start, _)| start))
-            .or_else(|| past_held_prototypes(node))
+            .or_else(|| past_held_prototypes(node, content))
     {
         return head;
     }
@@ -4054,10 +4136,10 @@ fn declaration_start(node: Node, language: Language) -> Node {
 /// leaves no error to tell by. A declaration that begins inside a part of its
 /// node, an error the grammar holds its first words in
 /// ([`past_held_prototypes`]), is read from that part.
-fn read_as_written(node: Node, language: Language) -> AsWritten {
+fn read_as_written(node: Node, content: &str, language: Language) -> AsWritten {
     let declaration = declaration_node(node, language);
     let end = declaration_end(declaration, language);
-    let start = declaration_start(declaration, language);
+    let start = declaration_start(declaration, content, language);
     let start = std::iter::successors(Some(start), Node::parent)
         .find(|part| {
             part.parent()
@@ -9274,8 +9356,10 @@ region     = "us-central1"
     /// function defined after them are declarations of their own, so the
     /// definition spans only what it writes after the last of them, a comment
     /// between them passed over, and from the words it begins with where the
-    /// error that holds the last of them holds those too, a directive's line
-    /// there passed over. Each of them keeps its own span.
+    /// error that holds the last of them holds those too. Preprocessor text
+    /// there is passed over, a directive's lines and a conditional around
+    /// words before the definition, and kept where it stands between the
+    /// definition's words. Each of them keeps its own span.
     #[test]
     fn a_definition_spans_only_what_it_writes_after_the_prototypes_read_into_it() {
         let spans = |content: &str| -> Vec<(String, String)> {
@@ -9358,6 +9442,47 @@ region     = "us-central1"
                 .any(|(name, written)| name == "getsyx" && !written.contains('#')),
             "a directive's line is no word of the function: {read:?}"
         );
+        // Preprocessor text the error that holds the last of curses.h's
+        // prototypes holds before a definition: a directive's line, with the
+        // lines a backslash splices onto it, and a conditional around words
+        // before the definition stay out of it, a conditional or a directive
+        // between its words stays in it, and where its branches each write
+        // its words it begins at its declarator.
+        let curses = "extern NCURSES_EXPORT(char *) NCURSES_SP_NAME(keybound) (SCREEN*, int, int);\n\
+             extern NCURSES_EXPORT(int) NCURSES_SP_NAME(assume_default_colors) (SCREEN*, int, int);\n";
+        let g = "static int WIN_CDECL g(int y) { if (y) { return 1; } return y; }";
+        let in_head = "static int\n#ifdef WIN\nWIN_CDECL\n#endif\ng(int y) { if (y) { return 1; } return y; }";
+        let define_in_head =
+            "static int WIN_CDECL\n#define X 1\ng(int y) { if (y) { return 1; } return y; }";
+        let branches = "#ifdef WIN\nstatic int WIN_CDECL\n#else\nstatic int\n#endif\n";
+        let continued = "#define NCURSES_ATTR_SHIFT \\\n     8\n";
+        for (newline, before, between, definition, after) in [
+            ("\n", "", continued, g, ""),
+            ("\r\n", "", continued, g, ""),
+            ("\n", "", "#ifdef X\nEXTRA_WORD\n#endif\n", g, ""),
+            ("\n", "", "#  ifdef X\nEXTRA_WORD\n#  endif\n", g, ""),
+            ("\n", "", "EXTRA_WORD\n#ifdef X\n", g, "#endif\n"),
+            ("\n", "#ifdef A\n", "EXTRA_WORD\n#else\n", g, "#endif\n"),
+            ("\n", "", "", in_head, ""),
+            ("\n", "", "", define_in_head, ""),
+            (
+                "\n",
+                "",
+                branches,
+                "g(int y) { if (y) { return 1; } return y; }",
+                "",
+            ),
+        ] {
+            let content =
+                format!("{before}{curses}{between}{definition}\n{after}int after(int x);\n")
+                    .replace('\n', newline);
+            let read = spans(&content);
+            let written = definition.replace('\n', newline);
+            assert!(
+                read.contains(&("g".to_string(), written.clone())),
+                "g spans {written:?} in {content:?}: {read:?}"
+            );
+        }
     }
 
     /// A class definition a macro made the grammar read as a function, or as
