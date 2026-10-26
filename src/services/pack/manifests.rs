@@ -3216,6 +3216,26 @@ mod tests {
         );
     }
 
+    /// A path a configuration writes is read against its directory as
+    /// TypeScript normalizes one, `..` by name rather than through a link,
+    /// and may name a directory above the project's root.
+    #[test]
+    fn a_configured_path_reads_its_parent_steps_by_name() {
+        let directory = ["repo".to_string(), "base".to_string()];
+        assert_eq!(
+            configured_path(Path::new("/w/outer"), &directory, "../../types"),
+            Path::new("/w/outer/types")
+        );
+        assert_eq!(
+            configured_path(Path::new("/w/outer"), &directory, "./../../../t/./u"),
+            Path::new("/w/t/u")
+        );
+        assert_eq!(
+            configured_path(Path::new("/w/outer"), &directory, "/abs/types"),
+            Path::new("/abs/types")
+        );
+    }
+
     /// A `pubspec.yaml` names its package in its top-level `name` key, not in
     /// an indented one.
     #[test]

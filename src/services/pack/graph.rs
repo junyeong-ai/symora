@@ -4703,14 +4703,19 @@ mod tests {
     /// A `classic` lookup is made once for each configuration, importer's
     /// directory and specifier (`ProjectIndex::classic`): two files of one
     /// directory that projects of different `paths` compile read one
-    /// specifier each through its own.
+    /// specifier each through its own, and a file of another directory
+    /// walks from its own (`lib/n`).
     #[test]
     fn classic_lookups_are_kept_apart_per_configuration() {
+        let imports = "import \"@x/m\";\nimport \"lib/n\";\n";
         let nodes = vec![
-            node_in(0, "mk/src/a.ts", "import \"@x/m\";\n", Language::TypeScript),
+            node_in(0, "mk/src/a.ts", imports, Language::TypeScript),
             node_in(1, "mk/src/b.ts", "import \"@x/m\";\n", Language::TypeScript),
             node_in(2, "mk/one/m.ts", "", Language::TypeScript),
             node_in(3, "mk/two/m.ts", "", Language::TypeScript),
+            node_in(4, "mk/src/deep/d.ts", imports, Language::TypeScript),
+            node_in(5, "mk/src/lib/n.ts", "", Language::TypeScript),
+            node_in(6, "mk/src/deep/lib/n.ts", "", Language::TypeScript),
         ];
         let project = |file: &str, target: &str| {
             format!(
@@ -4718,7 +4723,10 @@ mod tests {
                  \"paths\": {{\"@x/*\": [\"./{target}/*\"]}}}}, \"files\": [\"{file}\"]}}"
             )
         };
-        let (a, b) = (project("src/a.ts", "one"), project("src/b.ts", "two"));
+        let (a, b) = (
+            project("src/a.ts\", \"src/deep/d.ts", "one"),
+            project("src/b.ts", "two"),
+        );
         let manifests = manifests_of(
             &[
                 (
@@ -4736,8 +4744,9 @@ mod tests {
             &nodes,
         );
         let graph = build_import_graph(&nodes, &manifests);
-        assert_eq!(graph.edges[&0], vec![2]);
+        assert_eq!(graph.edges[&0], vec![2, 5]);
         assert_eq!(graph.edges[&1], vec![3]);
+        assert_eq!(graph.edges[&4], vec![2, 6]);
     }
 
     /// Under `classic`, a relative specifier and the paths `paths` and
@@ -4754,7 +4763,8 @@ mod tests {
     /// TypeScript file comes before the walk's (`bt`), the walk's before a
     /// JavaScript file there (`lib/x`), `@types` before it too (`jq2`), and a
     /// JavaScript file there before the walk's (`bj`). A file of another
-    /// kind a specifier spells exactly is still the one (`./x.vue`).
+    /// kind a specifier or a substitution spells exactly is still the one
+    /// (`./x.vue`, `@x/v/c.vue`).
     #[test]
     fn classic_resolution_reads_relative_paths_and_base_url_specifiers_alike() {
         let file = |id, rel: &str| {
@@ -4793,6 +4803,7 @@ mod tests {
             "@x/foo.js",
             "zed",
             "@t/tsx",
+            "@x/v/c.vue",
         ];
         let based = ["lib/x", "jq2", "bt", "bj", "components", "m/n"];
         let mut nodes = vec![
@@ -4831,6 +4842,7 @@ mod tests {
             "paths/src/zed.js",
             "paths/src/t/tsx.tsx",
             "paths/src/t/tsx.d.ts",
+            "paths/src/v/c.vue",
             "base/src/lib/x.js",
             "base/src/app/lib/x.ts",
             "base/src/jq2.js",
@@ -4902,6 +4914,7 @@ mod tests {
                 "paths/src/foo.ts",
                 "paths/types/zed.ts",
                 "paths/src/t/tsx.tsx",
+                "paths/src/v/c.vue",
             ]
         );
         assert_eq!(
@@ -4956,6 +4969,7 @@ mod tests {
             BTreeSet::from(["../components".to_string()])
         );
         assert!(graph.undetermined_imports.is_empty());
+        assert!(graph.typescript_not_installed && !graph.typescript_installed_unread);
     }
 
     /// `classic` resolution walks on past the project's root with `.ts`,
