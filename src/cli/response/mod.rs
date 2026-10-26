@@ -255,6 +255,14 @@ pub enum BodyOmission {
     ResponseSize,
 }
 
+/// Omit the fewest source bodies, largest first, that bring the response
+/// within `max_chars`, each leaving `body_omitted: response_size`; where none
+/// do, omit them all and leave the rest to list fitting.
+///
+/// Omitting a body shrinks the response for as long as the body costs no less
+/// than the marker it leaves, so in that order the size falls with each one,
+/// and the fewest that fit are found by bisection: measuring after every
+/// omission would cost the whole response once per body.
 pub fn fit_source_bodies(
     value: &mut serde_json::Value,
     paths: &[String],
@@ -264,34 +272,53 @@ pub fn fit_source_bodies(
     if paths.is_empty() || measure(value) <= max_chars {
         return;
     }
-    let mut bodies: Vec<_> = paths
+    let chars = |value: serde_json::Value| {
+        serde_json::to_string(&value)
+            .expect("a JSON value serializes")
+            .chars()
+            .count() as isize
+    };
+    let marker = chars(serde_json::json!({ "body_omitted": BodyOmission::ResponseSize }));
+    let mut bodies: Vec<(&str, isize)> = paths
         .iter()
         .filter_map(|path| {
+            let parent = path.strip_suffix("/body")?;
             let body = value.pointer(path)?.as_str()?;
-            let cost = serde_json::to_string(body).ok()?.chars().count();
-            Some((path, cost))
+            Some((parent, chars(serde_json::json!({ "body": body })) - marker))
         })
         .collect();
-    bodies.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
-    for (path, _) in bodies {
-        let Some(parent) = path.strip_suffix("/body") else {
-            continue;
-        };
-        if let Some(item) = value
-            .pointer_mut(parent)
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            item.shift_remove("body");
-            item.insert(
-                "body_omitted".to_string(),
-                serde_json::to_value(BodyOmission::ResponseSize).expect("body omission serializes"),
-            );
+    bodies.sort_by_key(|(_, saved)| std::cmp::Reverse(*saved));
+    let omitting = |count: usize| {
+        let mut fitted = value.clone();
+        for (parent, _) in &bodies[..count] {
+            if let Some(item) = fitted
+                .pointer_mut(parent)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                item.shift_remove("body");
+                item.insert(
+                    "body_omitted".to_string(),
+                    serde_json::to_value(BodyOmission::ResponseSize)
+                        .expect("body omission serializes"),
+                );
+            }
         }
-        recount_bodies(value);
-        if measure(value) <= max_chars {
-            break;
+        recount_bodies(&mut fitted);
+        fitted
+    };
+    let shrinking = bodies.iter().take_while(|(_, saved)| *saved >= 0).count();
+    let (mut low, mut high, mut fewest) = (1, shrinking, bodies.len());
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        if measure(&omitting(middle)) <= max_chars {
+            fewest = middle;
+            high = middle - 1;
+        } else {
+            low = middle + 1;
         }
     }
+    let fitted = omitting(fewest);
+    *value = fitted;
 }
 
 fn recount_bodies(value: &mut serde_json::Value) {
@@ -605,6 +632,41 @@ mod tests {
             unicode["callees"]["items"][0]["body_omitted"],
             "response_size"
         );
+    }
+
+    #[test]
+    fn source_fitting_omits_the_fewest_bodies_largest_first() {
+        let measure =
+            |value: &serde_json::Value| serde_json::to_string(value).unwrap().chars().count();
+        let items: Vec<_> = [900, 700, 500, 300, 100]
+            .iter()
+            .map(|size| serde_json::json!({ "body": "x".repeat(*size) }))
+            .collect();
+        let paths: Vec<String> = (0..items.len())
+            .map(|index| format!("/symbols/items/{index}/body"))
+            .collect();
+        let response = serde_json::json!({
+            "symbols": {"count": 5, "showing": 5, "items": items, "bodies_included": 5}
+        });
+        let omitted = |budget: usize| {
+            let mut value = response.clone();
+            fit_source_bodies(&mut value, &paths, budget, &measure);
+            let omitted: Vec<bool> = (0..5)
+                .map(|index| value["symbols"]["items"][index].get("body").is_none())
+                .collect();
+            (omitted, value["symbols"]["bodies_included"].clone())
+        };
+        let full = measure(&response);
+        assert_eq!(
+            omitted(full - 1_000),
+            (vec![true, true, false, false, false], 3.into())
+        );
+        assert_eq!(
+            omitted(full - 1_800),
+            (vec![true, true, true, false, false], 2.into())
+        );
+        assert_eq!(omitted(full), (vec![false; 5], 5.into()));
+        assert_eq!(omitted(10), (vec![true; 5], 0.into()));
     }
 
     #[test]
