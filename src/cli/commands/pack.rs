@@ -237,7 +237,7 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             .map(|specifier| format!("`{specifier}`"))
             .collect();
         hints.push(format!(
-            "{} import specifier(s) name different files under the projects of a tsconfig's `references` that compile their importers ({}): pack reads such a file under each one's module and output options; their dependencies do not contribute to ranking. Inspect the project references.",
+            "{} import specifier(s) name different files under the projects of a tsconfig's `references` that compile their importers ({}): pack reads such a file under each one's module, output and `allowJs`/`checkJs` options; their dependencies do not contribute to ranking. Inspect the project references.",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -550,7 +550,7 @@ mod tests {
             json["files"]["hints"][5]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) name different files under the projects of a tsconfig's `references` that compile their importers (`../components`): pack reads such a file under each one's module and output options; their dependencies do not contribute to ranking. Inspect the project references.")
+                .contains("1 import specifier(s) name different files under the projects of a tsconfig's `references` that compile their importers (`../components`): pack reads such a file under each one's module, output and `allowJs`/`checkJs` options; their dependencies do not contribute to ranking. Inspect the project references.")
         );
         assert!(
             json["files"]["hints"][6]
