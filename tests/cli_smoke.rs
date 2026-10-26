@@ -1738,7 +1738,9 @@ fn a_computed_member_is_found_by_its_brackets() {
 /// type's closing `;`, a member's `;` or a field's `,` — so a whole-line edit
 /// takes it rather than refusing to split its line. A C prototype the grammar
 /// read into the function defined after it is no part of that function, so
-/// deleting the function leaves it.
+/// deleting the function leaves it, and leaves whole a directive or a
+/// conditional written between the two; one written between the function's
+/// own words goes with it.
 #[test]
 fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
     let dir = tempfile::tempdir().unwrap();
@@ -1781,6 +1783,26 @@ fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
          int after(int x);\n",
     )
     .unwrap();
+    let curses = "extern NCURSES_EXPORT(char *) NCURSES_SP_NAME(keybound) (SCREEN*, int, int);\n\
+                  extern NCURSES_EXPORT(int) NCURSES_SP_NAME(assume_default_colors) (SCREEN*, int, int);\n";
+    let g = "static int WIN_CDECL g(int y) { if (y) { return 1; } return y; }";
+    for (file, written) in [
+        (
+            "define.h",
+            format!("#define NCURSES_ATTR_SHIFT \\\n     8\n{g}"),
+        ),
+        ("ifdef.h", format!("#ifdef X\nEXTRA_WORD\n#endif\n{g}")),
+        (
+            "head.h",
+            "static int\n#ifdef WIN\nWIN_CDECL\n#endif\ng(int y) { return y; }".to_string(),
+        ),
+    ] {
+        std::fs::write(
+            root.join(file),
+            format!("{curses}{written}\nint after(int x);\n"),
+        )
+        .unwrap();
+    }
     let config_dir = root.join(".symora");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
@@ -1807,6 +1829,9 @@ fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
         ("e.c", "derwin", 3, 4),
         ("e.c", "doupdate", 5, 5),
         ("e.c", "g", 6, 8),
+        ("define.h", "g", 5, 5),
+        ("ifdef.h", "g", 6, 6),
+        ("head.h", "g", 3, 7),
     ] {
         let preview = json_ok(
             root,
