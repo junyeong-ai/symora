@@ -354,10 +354,13 @@ impl ModuleOptions {
     }
 
     /// The module system TypeScript of `major` emits a file in, as tsc
-    /// 5.9.3, 6.0.3 and 7.0.2 do: the `module` set, else `commonjs` below
-    /// an ES2015 `target` and `es2015` from one — the default `target` being
-    /// ES5 in TypeScript 5 and a later one in 6 and 7. `None` where an option
-    /// it reads is unknown, or a value no version names.
+    /// 5.9.3, 6.0.3 and 7.0.2 do: the `module` set, else `commonjs` for an
+    /// ES5 `target` and `es2015` from ES2015 — the default `target` being ES5
+    /// in TypeScript 5 and a later one in 6 and 7. An ES3 `target` is read as
+    /// `commonjs` too, a project no tsc from 5 on builds: 5.9.3 and 6.0.3
+    /// reject it (TS5108) and 7.0.2 does (TS6046), where 6.0.3 and 7.0.2
+    /// resolve an import as from an ES module. `None` where an option it
+    /// reads is unknown, or a value no version names.
     pub(super) fn module_kind(&self, major: u8) -> Option<ModuleKind> {
         Some(match self.module.value()? {
             Some("commonjs") => ModuleKind::CommonJs,
