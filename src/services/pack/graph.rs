@@ -580,8 +580,8 @@ fn declares_es_imports(
     let extension = Path::new(&node.rel_path)
         .extension()
         .and_then(|extension| extension.to_str());
-    let package = nearest(&manifests.module_types, &node.directory)
-        .map_or(PackageType::Unset, |(_, package)| *package);
+    let package = nearest(&manifests.package_scopes, &node.directory)
+        .map_or(PackageType::Unset, |(_, scope)| scope.kind);
     let by_extension = match extension {
         Some("mjs" | "mts") => Some(true),
         Some("cjs" | "cts") => Some(false),
@@ -2338,8 +2338,9 @@ impl ProjectIndex<'_> {
     }
 
     /// What a workspace package's name, or a subpath below it, stands for,
-    /// or `None` where the specifier names no package of a workspace the
-    /// importer is in. A package with `exports` exports only what it maps:
+    /// or the name of the package whose `package.json` is the importer's
+    /// nearest, which no workspace need list; `None` where the specifier
+    /// names neither. A package with `exports` exports only what it maps:
     /// the name stands for the file `.` maps to, a subpath for the one
     /// `./<subpath>` or the pattern key matching it maps to
     /// (`export_subpath`), read through its conditions (`export_target`).
@@ -2385,6 +2386,18 @@ impl ProjectIndex<'_> {
             ImportMode::Exports(conditions) => Some(conditions),
         };
         let (name, subpath) = split_package_name(specifier);
+        // A package's own name read from inside it goes through the
+        // `exports` of the importer's package scope, whether or not a
+        // workspace lists the package (`loadModuleFromSelfNameReference`;
+        // `zr_*`, `s_*`).
+        let scope = nearest(&self.manifests.package_scopes, &from.directory);
+        if let Some((directory, scope)) = scope
+            && scope.name.as_deref() == Some(name)
+            && let Some((exports, conditions)) = scope.exports.as_ref().zip(conditions)
+        {
+            let package = (directory.as_slice(), exports, conditions);
+            return Some(self.package_exports(specifier, importer, reading, form, package, true));
+        }
         let declares = |package: &JsPackage| {
             package.name == name && from.directory.starts_with(&package.workspace)
         };
@@ -2456,8 +2469,29 @@ impl ProjectIndex<'_> {
                 None => undetermined(),
             });
         };
+        let package = (directory.as_slice(), exports, conditions);
+        Some(self.package_exports(specifier, importer, reading, form, package, false))
+    }
+
+    /// What a package's `exports`, with the conditions it is read under,
+    /// maps a specifier naming it to (`workspace_package`): `own` where the
+    /// importer reads its own package's name from inside it.
+    fn package_exports(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        reading: Reading,
+        form: ImportForm,
+        (directory, exports, conditions): (&[String], &serde_json::Value, ExportConditions),
+        own: bool,
+    ) -> Resolution {
+        let from = importer.node;
+        let subpath = split_package_name(specifier).1;
+        let typescript = reading.major.is_some();
+        let lookup = path_lookup(reading, form);
+        let undetermined = || Resolution::Undetermined(specifier.to_string());
         let Some((target, star)) = export_subpath(exports, subpath) else {
-            return Some(undetermined());
+            return undetermined();
         };
         let walk = |read, options: Option<&SelfName>| {
             let star = star.as_deref();
@@ -2474,10 +2508,10 @@ impl ProjectIndex<'_> {
             self.export_target(target, directory, importer, lookup)
         };
         if !typescript {
-            return Some(match walk(TargetRead::Script, None) {
+            return match walk(TargetRead::Script, None) {
                 Exported::Files(files) => Resolution::Files(files),
                 _ => undetermined(),
-            });
+            };
         }
         let pass = |extensions, options: Option<&SelfName>| match walk(
             TargetRead::Pass(extensions),
@@ -2491,12 +2525,10 @@ impl ProjectIndex<'_> {
             Exported::Files(files) => Some(Resolution::Files(files)),
             _ => None,
         };
-        let own = nearest(&self.manifests.module_types, &from.directory)
-            .is_some_and(|(at, _)| at == directory);
         if !own {
             let pass = |extensions| pass(extensions, None);
             let found = self.workspace_passes(specifier, importer, directory, lookup, true, &pass);
-            return Some(found.or_else(spelled).unwrap_or_else(undetermined));
+            return found.or_else(spelled).unwrap_or_else(undetermined);
         }
         // tsc reads a package's own name from inside it before it looks in
         // `node_modules`, under the options of the project compiling the
@@ -2524,12 +2556,12 @@ impl ProjectIndex<'_> {
             Some((first, rest)) => {
                 let found = read(Some(first));
                 if rest.iter().any(|other| read(Some(other)) != found) {
-                    return Some(Resolution::ProjectsUndetermined(specifier.to_string()));
+                    return Resolution::ProjectsUndetermined(specifier.to_string());
                 }
                 found
             }
         };
-        Some(found.or_else(spelled).unwrap_or_else(undetermined))
+        found.or_else(spelled).unwrap_or_else(undetermined)
     }
 
     /// The input tsc reads in place of an `exports` target a package's own
@@ -8911,6 +8943,88 @@ mod tests {
             graph.projects_undetermined_imports,
             BTreeSet::from(["two/o".to_string()])
         );
+        assert!(graph.undetermined_imports.is_empty());
+    }
+
+    /// A package's own name is read from a file whose nearest `package.json`
+    /// is the package's, through its `exports`, whether or not a workspace
+    /// lists the package, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: a
+    /// single-package repository's root, here a workspace's (`my-lib`;
+    /// `zr_*`), a package below a workspace that does not list it
+    /// (`@acme/lib`; `s_scoped_*`). A file below a nearer `package.json`
+    /// (`test/esm`; `s_nested_scope_*`) reads no such name, nor one under
+    /// `node10`, which reads no `exports` (`old`; `s_single_node10`), nor
+    /// another package, which reaches one no workspace lists only where it
+    /// is installed (`w`'s `@acme/lib`).
+    #[test]
+    fn a_packages_own_name_is_read_whether_or_not_a_workspace_lists_it() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let nodes = vec![
+            ts(
+                0,
+                "test/t.ts",
+                "import \"my-lib\";\nimport \"my-lib/sub\";\nimport \"w/sub\";\n",
+            ),
+            ts(1, "test/esm/u.ts", "import \"my-lib\";\n"),
+            ts(2, "src/index.ts", ""),
+            ts(3, "src/sub.ts", ""),
+            ts(4, "packages/w/src/sub.ts", "import \"@acme/lib/a\";\n"),
+            ts(5, "tools/lib/src/b.ts", "import \"@acme/lib/a\";\n"),
+            ts(6, "tools/lib/src/a.ts", ""),
+            ts(7, "tools/old/src/b.ts", "import \"old/a\";\n"),
+            ts(8, "tools/old/src/a.ts", ""),
+        ];
+        let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"name\": \"my-lib\", \"workspaces\": [\"packages/*\"], \
+                     \"devDependencies\": {\"typescript\": \"5.9.3\"}, \"exports\": \
+                     {\".\": {\"types\": \"./dist/index.d.ts\", \"default\": \"./dist/index.js\"}, \
+                     \"./sub\": \"./dist/sub.js\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    &format!(
+                        "{{\"compilerOptions\": {{{bundler}, \"outDir\": \"dist\", \
+                         \"rootDir\": \"src\"}}}}"
+                    ),
+                ),
+                ("test/esm/package.json", "{\"type\": \"module\"}"),
+                (
+                    "packages/w/package.json",
+                    "{\"name\": \"w\", \"exports\": {\"./sub\": \"./src/sub.ts\"}}",
+                ),
+                (
+                    "tools/lib/package.json",
+                    "{\"name\": \"@acme/lib\", \"exports\": {\"./*\": \"./src/*.ts\"}}",
+                ),
+                (
+                    "tools/lib/tsconfig.json",
+                    &format!("{{\"compilerOptions\": {{{bundler}}}}}"),
+                ),
+                (
+                    "tools/old/package.json",
+                    "{\"name\": \"old\", \"exports\": {\"./a\": \"./src/a.ts\"}}",
+                ),
+                (
+                    "tools/old/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"commonjs\", \"moduleResolution\": \"node10\"}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(
+            edges(0),
+            ["src/index.ts", "src/sub.ts", "packages/w/src/sub.ts"]
+        );
+        assert!(edges(1).is_empty());
+        assert!(edges(4).is_empty());
+        assert_eq!(edges(5), ["tools/lib/src/a.ts"]);
+        assert!(edges(7).is_empty());
         assert!(graph.undetermined_imports.is_empty());
     }
 
