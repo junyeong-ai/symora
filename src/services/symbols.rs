@@ -4974,24 +4974,34 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     }
     // A Dart primary constructor, written in its class's header, is placed
     // at the name it writes after the class's (`class C.named(int x)`), or,
-    // where it writes none, at the `(` its parameters open with: the class's
-    // name is the class's place, and a position names one declaration
-    // wherever it is the key, as in the index's rows and in the join of a
-    // server's symbols to the grammar's
+    // where it writes none, at the token that follows the class's name: the
+    // `<` its type parameters open with (`class C<T>(T x)`), or else the `(`
+    // its parameters open with (`class C(int x)`). Its syntax includes the
+    // class's name, and that name is the class's place: a position names one
+    // declaration wherever it is the key, as in the index's rows and in the
+    // join of a server's symbols to the grammar's
     // ([`SymbolExtractor::complete_from_declarations`]). The analyzer selects
-    // the class's name for both, and answers about the class at either
-    // token. An extension type's is placed the same way, at the name its
-    // type's name writes after a `.` (`extension type E._(int v)`), or at its
-    // representation's `(`.
+    // the class's name for both, and answers a position where a name ends as
+    // it answers the name, so definition, hover, references and rename at the
+    // token that follows it answer about the class as they do at its name. A
+    // token that whitespace or a comment parts from the name ends no name,
+    // and the analyzer answers no definition or hover there. An extension
+    // type's is placed the same way, at the name its type's name writes after
+    // a `.` (`extension type E._(int v)`), or at the `<` of its type
+    // parameters, or else at its representation's `(`.
     if language == Language::Dart && node.kind() == "primary_constructor" {
-        return node
-            .child_by_field_name("name")
-            .or_else(|| node.child_by_field_name("parameters")?.child(0));
+        return node.child_by_field_name("name").or_else(|| {
+            let opens = std::iter::successors(node.prev_sibling(), Node::prev_sibling)
+                .find(|before| !before.is_extra())
+                .filter(|before| before.kind() == "type_parameters")
+                .or_else(|| node.child_by_field_name("parameters"))?;
+            opens.child(0)
+        });
     }
     if language == Language::Dart && node.kind() == "extension_type_name" {
         return dart_extension_type_constructor(node).or_else(|| {
-            node.parent()?
-                .child_by_field_name("representation")?
+            child_of_kind(node, "type_parameters")
+                .or_else(|| node.parent()?.child_by_field_name("representation"))?
                 .child(0)
         });
     }
@@ -7511,6 +7521,14 @@ enum const Unit(final String symbol) {
 
 class N.new(final int n);
 
+class Box<T extends Object>(final T item);
+
+class const Duo<T>(final T left);
+
+enum Tagged<T>(final T tag) {
+  one(1);
+}
+
 class Wild(var int _, int _);
 
 class Blank {
@@ -7532,6 +7550,8 @@ extension type const Id<T>._(T raw) {}
 extension type Opt({int? raw}) {}
 
 extension type Rep(int _) {}
+
+extension type const Wrap<T extends Object>(T raw) {}
 
 void top() {
   int helper() => 1;
@@ -7610,6 +7630,16 @@ external final int topExternal, otherExternal;
                 "class:N",
                 "constructor:N/N.new",
                 "field:N/n",
+                "class:Box",
+                "constructor:Box/Box",
+                "field:Box/item",
+                "class:Duo",
+                "constructor:Duo/Duo",
+                "field:Duo/left",
+                "enum:Tagged",
+                "constructor:Tagged/Tagged",
+                "field:Tagged/tag",
+                "enum_member:Tagged/one",
                 "class:Wild",
                 "constructor:Wild/Wild",
                 "field:Wild/_",
@@ -7632,6 +7662,9 @@ external final int topExternal, otherExternal;
                 "class:Rep",
                 "constructor:Rep/Rep",
                 "field:Rep/_",
+                "class:Wrap",
+                "constructor:Wrap/Wrap",
+                "field:Wrap/raw",
                 "function:top",
                 "function:top/helper",
                 "variable:topLevel",
@@ -7784,16 +7817,21 @@ region     = "us-central1"
                 // writes the class's name, and one that does not is anchored
                 // at what it writes in its place: the name after the class's
                 // (`new named()` declares `C.named`), the keyword it is
-                // declared with (`new()` declares `C`), or the `(` a primary
-                // constructor's parameters open with (`class C(int x)`
-                // declares `C`), the class's name being the class's place.
+                // declared with (`new()` declares `C`), or the token after
+                // the class's name a primary constructor writes, the `<` of
+                // the type parameters or the `(` of its parameters (`class
+                // C(int x)` declares `C`), the class's name being the class's
+                // place.
                 let at_name = written_at(&symbol.name)
                     || fixture.language == Language::Dart
                         && symbol.kind == SymbolKind::Constructor
                         && symbol.container.as_deref().is_some_and(|class| {
                             match symbol.name.strip_prefix(class) {
                                 Some("") => {
-                                    written_at("new") || written_at("factory") || written_at("(")
+                                    written_at("new")
+                                        || written_at("factory")
+                                        || written_at("<")
+                                        || written_at("(")
                                 }
                                 Some(own) => own.strip_prefix('.').is_some_and(written_at),
                                 None => false,
@@ -8033,6 +8071,43 @@ region     = "us-central1"
         assert_eq!(extent("Pair/rank"), ((5, 3), (5, 21)));
         assert_eq!(extent("Id/Id._"), ((8, 16), (8, 35)));
         assert_eq!(extent("Id/raw"), ((8, 26), (8, 35)));
+    }
+
+    /// The analyzer answers a position where a name ends as it answers the
+    /// name, so an unnamed Dart primary constructor placed where its type's
+    /// name ends — the `<` of the type parameters, or the `(` where it writes
+    /// none — answers definition, hover and references there as at the
+    /// type's name. At the `(` after type parameters it answers no definition
+    /// or hover.
+    #[test]
+    fn an_unnamed_dart_primary_constructor_is_placed_where_its_types_name_ends() {
+        let content = "class P(final int x);\n\n\
+                       class G<T extends Object>(final T value);\n\n\
+                       class const C<T>(final T x);\n\n\
+                       class K<T> /* parameters */ (final T x);\n\n\
+                       enum E<T>(final T v) {\n  a(1);\n}\n\n\
+                       extension type X(int raw) {}\n\n\
+                       extension type const Y<T extends Object>(T raw) {}\n";
+        let symbols = SymbolExtractor::new().extract(Path::new("a.dart"), content, Language::Dart);
+        let location = |path: &str| {
+            &symbols
+                .iter()
+                .find(|symbol| symbol.name_path.as_deref() == Some(path))
+                .unwrap_or_else(|| panic!("{path} is declared"))
+                .location
+        };
+        for name in ["P", "G", "C", "K", "E", "X", "Y"] {
+            let declared = location(name);
+            let constructor = location(&format!("{name}/{name}"));
+            assert_eq!(
+                (constructor.line, constructor.column),
+                (
+                    declared.name_end_line.unwrap(),
+                    declared.name_end_column.unwrap()
+                ),
+                "{name}'s constructor is placed off where its name ends"
+            );
+        }
     }
 
     #[test]
