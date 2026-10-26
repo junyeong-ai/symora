@@ -697,6 +697,9 @@ impl Reference {
         if language == Language::Dart {
             return Self::dart(raw);
         }
+        if is_javascript(language) {
+            return Self::script(raw);
+        }
         if is_jvm(language) {
             let (name, wildcard) = match raw.strip_suffix(".*") {
                 Some(name) => (name, true),
@@ -728,28 +731,50 @@ impl Reference {
                 break;
             }
         }
-        if is_javascript(language) && !relative {
+        let components = split_components(rest);
+        if relative {
+            Self::Relative { up, components }
+        } else {
+            Self::Absolute(components)
+        }
+    }
+
+    /// A JavaScript or TypeScript specifier: a relative path where
+    /// TypeScript's `pathIsRelative` reads one (`.`, `..`, `./…`, `../…`),
+    /// its `.` and `..` segments folded as `normalizePath` folds them, so
+    /// `./a/../b` is `./b`; an absolute path names nothing; any other is
+    /// bare.
+    fn script(raw: &str) -> Self {
+        let relative = matches!(raw, "." | "..") || raw.starts_with("./") || raw.starts_with("../");
+        if !relative {
             return if raw.starts_with('/') {
                 Self::Unresolved
             } else {
                 Self::Bare(raw.to_string())
             };
         }
-        let components = split_components(rest);
-        if relative && is_javascript(language) {
-            let end = match raw.ends_with('/') {
-                true => PathEnd::Slash,
-                false => PathEnd::Name,
-            };
-            Self::Script {
-                up,
-                components,
-                end,
+        let mut up = 0;
+        let mut components: Vec<String> = Vec::new();
+        for segment in raw.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    if components.pop().is_none() {
+                        up += 1;
+                    }
+                }
+                _ => components.push(segment.to_string()),
             }
-        } else if relative {
-            Self::Relative { up, components }
-        } else {
-            Self::Absolute(components)
+        }
+        let end = match raw.rsplit('/').next() {
+            Some("") => PathEnd::Slash,
+            Some("." | "..") => PathEnd::Dot,
+            _ => PathEnd::Name,
+        };
+        Self::Script {
+            up,
+            components,
+            end,
         }
     }
 
@@ -844,6 +869,12 @@ enum PathEnd {
     /// A `/` (`./`, `./a/`): a directory alone, but under `classic`, which
     /// looks for a file named by the extension alone in it (`a/.ts`).
     Slash,
+    /// A `.` or `..` segment (`.`, `..`, `./a/..`): a directory alone, as
+    /// TypeScript's `normalizePathForCJSResolution` reads it, but under
+    /// `classic`, which looks for the file the folded path names, the
+    /// directory's name with an extension beside it (`.` in `src/app` as
+    /// `src/app.ts`).
+    Dot,
 }
 
 /// The module path a JavaScript or TypeScript specifier's components name:
@@ -1738,7 +1769,7 @@ impl ProjectIndex<'_> {
     /// trace it: the file the path names with the extensions `module_names`
     /// gives, then, but under `classic` and for an ES import under `node16`,
     /// the directory it names (`directory_module`); only the directory where
-    /// the path ends in `/` (`PathEnd`). `classic` and `node10`
+    /// the path ends in `/`, `.` or `..` (`PathEnd`). `classic` and `node10`
     /// make a pass with TypeScript's extensions, then one with JavaScript's,
     /// so `node10` takes `x/index.ts` over `x.js`; `bundler` and `node16`
     /// make one pass with both, taking `x.js` over it. `None` where no file
@@ -1757,7 +1788,7 @@ impl ProjectIndex<'_> {
                 // `classic` reads a path ending in `/` as naming a file
                 // spelled by the extension alone in that directory.
                 let path = match end {
-                    PathEnd::Name => path.to_vec(),
+                    PathEnd::Name | PathEnd::Dot => path.to_vec(),
                     PathEnd::Slash => [path, &[String::new()]].concat(),
                 };
                 self.module_file(&path, Extensions::TypeScript, true)
@@ -1889,7 +1920,9 @@ impl ProjectIndex<'_> {
                 (None, PathEnd::Name) => {
                     Resolution::Files(self.script_target(path, language).unwrap_or_default())
                 }
-                (None, PathEnd::Slash) => Resolution::Files(self.directory_index(path, language)),
+                (None, PathEnd::Slash | PathEnd::Dot) => {
+                    Resolution::Files(self.directory_index(path, language))
+                }
                 (Some(lookup), _) => match self.typescript_path(path, end, lookup) {
                     Some(Hit::Files(files)) => Resolution::Files(files),
                     Some(Hit::Open) => Resolution::Undetermined(written.to_string()),
@@ -2553,6 +2586,26 @@ mod tests {
         assert_eq!(
             Reference::parse("../", Language::TypeScript),
             script(1, &[], PathEnd::Slash)
+        );
+        assert_eq!(
+            Reference::parse(".", Language::TypeScript),
+            script(0, &[], PathEnd::Dot)
+        );
+        assert_eq!(
+            Reference::parse("..", Language::JavaScript),
+            script(1, &[], PathEnd::Dot)
+        );
+        assert_eq!(
+            Reference::parse("./a/../../b/./c", Language::TypeScript),
+            script(1, &["b", "c"], PathEnd::Name)
+        );
+        assert_eq!(
+            Reference::parse("./a/..", Language::TypeScript),
+            script(0, &[], PathEnd::Dot)
+        );
+        assert_eq!(
+            Reference::parse(".prettierrc", Language::TypeScript),
+            Reference::Bare(".prettierrc".to_string())
         );
         assert_eq!(
             Reference::parse("super::super::util", Language::Rust),
@@ -5346,6 +5399,155 @@ mod tests {
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
         );
+        assert!(graph.version_undetermined_imports.is_empty());
+    }
+
+    /// `.` and `..` are relative specifiers, as TypeScript's `pathIsRelative`
+    /// reads them, their segments folded where a path writes them, and each
+    /// module resolution reads them as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
+    /// (`rel_*`): `classic` as the file the folded path names (`.` in
+    /// `src/app` as `src/app.ts`, `../..` as a file beside the project's
+    /// directory) and a path ending in `/` as none; `node10`, `bundler` and
+    /// `node16` for a CommonJS import as the directory alone, its `index`;
+    /// `node16` for an ES import as nothing, since it reads no directory.
+    /// Where no TypeScript reads the import, Node and the bundlers read a
+    /// directory too.
+    #[test]
+    fn dot_segments_are_relative_paths_each_resolution_reads() {
+        let specifiers = [
+            ".",
+            "..",
+            "./sub/..",
+            "../..",
+            "./",
+            "../",
+            "./sub/../both",
+            "./sub/../both.js",
+        ];
+        let modes = [
+            (
+                "cls",
+                Some("\"moduleResolution\": \"classic\", \"module\": \"esnext\""),
+                None,
+            ),
+            (
+                "n10",
+                Some("\"moduleResolution\": \"node10\", \"module\": \"commonjs\""),
+                None,
+            ),
+            (
+                "bun",
+                Some("\"moduleResolution\": \"bundler\", \"module\": \"esnext\""),
+                None,
+            ),
+            (
+                "esm",
+                Some("\"moduleResolution\": \"node16\", \"module\": \"node16\""),
+                Some("module"),
+            ),
+            (
+                "cjs",
+                Some("\"moduleResolution\": \"node16\", \"module\": \"node16\""),
+                Some("commonjs"),
+            ),
+            ("js", None, None),
+        ];
+        let mut nodes = Vec::new();
+        let mut configs: Vec<(String, String)> = Vec::new();
+        let mut importers = Vec::new();
+        for (mode, options, package_type) in modes {
+            let (extension, language) = match options {
+                Some(_) => ("ts", Language::TypeScript),
+                None => ("js", Language::JavaScript),
+            };
+            let mut ids = Vec::new();
+            for (index, specifier) in specifiers.iter().enumerate() {
+                ids.push(nodes.len());
+                nodes.push(node_in(
+                    nodes.len(),
+                    &format!("{mode}/src/app/m{index}.{extension}"),
+                    &format!("import \"{specifier}\";\n"),
+                    language,
+                ));
+            }
+            importers.push(ids);
+            for file in [
+                "src/app/index",
+                "src/app",
+                "src/index",
+                "src",
+                "index",
+                "src/app/both",
+            ] {
+                let path = format!("{mode}/{file}.{extension}");
+                nodes.push(node_in(nodes.len(), &path, "", language));
+            }
+            let typescript = match options {
+                Some(_) => ", \"devDependencies\": {\"typescript\": \"^5.9.0\"}",
+                None => "",
+            };
+            let kind = package_type.map_or(String::new(), |kind| format!(", \"type\": \"{kind}\""));
+            configs.push((
+                format!("{mode}/package.json"),
+                format!("{{\"name\": \"{mode}\"{kind}{typescript}}}"),
+            ));
+            if let Some(options) = options {
+                configs.push((
+                    format!("{mode}/tsconfig.json"),
+                    format!("{{\"compilerOptions\": {{{options}, \"allowJs\": true}}}}"),
+                ));
+            }
+        }
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let read = |mode: usize| -> Vec<String> {
+            importers[mode]
+                .iter()
+                .map(|id| {
+                    let found: Vec<&str> = graph
+                        .edges
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .map(|dst| nodes[*dst].rel_path.split_once('/').unwrap().1)
+                        .collect();
+                    found.join(" ")
+                })
+                .collect()
+        };
+        assert_eq!(
+            read(0),
+            [
+                "src/app.ts",
+                "src.ts",
+                "src/app.ts",
+                "",
+                "",
+                "",
+                "src/app/both.ts",
+                "src/app/both.ts"
+            ]
+        );
+        let directories = [
+            "src/app/index.ts",
+            "src/index.ts",
+            "src/app/index.ts",
+            "index.ts",
+            "src/app/index.ts",
+            "src/index.ts",
+            "src/app/both.ts",
+            "src/app/both.ts",
+        ];
+        for mode in [1, 2, 4] {
+            assert_eq!(read(mode), directories, "{}", modes[mode].0);
+        }
+        assert_eq!(read(3), ["", "", "", "", "", "", "", "src/app/both.ts"]);
+        assert_eq!(read(5), directories.map(|file| file.replace(".ts", ".js")));
+        assert!(graph.undetermined_imports.is_empty());
         assert!(graph.version_undetermined_imports.is_empty());
     }
 
