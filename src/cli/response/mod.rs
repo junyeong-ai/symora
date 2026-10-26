@@ -638,35 +638,45 @@ mod tests {
     fn source_fitting_omits_the_fewest_bodies_largest_first() {
         let measure =
             |value: &serde_json::Value| serde_json::to_string(value).unwrap().chars().count();
+        // Five bodies longer than the marker that replaces them, then a hundred
+        // empty ones, which omitting would only grow.
         let items: Vec<_> = [900, 700, 500, 300, 100]
-            .iter()
-            .map(|size| serde_json::json!({ "body": "x".repeat(*size) }))
+            .into_iter()
+            .chain([0; 100])
+            .map(|size| serde_json::json!({ "body": "x".repeat(size) }))
             .collect();
         let paths: Vec<String> = (0..items.len())
             .map(|index| format!("/symbols/items/{index}/body"))
             .collect();
         let response = serde_json::json!({
-            "symbols": {"count": 5, "showing": 5, "items": items, "bodies_included": 5}
+            "symbols": {"count": 105, "showing": 105, "items": items, "bodies_included": 105}
         });
+        let largest_omitted = |count: usize| {
+            let mut value = response.clone();
+            for index in 0..count {
+                let item = value["symbols"]["items"][index].as_object_mut().unwrap();
+                item.shift_remove("body");
+                item.insert("body_omitted".into(), "response_size".into());
+            }
+            value["symbols"]["bodies_included"] = (105 - count).into();
+            measure(&value)
+        };
         let omitted = |budget: usize| {
             let mut value = response.clone();
             fit_source_bodies(&mut value, &paths, budget, &measure);
-            let omitted: Vec<bool> = (0..5)
-                .map(|index| value["symbols"]["items"][index].get("body").is_none())
+            let omitted: Vec<usize> = (0..105)
+                .filter(|index| value["symbols"]["items"][*index].get("body").is_none())
                 .collect();
             (omitted, value["symbols"]["bodies_included"].clone())
         };
-        let full = measure(&response);
+        assert_eq!(omitted(largest_omitted(2)), ((0..2).collect(), 103.into()));
         assert_eq!(
-            omitted(full - 1_000),
-            (vec![true, true, false, false, false], 3.into())
+            omitted(largest_omitted(2) - 1),
+            ((0..3).collect(), 102.into())
         );
-        assert_eq!(
-            omitted(full - 1_800),
-            (vec![true, true, true, false, false], 2.into())
-        );
-        assert_eq!(omitted(full), (vec![false; 5], 5.into()));
-        assert_eq!(omitted(10), (vec![true; 5], 0.into()));
+        assert_eq!(omitted(largest_omitted(5)), ((0..5).collect(), 100.into()));
+        assert_eq!(omitted(measure(&response)), (vec![], 105.into()));
+        assert_eq!(omitted(10), ((0..105).collect(), 0.into()));
     }
 
     #[test]
