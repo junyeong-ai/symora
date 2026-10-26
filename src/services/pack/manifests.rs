@@ -286,7 +286,7 @@ impl TsConfig {
             .majors()
             .iter()
             .copied()
-            .filter(|major| !refused || reads_base_url(*major))
+            .filter(|major| !refused || *major != 7)
             .collect()
     }
 }
