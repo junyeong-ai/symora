@@ -83,9 +83,9 @@ pub struct PackResult {
     /// `paths` alias, a workspace package's name — that named no file it
     /// determines, so their edges are missing rather than absent.
     pub undetermined_imports: Vec<String>,
-    /// The specifiers `classic` resolution names a JavaScript file in the
-    /// project for where a declaration in `node_modules/@types` or a
-    /// `typeRoots` directory, which it takes first, may stand for them: one
+    /// The specifiers `classic` resolution names a file in the project for
+    /// where a declaration in `node_modules/@types` or a `typeRoots`
+    /// directory, which it takes first, may stand for them: one
     /// outside the project, which pack checks on disk without reading it, or
     /// one a `typesVersions` pack does not follow maps.
     pub declaration_undetermined_imports: Vec<String>,
@@ -104,9 +104,9 @@ pub struct PackResult {
     /// `jsconfig.json` of an importer's JavaScript project read as different
     /// files.
     pub jsconfig_undetermined_imports: Vec<String>,
-    /// The specifiers naming a directory, or a `node_modules` package,
-    /// whose `package.json` holds `typesVersions`, which pack does not
-    /// follow.
+    /// The specifiers naming a directory, a workspace package or a
+    /// `node_modules` package whose `package.json` holds `typesVersions`,
+    /// which pack does not follow.
     pub types_versions_undetermined_imports: Vec<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of `version_undetermined_imports`.

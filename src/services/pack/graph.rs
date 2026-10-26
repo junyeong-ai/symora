@@ -26,9 +26,9 @@ pub(super) struct ImportGraph {
     pub(super) edges: Graph,
     pub(super) rust_relative_imports_omitted: bool,
     pub(super) undetermined_imports: BTreeSet<String>,
-    /// The specifiers `classic` resolution names a JavaScript file in the
-    /// project for where a declaration it takes first, which pack does not
-    /// read or whose `typesVersions` it does not follow, may stand for them.
+    /// The specifiers `classic` resolution names a file in the project for
+    /// where a declaration it takes first, which pack does not read or whose
+    /// `typesVersions` it does not follow, may stand for them.
     pub(super) declaration_undetermined_imports: BTreeSet<String>,
     /// The specifiers a declaration in a `typeRoots` directory may stand
     /// for outside `classic`, where pack cannot tell whether TypeScript
@@ -45,9 +45,9 @@ pub(super) struct ImportGraph {
     /// `jsconfig.json` of an importer's JavaScript project read as different
     /// files.
     pub(super) jsconfig_undetermined_imports: BTreeSet<String>,
-    /// The specifiers naming a directory, or a `node_modules` package,
-    /// whose `package.json` holds `typesVersions`, which pack does not
-    /// follow.
+    /// The specifiers naming a directory, a workspace package or a
+    /// `node_modules` package whose `package.json` holds `typesVersions`,
+    /// which pack does not follow.
     pub(super) types_versions_undetermined_imports: BTreeSet<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of those specifiers.
@@ -230,9 +230,9 @@ enum Resolution {
     /// A specifier the project's own configuration declares that names no
     /// file pack reads.
     Undetermined(String),
-    /// A specifier `classic` resolution names a JavaScript file in the
-    /// project for, where a declaration in `node_modules/@types` or a
-    /// `typeRoots` directory, which it takes first, may stand for it: one
+    /// A specifier `classic` resolution names a file in the project for,
+    /// where a declaration in `node_modules/@types` or a `typeRoots`
+    /// directory, which it takes first, may stand for it: one
     /// outside the project, which pack checks on disk without reading it,
     /// or one a `typesVersions` pack does not follow maps.
     DeclarationUndetermined(String),
@@ -253,9 +253,10 @@ enum Resolution {
     /// A specifier the TypeScript majors that may read the `jsconfig.json`
     /// of the importer's JavaScript project read as different files.
     JsConfigUndetermined(String),
-    /// A specifier naming a directory, or under `node10` a `node_modules`
-    /// package taking it before a `paths` or `baseUrl` file, whose
-    /// `package.json` holds `typesVersions`, which pack does not follow.
+    /// A specifier naming a directory, a workspace package, or under
+    /// `node10` a `node_modules` package taking it before a `paths` or
+    /// `baseUrl` file, whose `package.json` holds `typesVersions`, which
+    /// pack does not follow.
     TypesVersionsUndetermined(String),
 }
 
