@@ -9439,6 +9439,101 @@ mod tests {
         }
     }
 
+    /// A target keeps the module kind it writes and a name the scope that
+    /// reads it, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it under `bundler`
+    /// (`zs_*`). A package's own name maps a `.d.cts` or `.d.mts` target in
+    /// its output directory to a `.cts` or `.mts` input, not a `.ts` one
+    /// beside it (`w/n`, `w/m`; `zs_modkinds_*`), and a `.cjs` or `.mjs`
+    /// target to the JavaScript input of its kind (`w/c3`, `w/m3`); a file
+    /// below a nearer `package.json` reads the name from another package,
+    /// which maps nothing (`esm`'s `w/o`; `zs_nested_only_*`). Another
+    /// package's `.d.mts` or `.d.cts` target is that declaration or none
+    /// with TypeScript's extensions, then names the JavaScript file of its
+    /// kind (`k/k`, `k/c`; `zs_dmts_*`), and a subpath of a package without
+    /// `exports` names the file before the directory of that name (`x/lib/x`;
+    /// `zs_subdir_both_*`).
+    #[test]
+    fn a_target_keeps_its_module_kind_and_a_name_the_scope_reading_it() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let js = |id, rel| node_in(id, rel, "", Language::JavaScript);
+        let nodes = vec![
+            ts(
+                0,
+                "packages/w/src/t.ts",
+                "import \"w/n\";\nimport \"w/m\";\nimport \"w/c3\";\nimport \"w/m3\";\n",
+            ),
+            ts(1, "packages/w/src/esm/t.ts", "import \"w/o\";\n"),
+            ts(
+                2,
+                "src/main.ts",
+                "import \"k/k\";\nimport \"k/c\";\nimport \"x/lib/x\";\n",
+            ),
+            ts(3, "packages/w/src/n.cts", ""),
+            ts(4, "packages/w/src/n.ts", ""),
+            ts(5, "packages/w/src/m.mts", ""),
+            ts(6, "packages/w/src/m.ts", ""),
+            js(7, "packages/w/src/c3.cjs"),
+            js(8, "packages/w/src/m3.mjs"),
+            ts(9, "packages/w/src/o.ts", ""),
+            ts(10, "packages/k/src/k.mts", ""),
+            js(11, "packages/k/src/k.mjs"),
+            ts(12, "packages/k/src/c.cts", ""),
+            ts(13, "packages/x/lib/x.ts", ""),
+            ts(14, "packages/x/lib/x/index.ts", ""),
+        ];
+        let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    &format!("{{\"compilerOptions\": {{{bundler}}}}}"),
+                ),
+                (
+                    "packages/w/tsconfig.json",
+                    &format!(
+                        "{{\"compilerOptions\": {{{bundler}, \"outDir\": \"dist\", \
+                         \"rootDir\": \"src\"}}}}"
+                    ),
+                ),
+                (
+                    "packages/w/package.json",
+                    "{\"name\": \"w\", \"exports\": {\"./n\": {\"types\": \"./dist/n.d.cts\"}, \
+                     \"./m\": {\"types\": \"./dist/m.d.mts\"}, \"./c3\": \"./dist/c3.cjs\", \
+                     \"./m3\": \"./dist/m3.mjs\", \"./o\": \"./dist/o.js\"}}",
+                ),
+                ("packages/w/src/esm/package.json", "{\"type\": \"module\"}"),
+                (
+                    "packages/k/package.json",
+                    "{\"name\": \"k\", \"exports\": {\"./k\": \"./src/k.d.mts\", \
+                     \"./c\": {\"types\": \"./src/c.d.cts\"}}}",
+                ),
+                ("packages/x/package.json", "{\"name\": \"x\"}"),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id| edges_under(&nodes, id, &manifests);
+        assert_eq!(
+            edges(0),
+            [
+                "packages/w/src/n.cts",
+                "packages/w/src/m.mts",
+                "packages/w/src/c3.cjs",
+                "packages/w/src/m3.mjs"
+            ]
+        );
+        assert!(edges(1).is_empty());
+        assert_eq!(edges(2), ["packages/k/src/k.mjs", "packages/x/lib/x.ts"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["k/c".to_string(), "w/o".to_string()])
+        );
+    }
+
     /// A package's `exports` maps by conditions, read in their written order
     /// as TypeScript 6 matches them: `types`, `default` and the configured
     /// `customConditions` always, `import` under `bundler` or for an ES
