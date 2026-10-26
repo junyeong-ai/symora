@@ -2055,12 +2055,17 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
 /// it whole (`static int #ifdef WIN WIN_CDECL #endif g(…)`), as a
 /// directive's line does (`static int WIN_CDECL #define X 1 g(…)`). A
 /// declaration whose branches each write its words (`#ifdef WIN static int
-/// WIN_CDECL #else static int #endif g(…)`) begins at the declarator.
-/// `None` where its node holds none. Such prototypes come before the
-/// declarator: the grammar reads a later function declarator whose
-/// parameters name something as one of the node's own declarators, not in
-/// an error, and reads no K&R definition, whose parameters are declared
-/// after its declarator, as a function definition.
+/// WIN_CDECL #else static int #endif g(…)`) begins at the declarator. A
+/// declaration the grammar folds in without reading it as one of them is
+/// no row of its own and stays inside the declaration's range: `static int
+/// WIN_CDECL g(…);` before `static int WIN_CDECL h(…) {…}`, whose macro the
+/// grammar holds as a plain name beside it, and `NCURSES_EXPORT(WINDOW *)
+/// unread (int,int);`, whose parameters name nothing and which writes no
+/// storage class. `None` where its node holds none. Such prototypes come
+/// before the declarator: the grammar reads a later function declarator
+/// whose parameters name something as one of the node's own declarators,
+/// not in an error, and reads no K&R definition, whose parameters are
+/// declared after its declarator, as a function definition.
 fn past_held_prototypes<'t>(node: Node<'t>, content: &str) -> Option<Node<'t>> {
     let declarator = node.child_by_field_name("declarator")?;
     let mut cursor = node.walk();
@@ -4133,9 +4138,10 @@ fn declaration_start<'t>(node: Node<'t>, content: &str, language: Language) -> N
 /// before the declaration's body and the end on all of it, so an error inside
 /// a body (a macro statement with no `;`) leaves the start as written and the
 /// end not. A macro that happens to read as valid syntax of another shape
-/// leaves no error to tell by. A declaration that begins inside a part of its
-/// node, an error the grammar holds its first words in
-/// ([`past_held_prototypes`]), is read from that part.
+/// leaves no error to tell by. A declaration that begins inside its node
+/// ([`past_held_prototypes`]) is read from the part of the node that holds
+/// its start: the `static` written after the prototypes there, or the error
+/// that holds the last of them and the words it begins with.
 fn read_as_written(node: Node, content: &str, language: Language) -> AsWritten {
     let declaration = declaration_node(node, language);
     let end = declaration_end(declaration, language);
