@@ -8670,6 +8670,19 @@ region     = "us-central1"
         );
         assert_eq!(
             declared(
+                "struct uv_prepare_s {\n  UV_HANDLE_FIELDS\n  UV_PREPARE_PRIVATE_FIELDS\n};\n\n\
+                 UV_EXTERN int uv_prepare_init(uv_loop_t*, uv_prepare_t* prepare);\n\n\
+                 struct uv_check_s {\n  UV_HANDLE_FIELDS\n  UV_CHECK_PRIVATE_FIELDS\n};\n"
+            ),
+            [
+                "struct:uv_prepare_s",
+                "function:uv_prepare_init",
+                "struct:uv_check_s"
+            ],
+            "nor where the macros are plain names, written as a member's type and name are"
+        );
+        assert_eq!(
+            declared(
                 "class R : public QObject {\n    Q_OBJECT\npublic:\n    \
                  Q_INVOKABLE Q_REVISION(6, 11) QModelIndex mapFromSource(const QModelIndex &sourceIndex) const;\n    \
                  Q_INVOKABLE Q_REVISION(6, 11) QModelIndex mapToSource(const QModelIndex &proxyIndex) const;\n    \
