@@ -41,13 +41,25 @@ pub(super) struct Manifests {
     pub(super) ts_projects: TsProjects,
     /// Each package a JavaScript workspace lists, by its directory.
     pub(super) js_packages: HashMap<Vec<String>, JsPackage>,
-    /// The `"type"` each `package.json` above a JavaScript or TypeScript
-    /// file declares, by its directory: the nearest decides whether Node
-    /// reads a `.js` or `.ts` file there as an ES module.
-    pub(super) module_types: HashMap<Vec<String>, PackageType>,
+    /// What each `package.json` above a JavaScript or TypeScript file
+    /// declares, by its directory: the nearest is a file's package scope, as
+    /// Node and TypeScript read it (`getPackageScopeForPath`).
+    pub(super) package_scopes: HashMap<Vec<String>, PackageScope>,
     /// The TypeScript versions that may compile the files of each directory
     /// holding a JavaScript or TypeScript file (`TypeScriptVersions`).
     pub(super) typescript: HashMap<Vec<String>, TypeScript>,
+}
+
+/// What a `package.json` declares for the files it is the nearest of.
+#[derive(Debug, Clone)]
+pub(super) struct PackageScope {
+    /// Its `"type"`, which decides whether Node reads a `.js` or `.ts` file
+    /// there as an ES module.
+    pub(super) kind: PackageType,
+    /// Its `name` and `exports`, which a file reads the package's own name
+    /// through, whether or not a workspace lists the package.
+    pub(super) name: Option<String>,
+    pub(super) exports: Option<serde_json::Value>,
 }
 
 /// The `"type"` a `package.json` declares.
@@ -1046,7 +1058,7 @@ impl Manifests {
                     Some((directory, serde_json::from_str(&text).ok()?))
                 })
                 .collect();
-        let module_types = package_jsons
+        let package_scopes = package_jsons
             .iter()
             .map(|(directory, manifest)| {
                 let kind = match manifest.get("type").and_then(|kind| kind.as_str()) {
@@ -1054,7 +1066,13 @@ impl Manifests {
                     Some("commonjs") => PackageType::CommonJs,
                     _ => PackageType::Unset,
                 };
-                (directory.clone(), kind)
+                let name = manifest.get("name").and_then(|name| name.as_str());
+                let scope = PackageScope {
+                    kind,
+                    name: name.map(str::to_string),
+                    exports: manifest.get("exports").cloned(),
+                };
+                (directory.clone(), scope)
             })
             .collect();
         let python = python_configurations(root, nodes);
@@ -1076,7 +1094,7 @@ impl Manifests {
             pytest_rootdirs: python.rootdirs,
             ts_projects,
             js_packages: js_packages(&package_jsons, &workspaces),
-            module_types,
+            package_scopes,
             typescript,
         }
     }
