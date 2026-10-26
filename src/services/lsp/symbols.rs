@@ -123,7 +123,6 @@ fn parse_document_symbols(
             file,
             options,
             None,
-            None,
             0,
             conv,
         ));
