@@ -835,6 +835,64 @@ fn a_daemon_socket_path_too_long_to_bind_runs_in_process() {
     assert_eq!(value["count"], 1, "{value}");
 }
 
+/// Under the same home the lifecycle commands answer what is true instead of
+/// failing on the socket: none is running, so there is nothing to stop or
+/// unload, and starting one asks for a shorter home, naming the path's limit.
+#[test]
+fn a_daemon_socket_path_too_long_to_bind_leaves_nothing_to_stop_or_start() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("h".repeat(120));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let socket_dir = home.join(".symora").display().to_string();
+    let run = |args: &[&str]| {
+        let out = project_command(Path::new(env!("CARGO_BIN_EXE_symora")), &home, args)
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{args:?}: {e}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        (out.status.success(), value)
+    };
+
+    for (args, field) in [
+        (&["daemon", "status"][..], "running"),
+        (&["daemon", "stop"], "stopped"),
+        (&["daemon", "restart", "--project"], "restarted"),
+    ] {
+        let (succeeded, value) = run(args);
+        assert!(succeeded, "{args:?}: {value}");
+        assert!(value.get("error").is_none(), "{args:?}: {value}");
+        assert_eq!(value[field], false, "{args:?}: {value}");
+        let message = value["message"].as_str().unwrap();
+        assert!(message.contains(&socket_dir), "{args:?}: {value}");
+        assert!(
+            message.contains("must be shorter than"),
+            "{args:?}: {value}"
+        );
+    }
+    for args in [&["daemon", "start"][..], &["daemon", "restart"]] {
+        let (succeeded, value) = run(args);
+        assert!(!succeeded, "{args:?}: {value}");
+        let error = &value["error"];
+        assert_eq!(error["code"], "precondition_failed", "{args:?}: {value}");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(&socket_dir), "{args:?}: {value}");
+        assert!(
+            message.contains("must be shorter than"),
+            "{args:?}: {value}"
+        );
+        let hint = error["hint"].as_str().unwrap();
+        assert!(hint.contains("HOME"), "{args:?}: {value}");
+        assert!(hint.contains("runs in process"), "{args:?}: {value}");
+    }
+}
+
 /// A sandbox that forbids the daemon's directory still gets answers: the
 /// process runs in process instead of failing every command on the startup
 /// lock it cannot open.

@@ -86,7 +86,7 @@ flowchart TD
 ```
 
 - **백엔드마다 필요한 것이 다릅니다.** 인덱스와 `search ast`/`map`은 language server가 필요 없습니다. `symbols`와 `map file`은 서버가 응답하면 서버의 심볼 트리로, 응답하지 않으면 바이너리에 내장된 문법으로 읽은 선언으로 답하고, 어느 쪽인지 `backend`(`document`|`ast`)로 밝힙니다. 나머지 LSP 기반 명령(`refs`, `callers`, `context`, `impact`, `rename` 등)은 대상 언어의 서버가 필요합니다. 서버에 없는 기능은 구조화된 `unsupported` 응답으로 알리거나, 다른 근거로 대신 만든 결과임을 밝혀 돌려줍니다(call hierarchy가 없으면 `callers`에 `callers_status: "references_derived"`가 붙습니다). 틀린 결과를 말없이 내놓지는 않습니다.
-- **daemon은 자동.** Unix에서는 띄워 둔 language server 세션을 호출 사이에 재사용하므로 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스에서는 자동으로 in-process로 실행합니다. 같은 소스와 language server 상태라면 두 방식의 답은 같습니다.
+- **daemon은 자동.** Unix에서는 띄워 둔 language server 세션을 호출 사이에 재사용하므로 두 번째 호출부터 빠릅니다. `SYMORA_NO_DAEMON=1`로 in-process 실행할 수 있고, daemon 디렉터리(`~/.symora`)에 쓸 수 없는 샌드박스나 daemon 소켓 경로가 Unix 소켓 경로 한도를 넘을 만큼 home이 깊은 환경에서는 자동으로 in-process로 실행합니다. 같은 소스와 language server 상태라면 두 방식의 답은 같습니다.
 
 ---
 
@@ -533,7 +533,7 @@ symora mcp tools --profile read-only             # read-only 서버가 노출할
 - **Linux**, **macOS**: 지원.
 - **Windows**: 사전 빌드 바이너리와 CI 검증이 없습니다. daemon은 Unix domain socket으로 통신하므로 모든 명령이 in-process로 실행됩니다.
 
-Unix에서는 daemon이 기본으로 켜져 있습니다(`SYMORA_NO_DAEMON=1`이면 in-process로 실행합니다). 모드는 시작할 때 한 번 정해지며, 실행 도중 다른 모드로 넘어가지 않습니다. `daemon start`/`daemon restart`는 daemon이 실제로 응답할 때까지 기다렸다가 반환하므로, 성공 응답은 곧 서비스 가능 상태를 뜻합니다. daemon이 떠 있지 않을 때 여러 명령이 동시에 실행되어도 daemon은 하나만 뜹니다. 각 설치(실행 파일 경로)는 자체 daemon을 실행하므로 저장소별로 고정한 버전이 서로의 daemon을 교체하지 않습니다.
+Unix에서는 daemon이 기본으로 켜져 있습니다(`SYMORA_NO_DAEMON=1`이면 in-process로 실행합니다). 모드는 시작할 때 한 번 정해지며, 실행 도중 다른 모드로 넘어가지 않습니다. `daemon start`/`daemon restart`는 daemon이 실제로 응답할 때까지 기다렸다가 반환하므로, 성공 응답은 곧 서비스 가능 상태를 뜻합니다. daemon이 떠 있지 않을 때 여러 명령이 동시에 실행되어도 daemon은 하나만 뜹니다. 각 설치(실행 파일 경로)는 자체 daemon을 실행하므로 저장소별로 고정한 버전이 서로의 daemon을 교체하지 않습니다. Unix 소켓 경로는 macOS에서 104바이트, Linux에서 108바이트보다 짧아야 하므로, home이 깊어 daemon 소켓 경로(`~/.symora/daemon-<id>.sock`)가 이를 넘으면 daemon을 띄울 수 없고 모든 명령이 in-process로 실행됩니다. 이때 `daemon status`·`stop`·`restart --project`는 실행 중인 daemon이 없다고 그 이유와 함께 답하고, `daemon start`·`restart`는 `precondition_failed`로 실패하며 hint에서 `HOME`을 몇 바이트 줄여야 하는지 밝힙니다.
 
 ```bash
 symora daemon start | stop | restart | status

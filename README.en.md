@@ -86,7 +86,7 @@ flowchart TD
 ```
 
 - **Two backends, different needs.** Index and `search ast`/`map` work with no language server. `symbols` and `map file` answer from the server's tree when one serves and from the compiled-in grammar when not, and say which in `backend` (`document` | `ast`). The other LSP-backed commands (`refs`, `callers`, `context`, `impact`, `rename`, …) need the server for the target language, and when a server lacks a capability they degrade *honestly* — a structured `unsupported` response, or a fallback that says it is one (`callers` without call hierarchy marks `callers_status: "references_derived"`) — never a silently-wrong answer.
-- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process; a sandbox that cannot write the daemon directory (`~/.symora`) runs in-process on its own. For the same source and language-server state, both modes give the same answer.
+- **The daemon is automatic.** On Unix, Symora keeps language-server sessions warm across invocations so the second call is fast. Set `SYMORA_NO_DAEMON=1` to run in-process; a sandbox that cannot write the daemon directory (`~/.symora`), or a home too deep for the daemon's socket path to fit a Unix socket's limit, runs in-process on its own. For the same source and language-server state, both modes give the same answer.
 
 ---
 
@@ -533,7 +533,7 @@ For a known file or declaration, go directly to `symbols`, `context`, `refs`, or
 - **Linux** and **macOS**: supported.
 - **Windows**: no prebuilt binary and no CI coverage. The daemon speaks over a Unix domain socket, so every command runs in-process.
 
-On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` return once the daemon actually answers, so a success response means it is serving. Concurrent commands meeting a cold start bring up exactly one daemon. Each installation (executable path) runs its own daemon, so versions pinned per repository do not replace each other's daemon.
+On Unix the daemon is on by default (`SYMORA_NO_DAEMON=1` forces in-process). The mode is chosen once at startup — there is no runtime fallback. `daemon start` and `daemon restart` return once the daemon actually answers, so a success response means it is serving. Concurrent commands meeting a cold start bring up exactly one daemon. Each installation (executable path) runs its own daemon, so versions pinned per repository do not replace each other's daemon. A Unix socket's path must be shorter than 104 bytes on macOS and 108 on Linux, so under a home deep enough that the daemon's socket path (`~/.symora/daemon-<id>.sock`) exceeds it, no daemon can run and every command runs in-process. There `daemon status`, `stop` and `restart --project` answer that no daemon is running and why, and `daemon start` and `restart` fail with `precondition_failed`, with a hint saying how many bytes shorter `HOME` must be.
 
 ```bash
 symora daemon start | stop | restart | status

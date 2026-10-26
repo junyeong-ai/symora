@@ -62,6 +62,48 @@ pub enum DaemonStart {
     Replaced,
 }
 
+/// A daemon socket path the platform cannot address. A Unix socket is named
+/// by a path that fits, with its terminating NUL, in `sockaddr_un`'s
+/// `sun_path` (104 bytes on macOS, 108 on Linux), so under a home deep enough
+/// no daemon can listen for this installation, nor any client reach one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SocketPathTooLong {
+    path: PathBuf,
+    capacity: usize,
+}
+
+impl SocketPathTooLong {
+    fn check(path: &Path) -> Option<Self> {
+        // SAFETY: `sockaddr_un` holds only integers and a byte array, for
+        // which all-zero bytes are a valid value.
+        let capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+            .sun_path
+            .len();
+        (path.as_os_str().len() >= capacity).then(|| Self {
+            path: path.to_path_buf(),
+            capacity,
+        })
+    }
+
+    /// Bytes the path must lose to be addressable.
+    pub fn excess(&self) -> usize {
+        self.path.as_os_str().len() + 1 - self.capacity
+    }
+}
+
+impl std::fmt::Display for SocketPathTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "its socket path `{}` is {} bytes, and a Unix socket's path must be shorter \
+             than {} bytes on this platform",
+            self.path.display(),
+            self.path.as_os_str().len(),
+            self.capacity
+        )
+    }
+}
+
 /// Daemon client for CLI commands
 pub struct DaemonClient {
     config: DaemonRuntimeConfig,
@@ -144,12 +186,8 @@ impl DaemonClient {
     /// since daemon and direct execution agree, without warm reuse across
     /// invocations.
     pub fn can_start_daemon(&self) -> bool {
-        let socket = &self.config.socket_path;
-        if let Err(e) = std::os::unix::net::SocketAddr::from_pathname(socket) {
-            tracing::info!(
-                "daemon unavailable ({}: {e}); running in process",
-                socket.display()
-            );
+        if let Some(too_long) = self.socket_path_too_long() {
+            tracing::info!("daemon unavailable ({too_long}); running in process");
             return false;
         }
         let lock = &self.config.lock_path;
@@ -173,6 +211,12 @@ impl DaemonClient {
                 false
             }
         }
+    }
+
+    /// Whether this installation's socket path is too long to address, so
+    /// that no daemon can be running for it and none can be started.
+    pub fn socket_path_too_long(&self) -> Option<SocketPathTooLong> {
+        SocketPathTooLong::check(&self.config.socket_path)
     }
 
     async fn start_daemon_with_lock(&self) -> Result<DaemonStart, LspError> {
@@ -753,6 +797,29 @@ impl DaemonClient {
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+
+    /// The platform refuses to address a socket path exactly where the check
+    /// calls it too long, and accepts it once `excess` bytes are gone.
+    #[test]
+    fn a_socket_path_is_too_long_where_the_platform_refuses_it() {
+        use std::os::unix::net::SocketAddr;
+
+        for len in 90..=120 {
+            let path = format!("/{}", "s".repeat(len - 1));
+            let too_long = SocketPathTooLong::check(Path::new(&path));
+            assert_eq!(
+                too_long.is_some(),
+                SocketAddr::from_pathname(&path).is_err(),
+                "{len} bytes"
+            );
+            if let Some(too_long) = too_long {
+                let fits = len - too_long.excess();
+                assert!(SocketAddr::from_pathname(&path[..fits]).is_ok(), "{len}");
+                assert!(SocketAddr::from_pathname(&path[..=fits]).is_err(), "{len}");
+            }
+        }
+        assert!(SocketPathTooLong::check(Path::new("/s")).is_none());
+    }
 
     #[test]
     fn request_io_errors_distinguish_peer_closure_from_other_failures() {
