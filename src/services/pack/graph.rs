@@ -4513,8 +4513,8 @@ mod tests {
     /// option tsc 7.0.2 removed (TS5108) is read under 5 and 6 alone: with
     /// `moduleResolution: "node"` tsc 5.9.3 and 6.0.3 take the package's
     /// `types` (`node10_absent`), and with `moduleResolution: "classic"` or
-    /// `module` `amd`, `umd` or `system` they resolve no file for it, where
-    /// 7.0.2 takes its `import` file in each.
+    /// `module` `amd`, `umd`, `system` or `none` (TS6046) they resolve no
+    /// file for it, where 7.0.2 takes its `import` file in each.
     #[test]
     fn a_specifier_only_the_typescript_version_decides_is_disclosed_as_such() {
         let ts = |id, rel: &str, source: &str| node_in(id, rel, source, Language::TypeScript);
@@ -4528,6 +4528,7 @@ mod tests {
             "\"module\": \"amd\"",
             "\"module\": \"umd\"",
             "\"module\": \"system\"",
+            "\"module\": \"none\"",
         ];
         for (at, _) in removed.iter().enumerate() {
             nodes.push(ts(

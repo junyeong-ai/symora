@@ -266,8 +266,9 @@ impl TsConfig {
     /// Where no major pack reads is installed or declared — none, a range
     /// fixing none, a version above 7 — a chain setting an option tsc 7.0.2
     /// rejects as an error is one no TypeScript 7 compiles, so it is read
-    /// under 5 and 6 alone: `baseUrl` (TS5102), or a module option 7 removed
-    /// (`ModuleOptions::removed_in_7`).
+    /// under 5 and 6 alone: `baseUrl` (TS5102), or a module option 7 rejects
+    /// that pack reads apart under 6 and 7 (`ModuleOptions::removed_in_7`).
+    /// `outFile` (TS5102) is rejected too, but changes no option pack reads.
     pub(super) fn majors(&self) -> Vec<u8> {
         let refused = !matches!(self.typescript, TypeScript::Major(_))
             && (self.base_url.is_some() || self.module_options.removed_in_7());
@@ -327,14 +328,19 @@ pub(super) enum ModuleKind {
 }
 
 impl ModuleOptions {
-    /// Whether the chain sets a module option tsc 7.0.2 rejects as removed
-    /// (TS5108): `moduleResolution` `node`, `node10` or `classic`, or
-    /// `module` `amd`, `umd` or `system`.
+    /// Whether the chain sets a module option tsc 7.0.2 rejects as an error
+    /// and pack reads apart under 6 and 7: `moduleResolution` `node`,
+    /// `node10` or `classic`, `module` `amd`, `umd` or `system` (TS5108),
+    /// and `module` `none` (TS6046). It also rejects an ES3 or ES5 `target`,
+    /// which pack reads alike under 6 and 7.
     pub(super) fn removed_in_7(&self) -> bool {
         matches!(
             self.module_resolution.value(),
             Some(Some("node" | "node10" | "classic"))
-        ) || matches!(self.module.value(), Some(Some("amd" | "umd" | "system")))
+        ) || matches!(
+            self.module.value(),
+            Some(Some("amd" | "umd" | "system" | "none"))
+        )
     }
 
     /// The module system TypeScript of `major` emits a file in, as tsc
