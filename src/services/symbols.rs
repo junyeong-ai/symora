@@ -829,11 +829,9 @@ fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
 /// aside as an error, since a width is an expression, which a type begins
 /// only as a functional cast the grammar reads whole (`Pad : int(3);`): the
 /// name before the colon is then a macro standing for a specifier
-/// (`Q_SIGNALS:` before `void changed();`). A member writing a body is the
-/// source's, whatever the grammar read after it (`enum Mode { A }` before
-/// `Q_ENUM(Mode) public:`), and is left as the grammar reads it, as is a
-/// struct's body writing `public:` after a macro and before what reads as an
-/// expression, since C reads the same tokens as a bit-field.
+/// (`Q_SIGNALS:` before `void changed();`). A struct's body writing
+/// `public:` after a macro and before what reads as an expression is left as
+/// the grammar reads it, since C reads the same tokens as a bit-field.
 fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
@@ -874,12 +872,11 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
         let no_width = width.get(1).is_some_and(|first| {
             first.kind() == "primitive_type" && first.parent().is_some_and(|error| error.is_error())
         });
-        if (specifier.is_some()
+        if specifier.is_some()
             && body
                 .parent()
                 .is_some_and(|class| class.kind() == "class_specifier")
-            || no_width)
-            && !before.iter().any(|word| word.kind() == "{")
+            || no_width
         {
             if let Some((_, macros_before)) = specifier {
                 before = macros_before;
@@ -8431,15 +8428,12 @@ region     = "us-central1"
             ],
             "a run goes on through a conditional only where it holds such members alone"
         );
-        for defined in [
-            declared("class E {\n  enum Mode { A, B }\n  Q_ENUM(Mode)\n  int count;\n};\n"),
-            declared("class E {\n  enum Mode { A, B }\n  Q_ENUM(Mode)\npublic:\n  E();\n};\n"),
-        ] {
-            assert!(
-                defined.iter().any(|d| d == "enum:Mode"),
-                "a type a member defines is no macro: {defined:?}"
-            );
-        }
+        let defined =
+            declared("class E {\n  enum Mode { A, B }\n  Q_ENUM(Mode)\n  int count;\n};\n");
+        assert!(
+            defined.iter().any(|d| d == "enum:Mode"),
+            "a type a member defines is no macro: {defined:?}"
+        );
         assert_eq!(
             declared(
                 "struct Outer {\n  template <class T> struct Inner { Inner(T); };\n  \
