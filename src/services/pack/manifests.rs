@@ -713,21 +713,45 @@ pub(super) fn module_file(
         .find_map(|candidate| existing(&[directory, &[candidate]].concat()))
 }
 
+/// The file TypeScript takes for a path a `package.json` field or an
+/// `exports` target names with a set of extensions, as tsc 5.9.3, 6.0.3 and
+/// 7.0.2 read one (`loadFileNameFromPackageJsonField`): where it writes a
+/// TypeScript extension (`.ts`, `.tsx`, `.mts`, `.cts`, a declaration's
+/// among them) and the extensions hold TypeScript's, the file as written,
+/// none where it is missing; else the path with the extensions in place of
+/// the one it writes, none added (`module_names`), so a path writing none
+/// names no file, and a declaration read for declarations alone names
+/// itself, as tsc tries it as written.
+pub(super) fn field_file(
+    path: &[String],
+    extensions: Extensions,
+    existing: Existing,
+) -> Option<Vec<usize>> {
+    let name = path.last()?;
+    let typescript = matches!(extensions, Extensions::TypeScript | Extensions::All)
+        && [".ts", ".tsx", ".mts", ".cts"]
+            .iter()
+            .any(|written| has_extension(name, written));
+    match typescript {
+        true => existing(path),
+        false => module_file(path, extensions, false, existing),
+    }
+}
+
 /// The file TypeScript takes for a directory a path names, by the
 /// `package.json` it holds, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it
 /// (`dir_*`, `req_fields_*`): where that names one, the file the first of
 /// `typings` and `types`, where the extensions hold declarations, and
-/// `main` that is set names — a declaration as it is written where they
-/// hold declarations, as `loadFileNameFromPackageJsonField` tries it before
-/// its TypeScript twin, any other file with the extensions in place of the
-/// one it writes (`lib/m.js` as `lib/m.ts`, not as written) — or that
-/// directory's `index`; else, a field naming no file included, its own
-/// `index`. A `typesVersions` there, which pack does not follow, leaves it
-/// open, since it may map the directory to another file. Its `exports` is
-/// not read. A field's file is looked up with an extension added and, for
-/// declarations alone, as a TypeScript file too (`named_extensions`); the
-/// `index` with one added where `add`, which an ES import under `node16`
-/// does not.
+/// `main` that is set names (`field_file`), so a declaration as written
+/// before its TypeScript twin, `lib/m.js` as `lib/m.ts` and never as
+/// written, and a declaration lookup's `x.ts` as `x.d.ts` (`f_field_decl_*`);
+/// else that path with an extension added and, for declarations alone, as
+/// a TypeScript file too (`named_extensions`), or that directory's `index`;
+/// else, a field naming no file included, its own `index`. A
+/// `typesVersions` there, which pack does not follow, leaves it open, since
+/// it may map the directory to another file. Its `exports` is not read.
+/// The `index` is looked up with an extension added where `add`, which an
+/// ES import under `node16` does not.
 pub(super) fn directory_module(
     directory: &[String],
     manifest: Option<&serde_json::Value>,
@@ -756,16 +780,10 @@ pub(super) fn directory_module(
             });
         let found = named.and_then(|named| {
             let path = project_path(directory, named)?;
-            let declaration = [".d.ts", ".d.mts", ".d.cts"]
-                .iter()
-                .any(|extension| has_extension(named, extension));
-            let exact = (declarations && declaration)
-                .then(|| existing(&path))
-                .flatten();
-            let extensions = named_extensions(extensions);
-            exact
-                .or_else(|| module_file(&path, extensions, true, existing))
-                .or_else(|| index(&path, extensions, true))
+            let expanded = named_extensions(extensions);
+            field_file(&path, extensions, existing)
+                .or_else(|| module_file(&path, expanded, true, existing))
+                .or_else(|| index(&path, expanded, true))
         });
         if let Some(files) = found {
             return Some(Hit::Files(files));
