@@ -5475,7 +5475,12 @@ mod tests {
     /// `node_modules` but for a package's name whose `package.json` exists,
     /// which tsc's `index.js` fallback reads (`ei`, `p1c_*`), not for one
     /// without (`en`, `q1b_*`) or for a subpath (`es/sub`, `q1e_*`), so
-    /// only `pk`, `tn`, `en` and `es/sub` name one.
+    /// only `pk`, `tn`, `en`, `es/sub` and `@sc/q` name one. A declaration
+    /// a root holds where pack does not read it, beside a package whose
+    /// `exports` pack does not follow, forms no edge and is not disclosed,
+    /// as neither is a file pack reads (`ox` in `./node_modules/@org/types`);
+    /// a root that is no `node_modules/@types` keeps a scope as written
+    /// (`@sc/q` in `./src/@types`).
     #[test]
     fn a_type_root_declaration_outside_classic_comes_after_node_modules() {
         let specifiers = [
@@ -5496,6 +5501,8 @@ mod tests {
             "ei",
             "en",
             "es/sub",
+            "ox",
+            "@sc/q",
         ];
         let source: String = specifiers
             .iter()
@@ -5545,6 +5552,8 @@ mod tests {
                 let path = format!("typings/{file}");
                 nodes.push(node_in(nodes.len(), &path, "", Language::TypeScript));
             }
+            let scoped = "src/@types/@sc/q/index.d.ts";
+            nodes.push(node_in(nodes.len(), scoped, "", Language::TypeScript));
             let package = match kind {
                 Some(kind) => format!(
                     "{{\"type\": \"{kind}\", \"devDependencies\": {{\"typescript\": \"^5.9.0\"}}}}"
@@ -5553,7 +5562,7 @@ mod tests {
             };
             let config = format!(
                 "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \
-                 \"typeRoots\": [\"./typings\"]}}}}"
+                 \"typeRoots\": [\"./typings\", \"./node_modules/@org/types\", \"./src/@types\"]}}}}"
             );
             let manifests = manifests_of(
                 &[
@@ -5604,6 +5613,16 @@ mod tests {
                     ("typings/es/sub/package.json", "{\"types\": \"index.d.ts\"}"),
                     ("node_modules/es/package.json", "{\"name\": \"es\"}"),
                     ("node_modules/es/sub/index.js", ""),
+                    ("node_modules/@org/types/ox/index.d.ts", ""),
+                    (
+                        "node_modules/ox/package.json",
+                        "{\"name\": \"ox\", \"exports\": {\".\": \"./index.js\"}}",
+                    ),
+                    ("node_modules/ox/index.js", ""),
+                    (
+                        "src/@types/@sc/q/package.json",
+                        "{\"types\": \"index.d.ts\"}",
+                    ),
                 ],
                 &nodes,
             );
@@ -5613,7 +5632,10 @@ mod tests {
                 .get(&0)
                 .into_iter()
                 .flatten()
-                .map(|dst| nodes[*dst].rel_path.strip_prefix("typings/").unwrap())
+                .map(|dst| {
+                    let path = nodes[*dst].rel_path.as_str();
+                    path.strip_prefix("typings/").unwrap_or(path)
+                })
                 .collect();
             let edges: BTreeSet<String> = edges.into_iter().map(str::to_string).collect();
             read.push((edges, graph.type_root_undetermined_imports.clone()));
@@ -5633,6 +5655,7 @@ mod tests {
             "@sc/x/index.d.ts",
             "nm/index.d.ts",
             "tn/lib/t.ts",
+            "src/@types/@sc/q/index.d.ts",
         ];
         let node10 = [
             &common[..],
@@ -5655,6 +5678,7 @@ mod tests {
             "tn/lib/t.ts",
             "en/index.d.ts",
             "es/sub/index.d.ts",
+            "src/@types/@sc/q/index.d.ts",
         ];
         assert_eq!(read[3], (set(&esm), set(&[])));
     }
@@ -5710,6 +5734,47 @@ mod tests {
         assert!(edges(1).is_empty());
         assert!(edges(2).is_empty());
         assert_eq!(edges(3), vec!["typings/nested/index.d.ts"]);
+    }
+
+    /// The `node_modules` lookup goes on past the project's root, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it (`q7_nm_above_root_*`): a package of
+    /// JavaScript alone installed above the root takes `ul` before the type
+    /// root's declaration under `bundler`, and gives way to it under
+    /// `node10`.
+    #[test]
+    fn a_node_modules_above_the_projects_root_comes_before_a_type_root() {
+        let modes = [("bundler", "esnext", false), ("node10", "commonjs", true)];
+        for (resolution, module, declared) in modes {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = format!(
+                "{{\"compilerOptions\": {{\"moduleResolution\": \"{resolution}\", \
+                 \"module\": \"{module}\", \"typeRoots\": [\"./typings\"]}}}}"
+            );
+            for (path, contents) in [
+                (
+                    "outer/node_modules/ul/package.json",
+                    "{\"name\": \"ul\", \"main\": \"index.js\"}",
+                ),
+                ("outer/node_modules/ul/index.js", ""),
+                (
+                    "outer/repo/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                ("outer/repo/tsconfig.json", &config),
+            ] {
+                let path = dir.path().join(path);
+                std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+                std::fs::write(path, contents).expect("write");
+            }
+            let nodes = vec![
+                node_in(0, "src/main.ts", "import \"ul\";\n", Language::TypeScript),
+                node_in(1, "typings/ul/index.d.ts", "", Language::TypeScript),
+            ];
+            let manifests = Manifests::read(&dir.path().join("outer/repo"), &nodes);
+            let edges = edges_under(&nodes, 0, &manifests);
+            let want = declared.then(|| "typings/ul/index.d.ts".to_string());
+            assert_eq!(edges, want.into_iter().collect::<Vec<_>>(), "{resolution}");
+        }
     }
 
     /// A `paths` substitution naming a directory whose `package.json` holds
