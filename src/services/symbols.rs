@@ -2399,7 +2399,9 @@ fn body_end(content: &str, open: usize) -> Option<usize> {
             b'\'' if token_before(at).starts_with(|c: char| c.is_ascii_digit()) => {}
             quote @ (b'"' | b'\'') => {
                 at += 1;
-                while at < end && bytes[at] != quote && bytes[at] != b'\n' {
+                // An unclosed literal ends with its line, which a splice
+                // carries on.
+                while at < end && bytes[at] != quote && !starts_line(at + 1) {
                     at += if bytes[at] == b'\\' { 2 } else { 1 };
                 }
             }
@@ -8031,6 +8033,11 @@ region     = "us-central1"
             assert_eq!(
                 end(&spliced_after_blanks),
                 Some(crlf("#define OPEN(n) int n(void) \\ \n  { \\\t\n  int v;").as_str())
+            );
+            let spliced_literal = crlf("{\n  puts(\"a} \\ \nb}\");\n}\nint after;");
+            assert_eq!(
+                end(&spliced_literal),
+                Some(crlf("{\n  puts(\"a} \\ \nb}\");\n}").as_str())
             );
         }
         assert_eq!(end("{ int never_closed;\n"), None);
