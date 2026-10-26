@@ -1736,7 +1736,9 @@ fn a_computed_member_is_found_by_its_brackets() {
 /// follows. So is the statement or token that holds a declaration alone — an
 /// `export`, a `const` or Go `type` declaring one name, `extern "C"`, a C++
 /// type's closing `;`, a member's `;` or a field's `,` — so a whole-line edit
-/// takes it rather than refusing to split its line.
+/// takes it rather than refusing to split its line. A C prototype the grammar
+/// read into the function defined after it is no part of that function, so
+/// deleting the function leaves it.
 #[test]
 fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
     let dir = tempfile::tempdir().unwrap();
@@ -1770,6 +1772,15 @@ fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
         "package p\n\ntype Foo struct {\n\tA int\n}\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("e.c"),
+        "#include <stddef.h>\nextern NCURSES_EXPORT(int) PAIR_NUMBER (int);\nextern\n\
+         NCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);\n\
+         extern NCURSES_EXPORT(int) doupdate (void);\n\
+         static int WIN_CDECL g(void* ctx, const void* lp) {\n    return 0;\n}\n\
+         int after(int x);\n",
+    )
+    .unwrap();
     let config_dir = root.join(".symora");
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(
@@ -1793,6 +1804,9 @@ fn a_whole_line_edit_takes_all_the_syntax_of_a_declaration() {
         ("m.cpp", "Box", 6, 9),
         ("m.cpp", "cfun", 11, 13),
         ("types.go", "Foo", 3, 5),
+        ("e.c", "derwin", 3, 4),
+        ("e.c", "doupdate", 5, 5),
+        ("e.c", "g", 6, 8),
     ] {
         let preview = json_ok(
             root,

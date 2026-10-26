@@ -1983,6 +1983,42 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
     Some((start, end))
 }
 
+/// Where a C or C++ declaration's own text begins when the grammar read
+/// prototypes an error holds ([`error_held_prototype`]) into its node before
+/// its declarator: at the first word written after the last of them
+/// ([`written_words_before`]), or at the declarator where none is. Each of
+/// them is a declaration of its own, from its own start to its own end, so
+/// what the declaration writes begins after them, as it would after a
+/// prototype the grammar read whole (`extern NCURSES_EXPORT(int) doupdate
+/// (void);` before `static int WIN_CDECL g(…) {…}`, which the grammar reads
+/// as one function definition from the first prototype's `extern`), and the
+/// error that holds the last of them can hold the words it begins with
+/// (`int WIN_CDECL` before `g(…)`). A comment there is no word of it, nor is
+/// a directive's line the grammar held in that error (the `#endif` and
+/// `#define` lines curses.h writes between its prototypes and a macro the
+/// grammar read as a function). `None` where its node holds none. Such
+/// prototypes come before the declarator: the grammar reads a later function
+/// declarator whose parameters name something as one of the node's own
+/// declarators, not in an error, and reads no K&R definition, whose
+/// parameters are declared after its declarator, as a function definition.
+fn past_held_prototypes(node: Node) -> Option<Node> {
+    let declarator = node.child_by_field_name("declarator")?;
+    let mut cursor = node.walk();
+    let last = node
+        .children(&mut cursor)
+        .flat_map(|part| {
+            let mut cursor = part.walk();
+            part.named_children(&mut cursor).collect::<Vec<_>>()
+        })
+        .filter_map(error_held_prototype)
+        .map(|(_, end)| end.end_byte())
+        .max()?;
+    written_words_before(node, declarator.start_byte())
+        .into_iter()
+        .find(|word| word.start_byte() >= last)
+        .or(Some(declarator))
+}
+
 /// Whether a C or C++ function declarator is a prototype's though its
 /// parameters name nothing: a storage class written right before it, or
 /// before the run of macros written before it in the
@@ -3969,11 +4005,14 @@ fn shell_sets_beyond_its_name(part: Node, statement: Node) -> bool {
 /// o)`, see [`for_in_binding`]). A comment between those lines is inside the
 /// declaration; one above them is not. The rest of a C or C++ declaration that
 /// invoked a macro begins where that declaration does ([`continued_macro`]),
-/// and a prototype an error holds where [`error_held_prototype`] begins it.
+/// a prototype an error holds where [`error_held_prototype`] begins it, and
+/// a declaration the grammar read with such prototypes in its node after the
+/// last of them ([`past_held_prototypes`]).
 fn declaration_start(node: Node, language: Language) -> Node {
     if language == Language::Cpp
-        && let Some(head) =
-            continued_macro(node).or_else(|| error_held_prototype(node).map(|(start, _)| start))
+        && let Some(head) = continued_macro(node)
+            .or_else(|| error_held_prototype(node).map(|(start, _)| start))
+            .or_else(|| past_held_prototypes(node))
     {
         return head;
     }
@@ -4008,17 +4047,25 @@ fn declaration_start(node: Node, language: Language) -> Node {
 /// before the declaration's body and the end on all of it, so an error inside
 /// a body (a macro statement with no `;`) leaves the start as written and the
 /// end not. A macro that happens to read as valid syntax of another shape
-/// leaves no error to tell by.
+/// leaves no error to tell by. A declaration that begins inside a part of its
+/// node, an error the grammar holds its first words in
+/// ([`past_held_prototypes`]), is read from that part.
 fn read_as_written(node: Node, language: Language) -> AsWritten {
     let declaration = declaration_node(node, language);
     let end = declaration_end(declaration, language);
-    let parts: Vec<Node> =
-        std::iter::successors(Some(declaration_start(declaration, language)), |part| {
-            (part.id() != end.id())
-                .then(|| part.next_sibling())
-                .flatten()
+    let start = declaration_start(declaration, language);
+    let start = std::iter::successors(Some(start), Node::parent)
+        .find(|part| {
+            part.parent()
+                .is_some_and(|held| held.id() == declaration.id())
         })
-        .collect();
+        .unwrap_or(start);
+    let parts: Vec<Node> = std::iter::successors(Some(start), |part| {
+        (part.id() != end.id())
+            .then(|| part.next_sibling())
+            .flatten()
+    })
+    .collect();
     let body = node
         .child_by_field_name("body")
         .map_or(usize::MAX, |body| body.start_byte());
@@ -9219,6 +9266,96 @@ region     = "us-central1"
         );
     }
 
+    /// Prototypes an error holds that the grammar read into the node of the
+    /// function defined after them are declarations of their own, so the
+    /// definition spans only what it writes after the last of them, a comment
+    /// between them passed over, and from the words it begins with where the
+    /// error that holds the last of them holds those too, a directive's line
+    /// there passed over. Each of them keeps its own span.
+    #[test]
+    fn a_definition_spans_only_what_it_writes_after_the_prototypes_read_into_it() {
+        let spans = |content: &str| -> Vec<(String, String)> {
+            let lines = LineStarts::new(content);
+            SymbolExtractor::new()
+                .extract(Path::new("e.c"), content, Language::Cpp)
+                .iter()
+                .map(|symbol| {
+                    let location = &symbol.location;
+                    let (line, column) = location.effective_start();
+                    let start = lines.byte(line, column).expect("the start is in the file");
+                    let end = lines
+                        .byte(
+                            location.end_line.expect("an end line"),
+                            location.end_column.expect("an end column"),
+                        )
+                        .expect("the end is in the file");
+                    (symbol.name.clone(), content[start..end].to_string())
+                })
+                .collect()
+        };
+        // A reduction of curses.h's prototypes before zstd's cover.c.
+        let prototypes = "#include <stddef.h>\n\
+             extern NCURSES_EXPORT(int) PAIR_NUMBER (int);\n\
+             extern\nNCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);\n";
+        let own = [
+            (
+                "PAIR_NUMBER",
+                "extern NCURSES_EXPORT(int) PAIR_NUMBER (int);",
+            ),
+            (
+                "derwin",
+                "extern\nNCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);",
+            ),
+            ("doupdate", "extern NCURSES_EXPORT(int) doupdate (void);"),
+            ("after", "int after(int x);"),
+        ];
+        for (rest, g) in [
+            (
+                "extern NCURSES_EXPORT(int) doupdate (void);\n\
+                 static int WIN_CDECL g(void* ctx, const void* lp) {\n    return 0;\n}\n",
+                "static int WIN_CDECL g(void* ctx, const void* lp) {\n    return 0;\n}",
+            ),
+            (
+                "extern NCURSES_EXPORT(int) doupdate (void); /* implemented */\n\
+                 static int WIN_CDECL g(void* ctx, const void* lp) {\n    return 0;\n}\n",
+                "static int WIN_CDECL g(void* ctx, const void* lp) {\n    return 0;\n}",
+            ),
+            (
+                "extern NCURSES_EXPORT(int) doupdate (void);\n\
+                 int WIN_CDECL\ng(void* ctx, const void* lp) {\n    return 0;\n}\n",
+                "int WIN_CDECL\ng(void* ctx, const void* lp) {\n    return 0;\n}",
+            ),
+        ] {
+            let read = spans(&format!("{prototypes}{rest}int after(int x);\n"));
+            for (name, written) in own.into_iter().chain([("g", g)]) {
+                assert!(
+                    read.contains(&(name.to_string(), written.to_string())),
+                    "{name} spans {written:?}: {read:?}"
+                );
+            }
+        }
+        // A reduction of curses.h, whose grammar reads a macro's definition
+        // after its prototypes as a function, with the directives between
+        // them in the error that holds the last prototype.
+        let read = spans(
+            "extern NCURSES_EXPORT(char *) NCURSES_SP_NAME(keybound) (SCREEN*, int, int);\n\
+             extern NCURSES_EXPORT(int) NCURSES_SP_NAME(assume_default_colors) (SCREEN*, int, int);\n\
+             #endif\n#define NCURSES_ATTR_SHIFT       8\n\
+             #define getsyx(y,x) do { if (newscr) { \\\n\t\t\t} \\\n\t\t    } while(0)\n\
+             int after(int x);\n",
+        );
+        assert!(
+            read.contains(&(
+                "assume_default_colors".to_string(),
+                "extern NCURSES_EXPORT(int) NCURSES_SP_NAME(assume_default_colors) (SCREEN*, int, int);"
+                    .to_string()
+            )) && read
+                .iter()
+                .any(|(name, written)| name == "getsyx" && !written.contains('#')),
+            "a directive's line is no word of the function: {read:?}"
+        );
+    }
+
     /// A class definition a macro made the grammar read as a function, or as
     /// a variable its body initializes, is read again past the macro, so it
     /// is the class it defines, with its members read as a class body holds
@@ -10504,6 +10641,16 @@ region     = "us-central1"
                 (3, 5),
                 ((3, 1), (6, 2)),
                 ((2, 1), (6, 2)),
+            ),
+            (
+                "#include <stddef.h>\nextern NCURSES_EXPORT(int) PAIR_NUMBER (int);\nextern\n\
+                 NCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);\n\
+                 extern NCURSES_EXPORT(int) doupdate (void);\nint WIN_CDECL\n\
+                 g(void* ctx, const void* lp) {\n    return 0;\n}\n",
+                "g",
+                (7, 1),
+                ((7, 1), (9, 2)),
+                ((7, 1), (9, 2)),
             ),
             (
                 "auto [ka, kb] = make();\n",
