@@ -5551,6 +5551,150 @@ mod tests {
         assert!(graph.version_undetermined_imports.is_empty());
     }
 
+    /// `node16` looks the path of an `import x = require()` up as a CommonJS
+    /// import's even in a file emitted as an ES module, as tsc 5.9.3, 6.0.3
+    /// and 7.0.2 trace it (`req_esm`): the file the path names with an
+    /// extension added, then the directory, where an import declaration in
+    /// the same file names none of them.
+    #[test]
+    fn a_require_in_an_es_module_reads_its_path_as_a_commonjs_import() {
+        let nodes = vec![
+            node_in(
+                0,
+                "src/r.ts",
+                "import a = require(\"./both\");\nimport b = require(\"./sub\");\n\
+                 import c = require(\"./pn\");\n",
+                Language::TypeScript,
+            ),
+            node_in(
+                1,
+                "src/d.ts",
+                "import a from \"./both\";\nimport b from \"./sub\";\nimport c from \"./pn\";\n",
+                Language::TypeScript,
+            ),
+            node_in(2, "src/both.ts", "", Language::TypeScript),
+            node_in(3, "src/sub/index.ts", "", Language::TypeScript),
+            node_in(4, "src/pn/lib/n.js", "", Language::JavaScript),
+            node_in(5, "src/pn/index.ts", "", Language::TypeScript),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"type\": \"module\", \"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"node16\", \"moduleResolution\": \"node16\", \
+                     \"allowJs\": true}}",
+                ),
+                ("src/pn/package.json", "{\"main\": \"./lib/n.js\"}"),
+            ],
+            &nodes,
+        );
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            ["src/both.ts", "src/sub/index.ts", "src/pn/lib/n.js"]
+        );
+        assert!(edges_under(&nodes, 1, &manifests).is_empty());
+    }
+
+    /// A `paths` substitution writing an extension names the file it spells
+    /// before the lookup replaces that extension, under every module
+    /// resolution, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`px_*`): `@x` and
+    /// `@z/x` take `x.js` beside `x.ts`, which `@y`, writing none, takes; a
+    /// substitution naming no file takes the lookup's (`@z/both`).
+    #[test]
+    fn a_paths_substitution_writing_an_extension_names_its_file_first() {
+        let modes = [
+            "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+            "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+            "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+        ];
+        for options in modes {
+            let nodes = vec![
+                node_in(
+                    0,
+                    "src/main.ts",
+                    "import \"@x\";\nimport \"@y\";\nimport \"@z/x\";\nimport \"@z/both\";\n",
+                    Language::TypeScript,
+                ),
+                node_in(1, "src/x.js", "", Language::JavaScript),
+                node_in(2, "src/x.ts", "", Language::TypeScript),
+                node_in(3, "src/both.ts", "", Language::TypeScript),
+            ];
+            let config = format!(
+                "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \"paths\": \
+                 {{\"@x\": [\"./src/x.js\"], \"@y\": [\"./src/x\"], \"@z/*\": [\"./src/*.js\"]}}}}}}"
+            );
+            let manifests = manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let found: BTreeSet<&str> = graph.edges[&0]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect();
+            assert_eq!(
+                found,
+                BTreeSet::from(["src/x.js", "src/x.ts", "src/both.ts"]),
+                "{options}"
+            );
+            assert!(graph.undetermined_imports.is_empty(), "{options}");
+        }
+    }
+
+    /// Where a configuration that cannot be read leaves the module
+    /// resolution open, or under `node16` the format the importer is
+    /// emitted in, a relative path and a `paths` substitution name the one
+    /// script module they spell: `pn/index.ts` for `./pn`, which `bundler`
+    /// and `node16` for a CommonJS import read as the `package.json`'s
+    /// `main`, `pn/lib/n.js`.
+    #[test]
+    fn an_open_module_resolution_keeps_the_script_module_a_path_spells() {
+        let configs = [
+            "{\"extends\": \"./missing.json\", \"compilerOptions\": \
+             {\"allowJs\": true, \"paths\": {\"@/*\": [\"./src/*\"]}}}",
+            "{\"extends\": \"./missing.json\", \"compilerOptions\": \
+             {\"moduleResolution\": \"node16\", \"allowJs\": true, \"paths\": {\"@/*\": [\"./src/*\"]}}}",
+        ];
+        for config in configs {
+            let nodes = vec![
+                node_in(
+                    0,
+                    "src/main.ts",
+                    "import \"./pn\";\nimport \"@/pn\";\n",
+                    Language::TypeScript,
+                ),
+                node_in(1, "src/pn/lib/n.js", "", Language::JavaScript),
+                node_in(2, "src/pn/index.ts", "", Language::TypeScript),
+            ];
+            let manifests = manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                    ),
+                    ("tsconfig.json", config),
+                    ("src/pn/package.json", "{\"main\": \"./lib/n.js\"}"),
+                ],
+                &nodes,
+            );
+            assert_eq!(
+                edges_under(&nodes, 0, &manifests),
+                ["src/pn/index.ts"],
+                "{config}"
+            );
+        }
+    }
+
     /// A relative specifier is read under each module resolution the
     /// TypeScript majors that may compile its importer read it under: with
     /// `module` `esnext` and nothing installed or declared, 5 reads
