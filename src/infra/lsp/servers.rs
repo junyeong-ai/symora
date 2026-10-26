@@ -109,14 +109,15 @@ impl ServerConfig {
     ///    toolchain); version-managed setups are named in the error hint
     ///    instead.
     ///
-    /// Failure is loud: the error hint lists every directory searched
-    /// plus the install instruction.
+    /// Failure is loud: the error names every directory searched, and its
+    /// hint the install instruction.
     pub fn resolve(&self) -> Result<PathBuf, LspError> {
         resolve_command(&self.command).map_err(|searched| LspError::ServerNotInstalled {
             name: self.display_name.to_string(),
+            searched: searched.iter().map(|d| d.display().to_string()).collect(),
             install_hint: match self.source {
-                ServerSource::Builtin => not_found_hint(self.install.current(), &searched),
-                ServerSource::Config => override_not_found_hint(&self.command, &searched),
+                ServerSource::Builtin => not_found_hint(self.install.current()),
+                ServerSource::Config => override_not_found_hint(&self.command),
             },
         })
     }
@@ -268,16 +269,11 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn not_found_hint(install: &str, searched: &[PathBuf]) -> String {
+fn not_found_hint(install: &str) -> String {
     let mut hint = format!(
-        "{install}. Searched: {}. If the server is installed somewhere off PATH, set \
+        "{install}. If the server is installed somewhere off PATH, set \
          command = \"/absolute/path\" under [lsp.servers.<language>] in \
-         .symora/config.toml and run `symora daemon restart --project`",
-        searched
-            .iter()
-            .map(|d| d.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+         .symora/config.toml and run `symora daemon restart --project`"
     );
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
         && home.join(".nvm").is_dir()
@@ -291,16 +287,11 @@ fn not_found_hint(install: &str, searched: &[PathBuf]) -> String {
     hint
 }
 
-fn override_not_found_hint(command: &str, searched: &[PathBuf]) -> String {
+fn override_not_found_hint(command: &str) -> String {
     format!(
         "command `{command}` is set by [lsp.servers] in symora config but was not found \
-         or not executable. Searched: {}. Fix the override's path or remove it to fall \
-         back to the builtin server, then run `symora daemon restart --project`",
-        searched
-            .iter()
-            .map(|d| d.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+         or not executable. Fix the override's path or remove it to fall back to the \
+         builtin server, then run `symora daemon restart --project`"
     )
 }
 
@@ -1314,15 +1305,38 @@ mod tests {
         assert_eq!(config.probe_version(), None);
     }
 
+    /// Where the command was looked for is what the message states, and the
+    /// hint is the step that fixes it, so the hint does not repeat the
+    /// directories, which a long PATH makes most of either.
     #[test]
-    fn not_found_hint_lists_searched_dirs_and_install_instruction() {
-        let dirs = vec![PathBuf::from("/nowhere/a"), PathBuf::from("/nowhere/b")];
-        let hint = not_found_hint("npm install -g fake-ls", &dirs);
-        assert!(hint.contains("npm install -g fake-ls"));
-        assert!(hint.contains("/nowhere/a"));
-        assert!(hint.contains("/nowhere/b"));
-        assert!(hint.contains("If the server is installed somewhere off PATH"));
-        assert!(hint.contains("[lsp.servers.<language>]"));
+    fn not_installed_states_the_search_once_and_the_install_step_in_the_hint() {
+        let config = ServerConfig {
+            display_name: "fake-ls",
+            command: "/nowhere/a/fake-ls".to_string(),
+            args: vec![],
+            env: BTreeMap::new(),
+            version_arg: "--version",
+            version_command: None,
+            install: InstallInstructions {
+                macos: "npm install -g fake-ls",
+                linux: "npm install -g fake-ls",
+                windows: "npm install -g fake-ls",
+            },
+            tier: ServerTier::Fast,
+            source: ServerSource::Builtin,
+        };
+        let err = config.resolve().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Server not installed: fake-ls. Searched: /nowhere/a"
+        );
+        let LspError::ServerNotInstalled { install_hint, .. } = err else {
+            panic!("expected ServerNotInstalled");
+        };
+        assert!(install_hint.starts_with("npm install -g fake-ls. "));
+        assert!(install_hint.contains("If the server is installed somewhere off PATH"));
+        assert!(install_hint.contains("[lsp.servers.<language>]"));
+        assert!(!install_hint.contains("/nowhere/a"), "{install_hint}");
     }
 
     #[test]
@@ -1349,6 +1363,7 @@ mod tests {
         assert!(install_hint.contains("lsp.servers"));
         assert!(install_hint.contains("/nonexistent/fake-ls"));
         assert!(!install_hint.contains("npm install -g fake-ls"));
+        assert!(!install_hint.contains("Searched"), "{install_hint}");
     }
 
     #[test]

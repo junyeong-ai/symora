@@ -20,8 +20,15 @@ pub enum LspError {
     #[error("Connection closed before '{0}' was answered")]
     ConnectionLost(String),
 
-    #[error("Server not installed: {name}. Install: {install_hint}")]
-    ServerNotInstalled { name: String, install_hint: String },
+    /// `searched` is where the command was looked for, the fact the message
+    /// states; `install_hint` is the step that makes it resolve, which a
+    /// caller shows apart from the message.
+    #[error("Server not installed: {name}. Searched: {}", .searched.join(", "))]
+    ServerNotInstalled {
+        name: String,
+        searched: Vec<String>,
+        install_hint: String,
+    },
 
     #[error("Unsupported language: {0}. Run 'symora doctor' to see supported languages.")]
     UnsupportedLanguage(String),
