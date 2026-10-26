@@ -1899,9 +1899,13 @@ fn in_a_prototype_run(part: Node) -> bool {
 /// the error holds that macro (`GIT_EXTERN(int)
 /// git_blob_lookup_prefix(git_blob **blob, size_t len);`) or the statement
 /// before it does (`FT_EXPORT( FT_Error )` before `FT_Init( FT_Library
-/// library );`), or holds it itself ([`name_before_parameters`]). It ends
-/// with the statement after it, which holds its `;` and any macro written
-/// before that.
+/// library );`), or holds it itself ([`name_before_parameters`]). It begins
+/// with the storage class, cv-qualifiers and type the statement writes
+/// before that macro, beside it or right before what holds it, as a plain
+/// declaration does (`static int WIN_CDECL cmp(…)`, `extern
+/// NCURSES_EXPORT(int) PAIR_NUMBER (int);`), and ends with the statement
+/// after it, which holds its `;` and any macro written before that, or
+/// with the `;` itself.
 fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
     fn after(node: Node) -> Option<Node> {
         std::iter::successors(node.next_sibling(), Node::next_sibling)
@@ -1936,9 +1940,25 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
                 _ => false,
             })?
     };
+    let types = |part: Node| {
+        part.parent().is_some_and(|held| {
+            let mut cursor = held.walk();
+            held.children_by_field_name("type", &mut cursor)
+                .any(|typed| typed.id() == part.id())
+        })
+    };
+    let mut start = start;
+    while let Some(before) = sibling_before(start)
+        .or_else(|| start.parent().and_then(sibling_before))
+        .filter(|before| {
+            matches!(before.kind(), "storage_class_specifier" | "type_qualifier") || types(*before)
+        })
+    {
+        start = before;
+    }
     let end = after(node)
         .or_else(|| after(error))
-        .filter(|end| end.kind() == "expression_statement")
+        .filter(|end| matches!(end.kind(), "expression_statement" | ";"))
         .unwrap_or(node);
     Some((start, end))
 }
@@ -2646,15 +2666,15 @@ enum Read {
 /// well ([`declared_text`]). The rest of a C or C++ declaration that invoked
 /// a macro was read apart from where it begins ([`continued_macro`]), so it
 /// is a recovered reading. A prototype an error holds in the file's reading
-/// is signed with the text its range writes, from the macro it is written
-/// after to its `;` ([`error_held_prototype`]): that rule proves the span
-/// there. Read alone, the text has lost what the file writes around it, and
-/// a member's macros read there as the macro of a prototype's type
-/// (`Q_ENUM(Type) QEasingCurve(Type type = Linear);` in a class body), so
-/// a prototype an error holds alone is a recovered reading. A prototype the
-/// grammar read as a declaration with its macro's arguments in an error
-/// (`extern NCURSES_EXPORT(int) addch (const chtype);`) is no such one, and
-/// signs as null.
+/// is signed with the text its range writes, from the storage class and
+/// type it opens with to its `;` ([`error_held_prototype`]): that rule
+/// proves the span there. Read alone, the text has lost what the file
+/// writes around it, and a member's macros read there as the macro of a
+/// prototype's type (`Q_ENUM(Type) QEasingCurve(Type type = Linear);` in a
+/// class body), so a prototype an error holds alone is a recovered reading.
+/// A prototype the grammar read as a declaration with its macro's arguments
+/// in an error (`extern NCURSES_EXPORT(int) addch (const chtype);`) is no
+/// such one, and signs as null.
 fn read_signature(
     root: Node,
     content: &str,
@@ -8233,6 +8253,56 @@ region     = "us-central1"
                     .and_then(|symbol| symbol.signature.as_deref()),
                 Some(expected),
                 "a prototype an error holds signs with the text its range writes: {name}"
+            );
+        }
+        // Reductions of curses.h and zstd's cover.c.
+        let opened = "extern NCURSES_EXPORT(int) deleteln (void);\n\
+             extern NCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);\n\
+             extern NCURSES_EXPORT(int) doupdate (void);\n\
+             extern NCURSES_EXPORT(int) PAIR_NUMBER (int);\n\
+             #if defined(_WIN32)\nstatic int WIN_CDECL cmp1(void* g, const void* lp) {\n\
+             #else\nstatic int cmp1(const void *lp) {\n#endif\n  return 0;\n}\n\
+             #if defined(_WIN32)\nstatic const size_t WIN_CDECL cmp2(void* g, const void* lp) {\n\
+             #else\nstatic const size_t cmp2(const void *lp) {\n#endif\n  return 0;\n}\n";
+        let lines = LineStarts::new(opened);
+        let read = extractor.extract_with_signatures(Path::new("p.c"), opened, Language::Cpp);
+        for (name, line, range) in [
+            (
+                "derwin",
+                2,
+                "extern NCURSES_EXPORT(WINDOW *) derwin (WINDOW *,int,int,int,int);",
+            ),
+            (
+                "PAIR_NUMBER",
+                4,
+                "extern NCURSES_EXPORT(int) PAIR_NUMBER (int);",
+            ),
+            (
+                "cmp1",
+                6,
+                "static int WIN_CDECL cmp1(void* g, const void* lp)",
+            ),
+            (
+                "cmp2",
+                13,
+                "static const size_t WIN_CDECL cmp2(void* g, const void* lp)",
+            ),
+        ] {
+            let symbol = read
+                .iter()
+                .find(|symbol| symbol.name == name && symbol.location.line == line)
+                .unwrap_or_else(|| panic!("no {name} at {line} in {read:?}"));
+            let location = &symbol.location;
+            let (start_line, start_column) = location.effective_start();
+            let written = lines.byte(start_line, start_column).and_then(|start| {
+                let end = lines.byte(location.end_line?, location.end_column?)?;
+                opened.get(start..end)
+            });
+            assert_eq!(
+                (written, symbol.signature.as_deref()),
+                (Some(range), Some(range.trim_end_matches(';'))),
+                "a prototype an error holds spans and signs from the storage class and type \
+                 its statement opens with, as a plain declaration does: {name}"
             );
         }
         // Reductions of qeasingcurve.h and qfiledialog.h.
