@@ -5200,7 +5200,8 @@ mod tests {
     /// (`types_sub`). Above the project's root, where pack checks the disk
     /// alone, a JavaScript file the walk finds is disclosed where one may
     /// stand for it: a declaration it names (`fd/sub` as `fd/sub.d.ts`,
-    /// `flat` as `flat.d.ts`), a directory holding an `index.d.ts`
+    /// `flat` as `flat.d.ts`, `@acme/e/sub` as `acme__e/sub.d.ts`), a
+    /// directory holding an `index.d.ts`
     /// (`dd/sub`) or a `package.json` naming its types (`pj/sub`), or a
     /// subpath of a package with `typesVersions` (`tv/sub`). A package
     /// holding no such subpath (`lib/util`, `@acme/d/sub` below `acme__d`),
@@ -5212,6 +5213,7 @@ mod tests {
         let specifiers = [
             "lib/util",
             "@acme/d/sub",
+            "@acme/e/sub",
             "fd/sub",
             "flat",
             "dd/sub",
@@ -5228,6 +5230,7 @@ mod tests {
         for rel in [
             "src/lib/util.js",
             "src/@acme/d/sub.js",
+            "src/@acme/e/sub.js",
             "src/fd/sub.js",
             "src/flat.js",
             "src/dd/sub.js",
@@ -5251,6 +5254,7 @@ mod tests {
             ),
             ("outer/node_modules/@types/lib/index.d.ts", declaration),
             ("outer/node_modules/@types/acme__d/index.d.ts", declaration),
+            ("outer/node_modules/@types/acme__e/sub.d.ts", declaration),
             ("outer/node_modules/@types/fd/sub.d.ts", declaration),
             ("outer/node_modules/@types/flat.d.ts", declaration),
             ("outer/node_modules/@types/dd/sub/index.d.ts", declaration),
@@ -5292,10 +5296,17 @@ mod tests {
         assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
             graph.declaration_undetermined_imports,
-            ["fd/sub", "flat", "dd/sub", "pj/sub", "tv/sub"]
-                .into_iter()
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>()
+            [
+                "@acme/e/sub",
+                "fd/sub",
+                "flat",
+                "dd/sub",
+                "pj/sub",
+                "tv/sub"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>()
         );
     }
 
