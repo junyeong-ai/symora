@@ -1842,38 +1842,47 @@ impl ProjectIndex<'_> {
     }
 
     /// The file TypeScript takes for a directory a path names, as tsc 5.9.3,
-    /// 6.0.3 and 7.0.2 trace it: where its `package.json` names one, the file
-    /// its `typings` or `types` names, where the extensions hold
-    /// declarations, else its `main` with the extensions in place of the one
-    /// it writes (`lib/m.js` as `lib/m.ts`); else its `index`. A
-    /// `typesVersions` there leaves it open: 5.9.3 and 6.0.3 resolve none
-    /// where 7.0.2 takes the `index`. Its `exports` is not read.
+    /// 6.0.3 and 7.0.2 trace it (`dir_*`, `req_fields_*`): where its
+    /// `package.json` names one, the file the first of `typings` and
+    /// `types`, where the extensions hold declarations, and `main` that is
+    /// set names, with the extensions in place of the one it writes
+    /// (`lib/m.js` as `lib/m.ts`), or that directory's `index`; else, a
+    /// field naming no file included, its own `index`. A `typesVersions`
+    /// there leaves it open: 5.9.3 and 6.0.3 resolve none where 7.0.2 takes
+    /// the `index`. Its `exports` is not read.
     fn directory_module(&self, directory: &[String], extensions: Extensions) -> Option<Hit> {
+        let index = |directory: &[String]| {
+            let index = [directory, &["index".to_string()]].concat();
+            self.module_file(&index, extensions, true)
+        };
         if let Some(manifest) = self.manifests.package_json_at(directory) {
             if manifest.get("typesVersions").is_some() {
                 return Some(Hit::Open);
             }
             let declarations = extensions != Extensions::JavaScript;
-            let fields = ["typings", "types"]
+            let field = ["typings", "types"]
                 .into_iter()
                 .filter(|_| declarations)
-                .chain(["main"]);
-            for field in fields {
-                let named = manifest
-                    .get(field)
-                    .and_then(|value| value.as_str())
-                    .and_then(|path| project_path(directory, path));
-                let found = named.and_then(|path| {
-                    let exact = (field != "main").then(|| self.existing(&path)).flatten();
-                    exact.or_else(|| self.module_file(&path, extensions, true))
+                .chain(["main"])
+                .find_map(|field| {
+                    let named = manifest
+                        .get(field)?
+                        .as_str()
+                        .filter(|path| !path.is_empty())?;
+                    Some((field, named))
                 });
-                if let Some(files) = found {
-                    return Some(Hit::Files(files));
-                }
+            let found = field.and_then(|(field, named)| {
+                let path = project_path(directory, named)?;
+                let exact = (field != "main").then(|| self.existing(&path)).flatten();
+                exact
+                    .or_else(|| self.module_file(&path, extensions, true))
+                    .or_else(|| index(&path))
+            });
+            if let Some(files) = found {
+                return Some(Hit::Files(files));
             }
         }
-        let index = [directory, &["index".to_string()]].concat();
-        self.module_file(&index, extensions, true).map(Hit::Files)
+        index(directory).map(Hit::Files)
     }
 
     /// The file TypeScript takes for a project path with a set of
@@ -5681,6 +5690,61 @@ mod tests {
                 "{options}"
             );
             assert!(graph.undetermined_imports.is_empty(), "{options}");
+        }
+    }
+
+    /// A directory is read by the first of its `package.json`'s `typings`,
+    /// `types` and `main` that is set, as tsc 5.9.3, 6.0.3 and 7.0.2 trace
+    /// it (`req_fields_*`): a `types` naming no file gives way to the
+    /// directory's `index`, never to `main` (`./d1`); an empty `typings`
+    /// counts as unset (`./d2`); and a `main` naming a directory names its
+    /// `index` (`./d3`).
+    #[test]
+    fn a_directory_is_read_by_the_first_package_json_field_it_sets() {
+        let modes = [
+            "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+            "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+        ];
+        for options in modes {
+            let nodes = vec![
+                node_in(
+                    0,
+                    "src/main.ts",
+                    "import \"./d1\";\nimport \"./d2\";\nimport \"./d3\";\n",
+                    Language::TypeScript,
+                ),
+                node_in(1, "src/d1/lib/m.ts", "", Language::TypeScript),
+                node_in(2, "src/d1/index.ts", "", Language::TypeScript),
+                node_in(3, "src/d2/t.d.ts", "", Language::TypeScript),
+                node_in(4, "src/d2/index.ts", "", Language::TypeScript),
+                node_in(5, "src/d3/lib/index.ts", "", Language::TypeScript),
+                node_in(6, "src/d3/index.ts", "", Language::TypeScript),
+            ];
+            let config = format!("{{\"compilerOptions\": {{{options}, \"allowJs\": true}}}}");
+            let manifests = manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                    (
+                        "src/d1/package.json",
+                        "{\"types\": \"./missing.d.ts\", \"main\": \"./lib/m.js\"}",
+                    ),
+                    (
+                        "src/d2/package.json",
+                        "{\"typings\": \"\", \"types\": \"./t.d.ts\"}",
+                    ),
+                    ("src/d3/package.json", "{\"main\": \"./lib\"}"),
+                ],
+                &nodes,
+            );
+            assert_eq!(
+                edges_under(&nodes, 0, &manifests),
+                ["src/d1/index.ts", "src/d2/t.d.ts", "src/d3/lib/index.ts"],
+                "{options}"
+            );
         }
     }
 
