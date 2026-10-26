@@ -3424,7 +3424,7 @@ fn extract_declaration(
                     }
                     _ => node_kind(node),
                 };
-                (!names_nothing(text, language) && stated.insert(text))
+                (!names_nothing(text, node, language) && stated.insert(text))
                     .then(|| (text.to_string(), kind, name))
             })
             .collect()
@@ -4601,7 +4601,7 @@ fn extract_name_and_kind(
     let name = content
         .get(name_node.start_byte()..name_end_node(name_node).end_byte())?
         .to_string();
-    if names_nothing(&name, language) {
+    if names_nothing(&name, node, language) {
         return None;
     }
     Some((name, node_kind(node)))
@@ -4732,12 +4732,22 @@ fn name_end_node(name: Node) -> Node {
     name
 }
 
-/// Whether a declared name is no name at all: empty, the blank `_` that
-/// discards what is bound to it, or in C and C++ a word both languages
-/// reserve, which a grammar recovering from a macro reads where a name goes
-/// (`PyAPI_FUNC(int) Py_IsInitialized(void)` declares `void`).
-fn names_nothing(name: &str, language: Language) -> bool {
-    name.is_empty() || name == "_" || language == Language::Cpp && C_KEYWORDS.contains(&name)
+/// Whether the declaration `node` names nothing by `name`: an empty name, the
+/// blank `_` that discards what is bound to it, or in C and C++ a word both
+/// languages reserve, which a grammar recovering from a macro reads where a
+/// name goes (`PyAPI_FUNC(int) Py_IsInitialized(void)` declares `void`).
+/// Dart's `_` discards only what a block scope declares: a member, a
+/// top-level declaration and the field a declaring parameter declares are
+/// named `_` (`class C(var int _)` declares `C._`), and of the local
+/// declarations the query reads, a local function named `_` binds nothing.
+fn names_nothing(name: &str, node: Node, language: Language) -> bool {
+    name.is_empty()
+        || name == "_"
+            && (language != Language::Dart
+                || node
+                    .parent()
+                    .is_some_and(|holder| holder.kind() == "local_function_declaration"))
+        || language == Language::Cpp && C_KEYWORDS.contains(&name)
 }
 
 /// The keywords C and C++ both reserve.
@@ -7433,6 +7443,15 @@ enum const Unit(final String symbol) {
 
 class N.new(final int n);
 
+class Wild(var int _, int _);
+
+class Blank {
+  var _ = 0, kept = 1;
+  void run() {
+    void _() {}
+  }
+}
+
 extension Ext on String {
   static const limit = 1;
   void ext() {}
@@ -7443,6 +7462,8 @@ extension type Meters(int value) {}
 extension type const Id<T>._(T raw) {}
 
 extension type Opt({int? raw}) {}
+
+extension type Rep(int _) {}
 
 void top() {
   int helper() => 1;
@@ -7513,6 +7534,13 @@ external final int topExternal, otherExternal;
                 "class:N",
                 "constructor:N/N.new",
                 "field:N/n",
+                "class:Wild",
+                "constructor:Wild/Wild",
+                "field:Wild/_",
+                "class:Blank",
+                "field:Blank/_",
+                "field:Blank/kept",
+                "method:Blank/run",
                 "class:Ext",
                 "field:Ext/limit",
                 "method:Ext/ext",
@@ -7522,6 +7550,8 @@ external final int topExternal, otherExternal;
                 "field:Id/raw",
                 "class:Opt",
                 "field:Opt/raw",
+                "class:Rep",
+                "field:Rep/_",
                 "function:top",
                 "function:top/helper",
                 "variable:topLevel",
@@ -11473,6 +11503,42 @@ void topLevel() {}
             ("En/a", SymbolKind::EnumMember),
             ("En/En", SymbolKind::Constructor),
             ("En/listed", SymbolKind::Method),
+        ]
+        .map(|(path, kind)| (path.to_string(), kind));
+        assert_eq!(declared, expected);
+    }
+
+    /// Dart's `_` is a wildcard only where a block scope declares it, and a
+    /// declaring parameter declares a field: a field, a member and a
+    /// top-level declaration are named `_`, as the analyzer outlines them,
+    /// while a parameter that declares no field and a local function named
+    /// `_` bind nothing.
+    #[test]
+    fn a_dart_wildcard_discards_only_what_a_block_scope_declares() {
+        let content = "class C(var int _, int _) {\n  this {\n    void _() {}\n  }\n}\n\n\
+                       enum E(final int _) {\n  e(1);\n}\n\n\
+                       class G {\n  int get _ => 1;\n}\n\n\
+                       class M {\n  void _(int _) {}\n}\n\n\
+                       int _ = 0;\n";
+        let declared: Vec<(String, SymbolKind)> = SymbolExtractor::new()
+            .extract(Path::new("a.dart"), content, Language::Dart)
+            .into_iter()
+            .map(|symbol| (symbol.name_path.unwrap_or(symbol.name), symbol.kind))
+            .collect();
+        let expected = [
+            ("C", SymbolKind::Class),
+            ("C/C", SymbolKind::Constructor),
+            ("C/_", SymbolKind::Field),
+            ("C/this", SymbolKind::Constructor),
+            ("E", SymbolKind::Enum),
+            ("E/E", SymbolKind::Constructor),
+            ("E/_", SymbolKind::Field),
+            ("E/e", SymbolKind::EnumMember),
+            ("G", SymbolKind::Class),
+            ("G/_", SymbolKind::Property),
+            ("M", SymbolKind::Class),
+            ("M/_", SymbolKind::Method),
+            ("_", SymbolKind::Variable),
         ]
         .map(|(path, kind)| (path.to_string(), kind));
         assert_eq!(declared, expected);
