@@ -446,7 +446,7 @@ pub(super) enum ModuleResolution {
 /// What the `paths` pattern a specifier matches maps it to.
 pub(super) struct Mapping {
     /// The project paths its substitutions name, in the order written.
-    pub(super) paths: Vec<Vec<String>>,
+    pub(super) paths: Vec<Substituted>,
     /// Whether the pattern is `*`, which every specifier matches: one it maps
     /// to no file is looked up as a package, as any unmapped one is.
     pub(super) catch_all: bool,
@@ -482,11 +482,98 @@ impl TsConfig {
         Some(Mapping {
             paths: substitutions
                 .iter()
-                .filter_map(|substitution| project_path(base, &substitution.replacen('*', star, 1)))
+                .filter_map(|substitution| {
+                    Some(Substituted {
+                        path: project_path(base, &substitution.replacen('*', star, 1))?,
+                        extension: SCRIPT_EXTENSIONS
+                            .iter()
+                            .any(|extension| has_extension(substitution, extension)),
+                    })
+                })
                 .collect(),
             catch_all: pattern == "*",
         })
     }
+}
+
+/// The project path a `paths` substitution names for a specifier.
+pub(super) struct Substituted {
+    pub(super) path: Vec<String>,
+    /// Whether the substitution writes an extension TypeScript knows of its
+    /// own (`./src/*.js`), so that tsc tries the file it names before any
+    /// it names with an extension in place of that one or added.
+    pub(super) extension: bool,
+}
+
+/// The extensions TypeScript strips from a path it looks a module up by
+/// (`removeFileExtension`), the longer of two that both end a name first.
+const SCRIPT_EXTENSIONS: [&str; 12] = [
+    ".d.ts", ".d.mts", ".d.cts", ".mjs", ".mts", ".cjs", ".cts", ".ts", ".js", ".tsx", ".jsx",
+    ".json",
+];
+
+/// Whether a name ends with an extension and holds more than it.
+fn has_extension(name: &str, extension: &str) -> bool {
+    name.len() > extension.len() && name.ends_with(extension)
+}
+
+/// A pass of `classic` resolution, which looks a module up with one set of
+/// extensions and then another (`classic_names`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClassicPass {
+    /// TypeScript's own files, then declarations: the first pass.
+    TypeScript,
+    /// JavaScript files: the last pass, `allowJs` set or not.
+    JavaScript,
+}
+
+/// The names `classic` resolution tries, in order, for a file a path names
+/// by `name` in one pass, as tsc 5.9.3 and 6.0.3 trace it. A name holding a
+/// `.` first has its extension replaced: one TypeScript strips
+/// (`SCRIPT_EXTENSIONS`), else whatever follows its last `.`, gives way to
+/// the pass's extensions for it — for `.js`, `.ts`, `.d.ts`: `.ts`, `.tsx`,
+/// `.d.ts`, then `.js`, `.jsx`; for `.jsx`, `.tsx`: `.tsx`, `.ts`, `.d.ts`,
+/// then `.jsx`, `.js`; for `.mjs`, `.mts`, `.d.mts`: `.mts`, `.d.mts`, then
+/// `.mjs`, and alike for `.cjs`; for `.json` and any other: a declaration
+/// of it (`x.d.json.ts`, `x.d.css.ts`) and no JavaScript, `resolveJsonModule`
+/// not read. Then the pass's extensions are added to the whole name
+/// (`util.js.ts`): `.ts`, `.tsx`, `.d.ts`, or `.js`, `.jsx`. A directory's
+/// `index` is never tried.
+pub(super) fn classic_names(name: &str, pass: ClassicPass) -> Vec<String> {
+    let stripped = name.contains('.').then(|| {
+        SCRIPT_EXTENSIONS
+            .iter()
+            .find(|extension| has_extension(name, extension))
+            .map(|extension| &name[name.len() - extension.len()..])
+            .or_else(|| name.rfind('.').map(|dot| &name[dot..]))
+    });
+    let mut names = Vec::new();
+    if let Some(Some(extension)) = stripped {
+        let stem = &name[..name.len() - extension.len()];
+        let other = format!(".d{extension}.ts");
+        let (typescript, declaration, javascript): (&[&str], &[&str], &[&str]) = match extension {
+            ".js" | ".ts" | ".d.ts" => (&[".ts", ".tsx"], &[".d.ts"], &[".js", ".jsx"]),
+            ".jsx" | ".tsx" => (&[".tsx", ".ts"], &[".d.ts"], &[".jsx", ".js"]),
+            ".mjs" | ".mts" | ".d.mts" => (&[".mts"], &[".d.mts"], &[".mjs"]),
+            ".cjs" | ".cts" | ".d.cts" => (&[".cts"], &[".d.cts"], &[".cjs"]),
+            _ => (&[], &[other.as_str()], &[]),
+        };
+        let replaced: Vec<&str> = match pass {
+            ClassicPass::TypeScript => typescript.iter().chain(declaration).copied().collect(),
+            ClassicPass::JavaScript => javascript.to_vec(),
+        };
+        names.extend(
+            replaced
+                .iter()
+                .map(|extension| format!("{stem}{extension}")),
+        );
+    }
+    let added: &[&str] = match pass {
+        ClassicPass::TypeScript => &[".ts", ".tsx", ".d.ts"],
+        ClassicPass::JavaScript => &[".js", ".jsx"],
+    };
+    names.extend(added.iter().map(|extension| format!("{name}{extension}")));
+    names
 }
 
 /// What Cargo builds of a package: its library, where it has one, and the
@@ -2962,6 +3049,76 @@ fn go_mod_tokens(line: &str) -> Vec<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names `classic` tries for a path, in the order tsc 5.9.3 and
+    /// 6.0.3 trace them (`rel_js`, `bare_written`): a written extension
+    /// replaced by the pass's for it, else a declaration of it, then the
+    /// pass's added to the whole name.
+    #[test]
+    fn classic_resolution_tries_the_names_tsc_traces() {
+        let names = |name, pass| classic_names(name, pass);
+        let (ts, js) = (ClassicPass::TypeScript, ClassicPass::JavaScript);
+        assert_eq!(names("util", ts), ["util.ts", "util.tsx", "util.d.ts"]);
+        assert_eq!(names("util", js), ["util.js", "util.jsx"]);
+        assert_eq!(
+            names("w4.ts", ts),
+            [
+                "w4.ts",
+                "w4.tsx",
+                "w4.d.ts",
+                "w4.ts.ts",
+                "w4.ts.tsx",
+                "w4.ts.d.ts"
+            ]
+        );
+        assert_eq!(
+            names("w4.ts", js),
+            ["w4.js", "w4.jsx", "w4.ts.js", "w4.ts.jsx"]
+        );
+        assert_eq!(
+            names("w10.d.ts", ts)[..3],
+            ["w10.ts", "w10.tsx", "w10.d.ts"]
+        );
+        assert_eq!(
+            names("w14.tsx", ts),
+            [
+                "w14.tsx",
+                "w14.ts",
+                "w14.d.ts",
+                "w14.tsx.ts",
+                "w14.tsx.tsx",
+                "w14.tsx.d.ts"
+            ]
+        );
+        assert_eq!(names("w5.jsx", js)[..2], ["w5.jsx", "w5.js"]);
+        assert_eq!(
+            names("w8.mjs", ts),
+            [
+                "w8.mts",
+                "w8.d.mts",
+                "w8.mjs.ts",
+                "w8.mjs.tsx",
+                "w8.mjs.d.ts"
+            ]
+        );
+        assert_eq!(names("w8.mjs", js)[0], "w8.mjs");
+        assert_eq!(names("w9.cjs", ts)[..2], ["w9.cts", "w9.d.cts"]);
+        assert_eq!(
+            names("w11.json", ts),
+            [
+                "w11.d.json.ts",
+                "w11.json.ts",
+                "w11.json.tsx",
+                "w11.json.d.ts"
+            ]
+        );
+        assert_eq!(names("w11.json", js), ["w11.json.js", "w11.json.jsx"]);
+        assert_eq!(names("x.vue", ts)[..2], ["x.d.vue.ts", "x.vue.ts"]);
+        assert_eq!(
+            names("dotted.name", ts)[..2],
+            ["dotted.d.name.ts", "dotted.name.ts"]
+        );
+    }
 
     /// A `pubspec.yaml` names its package in its top-level `name` key, not in
     /// an indented one.
