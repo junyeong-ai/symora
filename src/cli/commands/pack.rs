@@ -242,6 +242,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             name_some(&specifiers)
         ));
     }
+    if !result.jsconfig_undetermined_imports.is_empty() {
+        let specifiers: Vec<String> = result
+            .jsconfig_undetermined_imports
+            .iter()
+            .map(|specifier| format!("`{specifier}`"))
+            .collect();
+        hints.push(format!(
+            "{} import specifier(s) name different files under the TypeScript majors that may read the `jsconfig.json` of their JavaScript project ({}); their dependencies do not contribute to ranking. Inspect its module options, which those majors read apart.",
+            specifiers.len(),
+            name_some(&specifiers)
+        ));
+    }
     if !result.undetermined_ts_projects.is_empty() {
         hints.push(format!(
             "{} file(s) sit below a tsconfig whose `references` name no one project compiling them ({}); their non-relative specifiers were read without a tsconfig's `paths`, `baseUrl` or conditions. Inspect the project references.",
@@ -398,6 +410,7 @@ mod tests {
             type_root_undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
             projects_undetermined_imports: Vec::new(),
+            jsconfig_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
             typescript_installed_unread: false,
@@ -480,6 +493,7 @@ mod tests {
         result.type_root_undetermined_imports = vec!["ex".to_string()];
         result.version_undetermined_imports = vec!["p6".to_string()];
         result.projects_undetermined_imports = vec!["../components".to_string()];
+        result.jsconfig_undetermined_imports = vec!["../lib".to_string()];
         result.typescript_ranges = vec![">=5".to_string()];
         result.typescript_not_installed = true;
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
@@ -526,6 +540,12 @@ mod tests {
         );
         assert!(
             json["files"]["hints"][6]
+                .as_str()
+                .unwrap()
+                .contains("1 import specifier(s) name different files under the TypeScript majors that may read the `jsconfig.json` of their JavaScript project (`../lib`); their dependencies do not contribute to ranking. Inspect its module options, which those majors read apart.")
+        );
+        assert!(
+            json["files"]["hints"][7]
                 .as_str()
                 .unwrap()
                 .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")
