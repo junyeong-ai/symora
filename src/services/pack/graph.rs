@@ -253,11 +253,9 @@ enum Resolution {
     /// A specifier the TypeScript majors that may read the `jsconfig.json`
     /// of the importer's JavaScript project read as different files.
     JsConfigUndetermined(String),
-    /// A specifier naming a directory whose `package.json` holds
-    /// `typesVersions`, which pack does not follow: a relative one, a path
-    /// `paths` or `baseUrl` names, a workspace package, or under `node10`
-    /// a `node_modules` package that may take it before a `paths` or
-    /// `baseUrl` JavaScript file.
+    /// A specifier naming a directory, or under `node10` a `node_modules`
+    /// package taking it before a `paths` or `baseUrl` file, whose
+    /// `package.json` holds `typesVersions`, which pack does not follow.
     TypesVersionsUndetermined(String),
 }
 
@@ -631,11 +629,9 @@ fn path_lookup(reading: Reading, form: ImportForm) -> Option<PathLookup> {
     }
 }
 
-/// What TypeScript finds for a non-relative specifier after a pass whose
-/// extensions hold declarations looked at its paths: in `node_modules` and
-/// the `typeRoots` directories (`ProjectIndex::type_root_specifier`), or
-/// under `classic` past the project's root, in `node_modules/@types` and
-/// the `typeRoots` (`ProjectIndex::classic_between`).
+/// What TypeScript finds for a non-relative specifier after a pass with
+/// declarations looked at its paths (`ProjectIndex::type_root_specifier`,
+/// `ProjectIndex::classic_between`).
 enum TypeRooted {
     /// What the specifier names: the declaration, or a disclosure.
     Resolved(Resolution),
@@ -1041,9 +1037,8 @@ struct ProjectIndex<'a> {
     /// of them the `node_modules` lookup covers.
     type_roots: RefCell<HashMap<TypeRootKey, Option<Declared>>>,
     /// Whether a `node_modules` package from a directory up takes each
-    /// non-relative specifier in a pass of a lookup, once per directory and
-    /// what the lookup reads (`node_modules_finds`): the walks up from the
-    /// importers' directories pass the same ones.
+    /// non-relative specifier (`node_modules_finds`), once per directory:
+    /// the walks up from the importers' directories pass the same ones.
     node_modules: RefCell<HashMap<NodeModulesKey, Option<bool>>>,
 }
 
@@ -1058,9 +1053,8 @@ type TypeRootKey = (Option<*const TsConfig>, Vec<String>, String, bool);
 type ClassicKey = (Option<*const TsConfig>, Vec<String>, String);
 
 /// What a `node_modules` lookup depends on (`ProjectIndex::node_modules`):
-/// the directory it starts in, `None` above the project's root; the
-/// specifier; the pass's extensions; the lookup, which decides whether
-/// `exports` is read and whether a name is given an extension.
+/// the directory it starts in (`None` above the project's root), the
+/// specifier, the pass's extensions, and the lookup.
 type NodeModulesKey = (Option<Vec<String>>, String, Extensions, PathLookup);
 
 /// Each crate's module tree, as Rust builds it from the crate's root file
@@ -1738,24 +1732,17 @@ impl ProjectIndex<'_> {
         found
     }
 
-    /// The lookup `read_bare_specifier` makes, as the reading's module
-    /// resolution does, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it. Each pass
+    /// The lookup `read_bare_specifier` makes, as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace the reading's module resolution. Each pass
     /// (`PathLookup::passes`) looks at each path a `paths` substitution names
-    /// in turn — the file it names first where the substitution writes an
-    /// extension of its own — then at the one below `baseUrl`, a `paths`
-    /// pattern naming no file passed over, and `classic` then in the
-    /// importer's directory and each one above it to the project's root
-    /// (`classic_walk`). After a pass whose extensions hold declarations,
-    /// `classic`, which reads no `package.json`, looks past the root and for
-    /// a declaration (`classic_between`), any other resolution in
-    /// `node_modules` and the `typeRoots` (`type_root_specifier`); a
-    /// declaration pack checks on disk without reading, or one a
-    /// `typesVersions` decides, may stand for the specifier, which is
-    /// disclosed where the rest of the lookup names a file in the project.
-    /// Where no pass names a file, one of any kind a substitution or
-    /// `baseUrl` spells exactly is the one, then a workspace package's file
-    /// (`workspace_package`), and a specifier a `paths` pattern other than
-    /// `*` declares is disclosed.
+    /// in turn, the file one writing an extension names first, then at the
+    /// one below `baseUrl`, and `classic` then in the importer's directories
+    /// (`classic_walk`). After a pass with declarations `classic` looks past
+    /// the root and for a declaration (`classic_between`), the others in
+    /// `node_modules` and the `typeRoots` (`type_root_specifier`). Where no
+    /// pass names a file, one of any kind a substitution or `baseUrl` spells
+    /// exactly is the one, then a workspace package's file, and a specifier
+    /// a `paths` pattern other than `*` declares is disclosed.
     fn lookup_bare_specifier(
         &self,
         specifier: &str,
@@ -1817,9 +1804,9 @@ impl ProjectIndex<'_> {
             if let Some(lookup) = lookup {
                 for extensions in lookup.passes() {
                     let walked = || match lookup {
-                        PathLookup::Classic => self
-                            .classic_walk(specifier, importer.node, *extensions)
-                            .map(Resolution::Files),
+                        PathLookup::Classic => {
+                            self.classic_walk(specifier, importer.node, *extensions)
+                        }
                         _ => None,
                     };
                     if let Some(found) = configured(*extensions).or_else(walked) {
@@ -1869,13 +1856,14 @@ impl ProjectIndex<'_> {
             self.workspace_package(specifier, importer, reading, form)
                 .unwrap_or_else(unmapped)
         };
+        let disclosed: fn(String) -> Resolution = match lookup {
+            Some(PathLookup::Classic) => Resolution::DeclarationUndetermined,
+            _ => Resolution::TypeRootUndetermined,
+        };
         match found {
-            Resolution::Files(files) if outside && !files.is_empty() => match lookup {
-                Some(PathLookup::Classic) => {
-                    Resolution::DeclarationUndetermined(specifier.to_string())
-                }
-                _ => Resolution::TypeRootUndetermined(specifier.to_string()),
-            },
+            Resolution::Files(files) if outside && !files.is_empty() => {
+                disclosed(specifier.to_string())
+            }
             found => found,
         }
     }
@@ -1886,12 +1874,12 @@ impl ProjectIndex<'_> {
     /// trace it (`tr_*`, `tq_*`): `None` where no type root holds a
     /// declaration for it (`type_root_declaration`). Where one does, a
     /// `node_modules` package or `@types` declaration the pass finds comes
-    /// first (`node_modules_finds`), which pack does not read
-    /// but for a workspace's package; where none does, the declaration is
-    /// the one; and where pack cannot tell, which an `exports` or
-    /// `typesVersions` it does not follow decides, it is disclosed. One a
-    /// root outside the project may hold is disclosed only where the rest of
-    /// the lookup names a file in it (`TypeRooted::Outside`).
+    /// first (`node_modules_finds`), which pack does not read but for a
+    /// workspace's package; where none does, the declaration is the one; and
+    /// where pack cannot tell, which an `exports` or `typesVersions` it does
+    /// not follow decides, it is disclosed. One a root outside the project
+    /// may hold is disclosed only where the rest of the lookup names a file
+    /// in it (`TypeRooted::Outside`).
     fn type_root_specifier(
         &self,
         specifier: &str,
@@ -1916,13 +1904,11 @@ impl ProjectIndex<'_> {
         })
     }
 
-    /// Whether TypeScript's lookup in `node_modules` under one module
-    /// resolution finds a file for a non-relative specifier with a pass's
-    /// extensions, in each directory from `directory` up to the filesystem's
-    /// root, `None` standing for those above the project's
-    /// (`manifests::node_modules_in`): `node10` reads no `exports`, and
-    /// `node16` adds no extension for an ES import. Once for what it depends
-    /// on (`ProjectIndex::node_modules`).
+    /// Whether TypeScript's lookup in `node_modules` finds a file for a
+    /// non-relative specifier with a pass's extensions in each directory from
+    /// `directory`, `None` standing for those above the project's root, up to
+    /// the filesystem's (`manifests::node_modules_in`): `node10` reads no
+    /// `exports`, and `node16` adds no extension for an ES import.
     fn node_modules_finds(
         &self,
         directory: Option<&[String]>,
@@ -1930,12 +1916,8 @@ impl ProjectIndex<'_> {
         lookup: PathLookup,
         extensions: Extensions,
     ) -> Option<bool> {
-        let key = (
-            directory.map(<[String]>::to_vec),
-            specifier.to_string(),
-            extensions,
-            lookup,
-        );
+        let from = directory.map(<[String]>::to_vec);
+        let key = (from, specifier.to_string(), extensions, lookup);
         if let Some(known) = self.node_modules.borrow().get(&key) {
             return *known;
         }
@@ -2071,24 +2053,24 @@ impl ProjectIndex<'_> {
         specifier: &str,
         from: &Node,
         extensions: Extensions,
-    ) -> Option<Vec<usize>> {
+    ) -> Option<Resolution> {
         let path = split_components(specifier);
-        (!path.is_empty()).then_some(())?;
-        (0..=from.directory.len()).rev().find_map(|depth| {
+        if path.is_empty() {
+            return None;
+        }
+        let found = (0..=from.directory.len()).rev().find_map(|depth| {
             let below = [&from.directory[..depth], &path].concat();
             self.module_file(&below, extensions, true)
-        })
+        });
+        found.map(Resolution::Files)
     }
 
     /// What `classic` takes for a non-relative specifier between its passes,
-    /// where its TypeScript pass found no file in the project, as tsc 5.9.3
-    /// and 6.0.3 go on: past the project's root, where pack checks the disk
-    /// alone and reads nothing, a TypeScript file ends the lookup with no
-    /// edge, as one on disk in the project that pack does not read does;
-    /// then a declaration in `node_modules/@types` or a type root
-    /// (`classic_declaration`) is the one, before every JavaScript file. One
-    /// pack checks on disk without reading, or one a `typesVersions` decides,
-    /// may stand for it (`TypeRooted::Outside`).
+    /// as tsc 5.9.3 and 6.0.3 go on: past the project's root, where pack
+    /// checks the disk alone, a TypeScript file ends the lookup with no edge,
+    /// as one in the project that pack does not read does; then a declaration
+    /// in `node_modules/@types` or a type root (`classic_declaration`) is the
+    /// one, before every JavaScript file, or may be (`TypeRooted::Outside`).
     fn classic_between(&self, specifier: &str, importer: &Importer) -> Option<TypeRooted> {
         let path = split_components(specifier);
         let above_root = path.split_last().is_some_and(|(name, directory)| {

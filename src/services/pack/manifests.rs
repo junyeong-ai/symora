@@ -561,12 +561,11 @@ fn holds_types(directory: &Path, specifier: &str) -> bool {
 /// on disk finds a file with a set of extensions, as tsc 5.9.3, 6.0.3 and
 /// 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`): the
 /// file the specifier's path names, but for a package's name under an ES
-/// import, then the directory (`directory_module`). An ES import reads a
-/// directory's `index` only for a package's name whose `package.json`
-/// exists, which sets no `exports` there: tsc's `index.js` fallback
-/// (`p1c_*`, `q1b_*` without one, `q1e_*` for a subpath). `None` where
-/// the package's `exports`, which the lookup reads, or the `typesVersions`
-/// a subpath goes through decides.
+/// import, then the directory (`directory_module`), whose `index` an ES
+/// import reads only for a package's name whose `package.json` exists, as
+/// tsc's `index.js` fallback does (`p1c_*`, `q1b_*`, `q1e_*`). `None`
+/// where the package's `exports`, which the lookup reads, or the
+/// `typesVersions` a subpath goes through decides.
 fn finds_package(
     modules: &Path,
     specifier: &str,
@@ -601,16 +600,13 @@ fn finds_package(
 /// Whether TypeScript's lookup in one directory's `node_modules` on disk
 /// finds a file for a non-relative specifier with a set of extensions, as
 /// tsc 5.9.3, 6.0.3 and 7.0.2 look before a `typeRoots` directory: its
-/// package (`finds_package`), then, where the extensions hold declarations,
-/// its `node_modules/@types` one under the scope-mangled name. With every
-/// extension, as `bundler` and `node16` look, tsc looks in every directory
-/// for TypeScript's and then for JavaScript's
-/// (`loadModuleFromNearestNodeModulesDirectoryWorker`), so a package's
-/// `main` is read for JavaScript where its `types` names no file. `add` is
-/// whether the lookup adds an extension to a name (not for an ES import
-/// under `node16`), `exports` whether it reads a package's `exports` (not
-/// `node10`). `None` where a `package.json` pack does not follow decides:
-/// `exports` the lookup reads, or `typesVersions`.
+/// package (`finds_package`), then, for declarations, its `@types` one.
+/// With every extension, as `bundler` and `node16` look, tsc looks for
+/// TypeScript's and then for JavaScript's, so a package's `main` is read
+/// for JavaScript where its `types` names no file. `add` is whether a name
+/// is given an extension, `exports` whether a package's `exports` is read.
+/// `None` where a `package.json` pack does not follow decides: `exports`
+/// the lookup reads, or `typesVersions`.
 pub(super) fn node_modules_in(
     directory: &Path,
     specifier: &str,
@@ -631,15 +627,9 @@ pub(super) fn node_modules_in(
         .map(|pass| finds_package(&modules, specifier, *pass, exports, add))
         .collect();
     if extensions != Extensions::JavaScript {
-        let types = modules.join("@types");
-        let mangled = mangle_scope(specifier);
-        found.push(finds_package(
-            &types,
-            &mangled,
-            Extensions::Declaration,
-            exports,
-            add,
-        ));
+        let (types, mangled) = (modules.join("@types"), mangle_scope(specifier));
+        let declaration = Extensions::Declaration;
+        found.push(finds_package(&types, &mangled, declaration, exports, add));
     }
     either(&found)
 }
@@ -664,9 +654,8 @@ pub(super) enum Hit {
     Open,
 }
 
-/// What a path names where a lookup checks for it (`module_file`,
-/// `directory_module`): the project's file where pack reads it, none where
-/// it is only on disk; `None` where it names no file.
+/// What a path names where a lookup checks for it: the project's file where
+/// pack reads it, none where it is only on disk; `None` where it names none.
 pub(super) type Existing<'e> = &'e dyn Fn(&[String]) -> Option<Vec<usize>>;
 
 /// The file TypeScript takes for a path with a set of extensions: the first
