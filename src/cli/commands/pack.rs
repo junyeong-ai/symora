@@ -174,8 +174,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             .iter()
             .map(|specifier| format!("`{specifier}`"))
             .collect();
+        let ranges = if result.typescript_ranges.is_empty() {
+            String::new()
+        } else {
+            let ranges: Vec<String> = result
+                .typescript_ranges
+                .iter()
+                .map(|range| format!("`{range}`"))
+                .collect();
+            format!(" (declared: {})", name_some(&ranges))
+        };
         hints.push(format!(
-            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}): the TypeScript version is not known, or not read from a declared range whose lower bound fixes no major from 5 to 7; their dependencies do not contribute to ranking. Install `typescript`, or declare it in the nearest `package.json`, to settle them.",
+            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}), no `typescript` installed or declared fixing a major from 5 to 7{ranges}; their dependencies do not contribute to ranking. Install `typescript`, or declare a range fixing its major in the nearest `package.json`, to settle them.",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -333,6 +343,7 @@ mod tests {
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
+            typescript_ranges: Vec::new(),
             undetermined_ts_projects: Vec::new(),
             unreadable_paths: Vec::new(),
         }
@@ -409,6 +420,7 @@ mod tests {
         result.rust_relative_imports_omitted = true;
         result.undetermined_imports = vec!["@/styles/app".to_string()];
         result.version_undetermined_imports = vec!["p6".to_string()];
+        result.typescript_ranges = vec![">=5".to_string()];
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
         assert!(
             render_markdown(&ctx(), &args, &result)
@@ -431,7 +443,7 @@ mod tests {
             json["files"]["hints"][2]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`): the TypeScript version is not known")
+                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`), no `typescript` installed or declared fixing a major from 5 to 7 (declared: `>=5`); ")
         );
         assert!(
             json["files"]["hints"][3]
