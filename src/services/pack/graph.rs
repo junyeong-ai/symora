@@ -606,11 +606,10 @@ impl PathLookup {
 /// How TypeScript of one reading looks a path an import spells up
 /// (`PathLookup`): `node16` as CommonJS for a `require` and for a
 /// declaration in a file emitted as CommonJS, as an ES import for one in a
-/// file emitted as an ES module. `None` where no TypeScript reads it, and
-/// where the reading leaves the resolution or, under `node16`, the format
-/// the file is emitted in open.
+/// file emitted as an ES module. `None` where the reading leaves the
+/// resolution or, under `node16`, the format the file is emitted in open,
+/// as the reading where no TypeScript reads it does.
 fn path_lookup(reading: Reading, form: ImportForm) -> Option<PathLookup> {
-    reading.major?;
     match reading.mode {
         ImportMode::Classic => Some(PathLookup::Classic),
         ImportMode::Node10 => Some(PathLookup::Node10),
@@ -979,8 +978,8 @@ impl Reference {
 enum PathEnd {
     /// A name (`./a`): a file, then a directory.
     Name,
-    /// A `/` (`./`, `./a/`): a directory alone, but under `classic`, which
-    /// looks for a file named by the extension alone in it (`a/.ts`).
+    /// A `/` (`./`, `./a/`): a directory alone, which `classic`, reading
+    /// no directory, takes for none.
     Slash,
     /// A `.` or `..` segment (`.`, `..`, `./a/..`): a directory alone, as
     /// TypeScript's `normalizePathForCJSResolution` reads it, but under
@@ -1033,10 +1032,10 @@ struct ProjectIndex<'a> {
     jvm: JvmIndex<'a>,
     rust: RustModules,
     /// What `classic` resolution named for each non-relative specifier,
-    /// once per configuration, `baseUrl` read or not, importer's directory
-    /// and specifier, all its lookup depends on (`classic_specifier`): the
-    /// files of a directory import the same names, and each lookup checks
-    /// the disk in every directory up to the filesystem's root.
+    /// once per configuration, importer's directory and specifier, all its
+    /// lookup depends on (`classic_specifier`): the files of a directory
+    /// import the same names, and each lookup checks the disk in every
+    /// directory up to the filesystem's root.
     classic: RefCell<HashMap<ClassicKey, Resolution>>,
     /// What the `typeRoots` of a configuration hold for each non-relative
     /// specifier, with an extension added to a name or not, once per
@@ -1052,8 +1051,8 @@ type TypeRootKey = (Option<*const TsConfig>, Vec<String>, String, bool);
 
 /// What a `classic` lookup depends on (`ProjectIndex::classic`): the
 /// configuration, by its place in the manifests, which outlive the index;
-/// whether `baseUrl` is read; the importer's directory; the specifier.
-type ClassicKey = (Option<*const TsConfig>, bool, Vec<String>, String);
+/// the importer's directory; the specifier.
+type ClassicKey = (Option<*const TsConfig>, Vec<String>, String);
 
 /// Each crate's module tree, as Rust builds it from the crate's root file
 /// through the `mod` declarations its files make. A module declared without
@@ -1713,6 +1712,9 @@ impl ProjectIndex<'_> {
         reading: Reading,
         form: ImportForm,
     ) -> Resolution {
+        if reading.mode == ImportMode::Classic {
+            return self.classic_specifier(specifier, importer);
+        }
         let language = importer.node.language;
         let config = importer.ts_config;
         // A JavaScript project's bundler reads its `jsconfig.json`'s `baseUrl`
@@ -1720,9 +1722,6 @@ impl ProjectIndex<'_> {
         // do with 7.0.2, which reads none.
         let base_url = reading.major.is_some_and(reads_base_url)
             || config.is_some_and(|config| config.javascript);
-        if reading.mode == ImportMode::Classic {
-            return self.classic_specifier(specifier, importer, base_url);
-        }
         let mapped = config.and_then(|config| config.mapped(specifier, base_url));
         let substitutions = || mapped.iter().flat_map(|mapping| &mapping.paths);
         let below_base = config
@@ -1959,9 +1958,10 @@ impl ProjectIndex<'_> {
     /// (`Extensions`), each trying the names `module_names` gives. Each
     /// pass looks at each path a `paths` substitution names in turn — the
     /// file it names first where the substitution writes an extension of its
-    /// own — then at the one below `baseUrl`, then in the importer's
-    /// directory and each one above it, past the project's root to the
-    /// filesystem's; a `paths` pattern naming no file is passed over. Between
+    /// own — then at the one below `baseUrl`, which 5 and 6, the majors
+    /// reading `classic`, both read, then in the importer's directory and
+    /// each one above it, past the project's root to the filesystem's; a
+    /// `paths` pattern naming no file is passed over. Between
     /// the passes it looks in each `node_modules/@types` above the importer,
     /// then in each directory the configuration's `typeRoots` names. So a
     /// TypeScript file any of them holds comes before every JavaScript file:
@@ -1976,35 +1976,28 @@ impl ProjectIndex<'_> {
     /// any kind a substitution or `baseUrl` spells exactly is the one, as
     /// elsewhere, and a specifier a `paths` pattern other than `*` declares
     /// is disclosed.
-    fn classic_specifier(
-        &self,
-        specifier: &str,
-        importer: &Importer,
-        base_url: bool,
-    ) -> Resolution {
+    fn classic_specifier(&self, specifier: &str, importer: &Importer) -> Resolution {
         let key = (
             importer.ts_config.map(std::ptr::from_ref),
-            base_url,
             importer.node.directory.clone(),
             specifier.to_string(),
         );
         if let Some(known) = self.classic.borrow().get(&key) {
             return known.clone();
         }
-        let found = self.classic_lookup(specifier, importer, base_url);
+        let found = self.classic_lookup(specifier, importer);
         self.classic.borrow_mut().insert(key, found.clone());
         found
     }
 
     /// The lookup `classic_specifier` makes once for what it depends on.
-    fn classic_lookup(&self, specifier: &str, importer: &Importer, base_url: bool) -> Resolution {
+    fn classic_lookup(&self, specifier: &str, importer: &Importer) -> Resolution {
         let from = importer.node;
         let config = importer.ts_config;
-        let mapped = config.and_then(|config| config.mapped(specifier, base_url));
+        let mapped = config.and_then(|config| config.mapped(specifier, true));
         let substitutions = || mapped.iter().flat_map(|mapping| &mapping.paths);
         let below_base = config
             .and_then(|config| config.base_url.as_ref())
-            .filter(|_| base_url)
             .and_then(|base| project_path(base, specifier));
         let mut directory = split_components(specifier);
         let Some(name) = directory.pop() else {
@@ -2108,15 +2101,12 @@ impl ProjectIndex<'_> {
                 .map(Hit::Files)
         };
         match lookup {
-            PathLookup::Classic => {
-                // `classic` reads a path ending in `/` as naming a file
-                // spelled by the extension alone in that directory.
-                let path = match end {
-                    PathEnd::Name | PathEnd::Dot => path.to_vec(),
-                    PathEnd::Slash => [path, &[String::new()]].concat(),
-                };
-                self.module_file(&path, extensions, true).map(Hit::Files)
-            }
+            PathLookup::Classic => match end {
+                PathEnd::Name | PathEnd::Dot => {
+                    self.module_file(path, extensions, true).map(Hit::Files)
+                }
+                PathEnd::Slash => None,
+            },
             PathLookup::Node10 | PathLookup::Bundler => {
                 file(true).or_else(|| self.directory_module(path, extensions, true))
             }
