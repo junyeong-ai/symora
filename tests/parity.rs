@@ -213,6 +213,7 @@ fn cli_and_mcp_emit_identical_payloads() {
 /// two tests never stop each other's. Dropping it stops the daemon.
 struct IsolatedDaemon {
     exe: PathBuf,
+    home: tempfile::TempDir,
 }
 
 impl IsolatedDaemon {
@@ -223,9 +224,9 @@ impl IsolatedDaemon {
         std::fs::create_dir_all(&dir).unwrap();
         let daemon = Self {
             exe: dir.join("symora"),
+            home: tempfile::tempdir().unwrap(),
         };
         if daemon.exe.exists() {
-            daemon.stop();
             // A copy written over one that has run is new code in a file the
             // kernel already verified, and macOS kills whatever executes it:
             // replace the file, not its contents.
@@ -242,13 +243,37 @@ impl IsolatedDaemon {
         daemon
     }
 
+    /// The daemon keeps its socket and pid files under its home, so it gets
+    /// one of its own rather than the user's, short enough for a socket's
+    /// path; rustup and cargo, which the language server runs, still find the
+    /// toolchains the user's home holds.
     fn command(&self, root: &Path) -> Command {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let toolchain = |var: &str, dir: &str| {
+            std::env::var_os(var).map_or_else(|| home.join(dir), PathBuf::from)
+        };
         let mut command = Command::new(&self.exe);
         command
             .current_dir(root)
+            .env("HOME", self.home.path())
+            .env("CARGO_HOME", toolchain("CARGO_HOME", ".cargo"))
+            .env("RUSTUP_HOME", toolchain("RUSTUP_HOME", ".rustup"))
             .env("XDG_CONFIG_HOME", no_global_config())
             .env_remove("SYMORA_NO_DAEMON");
         command
+    }
+
+    /// Assert that this installation's daemon is serving: a command that could
+    /// not reach one runs in process and agrees with the direct run without
+    /// comparing anything.
+    fn assert_serving(&self) {
+        let output = self
+            .command(Path::new(env!("CARGO_TARGET_TMPDIR")))
+            .args(["daemon", "status", "--format", "compact"])
+            .output()
+            .unwrap();
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["running"], true, "{status}");
     }
 
     fn stop(&self) {
@@ -279,6 +304,7 @@ fn run_daemon_cli(daemon: &IsolatedDaemon, root: &Path, args: &[&str]) -> Vec<Va
         output.status.success(),
         "fixture command {args:?} failed: {payload}"
     );
+    daemon.assert_serving();
     vec![payload]
 }
 
@@ -492,6 +518,9 @@ fn unconfirmed_rename_is_refused_by_cli_mcp_and_daemon() {
             expected = Some(result);
         }
         assert_eq!(std::fs::read_to_string(&source).unwrap(), original);
+        if !direct {
+            daemon.assert_serving();
+        }
     }
     let mut session = McpSession::new(Some(root.path()));
     let result = session.request("tools/call", json!({
