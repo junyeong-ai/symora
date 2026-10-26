@@ -1388,7 +1388,9 @@ fn declares_a_function(node: Node) -> bool {
 /// (`QT_BEGIN_NAMESPACE template <typename T> class Outer {` before a member
 /// `struct Inner {`), and each is read alone, from the end of the one before;
 /// in one with no body of its own, the name after the key may be a type's
-/// (`struct stat st;`), so only what is written before the key is taken.
+/// (`struct stat st;`), so only what is written before the key is taken. A
+/// preprocessor conditional between a head's name and the `{` or `;` after
+/// it is read through its first branch ([`head_conditional`]).
 fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>> {
     let text = |node: Node| source.get(node.byte_range()).unwrap_or_default();
     let is_identifier = |node: Node| {
@@ -1502,6 +1504,7 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
                 continue;
             }
             name -= 1;
+            let named = leaves[name].end_byte();
             while name >= key + 3
                 && leaves[name - 1].kind() == "::"
                 && is_identifier(leaves[name - 2])
@@ -1518,9 +1521,66 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
                     .filter(|&at| at != key && outside[at] && is_identifier(leaves[at]))
                     .map(|at| leaves[at].byte_range()),
             );
+            let ends = leaves
+                .get(end)
+                .map_or(opens, |closing| closing.start_byte());
+            macros.extend(head_conditional(node, named, ends));
         }
     }
     macros
+}
+
+/// What a preprocessor conditional writes in a C++ class head between the
+/// name the head ends with, from byte `from`, and the `{` or `;` after it,
+/// at byte `end`, read through its first branch: each directive's tokens and
+/// every token of a later branch, of which the grammar holds no line end
+/// there, so the lines hold. The declarations a
+/// class holds are the same whichever branch is taken, and the grammar reads
+/// no class head with a directive in it, so the class is read as its first
+/// branch writes it (`class QList #ifndef Q_QDOC : public
+/// QListSpecialMethods<T> #endif {`), as Universal Ctags reads a
+/// conditional. Nothing is taken where another directive is written there,
+/// whose text may be a macro's body (`#define`), or where a conditional is
+/// still open at the end. A conditional the grammar holds apart from the
+/// head is not reached: one opened by `#if` (`class QList #if A : public B
+/// #endif {`), one whose branches each write the `{` (`#ifdef A : public B {
+/// #else : public C { #endif`), and one after a name a macro precedes (`class
+/// Q_CORE_EXPORT QIODevice #ifndef QT_NO_QOBJECT : public QObject, #else :
+/// #endif public QIODeviceBase {`), whose declaration the grammar ends at the
+/// name.
+fn head_conditional(node: Node, from: usize, end: usize) -> Vec<std::ops::Range<usize>> {
+    let mut blanks = Vec::new();
+    let mut branches: Vec<bool> = Vec::new();
+    let mut directive = None;
+    for token in written_tokens_before(node, end)
+        .into_iter()
+        .filter(|token| token.start_byte() >= from)
+    {
+        let row = token.start_position().row;
+        if directs(token) {
+            match token.kind() {
+                "#if" | "#ifdef" | "#ifndef" => branches.push(false),
+                "#elif" | "#elifdef" | "#elifndef" | "#else" => {
+                    if let Some(later) = branches.last_mut() {
+                        *later = true;
+                    }
+                }
+                "#endif" => {
+                    branches.pop();
+                }
+                _ => return Vec::new(),
+            }
+            directive = Some(row);
+        }
+        if directive == Some(row) || branches.contains(&true) {
+            blanks.push(token.byte_range());
+        }
+    }
+    if branches.is_empty() {
+        blanks
+    } else {
+        Vec::new()
+    }
 }
 
 /// The macros a C prototype wraps its parameter list in so that it compiles
@@ -1669,28 +1729,37 @@ fn written_words(node: Node) -> Vec<Node> {
 /// The tokens a C or C++ node writes before the byte `end`
 /// ([`written_words`]).
 fn written_words_before(node: Node, end: usize) -> Vec<Node> {
-    let mut words = Vec::new();
-    let mut walk = vec![node];
     let mut directive = None;
+    written_tokens_before(node, end)
+        .into_iter()
+        .filter(|token| {
+            let row = token.start_position().row;
+            if directs(*token) {
+                directive = Some(row);
+            }
+            directive != Some(row)
+        })
+        .collect()
+}
+
+/// The tokens a C or C++ node writes before the byte `end`, in order,
+/// comments and the tokens the grammar supplied left out, a directive's kept.
+fn written_tokens_before(node: Node, end: usize) -> Vec<Node> {
+    let mut tokens = Vec::new();
+    let mut walk = vec![node];
     while let Some(part) = walk.pop() {
         if part.start_byte() >= end || part.is_extra() && !part.is_error() || part.is_missing() {
             continue;
         }
         if part.child_count() == 0 {
-            let row = part.start_position().row;
-            if directs(part) {
-                directive = Some(row);
-            }
-            if directive != Some(row) {
-                words.push(part);
-            }
+            tokens.push(part);
             continue;
         }
         let mut cursor = part.walk();
         let children: Vec<_> = part.children(&mut cursor).collect();
         walk.extend(children.into_iter().rev());
     }
-    words
+    tokens
 }
 
 /// Whether a C or C++ token is a preprocessor directive's keyword
@@ -7854,13 +7923,29 @@ region     = "us-central1"
     }
 
     /// A directive the grammar held among a macro's words is no word of it:
-    /// a rule neither blanks its line nor reads it as the end of a run.
+    /// a rule neither blanks its line nor reads it as the end of a run. A
+    /// preprocessor conditional between a class's name and its `{` is read
+    /// through its first branch instead: its directives' lines are blanked but
+    /// their line ends, and so is every later branch, while any other
+    /// directive there, or a conditional still open at the `{`, keeps them all.
     #[test]
-    fn a_directive_among_macro_words_keeps_its_line() {
+    fn a_directive_is_no_macro_word_and_a_head_conditional_reads_its_first_branch() {
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
             .expect("the C++ grammar loads");
+        let mut blank = |content: &str| -> String {
+            let tree = parser.parse(content, None).expect("the source parses");
+            let root = tree.root_node();
+            let mut bytes = content.as_bytes().to_vec();
+            for range in misread_class_macros(root, content.as_bytes())
+                .into_iter()
+                .chain(literal_argument_macros(root))
+            {
+                bytes[range].fill(b' ');
+            }
+            String::from_utf8(bytes).expect("blanks keep the source UTF-8")
+        };
         for (content, kept, blanked_names) in [
             (
                 "FOO(1)\n#define B 2\nBAR(2)\n#ifdef A\nBAZ(3)\n#endif\n#pragma pack(1)\nQUX(4)\n\
@@ -7881,25 +7966,112 @@ region     = "us-central1"
                 &["QT_BEGIN_NAMESPACE"][..],
             ),
             (
-                "class QList\n#ifndef Q_QDOC\n    : public Base\n#endif\n{\n    int a;\n};\n",
-                &["class QList\n", "#ifndef Q_QDOC\n"][..],
-                &[][..],
+                "QT_BEGIN_NAMESPACE\n\ntemplate <typename T>\nclass Outer {\n#ifdef A\n    int x;\n#else\n    \
+                 long x;\n#endif\n    template <typename HT>\n    struct Inner {\n        int y = 1;\n    \
+                 };\n    int a;\n};\n",
+                &["#ifdef A\n", "#else\n    long x;\n", "#endif\n"][..],
+                &["QT_BEGIN_NAMESPACE"][..],
             ),
         ] {
-            let tree = parser.parse(content, None).expect("the source parses");
-            let root = tree.root_node();
-            let mut bytes = content.as_bytes().to_vec();
-            for range in misread_class_macros(root, content.as_bytes())
-                .into_iter()
-                .chain(literal_argument_macros(root))
-            {
-                bytes[range].fill(b' ');
-            }
-            let blanked = String::from_utf8(bytes).expect("blanks keep the source UTF-8");
+            let blanked = blank(content);
             assert!(
                 kept.iter().all(|line| blanked.contains(line))
                     && blanked_names.iter().all(|name| !blanked.contains(name)),
                 "a directive's line is kept, and a run goes on past it: {blanked:?}"
+            );
+        }
+        for (content, read_past) in [
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n#endif\n{\n    int a;\n};\n",
+                &["#ifndef Q_QDOC", "#endif"][..],
+            ),
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n#else\n    : public Other\n#endif\n\
+                 {\n    int a;\n};\n",
+                &["#ifndef Q_QDOC", "#else", ": public Other", "#endif"][..],
+            ),
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n#elif defined(X)\n    : public Other\n\
+                 #endif\n{\n    int a;\n};\n",
+                &[
+                    "#ifndef Q_QDOC",
+                    "#elif defined(X)",
+                    ": public Other",
+                    "#endif",
+                ][..],
+            ),
+            (
+                "template <typename T>\nclass QList\n#ifndef Q_QDOC\n    : public Base<T>\n\
+                 #  if defined(B)\n    , public Other<T>\n#  endif\n#endif\n{\n    int a;\n};\n",
+                &["#ifndef Q_QDOC", "#  if defined(B)", "#  endif", "#endif"][..],
+            ),
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n{\n#endif\n    int a;\n};\n",
+                &[][..],
+            ),
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n#endif\n#define QLIST_DEFINED 1\n\
+                 {\n    int a;\n};\n",
+                &[][..],
+            ),
+            (
+                "class QList\n#ifndef Q_QDOC\n    : public Base\n#pragma message(\"x\")\n#endif\n\
+                 {\n    int a;\n};\n",
+                &[][..],
+            ),
+        ] {
+            let mut expected = content.to_string();
+            for text in read_past {
+                let at = expected.find(text).expect("the blanked text is written");
+                expected.replace_range(at..at + text.len(), &" ".repeat(text.len()));
+            }
+            assert_eq!(
+                blank(content),
+                expected,
+                "a head's conditional is read through its first branch"
+            );
+        }
+        for (content, expected) in [
+            (
+                "template <typename T>\nclass QList\n#ifndef Q_QDOC\n    : public QListSpecialMethods<T>\n\
+                 #endif\n{\n    using Data = QTypedArrayData<T>;\n    Data d;\npublic:\n    \
+                 QList() = default;\n    void append(const T &t);\n};\nint after(int x);\n",
+                &[
+                    "class:QList",
+                    "class:QList/Data",
+                    "field:QList/d",
+                    "constructor:QList/QList",
+                    "method:QList/append",
+                    "function:after",
+                ][..],
+            ),
+            (
+                "namespace QtPrivate {\n\ntemplate <typename Map>\nclass Storage<Map &>\n\
+                 #ifdef __cpp_lib_ranges\n    : public std::ranges::view_base\n#endif\n{\n    \
+                 Map *m_map;\npublic:\n    explicit Storage(Map &map) : m_map(&map) {}\n};\n\n\
+                 } // namespace QtPrivate\n\nQT_END_NAMESPACE\n",
+                &[
+                    "namespace:QtPrivate",
+                    "class:Storage<Map &>",
+                    "field:Storage<Map &>/m_map",
+                    "constructor:Storage<Map &>/Storage",
+                ][..],
+            ),
+        ] {
+            let declared: Vec<String> = SymbolExtractor::new()
+                .extract(Path::new("q.h"), content, Language::Cpp)
+                .iter()
+                .map(|symbol| {
+                    format!(
+                        "{}:{}",
+                        symbol.kind,
+                        symbol.name_path.as_deref().unwrap_or(&symbol.name)
+                    )
+                })
+                .collect();
+            assert_eq!(
+                declared, expected,
+                "a class whose head holds a conditional holds its members"
             );
         }
     }
