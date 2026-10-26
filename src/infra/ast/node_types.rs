@@ -297,8 +297,11 @@ const LUA: &[NodeType] = &[
     NodeType::new("assignment", "assignment_statement", "x = value"),
     NodeType::new("table", "table_constructor", "{ key = val }"),
     NodeType::new("if", "if_statement", "if cond then end"),
-    NodeType::new("for", "for_statement", "for i=1,n do end"),
-    NodeType::new("for", "for_in_statement", "for k,v in pairs()"),
+    NodeType::new(
+        "for",
+        "for_statement",
+        "for i=1,n do end, for k,v in pairs(t) do end",
+    ),
     NodeType::new("while", "while_statement", "while cond do end"),
     NodeType::new("repeat", "repeat_statement", "repeat until cond"),
 ];
@@ -321,12 +324,13 @@ const PHP: &[NodeType] = &[
 
 // Swift - tree-sitter-swift/src/node-types.json
 const SWIFT: &[NodeType] = &[
-    NodeType::new("class", "class_declaration", "class MyClass {}"),
+    NodeType::new(
+        "class",
+        "class_declaration",
+        "class C {}, struct S {}, enum E {}, extension T {}, actor A {}",
+    ),
     NodeType::new("function", "function_declaration", "func f() {}"),
     NodeType::new("protocol", "protocol_declaration", "protocol P {}"),
-    NodeType::new("enum", "enum_declaration", "enum E {}"),
-    NodeType::new("struct", "struct_declaration", "struct S {}"),
-    NodeType::new("extension", "extension_declaration", "extension T {}"),
     NodeType::new("import", "import_declaration", "import Foundation"),
     NodeType::new("property", "property_declaration", "var x: Int = 0"),
     NodeType::new("typealias", "typealias_declaration", "typealias T = ..."),
@@ -367,7 +371,7 @@ const ELIXIR: &[NodeType] = &[
 
 // Dart - tree-sitter-dart/src/node-types.json
 const DART: &[NodeType] = &[
-    NodeType::new("class", "class_definition", "class MyClass {}"),
+    NodeType::new("class", "class_declaration", "class MyClass {}"),
     NodeType::new("mixin", "mixin_declaration", "mixin M {}"),
     NodeType::new("extension", "extension_declaration", "extension on T {}"),
     NodeType::new("function", "function_signature", "void f() {}"),

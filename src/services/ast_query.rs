@@ -533,6 +533,24 @@ mod tests {
         );
     }
 
+    /// `search nodes` offers each catalogued node type as a query to run, and
+    /// a query error lists them as the ones to use, so each must be a node the
+    /// language's grammar defines.
+    #[test]
+    fn every_catalogued_node_type_is_a_query_its_grammar_compiles() {
+        let service = DefaultAstQueryService::default();
+        for &language in crate::infra::ast::node_types::supported_languages() {
+            let grammar = &service.parsers[&language].ts_language;
+            for node in crate::infra::ast::node_types::get_node_types(language) {
+                let query = format!("({})", node.node_type);
+                assert!(
+                    Query::new(grammar, &query).is_ok(),
+                    "{language:?} catalogues {query}, which its grammar does not define"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_rust_function_query() {
         let service = DefaultAstQueryService::default();
