@@ -6559,19 +6559,29 @@ mod tests {
     /// it (`req_fields_*`): a `types` naming no file gives way to the
     /// directory's `index`, never to `main` (`./d1`); an empty `typings`
     /// counts as unset (`./d2`); and a `main` naming a directory names its
-    /// `index` (`./d3`).
+    /// `index` (`./d3`). A field naming a JavaScript file is read with the
+    /// pass's extensions, so `node10`'s first pass, which holds TypeScript's
+    /// alone, takes the directory's `index.ts` over it (`./d4`); one naming
+    /// a declaration takes it over its TypeScript twin (`./d5`, `./d6`).
     #[test]
     fn a_directory_is_read_by_the_first_package_json_field_it_sets() {
         let modes = [
-            "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
-            "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+            (
+                "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+                "src/d4/index.ts",
+            ),
+            (
+                "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+                "src/d4/lib/index.js",
+            ),
         ];
-        for options in modes {
+        for (options, d4) in modes {
             let nodes = vec![
                 node_in(
                     0,
                     "src/main.ts",
-                    "import \"./d1\";\nimport \"./d2\";\nimport \"./d3\";\n",
+                    "import \"./d1\";\nimport \"./d2\";\nimport \"./d3\";\n\
+                     import \"./d4\";\nimport \"./d5\";\nimport \"./d6\";\n",
                     Language::TypeScript,
                 ),
                 node_in(1, "src/d1/lib/m.ts", "", Language::TypeScript),
@@ -6580,6 +6590,12 @@ mod tests {
                 node_in(4, "src/d2/index.ts", "", Language::TypeScript),
                 node_in(5, "src/d3/lib/index.ts", "", Language::TypeScript),
                 node_in(6, "src/d3/index.ts", "", Language::TypeScript),
+                node_in(7, "src/d4/lib/index.js", "", Language::JavaScript),
+                node_in(8, "src/d4/index.ts", "", Language::TypeScript),
+                node_in(9, "src/d5/index.d.ts", "", Language::TypeScript),
+                node_in(10, "src/d5/index.ts", "", Language::TypeScript),
+                node_in(11, "src/d6/index.d.ts", "", Language::TypeScript),
+                node_in(12, "src/d6/index.ts", "", Language::TypeScript),
             ];
             let config = format!("{{\"compilerOptions\": {{{options}, \"allowJs\": true}}}}");
             let manifests = manifests_of(
@@ -6598,12 +6614,22 @@ mod tests {
                         "{\"typings\": \"\", \"types\": \"./t.d.ts\"}",
                     ),
                     ("src/d3/package.json", "{\"main\": \"./lib\"}"),
+                    ("src/d4/package.json", "{\"types\": \"./lib/index.js\"}"),
+                    ("src/d5/package.json", "{\"types\": \"./index.d.ts\"}"),
+                    ("src/d6/package.json", "{\"main\": \"./index.d.ts\"}"),
                 ],
                 &nodes,
             );
             assert_eq!(
                 edges_under(&nodes, 0, &manifests),
-                ["src/d1/index.ts", "src/d2/t.d.ts", "src/d3/lib/index.ts"],
+                [
+                    "src/d1/index.ts",
+                    "src/d2/t.d.ts",
+                    "src/d3/lib/index.ts",
+                    d4,
+                    "src/d5/index.d.ts",
+                    "src/d6/index.d.ts"
+                ],
                 "{options}"
             );
         }
