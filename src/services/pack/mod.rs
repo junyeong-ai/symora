@@ -83,6 +83,11 @@ pub struct PackResult {
     /// `paths` alias, a workspace package's name — that named no file it
     /// determines, so their edges are missing rather than absent.
     pub undetermined_imports: Vec<String>,
+    /// The specifiers `classic` resolution names a JavaScript file in the
+    /// project for where a declaration in `node_modules/@types` or a
+    /// `typeRoots` directory, which it takes first and pack does not look up,
+    /// may stand for them.
+    pub declaration_undetermined_imports: Vec<String>,
     /// The specifiers the TypeScript majors that may compile an importer
     /// read as different files under its one configuration, because no
     /// installed `typescript` or declared version range fixes one major.
@@ -138,6 +143,7 @@ pub fn build_pack(
             unsupported_import_languages: Vec::new(),
             rust_relative_imports_omitted: false,
             undetermined_imports: Vec::new(),
+            declaration_undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
@@ -212,6 +218,10 @@ pub fn build_pack(
         unsupported_languages,
         rust_relative_imports_omitted: graph.rust_relative_imports_omitted,
         undetermined_imports: graph.undetermined_imports.into_iter().collect(),
+        declaration_undetermined_imports: graph
+            .declaration_undetermined_imports
+            .into_iter()
+            .collect(),
         version_undetermined_imports: graph.version_undetermined_imports.into_iter().collect(),
         typescript_ranges: graph.typescript_ranges.into_iter().collect(),
         typescript_not_installed: graph.typescript_not_installed,
