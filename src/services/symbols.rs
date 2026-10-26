@@ -330,6 +330,10 @@ impl SymbolExtractor {
     /// kinds are compared with the grammar's; a symbol with no grammar reading
     /// there keeps the server's range, and so does each end of one the grammar
     /// read there only by recovering from a syntax error ([`read_as_written`]).
+    /// A symbol a server nests in another is a declaration other than its
+    /// holder's, so it never takes the extent its holder was joined to: the
+    /// analyzer places a Dart class's unnamed primary constructor at the
+    /// class's name, where the grammar reads the class.
     pub fn complete_from_declarations(
         &self,
         symbols: &mut [Symbol],
@@ -337,22 +341,26 @@ impl SymbolExtractor {
         content: &str,
         language: Language,
     ) {
-        type Extent = (Option<(u32, u32)>, Option<(u32, u32)>);
+        /// The declaration an extent was read from, by its place in the
+        /// grammar's reading, and the extent.
+        type Extent = (usize, Option<(u32, u32)>, Option<(u32, u32)>);
         struct Extents {
             by_start: HashMap<(u32, u32), Extent>,
             by_end: HashMap<(u32, u32), Extent>,
         }
-        fn widen(symbols: &mut [Symbol], extents: &Extents) {
+        fn widen(symbols: &mut [Symbol], extents: &Extents, holder: Option<usize>) {
             for symbol in symbols {
                 let location = &mut symbol.location;
+                let own = |extent: &&Extent| Some(extent.0) != holder;
                 let named = extents
                     .by_start
                     .get(&(location.line, location.column))
+                    .filter(own)
                     .or_else(|| {
                         let end = (location.name_end_line?, location.name_end_column?);
-                        extents.by_end.get(&end)
+                        extents.by_end.get(&end).filter(own)
                     });
-                if let Some(&(start, end)) = named {
+                if let Some(&(_, start, end)) = named {
                     if let Some(start) = start
                         && start < location.effective_start()
                     {
@@ -370,7 +378,8 @@ impl SymbolExtractor {
                         location.end_column = Some(end.1);
                     }
                 }
-                widen(&mut symbol.children, extents);
+                let holder = named.map(|&(declaration, _, _)| declaration).or(holder);
+                widen(&mut symbol.children, extents, holder);
             }
         }
 
@@ -381,7 +390,8 @@ impl SymbolExtractor {
             by_start: HashMap::new(),
             by_end: HashMap::new(),
         };
-        for (node, declared) in self.declarations_in(&tree, path, content, language) {
+        let declarations = self.declarations_in(&tree, path, content, language);
+        for (declaration, (node, declared)) in declarations.into_iter().enumerate() {
             let written = read_as_written(node, content, language);
             let location = declared.location;
             let (Some(end_line), Some(end_column)) = (location.end_line, location.end_column)
@@ -389,6 +399,7 @@ impl SymbolExtractor {
                 continue;
             };
             let extent = (
+                declaration,
                 written.start.then(|| location.effective_start()),
                 written.end.then_some((end_line, end_column)),
             );
@@ -412,7 +423,7 @@ impl SymbolExtractor {
                 );
             }
         }
-        widen(symbols, &extents);
+        widen(symbols, &extents, None);
         self.describe(symbols, &tree, &LineStarts::new(content), language);
     }
 
@@ -4955,17 +4966,27 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         return child_of_kind(node, "new").or_else(|| child_of_kind(node, "factory"));
     }
     // A Dart primary constructor, written in its class's header, is placed
-    // at the name it writes after the class's (`class C.named(int x)`), or
-    // at the class's where it writes none. An extension type's is placed the
-    // same way in the type's name (`extension type E._(int v)`), where the
-    // analyzer resolves a call to it.
+    // at the name it writes after the class's (`class C.named(int x)`), or,
+    // where it writes none, at the `(` its parameters open with: the class's
+    // name is the class's place, and a position names one declaration
+    // wherever it is the key, as in the index's rows and in the join of a
+    // server's symbols to the grammar's
+    // ([`SymbolExtractor::complete_from_declarations`]). The analyzer selects
+    // the class's name for both, and answers about the class at either
+    // token. An extension type's is placed the same way, at the name its
+    // type's name writes after a `.` (`extension type E._(int v)`), or at its
+    // representation's `(`.
     if language == Language::Dart && node.kind() == "primary_constructor" {
         return node
             .child_by_field_name("name")
-            .or_else(|| node.parent()?.child_by_field_name("name"));
+            .or_else(|| node.child_by_field_name("parameters")?.child(0));
     }
     if language == Language::Dart && node.kind() == "extension_type_name" {
-        return dart_extension_type_constructor(node).or_else(|| child_of_kind(node, "identifier"));
+        return dart_extension_type_constructor(node).or_else(|| {
+            node.parent()?
+                .child_by_field_name("representation")?
+                .child(0)
+        });
     }
     // The initializers and body a Dart primary constructor declares in its
     // class's body (`this : assert(x > 0) { … }`) are named by their `this`,
@@ -7755,14 +7776,18 @@ region     = "us-central1"
                 // A Dart constructor is named for its class whether or not it
                 // writes the class's name, and one that does not is anchored
                 // at what it writes in its place: the name after the class's
-                // (`new named()` declares `C.named`), or the keyword it is
-                // declared with (`new()` declares `C`).
+                // (`new named()` declares `C.named`), the keyword it is
+                // declared with (`new()` declares `C`), or the `(` a primary
+                // constructor's parameters open with (`class C(int x)`
+                // declares `C`), the class's name being the class's place.
                 let at_name = written_at(&symbol.name)
                     || fixture.language == Language::Dart
                         && symbol.kind == SymbolKind::Constructor
                         && symbol.container.as_deref().is_some_and(|class| {
                             match symbol.name.strip_prefix(class) {
-                                Some("") => written_at("new") || written_at("factory"),
+                                Some("") => {
+                                    written_at("new") || written_at("factory") || written_at("(")
+                                }
                                 Some(own) => own.strip_prefix('.').is_some_and(written_at),
                                 None => false,
                             }
@@ -7772,6 +7797,30 @@ region     = "us-central1"
                     "{:?} anchors {} off its name: {}:{} is {line:?}",
                     fixture.language, symbol.name, symbol.location.line, symbol.location.column
                 );
+            }
+        }
+    }
+
+    /// A name position is the key of a declaration wherever one is looked up
+    /// by position: the index keeps one row per position, and a server's
+    /// symbol takes the extent of the declaration read at its name. Two
+    /// declarations placed at one position leave one of them unanswered.
+    #[test]
+    fn no_two_declarations_a_fixture_writes_share_a_name_position() {
+        let extractor = SymbolExtractor::new();
+        for fixture in DECLARATION_FIXTURES {
+            let mut placed = HashMap::new();
+            for symbol in
+                extractor.extract(Path::new(fixture.path), fixture.source, fixture.language)
+            {
+                let at = (symbol.location.line, symbol.location.column);
+                let path = symbol.name_path.unwrap_or(symbol.name);
+                if let Some(first) = placed.insert(at, path.clone()) {
+                    panic!(
+                        "{:?} places {first} and {path} both at {}:{}",
+                        fixture.language, at.0, at.1
+                    );
+                }
             }
         }
     }
@@ -10229,6 +10278,64 @@ region     = "us-central1"
         assert_eq!(extent(&symbols[2].children[0]), ((12, 5), (12, 11)));
         assert_eq!(extent(&symbols[3]), ((8, 5), (8, 13)));
         assert_eq!(extent(&symbols[4]), ((15, 1), (17, 2)));
+    }
+
+    /// A symbol a server nests in another is a declaration of its own. The
+    /// analyzer places a Dart class's unnamed primary constructor at the
+    /// class's name, as it answers here, and leaves the class's annotation
+    /// out of the class's range: the class takes the extent the grammar reads
+    /// at its name, and the constructor keeps its own.
+    #[test]
+    fn a_nested_server_symbol_never_takes_the_extent_its_holder_was_joined_to() {
+        let content = "@Deprecated('x')\nclass P(final int x) {\n  int get twice => x * 2;\n}\n";
+        let path = Path::new("a.dart");
+        let served = |name: &str,
+                      kind: SymbolKind,
+                      (line, column): (u32, u32),
+                      start: (u32, u32),
+                      end: (u32, u32)| {
+            Symbol::new(
+                name.to_string(),
+                kind,
+                Location::full(
+                    path.to_path_buf(),
+                    line,
+                    column,
+                    start.0,
+                    start.1,
+                    end.0,
+                    end.1,
+                )
+                .with_name_end(line, column + name.len() as u32),
+            )
+        };
+        let mut symbols = vec![
+            served("P", SymbolKind::Class, (2, 7), (2, 1), (4, 2)).with_children(vec![
+                served("P", SymbolKind::Constructor, (2, 7), (2, 7), (2, 21)),
+                served("x", SymbolKind::Field, (2, 19), (2, 9), (2, 20)),
+                served("twice", SymbolKind::Property, (3, 11), (3, 3), (3, 26)),
+            ]),
+        ];
+        SymbolExtractor::new().complete_from_declarations(
+            &mut symbols,
+            path,
+            content,
+            Language::Dart,
+        );
+        let extent = |symbol: &Symbol| {
+            let location = &symbol.location;
+            (
+                location.effective_start(),
+                (location.end_line.unwrap(), location.end_column.unwrap()),
+            )
+        };
+        assert_eq!(extent(&symbols[0]), ((1, 1), (4, 2)));
+        assert_eq!(extent(&symbols[0].children[0]), ((2, 7), (2, 21)));
+        assert_eq!(
+            symbols[0].children[0].signature.as_deref(),
+            Some("P(final int x)")
+        );
+        assert_eq!(extent(&symbols[0].children[1]), ((2, 9), (2, 20)));
     }
 
     /// A signature is read where its declaration is written: a method read

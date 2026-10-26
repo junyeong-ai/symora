@@ -2977,6 +2977,54 @@ mod tests {
         assert!(py.rows[0].file.ends_with("mod.py"));
     }
 
+    /// The index keeps one row per name position, so a declaration the
+    /// extractor placed at another's would be missing from every answer the
+    /// index gives alone. A Dart class's, an enum's and an extension type's
+    /// unnamed primary constructor is named for its type, and each is a row
+    /// of its own.
+    #[tokio::test]
+    async fn every_declaration_the_extractor_reads_is_a_row_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let source = "class P(final int x) {}\n\nenum E(final int v) {\n  a(1);\n}\n\n\
+                      extension type X(int v) {}\n";
+        let path = root.join("p.dart");
+        tokio::fs::write(&path, source).await.unwrap();
+        let store = Store::open(root, StoreConfig::default()).await.unwrap();
+        store.index(IndexOptions::default()).await.unwrap();
+
+        let read = SymbolExtractor::new().extract(&path, source, Language::Dart);
+        for (name_path, kind) in [
+            ("P/P", SymbolKind::Constructor),
+            ("E/E", SymbolKind::Constructor),
+            ("X/X", SymbolKind::Constructor),
+        ] {
+            assert!(
+                read.iter()
+                    .any(|symbol| symbol.name_path.as_deref() == Some(name_path)
+                        && symbol.kind == kind),
+                "{name_path} is read"
+            );
+        }
+        for symbol in &read {
+            let name_path = symbol.name_path.as_deref().unwrap();
+            let page = store
+                .search_symbols(name_path, 50, None, None, &[])
+                .await
+                .unwrap();
+            assert!(
+                page.rows.iter().any(|row| {
+                    row.name_path.as_deref() == Some(name_path)
+                        && row.kind == symbol.kind
+                        && (row.line, row.column) == (symbol.location.line, symbol.location.column)
+                }),
+                "no row answers {name_path} ({}): {:?}",
+                symbol.kind,
+                page.rows
+            );
+        }
+    }
+
     /// A hole bounds a confined answer only where it could hold rows inside
     /// the paths: under one of them, or above one.
     #[test]
