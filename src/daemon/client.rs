@@ -211,6 +211,8 @@ impl DaemonClient {
         let exe = std::env::current_exe()
             .map_err(|e| LspError::ServerStart(format!("Failed to get executable path: {}", e)))?;
 
+        // A process group of its own keeps what a terminal signals the job
+        // that started it, Ctrl-C or a hangup, off a daemon that outlives it.
         let child = Command::new(&exe)
             .current_dir(&self.project_root)
             .arg("daemon")
@@ -218,6 +220,7 @@ impl DaemonClient {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .process_group(0)
             .spawn()
             .map_err(|e| LspError::ServerStart(format!("Failed to spawn daemon: {}", e)))?;
 
