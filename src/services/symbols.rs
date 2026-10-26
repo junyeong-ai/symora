@@ -8068,6 +8068,20 @@ region     = "us-central1"
                 &["#ifndef Q_QDOC", "#  if defined(B)", "#  endif", "#endif"][..],
             ),
             (
+                "template <typename T>\nclass QList\n#ifndef Q_QDOC\n    : public Base<T>\n#else\n    \
+                 : public Other<T>\n#  ifdef B\n    , public Third<T>\n#  endif\n#endif\n{\n    \
+                 int a;\n};\n",
+                &[
+                    "#ifndef Q_QDOC",
+                    "#else",
+                    ": public Other<T>",
+                    "#  ifdef B",
+                    ", public Third<T>",
+                    "#  endif",
+                    "#endif",
+                ][..],
+            ),
+            (
                 "class QList\n#ifndef Q_QDOC\n    : public Base\n{\n#endif\n    int a;\n};\n",
                 &[][..],
             ),
