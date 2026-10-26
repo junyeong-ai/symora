@@ -9413,6 +9413,11 @@ region     = "us-central1"
                  int WIN_CDECL\ng(void* ctx, const void* lp) {\n    return 0;\n}\n",
                 "int WIN_CDECL\ng(void* ctx, const void* lp) {\n    return 0;\n}",
             ),
+            (
+                "extern NCURSES_EXPORT(int) doupdate (void);static int WIN_CDECL \
+                 g(void* ctx, const void* lp) {\n    return 0;\n}\n",
+                "static int WIN_CDECL g(void* ctx, const void* lp) {\n    return 0;\n}",
+            ),
         ] {
             let read = spans(&format!("{prototypes}{rest}int after(int x);\n"));
             for (name, written) in own.into_iter().chain([("g", g)]) {
