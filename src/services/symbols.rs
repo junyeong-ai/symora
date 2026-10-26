@@ -2841,13 +2841,19 @@ fn read_signature(
     let first = name + content.get(name..)?.chars().next()?.len_utf8();
     let named = root.named_descendant_for_byte_range(name, first)?;
     // A Dart primary constructor is written in its class's header, from the
-    // name the class gives it to the parameters its range ends with, and
-    // holds no body there, so it signs with its whole range, though the name
-    // it is placed at may be its class's ([`find_name_node`]).
+    // name the class gives it to the parameters its range ends with (an
+    // extension type's representation), and holds no body there, so it signs
+    // with its whole range, though the name it is placed at may be its
+    // class's ([`find_name_node`]).
     if language == Language::Dart
-        && let Some(class) = std::iter::successors(Some(named), Node::parent)
-            .find(|node| matches!(node.kind(), "class_declaration" | "enum_declaration"))
+        && let Some(class) = std::iter::successors(Some(named), Node::parent).find(|node| {
+            matches!(
+                node.kind(),
+                "class_declaration" | "enum_declaration" | "extension_type_declaration"
+            )
+        })
         && child_of_kind(class, "primary_constructor")
+            .or_else(|| class.child_by_field_name("representation"))
             .is_some_and(|constructor| constructor.end_byte() == end)
     {
         if errs_within(class, start, end) {
@@ -4125,7 +4131,8 @@ fn shell_sets_beyond_its_name(part: Node, statement: Node) -> bool {
 /// class member's decorators, a Rust item's outer attributes and doc comments
 /// (`///` is `#[doc]`), a Dart named parameter's annotations and `required`,
 /// the name, type parameters and `const` a Dart class writes before its
-/// primary constructor (`class const P<T>.named(T x)`) — or the `var` a loop
+/// primary constructor (`class const P<T>.named(T x)`), the `const` before an
+/// extension type's (`extension type const E._(int v)`) — or the `var` a loop
 /// binds it with (`for (var k in o)`, see [`for_in_binding`]). A comment
 /// between those lines is inside the declaration; one above them is not. The
 /// rest of a C or C++ declaration that
@@ -4153,7 +4160,7 @@ fn declaration_start<'t>(node: Node<'t>, content: &str, language: Language) -> N
             }
             (Language::Dart, "annotation" | "required") => node.kind() == "formal_parameter",
             (Language::Dart, "identifier" | "type_parameters" | "const") => {
-                node.kind() == "primary_constructor"
+                matches!(node.kind(), "primary_constructor" | "extension_type_name")
             }
             _ => false,
         };
@@ -4228,8 +4235,10 @@ fn errs_before(node: Node, limit: usize) -> bool {
 /// Where a declaration's text ends: its node ([`declaration_node`]), or the
 /// token right after it that ends it — a C++ type's `;`, a TypeScript or
 /// JavaScript member's `;` or `,`, a Rust field's or variant's `,`, the `;`
-/// after a prototype an error holds ([`error_held_prototype`]) — or the
-/// default value a Dart parameter's list writes after it (`{int x = 0}`).
+/// after a prototype an error holds ([`error_held_prototype`]), the
+/// representation that holds a Dart extension type's constructor's
+/// parameters after its name — or the default value a Dart parameter's list
+/// writes after it (`{int x = 0}`).
 fn declaration_end(node: Node, language: Language) -> Node {
     if language == Language::Cpp
         && let Some((_, end)) = error_held_prototype(node)
@@ -4258,6 +4267,7 @@ fn declaration_end(node: Node, language: Language) -> Node {
             })
         }
         (Language::Rust, ",") => true,
+        (Language::Dart, "extension_type_representation") => node.kind() == "extension_type_name",
         _ => false,
     };
     if ends { next } else { node }
@@ -4609,16 +4619,16 @@ fn extract_name_and_kind(
 
 /// The name a Dart constructor declares where it does not write its class's
 /// name before its own. A constructor is named for its class: `new id()`,
-/// `factory id()` and the primary constructor of `class C.id(int x)` declare
-/// `C.id`, and `new()`, `factory()` and that of `class C(int x)` declare `C`,
-/// as the analyzer names them, so `new C()` in class `C` declares `C.C`. A
-/// factory written `factory C()` is the language's one exception: it keeps
-/// the name `C` it had before the short forms. A constructor that writes its
-/// class's name first (`C.id()`, `factory C.id()`) is read as written. Of the
-/// generative constructors, only one written with `new` leaves the class's
-/// name out, as the grammar also reads a method written without a return
-/// type (`run() {}`) as a generative constructor
-/// ([`dart_method_without_a_return_type`]).
+/// `factory id()` and a primary constructor written `class C.id(int x)` or
+/// `extension type C.id(int x)` declare `C.id`, and `new()`, `factory()` and
+/// one written `class C(int x)` declare `C`, as the analyzer names them, so
+/// `new C()` in class `C` declares `C.C`. A factory written `factory C()` is
+/// the language's one exception: it keeps the name `C` it had before the
+/// short forms. A constructor that writes its class's name first (`C.id()`,
+/// `factory C.id()`) is read as written. Of the generative constructors, only
+/// one written with `new` leaves the class's name out, as the grammar also
+/// reads a method written without a return type (`run() {}`) as a generative
+/// constructor ([`dart_method_without_a_return_type`]).
 fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
     let factory = match node.kind() {
         "constructor_signature" | "constant_constructor_signature"
@@ -4626,12 +4636,16 @@ fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
         {
             false
         }
-        "primary_constructor" => false,
+        "primary_constructor" | "extension_type_name" => false,
         "factory_constructor_signature" | "redirecting_factory_constructor_signature" => true,
         _ => return None,
     };
     let class = dart_class_name(node, content)?;
-    match children_of_field(node, "name")[..] {
+    let own = match node.kind() {
+        "extension_type_name" => dart_extension_type_constructor(node).into_iter().collect(),
+        _ => children_of_field(node, "name"),
+    };
+    match own[..] {
         [] => Some(class.to_string()),
         [own] => {
             let own = content.get(own.byte_range())?;
@@ -4667,6 +4681,13 @@ fn dart_class_name<'c>(node: Node, content: &'c str) -> Option<&'c str> {
         )
     })?;
     content.get(find_name_node(class, Language::Dart)?.byte_range())
+}
+
+/// The name a Dart extension type's name gives the constructor its
+/// representation declares, after the type's name and type parameters and
+/// a `.` (`E<T>._`, `E.new`), which the grammar holds under no field.
+fn dart_extension_type_constructor(name: Node) -> Option<Node> {
+    child_of_kind(name, ".")?.next_sibling()
 }
 
 /// The node a declared name ends with: its own, the name a Dart named
@@ -4935,11 +4956,16 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
     }
     // A Dart primary constructor, written in its class's header, is placed
     // at the name it writes after the class's (`class C.named(int x)`), or
-    // at the class's where it writes none.
+    // at the class's where it writes none. An extension type's is placed the
+    // same way in the type's name (`extension type E._(int v)`), where the
+    // analyzer resolves a call to it.
     if language == Language::Dart && node.kind() == "primary_constructor" {
         return node
             .child_by_field_name("name")
             .or_else(|| node.parent()?.child_by_field_name("name"));
+    }
+    if language == Language::Dart && node.kind() == "extension_type_name" {
+        return dart_extension_type_constructor(node).or_else(|| child_of_kind(node, "identifier"));
     }
     // The initializers and body a Dart primary constructor declares in its
     // class's body (`this : assert(x > 0) { … }`) are named by their `this`,
@@ -5119,6 +5145,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "redirecting_factory_constructor_signature"
         | "primary_constructor"
         | "primary_constructor_body_signature"
+        | "extension_type_name"
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
 
@@ -5990,8 +6017,12 @@ const SCALA_QUERY: &str = r#"
 // wraps it, and a method's signature nests the same node. A parameter of a
 // class's or an enum's primary constructor declares a field where `final` or
 // `var` marks it, and every parameter of an extension type's representation
-// does. What a primary constructor declares in its class's body (`this : …`)
-// is a constructor of its own, as the analyzer reads it.
+// does. An extension type's header is its primary constructor, which its
+// name and representation write (`extension type E._(int v)` declares
+// `E._`); the analyzer leaves it out of its outline, as it does an enum's,
+// but resolves a call to it there. What a primary constructor declares in
+// its class's body (`this : …`) is a constructor of its own, as the analyzer
+// reads it.
 const DART_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_declaration) @symbol
@@ -5999,6 +6030,7 @@ const DART_QUERY: &str = r#"
 (mixin_declaration) @symbol
 (extension_declaration) @symbol
 (extension_type_declaration) @symbol
+(extension_type_name) @symbol
 (extension_type_representation) @symbol
 (extension_type_representation (optional_formal_parameters (formal_parameter) @symbol))
 (primary_constructor) @symbol
@@ -7561,12 +7593,16 @@ external final int topExternal, otherExternal;
                 "field:Ext/limit",
                 "method:Ext/ext",
                 "class:Meters",
+                "constructor:Meters/Meters",
                 "field:Meters/value",
                 "class:Id",
+                "constructor:Id/Id._",
                 "field:Id/raw",
                 "class:Opt",
+                "constructor:Opt/Opt",
                 "field:Opt/raw",
                 "class:Rep",
+                "constructor:Rep/Rep",
                 "field:Rep/_",
                 "function:top",
                 "function:top/helper",
@@ -7916,11 +7952,13 @@ region     = "us-central1"
     /// from the name the class gives it, with the class's type parameters and
     /// the `const` before them, to its parameters, and a field one of them
     /// declares spans from the annotations and `required` a named one is
-    /// written with to its default value, as the analyzer reads them.
+    /// written with to its default value, as the analyzer reads them. An
+    /// extension type's spans the same, to the end of its representation.
     #[test]
     fn a_dart_primary_constructor_spans_what_its_class_header_writes_for_it() {
         let content = "@immutable\nclass const Pair<T>.named(\n  final T first, {\n  \
-                       @Deprecated('x') required final T second,\n  final int rank = 0,\n});\n";
+                       @Deprecated('x') required final T second,\n  final int rank = 0,\n});\n\n\
+                       extension type const Id._(int raw) implements int {}\n";
         let symbols = SymbolExtractor::new().extract(Path::new("a.dart"), content, Language::Dart);
         let extent = |path: &str| {
             let location = &symbols
@@ -7937,6 +7975,8 @@ region     = "us-central1"
         assert_eq!(extent("Pair/first"), ((3, 3), (3, 16)));
         assert_eq!(extent("Pair/second"), ((4, 3), (4, 43)));
         assert_eq!(extent("Pair/rank"), ((5, 3), (5, 21)));
+        assert_eq!(extent("Id/Id._"), ((8, 16), (8, 35)));
+        assert_eq!(extent("Id/raw"), ((8, 26), (8, 35)));
     }
 
     #[test]
@@ -10462,6 +10502,20 @@ region     = "us-central1"
             (
                 "a.dart",
                 Language::Dart,
+                "extension type const E<T extends Object>._(T raw) implements Object {}\n",
+                "E._",
+                Some("const E<T extends Object>._(T raw)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "extension type const E<T extends Object>._(T raw) implements Object {}\n",
+                "raw",
+                Some("(T raw)"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
                 "class P(final int x int y) {}\n",
                 "P/P",
                 None,
@@ -11462,7 +11516,8 @@ void topLevel() {}
                        factory from() => F._();\n}\n\n\
                        class R {\n  const R._();\n  factory R() = R._;\n}\n\n\
                        class K.K(int x);\n\n\
-                       extension type E<T>._(T v) {\n  new wrap(this.v);\n}\n";
+                       extension type E<T>._(T v) {\n  new wrap(this.v);\n}\n\n\
+                       extension type W.new(int w) {}\n";
         let mut paths: Vec<String> = SymbolExtractor::new()
             .extract(Path::new("a.dart"), content, Language::Dart)
             .into_iter()
@@ -11472,8 +11527,8 @@ void topLevel() {}
         assert_eq!(
             paths,
             [
-                "C", "C/C", "C/C.C", "C/run", "E", "E/E.wrap", "E/v", "F", "F/F", "F/F.F", "F/F._",
-                "F/F.from", "K", "K/K.K", "R", "R/R", "R/R._"
+                "C", "C/C", "C/C.C", "C/run", "E", "E/E._", "E/E.wrap", "E/v", "F", "F/F", "F/F.F",
+                "F/F._", "F/F.from", "K", "K/K.K", "R", "R/R", "R/R._", "W", "W/W.new", "W/w"
             ]
         );
     }
@@ -11519,6 +11574,7 @@ void topLevel() {}
             ("typed", SymbolKind::Function),
             ("untyped", SymbolKind::Function),
             ("E", SymbolKind::Class),
+            ("E/E", SymbolKind::Constructor),
             ("E/v", SymbolKind::Field),
             ("E/E.other", SymbolKind::Constructor),
             ("E/wrapped", SymbolKind::Method),
