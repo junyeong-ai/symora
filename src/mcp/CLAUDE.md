@@ -36,7 +36,7 @@ Handlers run the underlying command against a `BufferedSink` and return whatever
 
 ## Lifecycle commands are CLI-only
 
-`setup`, `setup skill`, `setup deps`, `setup mcp`, `self update`, `self uninstall` are deliberately not exposed as MCP tools. They mutate the user's machine outside the project boundary — installing skills under `~/.claude`, writing MCP entries into agent-host configs, running package managers, replacing the running binary, removing config — and an AI agent should never drive those flows. Keep them out of the catalog.
+`setup` (with `setup skill`, `setup deps` and `setup mcp`), `self update`, `self uninstall`, `config` and `daemon` are deliberately not exposed as MCP tools, and `doctor` reaches MCP only as the read-only `check_language_support`. They act outside the project's source and index — installing skills under `~/.claude`, writing MCP entries into agent-host configs, running package managers, replacing the running binary, writing or removing config, stopping a daemon other projects use — and an AI agent should never drive those flows. Keep them out of the catalog.
 
 ## Transport ownership
 
