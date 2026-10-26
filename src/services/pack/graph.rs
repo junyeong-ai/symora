@@ -28,8 +28,8 @@ pub(super) struct ImportGraph {
     /// read as different files under its one configuration, where no
     /// installed or declared version fixes one major.
     pub(super) version_undetermined_imports: BTreeSet<String>,
-    /// The declared `typescript` ranges, fixing no major pack reads, of the
-    /// importers of those specifiers.
+    /// The declared `typescript` ranges pack reads no major from 5 to 7
+    /// from, of the importers of those specifiers.
     pub(super) typescript_ranges: BTreeSet<String>,
     /// The files writing a non-relative specifier whose TypeScript
     /// configuration the `references` above them leave undetermined: the

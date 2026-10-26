@@ -87,8 +87,8 @@ pub struct PackResult {
     /// read as different files under its one configuration, because no
     /// installed `typescript` or declared version range fixes one major.
     pub version_undetermined_imports: Vec<String>,
-    /// The declared `typescript` ranges, fixing no major pack reads, of the
-    /// importers of `version_undetermined_imports`.
+    /// The declared `typescript` ranges pack reads no major from 5 to 7
+    /// from, of the importers of `version_undetermined_imports`.
     pub typescript_ranges: Vec<String>,
     /// The JavaScript and TypeScript files below a configuration whose
     /// `references` name no one project compiling them — several that
