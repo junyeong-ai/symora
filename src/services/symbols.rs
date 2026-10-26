@@ -4608,34 +4608,34 @@ fn extract_name_and_kind(
 }
 
 /// The name a Dart constructor declares where it does not write its class's
-/// name before its own. A constructor is named for its class, so `new
-/// named()`, like `factory named()` in a class not named `named` and the
-/// primary constructor of `class C.named(int x)`, declares what `C.named()`
-/// does, and `new()`, `factory()` and the primary constructor of `class
-/// C(int x)` what `C()` does, as the analyzer names them; one that writes its
-/// class's name (`C.named()`, `factory C()`) is read as written. Only `new`
-/// marks a generative constructor so, as the grammar also reads a method
-/// written without a return type (`run() {}`) as one
+/// name before its own. A constructor is named for its class: `new id()`,
+/// `factory id()` and the primary constructor of `class C.id(int x)` declare
+/// `C.id`, and `new()`, `factory()` and that of `class C(int x)` declare `C`,
+/// as the analyzer names them, so `new C()` in class `C` declares `C.C`. A
+/// factory written `factory C()` is the language's one exception: it keeps
+/// the name `C` it had before the short forms. A constructor that writes its
+/// class's name first (`C.id()`, `factory C.id()`) is read as written. Of the
+/// generative constructors, only one written with `new` leaves the class's
+/// name out, as the grammar also reads a method written without a return
+/// type (`run() {}`) as a generative constructor
 /// ([`dart_method_without_a_return_type`]).
 fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
-    let may_omit_its_class = match node.kind() {
-        "constructor_signature" | "constant_constructor_signature" => {
-            child_of_kind(node, "new").is_some()
+    let factory = match node.kind() {
+        "constructor_signature" | "constant_constructor_signature"
+            if child_of_kind(node, "new").is_some() =>
+        {
+            false
         }
-        "factory_constructor_signature"
-        | "redirecting_factory_constructor_signature"
-        | "primary_constructor" => true,
-        _ => false,
+        "primary_constructor" => false,
+        "factory_constructor_signature" | "redirecting_factory_constructor_signature" => true,
+        _ => return None,
     };
-    if !may_omit_its_class {
-        return None;
-    }
     let class = dart_class_name(node, content)?;
     match children_of_field(node, "name")[..] {
         [] => Some(class.to_string()),
         [own] => {
             let own = content.get(own.byte_range())?;
-            (own != class).then(|| format!("{class}.{own}"))
+            (!factory || own != class).then(|| format!("{class}.{own}"))
         }
         _ => None,
     }
@@ -7377,9 +7377,16 @@ package object pkg {
 mixin M {}
 
 enum E {
-  x(1);
+  x(1),
+  y.other();
   final int weight;
   const E(this.weight);
+  const new other() : weight = 0;
+  factory pick() => x;
+}
+
+enum Level.named(final int rank) {
+  low.named(1);
 }
 
 abstract class A {
@@ -7409,6 +7416,7 @@ class Short {
   const new() : v = 0;
   new named(this.v);
   const new fixed() : v = 1;
+  new Short() : v = 2;
   factory make() => Short.named(2);
   factory alias(int v) = Short.named;
 }
@@ -7479,8 +7487,15 @@ external final int topExternal, otherExternal;
                 "interface:M",
                 "enum:E",
                 "enum_member:E/x",
+                "enum_member:E/y",
                 "field:E/weight",
                 "constructor:E/E",
+                "constructor:E/E.other",
+                "constructor:E/E.pick",
+                "enum:Level",
+                "constructor:Level/Level.named",
+                "field:Level/rank",
+                "enum_member:Level/low",
                 "class:A",
                 "method:A/am",
                 "field:A/af",
@@ -7504,6 +7519,7 @@ external final int topExternal, otherExternal;
                 "constructor:Short/Short",
                 "constructor:Short/Short.named",
                 "constructor:Short/Short.fixed",
+                "constructor:Short/Short.Short",
                 "constructor:Short/Short.make",
                 "constructor:Short/Short.alias",
                 "class:Made",
@@ -11432,14 +11448,20 @@ void topLevel() {}
     }
 
     /// A Dart constructor is named for its class whether or not it writes the
-    /// class's name, and one that writes it is read as written: `factory F()`
-    /// is `F`'s unnamed factory, and a method written without a return type,
-    /// which the grammar reads as a constructor's signature, keeps the name
-    /// it writes, as no `new` marks it.
+    /// class's name, and one that writes it first is read as written. After
+    /// `new` and in a primary constructor's header the class's name is a name
+    /// of its own (`new C()` and `class K.K(…)` declare `C.C` and `K.K`);
+    /// only a factory written `factory F()`, redirecting or not, keeps the
+    /// name `F`, by the language's one exception. A method written without a
+    /// return type, which the grammar reads as a constructor's signature,
+    /// keeps the name it writes, as no `new` marks it.
     #[test]
     fn a_dart_constructor_is_named_for_its_class() {
-        let content = "class C {\n  C();\n  run() {}\n}\n\n\
-                       class F {\n  F._();\n  factory F() => F._();\n  factory from() => F._();\n}\n\n\
+        let content = "class C {\n  C();\n  new C();\n  run() {}\n}\n\n\
+                       class F {\n  F._();\n  factory F() => F._();\n  const new F();\n  \
+                       factory from() => F._();\n}\n\n\
+                       class R {\n  const R._();\n  factory R() = R._;\n}\n\n\
+                       class K.K(int x);\n\n\
                        extension type E<T>._(T v) {\n  new wrap(this.v);\n}\n";
         let mut paths: Vec<String> = SymbolExtractor::new()
             .extract(Path::new("a.dart"), content, Language::Dart)
@@ -11450,7 +11472,8 @@ void topLevel() {}
         assert_eq!(
             paths,
             [
-                "C", "C/C", "C/run", "E", "E/E.wrap", "E/v", "F", "F/F", "F/F._", "F/F.from"
+                "C", "C/C", "C/C.C", "C/run", "E", "E/E.wrap", "E/v", "F", "F/F", "F/F.F", "F/F._",
+                "F/F.from", "K", "K/K.K", "R", "R/R", "R/R._"
             ]
         );
     }
