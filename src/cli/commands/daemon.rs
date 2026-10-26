@@ -46,8 +46,17 @@ pub enum DaemonCommand {
 async fn start_server() -> Result<()> {
     let config = DaemonRuntimeConfig::load()?;
     let server = DaemonServer::new(config);
+    let run = server.run();
+    tokio::pin!(run);
+    let result = tokio::select! {
+        result = &mut run => result,
+        () = crate::infra::signal::stop_requested() => {
+            server.shutdown();
+            run.await
+        }
+    };
 
-    if let Err(e) = server.run().await {
+    if let Err(e) = result {
         tracing::error!("Daemon server error: {}", e);
         return Err(anyhow::anyhow!("Daemon server failed: {}", e));
     }

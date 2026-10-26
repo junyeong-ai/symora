@@ -272,6 +272,10 @@ impl LspService for DefaultLspService {
     /// LIVE server's overlay is synced from disk and saved so
     /// save-driven analysis re-runs. Peek only: an edit never boots a
     /// server just to be noted.
+    async fn shutdown(&self) {
+        DefaultLspService::shutdown(self).await;
+    }
+
     async fn note_files_edited(&self, files: &[std::path::PathBuf]) {
         for file in files {
             self.symbol_cache.invalidate(file).await;

@@ -184,6 +184,10 @@ impl LspService for DeterministicLspService {
         self.inner.server_status(language).await
     }
 
+    async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
+
     async fn note_files_edited(&self, files: &[std::path::PathBuf]) {
         self.inner.note_files_edited(files).await;
     }

@@ -4,6 +4,7 @@ pub mod file_filter;
 pub mod file_lock;
 pub mod lsp;
 pub mod retry;
+pub mod signal;
 
 /// Stable 64-bit content fingerprint (FNV-1a) used to detect file changes.
 /// The algorithm is fixed and portable on purpose: this value is persisted

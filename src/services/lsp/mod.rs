@@ -159,6 +159,13 @@ pub trait LspService: Send + Sync {
     /// ever booting a server just to note an edit. Best-effort: an edit's
     /// success never depends on it.
     async fn note_files_edited(&self, _files: &[std::path::PathBuf]) {}
+
+    /// The process is done with the language layer: each server this
+    /// service started is asked to exit, so it stops what it started in a
+    /// session of its own, as rust-analyzer stops its check on save, which
+    /// stopping its group does not reach. A daemon's servers are the
+    /// daemon's to stop.
+    async fn shutdown(&self) {}
 }
 
 impl From<ServerStatusDetail> for ServerStatus {

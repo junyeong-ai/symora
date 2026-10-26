@@ -3,15 +3,18 @@ use std::process::ExitStatus;
 
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
-/// A language server and every process it starts. On unix the server leads
-/// a session of its own, and so a process group, and stopping or dropping it
-/// stops the group: a server signalled alone leaves what it ran still
-/// running, as rust-analyzer leaves the `cargo check` it started, whether it
-/// was killed or exited when asked. Out of Symora's group and terminal, a
-/// server is reached by no signal sent to either: a signal Symora does not
-/// handle, such as SIGKILL or SIGQUIT, ends Symora alone, and the server
-/// ends as its input closes, leaving what it started; and a process it
-/// starts that opens the terminal finds none.
+/// A language server and the processes it starts in its process group. On
+/// unix the server leads a session of its own, and so a group, and stopping
+/// or dropping it stops the group: a server signalled alone leaves what it
+/// ran still running, as rust-analyzer leaves the `cargo check` it started,
+/// whether it was killed or exited when asked. A process it starts in a
+/// session of its own, as rust-analyzer starts its check on save, only the
+/// server stops, which it does when asked to exit
+/// (`LspService::shutdown`). Out of Symora's group and terminal, a server
+/// is reached by no signal sent to either: a signal Symora does not handle,
+/// such as SIGKILL or SIGQUIT, ends Symora alone, and the server ends as its
+/// input closes, leaving what it started; and a process it starts that
+/// opens the terminal finds none.
 pub(super) struct ServerProcess {
     child: Child,
     /// The group to stop, held only until the server is reaped: past that
