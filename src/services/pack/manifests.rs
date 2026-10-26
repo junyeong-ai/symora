@@ -564,23 +564,29 @@ fn holds_types(directory: &Path, specifier: &str) -> bool {
 /// package's name names beside its directory (`node_modules/x.d.ts`), then
 /// what the package holds (`package_module`). `None` where the package's
 /// `exports`, which the lookup reads, or the `typesVersions` a subpath goes
-/// through decides.
+/// through decides, but that a package with `exports` that is a link to
+/// `looked_up`, a workspace package the caller walked with these
+/// extensions and found nothing in, finds nothing here either.
 fn finds_package(
     modules: &Path,
     specifier: &str,
     extensions: Extensions,
     exports: bool,
     add: bool,
+    looked_up: Option<&Path>,
 ) -> Option<bool> {
     let (package, subpath) = split_package_name(specifier);
     let package = split_components(package);
-    let root = package_json(&project_file(modules, &package).join("package.json"));
+    let directory = project_file(modules, &package);
+    let root = package_json(&directory.join("package.json"));
     if exports
         && root
             .as_ref()
             .is_some_and(|root| root.get("exports").is_some())
     {
-        return None;
+        let linked = looked_up
+            .is_some_and(|looked_up| directory.canonicalize().is_ok_and(|real| real == looked_up));
+        return linked.then_some(false);
     }
     let on_disk = |file: &[String]| project_file(modules, file).is_file().then(Vec::new);
     if add && subpath.is_empty() && module_file(&package, extensions, add, &on_disk).is_some() {
@@ -646,13 +652,15 @@ pub(super) fn package_module(
 /// for JavaScript where its `types` names no file. `add` is whether a name
 /// is given an extension, `exports` whether a package's `exports` is read.
 /// `None` where a `package.json` pack does not follow decides: `exports`
-/// the lookup reads, or `typesVersions`.
+/// the lookup reads, or `typesVersions`. A package that is a link to
+/// `looked_up` finds nothing (`finds_package`).
 pub(super) fn node_modules_in(
     directory: &Path,
     specifier: &str,
     extensions: Extensions,
     exports: bool,
     add: bool,
+    looked_up: Option<&Path>,
 ) -> Option<bool> {
     let modules = directory.join("node_modules");
     if !modules.is_dir() {
@@ -664,12 +672,19 @@ pub(super) fn node_modules_in(
     };
     let mut found: Vec<_> = passes
         .iter()
-        .map(|pass| finds_package(&modules, specifier, *pass, exports, add))
+        .map(|pass| finds_package(&modules, specifier, *pass, exports, add, looked_up))
         .collect();
     if extensions != Extensions::JavaScript {
         let (types, mangled) = (modules.join("@types"), mangle_scope(specifier));
         let declaration = Extensions::Declaration;
-        found.push(finds_package(&types, &mangled, declaration, exports, add));
+        found.push(finds_package(
+            &types,
+            &mangled,
+            declaration,
+            exports,
+            add,
+            None,
+        ));
     }
     either(&found)
 }
