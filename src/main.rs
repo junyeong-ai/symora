@@ -49,8 +49,16 @@ fn main() {
         }
     };
 
-    if let Err(e) = runtime.block_on(async_main()) {
-        refuse(e.into());
+    match runtime.block_on(async_main()) {
+        // Exiting skips destructors, so the runtime goes first: dropping it
+        // stops the language servers this process started.
+        Ok(errored) => {
+            drop(runtime);
+            if errored {
+                std::process::exit(2);
+            }
+        }
+        Err(e) => refuse(e.into()),
     }
 }
 
@@ -119,7 +127,8 @@ fn usage_error(error: &clap::Error) -> symora::cli::OutputError {
     symora::cli::OutputError::invalid(message).with_hint(hint.join(" "))
 }
 
-async fn async_main() -> anyhow::Result<()> {
+/// Run the command; true when it reported a failure.
+async fn async_main() -> anyhow::Result<bool> {
     let mut cli = parse_cli()?;
 
     let output_options = OutputOptions {
@@ -188,10 +197,7 @@ async fn async_main() -> anyhow::Result<()> {
     // -e` caller gets the same failure signal the MCP `isError` flag carries,
     // without scraping stdout. Checked above the daemon/direct split so both
     // modes agree; a shutdown-signal win leaves the flag false and exits 0.
-    if app.errored() {
-        std::process::exit(2);
-    }
-    Ok(())
+    Ok(app.errored())
 }
 
 fn edit_payload(command: &mut Commands) -> Option<&mut String> {
@@ -228,14 +234,36 @@ async fn shutdown_signal() {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
         let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+        // A hangup `nohup` set to be ignored stays ignored.
+        let mut sighup =
+            (!hangup_ignored()).then(|| signal(SignalKind::hangup()).expect("SIGHUP handler"));
+        let hangup = async {
+            match sighup.as_mut() {
+                Some(sighup) => sighup.recv().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             _ = sigterm.recv() => {},
             _ = sigint.recv() => {},
+            _ = hangup => {},
         }
     }
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await.ok();
+    }
+}
+
+/// Whether this process was started with hangups ignored, as `nohup` starts
+/// it.
+#[cfg(unix)]
+fn hangup_ignored() -> bool {
+    // SAFETY: a null new action only reads the current one into `current`.
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut current) == 0
+            && current.sa_sigaction == libc::SIG_IGN
     }
 }
 

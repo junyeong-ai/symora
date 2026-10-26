@@ -100,13 +100,14 @@ rusqlite = { version = "0.41.0", features = ["bundled"] }
 [target.'cfg(all(not(target_env = "msvc"), not(target_os = "windows")))'.dependencies]
 tikv-jemallocator = "0.7.0"
 
+# Stopping a language server's process group; tests also ask whether a pid
+# still names a process.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
 [dev-dependencies]
 tokio-test = "0.4.6"
 insta = { version = "1.49.0", features = ["json", "redactions"] }
-
-# A test that a stopped server's pid names no process tells ESRCH from EPERM.
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2.191"
 
 [profile.release]
 lto = true
