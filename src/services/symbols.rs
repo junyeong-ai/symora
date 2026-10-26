@@ -1139,12 +1139,11 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
         let words = written_words(node);
         let from = invocations_from(&words);
         macros.extend(words[from..].iter().map(Node::byte_range));
-        if from > 0 || words.is_empty() {
+        if from > 0 {
             continue;
         }
         for statement in run_before(node, |before| {
-            let words = written_words(before);
-            (holds_a_statement(before) && !words.is_empty() && invocations_from(&words) == 0)
+            (holds_a_statement(before) && invocations_from(&written_words(before)) == 0)
                 .then(|| vec![before])
         }) {
             macros.extend(written_words(statement).iter().map(Node::byte_range));
@@ -1441,7 +1440,6 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         let mut outside = Vec::with_capacity(leaves.len());
         for (at, leaf) in leaves.iter().enumerate() {
             if header.is_none()
-                && depth == 0
                 && text(*leaf) == b"template"
                 && leaves.get(at + 1).is_some_and(|next| next.kind() == "<")
             {
@@ -7932,7 +7930,9 @@ region     = "us-central1"
 
     /// An invocation the literal rule takes has literal arguments, `true` and
     /// `false` among them, or none, under a name, which a keyword taking
-    /// arguments is not (`__declspec(8)`).
+    /// arguments is not (`__declspec(8)`). The run it takes before one is of
+    /// statements, as the rule takes them, not a conditional holding one,
+    /// whose invocation stands before the `#endif` rather than a declaration.
     #[test]
     fn a_literal_invocation_is_a_name_with_literal_arguments() {
         let mut parser = tree_sitter::Parser::new();
@@ -7948,6 +7948,10 @@ region     = "us-central1"
             (
                 "_LIBC_SINGLE_BY_DEFAULT()\n\ntypedef long fpos_t;\n",
                 &["_LIBC_SINGLE_BY_DEFAULT", "(", ")"][..],
+            ),
+            (
+                "#ifdef A\nFOO(1)\n#endif\nBAR(2)\nint f(void);\n",
+                &["BAR", "(", "2", ")"][..],
             ),
         ] {
             let tree = parser.parse(content, None).expect("the source parses");
@@ -9273,6 +9277,11 @@ region     = "us-central1"
                     "class:SpanBase",
                     "field:SpanBase/a",
                 ][..],
+            ),
+            (
+                "ABSL_NAMESPACE_BEGIN\nextern template class EXPORT Foo<int>;\nclass EXPORT Bar {\n  \
+                 int a;\n};\nABSL_NAMESPACE_END\n",
+                &["class:Bar", "field:Bar/a"][..],
             ),
         ] {
             let declared: Vec<String> = SymbolExtractor::new()
