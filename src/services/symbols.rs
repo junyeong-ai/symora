@@ -4380,8 +4380,10 @@ fn signature_beside<'t>(body: Node<'t>, declared: &HashSet<usize>) -> Option<Nod
 /// method, a macro the grammar could not expand having taken the type of one
 /// written without (`API virtual T Copy() const = 0`); a C++ declaration
 /// outside a class body
-/// ([`in_class_body`]) states a function or a variable; and one whose class
-/// key a macro set aside declares that type ([`set_aside_class_kind`]).
+/// ([`in_class_body`]) states a function or a variable; one whose class
+/// key a macro set aside declares that type ([`set_aside_class_kind`]); and
+/// a Dart method the grammar read as a constructor
+/// ([`dart_method_without_a_return_type`]) is placed as a function.
 /// What holds a declaration is the nearest enclosing one with a name, as for
 /// its path ([`extract_container_path`]): a Dart member's signature sits in a
 /// nameless declaration of the same member.
@@ -4403,6 +4405,11 @@ fn placed_kind(
                 .map(|(_, kind)| (outer, kind))
         });
     let enclosing = container.map(|(_, kind)| kind);
+    let kind = if language == Language::Dart && dart_method_without_a_return_type(node, content) {
+        SymbolKind::Function
+    } else {
+        kind
+    };
     if language == Language::Cpp
         && let Some(kind) = set_aside_class_kind(node, content).or_else(|| {
             continued_macro(node)
@@ -4608,7 +4615,8 @@ fn extract_name_and_kind(
 /// C(int x)` what `C()` does, as the analyzer names them; one that writes its
 /// class's name (`C.named()`, `factory C()`) is read as written. Only `new`
 /// marks a generative constructor so, as the grammar also reads a method
-/// written without a return type (`run() {}`) as one.
+/// written without a return type (`run() {}`) as one
+/// ([`dart_method_without_a_return_type`]).
 fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
     let may_omit_its_class = match node.kind() {
         "constructor_signature" | "constant_constructor_signature" => {
@@ -4622,13 +4630,7 @@ fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
     if !may_omit_its_class {
         return None;
     }
-    let class = std::iter::successors(node.parent(), Node::parent).find(|holder| {
-        matches!(
-            holder.kind(),
-            "class_declaration" | "enum_declaration" | "extension_type_declaration"
-        )
-    })?;
-    let class = content.get(find_name_node(class, Language::Dart)?.byte_range())?;
+    let class = dart_class_name(node, content)?;
     match children_of_field(node, "name")[..] {
         [] => Some(class.to_string()),
         [own] => {
@@ -4637,6 +4639,34 @@ fn dart_constructor_name(node: Node, content: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Whether what the grammar reads as a Dart generative constructor's
+/// signature is a method's written without a return type (`run() {}`). A
+/// constructor is named for its class (`C()`, `C.named()`), or leaves the
+/// class's name out after `new`; such a method names none, in a class, an
+/// enum or an extension type, or in a mixin or an extension, which declare
+/// no constructor.
+fn dart_method_without_a_return_type(node: Node, content: &str) -> bool {
+    if node.kind() != "constructor_signature" || child_of_kind(node, "new").is_some() {
+        return false;
+    }
+    let written = node
+        .child_by_field_name("name")
+        .and_then(|name| content.get(name.byte_range()));
+    dart_class_name(node, content).is_none_or(|class| Some(class) != written)
+}
+
+/// The name of the Dart class, enum or extension type whose body holds
+/// `node`, which is what its constructors are named for.
+fn dart_class_name<'c>(node: Node, content: &'c str) -> Option<&'c str> {
+    let class = std::iter::successors(node.parent(), Node::parent).find(|holder| {
+        matches!(
+            holder.kind(),
+            "class_declaration" | "enum_declaration" | "extension_type_declaration"
+        )
+    })?;
+    content.get(find_name_node(class, Language::Dart)?.byte_range())
 }
 
 /// The node a declared name ends with: its own, the name a Dart named
@@ -7358,6 +7388,7 @@ class C {
   void cm() {
     void inner() {}
   }
+  untyped() => 0;
   int get size => 1;
   set size(int v) {}
   bool operator ==(Object o) => true;
@@ -7443,6 +7474,7 @@ external final int topExternal, otherExternal;
                 "constructor:C/C.alias",
                 "method:C/cm",
                 "function:cm/inner",
+                "method:C/untyped",
                 "property:C/size",
                 "property:C/size",
                 "method:C/==",
@@ -11391,6 +11423,59 @@ void topLevel() {}
                 "C", "C/C", "C/run", "E", "E/E.wrap", "E/v", "F", "F/F", "F/F._", "F/F.from"
             ]
         );
+    }
+
+    /// The grammar reads a Dart method written without a return type as a
+    /// generative constructor's signature. A constructor is named for its
+    /// class, so one that is not is the method it is, in every type that
+    /// declares members, mixins and extensions included, and is placed as one
+    /// written with a return type is; a getter, a setter and an operator
+    /// written without one are read by signatures of their own.
+    #[test]
+    fn a_dart_method_written_without_a_return_type_is_a_method() {
+        let content = "abstract class C {\n  C();\n  C.named() : this();\n  \
+                       external C.outside();\n  run() {}\n  pending();\n  external bound();\n  \
+                       static helper() {}\n  get size => 1;\n  set size(v) {}\n  \
+                       operator ==(o) => true;\n}\n\n\
+                       mixin M {\n  mixed() {}\n}\n\n\
+                       extension X on int {\n  extended() => this;\n}\n\n\
+                       extension on int {\n  void typed() {}\n  untyped() => this;\n}\n\n\
+                       extension type E(int v) {\n  E.other(this.v);\n  wrapped() => v;\n}\n\n\
+                       enum En {\n  a;\n  const En();\n  listed() => 0;\n}\n";
+        let declared: Vec<(String, SymbolKind)> = SymbolExtractor::new()
+            .extract(Path::new("a.dart"), content, Language::Dart)
+            .into_iter()
+            .map(|symbol| (symbol.name_path.unwrap_or(symbol.name), symbol.kind))
+            .collect();
+        let expected = [
+            ("C", SymbolKind::Class),
+            ("C/C", SymbolKind::Constructor),
+            ("C/C.named", SymbolKind::Constructor),
+            ("C/C.outside", SymbolKind::Constructor),
+            ("C/run", SymbolKind::Method),
+            ("C/pending", SymbolKind::Method),
+            ("C/bound", SymbolKind::Method),
+            ("C/helper", SymbolKind::Method),
+            ("C/size", SymbolKind::Property),
+            ("C/size", SymbolKind::Property),
+            ("C/==", SymbolKind::Method),
+            ("M", SymbolKind::Interface),
+            ("M/mixed", SymbolKind::Method),
+            ("X", SymbolKind::Class),
+            ("X/extended", SymbolKind::Method),
+            ("typed", SymbolKind::Function),
+            ("untyped", SymbolKind::Function),
+            ("E", SymbolKind::Class),
+            ("E/v", SymbolKind::Field),
+            ("E/E.other", SymbolKind::Constructor),
+            ("E/wrapped", SymbolKind::Method),
+            ("En", SymbolKind::Enum),
+            ("En/a", SymbolKind::EnumMember),
+            ("En/En", SymbolKind::Constructor),
+            ("En/listed", SymbolKind::Method),
+        ]
+        .map(|(path, kind)| (path.to_string(), kind));
+        assert_eq!(declared, expected);
     }
 
     /// A Swift function's return type carries the field its name does, and is
