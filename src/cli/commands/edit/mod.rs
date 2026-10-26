@@ -42,7 +42,7 @@ pub struct EditArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum EditCommand {
-    /// Replace a symbol's ENTIRE definition — the whole lines `symbols
+    /// Replace a symbol's entire definition — the whole lines `symbols
     /// --body` returns, from the decorator, attribute or doc-comment lines it
     /// opens with through its closing brace — pass the complete definition,
     /// not just the inner code. For a raw character range use `replace`.
