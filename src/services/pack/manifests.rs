@@ -561,9 +561,12 @@ fn holds_types(directory: &Path, specifier: &str) -> bool {
 /// on disk finds a file with a set of extensions, as tsc 5.9.3, 6.0.3 and
 /// 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`): the
 /// file the specifier's path names, but for a package's name under an ES
-/// import, then the directory (`directory_module`). `None` where the
-/// package's `exports`, which the lookup reads, or the `typesVersions` a
-/// subpath goes through decides.
+/// import, then the directory (`directory_module`). An ES import reads a
+/// directory's `index` only for a package's name whose `package.json`
+/// exists, which sets no `exports` there: tsc's `index.js` fallback
+/// (`p1c_*`, `q1b_*` without one, `q1e_*` for a subpath). `None` where
+/// the package's `exports`, which the lookup reads, or the `typesVersions`
+/// a subpath goes through decides.
 fn finds_package(
     modules: &Path,
     specifier: &str,
@@ -587,7 +590,8 @@ fn finds_package(
         true => root,
         false => package_json(&modules.join(specifier).join("package.json")),
     };
-    match directory_module(&candidate, manifest.as_ref(), extensions, add, &on_disk) {
+    let index = add || (subpath.is_empty() && modules.join(package).join("package.json").is_file());
+    match directory_module(&candidate, manifest.as_ref(), extensions, index, &on_disk) {
         Some(Hit::Files(_)) => Some(true),
         Some(Hit::Open) => None,
         None => Some(false),
