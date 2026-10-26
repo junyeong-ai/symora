@@ -68,8 +68,9 @@ pub(super) enum TypeScript {
     /// The major installed or declared, one below 5 read as 5 (`of_major`).
     Major(u8),
     /// Installed or declared at no major whose defaults pack reads
-    /// (`MAJORS`) — a version above them, a range fixing none — so any of
-    /// them; the declared range where one is written.
+    /// (`MAJORS`) — a version above them, a range pack reads none of them
+    /// from (`typescript_major`) — so any of them; the declared range where
+    /// one is written.
     Unknown(Option<String>),
 }
 
@@ -1749,23 +1750,25 @@ fn declared_typescript(root: &Path, directory: &[String]) -> Option<String> {
     })
 }
 
-/// The major a version range fixes, its lower bound's where every version
-/// it takes shares that major, as npm's semver reads its comparators: a
-/// caret, tilde or exact version, an x-range (`^5.9.0`, `~6.0`, `6.x`,
-/// `5`), or a set of comparators bounded within one major (`>=5.0.0
+/// The major pack reads from a version range: that of a caret, tilde or
+/// exact version, an x-range (`^5.9.0`, `~6.0`, `6.x`, `5`), or a set of
+/// comparators whose written bounds lie within one major (`>=5.0.0
 /// <6.0.0`), each of the alternatives `||` joins agreeing. `None` for any
 /// other range — an open one (`>=5`, `*`), one spanning majors (`>=5 <7`),
-/// a tag (`latest`).
+/// a tag (`latest`) — and for two forms that fix a major as npm's semver
+/// reads them, which pack does not: a `>` bound on a bare major (`>5 <7`
+/// takes only 6.x) and a hyphen range (`5.0.0 - 5.9.9`).
 fn typescript_major(range: &str) -> Option<u64> {
     let mut majors = range.split("||").map(alternative_major);
     let first = majors.next()??;
     majors.all(|major| major == Some(first)).then_some(first)
 }
 
-/// The major one alternative of a range fixes (`typescript_major`): the
-/// greatest major its comparators' lower bounds allow, where it is the
-/// least their upper bounds allow. An operator may stand apart from its
-/// version (`>= 5.0.0`).
+/// The major pack reads from one alternative of a range
+/// (`typescript_major`): the greatest major its comparators' lower bounds
+/// name, a `>` bound read as admitting its own, where it is the least their
+/// upper bounds allow. An operator may stand apart from its version (`>=
+/// 5.0.0`).
 fn alternative_major(alternative: &str) -> Option<u64> {
     let operator = |c: char| matches!(c, '<' | '>' | '=' | '^' | '~');
     let mut lowest: Option<u64> = None;
@@ -2867,8 +2870,11 @@ mod tests {
         );
     }
 
-    /// A declared `typescript` range gives a major only where every version
-    /// it takes shares one, its lower bound's, every alternative agreeing.
+    /// A declared `typescript` range gives a major only where its form is
+    /// one pack reads and every version it takes shares one, its lower
+    /// bound's, every alternative agreeing; a `>` bound on a bare major and a
+    /// hyphen range, which npm reads as 6.x and 5.x, give none rather than
+    /// another.
     #[test]
     fn a_typescript_range_fixes_a_major_only_by_its_lower_bound() {
         for (range, major) in [
@@ -2888,6 +2894,8 @@ mod tests {
             (">=5.9 <6.1", None),
             (">=5 <7", None),
             ("<6", None),
+            (">5 <7", None),
+            ("5.0.0 - 5.9.9", None),
             ("*", None),
             ("latest", None),
             ("workspace:*", None),

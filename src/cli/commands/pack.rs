@@ -185,7 +185,7 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             format!(" (declared: {})", name_some(&ranges))
         };
         hints.push(format!(
-            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}), no `typescript` installed or declared fixing a major from 5 to 7{ranges}; their dependencies do not contribute to ranking. Install `typescript`, or declare a range fixing its major in the nearest `package.json`, to settle them.",
+            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}): pack reads no major from 5 to 7 from the `typescript` installed or declared{ranges}; their dependencies do not contribute to ranking. Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -443,7 +443,7 @@ mod tests {
             json["files"]["hints"][2]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`), no `typescript` installed or declared fixing a major from 5 to 7 (declared: `>=5`); ")
+                .contains("1 import specifier(s) name different files under the TypeScript majors that may compile their importers (`p6`): pack reads no major from 5 to 7 from the `typescript` installed or declared (declared: `>=5`); their dependencies do not contribute to ranking. Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.")
         );
         assert!(
             json["files"]["hints"][3]
