@@ -3117,13 +3117,18 @@ struct Value {
 /// one. A parameter's default (Swift lists it beside its parameter, and an
 /// enum case's associated value beside its type), a destructuring pattern's
 /// default (`const { c = 1 } = obj`) or a Scala named pattern's binding
-/// (`val Person(name = n) = p`), what an alias names and a C++
-/// concept's constraint, which is what the concept is, are no declarator's
-/// value, nor is what follows the `=` ending C++'s `operator=`.
+/// (`val Person(name = n) = p`), what an alias names, the superclass and
+/// mixins a Dart mixin application declares its class with (`class C = B
+/// with M;`) and a C++ concept's constraint, which is what the concept is,
+/// are no declarator's value, nor is what follows the `=` ending C++'s
+/// `operator=`.
 fn given_value(node: Node) -> Option<Value> {
     let parent = node.parent()?;
     if ALIASES.contains(&parent.kind())
-        || parent.kind() == "concept_definition"
+        || matches!(
+            parent.kind(),
+            "concept_definition" | "mixin_application_class"
+        )
         || is_pattern_part(parent)
     {
         return None;
@@ -4945,6 +4950,14 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             "extension_type_name" => child_of_kind(name, "identifier"),
             _ => Some(name),
         };
+    }
+    // A Dart class declared by a mixin application (`class C = B with M;`)
+    // writes its name in the application, under no field.
+    if language == Language::Dart
+        && node.kind() == "class_declaration"
+        && let Some(application) = child_of_kind(node, "mixin_application_class")
+    {
+        return child_of_kind(application, "identifier");
     }
 
     let name_field = match language {
@@ -7364,6 +7377,11 @@ class Made {
   factory() => Made._();
 }
 
+class Mixed = Object with M;
+
+@Deprecated('x')
+abstract base class Based<T> = Object with M implements A;
+
 class Point(final int x, var int y, int scale) {
   this : assert(scale > 0) {
     void check() {}
@@ -7438,6 +7456,8 @@ external final int topExternal, otherExternal;
                 "class:Made",
                 "constructor:Made/Made._",
                 "constructor:Made/Made",
+                "class:Mixed",
+                "class:Based",
                 "class:Point",
                 "constructor:Point/Point",
                 "field:Point/x",
@@ -10346,6 +10366,13 @@ region     = "us-central1"
                 "class P(final int x) extends B {}\n",
                 "P",
                 Some("class P(final int x) extends B"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "abstract base class M<T> = B with N implements I;\n",
+                "M",
+                Some("abstract base class M<T> = B with N implements I"),
             ),
             (
                 "a.dart",
