@@ -521,12 +521,18 @@ impl SymbolExtractor {
     /// `content` read by this language's grammar, or `None` where it has no
     /// grammar here or the parse failed. C and C++ are read again past the
     /// macros a class definition holds where the grammar took it for a function
-    /// ([`misread_class_macros`]), those a class body writes alone before its
-    /// closing brace ([`brace_swallowing_macros`]), those written after a
-    /// function declarator ([`trailing_declarator_macros`]), those a
-    /// prototype wraps its parameters in ([`prototype_macros`]) and those
-    /// written before a member's qualified type ([`qualified_type_macros`]),
-    /// each spelled as blanks, so every offset still addresses `content`.
+    /// ([`misread_class_macros`]), those a class body writes as a member that
+    /// ends with neither `;` nor a body before the body's closing brace, which
+    /// the grammar took into it ([`brace_swallowing_macros`]), those written
+    /// after a function declarator ([`trailing_declarator_macros`]), those a
+    /// prototype wraps its parameters in ([`prototype_macros`]), those written
+    /// before a member's qualified type ([`qualified_type_macros`]), those a
+    /// member writes before an access specifier ([`access_specifier_macros`]),
+    /// those written as members the grammar ended with a `;` it supplied
+    /// ([`unended_member_macros`]) and those invoked with literal arguments
+    /// before a declaration ([`literal_argument_macros`]), each spelled as
+    /// blanks, so every offset still addresses `content`, until no rule takes
+    /// one.
     /// The grammar's recovery from an error is not local, so a blank can
     /// change how it reads declarations far from it, for better or worse,
     /// however well proved, and what a file reads depends on the blanks taken
@@ -919,10 +925,12 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// function with no type of its own (`QString Q_DECL_X(1)` before `f(int
 /// x);`), a member alone in a conditional's branch (`#ifndef
 /// QT_NO_QOBJECT Q_OBJECT #endif`), since a declaration may go on past a
-/// directive, and the members before a conditional holding a member of
-/// another shape, which ends the run (`Q_DECLARE_PRIVATE(B)` before `#ifdef
-/// X int x; #endif`). Every such member ends on a supplied `;`, so a subtree
-/// the grammar read without an error holds none.
+/// directive, unless an access specifier ends the member it runs into
+/// ([`access_specifier_macros`]), and the members before a conditional
+/// holding a member of another shape, which ends the run
+/// (`Q_DECLARE_PRIVATE(B)` before `#ifdef X int x; #endif`). Every such
+/// member ends on a supplied `;`, so a subtree the grammar read without an
+/// error holds none.
 fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize>> {
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
@@ -1056,20 +1064,23 @@ fn run_before(boundary: Node, of_the_run: impl Fn(Node) -> Option<Vec<Node>>) ->
 /// declaration (`QT_CORE_INLINE_SINCE(6, 8)` before `static void f();`,
 /// `QT_DEPRECATED_VERSION_X_6_0("…")` before `explicit C() = default;`):
 /// literal arguments name no parameter, so the invocation is no declarator,
-/// nor is a name with arguments a specifier, and a word only a declaration
-/// opens with ([`DECLARATION_OPENERS`]) or a primitive type follows no
-/// declarator, nor an expression, which ends with `;` first. Taken where
-/// the grammar set the invocation aside as an error's last words or read
-/// it as a call ending a statement whose `;` it supplied, the statement's
-/// written words ending with the `)`, and the next node opens with such a
-/// word; either is an error, so a subtree without one holds none. One on a
-/// directive's line is the directive's ([`written_words`]). An empty list
-/// may be a declarator's, which `const` follows, and a keyword taking
-/// arguments is a specifier (`__declspec(…)`). Left as read: such an invocation before a
-/// type's name (`QT_DEPRECATED_X("…") QString f();`), since the grammar
-/// reads GNU `typeof` as a name, and `typeof(1) x;` declares `x`; that one
-/// written before a cv-qualifier or storage class (`typeof(1) const x;`)
-/// would be taken. Not reached: an invocation the grammar read as a member's
+/// nor is a name with arguments a specifier, but for C23's `_BitInt(N)` and
+/// GNU's and C23's `typeof(…)`, which the grammar reads as calls, and a word
+/// only a declaration opens with ([`DECLARATION_OPENERS`]) or a primitive
+/// type follows no declarator, nor an expression, which ends with `;` first.
+/// Taken where the grammar set the invocation aside as an error's last words
+/// or read it as a call ending a statement whose `;` it supplied, the
+/// statement's written words ending with the `)`, and the next node opens
+/// with such a word; either is an error, so a subtree without one holds
+/// none. One on a directive's line is the directive's ([`written_words`]).
+/// An empty list may be a declarator's, which `const` follows, and a keyword
+/// taking arguments is a specifier (`__declspec(…)`). Of the two specifiers,
+/// one written before a cv-qualifier or a storage class in a member list is
+/// taken (`_BitInt(8) const z;`, `typeof(1) static w;`), a member the
+/// grammar reads in neither case. Left as read: such an invocation before a
+/// type's name (`QT_DEPRECATED_X("…") QString f();`), since `typeof(1) x;`
+/// declares `x`, though the grammar holds it in an error. Not reached: an
+/// invocation the grammar read as a member's
 /// type, with its arguments for the declarator and the members after it in
 /// an error there (`Q_REVISION(6, 12) void f(const QCollator &c);` before
 /// another such line, of which only the last reads, signed with both).
