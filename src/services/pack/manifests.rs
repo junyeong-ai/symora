@@ -566,7 +566,7 @@ fn has_extension(name: &str, extension: &str) -> bool {
 pub(super) enum ClassicPass {
     /// TypeScript's own files, then declarations: the first pass.
     TypeScript,
-    /// Declarations alone, as it looks in `@types`.
+    /// Declarations alone, as it looks in `@types` and `typeRoots`.
     Declaration,
     /// JavaScript files: the last pass, `allowJs` set or not.
     JavaScript,
