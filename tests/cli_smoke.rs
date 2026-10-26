@@ -4739,7 +4739,7 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
 
     // By position: where the grammar places a name the server's tree places
     // none, the grammar's declaration answers, unless the server's symbol
-    // there names it too, its name ending alike.
+    // there names it too, the two names sharing a character.
     for (at, path, kind, lines) in [
         ("f.dart:5:7", "E/E", "constructor", (5, 5)),
         ("f.dart:1:22", "X/raw", "field", (1, 1)),
@@ -4763,6 +4763,91 @@ fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
     let answer = json_ok(dir, &["search", "symbols", "X/X", "--signature"]);
     assert_eq!(answer["items"][0]["name_path"], "X/X", "{answer}");
     assert_eq!(answer["items"][0]["signature"], "X(int raw)", "{answer}");
+}
+
+/// A C++ project served by a scripted server that answers as clangd 21 does
+/// for `w.cpp`: a class `Widget`, then out-of-line definitions of its
+/// destructor, `operator==`, `operator bool` and `set`, and a function using
+/// each of them.
+#[cfg(unix)]
+fn clangd_shaped_project() -> Option<tempfile::TempDir> {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("clangd-shaped protocol fixture requires python3");
+        return None;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path();
+    std::fs::write(
+        dir.join("w.cpp"),
+        "struct Widget {\n  ~Widget();\n  bool operator==(const Widget &) const;\n  \
+         explicit operator bool() const;\n  void set(int);\n};\n\n\
+         Widget::~Widget() {}\n\
+         bool Widget::operator==(const Widget &) const { return true; }\n\
+         Widget::operator bool() const { return true; }\n\
+         void Widget::set(int) {}\n\n\
+         bool use(Widget &w) { w.set(1); return w == w && bool(w); }\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"cpp": {
+        "command": "python3",
+        "args": [server, dir.canonicalize().unwrap().join("w.cpp"), "clangd-outline"]
+    }}}});
+    std::fs::write(
+        dir.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    Some(root)
+}
+
+/// The `file:line:col` of each reference an edit's answer lists in `field`.
+#[cfg(unix)]
+fn listed_references(answer: &serde_json::Value, field: &str) -> Vec<String> {
+    answer[field]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no {field} in {answer}"))
+        .iter()
+        .map(|item| {
+            let file = item["file"].as_str().unwrap();
+            format!("{file}:{}:{}", item["line"], item["column"])
+        })
+        .collect()
+}
+
+/// clangd selects an out-of-line destructor at its `~` and an operator or a
+/// conversion operator at its `operator` keyword, where the grammar's name
+/// begins at the qualifier. At the position the index publishes, the
+/// server's own declaration answers an edit, so its references are asked
+/// where clangd reads that declaration and not at the qualifier, which names
+/// the class.
+#[cfg(unix)]
+#[test]
+fn an_edit_at_a_qualified_cpp_definition_is_the_servers_whatever_part_of_its_name_it_selects() {
+    let Some(root) = clangd_shaped_project() else {
+        return;
+    };
+    let dir = root.path();
+    for (at, kind, dangling) in [
+        ("w.cpp:8:1", "constructor", vec!["w.cpp:2:3"]),
+        ("w.cpp:9:6", "method", vec!["w.cpp:3:8", "w.cpp:13:42"]),
+        ("w.cpp:10:1", "function", vec!["w.cpp:4:12", "w.cpp:13:55"]),
+        ("w.cpp:11:6", "method", vec!["w.cpp:5:8", "w.cpp:13:25"]),
+    ] {
+        let edit = json_ok(dir, &["edit", "delete", at, "--dry-run"]);
+        assert_eq!(edit["target_kind"], kind, "{at}: {edit}");
+        assert_eq!(
+            listed_references(&edit, "dangling_references"),
+            dangling,
+            "{at}: {edit}"
+        );
+    }
 }
 
 /// A Go project served by the scripted rename server in `mode`, which never
