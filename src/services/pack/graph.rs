@@ -5858,12 +5858,21 @@ mod tests {
 
     /// A `package.json` field a declaration lookup reads names a TypeScript
     /// file too, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`tm_bundler`): a
-    /// type root's `types` of `lib/t` names `lib/t.ts`.
+    /// type root's `types` of `lib/t` names `lib/t.ts`. One writing `.ts`
+    /// is looked up as its declaration first (`f_field_decl_*`): `tw`'s
+    /// `./index.ts` names `index.d.ts` beside it.
     #[test]
     fn a_declaration_lookup_takes_a_typescript_file_a_field_names() {
         let nodes = vec![
-            node_in(0, "src/main.ts", "import \"tm\";\n", Language::TypeScript),
+            node_in(
+                0,
+                "src/main.ts",
+                "import \"tm\";\nimport \"tw\";\n",
+                Language::TypeScript,
+            ),
             node_in(1, "typings/tm/lib/t.ts", "", Language::TypeScript),
+            node_in(2, "typings/tw/index.ts", "", Language::TypeScript),
+            node_in(3, "typings/tw/index.d.ts", "", Language::TypeScript),
         ];
         let manifests = manifests_of(
             &[
@@ -5877,10 +5886,14 @@ mod tests {
                      \"module\": \"esnext\", \"typeRoots\": [\"./typings\"]}}",
                 ),
                 ("typings/tm/package.json", "{\"types\": \"lib/t\"}"),
+                ("typings/tw/package.json", "{\"types\": \"./index.ts\"}"),
             ],
             &nodes,
         );
-        assert_eq!(edges_under(&nodes, 0, &manifests), ["typings/tm/lib/t.ts"]);
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            ["typings/tm/lib/t.ts", "typings/tw/index.d.ts"]
+        );
     }
 
     /// A declaration a `typeRoots` directory outside the project may hold,
