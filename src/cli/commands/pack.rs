@@ -184,8 +184,24 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
                 .collect();
             format!(" (declared: {})", name_some(&ranges))
         };
+        // A declared range settles nothing where a `typescript` is
+        // installed, since pack reads the installed one first.
+        const DECLARE: &str = "Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.";
+        const REPLACE: &str = "pack reads the installed one before any declared range.";
+        let remedy = match (
+            result.typescript_not_installed,
+            result.typescript_installed_unread,
+        ) {
+            (_, false) => DECLARE.to_string(),
+            (false, true) => format!(
+                "Install a `typescript` of 5, 6 or 7 (`6.0.3`) in place of the one installed above 7 or with no version number to settle them: {REPLACE}"
+            ),
+            (true, true) => format!(
+                "{DECLARE} Where the one installed is above 7 or has no version number, install a 5, 6 or 7 in its place: {REPLACE}"
+            ),
+        };
         hints.push(format!(
-            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}): pack reads no major from 5 to 7 from the `typescript` installed or declared{ranges}; their dependencies do not contribute to ranking. Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.",
+            "{} import specifier(s) name different files under the TypeScript majors that may compile their importers ({}): pack reads no major from 5 to 7 from the `typescript` installed or declared{ranges}; their dependencies do not contribute to ranking. {remedy}",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -344,6 +360,8 @@ mod tests {
             undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
+            typescript_not_installed: false,
+            typescript_installed_unread: false,
             undetermined_ts_projects: Vec::new(),
             unreadable_paths: Vec::new(),
         }
@@ -421,6 +439,7 @@ mod tests {
         result.undetermined_imports = vec!["@/styles/app".to_string()];
         result.version_undetermined_imports = vec!["p6".to_string()];
         result.typescript_ranges = vec![">=5".to_string()];
+        result.typescript_not_installed = true;
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
         assert!(
             render_markdown(&ctx(), &args, &result)
@@ -451,6 +470,28 @@ mod tests {
                 .unwrap()
                 .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")
         );
+    }
+
+    /// A `typescript` installed above 7, or with no version number, is read
+    /// before any declared range, so the version hint advises installing a
+    /// 5, 6 or 7 in its place, alone where every importer has one installed.
+    #[test]
+    fn the_version_hint_advises_replacing_an_installed_typescript_it_reads_no_major_from() {
+        let hint = |not_installed, installed_unread| {
+            let mut result = sample_result();
+            result.version_undetermined_imports = vec!["p6".to_string()];
+            result.typescript_not_installed = not_installed;
+            result.typescript_installed_unread = installed_unread;
+            declaration_coverage_hints(&result).remove(0)
+        };
+        let declare = "Install `typescript`, or declare it as a caret, tilde, exact or x-range version of 5, 6 or 7 (`^6.0.3`) in the nearest `package.json`, to settle them.";
+        assert!(hint(true, false).ends_with(declare));
+        assert!(hint(false, true).ends_with(
+            "their dependencies do not contribute to ranking. Install a `typescript` of 5, 6 or 7 (`6.0.3`) in place of the one installed above 7 or with no version number to settle them: pack reads the installed one before any declared range."
+        ));
+        assert!(hint(true, true).ends_with(&format!(
+            "{declare} Where the one installed is above 7 or has no version number, install a 5, 6 or 7 in its place: pack reads the installed one before any declared range."
+        )));
     }
 
     #[test]
