@@ -776,7 +776,11 @@ fn opened_by_an_error(root: Node, content: &str) -> HashSet<usize> {
 /// arguments (`Q_DECLARE_PRIVATE(Job)`) or one after another (`Q_GADGET
 /// QML_VALUE_TYPE(release)`), and so is the run of members written as macros
 /// are before it ([`run_before`], [`macro_written_members`]), which the
-/// brace ends once it is blanked ([`unended_member_macros`]).
+/// brace ends once it is blanked ([`unended_member_macros`]). C compilers
+/// accept a struct's last member without its `;`, with a warning (`Foo *ptr`
+/// before `};`); that member is taken for macros too, so the struct reads
+/// without it. Nothing tells it apart: uv.h writes `UV_HANDLE_FIELDS
+/// UV_PREPARE_PRIVATE_FIELDS` before `};` as such a member is written.
 fn brace_swallowing_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     let mut macros = Vec::new();
     let mut pending = vec![root];
