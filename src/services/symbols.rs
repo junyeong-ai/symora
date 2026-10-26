@@ -7900,6 +7900,14 @@ region     = "us-central1"
                 "QAnimationGroup)",
             ),
             (
+                "class QStyleHints : public QObject\n{\n    Q_OBJECT\n    Q_DECLARE_PRIVATE(QStyleHints)\n    \
+                 Q_PROPERTY(int cursorFlashTime READ cursorFlashTime NOTIFY cursorFlashTimeChanged FINAL)\n    \
+                 Q_PROPERTY(qreal fontSmoothingGamma READ fontSmoothingGamma STORED false CONSTANT FINAL)\n    \
+                 Q_PROPERTY(int keyboardInputInterval READ keyboardInputInterval\n               \
+                 NOTIFY keyboardInputIntervalChanged FINAL)\npublic:\n    int cursorFlashTime() const;\n};\n",
+                "Q_PROPERTY",
+            ),
+            (
                 "extern NCURSES_EXPORT(char *) tparm (NCURSES_CONST char *, NCURSES_TPARM_ARG,\
                  NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,\
                  NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG,NCURSES_TPARM_ARG);\n\
