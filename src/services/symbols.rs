@@ -4832,6 +4832,16 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
         }
         return Some(left);
     }
+    // A Dart extension type is named by the identifier its name begins with,
+    // before the type parameters and the name of the constructor its
+    // representation declares: `extension type E<T>._(T v)` declares `E`.
+    if language == Language::Dart && node.kind() == "extension_type_declaration" {
+        let name = node.child_by_field_name("name")?;
+        return match name.kind() {
+            "extension_type_name" => child_of_kind(name, "identifier"),
+            _ => Some(name),
+        };
+    }
 
     let name_field = match language {
         Language::Kotlin => node
@@ -7210,6 +7220,8 @@ extension Ext on String {
 
 extension type Meters(int value) {}
 
+extension type const Id<T>._(T raw) {}
+
 void top() {
   int helper() => 1;
 }
@@ -7248,6 +7260,8 @@ external final int topExternal, otherExternal;
                 "method:Ext/ext",
                 "class:Meters",
                 "field:Meters/value",
+                "class:Id",
+                "field:Id/raw",
                 "function:top",
                 "function:top/helper",
                 "variable:topLevel",
