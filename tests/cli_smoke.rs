@@ -4257,6 +4257,35 @@ fn a_usage_error_names_what_is_wrong_and_how_the_command_is_used() {
     assert!(hint.contains("'symbols'"), "{hint}");
 }
 
+/// A host the HTTP transport refuses is bad input, as a port out of range
+/// is, so it arrives with the same code. The host is from a documentation
+/// range no machine holds, so a refusal that went missing fails to bind
+/// rather than serving.
+#[test]
+fn mcp_http_refuses_a_non_loopback_host_as_bad_input() {
+    for args in [
+        &[
+            "mcp",
+            "serve",
+            "--transport",
+            "http",
+            "--host",
+            "192.0.2.1",
+            "--port",
+            "0",
+        ][..],
+        &["mcp", "serve", "--transport", "http", "--port", "99999"][..],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            json["error"]["code"], "invalid_argument",
+            "{args:?}: {json}"
+        );
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn code_action_ranges_remain_bound_to_the_request_content() {
