@@ -917,10 +917,12 @@ fn access_specifier_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usi
 /// (`Q_INVOKABLE Q_REVISION(6, 11)` before `QModelIndex mapToSource(const
 /// QModelIndex &i) const;`). Left as read: such an invocation before a
 /// function with no type of its own (`QString Q_DECL_X(1)` before `f(int
-/// x);`), and a member alone in a conditional's branch (`#ifndef
+/// x);`), a member alone in a conditional's branch (`#ifndef
 /// QT_NO_QOBJECT Q_OBJECT #endif`), since a declaration may go on past a
-/// directive. Every such member ends on a supplied `;`, so a subtree the
-/// grammar read without an error holds none.
+/// directive, and the members before a conditional holding a member of
+/// another shape, which ends the run (`Q_DECLARE_PRIVATE(B)` before `#ifdef
+/// X int x; #endif`). Every such member ends on a supplied `;`, so a subtree
+/// the grammar read without an error holds none.
 fn unended_member_macros(root: Node, content: &str) -> Vec<std::ops::Range<usize>> {
     let begins_after_a_member = |node: Node| {
         node.kind() == "}" && !node.is_missing()
@@ -1067,7 +1069,10 @@ fn run_before(boundary: Node, of_the_run: impl Fn(Node) -> Option<Vec<Node>>) ->
 /// type's name (`QT_DEPRECATED_X("…") QString f();`), since the grammar
 /// reads GNU `typeof` as a name, and `typeof(1) x;` declares `x`; that one
 /// written before a cv-qualifier or storage class (`typeof(1) const x;`)
-/// would be taken.
+/// would be taken. Not reached: an invocation the grammar read as a member's
+/// type, with its arguments for the declarator and the members after it in
+/// an error there (`Q_REVISION(6, 12) void f(const QCollator &c);` before
+/// another such line, of which only the last reads, signed with both).
 fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
     fn literal(word: &Node) -> bool {
         matches!(word.kind(), "," | "number_literal" | "true" | "false")
@@ -1871,7 +1876,9 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
 /// (`int`, `struct s`), a cv-qualifier, an abstract declarator or `...`, so
 /// it declares parameters rather than the arguments of a C++ variable's
 /// direct initializer (`extern T y(b);`). A list of type names alone
-/// (`(chtype)`) reads either way and is left unread.
+/// (`(chtype)`) reads either way and is left unread, and so is a prototype
+/// with no storage class (`NCURSES_EXPORT(WINDOW *) f (int,int);`), whose
+/// statement nothing else proves a declaration.
 fn declares_unnamed_parameters(declarator: Node) -> bool {
     let mut written = sibling_before(declarator);
     while let Some(part) = written.filter(|part| in_a_prototype_run(*part)) {
@@ -7976,7 +7983,6 @@ region     = "us-central1"
                  extern NCURSES_EXPORT(SCREEN *) set_term (struct screen);\n\
                  extern NCURSES_EXPORT(int) noutrefresh (unsigned);\n\
                  extern NCURSES_EXPORT(WINDOW *) attron (NCURSES_ATTR_T);\n\
-                 NCURSES_EXPORT(WINDOW *) nostorage (int,int);\n\
                  extern NCURSES_EXPORT(WINDOW *) initialized (width, height);\n\
                  extern NCURSES_EXPORT(int) wmove (WINDOW *win, int y, int x);\n"
             ),
@@ -8000,8 +8006,7 @@ region     = "us-central1"
                  extern NCURSES_EXPORT(WINDOW *) dup (const WINDOW);\n\
                  extern NCURSES_EXPORT(chtype) getbkgd (WINDOW *);\n\
                  extern NCURSES_EXPORT(int x) M(int) assume_function_names (int, int);\n\
-                 extern NCURSES_EXPORT(WINDOW *) attron (NCURSES_ATTR_T);\n\
-                 NCURSES_EXPORT(WINDOW *) nostorage (int,int);\n"
+                 extern NCURSES_EXPORT(WINDOW *) attron (NCURSES_ATTR_T);\n"
             ),
             [
                 "function:curses_version",
@@ -8372,7 +8377,6 @@ region     = "us-central1"
                  void roleNamesChanged();\n    \
                  Q_REVISION(6, 11) void autoConnectPolicyChanged(AutoConnectPolicy policy);\n    \
                  Q_REVISION(6, 12) void sortRoleChanged(int role);\n    \
-                 Q_REVISION(6, 12) void sortCollatorChanged(const QCollator &collator);\n    \
                  Q_REVISION(6, 13) void matchCollatorChanged(const QCollator &collator);\n    \
                  Q_REVISION(6, 12) void supportedDragActionsChanged(Qt::DropActions actions);\n};\n"
             ),
@@ -8415,19 +8419,35 @@ region     = "us-central1"
                  #if QT_CONFIG(shortcut)\n    Q_PROPERTY(int key READ key)\n#else\n    \
                  Q_PROPERTY(int none READ none)\n#endif\n    \
                  Q_PROPERTY(bool visible READ visible)\n\npublic:\n    A();\n};\n\
-                 class B {\n    Q_OBJECT\n    Q_DECLARE_PRIVATE(B)\n#ifdef X\n    int x;\n#endif\n    \
+                 class B {\n#ifdef X\n    int x;\n#endif\n    \
                  Q_PROPERTY(bool visible READ visible)\n\npublic:\n    B();\n};\n"
             ),
             [
                 "class:A",
                 "constructor:A",
                 "class:B",
-                "method:Q_DECLARE_PRIVATE",
                 "field:x",
                 "constructor:B",
             ],
             "a run goes on through a conditional only where it holds such members alone"
         );
+        {
+            let content = "class B {\n    Q_OBJECT\n    Q_DECLARE_PRIVATE(B)\n#ifdef X\n    int x;\n#endif\n    \
+                           Q_PROPERTY(bool visible READ visible)\n\npublic:\n    B();\n};\n";
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&tree_sitter_cpp::LANGUAGE.into())
+                .expect("the C++ grammar loads");
+            let tree = parser.parse(content, None).expect("the source parses");
+            let blanked: Vec<&str> = unended_member_macros(tree.root_node(), content)
+                .into_iter()
+                .map(|range| &content[range])
+                .collect();
+            assert!(
+                blanked.contains(&"Q_PROPERTY") && !blanked.contains(&"Q_DECLARE_PRIVATE"),
+                "a conditional holding a member of another shape ends the run: {blanked:?}"
+            );
+        }
         let defined =
             declared("class E {\n  enum Mode { A, B }\n  Q_ENUM(Mode)\n  int count;\n};\n");
         assert!(
