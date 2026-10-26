@@ -963,6 +963,12 @@ pub(crate) mod tests {
         /// outlives the caller that launched it by up to a budget.
         const START_BUDGET_SECS: u64 = 10;
 
+        /// The budget of a test that waits a hanging start or an unanswered
+        /// request out in full: the fake records itself and answers
+        /// `initialize` within milliseconds, so this leaves it ample time
+        /// while the wait costs the suite little.
+        const WAITED_OUT_SECS: u64 = 3;
+
         const FAKE_SERVER: &str = r#"#!/bin/sh
 case "$1" in
   version|--version) echo "${NODE_OPTIONS:-fake-ls 1.0}"; exit 0 ;;
@@ -1017,8 +1023,24 @@ exec sleep 600
                 delay_secs: u32,
                 file_watch: FileWatch,
             ) -> Arc<LspManager> {
+                let budget = START_BUDGET_SECS + u64::from(delay_secs);
+                self.budgeted(behavior, delay_secs, file_watch, budget)
+            }
+
+            /// A pool like [`Self::manager`]'s under [`WAITED_OUT_SECS`].
+            fn waited_out(&self, behavior: &str) -> Arc<LspManager> {
+                self.budgeted(behavior, 0, FileWatch::On, WAITED_OUT_SECS)
+            }
+
+            fn budgeted(
+                &self,
+                behavior: &str,
+                delay_secs: u32,
+                file_watch: FileWatch,
+                budget_secs: u64,
+            ) -> Arc<LspManager> {
                 let mut config = crate::models::config::SymoraConfig::default();
-                config.lsp.timeout_secs = START_BUDGET_SECS + u64::from(delay_secs);
+                config.lsp.timeout_secs = budget_secs;
                 config
                     .lsp
                     .servers
@@ -1282,7 +1304,7 @@ exec sleep 600
         #[tokio::test]
         async fn request_timeout_and_cancellation_release_and_refresh_use() {
             let fake = FakeServer::new();
-            let manager = fake.manager("serve", 0);
+            let manager = fake.waited_out("serve");
             let client = bounded(manager.get_client(Language::Go)).await.unwrap();
             let stamp = client.usage().last_used;
             let request = client.request::<serde_json::Value>("textDocument/hover", None);
@@ -1350,7 +1372,7 @@ exec sleep 600
         #[tokio::test]
         async fn an_abandoned_start_neither_leaks_nor_blocks_the_next_caller() {
             let fake = FakeServer::new();
-            let manager = fake.manager("hang", 0);
+            let manager = fake.waited_out("hang");
             // Abandoned once the server has run, so the leak check below is
             // about a process that existed rather than one the start budget
             // killed before it could record itself.
