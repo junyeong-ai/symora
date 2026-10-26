@@ -192,12 +192,12 @@ struct Importer<'a> {
 }
 
 /// How one TypeScript version that may compile a file reads a non-relative
-/// specifier: whether it reads `baseUrl`, and how it reads a package's name.
-/// `major` is that version's major, `None` where Node or a bundler reads it.
+/// specifier: `major` is that version's major, which decides whether it
+/// reads `baseUrl` (`reads_base_url`), `None` where Node or a bundler reads
+/// it, and `mode` how it reads a package's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Reading {
     major: Option<u8>,
-    base_url: bool,
     mode: ImportMode,
 }
 
@@ -217,15 +217,24 @@ enum ImportMode {
 /// file, each `None` where its configuration leaves it open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExportConditions {
-    /// Whether TypeScript resolves the file's imports; where it does not,
-    /// Node and the bundlers do (`Importer::matches`).
-    typescript: bool,
     /// Whether `node` matches: under `node16` and `nodenext`, not under
     /// `bundler`.
     node: Option<bool>,
     /// Whether an import declaration in the file matches `import` rather
     /// than `require` (`declares_es_imports`).
     esm: Option<bool>,
+}
+
+/// How one reading of an import looks up a package's `exports` target
+/// (`export_target`): whether TypeScript reads it, where Node and the
+/// bundlers otherwise do (`Importer::matches`), the conditions it matches,
+/// how the import is written, and what a pattern key's `*` matched.
+#[derive(Debug, Clone, Copy)]
+struct Lookup<'s> {
+    typescript: bool,
+    conditions: ExportConditions,
+    form: ImportForm,
+    star: Option<&'s str>,
 }
 
 /// How an import is written, which TypeScript resolves under `bundler`,
@@ -291,9 +300,7 @@ impl<'a> Importer<'a> {
                     typescript: None,
                     readings: vec![Reading {
                         major: None,
-                        base_url: true,
                         mode: ImportMode::Exports(ExportConditions {
-                            typescript: false,
                             node: None,
                             esm: Some(true),
                         }),
@@ -306,7 +313,6 @@ impl<'a> Importer<'a> {
             for major in &majors {
                 let reading = Reading {
                     major: Some(*major),
-                    base_url: reads_base_url(*major),
                     mode: import_mode(options, *major, node, manifests),
                 };
                 if !read.contains(&reading) {
@@ -328,7 +334,7 @@ impl<'a> Importer<'a> {
     }
 
     /// Whether TypeScript matches an `exports` condition for an import this
-    /// file writes in `form` under `conditions`, `None` where its
+    /// file writes as `lookup` reads it, `None` where its
     /// configuration leaves that open: `types`, `default` and the
     /// `customConditions` always; `import` for a declaration in a file
     /// emitted (`bundler`) or read by Node (`node16`) as an ES module;
@@ -345,17 +351,13 @@ impl<'a> Importer<'a> {
     /// a `require`, and on never matching `types`; every other condition —
     /// `node`, `browser`, `module`, a custom one — some of them match and
     /// others do not, so it stays open.
-    fn matches(
-        &self,
-        conditions: ExportConditions,
-        form: ImportForm,
-        condition: &str,
-    ) -> Option<bool> {
-        let esm = match form {
+    fn matches(&self, lookup: Lookup, condition: &str) -> Option<bool> {
+        let conditions = lookup.conditions;
+        let esm = match lookup.form {
             ImportForm::Declaration => conditions.esm,
             ImportForm::Require => Some(false),
         };
-        if !conditions.typescript {
+        if !lookup.typescript {
             return match condition {
                 "default" => Some(true),
                 "import" => esm,
@@ -418,7 +420,6 @@ fn import_mode(
         Some(ModuleResolution::Node10) => ImportMode::Node10,
         Some(ModuleResolution::Classic) => ImportMode::Classic,
         _ => ImportMode::Exports(ExportConditions {
-            typescript: true,
             node: resolution.map(|resolution| resolution == ModuleResolution::Node16),
             esm: resolution
                 .and_then(|resolution| declares_es_imports(resolution, kind, node, manifests)),
@@ -492,10 +493,10 @@ impl Exported {
     /// Whether a lookup stops at this target rather than reading the next
     /// entry or key: TypeScript passes over a path naming no file, which
     /// Node and the bundlers resolve and stop at.
-    fn ends_lookup(&self, conditions: ExportConditions) -> bool {
+    fn ends_lookup(&self, lookup: Lookup) -> bool {
         match self {
             Self::Nothing => false,
-            Self::Missing => !conditions.typescript,
+            Self::Missing => !lookup.typescript,
             Self::Files(_) | Self::Undetermined => true,
         }
     }
@@ -1404,7 +1405,8 @@ impl ProjectIndex<'_> {
     ) -> Resolution {
         let language = importer.node.language;
         let config = importer.ts_config;
-        let mapped = config.and_then(|config| config.mapped(specifier, reading.base_url));
+        let base_url = reading.major.is_some_and(reads_base_url);
+        let mapped = config.and_then(|config| config.mapped(specifier, base_url));
         for path in mapped.iter().flat_map(|mapping| &mapping.paths) {
             if let Some(found) = self.script_target(path, language) {
                 return Resolution::Files(found);
@@ -1412,7 +1414,7 @@ impl ProjectIndex<'_> {
         }
         if let Some(found) = config
             .and_then(|config| config.base_url.as_ref())
-            .filter(|_| reading.base_url)
+            .filter(|_| base_url)
             .and_then(|base| project_path(base, specifier))
             .and_then(|path| self.script_target(&path, language))
         {
@@ -1422,7 +1424,7 @@ impl ProjectIndex<'_> {
             Some(mapping) if !mapping.catch_all => Resolution::Undetermined(specifier.to_string()),
             _ => Resolution::Files(Vec::new()),
         };
-        self.workspace_package(specifier, importer, reading.mode, form)
+        self.workspace_package(specifier, importer, reading, form)
             .unwrap_or_else(unmapped)
     }
 
@@ -1462,12 +1464,12 @@ impl ProjectIndex<'_> {
         &self,
         specifier: &str,
         importer: &Importer,
-        mode: ImportMode,
+        reading: Reading,
         form: ImportForm,
     ) -> Option<Resolution> {
         let from = importer.node;
         // The conditions `exports` is read under; `node10` reads no `exports`.
-        let conditions = match mode {
+        let conditions = match reading.mode {
             ImportMode::Classic => return None,
             ImportMode::Node10 => None,
             ImportMode::Exports(conditions) => Some(conditions),
@@ -1486,7 +1488,7 @@ impl ProjectIndex<'_> {
                 .any(declares)
                 .then(undetermined);
         };
-        let typescript = conditions.is_none_or(|conditions| conditions.typescript);
+        let typescript = reading.major.is_some();
         let exports = package.exports.as_ref().zip(conditions);
         let Some((exports, conditions)) = exports else {
             let entries: Vec<&str> = if !subpath.is_empty() {
@@ -1529,8 +1531,13 @@ impl ProjectIndex<'_> {
             });
         };
         let exported = export_subpath(exports, subpath).map(|(target, star)| {
-            let reading = (conditions, form, star.as_deref());
-            self.export_target(target, directory, importer, reading)
+            let lookup = Lookup {
+                typescript,
+                conditions,
+                form,
+                star: star.as_deref(),
+            };
+            self.export_target(target, directory, importer, lookup)
         });
         Some(match exported {
             Some(Exported::Files(files)) => Resolution::Files(files),
@@ -1582,23 +1589,23 @@ impl ProjectIndex<'_> {
         target: &serde_json::Value,
         directory: &[String],
         importer: &Importer,
-        reading: (ExportConditions, ImportForm, Option<&str>),
+        lookup: Lookup,
     ) -> Exported {
         match target {
             serde_json::Value::String(path) if path.starts_with("./") => {
-                export_path(path, reading.2)
+                export_path(path, lookup.star)
                     .and_then(|path| project_path(directory, &path))
                     .and_then(|path| self.script_target(&path, importer.node.language))
                     .map_or(Exported::Missing, Exported::Files)
             }
             serde_json::Value::Array(entries) => entries
                 .iter()
-                .map(|entry| self.export_target(entry, directory, importer, reading))
-                .find(|exported| exported.ends_lookup(reading.0))
+                .map(|entry| self.export_target(entry, directory, importer, lookup))
+                .find(|exported| exported.ends_lookup(lookup))
                 .unwrap_or(Exported::Nothing),
             serde_json::Value::Object(conditions) => {
                 let conditions: Vec<_> = conditions.iter().collect();
-                self.conditional_target(&conditions, directory, importer, reading)
+                self.conditional_target(&conditions, directory, importer, lookup)
             }
             _ => Exported::Nothing,
         }
@@ -1609,20 +1616,20 @@ impl ProjectIndex<'_> {
         conditions: &[(&String, &serde_json::Value)],
         directory: &[String],
         importer: &Importer,
-        reading: (ExportConditions, ImportForm, Option<&str>),
+        lookup: Lookup,
     ) -> Exported {
         for (at, (condition, target)) in conditions.iter().enumerate() {
-            let matched = importer.matches(reading.0, reading.1, condition);
+            let matched = importer.matches(lookup, condition);
             if matched == Some(false) {
                 continue;
             }
-            let exported = self.export_target(target, directory, importer, reading);
-            if !exported.ends_lookup(reading.0) {
+            let exported = self.export_target(target, directory, importer, lookup);
+            if !exported.ends_lookup(lookup) {
                 continue;
             }
             if matched.is_none() {
                 let rest =
-                    self.conditional_target(&conditions[at + 1..], directory, importer, reading);
+                    self.conditional_target(&conditions[at + 1..], directory, importer, lookup);
                 return if rest == exported {
                     rest
                 } else {
