@@ -4896,6 +4896,12 @@ fn find_name_node(node: Node, language: Language) -> Option<Node> {
             .child_by_field_name("name")
             .or_else(|| node.parent()?.child_by_field_name("name"));
     }
+    // The initializers and body a Dart primary constructor declares in its
+    // class's body (`this : assert(x > 0) { … }`) are named by their `this`,
+    // as the analyzer names them.
+    if node.kind() == "primary_constructor_body_signature" {
+        return child_of_kind(node, "this");
+    }
     // An operator is named by its symbol (Dart's `operator ==`, C#'s
     // `operator +`, the one Swift declares after its keyword and any comment
     // there), a C# conversion
@@ -5059,6 +5065,7 @@ fn node_kind(node: Node) -> SymbolKind {
         | "factory_constructor_signature"
         | "redirecting_factory_constructor_signature"
         | "primary_constructor"
+        | "primary_constructor_body_signature"
         | "init_declaration"
         | "deinit_declaration" => SymbolKind::Constructor,
 
@@ -5930,7 +5937,8 @@ const SCALA_QUERY: &str = r#"
 // wraps it, and a method's signature nests the same node. A parameter of a
 // class's or an enum's primary constructor declares a field where `final` or
 // `var` marks it, and every parameter of an extension type's representation
-// does.
+// does. What a primary constructor declares in its class's body (`this : …`)
+// is a constructor of its own, as the analyzer reads it.
 const DART_QUERY: &str = r#"
 (class_declaration) @symbol
 (enum_declaration) @symbol
@@ -5941,6 +5949,7 @@ const DART_QUERY: &str = r#"
 (extension_type_representation) @symbol
 (extension_type_representation (optional_formal_parameters (formal_parameter) @symbol))
 (primary_constructor) @symbol
+(primary_constructor_body_signature) @symbol
 (primary_constructor parameters: (formal_parameter_list (formal_parameter ["final" "var"]) @symbol))
 (primary_constructor parameters: (formal_parameter_list (optional_formal_parameters (formal_parameter ["final" "var"]) @symbol)))
 (source_file [(type_alias) (top_level_variable_declaration) (external_variable_declaration)] @symbol)
@@ -7356,6 +7365,9 @@ class Made {
 }
 
 class Point(final int x, var int y, int scale) {
+  this : assert(scale > 0) {
+    void check() {}
+  }
   int get sum => x + y;
 }
 
@@ -7367,6 +7379,7 @@ class User(this.name) {
 
 enum const Unit(final String symbol) {
   meter('m');
+  this : assert(symbol != '');
 }
 
 class N.new(final int n);
@@ -7429,6 +7442,8 @@ external final int topExternal, otherExternal;
                 "constructor:Point/Point",
                 "field:Point/x",
                 "field:Point/y",
+                "constructor:Point/this",
+                "function:this/check",
                 "property:Point/sum",
                 "class:Pair",
                 "constructor:Pair/Pair.named",
@@ -7442,6 +7457,7 @@ external final int topExternal, otherExternal;
                 "constructor:Unit/Unit",
                 "field:Unit/symbol",
                 "enum_member:Unit/meter",
+                "constructor:Unit/this",
                 "class:N",
                 "constructor:N/N.new",
                 "field:N/n",
@@ -10351,6 +10367,13 @@ region     = "us-central1"
                 "class P({required final int x = 0});\n",
                 "x",
                 Some("final int x"),
+            ),
+            (
+                "a.dart",
+                Language::Dart,
+                "class P(final int x) {\n  this : assert(x > 0) {\n    print(x);\n  }\n}\n",
+                "P/this",
+                Some("this : assert(x > 0)"),
             ),
             (
                 "a.dart",
