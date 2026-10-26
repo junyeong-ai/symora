@@ -4523,8 +4523,9 @@ mod tests {
     /// major is disclosed as undetermined whatever the version. Where no
     /// TypeScript is installed or declared, a configuration setting a module
     /// option tsc 7.0.2 removed (TS5108) is read under 5 and 6 alone: with
-    /// `moduleResolution: "node"` tsc 5.9.3 and 6.0.3 take the package's
-    /// `types` (`node10_absent`), and with `moduleResolution: "classic"` or
+    /// `moduleResolution: "node"` or `"node10"` tsc 5.9.3 and 6.0.3 take the
+    /// package's `types` (`node10_absent`, `node10_spelled`), and with
+    /// `moduleResolution: "classic"` or
     /// `module` `amd`, `umd`, `system` or `none` (TS6046) they resolve no
     /// file for it, where 7.0.2 takes its `import` file in each. A declared
     /// range admitting only 7 and above keeps 7, and what it reads apart from
@@ -4538,12 +4539,21 @@ mod tests {
             ts(1, "owners/shared/s.ts", "import q from 'q6'\n"),
             ts(2, "n10/src/a.ts", "import p from 'p6'\n"),
         ];
+        // Each option tsc 7.0.2 rejects, and the file tsc 5.9.3 and 6.0.3
+        // resolve `r6` to under it.
         let removed = [
-            "\"moduleResolution\": \"classic\", \"module\": \"esnext\"",
-            "\"module\": \"amd\"",
-            "\"module\": \"umd\"",
-            "\"module\": \"system\"",
-            "\"module\": \"none\"",
+            (
+                "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+                Some("packages/r6/src/types.ts"),
+            ),
+            (
+                "\"moduleResolution\": \"classic\", \"module\": \"esnext\"",
+                None,
+            ),
+            ("\"module\": \"amd\"", None),
+            ("\"module\": \"umd\"", None),
+            ("\"module\": \"system\"", None),
+            ("\"module\": \"none\"", None),
         ];
         for (at, _) in removed.iter().enumerate() {
             nodes.push(ts(
@@ -4583,7 +4593,7 @@ mod tests {
                     .to_string(),
             ),
         ];
-        for (at, options) in removed.iter().enumerate() {
+        for (at, (options, _)) in removed.iter().enumerate() {
             configs.push((
                 format!("rm{at}/tsconfig.json"),
                 format!("{{\"compilerOptions\": {{{options}}}}}"),
@@ -4626,7 +4636,17 @@ mod tests {
             .map(|dst| nodes[*dst].rel_path.as_str())
             .collect();
         assert_eq!(n10, vec!["packages/p6/src/types.ts"]);
-        assert!((3..3 + removed.len()).all(|id| graph.edges[&id].is_empty()));
+        for (at, (options, expected)) in removed.iter().enumerate() {
+            let found: Vec<&str> = graph.edges[&(3 + at)]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect();
+            assert_eq!(
+                found,
+                expected.iter().copied().collect::<Vec<_>>(),
+                "{options}"
+            );
+        }
         assert!(graph.edges[&ge7].is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
