@@ -1,6 +1,6 @@
 # src/daemon — Wire Layer Rules
 
-The daemon serves CLI commands over a Unix socket so language-server sessions can be reused across invocations. A process that cannot open the daemon's startup lock — a sandbox forbidding its directory — is wired in process instead (`DaemonClient::can_start_daemon`); invariant 3 is what makes that the same answer rather than a degraded one.
+The daemon serves CLI commands over a Unix socket so language-server sessions can be reused across invocations. A process that cannot address the daemon's socket — a home too deep for a Unix socket's path — or open its startup lock — a sandbox forbidding its directory — is wired in process instead (`DaemonClient::can_start_daemon`); invariant 3 is what makes that the same answer rather than a degraded one.
 
 ## Wire types are serialization-stable
 

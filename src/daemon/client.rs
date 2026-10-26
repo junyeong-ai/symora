@@ -136,12 +136,22 @@ impl DaemonClient {
         self.start_daemon_with_lock().await
     }
 
-    /// Whether this process can open the daemon's startup lock, which every
-    /// path that starts or replaces a daemon takes. A sandbox that forbids the
-    /// daemon directory makes it unopenable, and the caller then runs in
-    /// process — the same answers, since daemon and direct execution agree,
-    /// without warm reuse across invocations.
+    /// Whether this process can reach a daemon: address its socket, whose path
+    /// the platform bounds (104 bytes on macOS, 108 on Linux), and open the
+    /// startup lock every path that starts or replaces a daemon takes. A home
+    /// too deep for the socket's path, or a sandbox that forbids the daemon
+    /// directory, leaves the caller running in process — the same answers,
+    /// since daemon and direct execution agree, without warm reuse across
+    /// invocations.
     pub fn can_start_daemon(&self) -> bool {
+        let socket = &self.config.socket_path;
+        if let Err(e) = std::os::unix::net::SocketAddr::from_pathname(socket) {
+            tracing::info!(
+                "daemon unavailable ({}: {e}); running in process",
+                socket.display()
+            );
+            return false;
+        }
         let lock = &self.config.lock_path;
         let opened = lock
             .parent()
