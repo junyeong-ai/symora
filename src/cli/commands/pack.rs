@@ -254,6 +254,18 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             name_some(&specifiers)
         ));
     }
+    if !result.types_versions_undetermined_imports.is_empty() {
+        let specifiers: Vec<String> = result
+            .types_versions_undetermined_imports
+            .iter()
+            .map(|specifier| format!("`{specifier}`"))
+            .collect();
+        hints.push(format!(
+            "{} import specifier(s) name a directory whose `package.json` holds `typesVersions`, which pack does not follow ({}); their dependencies do not contribute to ranking. Inspect the directory's `package.json`.",
+            specifiers.len(),
+            name_some(&specifiers)
+        ));
+    }
     if !result.undetermined_ts_projects.is_empty() {
         hints.push(format!(
             "{} file(s) sit below a tsconfig whose `references` name no one project compiling them ({}); their non-relative specifiers were read without a tsconfig's `paths`, `baseUrl` or conditions. Inspect the project references.",
@@ -411,6 +423,7 @@ mod tests {
             version_undetermined_imports: Vec::new(),
             projects_undetermined_imports: Vec::new(),
             jsconfig_undetermined_imports: Vec::new(),
+            types_versions_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
             typescript_installed_unread: false,
@@ -494,6 +507,7 @@ mod tests {
         result.version_undetermined_imports = vec!["p6".to_string()];
         result.projects_undetermined_imports = vec!["../components".to_string()];
         result.jsconfig_undetermined_imports = vec!["../lib".to_string()];
+        result.types_versions_undetermined_imports = vec!["./pv".to_string()];
         result.typescript_ranges = vec![">=5".to_string()];
         result.typescript_not_installed = true;
         result.undetermined_ts_projects = vec!["scripts/gen.ts".to_string()];
@@ -546,6 +560,12 @@ mod tests {
         );
         assert!(
             json["files"]["hints"][7]
+                .as_str()
+                .unwrap()
+                .contains("1 import specifier(s) name a directory whose `package.json` holds `typesVersions`, which pack does not follow (`./pv`); their dependencies do not contribute to ranking. Inspect the directory's `package.json`.")
+        );
+        assert!(
+            json["files"]["hints"][8]
                 .as_str()
                 .unwrap()
                 .contains("1 file(s) sit below a tsconfig whose `references` name no one project compiling them (scripts/gen.ts)")

@@ -45,6 +45,9 @@ pub(super) struct ImportGraph {
     /// `jsconfig.json` of an importer's JavaScript project read as different
     /// files.
     pub(super) jsconfig_undetermined_imports: BTreeSet<String>,
+    /// The specifiers naming a directory whose `package.json` holds
+    /// `typesVersions`, which pack does not follow.
+    pub(super) types_versions_undetermined_imports: BTreeSet<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of those specifiers.
     pub(super) typescript_ranges: BTreeSet<String>,
@@ -103,6 +106,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut version_undetermined_imports = BTreeSet::new();
     let mut projects_undetermined_imports = BTreeSet::new();
     let mut jsconfig_undetermined_imports = BTreeSet::new();
+    let mut types_versions_undetermined_imports = BTreeSet::new();
     let mut typescript_ranges = BTreeSet::new();
     let mut typescript_not_installed = false;
     let mut typescript_installed_unread = false;
@@ -169,6 +173,10 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     jsconfig_undetermined_imports.insert(specifier);
                     continue;
                 }
+                Resolution::TypesVersionsUndetermined(specifier) => {
+                    types_versions_undetermined_imports.insert(specifier);
+                    continue;
+                }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
                     match importer.typescript {
@@ -201,6 +209,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         version_undetermined_imports,
         projects_undetermined_imports,
         jsconfig_undetermined_imports,
+        types_versions_undetermined_imports,
         typescript_ranges,
         typescript_not_installed,
         typescript_installed_unread,
@@ -242,6 +251,10 @@ enum Resolution {
     /// A specifier the TypeScript majors that may read the `jsconfig.json`
     /// of the importer's JavaScript project read as different files.
     JsConfigUndetermined(String),
+    /// A relative specifier, or a path `paths` or `baseUrl` names, naming a
+    /// directory whose `package.json` holds `typesVersions`, which pack does
+    /// not follow.
+    TypesVersionsUndetermined(String),
 }
 
 /// What resolving a file's references needs to know about where the file
@@ -1740,7 +1753,7 @@ impl ProjectIndex<'_> {
                 })?;
             Some(match hit {
                 Hit::Files(files) => Resolution::Files(files),
-                Hit::Open => Resolution::Undetermined(specifier.to_string()),
+                Hit::Open => Resolution::TypesVersionsUndetermined(specifier.to_string()),
             })
         };
         // A declaration a type root outside the project may hold, which
@@ -2246,7 +2259,7 @@ impl ProjectIndex<'_> {
                 }
                 (Some(lookup), _) => match self.typescript_path(path, end, lookup) {
                     Some(Hit::Files(files)) => Resolution::Files(files),
-                    Some(Hit::Open) => Resolution::Undetermined(written.to_string()),
+                    Some(Hit::Open) => Resolution::TypesVersionsUndetermined(written.to_string()),
                     None if end == PathEnd::Name => {
                         Resolution::Files(self.existing(path).unwrap_or_default())
                     }
@@ -5940,7 +5953,7 @@ mod tests {
     /// `bundler` and `node16` take. `node16` for an ES import adds no
     /// extension and reads no directory: only `./both.js`, `./w2.js` and
     /// `@/both.js` name a file. A `package.json` holding `typesVersions`
-    /// leaves the directory open (`./pv`). A path ending in `/` names a
+    /// leaves the directory open, disclosed as such (`./pv`). A path ending in `/` names a
     /// directory alone: `./x/` is `x/index.ts`, not `x.ts`.
     #[test]
     fn typescript_reads_a_relative_path_by_each_resolutions_order() {
@@ -6102,10 +6115,14 @@ mod tests {
         // import, which a declared `paths` pattern discloses.
         assert_eq!(
             graph.undetermined_imports,
-            ["./pv", "@/both", "@/dirfile"]
+            ["@/both", "@/dirfile"]
                 .into_iter()
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            graph.types_versions_undetermined_imports,
+            BTreeSet::from(["./pv".to_string()])
         );
         assert!(graph.version_undetermined_imports.is_empty());
     }

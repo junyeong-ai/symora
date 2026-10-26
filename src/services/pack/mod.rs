@@ -104,6 +104,9 @@ pub struct PackResult {
     /// `jsconfig.json` of an importer's JavaScript project read as different
     /// files.
     pub jsconfig_undetermined_imports: Vec<String>,
+    /// The specifiers naming a directory whose `package.json` holds
+    /// `typesVersions`, which pack does not follow.
+    pub types_versions_undetermined_imports: Vec<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of `version_undetermined_imports`.
     pub typescript_ranges: Vec<String>,
@@ -160,6 +163,7 @@ pub fn build_pack(
             version_undetermined_imports: Vec::new(),
             projects_undetermined_imports: Vec::new(),
             jsconfig_undetermined_imports: Vec::new(),
+            types_versions_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
             typescript_not_installed: false,
             typescript_installed_unread: false,
@@ -241,6 +245,10 @@ pub fn build_pack(
         version_undetermined_imports: graph.version_undetermined_imports.into_iter().collect(),
         projects_undetermined_imports: graph.projects_undetermined_imports.into_iter().collect(),
         jsconfig_undetermined_imports: graph.jsconfig_undetermined_imports.into_iter().collect(),
+        types_versions_undetermined_imports: graph
+            .types_versions_undetermined_imports
+            .into_iter()
+            .collect(),
         typescript_ranges: graph.typescript_ranges.into_iter().collect(),
         typescript_not_installed: graph.typescript_not_installed,
         typescript_installed_unread: graph.typescript_installed_unread,
