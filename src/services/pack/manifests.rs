@@ -262,11 +262,12 @@ pub(super) struct TsConfig {
 
 impl TsConfig {
     /// The TypeScript majors that may compile the configuration's files.
-    /// Where no TypeScript is installed or declared, a chain setting
-    /// `baseUrl` is one no TypeScript 7 compiles — tsc 7.0.2 refuses it with
-    /// TS5102 — so it is read under 5 and 6 alone.
+    /// Where no major pack reads is installed or declared — none, a range
+    /// fixing none, a version above 7 — a chain setting `baseUrl` is one no
+    /// TypeScript 7 compiles — tsc 7.0.2 refuses it with TS5102 — so it is
+    /// read under 5 and 6 alone.
     pub(super) fn majors(&self) -> Vec<u8> {
-        let refused = self.typescript == TypeScript::Absent && self.base_url.is_some();
+        let refused = !matches!(self.typescript, TypeScript::Major(_)) && self.base_url.is_some();
         self.typescript
             .majors()
             .iter()

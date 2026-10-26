@@ -3943,11 +3943,10 @@ mod tests {
     /// TypeScript 7 reads no `baseUrl`: tsc 7.0.2 reports TS5102, resolves
     /// nothing below it and `paths` against the configuration's own
     /// directory, where 5.9.3 and 6.0.3 resolve both against `baseUrl`
-    /// (`baseurl7`). So where no TypeScript is installed or declared, a
-    /// configuration setting `baseUrl` is read under 5 and 6 alone; where a
-    /// declared range fixes no major, 7 still reads it and a specifier
-    /// `baseUrl` decides is disclosed with that range. A set of comparators
-    /// within one major fixes it (`ts_range`).
+    /// (`baseurl7`). So where no TypeScript major is installed or declared —
+    /// none, or a range fixing none (`latest`) — a configuration setting
+    /// `baseUrl` is read under 5 and 6 alone. A set of comparators within one
+    /// major fixes it (`ts_range`).
     #[test]
     fn typescript_7_reads_no_base_url() {
         let source = "import a from \"lib/x\";\nimport b from \"@/lib/x\";\n";
@@ -4002,17 +4001,10 @@ mod tests {
         assert_eq!(edges(0), vec!["six/src/lib/x.ts"]);
         assert_eq!(edges(3), vec!["seven/lib/x.ts"]);
         assert_eq!(edges(6), vec!["none/src/lib/x.ts"]);
-        assert!(edges(9).is_empty());
+        assert_eq!(edges(9), vec!["latest/src/lib/x.ts"]);
         assert_eq!(edges(12), vec!["range/src/lib/x.ts"]);
         assert!(graph.undetermined_imports.is_empty());
-        assert_eq!(
-            graph.version_undetermined_imports,
-            BTreeSet::from(["@/lib/x".to_string(), "lib/x".to_string()])
-        );
-        assert_eq!(
-            graph.typescript_ranges,
-            BTreeSet::from(["latest".to_string()])
-        );
+        assert!(graph.version_undetermined_imports.is_empty());
     }
 
     /// A file several projects compile under different majors and module
