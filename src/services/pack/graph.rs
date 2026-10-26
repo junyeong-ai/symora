@@ -193,8 +193,9 @@ struct Importer<'a> {
 
 /// How one TypeScript version that may compile a file reads a non-relative
 /// specifier: `major` is that version's major, which decides whether it
-/// reads `baseUrl` (`reads_base_url`), `None` where Node or a bundler reads
-/// it, and `mode` how it reads a package's name.
+/// reads `baseUrl` (`reads_base_url`) but in a `jsconfig.json`'s JavaScript
+/// project, which its bundler builds; `None` where Node or a bundler reads
+/// it; and `mode` how it reads a package's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Reading {
     major: Option<u8>,
@@ -1405,7 +1406,11 @@ impl ProjectIndex<'_> {
     ) -> Resolution {
         let language = importer.node.language;
         let config = importer.ts_config;
-        let base_url = reading.major.is_some_and(reads_base_url);
+        // A JavaScript project's bundler reads its `jsconfig.json`'s `baseUrl`
+        // whatever TypeScript is installed: Next.js 16.3.3 and esbuild 0.28.2
+        // do with 7.0.2, which reads none.
+        let base_url = reading.major.is_some_and(reads_base_url)
+            || config.is_some_and(|config| config.javascript);
         let mapped = config.and_then(|config| config.mapped(specifier, base_url));
         for path in mapped.iter().flat_map(|mapping| &mapping.paths) {
             if let Some(found) = self.script_target(path, language) {
@@ -4077,8 +4082,9 @@ mod tests {
     /// A JavaScript project's `jsconfig.json`, as Create React App documents
     /// absolute imports (`baseUrl: "src"`) and Next.js its aliases, is read
     /// with its `baseUrl` (`cra_js`, `next_js`), as esbuild 0.28.2 and
-    /// Next.js 16.3.3 read it, and an import the TypeScript majors read
-    /// apart there is disclosed without advice to install TypeScript.
+    /// Next.js 16.3.3 read it, also where TypeScript 7 is declared
+    /// (`cra_js_ts7`), and an import the TypeScript majors read apart there
+    /// is disclosed without advice to install TypeScript.
     #[test]
     fn a_javascript_projects_jsconfig_is_read_with_its_base_url() {
         let js = |id, rel: &str, source: &str| node_in(id, rel, source, Language::JavaScript);
@@ -4095,6 +4101,12 @@ mod tests {
                 "import Nav from \"@/components/Nav\";\nimport Nav2 from \"components/Nav\";\n",
             ),
             js(3, "next/components/Nav.js", ""),
+            js(
+                4,
+                "cra7/src/pages/a.js",
+                "import Button from \"components/Button\";\n",
+            ),
+            js(5, "cra7/src/components/Button.js", ""),
         ];
         for file in ["types", "esm", "cjs"] {
             nodes.push(node_in(
@@ -4113,6 +4125,15 @@ mod tests {
                 ),
                 (
                     "cra/jsconfig.json",
+                    "{\"compilerOptions\": {\"baseUrl\": \"src\"}, \"include\": [\"src\"]}",
+                ),
+                (
+                    "cra7/package.json",
+                    "{\"dependencies\": {\"react-scripts\": \"5.0.1\"}, \
+                     \"devDependencies\": {\"typescript\": \"^7.0.2\"}}",
+                ),
+                (
+                    "cra7/jsconfig.json",
                     "{\"compilerOptions\": {\"baseUrl\": \"src\"}, \"include\": [\"src\"]}",
                 ),
                 (
@@ -4137,6 +4158,7 @@ mod tests {
         };
         assert_eq!(edges(0), vec!["cra/src/components/Button.js"]);
         assert_eq!(edges(2), vec!["next/components/Nav.js"]);
+        assert_eq!(edges(4), vec!["cra7/src/components/Button.js"]);
         assert!(graph.version_undetermined_imports.is_empty());
         assert_eq!(
             graph.undetermined_imports,
