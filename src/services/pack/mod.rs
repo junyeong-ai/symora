@@ -1067,4 +1067,136 @@ mod tests {
             build_pack(dir.path(), 10000, None, &FileFilter::new(dir.path()), &cfg).unwrap();
         assert_eq!(larger.files.len(), 3);
     }
+
+    /// Every disclosure the import graph makes reaches the result
+    /// `build_pack` returns, each from a project whose layout makes it: a
+    /// `paths` alias naming no file, a directory holding `typesVersions` and
+    /// a type root's declaration beside a package with `exports` (`alias`);
+    /// a JavaScript file `classic` finds where a `typesVersions` in `@types`
+    /// may decide (`classic`); a directory TypeScript 5 reads as `classic`
+    /// and 6 and 7 as `bundler`, under a declared range pack reads no major
+    /// from (`range`) and an installed version above 7 (`above`), and in a
+    /// `jsconfig.json`'s project (`js`); a file two projects of different
+    /// module options compile, which they read one specifier of apart and
+    /// whose package names are therefore read without a configuration
+    /// (`owners`); a Rust file no crate reaches.
+    #[test]
+    fn build_pack_returns_every_disclosure_the_graph_makes() {
+        const TS5: &str = "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}";
+        const TYPES_VERSIONS: &str = "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}";
+        let dir = tempfile::tempdir().unwrap();
+        for (path, contents) in [
+            ("alias/package.json", TS5),
+            (
+                "alias/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"esnext\", \"moduleResolution\": \"bundler\", \
+                 \"paths\": {\"@x/*\": [\"./nowhere/*\"]}, \"typeRoots\": [\"./typings\"]}}",
+            ),
+            (
+                "alias/src/main.ts",
+                "import \"@x/y\";\nimport \"./pv\";\nimport \"ex\";\n",
+            ),
+            ("alias/src/pv/package.json", TYPES_VERSIONS),
+            ("alias/src/pv/index.ts", ""),
+            ("alias/typings/ex/index.d.ts", ""),
+            (
+                "alias/node_modules/ex/package.json",
+                "{\"name\": \"ex\", \"exports\": {\".\": \"./index.js\"}}",
+            ),
+            ("alias/node_modules/ex/index.js", ""),
+            ("classic/package.json", TS5),
+            (
+                "classic/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"amd\"}}",
+            ),
+            ("classic/src/main.ts", "import \"jq\";\n"),
+            ("classic/src/jq.js", ""),
+            (
+                "classic/node_modules/@types/jq/package.json",
+                TYPES_VERSIONS,
+            ),
+            (
+                "range/package.json",
+                "{\"devDependencies\": {\"typescript\": \">=5\"}}",
+            ),
+            (
+                "range/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"esnext\"}}",
+            ),
+            ("range/src/app/main.ts", "import \"../components\";\n"),
+            ("range/src/components/index.ts", ""),
+            (
+                "above/node_modules/typescript/package.json",
+                "{\"name\": \"typescript\", \"version\": \"8.0.0\"}",
+            ),
+            (
+                "above/tsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"esnext\"}}",
+            ),
+            ("above/src/app/main.ts", "import \"../widgets\";\n"),
+            ("above/src/widgets/index.ts", ""),
+            ("js/package.json", "{\"name\": \"js\"}"),
+            (
+                "js/jsconfig.json",
+                "{\"compilerOptions\": {\"module\": \"esnext\"}}",
+            ),
+            ("js/src/app/main.js", "import \"../lib\";\n"),
+            ("js/src/lib/index.js", ""),
+            ("owners/package.json", TS5),
+            (
+                "owners/tsconfig.json",
+                "{\"files\": [], \"references\": [{\"path\": \"./tsconfig.a.json\"}, \
+                 {\"path\": \"./tsconfig.b.json\"}]}",
+            ),
+            (
+                "owners/tsconfig.a.json",
+                "{\"compilerOptions\": {\"composite\": true, \"module\": \"amd\"}, \
+                 \"include\": [\"src/shared/**/*.ts\"]}",
+            ),
+            (
+                "owners/tsconfig.b.json",
+                "{\"compilerOptions\": {\"composite\": true, \"module\": \"esnext\", \
+                 \"moduleResolution\": \"bundler\"}, \"include\": [\"src/shared/**/*.ts\"]}",
+            ),
+            (
+                "owners/src/shared/s.ts",
+                "import \"../parts\";\nimport \"lodash\";\n",
+            ),
+            ("owners/src/parts/index.ts", ""),
+            ("stray/lib.rs", "use super::other;\n"),
+        ] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let cfg = PackConfig {
+            use_cache: false,
+            ..Default::default()
+        };
+        let result =
+            build_pack(dir.path(), 4000, None, &FileFilter::new(dir.path()), &cfg).unwrap();
+        let strings =
+            |items: &[&str]| -> Vec<String> { items.iter().map(|item| item.to_string()).collect() };
+        assert_eq!(result.undetermined_imports, strings(&["@x/y"]));
+        assert_eq!(result.declaration_undetermined_imports, strings(&["jq"]));
+        assert_eq!(result.type_root_undetermined_imports, strings(&["ex"]));
+        assert_eq!(
+            result.version_undetermined_imports,
+            strings(&["../components", "../widgets"])
+        );
+        assert_eq!(result.projects_undetermined_imports, strings(&["../parts"]));
+        assert_eq!(result.jsconfig_undetermined_imports, strings(&["../lib"]));
+        assert_eq!(
+            result.types_versions_undetermined_imports,
+            strings(&["./pv"])
+        );
+        assert_eq!(result.typescript_ranges, strings(&[">=5"]));
+        assert!(result.typescript_not_installed);
+        assert!(result.typescript_installed_unread);
+        assert_eq!(
+            result.undetermined_ts_projects,
+            strings(&["owners/src/shared/s.ts"])
+        );
+        assert!(result.rust_relative_imports_omitted);
+    }
 }
