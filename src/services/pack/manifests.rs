@@ -274,13 +274,13 @@ impl TsConfig {
     /// rejects that pack reads apart under 6 and 7
     /// (`ModuleOptions::removed_in_7`); `outFile` (TS5102) is rejected too,
     /// but changes no option pack reads. Such a chain is read under 5 and 6
-    /// alone unless what pack knows of the TypeScript excludes every major
-    /// below 7: where none is installed or declared, where the version
+    /// alone where none is installed or declared, where the version
     /// installed is no number, and where a declared range admits a major
-    /// below 7 (`range_admits_below_7`). A major above 7 installed or
-    /// declared, and a declared range admitting only 7 and above (`>=7`),
-    /// keep 7, so what the majors read apart there is disclosed: no major
-    /// they admit builds the project.
+    /// below 7 (`range_admits_below_7`): that is, unless what pack knows of
+    /// the TypeScript excludes every major below 7. A major above 7
+    /// installed or declared, and a declared range admitting only 7 and
+    /// above (`>=7`), keep 7, so what the majors read apart there is
+    /// disclosed: no major they admit builds the project.
     pub(super) fn majors(&self) -> Vec<u8> {
         let rejected_by_7 = self.base_url.is_some() || self.module_options.removed_in_7();
         let refused = rejected_by_7
