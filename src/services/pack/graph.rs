@@ -41,6 +41,10 @@ pub(super) struct ImportGraph {
     /// The specifiers the projects of a tsconfig's `references` compiling
     /// an importer read as different files.
     pub(super) projects_undetermined_imports: BTreeSet<String>,
+    /// The specifiers the TypeScript majors that may read the
+    /// `jsconfig.json` of an importer's JavaScript project read as different
+    /// files.
+    pub(super) jsconfig_undetermined_imports: BTreeSet<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of those specifiers.
     pub(super) typescript_ranges: BTreeSet<String>,
@@ -98,6 +102,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut type_root_undetermined_imports = BTreeSet::new();
     let mut version_undetermined_imports = BTreeSet::new();
     let mut projects_undetermined_imports = BTreeSet::new();
+    let mut jsconfig_undetermined_imports = BTreeSet::new();
     let mut typescript_ranges = BTreeSet::new();
     let mut typescript_not_installed = false;
     let mut typescript_installed_unread = false;
@@ -160,6 +165,10 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     projects_undetermined_imports.insert(specifier);
                     continue;
                 }
+                Resolution::JsConfigUndetermined(specifier) => {
+                    jsconfig_undetermined_imports.insert(specifier);
+                    continue;
+                }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
                     match importer.typescript {
@@ -191,6 +200,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         type_root_undetermined_imports,
         version_undetermined_imports,
         projects_undetermined_imports,
+        jsconfig_undetermined_imports,
         typescript_ranges,
         typescript_not_installed,
         typescript_installed_unread,
@@ -229,6 +239,9 @@ enum Resolution {
     /// A specifier the projects of a tsconfig's `references` that compile
     /// the importer, saying different things, read as different files.
     ProjectsUndetermined(String),
+    /// A specifier the TypeScript majors that may read the `jsconfig.json`
+    /// of the importer's JavaScript project read as different files.
+    JsConfigUndetermined(String),
 }
 
 /// What resolving a file's references needs to know about where the file
@@ -652,15 +665,16 @@ enum Hit {
 /// How a specifier the readings of its importer name different files for
 /// is disclosed: as one the projects compiling it read apart where several
 /// saying different things take it, as one the TypeScript version decides
-/// where they read one configuration under several majors, else as one the
-/// configuration does not determine.
+/// where they read one configuration under several majors, and in a
+/// `jsconfig.json`'s JavaScript project, which is never one to tell to
+/// install TypeScript, as one the majors read its configuration apart.
 fn read_apart(specifier: &str, importer: &Importer) -> Resolution {
     if !importer.ts_owners.is_empty() {
         return Resolution::ProjectsUndetermined(specifier.to_string());
     }
     match importer.typescript {
         Some(_) => Resolution::VersionUndetermined(specifier.to_string()),
-        None => Resolution::Undetermined(specifier.to_string()),
+        None => Resolution::JsConfigUndetermined(specifier.to_string()),
     }
 }
 
@@ -6617,8 +6631,8 @@ mod tests {
     /// Next.js 16.3.3 read it, also where TypeScript 7 is declared
     /// (`cra_js_ts7`) and for a TypeScript file there, which esbuild 0.28.2
     /// resolves through it with TypeScript 7.0.2 installed, and an import
-    /// the TypeScript majors read apart there is disclosed without advice to
-    /// install TypeScript.
+    /// the TypeScript majors read apart there is disclosed as one they read
+    /// its configuration apart, without advice to install TypeScript.
     #[test]
     fn a_javascript_projects_jsconfig_is_read_with_its_base_url() {
         let js = |id, rel: &str, source: &str| node_in(id, rel, source, Language::JavaScript);
@@ -6702,9 +6716,47 @@ mod tests {
         assert_eq!(edges(6), vec!["cra7/src/components/Button.js"]);
         assert!(graph.version_undetermined_imports.is_empty());
         assert_eq!(
-            graph.undetermined_imports,
+            graph.jsconfig_undetermined_imports,
             BTreeSet::from(["p6".to_string()])
         );
+        assert!(graph.undetermined_imports.is_empty());
+    }
+
+    /// A relative specifier the TypeScript majors read apart in a
+    /// `jsconfig.json`'s JavaScript project is disclosed as one they read its
+    /// configuration apart, not as a `paths` alias naming no file, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it (`js_apart`): `module` `esnext` reads
+    /// `classic` under 5, which finds no file for `../components`, and
+    /// `bundler` under 6 and 7, which take `components/index.js`.
+    #[test]
+    fn a_relative_specifier_a_jsconfigs_majors_read_apart_names_its_cause() {
+        let nodes = vec![
+            node_in(
+                0,
+                "src/app/main.js",
+                "import x from \"../components\";\n",
+                Language::JavaScript,
+            ),
+            node_in(1, "src/components/index.js", "", Language::JavaScript),
+        ];
+        let manifests = manifests_of(
+            &[
+                ("package.json", "{\"name\": \"js-apart\"}"),
+                (
+                    "jsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"esnext\"}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.edges[&0].is_empty());
+        assert_eq!(
+            graph.jsconfig_undetermined_imports,
+            BTreeSet::from(["../components".to_string()])
+        );
+        assert!(graph.undetermined_imports.is_empty());
+        assert!(graph.version_undetermined_imports.is_empty());
     }
 
     /// A configuration with `references` that does not compile a file itself
