@@ -267,13 +267,12 @@ impl TsConfig {
     /// TypeScript 7 compiles: `baseUrl` (TS5102), or a module option 7
     /// rejects that pack reads apart under 6 and 7
     /// (`ModuleOptions::removed_in_7`); `outFile` (TS5102) is rejected too,
-    /// but changes no option pack reads. Where no major pack reads is
-    /// installed or declared and one below 7 is admissible — none installed
-    /// or declared, a version above 7 installed, a declared range admitting
-    /// one (`range_admits_below_7`) — such a chain is read under 5 and 6
-    /// alone. A declared range admitting only 7 and above (`>=7`) keeps 7, so
-    /// what the majors read apart there is disclosed: no major it admits
-    /// builds the project.
+    /// but changes no option pack reads. Such a chain is read under 5 and 6
+    /// alone where none is installed or declared, where the version
+    /// installed is above 7 or no number, and where a declared range admits
+    /// a major below 7 (`range_admits_below_7`). A declared range admitting
+    /// only 7 and above (`>=7`, `^8.0.0`) keeps 7, so what the majors read
+    /// apart there is disclosed: no major it admits builds the project.
     pub(super) fn majors(&self) -> Vec<u8> {
         let rejected_by_7 = self.base_url.is_some() || self.module_options.removed_in_7();
         let refused = rejected_by_7
