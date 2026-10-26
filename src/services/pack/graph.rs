@@ -1425,12 +1425,79 @@ impl ProjectIndex<'_> {
         {
             return Resolution::Files(found);
         }
-        let unmapped = || match &mapped {
-            Some(mapping) if !mapping.catch_all => Resolution::Undetermined(specifier.to_string()),
-            _ => Resolution::Files(Vec::new()),
+        let declared = mapped.as_ref().is_some_and(|mapping| !mapping.catch_all);
+        if reading.mode == ImportMode::Classic && !declared {
+            return self.classic_lookup(specifier, importer.node);
+        }
+        let unmapped = || match declared {
+            true => Resolution::Undetermined(specifier.to_string()),
+            false => Resolution::Files(Vec::new()),
         };
         self.workspace_package(specifier, importer, reading, form)
             .unwrap_or_else(unmapped)
+    }
+
+    /// What `classic` resolution, which reads no `package.json`, names for
+    /// a non-relative specifier past `paths` and `baseUrl`, as tsc 5.9.3 and
+    /// 6.0.3 look it up. In the importer's directory and each one above it
+    /// — past the project's root, to the filesystem's — it tries the
+    /// specifier with `.ts`, `.tsx` and `.d.ts`, a `.js` extension it writes
+    /// first stripped and then kept (`lib/util.js` as `lib/util.ts`, then
+    /// `lib/util.js.ts`), and takes the first file that exists. Only then
+    /// does it look in each `node_modules/@types` above the importer, and
+    /// last walks again with `.js` and `.jsx`, `allowJs` set or not; a
+    /// directory's `index`, `.mts` and `.cts` it never tries. So a TypeScript
+    /// file the walk finds in the project is the one, and a JavaScript file
+    /// is the one unless an `@types` package by the specifier's name sits in
+    /// a `node_modules` above the importer, which pack does not read, so the
+    /// specifier is disclosed there. A specifier writing another script
+    /// extension (`.ts`, `.jsx`) is disclosed, its lookup not measured. What
+    /// the walk finds outside the project, or nowhere, is no file pack reads;
+    /// like `node_modules`, the walk is read only up to the project's root.
+    fn classic_lookup(&self, specifier: &str, from: &Node) -> Resolution {
+        let mut directory = split_components(specifier);
+        let Some(name) = directory.pop() else {
+            return Resolution::Files(Vec::new());
+        };
+        let stems: Vec<&str> = match name.rsplit_once('.') {
+            Some((stem, "js")) => vec![stem, &name],
+            Some((_, "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")) => {
+                return Resolution::Undetermined(specifier.to_string());
+            }
+            _ => vec![&name],
+        };
+        let walk = |extensions: &[&str]| {
+            (0..=from.directory.len()).rev().find_map(|depth| {
+                stems.iter().find_map(|stem| {
+                    extensions.iter().find_map(|extension| {
+                        let path = [
+                            &from.directory[..depth],
+                            &directory,
+                            &[format!("{stem}.{extension}")],
+                        ]
+                        .concat();
+                        match self.exact.by_file.get(&path) {
+                            Some(file) => Some(vec![*file]),
+                            None => self.manifests.is_file_on_disk(&path).then(Vec::new),
+                        }
+                    })
+                })
+            })
+        };
+        if let Some(found) = walk(&["ts", "tsx", "d.ts"]) {
+            return Resolution::Files(found);
+        }
+        match walk(&["js", "jsx"]).unwrap_or_default() {
+            found
+                if !found.is_empty()
+                    && self
+                        .manifests
+                        .types_package_above(&from.directory, specifier) =>
+            {
+                Resolution::Undetermined(specifier.to_string())
+            }
+            found => Resolution::Files(found),
+        }
     }
 
     /// Whether a TypeScript configuration maps a non-relative specifier:
@@ -4168,6 +4235,82 @@ mod tests {
             graph.ts_owner_undetermined,
             BTreeSet::from(["apps/web/shared/s.ts".to_string()])
         );
+    }
+
+    /// `classic` resolution looks a non-relative specifier up in the
+    /// importer's directory and each one above it, as tsc 5.9.3 and 6.0.3
+    /// trace it (`classic_walk`): `.ts`, `.tsx` and `.d.ts` first, the
+    /// nearest directory first (`lib/near`), a written `.js` stripped
+    /// (`lib/other.js`), never a directory's `index` or `.mts`; then, past
+    /// `node_modules/@types`, `.js` and `.jsx`, so a JavaScript file is
+    /// disclosed where an `@types` package of its name is installed (`jq`).
+    /// Another written script extension is disclosed (`lib/util.ts`). A
+    /// file on disk that pack does not read ends the walk with no edge
+    /// (`lib/gen`, for which tsc takes `src/app/lib/gen.d.ts`).
+    #[test]
+    fn classic_resolution_walks_the_importers_directories() {
+        let ts = |id, rel: &str| node_in(id, rel, "", Language::TypeScript);
+        let js = |id, rel: &str| node_in(id, rel, "", Language::JavaScript);
+        let imports = "import a from \"lib/util\";\nimport b from \"lib/near\";\n\
+                       import c from \"x/both\";\nimport d from \"lib/other.js\";\n\
+                       import e from \"js/thing\";\nimport f from \"jq\";\n\
+                       import g from \"dir\";\nimport h from \"m/n\";\n\
+                       import i from \"lib/util.ts\";\nimport j from \"lib/gen\";\n";
+        let nodes = vec![
+            node_in(0, "cw/src/app/main.ts", imports, Language::TypeScript),
+            ts(1, "cw/src/lib/util.ts"),
+            ts(2, "cw/src/app/lib/near.ts"),
+            ts(3, "cw/src/lib/near.ts"),
+            ts(4, "cw/src/x/both.ts"),
+            ts(5, "cw/src/x/both.d.ts"),
+            js(6, "cw/src/js/thing.js"),
+            js(7, "cw/src/jq.js"),
+            ts(8, "cw/src/dir/index.ts"),
+            ts(9, "cw/src/m/n.mts"),
+            ts(10, "cw/src/lib/other.ts"),
+            ts(11, "cw/src/lib/gen.ts"),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "cw/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "cw/tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"amd\", \"outFile\": \"out.js\"}}",
+                ),
+                (
+                    "cw/node_modules/@types/jq/index.d.ts",
+                    "export declare const jq: string;",
+                ),
+                (
+                    "cw/src/app/lib/gen.d.ts",
+                    "export declare const gen: string;",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(
+            edges,
+            vec![
+                "cw/src/lib/util.ts",
+                "cw/src/app/lib/near.ts",
+                "cw/src/x/both.ts",
+                "cw/src/lib/other.ts",
+                "cw/src/js/thing.js"
+            ]
+        );
+        assert_eq!(
+            graph.undetermined_imports,
+            BTreeSet::from(["jq".to_string(), "lib/util.ts".to_string()])
+        );
+        assert!(graph.version_undetermined_imports.is_empty());
     }
 
     /// A JavaScript project's `jsconfig.json`, as Create React App documents
