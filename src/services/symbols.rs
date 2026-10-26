@@ -1130,9 +1130,7 @@ fn literal_argument_macros(root: Node) -> Vec<std::ops::Range<usize>> {
         let mut cursor = node.walk();
         pending.extend(node.children(&mut cursor));
         if !holds_a_statement(node)
-            || !std::iter::successors(node.next_sibling(), Node::next_sibling)
-                .find(|next| !next.is_extra())
-                .is_some_and(opens_with_a_declaration_word)
+            || !sibling_after(node).is_some_and(opens_with_a_declaration_word)
         {
             continue;
         }
@@ -1444,20 +1442,15 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         let mut clause = false;
         let mut outside = Vec::with_capacity(leaves.len());
         for (at, leaf) in leaves.iter().enumerate() {
-            if header.is_none()
+            if header.is_none_or(|last| at > last)
                 && text(*leaf) == b"template"
                 && leaves.get(at + 1).is_some_and(|next| next.kind() == "<")
             {
-                header = Some(0);
+                header =
+                    Some(matching_angle(&leaves, at + 1..leaves.len()).unwrap_or(leaves.len()));
             }
-            if let Some(open) = header {
-                let open = match leaf.kind() {
-                    "<" => open + 1,
-                    ">" => open.saturating_sub(1),
-                    _ => open,
-                };
-                header = (open > 0 || leaf.kind() != ">").then_some(open);
-                clause = header.is_none()
+            if let Some(last) = header.filter(|&last| at <= last) {
+                clause = at == last
                     && leaves
                         .get(at + 1)
                         .is_some_and(|next| text(*next) == b"requires");
@@ -1500,18 +1493,7 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
                 continue;
             }
             if name > key + 1 && leaves[name - 1].kind() == ">" {
-                let mut open = 0usize;
-                while name > key + 1 {
-                    name -= 1;
-                    match leaves[name].kind() {
-                        ">" => open += 1,
-                        "<" => open -= 1,
-                        _ => {}
-                    }
-                    if open == 0 {
-                        break;
-                    }
-                }
+                name = matching_angle(&leaves, (key + 1..name).rev()).unwrap_or(key + 1);
             }
             if name <= key + 1 || !is_identifier(leaves[name - 1]) {
                 continue;
@@ -1541,6 +1523,21 @@ fn misread_class_macros(root: Node, source: &[u8]) -> Vec<std::ops::Range<usize>
         }
     }
     macros
+}
+
+/// Where the angle bracket at the first of `indices` closes among C++
+/// `leaves`: the index, in the order `indices` runs, at which as many `<` as
+/// `>` have been passed, or `None` where none is.
+fn matching_angle(leaves: &[Node], indices: impl IntoIterator<Item = usize>) -> Option<usize> {
+    let mut open = 0isize;
+    indices.into_iter().find(|&at| {
+        open += match leaves[at].kind() {
+            "<" => 1,
+            ">" => -1,
+            _ => 0,
+        };
+        open == 0
+    })
 }
 
 /// What a preprocessor conditional writes in a C++ class head between the
@@ -1891,6 +1888,12 @@ fn sibling_before(node: Node) -> Option<Node> {
         .find(|before| !before.is_extra() || before.is_error())
 }
 
+/// The C or C++ node written right after `node` among its siblings, every
+/// node the grammar holds as an extra passed over.
+fn sibling_after(node: Node) -> Option<Node> {
+    std::iter::successors(node.next_sibling(), Node::next_sibling).find(|after| !after.is_extra())
+}
+
 /// Whether a C or C++ node is a word of the run of macros a prototype the
 /// grammar could not read is written after: an invocation whose arguments
 /// name nothing ([`names_a_parameter`]) or a plain name.
@@ -1919,10 +1922,6 @@ fn in_a_prototype_run(part: Node) -> bool {
 /// after it, which holds its `;` and any macro written before that, or
 /// with the `;` itself.
 fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
-    fn after(node: Node) -> Option<Node> {
-        std::iter::successors(node.next_sibling(), Node::next_sibling)
-            .find(|after| !after.is_extra())
-    }
     let error = node.parent().filter(|error| error.is_error())?;
     if !names_a_parameter(node) && !declares_unnamed_parameters(node) {
         return None;
@@ -1968,8 +1967,8 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
     {
         start = before;
     }
-    let end = after(node)
-        .or_else(|| after(error))
+    let end = sibling_after(node)
+        .or_else(|| sibling_after(error))
         .filter(|end| matches!(end.kind(), "expression_statement" | ";"))
         .unwrap_or(node);
     Some((start, end))
