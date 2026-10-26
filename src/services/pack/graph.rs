@@ -31,6 +31,14 @@ pub(super) struct ImportGraph {
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of those specifiers.
     pub(super) typescript_ranges: BTreeSet<String>,
+    /// Whether an importer of those specifiers has no `typescript`
+    /// installed: none at all, or a range declared.
+    pub(super) typescript_not_installed: bool,
+    /// Whether an importer of those specifiers has a `typescript` installed
+    /// that pack reads no major from 5 to 7 from, one above 7 or no number,
+    /// which a declared range does not settle: the installed one is read
+    /// first.
+    pub(super) typescript_installed_unread: bool,
     /// The files writing a non-relative specifier whose TypeScript
     /// configuration the `references` above them leave undetermined: the
     /// projects compiling the file disagree, or none compiles it and one
@@ -73,6 +81,8 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
     let mut undetermined_imports = BTreeSet::new();
     let mut version_undetermined_imports = BTreeSet::new();
     let mut typescript_ranges = BTreeSet::new();
+    let mut typescript_not_installed = false;
+    let mut typescript_installed_unread = false;
     let mut ts_owner_undetermined = BTreeSet::new();
     // The configurations each TypeScript project's references reach, and
     // whether one of them maps a specifier, each worked out once for every
@@ -122,10 +132,16 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                 }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
-                    if let Some(TypeScript::Above(Some(range)) | TypeScript::Unknown(Some(range))) =
-                        importer.typescript
-                    {
-                        typescript_ranges.insert(range.clone());
+                    match importer.typescript {
+                        Some(TypeScript::Above(Some(range)) | TypeScript::Unknown(Some(range))) => {
+                            typescript_ranges.insert(range.clone());
+                            typescript_not_installed = true;
+                        }
+                        Some(TypeScript::Above(None) | TypeScript::Unknown(None)) => {
+                            typescript_installed_unread = true;
+                        }
+                        Some(TypeScript::Absent) => typescript_not_installed = true,
+                        Some(TypeScript::Major(_)) | None => {}
                     }
                     continue;
                 }
@@ -143,6 +159,8 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         undetermined_imports,
         version_undetermined_imports,
         typescript_ranges,
+        typescript_not_installed,
+        typescript_installed_unread,
         ts_owner_undetermined,
     }
 }
@@ -4204,6 +4222,8 @@ mod tests {
                 "^8.0.0".to_string()
             ])
         );
+        // `inst8` has one installed, which no declared range settles.
+        assert!(graph.typescript_not_installed && graph.typescript_installed_unread);
     }
 
     /// A file several projects compile under different majors and module
@@ -5525,6 +5545,7 @@ mod tests {
             graph.typescript_ranges,
             BTreeSet::from(["^8.0.0".to_string(), "latest".to_string()])
         );
+        assert!(graph.typescript_not_installed && !graph.typescript_installed_unread);
     }
 
     /// A file TypeScript does not compile — a JavaScript file no

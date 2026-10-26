@@ -90,6 +90,14 @@ pub struct PackResult {
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of `version_undetermined_imports`.
     pub typescript_ranges: Vec<String>,
+    /// Whether an importer of `version_undetermined_imports` has no
+    /// `typescript` installed: none at all, or a range declared.
+    pub typescript_not_installed: bool,
+    /// Whether an importer of `version_undetermined_imports` has a
+    /// `typescript` installed that pack reads no major from 5 to 7 from (one
+    /// above 7, or no number), which only installing another settles: the
+    /// installed one is read before any declared range.
+    pub typescript_installed_unread: bool,
     /// The JavaScript and TypeScript files below a configuration whose
     /// `references` name no one project compiling them — several that
     /// disagree, or none where one of those projects maps a specifier the
@@ -132,6 +140,8 @@ pub fn build_pack(
             undetermined_imports: Vec::new(),
             version_undetermined_imports: Vec::new(),
             typescript_ranges: Vec::new(),
+            typescript_not_installed: false,
+            typescript_installed_unread: false,
             undetermined_ts_projects: Vec::new(),
             unreadable_paths: Vec::new(),
         });
@@ -204,6 +214,8 @@ pub fn build_pack(
         undetermined_imports: graph.undetermined_imports.into_iter().collect(),
         version_undetermined_imports: graph.version_undetermined_imports.into_iter().collect(),
         typescript_ranges: graph.typescript_ranges.into_iter().collect(),
+        typescript_not_installed: graph.typescript_not_installed,
+        typescript_installed_unread: graph.typescript_installed_unread,
         undetermined_ts_projects: graph.ts_owner_undetermined.into_iter().collect(),
         files: fitted.files,
         estimated_tokens: fitted.estimated_tokens,
