@@ -5328,7 +5328,10 @@ mod tests {
     /// it (`rp7/classic_typeroots`'s `jq`), none and nothing disclosed where
     /// it is only on disk (`@sc/z`). A JavaScript file the walk finds is
     /// disclosed where a root outside the project may hold a declaration
-    /// for it (`up`), and is the one where none does (`emp`, `@sc/y`).
+    /// for it (`up`), and is the one where none does (`emp`, `@sc/y`). A
+    /// `node_modules/@types` above the project's root comes before every
+    /// type root: its declaration, which pack does not read, stands for
+    /// `ot` over the one a root in the project holds, and forms no edge.
     #[test]
     fn classic_resolution_looks_in_the_type_roots_after_types() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5350,6 +5353,7 @@ mod tests {
             ),
             ("outer/repo/base/typings/emp/README.md", ""),
             ("outer/types/up/index.d.ts", declaration),
+            ("outer/node_modules/@types/ot/index.d.ts", declaration),
             (
                 "outer/repo/base/nm/node_modules/@types/sc__z/index.d.ts",
                 declaration,
@@ -5359,7 +5363,16 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
             std::fs::write(path, contents).expect("write");
         }
-        let specifiers = ["jq", "lib2/util", "@sc/x", "@sc/y", "up", "@sc/z", "emp"];
+        let specifiers = [
+            "jq",
+            "lib2/util",
+            "@sc/x",
+            "@sc/y",
+            "up",
+            "@sc/z",
+            "emp",
+            "ot",
+        ];
         let source: String = specifiers
             .iter()
             .map(|specifier| format!("import \"{specifier}\";\n"))
@@ -5381,6 +5394,7 @@ mod tests {
             "base/typings/lib2/util.d.ts",
             "base/typings/@sc/x/index.d.ts",
             "base/typings/sc__y/index.d.ts",
+            "base/typings/ot/index.d.ts",
         ] {
             nodes.push(node_in(nodes.len(), rel, declaration, Language::TypeScript));
         }
@@ -5498,7 +5512,9 @@ mod tests {
     /// `exports` pack does not follow, forms no edge and is not disclosed,
     /// as neither is a file pack reads (`ox` in `./node_modules/@org/types`);
     /// a root that is no `node_modules/@types` keeps a scope as written
-    /// (`@sc/q` in `./src/@types`).
+    /// (`@sc/q` in `./src/@types`). A subpath below a type root is not
+    /// read through the `typesVersions` of the `package.json` above it,
+    /// which only a `node_modules` package's subpath goes through (`vs/sub`).
     #[test]
     fn a_type_root_declaration_outside_classic_comes_after_node_modules() {
         let specifiers = [
@@ -5521,6 +5537,7 @@ mod tests {
             "es/sub",
             "ox",
             "@sc/q",
+            "vs/sub",
         ];
         let source: String = specifiers
             .iter()
@@ -5544,6 +5561,7 @@ mod tests {
             "ei/index.d.ts",
             "en/index.d.ts",
             "es/sub/index.d.ts",
+            "vs/sub/index.d.ts",
         ];
         let modes = [
             (
@@ -5641,6 +5659,11 @@ mod tests {
                         "src/@types/@sc/q/package.json",
                         "{\"types\": \"index.d.ts\"}",
                     ),
+                    (
+                        "typings/vs/package.json",
+                        "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                    ),
+                    ("typings/vs/ts/sub/index.d.ts", ""),
                 ],
                 &nodes,
             );
@@ -5674,6 +5697,7 @@ mod tests {
             "nm/index.d.ts",
             "tn/lib/t.ts",
             "src/@types/@sc/q/index.d.ts",
+            "vs/sub/index.d.ts",
         ];
         let node10 = [
             &common[..],
