@@ -67,10 +67,13 @@ pub(super) enum TypeScript {
     Absent,
     /// The major installed or declared, one below 5 read as 5 (`of_major`).
     Major(u8),
-    /// Installed or declared at no major whose defaults pack reads
-    /// (`MAJORS`) — a version above them, a range pack reads none of them
-    /// from (`typescript_major`) — so any of them; the declared range where
-    /// one is written.
+    /// A major above those whose defaults pack reads (`MAJORS`), installed
+    /// or declared (`^8.0.0`): read as any of them, though it excludes every
+    /// major below 7; the declared range where one is written.
+    Above(Option<String>),
+    /// Installed at a version that is no number, or declared as a range pack
+    /// reads no major from (`typescript_major`), so any of them; the
+    /// declared range where one is written.
     Unknown(Option<String>),
 }
 
@@ -89,20 +92,23 @@ impl TypeScript {
     pub(super) fn majors(&self) -> &[u8] {
         match self {
             Self::Major(major) => std::slice::from_ref(major),
-            Self::Absent | Self::Unknown(_) => &MAJORS,
+            Self::Absent | Self::Above(_) | Self::Unknown(_) => &MAJORS,
         }
     }
 
     /// What the version installed, or the `range` declared, is read as: one
     /// below 5 as 5, whose `module` and `moduleResolution` defaults
     /// TypeScript's documentation gives every earlier major too (`commonjs`
-    /// resolving as `node10`, an ES `module` as `classic`); one above 7, or
-    /// none, as unknown.
+    /// resolving as `node10`, an ES `module` as `classic`); one above 7 as
+    /// above them, and none as unknown.
     fn of_major(major: Option<u64>, range: Option<String>) -> Self {
-        match major.and_then(|major| u8::try_from(major).ok()) {
-            Some(major) if major < MAJORS[0] => Self::Major(MAJORS[0]),
-            Some(major) if MAJORS.contains(&major) => Self::Major(major),
-            _ => Self::Unknown(range),
+        match major {
+            Some(major) if major < u64::from(MAJORS[0]) => Self::Major(MAJORS[0]),
+            Some(major) => match u8::try_from(major) {
+                Ok(major) if MAJORS.contains(&major) => Self::Major(major),
+                _ => Self::Above(range),
+            },
+            None => Self::Unknown(range),
         }
     }
 }
@@ -268,16 +274,18 @@ impl TsConfig {
     /// rejects that pack reads apart under 6 and 7
     /// (`ModuleOptions::removed_in_7`); `outFile` (TS5102) is rejected too,
     /// but changes no option pack reads. Such a chain is read under 5 and 6
-    /// alone where none is installed or declared, where the version
-    /// installed is above 7 or no number, and where a declared range admits
-    /// a major below 7 (`range_admits_below_7`). A declared range admitting
-    /// only 7 and above (`>=7`, `^8.0.0`) keeps 7, so what the majors read
-    /// apart there is disclosed: no major it admits builds the project.
+    /// alone unless what pack knows of the TypeScript excludes every major
+    /// below 7: where none is installed or declared, where the version
+    /// installed is no number, and where a declared range admits a major
+    /// below 7 (`range_admits_below_7`). A major above 7 installed or
+    /// declared, and a declared range admitting only 7 and above (`>=7`),
+    /// keep 7, so what the majors read apart there is disclosed: no major
+    /// they admit builds the project.
     pub(super) fn majors(&self) -> Vec<u8> {
         let rejected_by_7 = self.base_url.is_some() || self.module_options.removed_in_7();
         let refused = rejected_by_7
             && match &self.typescript {
-                TypeScript::Major(_) => false,
+                TypeScript::Major(_) | TypeScript::Above(_) => false,
                 TypeScript::Absent | TypeScript::Unknown(None) => true,
                 TypeScript::Unknown(Some(range)) => range_admits_below_7(range),
             };
