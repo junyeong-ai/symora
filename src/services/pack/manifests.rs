@@ -664,6 +664,32 @@ impl Manifests {
         self.ts_projects.reached(project)
     }
 
+    /// Whether the file a path names whole is on disk.
+    pub(super) fn is_file_on_disk(&self, written: &[String]) -> bool {
+        self.root
+            .as_ref()
+            .is_some_and(|root| project_file(root, written).is_file())
+    }
+
+    /// Whether a `node_modules/@types` from `directory` up to the project
+    /// root holds a package by the name a specifier's first components give
+    /// (`@scope/name` as `scope__name`), as a directory or a `.d.ts` file,
+    /// which TypeScript's `classic` resolution looks in before it takes a
+    /// JavaScript file.
+    pub(super) fn types_package_above(&self, directory: &[String], specifier: &str) -> bool {
+        let Some(root) = &self.root else {
+            return false;
+        };
+        let (name, _) = split_package_name(specifier);
+        let package = name
+            .strip_prefix('@')
+            .map_or_else(|| name.to_string(), |scoped| scoped.replacen('/', "__", 1));
+        (0..=directory.len()).any(|depth| {
+            let types = project_file(root, &directory[..depth]).join("node_modules/@types");
+            types.join(&package).is_dir() || types.join(format!("{package}.d.ts")).is_file()
+        })
+    }
+
     /// Whether a file a JavaScript or TypeScript path names is on disk, as
     /// TypeScript looks for one: the file as written, with a script
     /// extension it leaves out or in place of the JavaScript one it writes,
