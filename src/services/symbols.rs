@@ -2575,9 +2575,14 @@ enum Read {
 /// the name opens: a value is a variable's body, and an initializer can be
 /// any size, so every value the statement writes before that stays out as
 /// well ([`declared_text`]). The rest of a C or C++ declaration that invoked
-/// a macro was read apart from where it begins ([`continued_macro`]), and so
-/// was a prototype an error holds ([`error_held_prototype`]), so each is a
-/// recovered reading.
+/// a macro was read apart from where it begins ([`continued_macro`]), so it
+/// is a recovered reading. A prototype an error holds is signed with the
+/// text its range writes, from the macro it is written after to its `;`
+/// ([`error_held_prototype`]): that rule proves the span, and no reading of
+/// it, in the file or alone, holds it without an error. A prototype the
+/// grammar read as a declaration with its macro's arguments in an error
+/// (`extern NCURSES_EXPORT(int) addch (const chtype);`) is no such one, and
+/// signs as null.
 fn read_signature(
     root: Node,
     content: &str,
@@ -2615,11 +2620,23 @@ fn read_signature(
         run_end = Some(last.end_byte());
     }
     if language == Language::Cpp
-        && (continued_macro(declaration).is_some()
-            || std::iter::successors(Some(named), Node::parent)
-                .take_while(|node| !node.is_error())
-                .any(|node| error_held_prototype(node).is_some()))
+        && std::iter::successors(Some(named), Node::parent)
+            .take_while(|node| !node.is_error())
+            .chain(
+                named
+                    .parent()
+                    .filter(Node::is_error)
+                    .and_then(|error| error.parent()),
+            )
+            .any(|node| error_held_prototype(node).is_some())
     {
+        let text = content
+            .get(start..end)?
+            .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ';' | ','))
+            .trim_start();
+        return (!text.is_empty()).then(|| Read::AsWritten(text.to_string()));
+    }
+    if language == Language::Cpp && continued_macro(declaration).is_some() {
         return Some(Read::Recovered);
     }
     // A JS/TS statement declaring several names is the declaration of each, as
@@ -7984,6 +8001,36 @@ region     = "us-central1"
             ],
             "a prototype an error holds is the function its parameters name, after its type's macro"
         );
+        let signed = extractor.extract_with_signatures(
+            Path::new("e.h"),
+            "FT_EXPORT( FT_Error )\nFT_Init( FT_Library  library );\n\
+             GIT_EXTERN(const char *) git_c(const git_blob *blob);\n\
+             LZO_EXTERN(int)\nlzo_x ( const lzo_bytep src, lzo_uint  src_len );\n",
+            Language::Cpp,
+        );
+        for (name, expected) in [
+            (
+                "FT_Init",
+                "FT_EXPORT( FT_Error )\nFT_Init( FT_Library  library )",
+            ),
+            (
+                "git_c",
+                "GIT_EXTERN(const char *) git_c(const git_blob *blob)",
+            ),
+            (
+                "lzo_x",
+                "LZO_EXTERN(int)\nlzo_x ( const lzo_bytep src, lzo_uint  src_len )",
+            ),
+        ] {
+            assert_eq!(
+                signed
+                    .iter()
+                    .find(|symbol| symbol.name == name)
+                    .and_then(|symbol| symbol.signature.as_deref()),
+                Some(expected),
+                "a prototype an error holds signs with the text its range writes: {name}"
+            );
+        }
         assert_eq!(
             declared(
                 "extern NCURSES_EXPORT(int) addch (const chtype);\n\
@@ -9147,7 +9194,7 @@ region     = "us-central1"
                 "FT_EXPORT( void )\nFT_List_Add( FT_List  list,\n FT_ListNode node );\n\n\
                  FT_EXPORT( FT_Error )\nFT_List_Iterate( FT_List  list,\n void*  user );\n",
                 "FT_List_Add",
-                None,
+                Some("FT_EXPORT( void )\nFT_List_Add( FT_List  list,\n FT_ListNode node )"),
             ),
             (
                 "a.h",
