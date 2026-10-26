@@ -519,8 +519,7 @@ const SCRIPT_EXTENSIONS: [&str; 12] = [
 
 /// Whether the path a specifier names below `base` may hold the declaration
 /// `classic` resolution takes for it there, as tsc 5.9.3 and 6.0.3 look one
-/// up: a declaration the path names (`classic_names` in the declaration
-/// pass), else the directory it names holding an `index.d.ts`, or a
+/// up: a declaration the path names (`module_names` of declarations), else the directory it names holding an `index.d.ts`, or a
 /// `package.json` naming `types`, `typings`, `main` or `typesVersions`
 /// (`declares_types`), whose file pack does not look up. A directory holding
 /// neither, or a `package.json` naming none of them, holds none: tsc takes
@@ -534,7 +533,7 @@ fn holds_declaration(base: &Path, specifier: &str) -> bool {
     let Some((name, parent)) = named else {
         return false;
     };
-    classic_names(name, ClassicPass::Declaration)
+    module_names(name, Extensions::Declaration, true)
         .iter()
         .any(|declaration| parent.join(declaration).is_file())
         || candidate.join("index.d.ts").is_file()
@@ -560,31 +559,36 @@ fn has_extension(name: &str, extension: &str) -> bool {
     name.len() > extension.len() && name.ends_with(extension)
 }
 
-/// A pass of `classic` resolution, which looks a module up with one set of
-/// extensions and then another (`classic_names`).
+/// The extensions TypeScript looks a module up with in one pass of its
+/// lookup (`module_names`): `classic` and `node10` look for TypeScript's
+/// files, then JavaScript's, `bundler` and `node16` for both at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ClassicPass {
-    /// TypeScript's own files, then declarations: the first pass.
+pub(super) enum Extensions {
+    /// TypeScript's own files, then declarations.
     TypeScript,
     /// Declarations alone, as it looks in `@types` and `typeRoots`.
     Declaration,
-    /// JavaScript files: the last pass, `allowJs` set or not.
+    /// JavaScript files, `allowJs` set or not.
     JavaScript,
+    /// TypeScript's files, declarations, then JavaScript's, as `bundler` and
+    /// `node16` look in one pass.
+    All,
 }
 
-/// The names `classic` resolution tries, in order, for a file a path names
-/// by `name` in one pass, as tsc 5.9.3 and 6.0.3 trace it. A name holding a
-/// `.` first has its extension replaced: one TypeScript strips
-/// (`SCRIPT_EXTENSIONS`), else whatever follows its last `.`, gives way to
-/// the pass's extensions for it — for `.js`, `.ts`, `.d.ts`: `.ts`, `.tsx`,
-/// `.d.ts`, then `.js`, `.jsx`; for `.jsx`, `.tsx`: `.tsx`, `.ts`, `.d.ts`,
-/// then `.jsx`, `.js`; for `.mjs`, `.mts`, `.d.mts`: `.mts`, `.d.mts`, then
-/// `.mjs`, and alike for `.cjs`; for `.json` and any other: a declaration
-/// of it (`x.d.json.ts`, `x.d.css.ts`) and no JavaScript, `resolveJsonModule`
-/// not read. Then the pass's extensions are added to the whole name
-/// (`util.js.ts`): `.ts`, `.tsx`, `.d.ts`, or `.js`, `.jsx`. A directory's
-/// `index` is never tried.
-pub(super) fn classic_names(name: &str, pass: ClassicPass) -> Vec<String> {
+/// The names TypeScript tries, in order, for a file a path names by `name`
+/// with a set of extensions, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it. A
+/// name holding a `.` first has its extension replaced: one TypeScript
+/// strips (`SCRIPT_EXTENSIONS`), else whatever follows its last `.`, gives
+/// way to the set's extensions for it — for `.js`, `.ts`, `.d.ts`: `.ts`,
+/// `.tsx`, `.d.ts`, then `.js`, `.jsx`; for `.jsx`, `.tsx`: `.tsx`, `.ts`,
+/// `.d.ts`, then `.jsx`, `.js`; for `.mjs`, `.mts`, `.d.mts`: `.mts`,
+/// `.d.mts`, then `.mjs`, and alike for `.cjs`; for `.json` and any other:
+/// a declaration of it (`x.d.json.ts`, `x.d.css.ts`) and no JavaScript,
+/// `resolveJsonModule` not read. Then, where `add` says the lookup adds
+/// extensions, as all but `node16`'s for an ES import do, the set's are
+/// added to the whole name (`util.js.ts`): `.ts`, `.tsx`, `.d.ts`, then
+/// `.js`, `.jsx`. A directory's `index` is the caller's to try.
+pub(super) fn module_names(name: &str, extensions: Extensions, add: bool) -> Vec<String> {
     let stripped = name.contains('.').then(|| {
         SCRIPT_EXTENSIONS
             .iter()
@@ -603,10 +607,16 @@ pub(super) fn classic_names(name: &str, pass: ClassicPass) -> Vec<String> {
             ".cjs" | ".cts" | ".d.cts" => (&[".cts"], &[".d.cts"], &[".cjs"]),
             _ => (&[], &[other.as_str()], &[]),
         };
-        let replaced: Vec<&str> = match pass {
-            ClassicPass::TypeScript => typescript.iter().chain(declaration).copied().collect(),
-            ClassicPass::Declaration => declaration.to_vec(),
-            ClassicPass::JavaScript => javascript.to_vec(),
+        let replaced: Vec<&str> = match extensions {
+            Extensions::TypeScript => typescript.iter().chain(declaration).copied().collect(),
+            Extensions::Declaration => declaration.to_vec(),
+            Extensions::JavaScript => javascript.to_vec(),
+            Extensions::All => typescript
+                .iter()
+                .chain(declaration)
+                .chain(javascript)
+                .copied()
+                .collect(),
         };
         names.extend(
             replaced
@@ -614,12 +624,15 @@ pub(super) fn classic_names(name: &str, pass: ClassicPass) -> Vec<String> {
                 .map(|extension| format!("{stem}{extension}")),
         );
     }
-    let added: &[&str] = match pass {
-        ClassicPass::TypeScript => &[".ts", ".tsx", ".d.ts"],
-        ClassicPass::Declaration => &[".d.ts"],
-        ClassicPass::JavaScript => &[".js", ".jsx"],
+    let added: &[&str] = match extensions {
+        Extensions::TypeScript => &[".ts", ".tsx", ".d.ts"],
+        Extensions::Declaration => &[".d.ts"],
+        Extensions::JavaScript => &[".js", ".jsx"],
+        Extensions::All => &[".ts", ".tsx", ".d.ts", ".js", ".jsx"],
     };
-    names.extend(added.iter().map(|extension| format!("{name}{extension}")));
+    if add {
+        names.extend(added.iter().map(|extension| format!("{name}{extension}")));
+    }
     names
 }
 
@@ -812,6 +825,13 @@ impl Manifests {
             .is_some_and(|root| project_file(root, written).is_file())
     }
 
+    /// The `package.json` a project directory holds on disk, `None` where it
+    /// holds none or one that is no JSON.
+    pub(super) fn package_json_at(&self, directory: &[String]) -> Option<serde_json::Value> {
+        let root = self.root.as_ref()?;
+        package_json(&project_file(root, directory).join("package.json"))
+    }
+
     /// Whether a directory above the project's root, up to the filesystem's,
     /// holds on disk the file a path names below it.
     pub(super) fn is_file_above_root(&self, written: &[String]) -> bool {
@@ -827,8 +847,8 @@ impl Manifests {
     /// tsc 5.9.3 and 6.0.3 look one up: in a `node_modules/@types` from
     /// `directory` up to the filesystem's root, the specifier's whole path
     /// below it, a scope mangled (`@scope/name/sub` as `scope__name/sub`).
-    /// There the path names a declaration (`classic_names` in the
-    /// declaration pass: `lib/util` as `lib/util.d.ts`), or a directory
+    /// There the path names a declaration (`module_names` of declarations:
+    /// `lib/util` as `lib/util.d.ts`), or a directory
     /// holding an `index.d.ts` or a `package.json` that names one, which
     /// pack does not follow (`declares_types`); or the specifier is a
     /// subpath of a package whose `package.json` holds `typesVersions`,
@@ -3152,8 +3172,8 @@ mod tests {
     /// pass's added to the whole name.
     #[test]
     fn classic_resolution_tries_the_names_tsc_traces() {
-        let names = |name, pass| classic_names(name, pass);
-        let (ts, js) = (ClassicPass::TypeScript, ClassicPass::JavaScript);
+        let names = |name, extensions| module_names(name, extensions, true);
+        let (ts, js) = (Extensions::TypeScript, Extensions::JavaScript);
         assert_eq!(names("util", ts), ["util.ts", "util.tsx", "util.d.ts"]);
         assert_eq!(names("util", js), ["util.js", "util.jsx"]);
         assert_eq!(

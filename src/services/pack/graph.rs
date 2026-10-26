@@ -7,9 +7,9 @@ use std::path::Path;
 
 use super::Node;
 use super::manifests::{
-    Basedir, ClassicPass, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution,
-    PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, classic_names,
-    export_path, export_subpath, nearest, own_or_only, project_path, python_packages,
+    Basedir, Extensions, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution,
+    PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, export_path,
+    export_subpath, module_names, nearest, own_or_only, project_path, python_packages,
     python_project, reads_base_url, split_package_name,
 };
 use crate::models::symbol::Language;
@@ -513,6 +513,60 @@ fn declares_es_imports(
     Some(emitted.unwrap_or(resolution == ModuleResolution::Bundler))
 }
 
+/// How a module resolution TypeScript reads an import under looks up the
+/// path a relative specifier, or a `paths` substitution or `baseUrl`, spells
+/// (`ProjectIndex::typescript_path`), as tsc 5.9.3, 6.0.3 and 7.0.2 trace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathLookup {
+    /// `classic`: the file with TypeScript's extensions, then JavaScript's;
+    /// no directory.
+    Classic,
+    /// `node10` under 5 and 6: the file, then the directory, with
+    /// TypeScript's extensions, then both again with JavaScript's.
+    Node10,
+    /// `bundler`, and `node16` for a CommonJS import: the file, then the
+    /// directory, with every extension at once.
+    Bundler,
+    /// `node16` for an ES import: only the file the path names with an
+    /// extension in place of the one it writes, none added and no directory.
+    Esm,
+}
+
+/// How TypeScript of one reading looks a path an import spells up
+/// (`PathLookup`): `node16` as CommonJS for a `require` and for a
+/// declaration in a file emitted as CommonJS, as an ES import for one in a
+/// file emitted as an ES module. `None` where no TypeScript reads it, and
+/// where the reading leaves the resolution or, under `node16`, the format
+/// the file is emitted in open.
+fn path_lookup(reading: Reading, form: ImportForm) -> Option<PathLookup> {
+    reading.major?;
+    match reading.mode {
+        ImportMode::Classic => Some(PathLookup::Classic),
+        ImportMode::Node10 => Some(PathLookup::Node10),
+        ImportMode::Exports(conditions) => {
+            let esm = match form {
+                ImportForm::Declaration => conditions.esm,
+                ImportForm::Require => Some(false),
+            };
+            match (conditions.node?, esm) {
+                (false, _) | (true, Some(false)) => Some(PathLookup::Bundler),
+                (true, Some(true)) => Some(PathLookup::Esm),
+                (true, None) => None,
+            }
+        }
+    }
+}
+
+/// What a lookup of a path finds (`ProjectIndex::typescript_path`).
+#[derive(Debug, PartialEq, Eq)]
+enum Hit {
+    /// The files: the project's file where pack reads it, none where it is
+    /// only on disk.
+    Files(Vec<usize>),
+    /// A `package.json` pack does not follow (`typesVersions`) decides it.
+    Open,
+}
+
 /// How a specifier the readings of its importer name different files for
 /// is disclosed: as one the TypeScript version decides where they read one
 /// configuration under several majors, else as one the configuration does
@@ -598,6 +652,13 @@ enum Reference {
     Crate(Vec<String>),
     /// A JVM import of all a package or class holds (`import a.b.*`).
     Wildcard(Vec<String>),
+    /// A JavaScript or TypeScript specifier that is a relative path, with
+    /// the parent hops it starts with and how it ends (`PathEnd`).
+    Script {
+        up: usize,
+        components: Vec<String>,
+        end: PathEnd,
+    },
     /// A JavaScript or TypeScript specifier that is no relative path
     /// (`react`, `@/components/Button`): a package's, or one the project's
     /// TypeScript configuration maps.
@@ -675,7 +736,17 @@ impl Reference {
             };
         }
         let components = split_components(rest);
-        if relative {
+        if relative && is_javascript(language) {
+            let end = match raw.ends_with('/') {
+                true => PathEnd::Slash,
+                false => PathEnd::Name,
+            };
+            Self::Script {
+                up,
+                components,
+                end,
+            }
+        } else if relative {
             Self::Relative { up, components }
         } else {
             Self::Absolute(components)
@@ -762,6 +833,17 @@ impl Reference {
             None => Self::Relative { up, components },
         }
     }
+}
+
+/// How a relative JavaScript or TypeScript specifier ends, which decides
+/// whether TypeScript looks it up as a file or only as a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathEnd {
+    /// A name (`./a`): a file, then a directory.
+    Name,
+    /// A `/` (`./`, `./a/`): a directory alone, but under `classic`, which
+    /// looks for a file named by the extension alone in it (`a/.ts`).
+    Slash,
 }
 
 /// The module path a JavaScript or TypeScript specifier's components name:
@@ -1394,11 +1476,22 @@ impl ProjectIndex<'_> {
                 path.extend_from_slice(components);
                 if package_is_directory(from.language) {
                     self.package(&path, from.language)
-                } else if is_javascript(from.language) {
-                    return self.relative_script(written, &path, importer);
                 } else {
                     self.module(&path, from.language)
                 }
+            }
+            Reference::Script {
+                up,
+                components,
+                end,
+            } => {
+                let base = from.directory.len().checked_sub(*up);
+                let Some(base) = base else {
+                    return Resolution::Files(Vec::new());
+                };
+                let mut path = from.directory[..base].to_vec();
+                path.extend_from_slice(components);
+                return self.relative_script(written, &path, *end, importer, form);
             }
             Reference::Package {
                 package,
@@ -1477,18 +1570,36 @@ impl ProjectIndex<'_> {
             return self.classic_specifier(specifier, importer, base_url);
         }
         let mapped = config.and_then(|config| config.mapped(specifier, base_url));
+        // TypeScript looks the paths `paths` and `baseUrl` name up as it
+        // does a relative one, a substitution writing an extension naming
+        // that file first.
+        let lookup = path_lookup(reading, form);
+        let configured = |path: &[String], extension: bool| match lookup {
+            None => self.script_target(path, language).map(Resolution::Files),
+            Some(lookup) => extension
+                .then(|| self.existing(path))
+                .flatten()
+                .map(Resolution::Files)
+                .or_else(
+                    || match self.typescript_path(path, PathEnd::Name, lookup)? {
+                        Hit::Files(files) => Some(Resolution::Files(files)),
+                        Hit::Open => Some(Resolution::Undetermined(specifier.to_string())),
+                    },
+                )
+                .or_else(|| self.existing(path).map(Resolution::Files)),
+        };
         for substituted in mapped.iter().flat_map(|mapping| &mapping.paths) {
-            if let Some(found) = self.script_target(&substituted.path, language) {
-                return Resolution::Files(found);
+            if let Some(found) = configured(&substituted.path, substituted.extension) {
+                return found;
             }
         }
         if let Some(found) = config
             .and_then(|config| config.base_url.as_ref())
             .filter(|_| base_url)
             .and_then(|base| project_path(base, specifier))
-            .and_then(|path| self.script_target(&path, language))
+            .and_then(|path| configured(&path, false))
         {
-            return Resolution::Files(found);
+            return found;
         }
         let unmapped = || match mapped.as_ref().is_some_and(|mapping| !mapping.catch_all) {
             true => Resolution::Undetermined(specifier.to_string()),
@@ -1501,7 +1612,7 @@ impl ProjectIndex<'_> {
     /// What `classic` resolution, which reads no `package.json`, names for
     /// a non-relative specifier, as tsc 5.9.3 and 6.0.3 look it up: in two
     /// passes, TypeScript's files and declarations and then JavaScript's
-    /// (`ClassicPass`), each trying the names `classic_names` gives. Each
+    /// (`Extensions`), each trying the names `module_names` gives. Each
     /// pass looks at each path a `paths` substitution names in turn — the
     /// file it names first where the substitution writes an extension of its
     /// own — then at the one below `baseUrl`, then in the importer's
@@ -1561,12 +1672,12 @@ impl ProjectIndex<'_> {
                         .extension
                         .then(|| self.existing(&substituted.path))
                         .flatten()
-                        .or_else(|| self.classic_file(&substituted.path, pass))
+                        .or_else(|| self.module_file(&substituted.path, pass, true))
                 })
                 .or_else(|| {
                     below_base
                         .as_ref()
-                        .and_then(|path| self.classic_file(path, pass))
+                        .and_then(|path| self.module_file(path, pass, true))
                 })
         };
         let walk = |pass| {
@@ -1577,15 +1688,15 @@ impl ProjectIndex<'_> {
                     std::slice::from_ref(&name),
                 ]
                 .concat();
-                self.classic_file(&path, pass)
+                self.module_file(&path, pass, true)
             })
         };
         if let Some(found) =
-            configured(ClassicPass::TypeScript).or_else(|| walk(ClassicPass::TypeScript))
+            configured(Extensions::TypeScript).or_else(|| walk(Extensions::TypeScript))
         {
             return Resolution::Files(found);
         }
-        let above_root = classic_names(&name, ClassicPass::TypeScript)
+        let above_root = module_names(&name, Extensions::TypeScript, true)
             .into_iter()
             .any(|candidate| {
                 let path = [&directory[..], &[candidate]].concat();
@@ -1594,7 +1705,7 @@ impl ProjectIndex<'_> {
         if above_root {
             return Resolution::Files(Vec::new());
         }
-        let found = configured(ClassicPass::JavaScript).or_else(|| walk(ClassicPass::JavaScript));
+        let found = configured(Extensions::JavaScript).or_else(|| walk(Extensions::JavaScript));
         match found {
             Some(found)
                 if !found.is_empty()
@@ -1622,28 +1733,122 @@ impl ProjectIndex<'_> {
         }
     }
 
-    /// What a relative specifier names under `classic` resolution, `path`
-    /// being the project path it spells: the first file its two passes take
-    /// (`classic_specifier`) for that path alone, else a file of any kind
-    /// the path spells exactly. Nothing where it names no file in the project.
-    fn classic_relative(&self, path: &[String]) -> Resolution {
-        let found = self
-            .classic_file(path, ClassicPass::TypeScript)
-            .or_else(|| self.classic_file(path, ClassicPass::JavaScript))
-            .or_else(|| self.existing(path));
-        Resolution::Files(found.unwrap_or_default())
+    /// The file TypeScript takes for a project path one of its module
+    /// resolutions looks up (`PathLookup`), as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace it: the file the path names with the extensions `module_names`
+    /// gives, then, but under `classic` and for an ES import under `node16`,
+    /// the directory it names (`directory_module`); only the directory where
+    /// the path ends in `/` (`PathEnd`). `classic` and `node10`
+    /// make a pass with TypeScript's extensions, then one with JavaScript's,
+    /// so `node10` takes `x/index.ts` over `x.js`; `bundler` and `node16`
+    /// make one pass with both, taking `x.js` over it. `None` where no file
+    /// is found.
+    fn typescript_path(&self, path: &[String], end: PathEnd, lookup: PathLookup) -> Option<Hit> {
+        let named = end == PathEnd::Name;
+        let file = |extensions, add| {
+            named
+                .then(|| self.module_file(path, extensions, add))
+                .flatten()
+                .map(Hit::Files)
+        };
+        let directory = |extensions| self.directory_module(path, extensions);
+        match lookup {
+            PathLookup::Classic => {
+                // `classic` reads a path ending in `/` as naming a file
+                // spelled by the extension alone in that directory.
+                let path = match end {
+                    PathEnd::Name => path.to_vec(),
+                    PathEnd::Slash => [path, &[String::new()]].concat(),
+                };
+                self.module_file(&path, Extensions::TypeScript, true)
+                    .or_else(|| self.module_file(&path, Extensions::JavaScript, true))
+                    .map(Hit::Files)
+            }
+            PathLookup::Node10 => file(Extensions::TypeScript, true)
+                .or_else(|| directory(Extensions::TypeScript))
+                .or_else(|| file(Extensions::JavaScript, true))
+                .or_else(|| directory(Extensions::JavaScript)),
+            PathLookup::Bundler => {
+                file(Extensions::All, true).or_else(|| directory(Extensions::All))
+            }
+            PathLookup::Esm => file(Extensions::All, false),
+        }
     }
 
-    /// The file `classic` resolution takes for a project path in one pass,
-    /// trying the names `classic_names` gives in the path's directory: where
-    /// one exists, the project's file where pack reads it, none where it is
-    /// only on disk. `None` where none of them exists.
-    fn classic_file(&self, path: &[String], pass: ClassicPass) -> Option<Vec<usize>> {
+    /// The file TypeScript takes for a directory a path names, as tsc 5.9.3,
+    /// 6.0.3 and 7.0.2 trace it: where its `package.json` names one, the file
+    /// its `typings` or `types` names, where the extensions hold
+    /// declarations, else its `main` with the extensions in place of the one
+    /// it writes (`lib/m.js` as `lib/m.ts`); else its `index`. A
+    /// `typesVersions` there leaves it open: 5.9.3 and 6.0.3 resolve none
+    /// where 7.0.2 takes the `index`. Its `exports` is not read.
+    fn directory_module(&self, directory: &[String], extensions: Extensions) -> Option<Hit> {
+        if let Some(manifest) = self.manifests.package_json_at(directory) {
+            if manifest.get("typesVersions").is_some() {
+                return Some(Hit::Open);
+            }
+            let declarations = extensions != Extensions::JavaScript;
+            let fields = ["typings", "types"]
+                .into_iter()
+                .filter(|_| declarations)
+                .chain(["main"]);
+            for field in fields {
+                let named = manifest
+                    .get(field)
+                    .and_then(|value| value.as_str())
+                    .and_then(|path| project_path(directory, path));
+                let found = named.and_then(|path| {
+                    let exact = (field != "main").then(|| self.existing(&path)).flatten();
+                    exact.or_else(|| self.module_file(&path, extensions, true))
+                });
+                if let Some(files) = found {
+                    return Some(Hit::Files(files));
+                }
+            }
+        }
+        let index = [directory, &["index".to_string()]].concat();
+        self.module_file(&index, extensions, true).map(Hit::Files)
+    }
+
+    /// The file TypeScript takes for a project path with a set of
+    /// extensions, trying the names `module_names` gives in the path's
+    /// directory: where one exists, the project's file where pack reads it,
+    /// none where it is only on disk. `None` where none of them exists.
+    fn module_file(
+        &self,
+        path: &[String],
+        extensions: Extensions,
+        add: bool,
+    ) -> Option<Vec<usize>> {
         let (name, directory) = path.split_last()?;
-        classic_names(name, pass).into_iter().find_map(|candidate| {
-            let file = [directory, &[candidate]].concat();
-            self.existing(&file)
-        })
+        module_names(name, extensions, add)
+            .into_iter()
+            .find_map(|candidate| {
+                let file = [directory, &[candidate]].concat();
+                self.existing(&file)
+            })
+    }
+
+    /// The `index` script module of a directory a relative specifier spells
+    /// as one, where Node and the bundlers rather than TypeScript read it:
+    /// the one file named `index` there, none where several are.
+    fn directory_index(&self, directory: &[String], language: Language) -> Vec<usize> {
+        let found = self
+            .exact
+            .by_module
+            .get(directory)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| {
+                let node = &self.nodes[*id];
+                imports_across(language, node.language)
+                    && Path::new(&node.rel_path)
+                        .file_stem()
+                        .is_some_and(|stem| stem == "index")
+                    && node.directory.as_slice() == directory
+            });
+        Found::first([Found::of(found)])
     }
 
     /// The file a project path names whole, whatever its kind: the
@@ -1657,29 +1862,49 @@ impl ProjectIndex<'_> {
     }
 
     /// What a relative JavaScript or TypeScript specifier names, `path` being
-    /// the project path it spells: under `classic` the file that resolution
-    /// takes (`classic_relative`), under any other the script module it
-    /// spells (`script_target`). Where the importer's readings read it under
-    /// both and those name different files, it is disclosed, as a
-    /// non-relative one is (`bare_specifier`).
-    fn relative_script(&self, written: &str, path: &[String], importer: &Importer) -> Resolution {
-        let script = || {
-            Resolution::Files(
-                self.script_target(path, importer.node.language)
-                    .unwrap_or_default(),
-            )
-        };
-        let classic = importer
-            .readings
-            .iter()
-            .filter(|reading| reading.mode == ImportMode::Classic)
-            .count();
-        if classic == 0 {
-            return script();
+    /// the project path it spells, under each reading of the importer: the
+    /// file the module resolution TypeScript reads it under takes
+    /// (`typescript_path`), else a file of any kind the path spells exactly;
+    /// where no TypeScript reads it, or what it is read under is left open,
+    /// the script module it spells (`script_target`), or for a directory
+    /// the `index` it holds (`directory_index`). Where the readings name
+    /// different files, it is disclosed, as a non-relative one is
+    /// (`bare_specifier`).
+    fn relative_script(
+        &self,
+        written: &str,
+        path: &[String],
+        end: PathEnd,
+        importer: &Importer,
+        form: ImportForm,
+    ) -> Resolution {
+        let mut read: Vec<(Option<PathLookup>, Resolution)> = Vec::new();
+        for reading in &importer.readings {
+            let lookup = path_lookup(*reading, form);
+            if read.iter().any(|(known, _)| *known == lookup) {
+                continue;
+            }
+            let language = importer.node.language;
+            let found = match (lookup, end) {
+                (None, PathEnd::Name) => {
+                    Resolution::Files(self.script_target(path, language).unwrap_or_default())
+                }
+                (None, PathEnd::Slash) => Resolution::Files(self.directory_index(path, language)),
+                (Some(lookup), _) => match self.typescript_path(path, end, lookup) {
+                    Some(Hit::Files(files)) => Resolution::Files(files),
+                    Some(Hit::Open) => Resolution::Undetermined(written.to_string()),
+                    None if end == PathEnd::Name => {
+                        Resolution::Files(self.existing(path).unwrap_or_default())
+                    }
+                    None => Resolution::Files(Vec::new()),
+                },
+            };
+            read.push((lookup, found));
         }
-        let found = self.classic_relative(path);
-        if classic == importer.readings.len() || found == script() {
-            return found;
+        let mut found = read.into_iter().map(|(_, found)| found);
+        let first = found.next().unwrap_or(Resolution::Files(Vec::new()));
+        if found.all(|other| other == first) {
+            return first;
         }
         read_apart(written, importer)
     }
@@ -2312,13 +2537,22 @@ mod tests {
             Reference::parse("github.com/acme/w/internal/store", Language::Go),
             abs(&["github.com", "acme", "w", "internal", "store"])
         );
+        let script = |up, c: &[&str], end| Reference::Script {
+            up,
+            components: c.iter().map(|s| s.to_string()).collect(),
+            end,
+        };
         assert_eq!(
             Reference::parse("./services/pack", Language::TypeScript),
-            rel(0, &["services", "pack"])
+            script(0, &["services", "pack"], PathEnd::Name)
         );
         assert_eq!(
             Reference::parse("../../shared/util", Language::TypeScript),
-            rel(2, &["shared", "util"])
+            script(2, &["shared", "util"], PathEnd::Name)
+        );
+        assert_eq!(
+            Reference::parse("../", Language::TypeScript),
+            script(1, &[], PathEnd::Slash)
         );
         assert_eq!(
             Reference::parse("super::super::util", Language::Rust),
@@ -4932,24 +5166,210 @@ mod tests {
         assert!(graph.version_undetermined_imports.is_empty());
     }
 
+    /// Outside `classic`, TypeScript looks the path a relative specifier or
+    /// a `paths` substitution spells up as each module resolution does, as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`rel_*`, `dir_*`): a file before
+    /// a directory, `.ts`, `.tsx`, `.d.ts`, then `.js`, `.jsx`, a written
+    /// extension giving way to those (`./w2.js` as `w2.ts`), and in a
+    /// directory the `types` or `main` of its `package.json`, with those
+    /// extensions in place of the one it writes, else its `index`. `node10`
+    /// under 5 makes the TypeScript pass over the file and the directory
+    /// before the JavaScript one, so it takes `dirfile/index.ts` over
+    /// `dirfile.js` and `pn/index.ts` over the `main`'s `pn/lib/n.js`, which
+    /// `bundler` and `node16` take. `node16` for an ES import adds no
+    /// extension and reads no directory: only `./both.js`, `./w2.js` and
+    /// `@/both.js` name a file. A `package.json` holding `typesVersions`
+    /// leaves the directory open (`./pv`). A path ending in `/` names a
+    /// directory alone: `./x/` is `x/index.ts`, not `x.ts`.
+    #[test]
+    fn typescript_reads_a_relative_path_by_each_resolutions_order() {
+        let specifiers = [
+            "./both",
+            "./both.js",
+            "./dirfile",
+            "./y",
+            "./z",
+            "./w2.js",
+            "./pm",
+            "./pn",
+            "./pkg",
+            "@/both",
+            "@/dirfile",
+            "./pv",
+            "./x/",
+        ];
+        let source: String = specifiers
+            .iter()
+            .map(|specifier| format!("import \"{specifier}\";\n"))
+            .collect();
+        let modes = [
+            (
+                "n10",
+                "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+                None,
+            ),
+            (
+                "bun",
+                "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+                None,
+            ),
+            (
+                "esm",
+                "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+                Some("module"),
+            ),
+            (
+                "cjs",
+                "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+                Some("commonjs"),
+            ),
+        ];
+        let files = [
+            "both.ts",
+            "both.js",
+            "dirfile.js",
+            "dirfile/index.ts",
+            "y.d.ts",
+            "y.js",
+            "z.tsx",
+            "z.ts",
+            "w2.ts",
+            "w2.js",
+            "pm/lib/m.ts",
+            "pm/lib/m.js",
+            "pm/index.ts",
+            "pn/lib/n.js",
+            "pn/index.ts",
+            "pkg/lib/t.d.ts",
+            "pkg/index.ts",
+            "pv/index.ts",
+            "x.ts",
+            "x/index.ts",
+        ];
+        let mut nodes = Vec::new();
+        let mut configs: Vec<(String, String)> = Vec::new();
+        for (mode, options, package_type) in modes {
+            nodes.push(node_in(
+                nodes.len(),
+                &format!("{mode}/src/main.ts"),
+                &source,
+                Language::TypeScript,
+            ));
+            for file in files {
+                let language = match file.rsplit_once('.').map(|(_, extension)| extension) {
+                    Some("js") => Language::JavaScript,
+                    _ => Language::TypeScript,
+                };
+                nodes.push(node_in(
+                    nodes.len(),
+                    &format!("{mode}/src/{file}"),
+                    "",
+                    language,
+                ));
+            }
+            let package = match package_type {
+                Some(kind) => format!(
+                    "{{\"type\": \"{kind}\", \"devDependencies\": {{\"typescript\": \"^5.9.0\"}}}}"
+                ),
+                None => "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}".to_string(),
+            };
+            configs.push((format!("{mode}/package.json"), package));
+            configs.push((
+                format!("{mode}/tsconfig.json"),
+                format!(
+                    "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \
+                     \"paths\": {{\"@/*\": [\"./src/*\"]}}}}}}"
+                ),
+            ));
+            for (file, contents) in [
+                ("pm/package.json", "{\"main\": \"./lib/m.js\"}"),
+                ("pn/package.json", "{\"main\": \"./lib/n.js\"}"),
+                (
+                    "pkg/package.json",
+                    "{\"types\": \"./lib/t.d.ts\", \"main\": \"./lib/m.js\"}",
+                ),
+                (
+                    "pv/package.json",
+                    "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                ),
+            ] {
+                configs.push((format!("{mode}/src/{file}"), contents.to_string()));
+            }
+        }
+        let configs: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let manifests = manifests_of(&configs, &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let stride = files.len() + 1;
+        let edges = |mode: usize| -> Vec<&str> {
+            graph.edges[&(mode * stride)]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.split_once("/src/").unwrap().1)
+                .collect()
+        };
+        assert_eq!(
+            edges(0),
+            vec![
+                "both.ts",
+                "dirfile/index.ts",
+                "y.d.ts",
+                "z.ts",
+                "w2.ts",
+                "pm/lib/m.ts",
+                "pn/index.ts",
+                "pkg/lib/t.d.ts",
+                "x/index.ts"
+            ]
+        );
+        let single = vec![
+            "both.ts",
+            "dirfile.js",
+            "y.d.ts",
+            "z.ts",
+            "w2.ts",
+            "pm/lib/m.ts",
+            "pn/lib/n.js",
+            "pkg/lib/t.d.ts",
+            "x/index.ts",
+        ];
+        assert_eq!(edges(1), single);
+        assert_eq!(edges(3), single);
+        assert_eq!(edges(2), vec!["both.ts", "w2.ts"]);
+        // `@/both` and `@/dirfile` name no file under `node16` for an ES
+        // import, which a declared `paths` pattern discloses.
+        assert_eq!(
+            graph.undetermined_imports,
+            ["./pv", "@/both", "@/dirfile"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        );
+        assert!(graph.version_undetermined_imports.is_empty());
+    }
+
     /// A relative specifier is read under each module resolution the
     /// TypeScript majors that may compile its importer read it under: with
     /// `module` `esnext` and nothing installed or declared, 5 reads
     /// `classic`, which tries no directory's `index`, and 6 and 7 `bundler`,
     /// which do, so `../components` is disclosed as one the TypeScript
     /// version decides, while `./util`, a file each reads alike, keeps its
-    /// edge.
+    /// edge, as does `./both`, whose `.ts` beside a `.js` each takes
+    /// (`probe_mixed`).
     #[test]
     fn a_relative_specifier_the_majors_read_apart_is_disclosed() {
         let nodes = vec![
             node_in(
                 0,
                 "app/src/app/main.ts",
-                "import \"../components\";\nimport \"./util\";\n",
+                "import \"../components\";\nimport \"./util\";\nimport \"./both\";\n",
                 Language::TypeScript,
             ),
             node_in(1, "app/src/components/index.ts", "", Language::TypeScript),
             node_in(2, "app/src/app/util.ts", "", Language::TypeScript),
+            node_in(3, "app/src/app/both.ts", "", Language::TypeScript),
+            node_in(4, "app/src/app/both.js", "", Language::JavaScript),
         ];
         let manifests = manifests_of(
             &[(
@@ -4963,7 +5383,7 @@ mod tests {
             .iter()
             .map(|dst| nodes[*dst].rel_path.as_str())
             .collect();
-        assert_eq!(edges, vec!["app/src/app/util.ts"]);
+        assert_eq!(edges, vec!["app/src/app/util.ts", "app/src/app/both.ts"]);
         assert_eq!(
             graph.version_undetermined_imports,
             BTreeSet::from(["../components".to_string()])
