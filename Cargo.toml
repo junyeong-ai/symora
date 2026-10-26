@@ -68,7 +68,7 @@ tree-sitter-kotlin-sg = "0.4.1"
 tree-sitter-swift = "0.7.4"
 tree-sitter-scala = "0.26.3"
 tree-sitter-elixir = "0.3.5"
-tree-sitter-dart = "0.2.0"
+tree-sitter-dart = "0.3.0"
 tree-sitter-hcl = "1.1.0"
 streaming-iterator = "0.1.9"
 

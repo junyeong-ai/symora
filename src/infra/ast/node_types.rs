@@ -380,7 +380,11 @@ const DART: &[NodeType] = &[
     NodeType::new("getter", "getter_signature", "T get name => ..."),
     NodeType::new("setter", "setter_signature", "set name(T v) { ... }"),
     NodeType::new("import", "import_or_export", "import 'pkg.dart'"),
-    NodeType::new("variable", "initialized_variable_definition", "var x = ..."),
+    NodeType::new(
+        "variable",
+        "initialized_variable_declaration",
+        "var x = ...",
+    ),
     NodeType::new("if", "if_statement", "if (cond) {}"),
     NodeType::new("for", "for_statement", "for (final x in xs) {}"),
 ];
