@@ -1479,12 +1479,12 @@ impl ProjectIndex<'_> {
     /// own — then at the one below `baseUrl`, then in the importer's
     /// directory and each one above it, past the project's root to the
     /// filesystem's; a `paths` pattern naming no file is passed over. Between
-    /// the passes it looks in each `node_modules/@types` above the importer.
-    /// So a TypeScript file any of them holds comes before every JavaScript
-    /// file, and a JavaScript file is the one unless a declaration for the
-    /// specifier may sit in a `node_modules/@types` above the importer
-    /// (`Manifests::declaration_above`), which pack does not read, so the
-    /// specifier is disclosed there. Past
+    /// the passes it looks in each `node_modules/@types` above the importer,
+    /// then in each directory the configuration's `typeRoots` names. So a
+    /// TypeScript file any of them holds comes before every JavaScript file,
+    /// and a JavaScript file is the one unless a declaration for the
+    /// specifier may sit in one of those (`Manifests::declaration_above`),
+    /// which pack does not read, so the specifier is disclosed there. Past
     /// the root pack checks the disk alone, reading nothing: a TypeScript
     /// file there ends the lookup with no edge, as one on disk in the project
     /// that pack does not read does, and what the JavaScript pass would find
@@ -1554,7 +1554,11 @@ impl ProjectIndex<'_> {
         match found {
             Some(found)
                 if !found.is_empty()
-                    && self.manifests.declaration_above(&from.directory, specifier) =>
+                    && self.manifests.declaration_above(
+                        &from.directory,
+                        specifier,
+                        config.map_or(&[], |config| config.type_roots.as_slice()),
+                    ) =>
             {
                 Resolution::Undetermined(specifier.to_string())
             }
@@ -4566,6 +4570,83 @@ mod tests {
         assert_eq!(
             graph.undetermined_imports,
             ["fd/sub", "flat", "dd/sub", "pj/sub", "tv/sub"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    /// After `node_modules/@types`, `classic` looks in each directory the
+    /// chain's `typeRoots` names, against the configuration declaring it,
+    /// as tsc 5.9.3 and 6.0.3 trace it (`typeroots`, `typeroots_nm`,
+    /// `tru`): the specifier's whole path below it (`lib2/util` as
+    /// `lib2/util.d.ts`), a scope kept as written (`@sc/x`, where
+    /// `sc__y` names nothing for `@sc/y`) but where the root is itself a
+    /// `node_modules/@types` (`@sc/z` as `sc__z`), and a root above the
+    /// project's (`up`). A JavaScript file the walk finds is disclosed
+    /// where one of them holds a declaration for it, and is the one where
+    /// none does (`emp`).
+    #[test]
+    fn classic_resolution_looks_in_the_type_roots_after_types() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let declaration = "export declare const v: number;";
+        for (path, contents) in [
+            (
+                "outer/repo/package.json",
+                "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+            ),
+            (
+                "outer/repo/tsconfig.json",
+                "{\"extends\": \"./base/tsconfig.base.json\", \"compilerOptions\": \
+                 {\"moduleResolution\": \"classic\", \"module\": \"esnext\"}}",
+            ),
+            (
+                "outer/repo/base/tsconfig.base.json",
+                "{\"compilerOptions\": {\"typeRoots\": [\"./typings\", \"../../types\", \
+                 \"./nm/node_modules/@types\"]}}",
+            ),
+            ("outer/repo/base/typings/jq/index.d.ts", declaration),
+            ("outer/repo/base/typings/lib2/util.d.ts", declaration),
+            ("outer/repo/base/typings/@sc/x/index.d.ts", declaration),
+            ("outer/repo/base/typings/sc__y/index.d.ts", declaration),
+            ("outer/repo/base/typings/emp/README.md", ""),
+            ("outer/types/up/index.d.ts", declaration),
+            (
+                "outer/repo/base/nm/node_modules/@types/sc__z/index.d.ts",
+                declaration,
+            ),
+        ] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write");
+        }
+        let specifiers = ["jq", "lib2/util", "@sc/x", "@sc/y", "up", "@sc/z", "emp"];
+        let source: String = specifiers
+            .iter()
+            .map(|specifier| format!("import \"{specifier}\";\n"))
+            .collect();
+        let mut nodes = vec![node_in(0, "src/app/main.ts", &source, Language::TypeScript)];
+        for rel in [
+            "src/jq.js",
+            "src/lib2/util.js",
+            "src/@sc/x.js",
+            "src/@sc/y.js",
+            "src/up.js",
+            "src/@sc/z.js",
+            "src/emp.js",
+        ] {
+            nodes.push(node_in(nodes.len(), rel, "", Language::JavaScript));
+        }
+        let manifests = Manifests::read(&dir.path().join("outer/repo"), &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(edges, vec!["src/@sc/y.js", "src/emp.js"]);
+        assert_eq!(
+            graph.undetermined_imports,
+            ["jq", "lib2/util", "@sc/x", "up", "@sc/z"]
                 .into_iter()
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>()
