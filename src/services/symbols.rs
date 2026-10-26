@@ -1551,13 +1551,17 @@ fn matching_angle(leaves: &[Node], indices: impl IntoIterator<Item = usize>) -> 
 /// QListSpecialMethods<T> #endif {`), as Universal Ctags reads a
 /// conditional. Nothing is taken where another directive is written there,
 /// whose text may be a macro's body (`#define`), or where a conditional is
-/// still open at the end. A conditional the grammar holds apart from the
-/// head is not reached: one opened by `#if` (`class QList #if A : public B
-/// #endif {`), one whose branches each write the `{` (`#ifdef A : public B {
-/// #else : public C { #endif`), and one after a name a macro precedes (`class
-/// Q_CORE_EXPORT QIODevice #ifndef QT_NO_QOBJECT : public QObject, #else :
-/// #endif public QIODeviceBase {`), whose declaration the grammar ends at the
-/// name.
+/// still open at the end. Only what follows the name is read, so a directive
+/// that closes or continues a conditional opened before it is blanked alone,
+/// and the branch it begins is kept: `#ifndef Q_QDOC class Q_CORE_EXPORT
+/// QList : public Base #else : public Other #endif {` reads with both base
+/// clauses, and its signature is null. A conditional the grammar holds apart
+/// from the head is not reached: one opened by `#if` (`class QList #if A :
+/// public B #endif {`), one whose branches each write the `{` (`#ifdef A :
+/// public B { #else : public C { #endif`), and one after a name a macro
+/// precedes (`class Q_CORE_EXPORT QIODevice #ifndef QT_NO_QOBJECT : public
+/// QObject, #else : #endif public QIODeviceBase {`), whose declaration the
+/// grammar ends at the name.
 fn head_conditional(node: Node, from: usize, end: usize) -> Vec<std::ops::Range<usize>> {
     let mut blanks = Vec::new();
     let mut branches: Vec<bool> = Vec::new();
