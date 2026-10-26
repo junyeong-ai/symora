@@ -5591,6 +5591,33 @@ mod tests {
         assert_eq!(read[3], (set(&["pk/main.d.ts", "tn/lib/t.ts"]), set(&[])));
     }
 
+    /// A `package.json` field a declaration lookup reads names a TypeScript
+    /// file too, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it (`tm_bundler`): a
+    /// type root's `types` of `lib/t` names `lib/t.ts`.
+    #[test]
+    fn a_declaration_lookup_takes_a_typescript_file_a_field_names() {
+        let nodes = vec![
+            node_in(0, "src/main.ts", "import \"tm\";\n", Language::TypeScript),
+            node_in(1, "typings/tm/lib/t.ts", "", Language::TypeScript),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"bundler\", \
+                     \"module\": \"esnext\", \"typeRoots\": [\"./typings\"]}}",
+                ),
+                ("typings/tm/package.json", "{\"types\": \"lib/t\"}"),
+            ],
+            &nodes,
+        );
+        assert_eq!(edges_under(&nodes, 0, &manifests), ["typings/tm/lib/t.ts"]);
+    }
+
     /// A declaration a `typeRoots` directory outside the project may hold,
     /// which pack checks on disk without reading, is disclosed outside
     /// `classic` only where the rest of the lookup names a file in the
