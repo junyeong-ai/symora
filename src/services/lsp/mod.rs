@@ -163,8 +163,9 @@ pub trait LspService: Send + Sync {
     /// The process is done with the language layer: each server this
     /// service started is asked to exit, so it stops what it started in a
     /// session of its own, as rust-analyzer stops its check on save, which
-    /// stopping its group does not reach. A daemon's servers are the
-    /// daemon's to stop.
+    /// stopping its group does not reach. The servers are asked together,
+    /// each within the bound `LspClient::shutdown` keeps. A daemon's servers
+    /// are the daemon's to stop.
     async fn shutdown(&self) {}
 }
 

@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures::future::join_all;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::daemon::proves_no_listener;
@@ -233,13 +234,14 @@ impl DaemonServer {
             (contexts, idle)
         };
 
-        for (_, ctx) in &contexts {
+        join_all(contexts.iter().map(|(_, ctx)| async move {
             ctx.lsp.cleanup_idle(self.config.idle_timeout).await;
             let cache_expired = ctx.lsp.cleanup_expired_caches().await;
             if cache_expired > 0 {
                 tracing::debug!("Cleaned up {} expired cache entries", cache_expired);
             }
-        }
+        }))
+        .await;
 
         let idle: Vec<_> = if idle_paths.is_empty() {
             Vec::new()
@@ -259,13 +261,14 @@ impl DaemonServer {
                 .collect()
         };
 
-        for (path, ctx) in idle {
+        join_all(idle.into_iter().map(|(path, ctx)| async move {
             if let Err(e) = ctx.store.checkpoint().await {
                 tracing::debug!("Failed to checkpoint store for {:?}: {}", path, e);
             }
             ctx.lsp.shutdown().await;
             tracing::info!("Removed idle project: {:?}", path);
-        }
+        }))
+        .await;
 
         let projects = self.projects.read().await;
         let usage = self
@@ -293,12 +296,13 @@ impl DaemonServer {
                 .collect()
         };
 
-        for (_path, ctx) in &contexts {
+        join_all(contexts.iter().map(|(_path, ctx)| async move {
             if let Err(e) = ctx.store.checkpoint().await {
                 tracing::debug!("Failed to checkpoint store during shutdown: {}", e);
             }
             ctx.lsp.shutdown().await;
-        }
+        }))
+        .await;
     }
 
     pub fn shutdown(&self) {
