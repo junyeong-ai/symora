@@ -10,12 +10,17 @@ use tokio::net::TcpListener;
 
 use super::{McpProfile, server::McpServer};
 use crate::app::App;
+use crate::cli::OutputError;
 
 pub async fn serve_http(app: App, addr: SocketAddr, profile: McpProfile) -> Result<()> {
-    anyhow::ensure!(
-        addr.ip().is_loopback(),
-        "MCP HTTP binds only to loopback; expose it through an authenticated proxy for remote access"
-    );
+    if !addr.ip().is_loopback() {
+        return Err(OutputError::invalid(format!(
+            "MCP HTTP binds only to loopback, not {}",
+            addr.ip()
+        ))
+        .with_hint("Expose it through an authenticated proxy for remote access.")
+        .into());
+    }
     let server = McpServer::new(Arc::new(app), profile);
     let mut config = StreamableHttpServerConfig::default();
     config.legacy_session_mode = false;
