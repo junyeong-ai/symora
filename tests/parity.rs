@@ -263,9 +263,10 @@ impl IsolatedDaemon {
         command
     }
 
-    /// Assert that this installation's daemon is serving: a command that could
-    /// not reach one runs in process and agrees with the direct run without
-    /// comparing anything.
+    /// Assert that this installation's daemon is serving from this test's own
+    /// home: a command that could not reach one runs in process and agrees
+    /// with the direct run without comparing anything, and one that served
+    /// from another home left its socket and pid files there.
     fn assert_serving(&self) {
         let output = self
             .command(Path::new(env!("CARGO_TARGET_TMPDIR")))
@@ -274,6 +275,8 @@ impl IsolatedDaemon {
             .unwrap();
         let status: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(status["running"], true, "{status}");
+        let socket = Path::new(status["socket_path"].as_str().unwrap_or_default());
+        assert!(socket.starts_with(self.home.path()), "{status}");
     }
 
     fn stop(&self) {
