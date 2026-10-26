@@ -1958,11 +1958,16 @@ fn error_held_prototype(node: Node) -> Option<(Node, Node)> {
                 .any(|typed| typed.id() == part.id())
         })
     };
+    // The grammar never holds a type as an error, and `types` reads every
+    // child of what holds the part, which for an error holding a run of
+    // prototypes is each of them: asked of every part before every
+    // prototype, it grows with the square of the run.
     let mut start = start;
     while let Some(before) = sibling_before(start)
         .or_else(|| start.parent().and_then(sibling_before))
         .filter(|before| {
-            matches!(before.kind(), "storage_class_specifier" | "type_qualifier") || types(*before)
+            matches!(before.kind(), "storage_class_specifier" | "type_qualifier")
+                || !before.is_error() && types(*before)
         })
     {
         start = before;
