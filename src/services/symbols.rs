@@ -8031,6 +8031,55 @@ region     = "us-central1"
                 "a prototype an error holds signs with the text its range writes: {name}"
             );
         }
+        // Reductions of qsurface.h, zstd's cover.c and qabstractitemmodel.h.
+        let surface = extractor.extract_with_signatures(
+            Path::new("s.h"),
+            "class Q_GUI_EXPORT QSurface\n{\npublic:\n    enum SurfaceType {\n        RasterSurface,\n\
+             #if QT_REMOVAL_QT7_DEPRECATED_SINCE(6, 11)\n        \
+             RasterGLSurface Q_DECL_ENUMERATOR_DEPRECATED_X(\"Use RasterSurface instead\"),\n\
+             #endif\n        OpenVGSurface = 3,\n        Direct3DSurface\n    };\n    \
+             SurfaceType surfaceType() const;\n};\n",
+            Language::Cpp,
+        );
+        assert!(
+            surface
+                .iter()
+                .any(|symbol| symbol.kind == SymbolKind::Method
+                    && symbol.name_path.as_deref() == Some("QSurface/surfaceType")),
+            "a member whose type is a plain name swallows the brace of the enum before: {surface:?}"
+        );
+        let cover = extractor.extract(
+            Path::new("cover.c"),
+            "#if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)\n\
+             static int WIN_CDECL COVER_strict_cmp(void* g_coverCtx, const void* lp, const void* rp) {\n\
+             #elif defined(_GNU_SOURCE)\n\
+             static int COVER_strict_cmp(const void *lp, const void *rp, void *g_coverCtx) {\n\
+             #else /* C90 fallback.*/\n\
+             static int COVER_strict_cmp(const void *lp, const void *rp) {\n#endif\n  \
+             int result = COVER_cmp((COVER_ctx_t*)g_coverCtx, lp, rp);\n  return result;\n}\n",
+            Language::Cpp,
+        );
+        assert!(
+            cover
+                .iter()
+                .any(|symbol| symbol.name == "COVER_strict_cmp" && symbol.location.line == 2),
+            "a run of words alone before a definition's name is its macros and type: {cover:?}"
+        );
+        assert_eq!(
+            extractor
+                .extract_with_signatures(
+                    Path::new("m.h"),
+                    "class Q_CORE_EXPORT QAbstractItemModel : public QObject\n{\n    \
+                     Q_INVOKABLE virtual Qt::ItemFlags flags(const QModelIndex &index) const;\n};\n",
+                    Language::Cpp,
+                )
+                .iter()
+                .find(|symbol| symbol.name == "flags")
+                .and_then(|symbol| symbol.signature.clone())
+                .as_deref(),
+            Some("virtual Qt::ItemFlags flags(const QModelIndex &index) const"),
+            "a qualified name's `::` after a macro is no specifier's colon"
+        );
         assert_eq!(
             declared(
                 "extern NCURSES_EXPORT(int) addch (const chtype);\n\
