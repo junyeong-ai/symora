@@ -45,8 +45,9 @@ pub(super) struct ImportGraph {
     /// `jsconfig.json` of an importer's JavaScript project read as different
     /// files.
     pub(super) jsconfig_undetermined_imports: BTreeSet<String>,
-    /// The specifiers naming a directory whose `package.json` holds
-    /// `typesVersions`, which pack does not follow.
+    /// The specifiers naming a directory, or a `node_modules` package,
+    /// whose `package.json` holds `typesVersions`, which pack does not
+    /// follow.
     pub(super) types_versions_undetermined_imports: BTreeSet<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of those specifiers.
@@ -251,9 +252,11 @@ enum Resolution {
     /// A specifier the TypeScript majors that may read the `jsconfig.json`
     /// of the importer's JavaScript project read as different files.
     JsConfigUndetermined(String),
-    /// A relative specifier, or a path `paths` or `baseUrl` names, naming a
-    /// directory whose `package.json` holds `typesVersions`, which pack does
-    /// not follow.
+    /// A specifier naming a directory whose `package.json` holds
+    /// `typesVersions`, which pack does not follow: a relative one, a path
+    /// `paths` or `baseUrl` names, a workspace package, or under `node10`
+    /// a `node_modules` package that may take it before a `paths` or
+    /// `baseUrl` JavaScript file.
     TypesVersionsUndetermined(String),
 }
 
@@ -1791,6 +1794,11 @@ impl ProjectIndex<'_> {
         // A declaration pack does not read may stand for it, which tsc
         // takes over whatever the rest of the lookup names.
         let mut outside = false;
+        // A `node_modules` package forms an edge only as a workspace's does.
+        let packaged = || {
+            self.workspace_package(specifier, importer, reading, form)
+                .unwrap_or(Resolution::Files(Vec::new()))
+        };
         let found = 'found: {
             if let Some(lookup) = lookup {
                 for extensions in lookup.passes() {
@@ -1801,6 +1809,25 @@ impl ProjectIndex<'_> {
                         _ => None,
                     };
                     if let Some(found) = configured(*extensions).or_else(walked) {
+                        // `node10` looked in `node_modules` in its TypeScript
+                        // pass, before this one reads `paths` and `baseUrl`
+                        // again (`p3*`).
+                        if lookup == PathLookup::Node10 && *extensions == Extensions::JavaScript {
+                            let directory = &importer.node.directory;
+                            let typescript = Extensions::TypeScript;
+                            match self
+                                .manifests
+                                .node_modules_finds(directory, specifier, typescript, false, true)
+                            {
+                                Some(true) => break 'found packaged(),
+                                None => {
+                                    break 'found Resolution::TypesVersionsUndetermined(
+                                        specifier.to_string(),
+                                    );
+                                }
+                                Some(false) => {}
+                            }
+                        }
                         break 'found found;
                     }
                     if *extensions == Extensions::JavaScript {
@@ -1812,11 +1839,7 @@ impl ProjectIndex<'_> {
                     };
                     match between {
                         Some(TypeRooted::Resolved(found)) => break 'found found,
-                        Some(TypeRooted::Packaged) => {
-                            break 'found self
-                                .workspace_package(specifier, importer, reading, form)
-                                .unwrap_or(Resolution::Files(Vec::new()));
-                        }
+                        Some(TypeRooted::Packaged) => break 'found packaged(),
                         Some(TypeRooted::Outside) => outside = true,
                         None => {}
                     }
@@ -6503,6 +6526,101 @@ mod tests {
                     .into_iter()
                     .collect();
                 assert_eq!(found, want, "{options} {kind:?} {id}");
+            }
+        }
+    }
+
+    /// `node10` looks a non-relative specifier up in `node_modules` with
+    /// TypeScript's extensions between its passes, as tsc 5.9.3 and 6.0.3
+    /// trace it, so a declaration or TypeScript file there comes before the
+    /// JavaScript file `baseUrl` names: none for `config` and `lib/x`
+    /// (`p3_*`, `p3c_*`), the workspace package's for `w` (`q2a_*`), and a
+    /// `typesVersions` pack does not follow leaves `tv/x` open (`q2b_*`). A
+    /// package of JavaScript alone leaves `plain` the project's file
+    /// (`q2c_*`). `bundler` reads `baseUrl` first in its one pass
+    /// (`p3d_*`).
+    #[test]
+    fn node10_looks_in_node_modules_before_a_base_url_javascript_file() {
+        let modes = [
+            (
+                "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+                true,
+            ),
+            (
+                "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+                false,
+            ),
+        ];
+        for (options, node10) in modes {
+            let specifiers = ["config", "lib/x", "w", "tv/x", "plain"];
+            let source: String = specifiers
+                .iter()
+                .map(|specifier| format!("import \"{specifier}\";\n"))
+                .collect();
+            let nodes = vec![
+                node_in(0, "src/app/main.ts", &source, Language::TypeScript),
+                node_in(1, "src/config.js", "", Language::JavaScript),
+                node_in(2, "src/lib/x.js", "", Language::JavaScript),
+                node_in(3, "src/w.js", "", Language::JavaScript),
+                node_in(4, "packages/w/src/index.ts", "", Language::TypeScript),
+                node_in(5, "src/tv/x.js", "", Language::JavaScript),
+                node_in(6, "src/plain.js", "", Language::JavaScript),
+            ];
+            let config = format!(
+                "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \"baseUrl\": \"./src\"}}}}"
+            );
+            let manifests = manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"workspaces\": [\"packages/*\"], \
+                         \"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                    ("node_modules/@types/config/index.d.ts", ""),
+                    ("node_modules/lib/package.json", "{\"name\": \"lib\"}"),
+                    ("node_modules/lib/x.d.ts", ""),
+                    (
+                        "packages/w/package.json",
+                        "{\"name\": \"w\", \"main\": \"./src/index.ts\"}",
+                    ),
+                    (
+                        "node_modules/w/package.json",
+                        "{\"name\": \"w\", \"main\": \"./src/index.ts\"}",
+                    ),
+                    ("node_modules/w/src/index.ts", ""),
+                    (
+                        "node_modules/tv/package.json",
+                        "{\"name\": \"tv\", \"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                    ),
+                    ("node_modules/tv/ts/x.d.ts", ""),
+                    (
+                        "node_modules/plain/package.json",
+                        "{\"name\": \"plain\", \"main\": \"index.js\"}",
+                    ),
+                    ("node_modules/plain/index.js", ""),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let edges: Vec<&str> = graph.edges[&0]
+                .iter()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect();
+            let disclosed = &graph.types_versions_undetermined_imports;
+            if node10 {
+                assert_eq!(edges, vec!["packages/w/src/index.ts", "src/plain.js"]);
+                assert_eq!(*disclosed, BTreeSet::from(["tv/x".to_string()]));
+            } else {
+                let all = [
+                    "src/config.js",
+                    "src/lib/x.js",
+                    "src/w.js",
+                    "src/tv/x.js",
+                    "src/plain.js",
+                ];
+                assert_eq!(edges, all);
+                assert!(disclosed.is_empty());
             }
         }
     }

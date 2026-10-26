@@ -261,7 +261,7 @@ fn declaration_coverage_hints(result: &PackResult) -> Vec<String> {
             .map(|specifier| format!("`{specifier}`"))
             .collect();
         hints.push(format!(
-            "{} import specifier(s) name a directory whose `package.json` holds `typesVersions`, which pack does not follow ({}); their dependencies do not contribute to ranking. Inspect the directory's `package.json`.",
+            "{} import specifier(s) name a directory, or a `node_modules` package, whose `package.json` holds `typesVersions`, which pack does not follow ({}); their dependencies do not contribute to ranking. Inspect that `package.json`.",
             specifiers.len(),
             name_some(&specifiers)
         ));
@@ -562,7 +562,7 @@ mod tests {
             json["files"]["hints"][7]
                 .as_str()
                 .unwrap()
-                .contains("1 import specifier(s) name a directory whose `package.json` holds `typesVersions`, which pack does not follow (`./pv`); their dependencies do not contribute to ranking. Inspect the directory's `package.json`.")
+                .contains("1 import specifier(s) name a directory, or a `node_modules` package, whose `package.json` holds `typesVersions`, which pack does not follow (`./pv`); their dependencies do not contribute to ranking. Inspect that `package.json`.")
         );
         assert!(
             json["files"]["hints"][8]

@@ -104,8 +104,9 @@ pub struct PackResult {
     /// `jsconfig.json` of an importer's JavaScript project read as different
     /// files.
     pub jsconfig_undetermined_imports: Vec<String>,
-    /// The specifiers naming a directory whose `package.json` holds
-    /// `typesVersions`, which pack does not follow.
+    /// The specifiers naming a directory, or a `node_modules` package,
+    /// whose `package.json` holds `typesVersions`, which pack does not
+    /// follow.
     pub types_versions_undetermined_imports: Vec<String>,
     /// The declared `typescript` ranges pack reads no major from 5 to 7
     /// from, of the importers of `version_undetermined_imports`.
