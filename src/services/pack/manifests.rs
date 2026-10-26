@@ -598,6 +598,61 @@ fn finds_package(
     }
 }
 
+/// Whether TypeScript's lookup in one directory's `node_modules` on disk
+/// finds a file for a non-relative specifier with a set of extensions, as
+/// tsc 5.9.3, 6.0.3 and 7.0.2 look before a `typeRoots` directory: its
+/// package (`finds_package`), then, where the extensions hold declarations,
+/// its `node_modules/@types` one under the scope-mangled name. With every
+/// extension, as `bundler` and `node16` look, tsc looks in every directory
+/// for TypeScript's and then for JavaScript's
+/// (`loadModuleFromNearestNodeModulesDirectoryWorker`), so a package's
+/// `main` is read for JavaScript where its `types` names no file. `add` is
+/// whether the lookup adds an extension to a name (not for an ES import
+/// under `node16`), `exports` whether it reads a package's `exports` (not
+/// `node10`). `None` where a `package.json` pack does not follow decides:
+/// `exports` the lookup reads, or `typesVersions`.
+pub(super) fn node_modules_in(
+    directory: &Path,
+    specifier: &str,
+    extensions: Extensions,
+    exports: bool,
+    add: bool,
+) -> Option<bool> {
+    let modules = directory.join("node_modules");
+    if !modules.is_dir() {
+        return Some(false);
+    }
+    let passes = match extensions {
+        Extensions::All => &[Extensions::TypeScript, Extensions::JavaScript][..],
+        _ => std::slice::from_ref(&extensions),
+    };
+    let mut found: Vec<_> = passes
+        .iter()
+        .map(|pass| finds_package(&modules, specifier, *pass, exports, add))
+        .collect();
+    if extensions != Extensions::JavaScript {
+        let types = modules.join("@types");
+        let mangled = mangle_scope(specifier);
+        found.push(finds_package(
+            &types,
+            &mangled,
+            Extensions::Declaration,
+            exports,
+            add,
+        ));
+    }
+    either(&found)
+}
+
+/// Whether one of several `node_modules` lookups finds a file: `None` where
+/// none does and one is left open.
+pub(super) fn either(found: &[Option<bool>]) -> Option<bool> {
+    match found.contains(&Some(true)) {
+        true => Some(true),
+        false => (!found.contains(&None)).then_some(false),
+    }
+}
+
 /// What a lookup of a path finds (`directory_module`,
 /// `ProjectIndex::typescript_path`).
 #[derive(Debug, PartialEq, Eq)]
@@ -738,7 +793,7 @@ fn has_extension(name: &str, extension: &str) -> bool {
 /// The extensions TypeScript looks a module up with in one pass of its
 /// lookup (`module_names`): `classic` and `node10` look for TypeScript's
 /// files, then JavaScript's, `bundler` and `node16` for both at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Extensions {
     /// TypeScript's own files, then declarations.
     TypeScript,
@@ -1054,71 +1109,6 @@ impl Manifests {
                 .skip(1)
                 .any(|directory| holds_types(directory, specifier))
         })
-    }
-
-    /// Whether TypeScript's lookup in `node_modules` finds a file for a
-    /// non-relative specifier with a set of extensions, as tsc 5.9.3, 6.0.3
-    /// and 7.0.2 look before a `typeRoots` directory: in each directory from
-    /// `directory` up to the filesystem's root, its `node_modules` package
-    /// (`finds_package`), then, where the extensions hold declarations, its
-    /// `node_modules/@types` one under the scope-mangled name. With every
-    /// extension, as `bundler` and `node16` look, tsc looks in every
-    /// directory for TypeScript's and then for JavaScript's
-    /// (`loadModuleFromNearestNodeModulesDirectoryWorker`), so a package's
-    /// `main` is read for JavaScript where its `types` names no file. `add`
-    /// is whether the lookup adds an extension to a name (not for an ES
-    /// import under `node16`), `exports` whether it reads a package's
-    /// `exports` (not `node10`). `None` where a `package.json` pack does
-    /// not follow decides: `exports` the lookup reads, or `typesVersions`.
-    pub(super) fn node_modules_finds(
-        &self,
-        directory: &[String],
-        specifier: &str,
-        extensions: Extensions,
-        exports: bool,
-        add: bool,
-    ) -> Option<bool> {
-        let Some(root) = &self.root else {
-            return Some(false);
-        };
-        let mangled = mangle_scope(specifier);
-        let directories = (0..=directory.len())
-            .rev()
-            .map(|depth| project_file(root, &directory[..depth]))
-            .chain(root.ancestors().skip(1).map(Path::to_path_buf));
-        let mut open = false;
-        for directory in directories {
-            let modules = directory.join("node_modules");
-            if !modules.is_dir() {
-                continue;
-            }
-            let passes = match extensions {
-                Extensions::All => &[Extensions::TypeScript, Extensions::JavaScript][..],
-                _ => std::slice::from_ref(&extensions),
-            };
-            let mut found: Vec<_> = passes
-                .iter()
-                .map(|pass| finds_package(&modules, specifier, *pass, exports, add))
-                .collect();
-            if extensions != Extensions::JavaScript {
-                let types = modules.join("@types");
-                found.push(finds_package(
-                    &types,
-                    &mangled,
-                    Extensions::Declaration,
-                    exports,
-                    add,
-                ));
-            }
-            for found in found {
-                match found {
-                    Some(true) => return Some(true),
-                    Some(false) => {}
-                    None => open = true,
-                }
-            }
-        }
-        (!open).then_some(false)
     }
 
     /// Whether a file a JavaScript or TypeScript path names is on disk, as
@@ -2427,7 +2417,7 @@ fn pnpm_catalog(yaml: &str, catalog: &str, package: &str) -> Option<String> {
 }
 
 /// The file on disk a project path names.
-fn project_file(root: &Path, path: &[String]) -> PathBuf {
+pub(super) fn project_file(root: &Path, path: &[String]) -> PathBuf {
     path.iter()
         .fold(root.to_path_buf(), |path, part| path.join(part))
 }

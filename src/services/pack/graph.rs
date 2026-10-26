@@ -9,9 +9,9 @@ use super::Node;
 use super::manifests::{
     self, Basedir, Extensions, Hit, JsPackage, Manifests, ModuleKind, ModuleOptions,
     ModuleResolution, PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript,
-    export_path, export_subpath, mangle_scope, module_names, nearest, own_or_only, project_path,
-    python_packages, python_project, reads_base_url, split_package_name, type_root_holds,
-    type_root_name,
+    either, export_path, export_subpath, mangle_scope, module_names, nearest, node_modules_in,
+    own_or_only, project_file, project_path, python_packages, python_project, reads_base_url,
+    split_package_name, type_root_holds, type_root_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -97,6 +97,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         exact,
         classic: RefCell::default(),
         type_roots: RefCell::default(),
+        node_modules: RefCell::default(),
     };
 
     let mut graph: Graph = BTreeMap::new();
@@ -577,7 +578,7 @@ fn declares_es_imports(
 /// How a module resolution TypeScript reads an import under looks up the
 /// path a relative specifier, or a `paths` substitution or `baseUrl`, spells
 /// (`ProjectIndex::typescript_path`), as tsc 5.9.3, 6.0.3 and 7.0.2 trace it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PathLookup {
     /// `classic`: the file with TypeScript's extensions, then JavaScript's;
     /// no directory.
@@ -1039,6 +1040,11 @@ struct ProjectIndex<'a> {
     /// importer's directory (`type_root_declaration`), which decides which
     /// of them the `node_modules` lookup covers.
     type_roots: RefCell<HashMap<TypeRootKey, Option<Declared>>>,
+    /// Whether a `node_modules` package from a directory up takes each
+    /// non-relative specifier in a pass of a lookup, once per directory and
+    /// what the lookup reads (`node_modules_finds`): the walks up from the
+    /// importers' directories pass the same ones.
+    node_modules: RefCell<HashMap<NodeModulesKey, Option<bool>>>,
 }
 
 /// What a `typeRoots` lookup depends on (`ProjectIndex::type_roots`): the
@@ -1050,6 +1056,12 @@ type TypeRootKey = (Option<*const TsConfig>, Vec<String>, String, bool);
 /// configuration, by its place in the manifests, which outlive the index;
 /// the importer's directory; the specifier.
 type ClassicKey = (Option<*const TsConfig>, Vec<String>, String);
+
+/// What a `node_modules` lookup depends on (`ProjectIndex::node_modules`):
+/// the directory it starts in, `None` above the project's root; the
+/// specifier; the pass's extensions; the lookup, which decides whether
+/// `exports` is read and whether a name is given an extension.
+type NodeModulesKey = (Option<Vec<String>>, String, Extensions, PathLookup);
 
 /// Each crate's module tree, as Rust builds it from the crate's root file
 /// through the `mod` declarations its files make. A module declared without
@@ -1769,6 +1781,7 @@ impl ProjectIndex<'_> {
         // a substitution writing an extension naming that file first; then
         // a file of any kind one spells exactly is the one.
         let lookup = path_lookup(reading, form);
+        let types_versions = || Resolution::TypesVersionsUndetermined(specifier.to_string());
         let configured = |extensions| {
             let lookup = lookup?;
             let hit = substitutions()
@@ -1788,12 +1801,13 @@ impl ProjectIndex<'_> {
                 })?;
             Some(match hit {
                 Hit::Files(files) => Resolution::Files(files),
-                Hit::Open => Resolution::TypesVersionsUndetermined(specifier.to_string()),
+                Hit::Open => types_versions(),
             })
         };
         // A declaration pack does not read may stand for it, which tsc
         // takes over whatever the rest of the lookup names.
         let mut outside = false;
+        let directory = Some(importer.node.directory.as_slice());
         // A `node_modules` package forms an edge only as a workspace's does.
         let packaged = || {
             self.workspace_package(specifier, importer, reading, form)
@@ -1813,18 +1827,11 @@ impl ProjectIndex<'_> {
                         // pass, before this one reads `paths` and `baseUrl`
                         // again (`p3*`).
                         if lookup == PathLookup::Node10 && *extensions == Extensions::JavaScript {
-                            let directory = &importer.node.directory;
                             let typescript = Extensions::TypeScript;
-                            match self
-                                .manifests
-                                .node_modules_finds(directory, specifier, typescript, false, true)
+                            match self.node_modules_finds(directory, specifier, lookup, typescript)
                             {
                                 Some(true) => break 'found packaged(),
-                                None => {
-                                    break 'found Resolution::TypesVersionsUndetermined(
-                                        specifier.to_string(),
-                                    );
-                                }
+                                None => break 'found types_versions(),
                                 Some(false) => {}
                             }
                         }
@@ -1879,7 +1886,7 @@ impl ProjectIndex<'_> {
     /// trace it (`tr_*`, `tq_*`): `None` where no type root holds a
     /// declaration for it (`type_root_declaration`). Where one does, a
     /// `node_modules` package or `@types` declaration the pass finds comes
-    /// first (`Manifests::node_modules_finds`), which pack does not read
+    /// first (`node_modules_finds`), which pack does not read
     /// but for a workspace's package; where none does, the declaration is
     /// the one; and where pack cannot tell, which an `exports` or
     /// `typesVersions` it does not follow decides, it is disclosed. One a
@@ -1894,13 +1901,8 @@ impl ProjectIndex<'_> {
     ) -> Option<TypeRooted> {
         let add = lookup != PathLookup::Esm;
         let declared = self.type_root_declaration(specifier, importer, add)?;
-        let packaged = self.manifests.node_modules_finds(
-            &importer.node.directory,
-            specifier,
-            extensions,
-            lookup != PathLookup::Node10,
-            add,
-        );
+        let directory = Some(importer.node.directory.as_slice());
+        let packaged = self.node_modules_finds(directory, specifier, lookup, extensions);
         let undetermined = || Resolution::TypeRootUndetermined(specifier.to_string());
         Some(match (declared, packaged) {
             (_, Some(true)) => TypeRooted::Packaged,
@@ -1912,6 +1914,45 @@ impl ProjectIndex<'_> {
             (Declared::Outside, _) => TypeRooted::Outside,
             _ => TypeRooted::Resolved(undetermined()),
         })
+    }
+
+    /// Whether TypeScript's lookup in `node_modules` under one module
+    /// resolution finds a file for a non-relative specifier with a pass's
+    /// extensions, in each directory from `directory` up to the filesystem's
+    /// root, `None` standing for those above the project's
+    /// (`manifests::node_modules_in`): `node10` reads no `exports`, and
+    /// `node16` adds no extension for an ES import. Once for what it depends
+    /// on (`ProjectIndex::node_modules`).
+    fn node_modules_finds(
+        &self,
+        directory: Option<&[String]>,
+        specifier: &str,
+        lookup: PathLookup,
+        extensions: Extensions,
+    ) -> Option<bool> {
+        let key = (
+            directory.map(<[String]>::to_vec),
+            specifier.to_string(),
+            extensions,
+            lookup,
+        );
+        if let Some(known) = self.node_modules.borrow().get(&key) {
+            return *known;
+        }
+        let (exports, add) = (lookup != PathLookup::Node10, lookup != PathLookup::Esm);
+        let finds =
+            |directory: &Path| node_modules_in(directory, specifier, extensions, exports, add);
+        let found = match (directory, &self.manifests.root) {
+            (_, None) => Some(false),
+            (Some(directory), Some(root)) => {
+                let parent = directory.split_last().map(|(_, parent)| parent);
+                let up = self.node_modules_finds(parent, specifier, lookup, extensions);
+                either(&[finds(&project_file(root, directory)), up])
+            }
+            (None, Some(root)) => either(&root.ancestors().skip(1).map(finds).collect::<Vec<_>>()),
+        };
+        self.node_modules.borrow_mut().insert(key, found);
+        found
     }
 
     /// The declaration the `typeRoots` of an importer's configuration hold
@@ -5616,6 +5657,59 @@ mod tests {
             "es/sub/index.d.ts",
         ];
         assert_eq!(read[3], (set(&esm), set(&[])));
+    }
+
+    /// The `node_modules` lookup before a type root is kept apart per
+    /// directory and per module resolution, as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace it (`q6b_node16_per_directory`): under `node16` an ES import of
+    /// `en`, whose package holds no `package.json`, reads no `index` and
+    /// takes the type root's declaration, where a CommonJS one from the same
+    /// directory takes the package's `index.js`; `nested`, which a
+    /// `node_modules` in `src/app` declares, is that one's there and the
+    /// type root's from `src`.
+    #[test]
+    fn node_modules_lookups_are_kept_apart_per_directory_and_resolution() {
+        let source = |specifier| format!("import \"{specifier}\";\n");
+        let nodes = vec![
+            node_in(0, "src/app/a.mts", &source("en"), Language::TypeScript),
+            node_in(1, "src/app/b.cts", &source("en"), Language::TypeScript),
+            node_in(2, "src/app/c.cts", &source("nested"), Language::TypeScript),
+            node_in(3, "src/d.cts", &source("nested"), Language::TypeScript),
+            node_in(4, "typings/en/index.d.ts", "", Language::TypeScript),
+            node_in(5, "typings/nested/index.d.ts", "", Language::TypeScript),
+        ];
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"module\": \"node16\", \
+                     \"moduleResolution\": \"node16\", \"typeRoots\": [\"./typings\"]}}",
+                ),
+                ("typings/en/package.json", "{\"types\": \"index.d.ts\"}"),
+                ("typings/nested/package.json", "{\"types\": \"index.d.ts\"}"),
+                ("node_modules/en/index.js", ""),
+                ("src/app/node_modules/nested/index.d.ts", ""),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges = |id: usize| -> Vec<&str> {
+            graph
+                .edges
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect()
+        };
+        assert_eq!(edges(0), vec!["typings/en/index.d.ts"]);
+        assert!(edges(1).is_empty());
+        assert!(edges(2).is_empty());
+        assert_eq!(edges(3), vec!["typings/nested/index.d.ts"]);
     }
 
     /// A `paths` substitution naming a directory whose `package.json` holds
