@@ -3438,6 +3438,33 @@ mod tests {
                 configs.push((format!("{root}/src/{package}/{file}"), text.to_string()));
             }
         }
+        // A Poetry 1.x root, which `[build-system]` alone installs, covers
+        // the directories below its `src/`, a nested project's among them:
+        // installed editable (`uv pip install -e`, uv 0.13.5), it loads
+        // `pq/src/pq/core.py` from `pq/src/tools/tests`.
+        let core = "pq/src/pq/core.py".to_string();
+        for (rel, source) in [
+            ("pq/src/pq/__init__.py", ""),
+            ("pq/src/pq/core.py", ""),
+            ("pq/src/tools/tests/test_t.py", "from pq.core import x\n"),
+        ] {
+            if !source.is_empty() {
+                dependents.push((nodes.len(), core.clone()));
+            }
+            nodes.push(node_in(nodes.len(), rel, source, Language::Python));
+        }
+        configs.push((
+            "pq/pyproject.toml".to_string(),
+            "[tool.poetry]\nname = \"pq\"\nversion = \"0.1.0\"\n\
+             packages = [{ include = \"pq\", from = \"src\" }]\n\
+             [build-system]\nrequires = [\"poetry-core>=1.0.0\"]\n\
+             build-backend = \"poetry.core.masonry.api\"\n"
+                .to_string(),
+        ));
+        configs.push((
+            "pq/src/tools/pyproject.toml".to_string(),
+            member("tools", ""),
+        ));
         let configs: Vec<(&str, &str)> = configs
             .iter()
             .map(|(path, text)| (path.as_str(), text.as_str()))
@@ -4147,8 +4174,10 @@ mod tests {
     /// absolute imports (`baseUrl: "src"`) and Next.js its aliases, is read
     /// with its `baseUrl` (`cra_js`, `next_js`), as esbuild 0.28.2 and
     /// Next.js 16.3.3 read it, also where TypeScript 7 is declared
-    /// (`cra_js_ts7`), and an import the TypeScript majors read apart there
-    /// is disclosed without advice to install TypeScript.
+    /// (`cra_js_ts7`) and for a TypeScript file there, which esbuild 0.28.2
+    /// resolves through it with TypeScript 7.0.2 installed, and an import
+    /// the TypeScript majors read apart there is disclosed without advice to
+    /// install TypeScript.
     #[test]
     fn a_javascript_projects_jsconfig_is_read_with_its_base_url() {
         let js = |id, rel: &str, source: &str| node_in(id, rel, source, Language::JavaScript);
@@ -4171,6 +4200,12 @@ mod tests {
                 "import Button from \"components/Button\";\n",
             ),
             js(5, "cra7/src/components/Button.js", ""),
+            node_in(
+                6,
+                "cra7/src/pages/b.ts",
+                "import Button from \"components/Button\";\n",
+                Language::TypeScript,
+            ),
         ];
         for file in ["types", "esm", "cjs"] {
             nodes.push(node_in(
@@ -4223,6 +4258,7 @@ mod tests {
         assert_eq!(edges(0), vec!["cra/src/components/Button.js"]);
         assert_eq!(edges(2), vec!["next/components/Nav.js"]);
         assert_eq!(edges(4), vec!["cra7/src/components/Button.js"]);
+        assert_eq!(edges(6), vec!["cra7/src/components/Button.js"]);
         assert!(graph.version_undetermined_imports.is_empty());
         assert_eq!(
             graph.undetermined_imports,
