@@ -3231,7 +3231,11 @@ mod tests {
     /// one whose `tool.uv.package` is `false`, but it is still a project,
     /// whose dependencies uv 0.13.5 installs: a workspace member below `src/`
     /// (`uvsrc_app`), or an application below a root configuring only ruff
-    /// (`ruffroot_uvapp`), imports its uv dependency.
+    /// (`ruffroot_uvapp`), imports its uv dependency. Each file that declares
+    /// a project starts one there: a `setup.cfg` beside a `pyproject.toml`
+    /// configuring a tool, a `setup.py`, and a Poetry 1.x `[build-system]`
+    /// without `[project]`, each of which `uv pip install -e` (uv 0.13.5)
+    /// installs.
     #[test]
     fn only_a_root_a_project_puts_on_sys_path_covers_the_directories_below_it() {
         let python = |id, rel, source| node_in(id, rel, source, Language::Python);
@@ -3377,6 +3381,62 @@ mod tests {
                      [tool.uv.sources]\n{source}\n"
                 ),
             ));
+        }
+        for (root, package, files) in [
+            (
+                "sc",
+                "a",
+                vec![
+                    ("pyproject.toml", "[tool.black]\nline-length = 100\n"),
+                    (
+                        "setup.cfg",
+                        "[metadata]\nname = a\n\n[options]\npackages = find:\n",
+                    ),
+                ],
+            ),
+            (
+                "sp",
+                "b",
+                vec![(
+                    "setup.py",
+                    "from setuptools import setup\nsetup(name=\"b\")\n",
+                )],
+            ),
+            (
+                "pt",
+                "c",
+                vec![(
+                    "pyproject.toml",
+                    "[tool.poetry]\nname = \"c\"\nversion = \"0.1.0\"\n\
+                     [build-system]\nrequires = [\"poetry-core>=1.0.0\"]\n\
+                     build-backend = \"poetry.core.masonry.api\"\n",
+                )],
+            ),
+        ] {
+            let core = format!("{root}/src/{package}/{package}/core.py");
+            for (rel, source) in [
+                (
+                    format!("{root}/src/{package}/{package}/__init__.py"),
+                    String::new(),
+                ),
+                (core.clone(), String::new()),
+                (
+                    format!("{root}/src/{package}/tests/test_{package}.py"),
+                    format!("from {package}.core import x\n"),
+                ),
+            ] {
+                if !source.is_empty() {
+                    dependents.push((nodes.len(), core.clone()));
+                }
+                nodes.push(node_in(nodes.len(), &rel, &source, Language::Python));
+            }
+            configs.push((
+                format!("{root}/pyproject.toml"),
+                "[tool.ruff]\nline-length = 100\n".to_string(),
+            ));
+            for (file, text) in files {
+                configs.push((format!("{root}/src/{package}/{file}"), text.to_string()));
+            }
         }
         let configs: Vec<(&str, &str)> = configs
             .iter()
@@ -4448,13 +4508,18 @@ mod tests {
     /// A specifier that each TypeScript major reads alike but the majors
     /// read differently is disclosed as one the unknown version decides;
     /// one that projects compiling the file read differently under one
-    /// major is disclosed as undetermined whatever the version.
+    /// major is disclosed as undetermined whatever the version. A
+    /// configuration setting no `baseUrl` is read under 7 too where no
+    /// TypeScript is installed or declared: with `moduleResolution: "node"`,
+    /// tsc 5.9.3 and 6.0.3 take the package's `types` and 7.0.2, which
+    /// removed `node10` (TS5108), its `import` file (`node10_absent`).
     #[test]
     fn a_specifier_only_the_typescript_version_decides_is_disclosed_as_such() {
         let ts = |id, rel: &str, source: &str| node_in(id, rel, source, Language::TypeScript);
         let mut nodes = vec![
             ts(0, "ver/src/a.ts", "import p from 'p6'\n"),
             ts(1, "owners/shared/s.ts", "import q from 'q6'\n"),
+            ts(2, "n10/src/a.ts", "import p from 'p6'\n"),
         ];
         let mut configs = vec![
             (
@@ -4462,6 +4527,11 @@ mod tests {
                 "{\"workspaces\": [\"packages/*\"]}".to_string(),
             ),
             ("ver/tsconfig.json".to_string(), "{}".to_string()),
+            (
+                "n10/tsconfig.json".to_string(),
+                "{\"compilerOptions\": {\"moduleResolution\": \"node\", \"module\": \"esnext\"}}"
+                    .to_string(),
+            ),
             (
                 "owners/package.json".to_string(),
                 "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}".to_string(),
@@ -4504,6 +4574,7 @@ mod tests {
         let manifests = manifests_of(&configs, &nodes);
         let graph = build_import_graph(&nodes, &manifests);
         assert!(graph.edges[&0].is_empty() && graph.edges[&1].is_empty());
+        assert!(graph.edges[&2].is_empty());
         assert_eq!(
             graph.version_undetermined_imports,
             BTreeSet::from(["p6".to_string()])
@@ -5119,11 +5190,15 @@ mod tests {
     /// only where they agree: `default`, `import` for a declaration and
     /// `require` for a `require`, and never `types`; `node`, `browser` and
     /// the rest some of them match and others do not (`jsnode`, where Node
-    /// prints the `node` file and bundlers take the `import` one).
+    /// prints the `node` file and bundlers take the `import` one). A
+    /// TypeScript file under a declared range fixing no major is
+    /// TypeScript's: tsc 5.9.3, 6.0.3 and 7.0.2 each compile
+    /// `scripts/gen.ts` without a configuration to the package's `types`,
+    /// where Node would take its unbuilt `main` (`latest_noconfig`).
     #[test]
     fn a_file_typescript_does_not_compile_matches_what_node_and_bundlers_agree_on() {
         let imports = "import a from 'p7'\nimport b from 'p8'\nimport c from 'p9'\n\
-                       import d from 'p10'\n";
+                       import d from 'p10'\nimport e from 'p11'\n";
         let nodes = vec![
             node_in(0, "apps/cli/src/a.js", imports, Language::JavaScript),
             node_in(
@@ -5146,6 +5221,13 @@ mod tests {
             node_in(8, "packages/p9/src/def.js", "", Language::JavaScript),
             node_in(9, "packages/p10/src/b.js", "", Language::JavaScript),
             node_in(10, "packages/p10/src/d.js", "", Language::JavaScript),
+            node_in(11, "packages/p11/src/index.ts", "", Language::TypeScript),
+            node_in(
+                12,
+                "scripts/gen.ts",
+                "import e from 'p11'\n",
+                Language::TypeScript,
+            ),
         ];
         let manifests = manifests_of(
             &[
@@ -5176,6 +5258,16 @@ mod tests {
                     "{\"name\": \"p10\", \"exports\": {\".\": {\"browser\": \"./src/b.js\", \
                      \"default\": \"./src/d.js\"}}}",
                 ),
+                (
+                    "packages/p11/package.json",
+                    "{\"name\": \"p11\", \"types\": \"./src/index.ts\", \"main\": \"./dist/index.js\"}",
+                ),
+                // A range fixing no major: TypeScript compiles the file under
+                // the defaults of 5, 6 and 7, which agree on `types`.
+                (
+                    "scripts/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"latest\"}}",
+                ),
             ],
             &nodes,
         );
@@ -5192,9 +5284,10 @@ mod tests {
         );
         assert_eq!(edges(1), vec!["packages/p8/src/cjs.js"]);
         assert_eq!(edges(2), vec!["packages/p8/src/esm.js"]);
+        assert_eq!(edges(12), vec!["packages/p11/src/index.ts"]);
         assert_eq!(
             graph.undetermined_imports,
-            BTreeSet::from(["p10".to_string(), "p7".to_string()])
+            BTreeSet::from(["p10".to_string(), "p11".to_string(), "p7".to_string()])
         );
     }
 
