@@ -730,7 +730,7 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::mutating(
             "replace_symbol_body",
-            "Replace the symbol's ENTIRE definition — the span covered by the body \
+            "Replace the symbol's entire definition — the span covered by the body \
                           search_symbols or list_file_symbols returns: any decorator, attribute \
                           or doc-comment lines it opens with, its signature, braces and body. \
                           Pass the complete definition as body, not just the inner code; a body \
