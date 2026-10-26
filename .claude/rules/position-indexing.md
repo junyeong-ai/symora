@@ -34,7 +34,7 @@ For pure ASCII the two collapse (scalar == byte == UTF-16 unit), which is why a 
 ## Where conversions live
 
 - `src/cli/location.rs` parses `file:line[:column]` (1-indexed scalar; an omitted column is tracked by `column_explicit`).
-- `src/services/lsp/position.rs` holds the only scalar ↔ wire transcoders. Outbound positions are built with `to_lsp_position` (`src/services/lsp/helpers.rs`). Every inbound range is decoded through `PositionConverter::scalar_column_disclosed` (`src/services/lsp/converters.rs`), which yields the scalar column and the `degraded` flag `Location::degraded_column` carries; a new inbound reader that builds a `Location` does the same. A raw model `Position`, which carries no flag, decodes through `scalar_offset`.
+- `src/services/lsp/position.rs` holds the only scalar ↔ wire transcoders. Outbound positions are built with `to_lsp_position` (`src/services/lsp/helpers.rs`). Every inbound range is decoded through `PositionConverter::scalar_column_disclosed` (called from `src/services/lsp/converters.rs`), which yields the scalar column and the `degraded` flag `Location::degraded_column` carries; a new inbound reader that builds a `Location` does the same. A raw model `Position`, which carries no flag, decodes through `scalar_offset`.
 - The daemon wire (`src/services/daemon_lsp.rs` ↔ `src/daemon/wire.rs`) adds no conversion: `Location` crosses 1-indexed scalar, native edit ranges 0-indexed scalar. Do not transcode them again because their type is `Position` or `Range`.
 
 ## Degradation is disclosed, never silently guessed
