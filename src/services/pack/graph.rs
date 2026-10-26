@@ -9,8 +9,9 @@ use super::Node;
 use super::manifests::{
     Basedir, Extensions, JsPackage, Manifests, ModuleKind, ModuleOptions, ModuleResolution,
     PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript, export_path,
-    export_subpath, module_names, nearest, own_or_only, project_path, python_packages,
-    python_project, reads_base_url, split_package_name,
+    export_subpath, mangle_scope, module_names, named_extensions, nearest, own_or_only,
+    project_path, python_packages, python_project, reads_base_url, split_package_name,
+    type_root_holds, type_root_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -27,8 +28,12 @@ pub(super) struct ImportGraph {
     pub(super) undetermined_imports: BTreeSet<String>,
     /// The specifiers `classic` resolution names a JavaScript file in the
     /// project for where a declaration it takes first, which pack does not
-    /// look up, may stand for them.
+    /// read or whose `typesVersions` it does not follow, may stand for them.
     pub(super) declaration_undetermined_imports: BTreeSet<String>,
+    /// The specifiers a declaration in a `typeRoots` directory may stand
+    /// for outside `classic`, where pack cannot tell whether TypeScript
+    /// takes it.
+    pub(super) type_root_undetermined_imports: BTreeSet<String>,
     /// The specifiers the TypeScript majors that may compile an importer
     /// read as different files under its one configuration, where no
     /// installed or declared version fixes one major.
@@ -80,12 +85,14 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         rust: RustModules::of(nodes, manifests, &exact.by_file),
         exact,
         classic: RefCell::default(),
+        type_roots: RefCell::default(),
     };
 
     let mut graph: Graph = BTreeMap::new();
     let mut rust_relative_imports_omitted = false;
     let mut undetermined_imports = BTreeSet::new();
     let mut declaration_undetermined_imports = BTreeSet::new();
+    let mut type_root_undetermined_imports = BTreeSet::new();
     let mut version_undetermined_imports = BTreeSet::new();
     let mut typescript_ranges = BTreeSet::new();
     let mut typescript_not_installed = false;
@@ -141,6 +148,10 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
                     declaration_undetermined_imports.insert(specifier);
                     continue;
                 }
+                Resolution::TypeRootUndetermined(specifier) => {
+                    type_root_undetermined_imports.insert(specifier);
+                    continue;
+                }
                 Resolution::VersionUndetermined(specifier) => {
                     version_undetermined_imports.insert(specifier);
                     match importer.typescript {
@@ -169,6 +180,7 @@ pub(super) fn build_import_graph(nodes: &[Node], manifests: &Manifests) -> Impor
         rust_relative_imports_omitted,
         undetermined_imports,
         declaration_undetermined_imports,
+        type_root_undetermined_imports,
         version_undetermined_imports,
         typescript_ranges,
         typescript_not_installed,
@@ -190,9 +202,17 @@ enum Resolution {
     Undetermined(String),
     /// A specifier `classic` resolution names a JavaScript file in the
     /// project for, where a declaration in `node_modules/@types` or a
-    /// `typeRoots` directory, which it takes first and pack does not look up,
-    /// may stand for it.
+    /// `typeRoots` directory, which it takes first, may stand for it: one
+    /// outside the project, which pack checks on disk without reading it,
+    /// or one a `typesVersions` pack does not follow maps.
     DeclarationUndetermined(String),
+    /// A specifier a declaration in a `typeRoots` directory may stand for
+    /// outside `classic`, where pack cannot tell whether TypeScript takes
+    /// it: a `node_modules` package whose `exports` or `typesVersions` pack
+    /// does not follow may take the specifier first, or the declaration lies
+    /// outside the project, where pack checks the disk alone, while the
+    /// rest of the lookup names a file in it.
+    TypeRootUndetermined(String),
     /// A specifier the TypeScript majors that may compile the importer read
     /// as different files under its one configuration, no installed or
     /// declared version fixing one.
@@ -570,6 +590,43 @@ fn path_lookup(reading: Reading, form: ImportForm) -> Option<PathLookup> {
     }
 }
 
+/// What a `typeRoots` directory decides for a non-relative specifier
+/// (`ProjectIndex::type_root_specifier`).
+enum TypeRooted {
+    /// What the specifier names: the declaration, or a disclosure.
+    Resolved(Resolution),
+    /// A `node_modules` package takes it before the type root.
+    Packaged,
+    /// A declaration a type root outside the project may hold stands for it
+    /// if it is there.
+    Outside,
+}
+
+/// The declaration a `node_modules/@types` or `typeRoots` directory holds
+/// for a non-relative specifier, which TypeScript takes before a JavaScript
+/// file.
+#[derive(Debug, Clone)]
+enum Declared {
+    /// One in the project: the file where pack reads it, none where it is
+    /// only on disk.
+    Files(Vec<usize>),
+    /// One in the project that a `typesVersions` pack does not follow
+    /// decides.
+    Open,
+    /// One outside the project, where pack checks the disk alone, may be
+    /// there.
+    Outside,
+}
+
+impl Declared {
+    fn of(hit: Hit) -> Self {
+        match hit {
+            Hit::Files(files) => Self::Files(files),
+            Hit::Open => Self::Open,
+        }
+    }
+}
+
 /// What a lookup of a path finds (`ProjectIndex::typescript_path`).
 #[derive(Debug, PartialEq, Eq)]
 enum Hit {
@@ -938,7 +995,17 @@ struct ProjectIndex<'a> {
     /// files of a directory import the same names, and each lookup checks
     /// the disk in every directory up to the filesystem's root.
     classic: RefCell<HashMap<ClassicKey, Resolution>>,
+    /// What the `typeRoots` of a configuration hold for each non-relative
+    /// specifier, with an extension added to a name or not, once per
+    /// importer's directory (`type_root_declaration`), which decides which
+    /// of them the `node_modules` lookup covers.
+    type_roots: RefCell<HashMap<TypeRootKey, Option<Declared>>>,
 }
+
+/// What a `typeRoots` lookup depends on (`ProjectIndex::type_roots`): the
+/// configuration, the importer's directory, the specifier and whether a
+/// name is given an extension.
+type TypeRootKey = (Option<*const TsConfig>, Vec<String>, String, bool);
 
 /// What a `classic` lookup depends on (`ProjectIndex::classic`): the
 /// configuration, by its place in the manifests, which outlive the index;
@@ -1646,26 +1713,201 @@ impl ProjectIndex<'_> {
                 Hit::Open => Resolution::Undetermined(specifier.to_string()),
             })
         };
-        let passes = lookup.map_or(&[][..], PathLookup::passes);
-        if let Some(found) = passes.iter().find_map(|extensions| configured(*extensions)) {
-            return found;
-        }
-        let spelled = |path: &[String]| match lookup {
-            None => self.script_target(path, language),
-            Some(_) => self.existing(path),
+        // A declaration a type root outside the project may hold, which
+        // tsc takes over whatever the rest of the lookup names.
+        let mut outside = false;
+        let found = 'found: {
+            if let Some(lookup) = lookup {
+                for extensions in lookup.passes() {
+                    if let Some(found) = configured(*extensions) {
+                        break 'found found;
+                    }
+                    if *extensions == Extensions::JavaScript {
+                        continue;
+                    }
+                    match self.type_root_specifier(specifier, importer, lookup, *extensions) {
+                        Some(TypeRooted::Resolved(found)) => break 'found found,
+                        Some(TypeRooted::Packaged) => {
+                            break 'found self
+                                .workspace_package(specifier, importer, reading, form)
+                                .unwrap_or(Resolution::Files(Vec::new()));
+                        }
+                        Some(TypeRooted::Outside) => outside = true,
+                        None => {}
+                    }
+                }
+            }
+            let spelled = |path: &[String]| match lookup {
+                None => self.script_target(path, language),
+                Some(_) => self.existing(path),
+            };
+            let found = substitutions()
+                .find_map(|substituted| spelled(&substituted.path))
+                .or_else(|| below_base.as_ref().and_then(|path| spelled(path)));
+            if let Some(found) = found {
+                break 'found Resolution::Files(found);
+            }
+            let unmapped = || match mapped.as_ref().is_some_and(|mapping| !mapping.catch_all) {
+                true => Resolution::Undetermined(specifier.to_string()),
+                false => Resolution::Files(Vec::new()),
+            };
+            self.workspace_package(specifier, importer, reading, form)
+                .unwrap_or_else(unmapped)
         };
-        let found = substitutions()
-            .find_map(|substituted| spelled(&substituted.path))
-            .or_else(|| below_base.as_ref().and_then(|path| spelled(path)));
-        if let Some(found) = found {
-            return Resolution::Files(found);
+        match found {
+            Resolution::Files(files) if outside && !files.is_empty() => {
+                Resolution::TypeRootUndetermined(specifier.to_string())
+            }
+            found => found,
         }
-        let unmapped = || match mapped.as_ref().is_some_and(|mapping| !mapping.catch_all) {
-            true => Resolution::Undetermined(specifier.to_string()),
-            false => Resolution::Files(Vec::new()),
-        };
-        self.workspace_package(specifier, importer, reading, form)
-            .unwrap_or_else(unmapped)
+    }
+
+    /// What a `typeRoots` directory gives a non-relative specifier outside
+    /// `classic`, which TypeScript looks in after `node_modules` in a pass
+    /// whose extensions hold declarations, as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace it (`tr_*`, `tq_*`): `None` where no type root holds a
+    /// declaration for it (`type_root_declaration`). Where one does, a
+    /// `node_modules` package or `@types` declaration the pass finds comes
+    /// first (`Manifests::node_modules_finds`), which pack does not read
+    /// but for a workspace's package; where none does, the declaration is
+    /// the one; and where pack cannot tell, which an `exports` or
+    /// `typesVersions` it does not follow decides, it is disclosed. One a
+    /// root outside the project may hold is disclosed only where the rest of
+    /// the lookup names a file in it (`TypeRooted::Outside`).
+    fn type_root_specifier(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        lookup: PathLookup,
+        extensions: Extensions,
+    ) -> Option<TypeRooted> {
+        let add = lookup != PathLookup::Esm;
+        let declared = self.type_root_declaration(specifier, importer, add)?;
+        let packaged = self.manifests.node_modules_finds(
+            &importer.node.directory,
+            specifier,
+            extensions,
+            lookup != PathLookup::Node10,
+            add,
+        );
+        let undetermined = || Resolution::TypeRootUndetermined(specifier.to_string());
+        Some(match (declared, packaged) {
+            (_, Some(true)) => TypeRooted::Packaged,
+            (Declared::Files(files), Some(false)) => TypeRooted::Resolved(Resolution::Files(files)),
+            // Neither is a file pack reads.
+            (Declared::Files(files), None) if files.is_empty() => {
+                TypeRooted::Resolved(Resolution::Files(files))
+            }
+            (Declared::Outside, _) => TypeRooted::Outside,
+            _ => TypeRooted::Resolved(undetermined()),
+        })
+    }
+
+    /// The declaration the `typeRoots` of an importer's configuration hold
+    /// for a non-relative specifier, as TypeScript's `resolveFromTypeRoot`
+    /// looks in each in turn, by the name `type_root_name` gives: in one in
+    /// the project, the declaration there (`declaration_in`), an edge where
+    /// pack reads it; outside it, where pack checks the disk alone, one that
+    /// may be there (`type_root_holds`). `add` is whether the lookup adds an
+    /// extension to a name, which an ES import under `node16` does not. A
+    /// root that is the `node_modules/@types` of a directory from the
+    /// importer's up is passed over: TypeScript looks in it before, as it
+    /// walks `node_modules`, so it holds nothing the walk did not find.
+    fn type_root_declaration(
+        &self,
+        specifier: &str,
+        importer: &Importer,
+        add: bool,
+    ) -> Option<Declared> {
+        let config = importer.ts_config;
+        let roots = config.map_or(&[][..], |config| config.type_roots.as_slice());
+        if roots.is_empty() {
+            return None;
+        }
+        let directory = &importer.node.directory;
+        let key = (
+            config.map(std::ptr::from_ref),
+            directory.clone(),
+            specifier.to_string(),
+            add,
+        );
+        if let Some(known) = self.type_roots.borrow().get(&key) {
+            return known.clone();
+        }
+        let found = roots
+            .iter()
+            .filter(|type_root| !self.manifests.is_types_of_ancestor(type_root, directory))
+            .find_map(
+                |type_root| match self.manifests.project_path_of(type_root) {
+                    Some(base) => {
+                        let name = type_root_name(type_root, specifier);
+                        self.declaration_in(&base, &name, add, false)
+                            .map(Declared::of)
+                    }
+                    None => type_root_holds(type_root, specifier).then_some(Declared::Outside),
+                },
+            );
+        self.type_roots.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    /// The declaration `classic` takes for a non-relative specifier where its
+    /// TypeScript pass finds no file, as tsc 5.9.3 and 6.0.3 look one up: in
+    /// each `node_modules/@types` from the importer's directory up, the
+    /// specifier's whole path, its scope mangled (`declaration_in`), then
+    /// in each type root (`type_root_declaration`). Below the project's root
+    /// it is the declaration there, an edge where pack reads it; above it,
+    /// where pack checks the disk alone, one may be there
+    /// (`Manifests::types_above_root`).
+    fn classic_declaration(&self, specifier: &str, importer: &Importer) -> Option<Declared> {
+        let directory = &importer.node.directory;
+        let mangled = mangle_scope(specifier);
+        (0..=directory.len())
+            .rev()
+            .find_map(|depth| {
+                let types = ["node_modules".to_string(), "@types".to_string()];
+                self.declaration_in(
+                    &[&directory[..depth], &types].concat(),
+                    &mangled,
+                    true,
+                    true,
+                )
+                .map(Declared::of)
+            })
+            .or_else(|| {
+                self.manifests
+                    .types_above_root(specifier)
+                    .then_some(Declared::Outside)
+            })
+            .or_else(|| self.type_root_declaration(specifier, importer, true))
+    }
+
+    /// The declaration a project directory TypeScript looks in for one — a
+    /// `node_modules/@types`, a type root — holds for a name's path below
+    /// it, as tsc 5.9.3, 6.0.3 and 7.0.2 trace it: the file the path names
+    /// with a declaration's extensions, then the directory
+    /// (`directory_module`). Where `versions`, as in a `node_modules/@types`,
+    /// a subpath of a package whose `package.json` holds `typesVersions` is
+    /// left open.
+    fn declaration_in(
+        &self,
+        base: &[String],
+        name: &str,
+        add: bool,
+        versions: bool,
+    ) -> Option<Hit> {
+        let (package, subpath) = split_package_name(name);
+        if versions && !subpath.is_empty() {
+            let package = [base, &split_components(package)].concat();
+            let manifest = self.manifests.package_json_at(&package);
+            if manifest.is_some_and(|manifest| manifest.get("typesVersions").is_some()) {
+                return Some(Hit::Open);
+            }
+        }
+        let path = [base, &split_components(name)].concat();
+        self.module_file(&path, Extensions::Declaration, add)
+            .map(Hit::Files)
+            .or_else(|| self.directory_module(&path, Extensions::Declaration, add))
     }
 
     /// What `classic` resolution, which reads no `package.json`, names for
@@ -1679,10 +1921,11 @@ impl ProjectIndex<'_> {
     /// filesystem's; a `paths` pattern naming no file is passed over. Between
     /// the passes it looks in each `node_modules/@types` above the importer,
     /// then in each directory the configuration's `typeRoots` names. So a
-    /// TypeScript file any of them holds comes before every JavaScript file,
-    /// and a JavaScript file is the one unless a declaration for the
-    /// specifier may sit in one of those (`Manifests::declaration_above`),
-    /// which pack does not read, so the specifier is disclosed there. Past
+    /// TypeScript file any of them holds comes before every JavaScript file:
+    /// a declaration there (`classic_declaration`) is the one, and a
+    /// JavaScript file is the one unless a declaration for the specifier may
+    /// sit where pack checks the disk alone, so the specifier is disclosed
+    /// there. Past
     /// the root pack checks the disk alone, reading nothing: a TypeScript
     /// file there ends the lookup with no edge, as one on disk in the project
     /// that pack does not read does, and what the JavaScript pass would find
@@ -1764,16 +2007,13 @@ impl ProjectIndex<'_> {
         if above_root {
             return Resolution::Files(Vec::new());
         }
+        let declared = self.classic_declaration(specifier, importer);
+        if let Some(Declared::Files(files)) = declared {
+            return Resolution::Files(files);
+        }
         let found = configured(Extensions::JavaScript).or_else(|| walk(Extensions::JavaScript));
         match found {
-            Some(found)
-                if !found.is_empty()
-                    && self.manifests.declaration_above(
-                        &from.directory,
-                        specifier,
-                        config.map_or(&[], |config| config.type_roots.as_slice()),
-                    ) =>
-            {
+            Some(found) if !found.is_empty() && declared.is_some() => {
                 Resolution::DeclarationUndetermined(specifier.to_string())
             }
             Some(found) => Resolution::Files(found),
@@ -1835,7 +2075,7 @@ impl ProjectIndex<'_> {
                 self.module_file(&path, extensions, true).map(Hit::Files)
             }
             PathLookup::Node10 | PathLookup::Bundler => {
-                file(true).or_else(|| self.directory_module(path, extensions))
+                file(true).or_else(|| self.directory_module(path, extensions, true))
             }
             PathLookup::Esm => file(false),
         }
@@ -1849,11 +2089,19 @@ impl ProjectIndex<'_> {
     /// (`lib/m.js` as `lib/m.ts`), or that directory's `index`; else, a
     /// field naming no file included, its own `index`. A `typesVersions`
     /// there leaves it open: 5.9.3 and 6.0.3 resolve none where 7.0.2 takes
-    /// the `index`. Its `exports` is not read.
-    fn directory_module(&self, directory: &[String], extensions: Extensions) -> Option<Hit> {
-        let index = |directory: &[String]| {
+    /// the `index`. Its `exports` is not read. A field's file is looked up
+    /// with an extension added and, for declarations alone, as a TypeScript
+    /// file too (`named_extensions`); the `index` with one added where
+    /// `add`, which an ES import under `node16` does not.
+    fn directory_module(
+        &self,
+        directory: &[String],
+        extensions: Extensions,
+        add: bool,
+    ) -> Option<Hit> {
+        let index = |directory: &[String], extensions, add| {
             let index = [directory, &["index".to_string()]].concat();
-            self.module_file(&index, extensions, true)
+            self.module_file(&index, extensions, add)
         };
         if let Some(manifest) = self.manifests.package_json_at(directory) {
             if manifest.get("typesVersions").is_some() {
@@ -1874,15 +2122,16 @@ impl ProjectIndex<'_> {
             let found = field.and_then(|(field, named)| {
                 let path = project_path(directory, named)?;
                 let exact = (field != "main").then(|| self.existing(&path)).flatten();
+                let extensions = named_extensions(extensions);
                 exact
                     .or_else(|| self.module_file(&path, extensions, true))
-                    .or_else(|| index(&path))
+                    .or_else(|| index(&path, extensions, true))
             });
             if let Some(files) = found {
                 return Some(Hit::Files(files));
             }
         }
-        index(directory).map(Hit::Files)
+        index(directory, extensions, add).map(Hit::Files)
     }
 
     /// The file TypeScript takes for a project path with a set of
@@ -4775,9 +5024,10 @@ mod tests {
     /// trace it (`classic_walk`): `.ts`, `.tsx` and `.d.ts` first, the
     /// nearest directory first (`lib/near`), a written `.js` stripped
     /// (`lib/other.js`), never a directory's `index` or `.mts`; then, past
-    /// `node_modules/@types`, `.js` and `.jsx`, so a JavaScript file is
-    /// disclosed where an `@types` package of its name is installed (`jq`).
-    /// A written `.ts` is stripped alike (`lib/util.ts`). A file on disk that
+    /// `node_modules/@types`, `.js` and `.jsx`, so a JavaScript file gives
+    /// way to an `@types` package of its name installed in the project,
+    /// which pack does not read: no edge, nothing disclosed (`jq`). A
+    /// written `.ts` is stripped alike (`lib/util.ts`). A file on disk that
     /// pack does not read ends the walk with no edge (`lib/gen`, for which
     /// tsc takes `src/app/lib/gen.d.ts`).
     #[test]
@@ -4840,23 +5090,22 @@ mod tests {
             ]
         );
         assert!(graph.undetermined_imports.is_empty());
-        assert_eq!(
-            graph.declaration_undetermined_imports,
-            BTreeSet::from(["jq".to_string()])
-        );
+        assert!(graph.declaration_undetermined_imports.is_empty());
         assert!(graph.version_undetermined_imports.is_empty());
     }
 
     /// Between its passes `classic` looks the specifier's whole path up
     /// below `node_modules/@types`, as tsc 5.9.3 and 6.0.3 trace it
-    /// (`types_sub`): a declaration it names (`fd/sub` as `fd/sub.d.ts`,
+    /// (`types_sub`). Above the project's root, where pack checks the disk
+    /// alone, a JavaScript file the walk finds is disclosed where one may
+    /// stand for it: a declaration it names (`fd/sub` as `fd/sub.d.ts`,
     /// `flat` as `flat.d.ts`), a directory holding an `index.d.ts`
     /// (`dd/sub`) or a `package.json` naming its types (`pj/sub`), or a
-    /// subpath of a package with `typesVersions` (`tv/sub`). A JavaScript
-    /// file the walk finds is disclosed there. A package holding no such
-    /// subpath (`lib/util`, `@acme/d/sub` below `acme__d`), a directory
-    /// holding no declaration (`empty`) and a `package.json` naming none
-    /// (`pkgonly`) leave the JavaScript file the one, as tsc takes it.
+    /// subpath of a package with `typesVersions` (`tv/sub`). A package
+    /// holding no such subpath (`lib/util`, `@acme/d/sub` below `acme__d`),
+    /// a directory holding no declaration (`empty`) and a `package.json`
+    /// naming none (`pkgonly`) leave the JavaScript file the one, as tsc
+    /// takes it.
     #[test]
     fn classic_resolution_looks_the_specifiers_whole_path_up_below_types() {
         let specifiers = [
@@ -4874,59 +5123,57 @@ mod tests {
             .iter()
             .map(|specifier| format!("import \"{specifier}\";\n"))
             .collect();
-        let mut nodes = vec![node_in(
-            0,
-            "ts/src/app/main.ts",
-            &source,
-            Language::TypeScript,
-        )];
+        let mut nodes = vec![node_in(0, "src/app/main.ts", &source, Language::TypeScript)];
         for rel in [
-            "ts/src/lib/util.js",
-            "ts/src/@acme/d/sub.js",
-            "ts/src/fd/sub.js",
-            "ts/src/flat.js",
-            "ts/src/dd/sub.js",
-            "ts/src/pj/sub.js",
-            "ts/src/tv/sub.js",
-            "ts/src/empty.js",
-            "ts/src/pkgonly.js",
+            "src/lib/util.js",
+            "src/@acme/d/sub.js",
+            "src/fd/sub.js",
+            "src/flat.js",
+            "src/dd/sub.js",
+            "src/pj/sub.js",
+            "src/tv/sub.js",
+            "src/empty.js",
+            "src/pkgonly.js",
         ] {
             nodes.push(node_in(nodes.len(), rel, "", Language::JavaScript));
         }
         let declaration = "export declare const v: number;";
-        let manifests = manifests_of(
-            &[
-                (
-                    "ts/package.json",
-                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
-                ),
-                (
-                    "ts/tsconfig.json",
-                    "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\"}}",
-                ),
-                ("ts/node_modules/@types/lib/index.d.ts", declaration),
-                ("ts/node_modules/@types/acme__d/index.d.ts", declaration),
-                ("ts/node_modules/@types/fd/sub.d.ts", declaration),
-                ("ts/node_modules/@types/flat.d.ts", declaration),
-                ("ts/node_modules/@types/dd/sub/index.d.ts", declaration),
-                (
-                    "ts/node_modules/@types/pj/sub/package.json",
-                    "{\"types\": \"x.d.ts\"}",
-                ),
-                ("ts/node_modules/@types/pj/sub/x.d.ts", declaration),
-                (
-                    "ts/node_modules/@types/tv/package.json",
-                    "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
-                ),
-                ("ts/node_modules/@types/tv/ts/sub.d.ts", declaration),
-                ("ts/node_modules/@types/empty/README.md", ""),
-                (
-                    "ts/node_modules/@types/pkgonly/package.json",
-                    "{\"name\": \"@types/pkgonly\"}",
-                ),
-            ],
-            &nodes,
-        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (path, contents) in [
+            (
+                "outer/ts/package.json",
+                "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+            ),
+            (
+                "outer/ts/tsconfig.json",
+                "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\"}}",
+            ),
+            ("outer/node_modules/@types/lib/index.d.ts", declaration),
+            ("outer/node_modules/@types/acme__d/index.d.ts", declaration),
+            ("outer/node_modules/@types/fd/sub.d.ts", declaration),
+            ("outer/node_modules/@types/flat.d.ts", declaration),
+            ("outer/node_modules/@types/dd/sub/index.d.ts", declaration),
+            (
+                "outer/node_modules/@types/pj/sub/package.json",
+                "{\"types\": \"x.d.ts\"}",
+            ),
+            ("outer/node_modules/@types/pj/sub/x.d.ts", declaration),
+            (
+                "outer/node_modules/@types/tv/package.json",
+                "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+            ),
+            ("outer/node_modules/@types/tv/ts/sub.d.ts", declaration),
+            ("outer/node_modules/@types/empty/README.md", ""),
+            (
+                "outer/node_modules/@types/pkgonly/package.json",
+                "{\"name\": \"@types/pkgonly\"}",
+            ),
+        ] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write");
+        }
+        let manifests = Manifests::read(&dir.path().join("outer/ts"), &nodes);
         let graph = build_import_graph(&nodes, &manifests);
         let edges: Vec<&str> = graph.edges[&0]
             .iter()
@@ -4935,10 +5182,10 @@ mod tests {
         assert_eq!(
             edges,
             vec![
-                "ts/src/lib/util.js",
-                "ts/src/@acme/d/sub.js",
-                "ts/src/empty.js",
-                "ts/src/pkgonly.js"
+                "src/lib/util.js",
+                "src/@acme/d/sub.js",
+                "src/empty.js",
+                "src/pkgonly.js"
             ]
         );
         assert!(graph.undetermined_imports.is_empty());
@@ -4958,9 +5205,12 @@ mod tests {
     /// `lib2/util.d.ts`), a scope kept as written (`@sc/x`, where
     /// `sc__y` names nothing for `@sc/y`) but where the root is itself a
     /// `node_modules/@types` (`@sc/z` as `sc__z`), and a root above the
-    /// project's (`up`). A JavaScript file the walk finds is disclosed
-    /// where one of them holds a declaration for it, and is the one where
-    /// none does (`emp`).
+    /// project's (`up`). A declaration one in the project holds is the one
+    /// tsc takes over the walk's JavaScript file: an edge where pack reads
+    /// it (`rp7/classic_typeroots`'s `jq`), none and nothing disclosed where
+    /// it is only on disk (`@sc/z`). A JavaScript file the walk finds is
+    /// disclosed where a root outside the project may hold a declaration
+    /// for it (`up`), and is the one where none does (`emp`, `@sc/y`).
     #[test]
     fn classic_resolution_looks_in_the_type_roots_after_types() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4980,10 +5230,6 @@ mod tests {
                 "{\"compilerOptions\": {\"typeRoots\": [\"./typings\", \"../../types\", \
                  \"./nm/node_modules/@types\"]}}",
             ),
-            ("outer/repo/base/typings/jq/index.d.ts", declaration),
-            ("outer/repo/base/typings/lib2/util.d.ts", declaration),
-            ("outer/repo/base/typings/@sc/x/index.d.ts", declaration),
-            ("outer/repo/base/typings/sc__y/index.d.ts", declaration),
             ("outer/repo/base/typings/emp/README.md", ""),
             ("outer/types/up/index.d.ts", declaration),
             (
@@ -5012,21 +5258,326 @@ mod tests {
         ] {
             nodes.push(node_in(nodes.len(), rel, "", Language::JavaScript));
         }
+        for rel in [
+            "base/typings/jq/index.d.ts",
+            "base/typings/lib2/util.d.ts",
+            "base/typings/@sc/x/index.d.ts",
+            "base/typings/sc__y/index.d.ts",
+        ] {
+            nodes.push(node_in(nodes.len(), rel, declaration, Language::TypeScript));
+        }
         let manifests = Manifests::read(&dir.path().join("outer/repo"), &nodes);
         let graph = build_import_graph(&nodes, &manifests);
         let edges: Vec<&str> = graph.edges[&0]
             .iter()
             .map(|dst| nodes[*dst].rel_path.as_str())
             .collect();
-        assert_eq!(edges, vec!["src/@sc/y.js", "src/emp.js"]);
+        assert_eq!(
+            edges,
+            vec![
+                "base/typings/jq/index.d.ts",
+                "base/typings/lib2/util.d.ts",
+                "base/typings/@sc/x/index.d.ts",
+                "src/@sc/y.js",
+                "src/emp.js"
+            ]
+        );
         assert!(graph.undetermined_imports.is_empty());
         assert_eq!(
             graph.declaration_undetermined_imports,
-            ["jq", "lib2/util", "@sc/x", "up", "@sc/z"]
-                .into_iter()
-                .map(str::to_string)
-                .collect::<BTreeSet<_>>()
+            BTreeSet::from(["up".to_string()])
         );
+    }
+
+    /// `classic` takes a declaration the project holds in a
+    /// `node_modules/@types` or a `typeRoots` directory over the walk's
+    /// JavaScript file, as tsc 5.9.3 and 6.0.3 trace it (`tq2_classic`): the
+    /// edge to it where pack reads it, a scope mangled (`@acme/d` as
+    /// `acme__d`) and a `types` naming a TypeScript file naming it (`pj`,
+    /// `tt2`); a subpath through `typesVersions`, which pack does not
+    /// follow, is disclosed (`tv/sub`).
+    #[test]
+    fn classic_takes_a_declaration_the_project_holds() {
+        let source = "import \"@acme/d\";\nimport \"pj\";\nimport \"tv/sub\";\nimport \"tt2\";\n";
+        let mut nodes = vec![node_in(0, "src/app/main.ts", source, Language::TypeScript)];
+        for rel in ["src/@acme/d.js", "src/pj.js", "src/tv/sub.js", "src/tt2.js"] {
+            nodes.push(node_in(nodes.len(), rel, "", Language::JavaScript));
+        }
+        for rel in [
+            "node_modules/@types/acme__d/index.d.ts",
+            "node_modules/@types/pj/lib/t.ts",
+            "typings/tt2/lib/t.ts",
+        ] {
+            nodes.push(node_in(nodes.len(), rel, "", Language::TypeScript));
+        }
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \
+                     \"module\": \"esnext\", \"typeRoots\": [\"./typings\"]}}",
+                ),
+                (
+                    "node_modules/@types/pj/package.json",
+                    "{\"types\": \"lib/t.ts\"}",
+                ),
+                (
+                    "node_modules/@types/tv/package.json",
+                    "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                ),
+                ("node_modules/@types/tv/ts/sub.d.ts", ""),
+                ("typings/tt2/package.json", "{\"types\": \"lib/t.ts\"}"),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(
+            edges,
+            [
+                "node_modules/@types/acme__d/index.d.ts",
+                "node_modules/@types/pj/lib/t.ts",
+                "typings/tt2/lib/t.ts"
+            ]
+        );
+        assert_eq!(
+            graph.declaration_undetermined_imports,
+            BTreeSet::from(["tv/sub".to_string()])
+        );
+    }
+
+    /// Outside `classic`, TypeScript looks in the `typeRoots` after
+    /// `node_modules` in a pass whose extensions hold declarations, as tsc
+    /// 5.9.3, 6.0.3 and 7.0.2 trace it (`tr_*`): a declaration a root in the
+    /// project holds is the edge where no package or `@types` declaration
+    /// there takes the specifier first (`jq`, `lib2/util`, `@sc/x`, `pk`
+    /// through its `package.json`, and `nm`, a package holding nothing).
+    /// `node10` makes that pass before the JavaScript one, so a package of
+    /// JavaScript alone gives way to it (`ul`, `ex`, whose `exports` it does
+    /// not read), where `bundler` and `node16` take the package's file in
+    /// their one pass (`ul`), an `exports` pack does not follow leaving it
+    /// open (`ex`), as does a `typesVersions` (`tv`, which 5.9.3 and 6.0.3
+    /// pass over and 7.0.2 does not). A package that is a JavaScript file
+    /// (`tf`) gives way under `node10` alike (`tf_*`). A package with its own
+    /// declaration (`tl`, `tt` through its `types`) or one in `@types`
+    /// (`at`) comes first in every mode. A `types` naming a TypeScript file
+    /// names it (`tn`). `node16` for an ES import adds no extension and
+    /// reads no `index` there, so only `pk` and `tn` name one.
+    #[test]
+    fn a_type_root_declaration_outside_classic_comes_after_node_modules() {
+        let specifiers = [
+            "jq",
+            "ul",
+            "tl",
+            "at",
+            "lib2/util",
+            "pk",
+            "ex",
+            "@sc/x",
+            "nm",
+            "tf",
+            "tt",
+            "tv",
+            "tn",
+        ];
+        let source: String = specifiers
+            .iter()
+            .map(|specifier| format!("import \"{specifier}\";\n"))
+            .collect();
+        let typings = [
+            "jq/index.d.ts",
+            "ul/index.d.ts",
+            "tl/index.d.ts",
+            "at/index.d.ts",
+            "lib2/util.d.ts",
+            "pk/main.d.ts",
+            "ex/index.d.ts",
+            "@sc/x/index.d.ts",
+            "nm/index.d.ts",
+            "tf/index.d.ts",
+            "tt/index.d.ts",
+            "tv/index.d.ts",
+            "tn/lib/t.ts",
+        ];
+        let modes = [
+            (
+                "\"moduleResolution\": \"node10\", \"module\": \"commonjs\"",
+                None,
+            ),
+            (
+                "\"moduleResolution\": \"bundler\", \"module\": \"esnext\"",
+                None,
+            ),
+            (
+                "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+                None,
+            ),
+            (
+                "\"moduleResolution\": \"node16\", \"module\": \"node16\"",
+                Some("module"),
+            ),
+        ];
+        let mut read = Vec::new();
+        for (options, kind) in modes {
+            let mut nodes = vec![node_in(0, "src/app/main.ts", &source, Language::TypeScript)];
+            for file in typings {
+                let path = format!("typings/{file}");
+                nodes.push(node_in(nodes.len(), &path, "", Language::TypeScript));
+            }
+            let package = match kind {
+                Some(kind) => format!(
+                    "{{\"type\": \"{kind}\", \"devDependencies\": {{\"typescript\": \"^5.9.0\"}}}}"
+                ),
+                None => "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}".to_string(),
+            };
+            let config = format!(
+                "{{\"compilerOptions\": {{{options}, \"allowJs\": true, \
+                 \"typeRoots\": [\"./typings\"]}}}}"
+            );
+            let manifests = manifests_of(
+                &[
+                    ("package.json", &package),
+                    ("tsconfig.json", &config),
+                    ("typings/pk/package.json", "{\"types\": \"main.d.ts\"}"),
+                    (
+                        "node_modules/ul/package.json",
+                        "{\"name\": \"ul\", \"main\": \"index.js\"}",
+                    ),
+                    ("node_modules/ul/index.js", ""),
+                    (
+                        "node_modules/tl/package.json",
+                        "{\"name\": \"tl\", \"types\": \"index.d.ts\"}",
+                    ),
+                    ("node_modules/tl/index.d.ts", ""),
+                    ("node_modules/@types/at/index.d.ts", ""),
+                    (
+                        "node_modules/ex/package.json",
+                        "{\"name\": \"ex\", \"exports\": {\".\": \"./index.js\"}}",
+                    ),
+                    ("node_modules/ex/index.js", ""),
+                    ("node_modules/nm/package.json", "{\"name\": \"nm\"}"),
+                    ("node_modules/tf.js", ""),
+                    (
+                        "node_modules/tt/package.json",
+                        "{\"name\": \"tt\", \"types\": \"lib/x.d.ts\"}",
+                    ),
+                    ("node_modules/tt/lib/x.d.ts", ""),
+                    (
+                        "node_modules/tv/package.json",
+                        "{\"name\": \"tv\", \"main\": \"index.js\", \
+                         \"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                    ),
+                    ("node_modules/tv/index.js", ""),
+                    ("typings/tn/package.json", "{\"types\": \"lib/t.ts\"}"),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let edges: BTreeSet<&str> = graph
+                .edges
+                .get(&0)
+                .into_iter()
+                .flatten()
+                .map(|dst| nodes[*dst].rel_path.strip_prefix("typings/").unwrap())
+                .collect();
+            let edges: BTreeSet<String> = edges.into_iter().map(str::to_string).collect();
+            read.push((edges, graph.type_root_undetermined_imports.clone()));
+            assert!(graph.undetermined_imports.is_empty(), "{options}");
+            assert!(
+                graph.declaration_undetermined_imports.is_empty(),
+                "{options}"
+            );
+        }
+        let set = |items: &[&str]| -> BTreeSet<String> {
+            items.iter().map(|item| item.to_string()).collect()
+        };
+        let common = [
+            "jq/index.d.ts",
+            "lib2/util.d.ts",
+            "pk/main.d.ts",
+            "@sc/x/index.d.ts",
+            "nm/index.d.ts",
+            "tn/lib/t.ts",
+        ];
+        let node10 = [
+            &common[..],
+            &["ul/index.d.ts", "ex/index.d.ts", "tf/index.d.ts"],
+        ]
+        .concat();
+        assert_eq!(read[0], (set(&node10), set(&["tv"])));
+        assert_eq!(read[1], (set(&common), set(&["ex", "tv"])));
+        assert_eq!(read[2], (set(&common), set(&["ex", "tv"])));
+        assert_eq!(read[3], (set(&["pk/main.d.ts", "tn/lib/t.ts"]), set(&[])));
+    }
+
+    /// A declaration a `typeRoots` directory outside the project may hold,
+    /// which pack checks on disk without reading, is disclosed outside
+    /// `classic` only where the rest of the lookup names a file in the
+    /// project, which tsc would pass over for it (`up`, whose `paths`
+    /// JavaScript file `node10` looks for after the type roots); where it
+    /// names none there is nothing to disclose (`none`). A root that is the
+    /// `node_modules/@types` of the importer's directory or one above it is
+    /// passed over, since TypeScript's `node_modules` walk looks there first:
+    /// its `typesVersions` package leaves nothing open (`react`).
+    #[test]
+    fn a_type_root_outside_the_project_discloses_only_a_file_in_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let declaration = "export declare const v: number;";
+        for (path, contents) in [
+            (
+                "outer/repo/package.json",
+                "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+            ),
+            (
+                "outer/repo/tsconfig.json",
+                "{\"compilerOptions\": {\"moduleResolution\": \"node10\", \"module\": \"commonjs\", \
+                 \"allowJs\": true, \"typeRoots\": [\"./node_modules/@types\", \"../types\"], \
+                 \"paths\": {\"up\": [\"./src/up\"]}}}",
+            ),
+            ("outer/types/up/index.d.ts", declaration),
+            ("outer/types/none/index.d.ts", declaration),
+            (
+                "outer/repo/node_modules/react/package.json",
+                "{\"name\": \"react\", \"main\": \"index.js\"}",
+            ),
+            ("outer/repo/node_modules/react/index.js", ""),
+            (
+                "outer/repo/node_modules/@types/react/package.json",
+                "{\"types\": \"index.d.ts\", \"typesVersions\": {\"<=5.0\": {\"*\": [\"ts5.0/*\"]}}}",
+            ),
+            (
+                "outer/repo/node_modules/@types/react/index.d.ts",
+                declaration,
+            ),
+        ] {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(path, contents).expect("write");
+        }
+        let nodes = vec![
+            node_in(
+                0,
+                "src/app/main.ts",
+                "import \"up\";\nimport \"none\";\nimport \"react\";\n",
+                Language::TypeScript,
+            ),
+            node_in(1, "src/up.js", "", Language::JavaScript),
+        ];
+        let manifests = Manifests::read(&dir.path().join("outer/repo"), &nodes);
+        let graph = build_import_graph(&nodes, &manifests);
+        assert!(graph.edges[&0].is_empty());
+        assert_eq!(
+            graph.type_root_undetermined_imports,
+            BTreeSet::from(["up".to_string()])
+        );
+        assert!(graph.declaration_undetermined_imports.is_empty());
     }
 
     /// A `classic` lookup is made once for each configuration, importer's
@@ -5090,7 +5641,8 @@ mod tests {
     /// passed over for the next (`@y/thing`) or the walk (`@n/q`), and a
     /// pattern naming none at all is disclosed (`@x/x`). Below `baseUrl` a
     /// TypeScript file comes before the walk's (`bt`), the walk's before a
-    /// JavaScript file there (`lib/x`), `@types` before it too (`jq2`), and a
+    /// JavaScript file there (`lib/x`), `@types` before it too, its
+    /// declaration the edge where pack reads it (`jq2`), and a
     /// JavaScript file there before the walk's (`bj`). A file of another
     /// kind a specifier or a substitution spells exactly is still the one
     /// (`./x.vue`, `@x/v/c.vue`).
@@ -5181,6 +5733,7 @@ mod tests {
             "base/src/app/bj.jsx",
             "base/src/components/index.ts",
             "base/src/m/n.mts",
+            "base/node_modules/@types/jq2/index.d.ts",
         ] {
             nodes.push(file(nodes.len(), rel));
         }
@@ -5205,10 +5758,6 @@ mod tests {
                     "base/tsconfig.json",
                     "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\", \
                      \"baseUrl\": \"src\"}}",
-                ),
-                (
-                    "base/node_modules/@types/jq2/index.d.ts",
-                    "export declare const jq2: string;",
                 ),
             ],
             &nodes,
@@ -5248,16 +5797,18 @@ mod tests {
         );
         assert_eq!(
             edges(2),
-            vec!["base/src/app/lib/x.ts", "base/src/bt.ts", "base/src/bj.js"]
+            vec![
+                "base/src/app/lib/x.ts",
+                "base/node_modules/@types/jq2/index.d.ts",
+                "base/src/bt.ts",
+                "base/src/bj.js"
+            ]
         );
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["@x/x".to_string()])
         );
-        assert_eq!(
-            graph.declaration_undetermined_imports,
-            BTreeSet::from(["jq2".to_string()])
-        );
+        assert!(graph.declaration_undetermined_imports.is_empty());
         assert!(graph.version_undetermined_imports.is_empty());
     }
 

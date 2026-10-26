@@ -517,6 +517,143 @@ const SCRIPT_EXTENSIONS: [&str; 12] = [
     ".json",
 ];
 
+/// A specifier as TypeScript looks it up in a `node_modules/@types`: a scope
+/// mangled (`@scope/name/sub` as `scope__name/sub`).
+pub(super) fn mangle_scope(specifier: &str) -> String {
+    specifier.strip_prefix('@').map_or_else(
+        || specifier.to_string(),
+        |scoped| scoped.replacen('/', "__", 1),
+    )
+}
+
+/// The name TypeScript looks a specifier up by below a `typeRoots`
+/// directory: the specifier as written, its scope mangled only where the
+/// directory is itself a `node_modules/@types`.
+pub(super) fn type_root_name(type_root: &Path, specifier: &str) -> String {
+    match type_root.ends_with("node_modules/@types") {
+        true => mangle_scope(specifier),
+        false => specifier.to_string(),
+    }
+}
+
+/// Whether a `typeRoots` directory may hold a declaration for a specifier
+/// (`holds_declaration`), which pack checks on disk without reading it.
+pub(super) fn type_root_holds(type_root: &Path, specifier: &str) -> bool {
+    holds_declaration(type_root, &type_root_name(type_root, specifier))
+}
+
+/// Whether `directory`'s `node_modules/@types` may hold a declaration for a
+/// specifier's whole path: one the path names, scope mangled
+/// (`holds_declaration`), or, for a subpath, a package whose `package.json`
+/// holds `typesVersions`, which may map it to another file.
+fn holds_types(directory: &Path, specifier: &str) -> bool {
+    let mangled = mangle_scope(specifier);
+    let (package, subpath) = split_package_name(&mangled);
+    let types = directory.join("node_modules/@types");
+    holds_declaration(&types, &mangled)
+        || (!subpath.is_empty()
+            && package_json(&types.join(package).join("package.json"))
+                .is_some_and(|manifest| manifest.get("typesVersions").is_some()))
+}
+
+/// Whether TypeScript's lookup of a package in one `node_modules` directory
+/// on disk finds a file with a set of extensions, as tsc 5.9.3, 6.0.3 and
+/// 7.0.2 look one up (`loadModuleFromSpecificNodeModulesDirectory`): the
+/// file the specifier's path names, but for a package's name under an ES
+/// import, then the directory (`finds_in_directory`). `None` where the
+/// package's `exports`, which the lookup reads, or the `typesVersions` a
+/// subpath goes through decides.
+fn finds_package(
+    modules: &Path,
+    specifier: &str,
+    extensions: Extensions,
+    exports: bool,
+    add: bool,
+) -> Option<bool> {
+    let (package, subpath) = split_package_name(specifier);
+    let root = package_json(&modules.join(package).join("package.json"));
+    let declares = |field: &str| root.as_ref().is_some_and(|root| root.get(field).is_some());
+    if (exports && declares("exports")) || (!subpath.is_empty() && declares("typesVersions")) {
+        return None;
+    }
+    let candidate = modules.join(specifier);
+    if (add || !subpath.is_empty()) && finds_file(&candidate, extensions, add) {
+        return Some(true);
+    }
+    let manifest = match subpath.is_empty() {
+        true => root,
+        false => package_json(&candidate.join("package.json")),
+    };
+    finds_in_directory(&candidate, manifest.as_ref(), extensions, add)
+}
+
+/// Whether a directory on disk holds the file TypeScript takes for it, as
+/// `ProjectIndex::directory_module` reads a project's: the first of
+/// `typings` and `types`, where the extensions hold declarations, and
+/// `main` that its `package.json` sets, or that directory's `index`; else
+/// its own `index`. `None` where it holds `typesVersions`.
+fn finds_in_directory(
+    directory: &Path,
+    manifest: Option<&serde_json::Value>,
+    extensions: Extensions,
+    add: bool,
+) -> Option<bool> {
+    let index =
+        |directory: &Path, extensions, add| finds_file(&directory.join("index"), extensions, add);
+    if let Some(manifest) = manifest {
+        if manifest.get("typesVersions").is_some() {
+            return None;
+        }
+        let declarations = extensions != Extensions::JavaScript;
+        let field = ["typings", "types"]
+            .into_iter()
+            .filter(|_| declarations)
+            .chain(["main"])
+            .find_map(|field| {
+                let named = manifest
+                    .get(field)?
+                    .as_str()
+                    .filter(|path| !path.is_empty())?;
+                Some((field, named))
+            });
+        if let Some((field, named)) = field {
+            let path = directory.join(named);
+            let extensions = named_extensions(extensions);
+            if (field != "main" && path.is_file())
+                || finds_file(&path, extensions, true)
+                || index(&path, extensions, true)
+            {
+                return Some(true);
+            }
+        }
+    }
+    Some(index(directory, extensions, add))
+}
+
+/// Whether a file a path names with a set of extensions is on disk, trying
+/// the names `module_names` gives.
+fn finds_file(path: &Path, extensions: Extensions, add: bool) -> bool {
+    let named = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .zip(path.parent());
+    named.is_some_and(|(name, parent)| {
+        module_names(name, extensions, add)
+            .iter()
+            .any(|candidate| parent.join(candidate).is_file())
+    })
+}
+
+/// The extensions TypeScript looks the file a `package.json` field names
+/// up with: a lookup for declarations alone takes a TypeScript file there
+/// too.
+pub(super) fn named_extensions(extensions: Extensions) -> Extensions {
+    match extensions {
+        Extensions::Declaration => Extensions::TypeScript,
+        other => other,
+    }
+}
+
 /// Whether the path a specifier names below `base` may hold the declaration
 /// `classic` resolution takes for it there, as tsc 5.9.3 and 6.0.3 look one
 /// up: a declaration the path names (`module_names` of declarations), else the directory it names holding an `index.d.ts`, or a
@@ -842,46 +979,96 @@ impl Manifests {
         })
     }
 
-    /// Whether a declaration that TypeScript's `classic` resolution looks
-    /// for before it takes a JavaScript file may stand for a specifier, as
-    /// tsc 5.9.3 and 6.0.3 look one up: in a `node_modules/@types` from
-    /// `directory` up to the filesystem's root, the specifier's whole path
-    /// below it, a scope mangled (`@scope/name/sub` as `scope__name/sub`).
-    /// There the path names a declaration (`module_names` of declarations:
-    /// `lib/util` as `lib/util.d.ts`), or a directory
-    /// holding an `index.d.ts` or a `package.json` that names one, which
-    /// pack does not follow (`declares_types`); or the specifier is a
-    /// subpath of a package whose `package.json` holds `typesVersions`,
-    /// which may map it to another file. Then below each of `type_roots`,
-    /// the configuration's `typeRoots`, the specifier's path alike, a scope
-    /// mangled only where the root is itself a `node_modules/@types`.
-    pub(super) fn declaration_above(
-        &self,
-        directory: &[String],
-        specifier: &str,
-        type_roots: &[PathBuf],
-    ) -> bool {
+    /// The project path a path on disk lies at, `None` where it lies outside
+    /// the project.
+    pub(super) fn project_path_of(&self, path: &Path) -> Option<Vec<String>> {
+        let relative = path.strip_prefix(self.root.as_ref()?).ok()?;
+        relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(part) => part.to_str().map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a path is the `node_modules/@types` of `directory` or of a
+    /// directory above it, up to the filesystem's root.
+    pub(super) fn is_types_of_ancestor(&self, path: &Path, directory: &[String]) -> bool {
         let Some(root) = &self.root else {
             return false;
         };
-        let mangled = specifier.strip_prefix('@').map_or_else(
-            || specifier.to_string(),
-            |scoped| scoped.replacen('/', "__", 1),
-        );
-        let (package, subpath) = split_package_name(&mangled);
-        let holds = |directory: &Path| {
-            let types = directory.join("node_modules/@types");
-            holds_declaration(&types, &mangled)
-                || (!subpath.is_empty()
-                    && package_json(&types.join(package).join("package.json"))
-                        .is_some_and(|manifest| manifest.get("typesVersions").is_some()))
+        let holder = path
+            .ends_with("node_modules/@types")
+            .then(|| path.parent().and_then(Path::parent))
+            .flatten();
+        holder.is_some_and(|holder| project_file(root, directory).starts_with(holder))
+    }
+
+    /// Whether a `node_modules/@types` in a directory above the project's
+    /// root, up to the filesystem's, may hold a declaration for a
+    /// specifier's whole path (`holds_types`), which pack checks on disk
+    /// without reading it.
+    pub(super) fn types_above_root(&self, specifier: &str) -> bool {
+        self.root.as_ref().is_some_and(|root| {
+            root.ancestors()
+                .skip(1)
+                .any(|directory| holds_types(directory, specifier))
+        })
+    }
+
+    /// Whether TypeScript's lookup in `node_modules` finds a file for a
+    /// non-relative specifier with a set of extensions, as tsc 5.9.3, 6.0.3
+    /// and 7.0.2 look before a `typeRoots` directory: in each directory from
+    /// `directory` up to the filesystem's root, its `node_modules` package
+    /// (`finds_package`), then, where the extensions hold declarations, its
+    /// `node_modules/@types` one under the scope-mangled name. `add` is
+    /// whether the lookup adds an extension to a name (not for an ES import
+    /// under `node16`), `exports` whether it reads a package's `exports`
+    /// (not `node10`). `None` where a `package.json` pack does not follow
+    /// decides: `exports` the lookup reads, or `typesVersions`.
+    pub(super) fn node_modules_finds(
+        &self,
+        directory: &[String],
+        specifier: &str,
+        extensions: Extensions,
+        exports: bool,
+        add: bool,
+    ) -> Option<bool> {
+        let Some(root) = &self.root else {
+            return Some(false);
         };
-        (0..=directory.len()).any(|depth| holds(&project_file(root, &directory[..depth])))
-            || root.ancestors().skip(1).any(holds)
-            || type_roots.iter().any(|type_root| {
-                let at_types = type_root.ends_with("node_modules/@types");
-                holds_declaration(type_root, if at_types { &mangled } else { specifier })
-            })
+        let mangled = mangle_scope(specifier);
+        let directories = (0..=directory.len())
+            .rev()
+            .map(|depth| project_file(root, &directory[..depth]))
+            .chain(root.ancestors().skip(1).map(Path::to_path_buf));
+        let mut open = false;
+        for directory in directories {
+            let modules = directory.join("node_modules");
+            if !modules.is_dir() {
+                continue;
+            }
+            let mut found = vec![finds_package(&modules, specifier, extensions, exports, add)];
+            if extensions != Extensions::JavaScript {
+                let types = modules.join("@types");
+                found.push(finds_package(
+                    &types,
+                    &mangled,
+                    Extensions::Declaration,
+                    exports,
+                    add,
+                ));
+            }
+            for found in found {
+                match found {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => open = true,
+                }
+            }
+        }
+        (!open).then_some(false)
     }
 
     /// Whether a file a JavaScript or TypeScript path names is on disk, as
