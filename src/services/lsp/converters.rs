@@ -118,7 +118,6 @@ pub(super) fn convert_document_symbols(
     symbols: &[DocumentSymbol],
     file: &Path,
     options: &FindSymbolsOptions,
-    content: Option<&str>,
     container: Option<&str>,
     current_depth: u32,
     conv: &mut PositionConverter,
@@ -163,12 +162,6 @@ pub(super) fn convert_document_symbols(
                 symbol = symbol.with_container(c);
             }
 
-            if options.include_body
-                && let Some(body) = content.and_then(|c| extract_body_from_range(c, &doc_sym.range))
-            {
-                symbol = symbol.with_body(body);
-            }
-
             if current_depth < options.depth
                 && let Some(children) = &doc_sym.children
             {
@@ -176,7 +169,6 @@ pub(super) fn convert_document_symbols(
                     children,
                     file,
                     options,
-                    content,
                     Some(&display_name),
                     current_depth + 1,
                     conv,
@@ -187,18 +179,6 @@ pub(super) fn convert_document_symbols(
             symbol
         })
         .collect()
-}
-
-fn extract_lines(content: &str, start: usize, end: usize) -> Option<String> {
-    let selected: Vec<&str> = content.lines().skip(start).take(end - start + 1).collect();
-    if selected.is_empty() {
-        return None;
-    }
-    Some(selected.join("\n"))
-}
-
-pub(super) fn extract_body_from_range(content: &str, range: &Range) -> Option<String> {
-    extract_lines(content, range.start.line as usize, range.end.line as usize)
 }
 
 /// LSP `Diagnostic.code` is a string-or-number union. Surface the value
