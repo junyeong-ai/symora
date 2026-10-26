@@ -37,6 +37,8 @@ The position answer adds regions the LANGUAGE excludes from a production build (
 
 `DECLARATION_FIXTURES` is the contract per language: a form or a language joins it with the query that reads it, and every pattern of a query matches a form its fixtures write. Where a language server is installed, its document symbols are the reference to compare a change against.
 
+No two declarations of a file share a name position: the index keeps one row per position and the language-server join matches by it, so a declaration that writes no name of its own (an unnamed Dart primary constructor) is placed at syntax it does write.
+
 `declaration_visibility` answers `is_exported`; its contract is in `.claude/rules/json-output-stability.md` (Symbols and analysis).
 
 ## Import edges come from the parse tree
