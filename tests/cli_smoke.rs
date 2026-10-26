@@ -4186,6 +4186,122 @@ fn code_action_ranges_remain_bound_to_the_request_content() {
     }
 }
 
+/// What a language server started stops with it when a command run without
+/// the daemon ends: when it answers, when it reports a failure, and when a
+/// hangup stops it.
+#[test]
+#[cfg(unix)]
+fn a_command_stops_what_its_language_server_started() {
+    use serde_json::json;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("protocol fixtures require python3");
+        return;
+    }
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lsp");
+    // The server runs through `sh`, which first starts a `sleep` of its own
+    // and records its pid in `helper.pid`.
+    let served = |server: &str, args: &dyn Fn(&Path) -> Vec<serde_json::Value>| {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.go"), "abc()\n").unwrap();
+        std::fs::write(
+            root.path().join("go.mod"),
+            "module example.com/fixture\n\ngo 1.25\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join(".symora")).unwrap();
+        let mut argv = vec![
+            json!("-c"),
+            json!("sleep 60 & echo $! > \"$1\"; shift; exec python3 \"$@\""),
+            json!("sh"),
+            json!(root.path().join("helper.pid")),
+            json!(fixtures.join(server)),
+        ];
+        argv.extend(args(root.path()));
+        let config = json!({"lsp": {"servers": {"go": {"command": "sh", "args": argv}}}});
+        std::fs::write(
+            root.path().join(".symora/config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        root
+    };
+    let pid_in = |file: &Path| -> libc::pid_t {
+        std::fs::read_to_string(file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    // SAFETY: signal 0 only asks whether the process exists.
+    let alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0;
+    let stops = |pid: libc::pid_t| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let outlived = alive(pid);
+        if outlived {
+            // SAFETY: the pid is a process this test's fixture started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        !outlived
+    };
+
+    for fails in [false, true] {
+        let root = served("code_action_server.py", &|root| {
+            vec![
+                json!(root.join("main.go")),
+                json!(if fails { "mutate" } else { "keep" }),
+            ]
+        });
+        let output = symora()
+            .args(["actions", "apply", "main.go:1:1", "Rename first token"])
+            .args(["--format", "compact"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let stopped = stops(pid_in(&root.path().join("helper.pid")));
+        let payload: serde_json::Value = common::parse_response(&output.stdout).unwrap();
+        assert_eq!(output.status.success(), !fails, "{payload}");
+        assert!(stopped, "the server's child outlived the command");
+    }
+
+    // A server held in `initialize` keeps the command running until the
+    // hangup reaches it.
+    let root = served("configuration_server.py", &|root| {
+        vec![json!(root.join("server.pid")), json!(root.join("never"))]
+    });
+    let mut command = symora()
+        .args(["hover", "main.go:1:1", "--format", "compact"])
+        .current_dir(root.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let server = root.path().join("server.pid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !server.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (server, helper) = (pid_in(&server), pid_in(&root.path().join("helper.pid")));
+    // SAFETY: the pid is the command this test started.
+    unsafe { libc::kill(command.id() as libc::pid_t, libc::SIGHUP) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while command.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = command.kill();
+    let stopped = [stops(helper), stops(server)];
+    assert_eq!(
+        stopped,
+        [true, true],
+        "the server or its child outlived a hangup"
+    );
+}
+
 /// A path query's live answer is cut to its limit after the ranking every
 /// symbol surface shares has ordered it, so the cut keeps the match the
 /// answer leads with, not the one the server happened to list first.

@@ -6,7 +6,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
 use tokio::time::timeout;
 
@@ -23,9 +23,11 @@ use crate::models::symbol::Language;
 
 mod capabilities;
 mod indexing;
+mod process;
 
 use capabilities::client_capabilities;
 use indexing::IndexingStatus;
+use process::ServerProcess;
 
 pub use indexing::{IndexingEvent, IndexingQuery, IndexingState};
 
@@ -292,10 +294,11 @@ impl Drop for DocumentSyncGuard<'_> {
 
 pub struct LspClient {
     language: Language,
-    /// Spawned `kill_on_drop`, so the server process lives exactly as long as
-    /// this client. Nothing the client starts may hold it strongly — a task
-    /// or handler that did would keep an abandoned server running forever.
-    process: Mutex<Option<Child>>,
+    /// Stopped when this client is dropped, so the server and what it started
+    /// live exactly as long as this client. Nothing the client starts may
+    /// hold it strongly — a task or handler that did would keep an abandoned
+    /// server running forever.
+    process: Mutex<Option<ServerProcess>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     usage: std::sync::Mutex<ClientUseState>,
     next_id: AtomicU64,
@@ -404,29 +407,24 @@ impl LspClient {
         );
 
         // Spawn server process
-        let mut child = Command::new(&launch.command)
-            .args(&launch.args)
-            .envs(&launch.env)
-            .current_dir(&self.root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| LspError::ServerStart(format!("{}: {}", launch.command.display(), e)))?;
+        let mut child = ServerProcess::spawn(
+            Command::new(&launch.command)
+                .args(&launch.args)
+                .envs(&launch.env)
+                .current_dir(&self.root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .map_err(|e| LspError::ServerStart(format!("{}: {}", launch.command.display(), e)))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| LspError::ServerStart("Failed to get stdin".to_string()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| LspError::ServerStart("Failed to get stdout".to_string()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| LspError::ServerStart("Failed to get stderr".to_string()))?;
+        let (stdin, stdout, stderr) = child.take_stdio();
+        let stdin =
+            stdin.ok_or_else(|| LspError::ServerStart("Failed to get stdin".to_string()))?;
+        let stdout =
+            stdout.ok_or_else(|| LspError::ServerStart("Failed to get stdout".to_string()))?;
+        let stderr =
+            stderr.ok_or_else(|| LspError::ServerStart("Failed to get stderr".to_string()))?;
 
         // Store process and stdin
         *self.process.lock().await = Some(child);
@@ -932,13 +930,13 @@ impl LspClient {
         if let Ok(mut stdin) = self.stdin.try_lock() {
             stdin.take();
         } else if let Some(child) = self.process.lock().await.as_mut() {
-            let _ = child.start_kill();
+            child.start_kill();
         }
 
         // Stage 2 & 3: Wait for process exit, then force kill
         if let Some(mut child) = self.process.lock().await.take() {
             if !acknowledged {
-                let _ = child.start_kill();
+                child.start_kill();
             }
             let remaining = crate::infra::deadline::remaining(Duration::from_secs(5));
             match timeout(remaining, child.wait()).await {
@@ -1502,22 +1500,6 @@ impl LspClient {
     }
 }
 
-impl Drop for LspClient {
-    fn drop(&mut self) {
-        if let Ok(mut process_guard) = self.process.try_lock() {
-            if let Some(ref mut child) = *process_guard {
-                let _ = child.start_kill();
-                tracing::debug!("LspClient for {} dropped, process killed", self.language);
-            }
-        } else {
-            tracing::warn!(
-                "LspClient for {} dropped but could not acquire lock - potential zombie process",
-                self.language
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod test_support {
     use super::*;
@@ -1834,13 +1816,9 @@ mod tests {
     #[tokio::test]
     async fn a_live_process_with_closed_input_is_not_a_reusable_session() {
         let client = test_client();
-        let mut child = Command::new("sleep")
-            .arg("20")
-            .stdin(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        *client.stdin.lock().await = child.stdin.take();
+        let mut child =
+            ServerProcess::spawn(Command::new("sleep").arg("20").stdin(Stdio::piped())).unwrap();
+        *client.stdin.lock().await = child.take_stdio().0;
         *client.process.lock().await = Some(child);
         assert!(client.is_running().await);
         client.stdin.lock().await.take();
