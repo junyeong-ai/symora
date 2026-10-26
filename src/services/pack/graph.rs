@@ -4508,11 +4508,13 @@ mod tests {
     /// A specifier that each TypeScript major reads alike but the majors
     /// read differently is disclosed as one the unknown version decides;
     /// one that projects compiling the file read differently under one
-    /// major is disclosed as undetermined whatever the version. A
-    /// configuration setting no `baseUrl` is read under 7 too where no
-    /// TypeScript is installed or declared: with `moduleResolution: "node"`,
-    /// tsc 5.9.3 and 6.0.3 take the package's `types` and 7.0.2, which
-    /// removed `node10` (TS5108), its `import` file (`node10_absent`).
+    /// major is disclosed as undetermined whatever the version. Where no
+    /// TypeScript is installed or declared, a configuration setting a module
+    /// option tsc 7.0.2 removed (TS5108) is read under 5 and 6 alone: with
+    /// `moduleResolution: "node"` tsc 5.9.3 and 6.0.3 take the package's
+    /// `types` (`node10_absent`), and with `moduleResolution: "classic"` or
+    /// `module` `amd`, `umd` or `system` they resolve no file for it, where
+    /// 7.0.2 takes its `import` file in each.
     #[test]
     fn a_specifier_only_the_typescript_version_decides_is_disclosed_as_such() {
         let ts = |id, rel: &str, source: &str| node_in(id, rel, source, Language::TypeScript);
@@ -4521,6 +4523,19 @@ mod tests {
             ts(1, "owners/shared/s.ts", "import q from 'q6'\n"),
             ts(2, "n10/src/a.ts", "import p from 'p6'\n"),
         ];
+        let removed = [
+            "\"moduleResolution\": \"classic\", \"module\": \"esnext\"",
+            "\"module\": \"amd\"",
+            "\"module\": \"umd\"",
+            "\"module\": \"system\"",
+        ];
+        for (at, _) in removed.iter().enumerate() {
+            nodes.push(ts(
+                nodes.len(),
+                &format!("rm{at}/src/a.ts"),
+                "import r from 'r6'\n",
+            ));
+        }
         let mut configs = vec![
             (
                 "package.json".to_string(),
@@ -4542,6 +4557,12 @@ mod tests {
                     .to_string(),
             ),
         ];
+        for (at, options) in removed.iter().enumerate() {
+            configs.push((
+                format!("rm{at}/tsconfig.json"),
+                format!("{{\"compilerOptions\": {{{options}}}}}"),
+            ));
+        }
         for (project, resolution) in [("a", "node10"), ("b", "bundler")] {
             configs.push((
                 format!("owners/{project}/tsconfig.json"),
@@ -4551,7 +4572,7 @@ mod tests {
                 ),
             ));
         }
-        for package in ["p6", "q6"] {
+        for package in ["p6", "q6", "r6"] {
             for file in ["types", "esm", "cjs"] {
                 nodes.push(ts(
                     nodes.len(),
@@ -4574,7 +4595,12 @@ mod tests {
         let manifests = manifests_of(&configs, &nodes);
         let graph = build_import_graph(&nodes, &manifests);
         assert!(graph.edges[&0].is_empty() && graph.edges[&1].is_empty());
-        assert!(graph.edges[&2].is_empty());
+        let n10: Vec<&str> = graph.edges[&2]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(n10, vec!["packages/p6/src/types.ts"]);
+        assert!((3..3 + removed.len()).all(|id| graph.edges[&id].is_empty()));
         assert_eq!(
             graph.version_undetermined_imports,
             BTreeSet::from(["p6".to_string()])

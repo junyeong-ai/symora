@@ -264,11 +264,13 @@ pub(super) struct TsConfig {
 impl TsConfig {
     /// The TypeScript majors that may compile the configuration's files.
     /// Where no major pack reads is installed or declared — none, a range
-    /// fixing none, a version above 7 — a chain setting `baseUrl` is one no
-    /// TypeScript 7 compiles — tsc 7.0.2 refuses it with TS5102 — so it is
-    /// read under 5 and 6 alone.
+    /// fixing none, a version above 7 — a chain setting an option tsc 7.0.2
+    /// rejects as an error is one no TypeScript 7 compiles, so it is read
+    /// under 5 and 6 alone: `baseUrl` (TS5102), or a module option 7 removed
+    /// (`ModuleOptions::removed_in_7`).
     pub(super) fn majors(&self) -> Vec<u8> {
-        let refused = !matches!(self.typescript, TypeScript::Major(_)) && self.base_url.is_some();
+        let refused = !matches!(self.typescript, TypeScript::Major(_))
+            && (self.base_url.is_some() || self.module_options.removed_in_7());
         self.typescript
             .majors()
             .iter()
@@ -325,6 +327,16 @@ pub(super) enum ModuleKind {
 }
 
 impl ModuleOptions {
+    /// Whether the chain sets a module option tsc 7.0.2 rejects as removed
+    /// (TS5108): `moduleResolution` `node`, `node10` or `classic`, or
+    /// `module` `amd`, `umd` or `system`.
+    pub(super) fn removed_in_7(&self) -> bool {
+        matches!(
+            self.module_resolution.value(),
+            Some(Some("node" | "node10" | "classic"))
+        ) || matches!(self.module.value(), Some(Some("amd" | "umd" | "system")))
+    }
+
     /// The module system TypeScript of `major` emits a file in, as tsc
     /// 5.9.3, 6.0.3 and 7.0.2 do: the `module` set, else `commonjs` below
     /// an ES2015 `target` and `es2015` from one — the default `target` being
