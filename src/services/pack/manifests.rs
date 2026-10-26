@@ -512,6 +512,44 @@ const SCRIPT_EXTENSIONS: [&str; 12] = [
     ".json",
 ];
 
+/// Whether the path a specifier names below `base` may hold the declaration
+/// `classic` resolution takes for it there, as tsc 5.9.3 and 6.0.3 look one
+/// up: a declaration the path names (`classic_names` in the declaration
+/// pass), else the directory it names holding an `index.d.ts`, or a
+/// `package.json` naming `types`, `typings`, `main` or `typesVersions`
+/// (`declares_types`), whose file pack does not look up. A directory holding
+/// neither, or a `package.json` naming none of them, holds none: tsc takes
+/// the JavaScript file there.
+fn holds_declaration(base: &Path, specifier: &str) -> bool {
+    let candidate = base.join(specifier);
+    let named = candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .zip(candidate.parent());
+    let Some((name, parent)) = named else {
+        return false;
+    };
+    classic_names(name, ClassicPass::Declaration)
+        .iter()
+        .any(|declaration| parent.join(declaration).is_file())
+        || candidate.join("index.d.ts").is_file()
+        || package_json(&candidate.join("package.json"))
+            .is_some_and(|manifest| declares_types(&manifest))
+}
+
+/// Whether a `package.json` names a field TypeScript reads a declaration
+/// for its directory by: `typings`, `types`, `main` or `typesVersions`.
+fn declares_types(manifest: &serde_json::Value) -> bool {
+    ["typings", "types", "main", "typesVersions"]
+        .iter()
+        .any(|field| manifest.get(field).is_some())
+}
+
+/// The `package.json` at a path, `None` where it is missing or no JSON.
+fn package_json(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
 /// Whether a name ends with an extension and holds more than it.
 fn has_extension(name: &str, extension: &str) -> bool {
     name.len() > extension.len() && name.ends_with(extension)
@@ -523,6 +561,8 @@ fn has_extension(name: &str, extension: &str) -> bool {
 pub(super) enum ClassicPass {
     /// TypeScript's own files, then declarations: the first pass.
     TypeScript,
+    /// Declarations alone, as it looks in `@types`.
+    Declaration,
     /// JavaScript files: the last pass, `allowJs` set or not.
     JavaScript,
 }
@@ -560,6 +600,7 @@ pub(super) fn classic_names(name: &str, pass: ClassicPass) -> Vec<String> {
         };
         let replaced: Vec<&str> = match pass {
             ClassicPass::TypeScript => typescript.iter().chain(declaration).copied().collect(),
+            ClassicPass::Declaration => declaration.to_vec(),
             ClassicPass::JavaScript => javascript.to_vec(),
         };
         names.extend(
@@ -570,6 +611,7 @@ pub(super) fn classic_names(name: &str, pass: ClassicPass) -> Vec<String> {
     }
     let added: &[&str] = match pass {
         ClassicPass::TypeScript => &[".ts", ".tsx", ".d.ts"],
+        ClassicPass::Declaration => &[".d.ts"],
         ClassicPass::JavaScript => &[".js", ".jsx"],
     };
     names.extend(added.iter().map(|extension| format!("{name}{extension}")));
@@ -775,22 +817,32 @@ impl Manifests {
         })
     }
 
-    /// Whether a `node_modules/@types` from `directory` up to the
-    /// filesystem's root holds a package by the name a specifier's first
-    /// components give (`@scope/name` as `scope__name`), as a directory or a
-    /// `.d.ts` file, which TypeScript's `classic` resolution looks in before
-    /// it takes a JavaScript file.
-    pub(super) fn types_package_above(&self, directory: &[String], specifier: &str) -> bool {
+    /// Whether a declaration that TypeScript's `classic` resolution looks
+    /// for before it takes a JavaScript file may stand for a specifier, as
+    /// tsc 5.9.3 and 6.0.3 look one up: in a `node_modules/@types` from
+    /// `directory` up to the filesystem's root, the specifier's whole path
+    /// below it, a scope mangled (`@scope/name/sub` as `scope__name/sub`).
+    /// There the path names a declaration (`classic_names` in the
+    /// declaration pass: `lib/util` as `lib/util.d.ts`), or a directory
+    /// holding an `index.d.ts` or a `package.json` that names one, which
+    /// pack does not follow (`declares_types`); or the specifier is a
+    /// subpath of a package whose `package.json` holds `typesVersions`,
+    /// which may map it to another file.
+    pub(super) fn declaration_above(&self, directory: &[String], specifier: &str) -> bool {
         let Some(root) = &self.root else {
             return false;
         };
-        let (name, _) = split_package_name(specifier);
-        let package = name
-            .strip_prefix('@')
-            .map_or_else(|| name.to_string(), |scoped| scoped.replacen('/', "__", 1));
+        let mangled = specifier.strip_prefix('@').map_or_else(
+            || specifier.to_string(),
+            |scoped| scoped.replacen('/', "__", 1),
+        );
+        let (package, subpath) = split_package_name(&mangled);
         let holds = |directory: &Path| {
             let types = directory.join("node_modules/@types");
-            types.join(&package).is_dir() || types.join(format!("{package}.d.ts")).is_file()
+            holds_declaration(&types, &mangled)
+                || (!subpath.is_empty()
+                    && package_json(&types.join(package).join("package.json"))
+                        .is_some_and(|manifest| manifest.get("typesVersions").is_some()))
         };
         (0..=directory.len()).any(|depth| holds(&project_file(root, &directory[..depth])))
             || root.ancestors().skip(1).any(holds)

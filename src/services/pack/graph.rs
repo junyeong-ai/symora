@@ -1481,9 +1481,10 @@ impl ProjectIndex<'_> {
     /// filesystem's; a `paths` pattern naming no file is passed over. Between
     /// the passes it looks in each `node_modules/@types` above the importer.
     /// So a TypeScript file any of them holds comes before every JavaScript
-    /// file, and a JavaScript file is the one unless an `@types` package by
-    /// the specifier's name sits in a `node_modules` above the importer,
-    /// which pack does not read, so the specifier is disclosed there. Past
+    /// file, and a JavaScript file is the one unless a declaration for the
+    /// specifier may sit in a `node_modules/@types` above the importer
+    /// (`Manifests::declaration_above`), which pack does not read, so the
+    /// specifier is disclosed there. Past
     /// the root pack checks the disk alone, reading nothing: a TypeScript
     /// file there ends the lookup with no edge, as one on disk in the project
     /// that pack does not read does, and what the JavaScript pass would find
@@ -1553,9 +1554,7 @@ impl ProjectIndex<'_> {
         match found {
             Some(found)
                 if !found.is_empty()
-                    && self
-                        .manifests
-                        .types_package_above(&from.directory, specifier) =>
+                    && self.manifests.declaration_above(&from.directory, specifier) =>
             {
                 Resolution::Undetermined(specifier.to_string())
             }
@@ -4468,6 +4467,109 @@ mod tests {
             BTreeSet::from(["jq".to_string()])
         );
         assert!(graph.version_undetermined_imports.is_empty());
+    }
+
+    /// Between its passes `classic` looks the specifier's whole path up
+    /// below `node_modules/@types`, as tsc 5.9.3 and 6.0.3 trace it
+    /// (`types_sub`): a declaration it names (`fd/sub` as `fd/sub.d.ts`,
+    /// `flat` as `flat.d.ts`), a directory holding an `index.d.ts`
+    /// (`dd/sub`) or a `package.json` naming its types (`pj/sub`), or a
+    /// subpath of a package with `typesVersions` (`tv/sub`). A JavaScript
+    /// file the walk finds is disclosed there. A package holding no such
+    /// subpath (`lib/util`, `@acme/d/sub` below `acme__d`), a directory
+    /// holding no declaration (`empty`) and a `package.json` naming none
+    /// (`pkgonly`) leave the JavaScript file the one, as tsc takes it.
+    #[test]
+    fn classic_resolution_looks_the_specifiers_whole_path_up_below_types() {
+        let specifiers = [
+            "lib/util",
+            "@acme/d/sub",
+            "fd/sub",
+            "flat",
+            "dd/sub",
+            "pj/sub",
+            "tv/sub",
+            "empty",
+            "pkgonly",
+        ];
+        let source: String = specifiers
+            .iter()
+            .map(|specifier| format!("import \"{specifier}\";\n"))
+            .collect();
+        let mut nodes = vec![node_in(
+            0,
+            "ts/src/app/main.ts",
+            &source,
+            Language::TypeScript,
+        )];
+        for rel in [
+            "ts/src/lib/util.js",
+            "ts/src/@acme/d/sub.js",
+            "ts/src/fd/sub.js",
+            "ts/src/flat.js",
+            "ts/src/dd/sub.js",
+            "ts/src/pj/sub.js",
+            "ts/src/tv/sub.js",
+            "ts/src/empty.js",
+            "ts/src/pkgonly.js",
+        ] {
+            nodes.push(node_in(nodes.len(), rel, "", Language::JavaScript));
+        }
+        let declaration = "export declare const v: number;";
+        let manifests = manifests_of(
+            &[
+                (
+                    "ts/package.json",
+                    "{\"devDependencies\": {\"typescript\": \"^5.9.0\"}}",
+                ),
+                (
+                    "ts/tsconfig.json",
+                    "{\"compilerOptions\": {\"moduleResolution\": \"classic\", \"module\": \"esnext\"}}",
+                ),
+                ("ts/node_modules/@types/lib/index.d.ts", declaration),
+                ("ts/node_modules/@types/acme__d/index.d.ts", declaration),
+                ("ts/node_modules/@types/fd/sub.d.ts", declaration),
+                ("ts/node_modules/@types/flat.d.ts", declaration),
+                ("ts/node_modules/@types/dd/sub/index.d.ts", declaration),
+                (
+                    "ts/node_modules/@types/pj/sub/package.json",
+                    "{\"types\": \"x.d.ts\"}",
+                ),
+                ("ts/node_modules/@types/pj/sub/x.d.ts", declaration),
+                (
+                    "ts/node_modules/@types/tv/package.json",
+                    "{\"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                ),
+                ("ts/node_modules/@types/tv/ts/sub.d.ts", declaration),
+                ("ts/node_modules/@types/empty/README.md", ""),
+                (
+                    "ts/node_modules/@types/pkgonly/package.json",
+                    "{\"name\": \"@types/pkgonly\"}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        let edges: Vec<&str> = graph.edges[&0]
+            .iter()
+            .map(|dst| nodes[*dst].rel_path.as_str())
+            .collect();
+        assert_eq!(
+            edges,
+            vec![
+                "ts/src/lib/util.js",
+                "ts/src/@acme/d/sub.js",
+                "ts/src/empty.js",
+                "ts/src/pkgonly.js"
+            ]
+        );
+        assert_eq!(
+            graph.undetermined_imports,
+            ["fd/sub", "flat", "dd/sub", "pj/sub", "tv/sub"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        );
     }
 
     /// Under `classic`, a relative specifier and the paths `paths` and
