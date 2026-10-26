@@ -806,6 +806,35 @@ fn edit_notifications_do_not_start_daemon_when_listener_disappears_after_ping() 
     }
 }
 
+/// A home too deep for a Unix socket's path (104 bytes on macOS, 108 on
+/// Linux) runs in process, as the direct run answers, instead of failing on
+/// a daemon it could never reach.
+#[test]
+fn a_daemon_socket_path_too_long_to_bind_runs_in_process() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("h".repeat(120));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+
+    let out = project_command(
+        Path::new(env!("CARGO_BIN_EXE_symora")),
+        &home,
+        &["--format", "compact", "search", "content", "alpha"],
+    )
+    .current_dir(&project)
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(value["count"], 1, "{value}");
+}
+
 /// A sandbox that forbids the daemon's directory still gets answers: the
 /// process runs in process instead of failing every command on the startup
 /// lock it cannot open.
