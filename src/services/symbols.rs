@@ -7994,12 +7994,6 @@ region     = "us-central1"
         }
     }
 
-    /// A C header's macros can leave the grammar recovering around its
-    /// declarations: a struct holding a macro member puts what follows inside
-    /// a syntax error, where a prototype reads as a member, and a macro type
-    /// cuts a typedef short of its name. What the grammar read whole is read
-    /// where it stands, as a function and a type; what it cut short names
-    /// nothing.
     /// A body ends where one configuration of the preprocessor closes it,
     /// whatever brackets comments, literals and other branches hold, and a
     /// brace a directive writes ends with that directive at the latest.
@@ -8309,6 +8303,12 @@ region     = "us-central1"
         }
     }
 
+    /// A C header's macros can leave the grammar recovering around its
+    /// declarations: a struct holding a macro member puts what follows inside
+    /// a syntax error, where a prototype reads as a member, and a macro type
+    /// cuts a typedef short of its name. What the grammar read whole is read
+    /// where it stands, as a function and a type; what it cut short names
+    /// nothing.
     #[test]
     fn a_recovered_header_declares_only_what_the_grammar_read_whole() {
         let extractor = SymbolExtractor::new();
