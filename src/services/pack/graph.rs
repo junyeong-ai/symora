@@ -4375,13 +4375,16 @@ mod tests {
     /// not to the `.js` files in it, and `jz` to the `@types/jz` two above
     /// it. So `lib/x` and `lib/y` form no edge and `jz` is disclosed. A `.js`
     /// file above the root comes after the project's: `lib/w` keeps its
-    /// edge.
+    /// edge. The walk reaches past the root only after the project's
+    /// directories: a `.ts` file in both, as `lib/v` names, is the
+    /// project's, as tsc 5.9.3 and 6.0.3 resolve it (`tsboth`).
     #[test]
     fn classic_resolution_walks_past_the_projects_root_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         for (path, contents) in [
             ("lib/x.ts", "export const x = 1;"),
             ("outer/lib/y.d.ts", "export declare const y: number;"),
+            ("outer/lib/v.ts", "export const v = 1;"),
             (
                 "node_modules/@types/jz/index.d.ts",
                 "export declare const jz: string;",
@@ -4402,13 +4405,15 @@ mod tests {
         }
         let js = |id, rel: &str| node_in(id, rel, "", Language::JavaScript);
         let imports = "import x from \"lib/x\";\nimport y from \"lib/y\";\n\
-                       import jz from \"jz\";\nimport w from \"lib/w\";\n";
+                       import jz from \"jz\";\nimport w from \"lib/w\";\n\
+                       import v from \"lib/v\";\n";
         let nodes = vec![
             node_in(0, "src/app/main.ts", imports, Language::TypeScript),
             js(1, "src/lib/x.js"),
             js(2, "src/lib/y.js"),
             js(3, "src/jz.js"),
             js(4, "src/lib/w.js"),
+            node_in(5, "src/lib/v.ts", "", Language::TypeScript),
         ];
         let manifests = Manifests::read(&dir.path().join("outer/repo"), &nodes);
         let graph = build_import_graph(&nodes, &manifests);
@@ -4416,7 +4421,7 @@ mod tests {
             .iter()
             .map(|dst| nodes[*dst].rel_path.as_str())
             .collect();
-        assert_eq!(edges, vec!["src/lib/w.js"]);
+        assert_eq!(edges, vec!["src/lib/w.js", "src/lib/v.ts"]);
         assert_eq!(
             graph.undetermined_imports,
             BTreeSet::from(["jz".to_string()])
