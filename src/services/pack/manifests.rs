@@ -143,13 +143,43 @@ pub(super) struct TsProjects {
 }
 
 /// A TypeScript configuration as the project `tsc -b` builds from it: what
-/// it says about its files' specifiers, the files it compiles itself, and
-/// the projects its `references` name, by their indices in `TsProjects`.
+/// it says about its files' specifiers, what it says about a package's own
+/// name read from inside it, the files it compiles itself, and the projects
+/// its `references` name, by their indices in `TsProjects`.
 #[derive(Debug, Clone, Default)]
 struct TsProject {
     config: TsConfig,
+    self_name: SelfName,
     sources: TsSources,
     references: Vec<usize>,
+}
+
+/// The options tsc 5.9.3, 6.0.3 and 7.0.2 read a package's own name from
+/// inside it with (`loadModuleFromSelfNameReference`), each against the
+/// directory of the configuration setting it: whether they read JavaScript,
+/// which has them walk the package's `exports` once with every extension,
+/// and the output directories and root they map a target in an output
+/// directory back to its input by (`tryLoadInputFileForPath`). They are
+/// kept beside the project's `TsConfig`, outside the equality that decides
+/// whether projects compiling a file say different things about its
+/// specifiers: projects differing in these alone read every other specifier
+/// alike. Each is `None` where a configuration the chain could not read may
+/// set it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct SelfName {
+    /// The directory of the configuration file the project is built from,
+    /// which has to lie in the package's directory for tsc to map a target.
+    pub(super) directory: Vec<String>,
+    /// `declarationDir`, `outDir` and `rootDir`, as paths on disk;
+    /// `Some(None)` where the chain sets none.
+    pub(super) declaration_dir: Option<Option<PathBuf>>,
+    pub(super) out_dir: Option<Option<PathBuf>>,
+    pub(super) root_dir: Option<Option<PathBuf>>,
+    /// Whether `composite` is set.
+    pub(super) composite: Option<bool>,
+    /// Whether tsc reads JavaScript: `allowJs`, else `checkJs`, which a
+    /// `jsconfig.json` reads as `allowJs` unless it sets it.
+    pub(super) allow_js: Option<bool>,
 }
 
 /// The files a TypeScript project compiles itself (`ts_sources`).
@@ -217,9 +247,17 @@ impl TsProjects {
     /// project it reaches compiles as that project's output declaration,
     /// as tsc 5.9.3, 6.0.3 and 7.0.2 all build it.
     fn owners(&self, project: usize, file: &Path) -> Vec<&TsConfig> {
-        let own = &self.projects[project];
-        if own.references.is_empty() {
-            return vec![&own.config];
+        self.owning(project, file)
+            .into_iter()
+            .map(|at| &self.projects[at].config)
+            .collect()
+    }
+
+    /// The projects whose configurations `file` is compiled under
+    /// (`owners`), by their indices.
+    fn owning(&self, project: usize, file: &Path) -> Vec<usize> {
+        if self.projects[project].references.is_empty() {
+            return vec![project];
         }
         let taking: Vec<usize> = self
             .reached_projects(project)
@@ -228,13 +266,13 @@ impl TsProjects {
             .collect();
         taking
             .iter()
+            .copied()
             .filter(|at| {
                 !self
-                    .reached_projects(**at)
+                    .reached_projects(*at)
                     .into_iter()
-                    .any(|below| below != **at && taking.contains(&below))
+                    .any(|below| below != *at && taking.contains(&below))
             })
-            .map(|at| &self.projects[*at].config)
             .collect()
     }
 }
@@ -1112,6 +1150,24 @@ impl Manifests {
         }
     }
 
+    /// What the projects compiling a file (`ts_owner`) say about a
+    /// package's own name read from it (`SelfName`), each different one
+    /// once: none where no configuration compiles it.
+    pub(super) fn self_names(&self, from: &Node) -> Vec<&SelfName> {
+        let projects = &self.ts_projects;
+        let Some((_, project)) = nearest(&projects.by_directory, &from.directory) else {
+            return Vec::new();
+        };
+        let mut found: Vec<&SelfName> = Vec::new();
+        for at in projects.owning(*project, Path::new(&from.rel_path)) {
+            let self_name = &projects.projects[at].self_name;
+            if !found.contains(&self_name) {
+                found.push(self_name);
+            }
+        }
+        found
+    }
+
     /// The configurations of the TypeScript project at `project` and of
     /// every project its references reach, each once.
     pub(super) fn reached(&self, project: usize) -> Vec<&TsConfig> {
@@ -1440,6 +1496,22 @@ struct Chain {
     unread: Option<usize>,
 }
 
+impl Chain {
+    /// The value of an option the chain decides, with the directory of the
+    /// configuration setting it: `Some(None)` where it sets none, `None`
+    /// where a configuration it could not read may set it.
+    fn decided(&self, key: &str) -> Option<Option<(&Vec<String>, &serde_json::Value)>> {
+        let read = self.unread.unwrap_or(self.configs.len());
+        let value = self.configs[..read].iter().find_map(|(directory, config)| {
+            Some((directory, config.get("compilerOptions")?.get(key)?))
+        });
+        match value {
+            Some(value) => Some(Some(value)),
+            None => self.unread.is_none().then_some(None),
+        }
+    }
+}
+
 impl TsReader<'_> {
     /// The configuration in the file at `path`, parsed the first time it is
     /// asked for; `None` where it is missing or no JSON with comments.
@@ -1484,13 +1556,10 @@ impl TsReader<'_> {
             })
             .collect();
         let index = self.projects.projects.len();
+        let javascript = path.last().is_some_and(|file| file == "jsconfig.json");
         self.projects.projects.push(TsProject {
-            config: ts_config(
-                self.root,
-                &chain,
-                self.versions.of(directory),
-                path.last().is_some_and(|file| file == "jsconfig.json"),
-            ),
+            config: ts_config(self.root, &chain, self.versions.of(directory), javascript),
+            self_name: self_name(self.root, &chain, javascript),
             sources: ts_sources(&chain.configs),
             references: Vec::new(),
         });
@@ -2110,18 +2179,7 @@ fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: boo
             Some((directory, value))
         })
     };
-    // The value of an option the chain decides: `Some(None)` where it sets
-    // none, `None` where a configuration it could not read may set it.
-    let read = chain.unread.unwrap_or(configs.len());
-    let decided = |key: &str| {
-        let value = configs[..read]
-            .iter()
-            .find_map(|(_, config)| config.get("compilerOptions")?.get(key));
-        match value {
-            Some(value) => Some(Some(value)),
-            None => chain.unread.is_none().then_some(None),
-        }
-    };
+    let decided = |key: &str| chain.decided(key).map(|set| set.map(|(_, value)| value));
     let setting = |key: &str| match decided(key) {
         Some(Some(value)) => value.as_str().map_or(Setting::Unknown, |value| {
             Setting::Set(value.to_ascii_lowercase())
@@ -2182,6 +2240,43 @@ fn ts_config(root: &Path, chain: &Chain, typescript: TypeScript, javascript: boo
         custom_conditions,
         javascript,
         type_roots,
+    }
+}
+
+/// The options a configuration chain has tsc read a package's own name
+/// from inside it with (`SelfName`): a path option against the directory of
+/// the configuration setting it, and `allowJs` set by default in a
+/// `jsconfig.json`, as tsc's `getDefaultCompilerOptions` sets it.
+fn self_name(root: &Path, chain: &Chain, javascript: bool) -> SelfName {
+    let path = |key: &str| {
+        chain.decided(key).map(|set| {
+            let (directory, written) = set?;
+            let written = written.as_str().filter(|written| !written.is_empty())?;
+            Some(configured_path(root, directory, written))
+        })
+    };
+    let flag = |key: &str| {
+        chain
+            .decided(key)
+            .map(|set| set.is_some_and(|(_, value)| value.as_bool() == Some(true)))
+    };
+    let allow_js = match chain.decided("allowJs") {
+        Some(Some((_, value))) => Some(value.as_bool() == Some(true)),
+        Some(None) if javascript => Some(true),
+        Some(None) => flag("checkJs"),
+        None => None,
+    };
+    SelfName {
+        directory: chain
+            .configs
+            .first()
+            .map(|(directory, _)| directory.clone())
+            .unwrap_or_default(),
+        declaration_dir: path("declarationDir"),
+        out_dir: path("outDir"),
+        root_dir: path("rootDir"),
+        composite: flag("composite"),
+        allow_js,
     }
 }
 

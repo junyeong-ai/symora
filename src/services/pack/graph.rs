@@ -3,15 +3,15 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::Node;
 use super::manifests::{
     self, Basedir, Extensions, Hit, JsPackage, Manifests, ModuleKind, ModuleOptions,
-    ModuleResolution, PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript,
-    either, export_path, export_subpath, mangle_scope, module_names, nearest, node_modules_in,
-    own_or_only, package_module, project_file, project_path, python_packages, python_project,
-    reads_base_url, split_package_name, type_root_holds, type_root_name,
+    ModuleResolution, PackageType, Pytest, PythonProject, Rootdir, SelfName, TsConfig, TsOwner,
+    TypeScript, either, export_path, export_subpath, mangle_scope, module_names, nearest,
+    node_modules_in, own_or_only, package_module, project_file, project_path, python_packages,
+    python_project, reads_base_url, split_package_name, type_root_holds, type_root_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -328,13 +328,25 @@ struct ExportConditions {
 /// (`export_target`): how it reads a target's path, which says whether
 /// TypeScript reads it, where Node and the bundlers otherwise do
 /// (`Importer::matches`), the conditions it matches, how the import is
-/// written, and what a pattern key's `*` matched.
+/// written, what a pattern key's `*` matched, and, for a package's own name
+/// read from inside it under a configuration, what that configuration says
+/// of it.
 #[derive(Debug, Clone, Copy)]
 struct Lookup<'s> {
     read: TargetRead,
     conditions: ExportConditions,
     form: ImportForm,
     star: Option<&'s str>,
+    own: Option<Own<'s>>,
+}
+
+/// A package's own name read from inside it under a configuration, by the
+/// TypeScript major reading it, which maps a target in an output directory
+/// back to its input (`ProjectIndex::output_input`).
+#[derive(Debug, Clone, Copy)]
+struct Own<'s> {
+    options: &'s SelfName,
+    major: u8,
 }
 
 impl Lookup<'_> {
@@ -2309,10 +2321,11 @@ impl ProjectIndex<'_> {
     /// whole walk with TypeScript's before the whole walk with JavaScript's
     /// (`workspace_passes`), the package's own name read from inside it
     /// (`loadModuleFromSelfNameReference`) without the `node_modules` look
-    /// between them and disclosed where reading it in one pass, as `allowJs`
-    /// or `checkJs`, which pack does not read, has tsc do, names another
-    /// file; and where neither pass finds one, the file of any kind a target
-    /// spells exactly. Without `exports`, or under `node10`, which does not
+    /// between them, under the options of the project compiling the
+    /// importer (`SelfName`): in one walk where it reads JavaScript, and
+    /// with a target in an output directory read as its input
+    /// (`output_input`); and where neither pass finds one, the file of any
+    /// kind a target spells exactly. Without `exports`, or under `node10`, which does not
     /// read it, the name or a subpath stands for the file TypeScript's
     /// `node_modules` lookup takes below the package's directory
     /// (`manifests::package_module`), as tsc 5.9.3, 6.0.3 and 7.0.2 trace
@@ -2419,42 +2432,176 @@ impl ProjectIndex<'_> {
         let Some((target, star)) = export_subpath(exports, subpath) else {
             return Some(undetermined());
         };
-        let walk = |read| {
+        let walk = |read, options: Option<&SelfName>| {
             let star = star.as_deref();
+            let own = options
+                .zip(reading.major)
+                .map(|(options, major)| Own { options, major });
             let lookup = Lookup {
                 read,
                 conditions,
                 form,
                 star,
+                own,
             };
             self.export_target(target, directory, importer, lookup)
         };
         if !typescript {
-            return Some(match walk(TargetRead::Script) {
+            return Some(match walk(TargetRead::Script, None) {
                 Exported::Files(files) => Resolution::Files(files),
                 _ => undetermined(),
             });
         }
-        let pass = |extensions| match walk(TargetRead::Pass(extensions)) {
+        let pass = |extensions, options: Option<&SelfName>| match walk(
+            TargetRead::Pass(extensions),
+            options,
+        ) {
             Exported::Files(files) => Some(Resolution::Files(files)),
             Exported::Undetermined => Some(undetermined()),
             Exported::Nothing | Exported::Missing => None,
         };
-        // tsc reads a package's own name from inside it before it looks in
-        // `node_modules`, and in one pass where `allowJs` or `checkJs`,
-        // which pack does not read, is set (`s_allowjs_*`, `s_types_*`).
-        let own = nearest(&self.manifests.module_types, &from.directory)
-            .is_some_and(|(at, _)| at == directory);
-        let found = self.workspace_passes(specifier, importer, directory, lookup, !own, &pass);
-        let found = match own && found != pass(Extensions::All) {
-            true => Some(undetermined()),
-            false => found,
-        };
-        let spelled = || match walk(TargetRead::Spelled) {
+        let spelled = || match walk(TargetRead::Spelled, None) {
             Exported::Files(files) => Some(Resolution::Files(files)),
             _ => None,
         };
+        let own = nearest(&self.manifests.module_types, &from.directory)
+            .is_some_and(|(at, _)| at == directory);
+        if !own {
+            let pass = |extensions| pass(extensions, None);
+            let found = self.workspace_passes(specifier, importer, directory, lookup, true, &pass);
+            return Some(found.or_else(spelled).unwrap_or_else(undetermined));
+        }
+        // tsc reads a package's own name from inside it before it looks in
+        // `node_modules`, under the options of the project compiling the
+        // importer (`s_*`, `m_*`): in one walk with every extension where it
+        // reads JavaScript, else in both with nothing between them.
+        let read = |options: Option<&SelfName>| {
+            let pass = |extensions| pass(extensions, options);
+            let walks =
+                || self.workspace_passes(specifier, importer, directory, lookup, false, &pass);
+            match options.map_or(Some(false), |options| options.allow_js) {
+                Some(true) => pass(Extensions::All),
+                Some(false) => walks(),
+                None => {
+                    let walks = walks();
+                    match walks == pass(Extensions::All) {
+                        true => walks,
+                        false => Some(undetermined()),
+                    }
+                }
+            }
+        };
+        let projects = self.manifests.self_names(from);
+        let found = match projects.split_first() {
+            None => read(None),
+            Some((first, rest)) => {
+                let found = read(Some(first));
+                if rest.iter().any(|other| read(Some(other)) != found) {
+                    return Some(Resolution::ProjectsUndetermined(specifier.to_string()));
+                }
+                found
+            }
+        };
         Some(found.or_else(spelled).unwrap_or_else(undetermined))
+    }
+
+    /// The input tsc reads in place of an `exports` target a package's own
+    /// name reaches from inside it, as tsc 5.9.3, 6.0.3 and 7.0.2 map a
+    /// target in an output directory back to the input it is built from
+    /// (`tryLoadInputFileForPath`; `s_rootdir_*`, `s_decldir_*`, `m_*`):
+    /// where the configuration lies in the package's directory and sets
+    /// `declarationDir` or `outDir`, a target in either, in that order,
+    /// written as `.mjs`, `.cjs`, `.js`, `.json`, `.d.mts`, `.d.cts` or
+    /// `.d.ts`, names the file at its path below the root with an input
+    /// extension the pass holds in place of that one — `.mts`, `.mjs` for
+    /// the first kind, `.cts`, `.cjs` for the second, else `.tsx`, `.ts`,
+    /// `.jsx`, `.js` — the first that exists, read as the pass reads a
+    /// target; 7 takes any of them in either pass and reads it with every
+    /// extension, so a `.js` input names a declaration beside it
+    /// (`m_ts7_*`). The root is `rootDir`, else, under 6 and 7, the
+    /// configuration's directory, and under 5 that of a `composite` one,
+    /// else each directory from the filesystem's root down to the package's
+    /// in turn, where 5 reports TS2209 (`m_guess_*`, `m_guessorder_*`,
+    /// `m_srccfg*`, `m_srccomp_*`). `None` where it maps none; undetermined
+    /// where a configuration the chain could not read may set an option the
+    /// mapping reads.
+    fn output_input(
+        &self,
+        path: &[String],
+        extensions: Extensions,
+        package: &[String],
+        own: Own,
+    ) -> Option<Exported> {
+        let name = path.last()?;
+        let written = [".mjs", ".cjs", ".js", ".json", ".d.mts", ".d.cts", ".d.ts"]
+            .into_iter()
+            .find(|written| name.len() > written.len() && name.ends_with(written))?;
+        let options = own.options;
+        if !options.directory.starts_with(package) {
+            return None;
+        }
+        let (Some(declaration_dir), Some(out_dir)) = (&options.declaration_dir, &options.out_dir)
+        else {
+            return Some(Exported::Undetermined);
+        };
+        let outputs: Vec<&PathBuf> = declaration_dir.iter().chain(out_dir).collect();
+        let root = self.manifests.root.as_ref()?;
+        let file = project_file(root, path);
+        if !outputs.iter().any(|output| file.starts_with(output)) {
+            return None;
+        }
+        let roots: Vec<PathBuf> = match (&options.root_dir, own.major, options.composite) {
+            (None, ..) | (Some(None), 5, None) => return Some(Exported::Undetermined),
+            (Some(Some(root_dir)), ..) => vec![root_dir.clone()],
+            (Some(None), 5, Some(false)) => {
+                let mut guesses: Vec<PathBuf> = project_file(root, package)
+                    .ancestors()
+                    .map(Path::to_path_buf)
+                    .collect();
+                guesses.reverse();
+                guesses
+            }
+            (Some(None), ..) => vec![project_file(root, &options.directory)],
+        };
+        let inputs: &[&str] = match written {
+            ".mjs" | ".d.mts" => &[".mts", ".mjs"],
+            ".cjs" | ".d.cts" => &[".cts", ".cjs"],
+            _ => &[".tsx", ".ts", ".jsx", ".js"],
+        };
+        // 7 maps to an input of any extension in either walk and reads it
+        // with every extension (`m_ts7_*`); 5 and 6 keep to the walk's.
+        let extensions = match own.major {
+            7.. => Extensions::All,
+            _ => extensions,
+        };
+        let held = |input: &&&str| match extensions {
+            Extensions::All => true,
+            Extensions::JavaScript => [".js", ".jsx", ".mjs", ".cjs"].contains(*input),
+            Extensions::TypeScript => [".ts", ".tsx", ".mts", ".cts"].contains(*input),
+            Extensions::Declaration => false,
+        };
+        for input_root in &roots {
+            for output in &outputs {
+                let Ok(below) = file.strip_prefix(output) else {
+                    continue;
+                };
+                let base = input_root.join(below);
+                let stem = base.to_str()?.strip_suffix(written)?;
+                for input in inputs.iter().filter(held) {
+                    let candidate = PathBuf::from(format!("{stem}{input}"));
+                    let existing = |file: &[String]| self.existing(file);
+                    let found = match self.manifests.project_path_of(&candidate) {
+                        Some(project) => existing(&project)
+                            .and_then(|_| manifests::field_file(&project, extensions, &existing)),
+                        None => candidate.is_file().then(Vec::new),
+                    };
+                    if let Some(files) = found {
+                        return Some(Exported::Files(files));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// What TypeScript's lookup of a workspace package takes, `pass`
@@ -2539,16 +2686,25 @@ impl ProjectIndex<'_> {
     ) -> Exported {
         match target {
             serde_json::Value::String(path) if path.starts_with("./") => {
-                export_path(path, lookup.star)
-                    .and_then(|path| project_path(directory, &path))
-                    .and_then(|path| match lookup.read {
-                        TargetRead::Script => self.script_target(&path, importer.node.language),
-                        TargetRead::Pass(extensions) => {
-                            manifests::field_file(&path, extensions, &|file| self.existing(file))
+                let Some(path) =
+                    export_path(path, lookup.star).and_then(|path| project_path(directory, &path))
+                else {
+                    return Exported::Missing;
+                };
+                let found = match lookup.read {
+                    TargetRead::Script => self.script_target(&path, importer.node.language),
+                    TargetRead::Pass(extensions) => {
+                        let mapped = lookup
+                            .own
+                            .and_then(|own| self.output_input(&path, extensions, directory, own));
+                        if let Some(mapped) = mapped {
+                            return mapped;
                         }
-                        TargetRead::Spelled => self.existing(&path),
-                    })
-                    .map_or(Exported::Missing, Exported::Files)
+                        manifests::field_file(&path, extensions, &|file| self.existing(file))
+                    }
+                    TargetRead::Spelled => self.existing(&path),
+                };
+                found.map_or(Exported::Missing, Exported::Files)
             }
             serde_json::Value::Array(entries) => entries
                 .iter()
@@ -8171,10 +8327,9 @@ mod tests {
     /// extension or naming a directory names no file and is disclosed;
     /// where no pass finds one, a file of any kind a target spells exactly is
     /// the one (`w/s.css`). A package's own name read from inside it
-    /// (`s_types_*`, `s_allowjs_*`) is not looked for in `node_modules`
-    /// between the passes (`s/j`), and is disclosed where reading it in one
-    /// pass, as `allowJs` or `checkJs` has tsc do, names another file
-    /// (`s/p`).
+    /// (`s_types_*`, `t2_self_noconfig`) is not looked for in `node_modules`
+    /// between the passes (`s/j`), which read it as from another package
+    /// where nothing sets `allowJs` (`s/p`).
     #[test]
     fn an_exports_target_is_read_with_typescripts_extensions_before_javascripts() {
         let imports = "import \"w/a\";\nimport \"w/t\";\nimport \"w/p\";\nimport \"w/e\";\n\
@@ -8286,12 +8441,311 @@ mod tests {
         let graph = build_import_graph(&nodes, &manifests);
         assert_eq!(
             edges_under(&nodes, 0, &manifests),
-            ["packages/s/src/j.js", "packages/s/src/a.d.ts"]
+            [
+                "packages/s/src/j.js",
+                "packages/s/types/p.d.ts",
+                "packages/s/src/a.d.ts"
+            ]
+        );
+        assert!(graph.undetermined_imports.is_empty());
+    }
+
+    /// A package's own name read from inside it is read under the options
+    /// of the project compiling the importer, as tsc 5.9.3, 6.0.3 and 7.0.2
+    /// trace it. Where that project's configuration lies in the package's
+    /// directory and sets `outDir` or `declarationDir`, a target in either,
+    /// written as `.js`, `.json`, `.d.ts` or their module kinds, names its
+    /// input below `rootDir`, here set through `extends` against the
+    /// configuration setting it (`m/o`, `m/od`, `m/data`, `m/mm`;
+    /// `s_rootdir_*`, `m_extends_*`, `s_ext_*`), before the output a build
+    /// wrote there (`m/b`; `m_built_*`); a target outside them is read as
+    /// written (`m/a`, `m/p`). 5.9.3 and 6.0.3 map to a JavaScript input in
+    /// the JavaScript walk alone (`m/q`, `m/q2`, `m/r3`; `m_jsinput_*`), 7.0.2
+    /// in either, read with every extension (`m_ts7_*`). Without `rootDir`,
+    /// 5.9.3 tries the directory of a `composite` configuration (`cs/o`;
+    /// `m_srccomp_*`), else each directory from the filesystem's root down
+    /// to the package's, reporting TS2209 (`g/o`; `m_guessorder_*`), and 6.0.3
+    /// and 7.0.2 the configuration's (`m_srccfg*`). A configuration outside
+    /// the package maps nothing (`r/o`; `m_rootcfg_*`), nor does another
+    /// package's import of the name (`app`; `x_outdir_*`), which reads a
+    /// referenced project's built declaration (`rb_*`). `allowJs`, else
+    /// `checkJs`, has the name walked once with every extension (`j/p`;
+    /// `s_checkjs_*`), as a `jsconfig.json` has by default (`js/p`;
+    /// `m_jsconfig_*`). What a configuration the chain cannot read may set
+    /// is disclosed: output directories (`u/x`), a root that a configuration
+    /// read below the unread one sets (`k/o`, where `k/a`,
+    /// outside them, is read), `allowJs` where one walk reads the name apart
+    /// (`u/p`); and so is a name the projects compiling the importer map
+    /// apart (`two/o`), though projects differing in these options alone
+    /// read every other specifier alike (`two/a`).
+    #[test]
+    fn a_packages_own_name_is_read_under_its_projects_output_options() {
+        let ts = |id, rel, source| node_in(id, rel, source, Language::TypeScript);
+        let js = |id, rel, source| node_in(id, rel, source, Language::JavaScript);
+        let own = "import \"m/o\";\nimport \"m/od\";\nimport \"m/q\";\nimport \"m/data\";\n\
+                   import \"m/a\";\nimport \"m/p\";\nimport \"m/b\";\nimport \"m/mm\";\n\
+                   import \"m/q2\";\nimport \"m/r3\";\n";
+        let nodes = vec![
+            ts(0, "packages/m/src/self.ts", own),
+            ts(
+                1,
+                "src/app.ts",
+                "import \"m/o\";\nimport \"m/a\";\nimport \"m/b\";\n",
+            ),
+            ts(2, "packages/m/src/o.ts", ""),
+            ts(3, "packages/m/src/od.ts", ""),
+            js(4, "packages/m/src/q.js", ""),
+            ts(5, "packages/m/src/data.ts", ""),
+            js(6, "packages/m/src/a.js", ""),
+            ts(7, "packages/m/src/a.d.ts", ""),
+            js(8, "packages/m/src/p.js", ""),
+            ts(9, "packages/m/types/p.d.ts", ""),
+            ts(10, "packages/m/src/b.ts", ""),
+            ts(11, "packages/m/dist/b.d.ts", ""),
+            ts(12, "packages/m/src/mm.mts", ""),
+            js(13, "packages/m/src/q2.js", ""),
+            ts(14, "packages/m/types/q2.d.ts", ""),
+            js(15, "packages/m/src/r3.js", ""),
+            ts(16, "packages/m/src/r3.d.ts", ""),
+            ts(17, "packages/g/src/self.ts", "import \"g/o\";\n"),
+            ts(18, "packages/o.ts", ""),
+            ts(19, "packages/g/o.ts", ""),
+            ts(20, "packages/g/src/o.ts", ""),
+            ts(21, "packages/cs/src/self.ts", "import \"cs/o\";\n"),
+            ts(22, "packages/cs/o.ts", ""),
+            ts(23, "packages/cs/src/o.ts", ""),
+            ts(24, "packages/r/src/self.ts", "import \"r/o\";\n"),
+            ts(25, "packages/r/src/o.ts", ""),
+            ts(26, "packages/j/src/self.ts", "import \"j/p\";\n"),
+            js(27, "packages/j/src/p.js", ""),
+            ts(28, "packages/j/types/p.d.ts", ""),
+            js(29, "packages/js/src/self.js", "import \"js/p\";\n"),
+            js(30, "packages/js/src/p.js", ""),
+            ts(31, "packages/js/types/p.d.ts", ""),
+            ts(
+                32,
+                "packages/u/src/self.ts",
+                "import \"u/x\";\nimport \"u/p\";\nimport \"u/t\";\n",
+            ),
+            ts(33, "packages/u/out/x.d.ts", ""),
+            js(34, "packages/u/src/p.jsx", ""),
+            ts(35, "packages/u/types/p.ts", ""),
+            ts(36, "packages/u/src/t.ts", ""),
+            ts(
+                37,
+                "packages/k/src/self.ts",
+                "import \"k/o\";\nimport \"k/a\";\n",
+            ),
+            ts(38, "packages/k/o.ts", ""),
+            js(39, "packages/k/src/a.js", ""),
+            ts(40, "packages/k/src/a.d.ts", ""),
+            ts(41, "packages/k/src/o.ts", ""),
+        ];
+        let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
+        let config = |options: &str| format!("{{\"compilerOptions\": {{{bundler}{options}}}}}");
+        let unread = |options: &str| {
+            format!(
+                "{{\"extends\": \"./missing.json\", \"compilerOptions\": {{{bundler}{options}}}}}"
+            )
+        };
+        let p = "{\"default\": \"./src/p.js\", \"types\": \"./types/p.d.ts\"}";
+        let package = |name: &str, exports: &str| {
+            format!("{{\"name\": \"{name}\", \"exports\": {{{exports}}}}}")
+        };
+        let m = format!(
+            "\"./o\": \"./dist/o.js\", \"./od\": \"./dist/od.d.ts\", \"./q\": \"./dist/q.js\", \
+             \"./data\": \"./dist/data.json\", \"./a\": \"./src/a.js\", \"./p\": {p}, \
+             \"./b\": \"./dist/b.js\", \"./mm\": \"./dist/mm.mjs\", \
+             \"./q2\": {{\"default\": \"./dist/q2.js\", \"types\": \"./types/q2.d.ts\"}}, \
+             \"./r3\": \"./dist/r3.js\""
+        );
+        let u = "\"./x\": \"./out/x.js\", \"./p\": {\"default\": \"./src/p.jsx\", \
+                 \"types\": \"./types/p.ts\"}, \"./t\": \"./src/t.ts\"";
+        // tsc 5.9.3 tries `packages/o.ts`, above the package, before
+        // `packages/g/o.ts`; 7.0.2 maps `m/q2` and `m/r3` in the TypeScript
+        // walk, `m/r3` to the declaration beside its JavaScript input.
+        let majors = [
+            (
+                "5.9.3",
+                "packages/o.ts",
+                "packages/m/types/q2.d.ts",
+                "packages/m/src/r3.js",
+            ),
+            (
+                "^6.0.3",
+                "packages/g/src/o.ts",
+                "packages/m/types/q2.d.ts",
+                "packages/m/src/r3.js",
+            ),
+            (
+                "^7.0.2",
+                "packages/g/src/o.ts",
+                "packages/m/src/q2.js",
+                "packages/m/src/r3.d.ts",
+            ),
+        ];
+        for (typescript, g, q2, r3) in majors {
+            let root = format!(
+                "{{\"workspaces\": [\"packages/*\"], \"devDependencies\": {{\"typescript\": \"{typescript}\"}}}}"
+            );
+            let files = [
+                ("package.json", root),
+                (
+                    "tsconfig.json",
+                    config(", \"outDir\": \"packages/r/dist\", \"rootDir\": \"packages/r/src\""),
+                ),
+                (
+                    "packages/m/tsconfig.json",
+                    format!(
+                        "{{\"extends\": \"./config/base.json\", \"compilerOptions\": {{{bundler}}}}}"
+                    ),
+                ),
+                (
+                    "packages/m/config/base.json",
+                    "{\"compilerOptions\": {\"outDir\": \"../dist\", \"rootDir\": \"../src\"}}"
+                        .to_string(),
+                ),
+                ("packages/m/package.json", package("m", &m)),
+                (
+                    "packages/g/src/tsconfig.json",
+                    config(", \"outDir\": \"../dist\""),
+                ),
+                (
+                    "packages/g/package.json",
+                    package("g", "\"./o\": \"./dist/o.js\""),
+                ),
+                (
+                    "packages/cs/src/tsconfig.json",
+                    config(", \"composite\": true, \"outDir\": \"../dist\""),
+                ),
+                (
+                    "packages/cs/package.json",
+                    package("cs", "\"./o\": \"./dist/o.js\""),
+                ),
+                (
+                    "packages/r/package.json",
+                    package("r", "\"./o\": \"./dist/o.js\""),
+                ),
+                ("packages/j/tsconfig.json", config(", \"checkJs\": true")),
+                (
+                    "packages/j/package.json",
+                    package("j", &format!("\"./p\": {p}")),
+                ),
+                ("packages/js/jsconfig.json", config("")),
+                (
+                    "packages/js/package.json",
+                    package("js", &format!("\"./p\": {p}")),
+                ),
+                ("packages/u/tsconfig.json", unread("")),
+                ("packages/u/package.json", package("u", u)),
+                (
+                    "packages/k/tsconfig.json",
+                    format!(
+                        "{{\"extends\": [\"./base.json\", \"./missing.json\"], \"compilerOptions\": \
+                         {{{bundler}, \"outDir\": \"dist\", \"declarationDir\": \"dist\"}}}}"
+                    ),
+                ),
+                (
+                    "packages/k/base.json",
+                    "{\"compilerOptions\": {\"rootDir\": \"src\"}}".to_string(),
+                ),
+                (
+                    "packages/k/package.json",
+                    package("k", "\"./o\": \"./dist/o.js\", \"./a\": \"./src/a.js\""),
+                ),
+            ];
+            let files: Vec<(&str, &str)> = files
+                .iter()
+                .map(|(path, contents)| (*path, contents.as_str()))
+                .collect();
+            let manifests = manifests_of(&files, &nodes);
+            let graph = build_import_graph(&nodes, &manifests);
+            let edges = |id| edges_under(&nodes, id, &manifests);
+            assert_eq!(
+                edges(0),
+                [
+                    "packages/m/src/o.ts",
+                    "packages/m/src/od.ts",
+                    "packages/m/src/q.js",
+                    "packages/m/src/data.ts",
+                    "packages/m/src/a.d.ts",
+                    "packages/m/types/p.d.ts",
+                    "packages/m/src/b.ts",
+                    "packages/m/src/mm.mts",
+                    q2,
+                    r3
+                ],
+                "{typescript}"
+            );
+            assert_eq!(
+                edges(1),
+                ["packages/m/src/a.d.ts", "packages/m/dist/b.d.ts"],
+                "{typescript}"
+            );
+            assert_eq!(edges(17), [g], "{typescript}");
+            assert_eq!(edges(21), ["packages/cs/src/o.ts"], "{typescript}");
+            assert!(edges(24).is_empty(), "{typescript}");
+            assert_eq!(edges(26), ["packages/j/src/p.js"], "{typescript}");
+            assert_eq!(edges(29), ["packages/js/src/p.js"], "{typescript}");
+            assert_eq!(edges(32), ["packages/u/src/t.ts"], "{typescript}");
+            assert_eq!(edges(37), ["packages/k/src/a.d.ts"], "{typescript}");
+            assert_eq!(
+                graph.undetermined_imports,
+                ["k/o", "m/o", "r/o", "u/p", "u/x"]
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                "{typescript}"
+            );
+        }
+        let nodes = vec![
+            ts(
+                0,
+                "packages/two/src/self.ts",
+                "import \"two/o\";\nimport \"two/a\";\n",
+            ),
+            ts(1, "packages/two/src/o.ts", ""),
+            js(2, "packages/two/src/a.js", ""),
+            ts(3, "packages/two/src/a.d.ts", ""),
+        ];
+        let project = |options: &str| {
+            format!(
+                "{{\"compilerOptions\": {{{bundler}, \"composite\": true{options}}}, \
+                 \"include\": [\"src\"]}}"
+            )
+        };
+        let built = project(", \"outDir\": \"dist\", \"rootDir\": \"src\"");
+        let unrooted = project(", \"outDir\": \"out\"");
+        let manifests = manifests_of(
+            &[
+                (
+                    "package.json",
+                    "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                ),
+                (
+                    "tsconfig.json",
+                    "{\"files\": [], \"references\": [{\"path\": \"./packages/two/tsconfig.build.json\"}, \
+                     {\"path\": \"./packages/two/tsconfig.out.json\"}]}",
+                ),
+                ("packages/two/tsconfig.build.json", &built),
+                ("packages/two/tsconfig.out.json", &unrooted),
+                (
+                    "packages/two/package.json",
+                    "{\"name\": \"two\", \"exports\": {\"./o\": \"./dist/o.js\", \"./a\": \"./src/a.js\"}}",
+                ),
+            ],
+            &nodes,
+        );
+        let graph = build_import_graph(&nodes, &manifests);
+        assert_eq!(
+            edges_under(&nodes, 0, &manifests),
+            ["packages/two/src/a.d.ts"]
         );
         assert_eq!(
-            graph.undetermined_imports,
-            BTreeSet::from(["s/p".to_string()])
+            graph.projects_undetermined_imports,
+            BTreeSet::from(["two/o".to_string()])
         );
+        assert!(graph.undetermined_imports.is_empty());
     }
 
     /// A package's `exports` maps by conditions, read in their written order
