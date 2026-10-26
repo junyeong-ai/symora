@@ -10,8 +10,8 @@ use super::manifests::{
     self, Basedir, Extensions, Hit, JsPackage, Manifests, ModuleKind, ModuleOptions,
     ModuleResolution, PackageType, Pytest, PythonProject, Rootdir, TsConfig, TsOwner, TypeScript,
     either, export_path, export_subpath, mangle_scope, module_names, nearest, node_modules_in,
-    own_or_only, project_file, project_path, python_packages, python_project, reads_base_url,
-    split_package_name, type_root_holds, type_root_name,
+    own_or_only, package_module, project_file, project_path, python_packages, python_project,
+    reads_base_url, split_package_name, type_root_holds, type_root_name,
 };
 use crate::models::symbol::Language;
 use crate::services::imports::{FileClass, ModuleDeclaration, ModulePath};
@@ -2264,18 +2264,22 @@ impl ProjectIndex<'_> {
     /// `./<subpath>` or the pattern key matching it maps to
     /// (`export_subpath`), read through its conditions (`export_target`).
     /// Without `exports`, or under `node10`, which does not read it, the name
-    /// stands for the file TypeScript's `node_modules` lookup takes for the
-    /// package's directory with TypeScript's extensions, else with
-    /// JavaScript's (`directory_module`), as tsc 5.9.3, 6.0.3 and 7.0.2
-    /// trace it: by the first of `typings`, `types` and `main` it sets, else
-    /// its `index`, a `typesVersions` leaving it open — for Node and the
-    /// bundlers, which read no `types`, its `main`, else its `index`, where
-    /// no `module` or `browser` field names another
-    /// (`bundler_entry_differs`) — and a subpath for the file below the
-    /// package. Under `classic`, which reads no `package.json`, no name is a
-    /// package's. A package whose file pack cannot determine is disclosed: a
-    /// condition the importer's configuration leaves open, an entry naming no
-    /// file, or a name two packages of the workspace give.
+    /// or a subpath stands for the file TypeScript's `node_modules` lookup
+    /// takes below the package's directory with TypeScript's extensions,
+    /// else with JavaScript's (`manifests::package_module`), as tsc 5.9.3,
+    /// 6.0.3 and 7.0.2 trace it: the name by the first of `typings`, `types`
+    /// and `main` it sets, else its `index`, a subpath as the file it names,
+    /// then as a directory, an ES import adding no extension, and a
+    /// `typesVersions` leaving either open; else a file of any kind a subpath
+    /// spells exactly. Where the module resolution is left open, a subpath
+    /// stands for the file below the package it spells, as for Node and the
+    /// bundlers, for which the name stands for its `main`, else its `index`,
+    /// where no `module` or `browser` field names another
+    /// (`bundler_entry_differs`). Under `classic`, which reads no
+    /// `package.json`, no name is a package's. A package whose file pack
+    /// cannot determine is disclosed: a condition the importer's
+    /// configuration leaves open, an entry naming no file, or a name two
+    /// packages of the workspace give.
     fn workspace_package(
         &self,
         specifier: &str,
@@ -2307,14 +2311,28 @@ impl ProjectIndex<'_> {
         let typescript = reading.major.is_some();
         let exports = package.exports.as_ref().zip(conditions);
         let Some((exports, conditions)) = exports else {
-            if typescript && subpath.is_empty() {
+            let lookup = path_lookup(reading, form);
+            if typescript && (subpath.is_empty() || lookup.is_some()) {
+                let root = self.manifests.root.as_ref()?;
+                let manifest = self.manifests.package_json_at(directory);
+                let existing = |file: &[String]| self.existing(file);
+                let add = lookup != Some(PathLookup::Esm);
                 let found = [Extensions::TypeScript, Extensions::JavaScript]
                     .into_iter()
-                    .find_map(|extensions| self.directory_module(directory, extensions, true));
+                    .find_map(|extensions| {
+                        let manifest = manifest.as_ref();
+                        package_module(
+                            root, directory, manifest, subpath, extensions, add, &existing,
+                        )
+                    });
+                let spelled = || {
+                    let path = project_path(directory, subpath).filter(|_| !subpath.is_empty())?;
+                    self.existing(&path)
+                };
                 return Some(match found {
                     Some(Hit::Files(files)) => Resolution::Files(files),
                     Some(Hit::Open) => Resolution::TypesVersionsUndetermined(specifier.to_string()),
-                    None => undetermined(),
+                    None => spelled().map_or_else(undetermined, Resolution::Files),
                 });
             }
             let entries: Vec<&str> = if !subpath.is_empty() {
@@ -7777,6 +7795,118 @@ mod tests {
             graph.types_versions_undetermined_imports,
             BTreeSet::from(["versioned".to_string()])
         );
+    }
+
+    /// TypeScript reads a subpath of a workspace package without `exports`
+    /// as its `node_modules` lookup reads one below the package's link, as
+    /// tsc 5.9.3, 6.0.3 and 7.0.2 trace it: the file it names and then the
+    /// directory, by the `package.json` it holds, with TypeScript's
+    /// extensions, and only then with JavaScript's. So a declaration or a
+    /// TypeScript file beside a JavaScript one comes first, and so does a
+    /// directory's `index.ts` beside a JavaScript file of its name. An ES
+    /// import under `node16` adds no extension and reads no `index`: a
+    /// subpath writing none names no file, and is disclosed. A
+    /// `typesVersions` the package holds leaves a subpath open. A file of
+    /// any kind a subpath spells exactly is the one where neither pass finds
+    /// a file: a stylesheet pack does not read forms no edge and is not
+    /// disclosed.
+    #[test]
+    fn a_workspace_package_subpath_is_read_as_typescript_reads_one_in_node_modules() {
+        let ts = |id, rel| node_in(id, rel, "", Language::TypeScript);
+        let js = |id, rel| node_in(id, rel, "", Language::JavaScript);
+        let bundler = "\"module\": \"esnext\", \"moduleResolution\": \"bundler\"";
+        let node10 = "\"module\": \"commonjs\", \"moduleResolution\": \"node10\"";
+        let node16 = "\"module\": \"node16\", \"moduleResolution\": \"node16\"";
+        let specifiers = [
+            "w/src/a", "w/src/b", "w/src/c", "w/lib/x", "w/src/j", "w/lib/y",
+        ];
+        let read = [
+            "packages/w/src/a.d.ts",
+            "packages/w/src/b.d.ts",
+            "packages/w/src/c.ts",
+            "packages/w/lib/x/index.ts",
+            "packages/w/src/j.js",
+            "packages/w/lib/y/main.d.ts",
+        ];
+        let modes = [
+            (bundler, "src/app.ts", &specifiers[..], &read[..]),
+            (node10, "src/app.ts", &specifiers, &read),
+            (node16, "src/app.cts", &specifiers, &read),
+            (
+                node16,
+                "src/app.mts",
+                &[
+                    "w/src/a.js",
+                    "w/src/c.js",
+                    "w/lib/x/index.js",
+                    "w/lib/y",
+                    "w/src/b",
+                ],
+                &[read[0], read[2], read[3], read[5]],
+            ),
+        ];
+        for (options, importer, specifiers, edges) in modes {
+            let source: String = specifiers
+                .iter()
+                .chain(&["v/src/a", "w/theme.css"])
+                .map(|specifier| format!("import \"{specifier}\";\n"))
+                .collect();
+            let nodes = vec![
+                node_in(0, importer, &source, Language::TypeScript),
+                js(1, "packages/w/src/a.js"),
+                ts(2, "packages/w/src/a.d.ts"),
+                ts(3, "packages/w/src/b.d.ts"),
+                ts(4, "packages/w/src/c.ts"),
+                js(5, "packages/w/src/c.js"),
+                js(6, "packages/w/lib/x.js"),
+                ts(7, "packages/w/lib/x/index.ts"),
+                js(8, "packages/w/src/j.js"),
+                ts(9, "packages/w/lib/y/main.d.ts"),
+                ts(10, "packages/w/lib/y/index.ts"),
+                js(11, "packages/v/src/a.js"),
+                ts(12, "packages/v/ts/src/a.d.ts"),
+            ];
+            let config = format!("{{\"compilerOptions\": {{{options}}}}}");
+            let manifests = manifests_of(
+                &[
+                    (
+                        "package.json",
+                        "{\"workspaces\": [\"packages/*\"], \"devDependencies\": {\"typescript\": \"5.9.3\"}}",
+                    ),
+                    ("tsconfig.json", &config),
+                    ("packages/w/package.json", "{\"name\": \"w\"}"),
+                    ("packages/w/theme.css", ""),
+                    (
+                        "packages/w/lib/y/package.json",
+                        "{\"types\": \"./main.d.ts\"}",
+                    ),
+                    (
+                        "packages/v/package.json",
+                        "{\"name\": \"v\", \"typesVersions\": {\"*\": {\"*\": [\"ts/*\"]}}}",
+                    ),
+                ],
+                &nodes,
+            );
+            let graph = build_import_graph(&nodes, &manifests);
+            let found: Vec<&str> = graph
+                .edges
+                .get(&0)
+                .into_iter()
+                .flatten()
+                .map(|dst| nodes[*dst].rel_path.as_str())
+                .collect();
+            assert_eq!(found, edges, "{importer} {options}");
+            assert_eq!(
+                graph.types_versions_undetermined_imports,
+                BTreeSet::from(["v/src/a".to_string()]),
+                "{importer} {options}"
+            );
+            let unnamed = match importer {
+                "src/app.mts" => BTreeSet::from(["w/src/b".to_string()]),
+                _ => BTreeSet::new(),
+            };
+            assert_eq!(graph.undetermined_imports, unnamed, "{importer} {options}");
+        }
     }
 
     /// A package's `exports` maps by conditions, read in their written order
