@@ -4646,6 +4646,125 @@ fn a_computed_member_is_found_live_through_what_encloses_it() {
     }
 }
 
+/// A declaration the index finds and the language server's tree lacks — the
+/// Dart analyzer outlines no extension type's or enum's primary constructor
+/// and qualifies no extension type member's path — is answered from the
+/// grammar by every surface that names it, by path or by where its name is
+/// placed, never as absent or as the type whose name ends there.
+#[cfg(unix)]
+#[test]
+fn a_declaration_the_servers_tree_lacks_is_answered_from_the_grammar() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("outline protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path();
+    std::fs::write(
+        dir.join("f.dart"),
+        "extension type X(int raw) {\n  int get twice => raw * 2;\n}\n\n\
+         enum E(final int v) {\n  a(1);\n}\n\n\
+         class N.named(final int n);\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"dart": {
+        "command": "python3",
+        "args": [server, dir.canonicalize().unwrap().join("f.dart"), "dart-outline"]
+    }}}});
+    std::fs::write(
+        dir.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let rows = |answer: &serde_json::Value| -> Vec<(String, String, u64, u64)> {
+        answer["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["name_path"].as_str().unwrap().to_string(),
+                    item["kind"].as_str().unwrap().to_string(),
+                    item["location"]["line"].as_u64().unwrap(),
+                    item["location"]["column"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let row =
+        |path: &str, kind: &str, line, column| (path.to_string(), kind.to_string(), line, column);
+
+    // By path: the server's tree answers what it holds, the grammar what it
+    // lacks, each with its own backend.
+    for (path, expected) in [
+        ("X/X", row("X/X", "constructor", 1, 17)),
+        ("X/twice", row("X/twice", "property", 2, 11)),
+        ("E/v", row("E/v", "field", 5, 18)),
+    ] {
+        let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", path]);
+        assert_eq!(answer["backend"], "ast", "{path}: {answer}");
+        assert_eq!(rows(&answer), [expected], "{path}: {answer}");
+    }
+    let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", "E"]);
+    assert_eq!(answer["backend"], "document", "{answer}");
+    assert_eq!(rows(&answer), [row("E", "enum", 5, 6)], "{answer}");
+    let answer = json_ok(dir, &["symbols", "f.dart", "--symbol", "Nope"]);
+    assert_eq!(answer["backend"], "document", "{answer}");
+    assert_eq!(answer["count"], 0, "{answer}");
+
+    let edit = json_ok(
+        dir,
+        &[
+            "edit",
+            "delete",
+            "f.dart",
+            "--symbol",
+            "X/twice",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(edit["target_symbol"], "X/twice", "{edit}");
+    assert_eq!(
+        edit["lines"],
+        serde_json::json!({"start": 2, "end": 2}),
+        "{edit}"
+    );
+
+    // By position: where the grammar places a name the server's tree places
+    // none, the grammar's declaration answers, unless the server's symbol
+    // there names it too, its name ending alike.
+    for (at, path, kind, lines) in [
+        ("f.dart:5:7", "E/E", "constructor", (5, 5)),
+        ("f.dart:1:22", "X/raw", "field", (1, 1)),
+        ("f.dart:1:16", "X", "namespace", (1, 3)),
+        ("f.dart:9:9", "N/N.named", "method", (9, 9)),
+    ] {
+        let edit = json_ok(
+            dir,
+            &["edit", "insert-after", at, "--code", "// x", "--dry-run"],
+        );
+        assert_eq!(edit["target_symbol"], path, "{at}: {edit}");
+        assert_eq!(edit["target_kind"], kind, "{at}: {edit}");
+        assert_eq!(
+            edit["lines"],
+            serde_json::json!({"start": lines.0, "end": lines.1}),
+            "{at}: {edit}"
+        );
+    }
+
+    json_ok(dir, &["search", "index", "build"]);
+    let answer = json_ok(dir, &["search", "symbols", "X/X", "--signature"]);
+    assert_eq!(answer["items"][0]["name_path"], "X/X", "{answer}");
+    assert_eq!(answer["items"][0]["signature"], "X(int raw)", "{answer}");
+}
+
 /// A Go project served by the scripted rename server in `mode`, which never
 /// confirms workspace readiness: `main.go` declares and calls `abc`, and
 /// `other.go` calls it too.

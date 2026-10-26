@@ -19,6 +19,7 @@ use crate::cli::symbol_discovery::{
     resolve_search_languages, sort_by_rank, symbol_rank,
 };
 use crate::cli::utils::shell_arg;
+use crate::cli::{FileSymbols, SymbolBackend};
 use crate::error::{LspError, StoreError};
 use crate::infra::file_filter::FileFilter;
 use crate::models::lsp::{FindSymbolsOptions, IndexingDegradation};
@@ -843,12 +844,15 @@ async fn publish(
     app.output.print_source(section, &body_paths);
 }
 
-/// Read each row's source from its file's declarations, as `symbols <file>`
-/// reads them: an index or workspace row carries only where its name is. One
-/// read per file. A row takes its position from the declaration it takes its
-/// source from, so both describe the file as it is now. A row whose
-/// declaration that read does not place carries no source rather than a
-/// neighbour's.
+/// Read each row's source from its file's declarations, as `symbols <file>
+/// --symbol` reads them: an index or workspace row carries only where its
+/// name is. One read per file, and the grammar's reading of it as well for a
+/// row the language server's tree does not place ([`declared_addressing`]).
+/// A row takes its position from the declaration it takes its source from,
+/// so both describe the file as it is now. A row whose declaration neither
+/// read places carries no source rather than a neighbour's.
+///
+/// [`declared_addressing`]: crate::cli::declared_addressing
 async fn attach_source(
     app: &App,
     rows: &mut [SymbolResultOutput],
@@ -862,7 +866,8 @@ async fn attach_source(
     let options = FindSymbolsOptions::default()
         .with_depth(u32::MAX)
         .with_body();
-    let mut declared: HashMap<String, Vec<Symbol>> = HashMap::new();
+    let mut declared: HashMap<String, Option<FileSymbols>> = HashMap::new();
+    let mut read: HashMap<String, Vec<Symbol>> = HashMap::new();
     for row in rows {
         if is_stale_row(row, stale_files) {
             let Some((line, column)) = changed.place(app, row).await else {
@@ -871,15 +876,29 @@ async fn attach_source(
             row.line = line;
             row.column = column;
         }
+        let path = app.root().join(&row.file);
         if !declared.contains_key(&row.file) {
-            let symbols =
-                crate::cli::declared_in(app, &app.root().join(&row.file), options.clone())
-                    .await
-                    .map(|answer| answer.symbols)
-                    .unwrap_or_default();
-            declared.insert(row.file.clone(), symbols);
+            let answer = crate::cli::declared_in(app, &path, options.clone())
+                .await
+                .ok();
+            declared.insert(row.file.clone(), answer);
         }
-        let Some(declaration) = declaration_of(&declared[&row.file], row) else {
+        let Some(answer) = &declared[&row.file] else {
+            continue;
+        };
+        if answer.backend == SymbolBackend::Document
+            && declaration_of(&answer.symbols, row).is_none()
+            && !read.contains_key(&row.file)
+        {
+            let symbols = crate::cli::read_by_grammar(app, &path, &options)
+                .await
+                .map(|read| read.symbols)
+                .unwrap_or_default();
+            read.insert(row.file.clone(), symbols);
+        }
+        let Some(declaration) = declaration_of(&answer.symbols, row)
+            .or_else(|| declaration_of(read.get(&row.file)?, row))
+        else {
             continue;
         };
         row.line = declaration.location.line;

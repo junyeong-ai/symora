@@ -15,7 +15,9 @@ pub use analysis::LocationAnalysis;
 pub use blast_radius::BlastRadius;
 pub use call_graph::{CallGraphWalk, Direction, WalkConfig};
 pub use errors::{ErrorCode, OutputError};
-pub use file_symbols::{FileSymbols, SymbolBackend, declared_in};
+pub use file_symbols::{
+    FileSymbols, SymbolBackend, declared_addressing, declared_at, declared_in, read_by_grammar,
+};
 pub use input_error::{CliInputError, resolve_project_file};
 pub use location::{LocationArg, ParsedLocation};
 pub use output::{OutputContext, OutputFormat, OutputOptions};
