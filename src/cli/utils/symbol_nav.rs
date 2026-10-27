@@ -329,7 +329,7 @@ pub fn declared_with<'a>(symbols: &'a [Symbol], symbol: &Symbol) -> Vec<&'a Symb
 }
 
 /// Whether `outer`'s declared range holds `inner`'s and is not the same one.
-fn holds(outer: &Symbol, inner: &Symbol) -> bool {
+pub fn holds(outer: &Symbol, inner: &Symbol) -> bool {
     let (outer_start, outer_end) = span(outer);
     let (inner_start, inner_end) = span(inner);
     (outer_start, outer_end) != (inner_start, inner_end)

@@ -111,8 +111,8 @@ pub async fn execute(args: SymbolsArgs, app: &App) -> Result<()> {
         None => crate::cli::declared_in(app, &abs_path, options).await,
     };
     match answer {
-        Ok(mut answer) => {
-            let declarations = filter.outermost(std::mem::take(&mut answer.symbols));
+        Ok(answer) => {
+            let declarations = filter.outermost(answer.symbols.clone());
 
             let total = declarations.len();
             let listed = &declarations[..total.min(limit)];
