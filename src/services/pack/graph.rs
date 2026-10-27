@@ -8813,6 +8813,7 @@ mod tests {
                     "packages/m/package.json",
                     "{\"name\": \"m\", \"type\": \"module\", \"main\": \"./src/index.js\"}",
                 ),
+                ("packages/m/sub.js", ""),
                 (
                     "packages/t/package.json",
                     "{\"name\": \"t\", \"type\": \"module\", \"exports\": {\".\": \
