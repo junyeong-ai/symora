@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::app::App;
-use crate::cli::utils::{SymbolResolution, column_addressed_symbol, placed_at};
+use crate::cli::utils::{SymbolResolution, column_addressed_symbol, holds, placed_at};
 use crate::error::LspError;
 use crate::models::lsp::FindSymbolsOptions;
 use crate::models::symbol::{Language, Location, Symbol};
@@ -45,14 +45,14 @@ impl FileSymbols {
     /// The server's own tree places each of its symbols where it reads it.
     /// A declaration the grammar answered for is the symbol that tree holds
     /// at its position, where the answer kept the tree ([`Self::served`]),
-    /// if their names share a character ([`names_alike`]): clangd reads the
-    /// qualifier where the grammar places `Widget::set` as class `Widget`,
-    /// and its own `set` as the member. Otherwise the grammar's position
-    /// serves if a definition the server names there is the same
-    /// declaration — pyright names every `@overload` stub of a function at
-    /// each of them, and its outline holds the implementation alone — and
-    /// nothing does where each is another: the analyzer reads the `(` where
-    /// the grammar places a Dart enum's primary constructor as the enum.
+    /// if that symbol names it ([`names_one`]): clangd reads the qualifier
+    /// where the grammar places `Widget::set` as class `Widget`, and its own
+    /// `set` as the member. Otherwise the grammar's position serves if a
+    /// definition the server names there is the same declaration — pyright
+    /// names every `@overload` stub of a function at each of them, and its
+    /// outline holds the implementation alone — and nothing does where each
+    /// is another: the analyzer reads the `(` where the grammar places a
+    /// Dart enum's primary constructor as the enum.
     pub async fn served_as<'a>(
         &'a self,
         lsp: &dyn LspService,
@@ -65,7 +65,7 @@ impl FileSymbols {
         let (line, column) = (symbol.location.line, symbol.location.column);
         if let Some(served) = &self.served
             && let SymbolResolution::Match(alike) = column_addressed_symbol(served, line, column)
-            && names_alike(alike, symbol)
+            && names_one(alike, symbol, &self.symbols)
         {
             return Some(alike);
         }
@@ -154,10 +154,10 @@ pub async fn declared_addressing(
 /// analyzer outlines no primary constructor of a Dart extension type or
 /// enum, and the grammar places one where the type's name ends, which the
 /// server's tree reads as the type itself: an edit there would address the
-/// whole type. A symbol of the server's names the grammar's declaration
-/// where the two names share a character ([`names_alike`]), so a C++
-/// definition the grammar places at its qualifier stays clangd's, whatever
-/// part of the name clangd selects.
+/// whole type. A symbol of the server's that names the grammar's
+/// declaration ([`names_one`]) answers for it, so a C++ definition the
+/// grammar places at its qualifier stays clangd's, whatever part of the
+/// name clangd selects.
 pub async fn declared_at(
     app: &App,
     file: &Path,
@@ -177,26 +177,38 @@ pub async fn declared_at(
     };
     Ok(
         match column_addressed_symbol(&answer.symbols, line, column) {
-            SymbolResolution::Match(served) if names_alike(served, placed) => answer,
+            SymbolResolution::Match(served) if names_one(served, placed, &read.symbols) => answer,
             _ => read,
         },
     )
 }
 
-/// Whether two readings' symbols name one declaration: their names share a
-/// character.
+/// Whether a language server's symbol names `declaration`, one of the
+/// grammar's flat `declarations`: their names share a character, and the
+/// server's name shares none with a declaration that `declaration` does not
+/// hold.
 ///
 /// A server can select any part of a name the grammar reads whole. clangd
 /// selects the last part of a qualified name (`set` in `Widget::set`), the
 /// `~` of an out-of-line destructor (`Widget::~Widget`, `Box<T>::~Box`) and
 /// the keyword of an operator or a conversion operator
 /// (`Widget::operator==`, `Widget::operator bool`), where the grammar's
-/// name runs from the qualifier to the end. A name that ends where another
-/// begins shares no character with it: the analyzer's name of a Dart type,
-/// and the primary constructor the grammar places at the `(` or `<` after
-/// it.
-fn names_alike(one: &Symbol, other: &Symbol) -> bool {
-    share_a_character(name_span(one), name_span(other))
+/// name runs from the qualifier to the end. A server can also select more
+/// than a name: typescript-language-server selects a later overload or a
+/// merged namespace over the whole declaration, members included, and
+/// sourcekit-lsp selects a Swift tuple pattern `(a, b)` as one symbol, which
+/// names neither `a` nor `b`. A name that ends where another begins shares
+/// no character with it: the analyzer's name of a Dart type, and the
+/// primary constructor the grammar places at the `(` or `<` after it.
+fn names_one(served: &Symbol, declaration: &Symbol, declarations: &[Symbol]) -> bool {
+    let named = name_span(served);
+    let placed = |symbol: &Symbol| (symbol.location.line, symbol.location.column);
+    share_a_character(named, name_span(declaration))
+        && declarations.iter().all(|other| {
+            placed(other) == placed(declaration)
+                || holds(declaration, other)
+                || !share_a_character(named, name_span(other))
+        })
 }
 
 /// Where a name begins, and where it ends, exclusive.
@@ -271,12 +283,28 @@ mod tests {
         Symbol::new("name".to_string(), SymbolKind::Function, location)
     }
 
+    /// A declaration named from `name` to `name_end`, declared over `range`.
+    fn declared(name: (u32, u32), name_end: (u32, u32), range: ((u32, u32), (u32, u32))) -> Symbol {
+        let ((start_line, start_column), (end_line, end_column)) = range;
+        let location = Location::full(
+            PathBuf::from("f"),
+            name.0,
+            name.1,
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+        )
+        .with_name_end(name_end.0, name_end.1);
+        Symbol::new("name".to_string(), SymbolKind::Variable, location)
+    }
+
     /// The grammar reads a qualified C++ definition's name from its
     /// qualifier, and clangd selects a part of it; a name that ends where
     /// another begins, as the Dart analyzer's enum name does where the
     /// grammar places the enum's primary constructor, is another one's.
     #[test]
-    fn two_readings_name_one_declaration_where_their_names_share_a_character() {
+    fn a_servers_symbol_names_a_declaration_its_name_shares_a_character_with() {
         for (grammar, server) in [
             // `Widget::~Widget` and clangd's `~`.
             (named(7, 1, Some(16)), named(7, 9, Some(10))),
@@ -290,8 +318,11 @@ mod tests {
             (named(5, 3, Some(8)), named(5, 7, None)),
             (named(5, 3, Some(8)), named(5, 3, Some(3))),
         ] {
-            assert!(names_alike(&grammar, &server), "{grammar:?} {server:?}");
-            assert!(names_alike(&server, &grammar), "{grammar:?} {server:?}");
+            let declarations = std::slice::from_ref(&grammar);
+            assert!(
+                names_one(&server, &grammar, declarations),
+                "{grammar:?} {server:?}"
+            );
         }
         for (grammar, server) in [
             // `P11/P11` at its `(`, and the analyzer's enum `P11` before it.
@@ -300,8 +331,34 @@ mod tests {
             (named(5, 3, Some(8)), named(5, 8, None)),
             (named(5, 3, Some(8)), named(6, 3, Some(8))),
         ] {
-            assert!(!names_alike(&grammar, &server), "{grammar:?} {server:?}");
-            assert!(!names_alike(&server, &grammar), "{grammar:?} {server:?}");
+            let declarations = std::slice::from_ref(&grammar);
+            assert!(
+                !names_one(&server, &grammar, declarations),
+                "{grammar:?} {server:?}"
+            );
         }
+    }
+
+    /// A server's name over several declarations' names names the one that
+    /// holds the others, as typescript-language-server's merged namespace
+    /// does its members, and none of declarations that hold none: a Swift
+    /// tuple pattern `(ta, tb)` that sourcekit-lsp selects whole.
+    #[test]
+    fn a_servers_name_over_several_declarations_names_the_one_holding_the_others() {
+        let statement = ((22, 1), (22, 22));
+        let ta = declared((22, 6), (22, 8), statement);
+        let tb = declared((22, 10), (22, 12), statement);
+        let pattern = declared((22, 5), (22, 13), statement);
+        let both = [ta.clone(), tb.clone()];
+        assert!(!names_one(&pattern, &ta, &both));
+        assert!(!names_one(&pattern, &tb, &both));
+        assert!(names_one(&pattern, &ta, std::slice::from_ref(&ta)));
+
+        let namespace = declared((10, 11), (10, 12), ((10, 1), (14, 2)));
+        let member = declared((11, 16), (11, 17), ((11, 3), (11, 22)));
+        let whole = declared((10, 1), (14, 2), ((10, 1), (14, 2)));
+        let declarations = [namespace.clone(), member.clone()];
+        assert!(names_one(&whole, &namespace, &declarations));
+        assert!(!names_one(&whole, &member, &declarations));
     }
 }

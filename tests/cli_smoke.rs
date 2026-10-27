@@ -4921,6 +4921,53 @@ fn a_grammar_answered_cpp_definitions_references_are_asked_where_clangd_reads_it
     );
 }
 
+/// sourcekit-lsp selects a Swift tuple pattern `(ta, tb)` as one symbol
+/// over both names, which names neither: an edit at either name addresses
+/// the grammar's declaration, which a whole-line delete refuses for the
+/// declaration it shares a statement with, and its references are asked at
+/// its own name, since the server reads nothing at the pattern's `(`.
+#[cfg(unix)]
+#[test]
+fn a_server_symbol_over_two_declarations_answers_for_neither() {
+    if !Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("sourcekit-shaped protocol fixture requires python3");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path();
+    std::fs::write(
+        dir.join("p.swift"),
+        "let (ta, tb) = (1, 2)\nfunc use() -> Int { ta + tb }\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.join(".symora")).unwrap();
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/lsp/code_action_server.py");
+    let config = serde_json::json!({"lsp": {"servers": {"swift": {
+        "command": "python3",
+        "args": [server, dir.canonicalize().unwrap().join("p.swift"), "sourcekit-outline"]
+    }}}});
+    std::fs::write(
+        dir.join(".symora/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let refused = run_in(dir, &["edit", "delete", "p.swift:1:10", "--dry-run"]);
+    assert!(!refused.status.success());
+    let refused: serde_json::Value = common::parse_response(&refused.stdout).unwrap();
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("declared together with 'ta'"), "{refused}");
+
+    let answer = json_ok(dir, &["symbols", "p.swift", "--symbol", "tb", "--refs"]);
+    assert_eq!(answer["backend"], "ast", "{answer}");
+    assert_eq!(answer["items"][0]["refs"], 1, "{answer}");
+}
+
 /// pyright's tree lists an overloaded method's implementation alone, and
 /// its definition at any of the method's declarations names all three. The
 /// grammar answers an edit at an `@overload` stub, and each stub's

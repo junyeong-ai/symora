@@ -37,7 +37,9 @@ def lsp_range(start, end):
 # reference request answers. clangd 21 reads a qualifier (`Widget::`) as
 # its class; pyright answers each declaration of an overloaded method as
 # its definition; the Dart analyzer answers a position where a name ends as
-# it answers the name, so it reads the `(` after an enum's name as the enum.
+# it answers the name, so it reads the `(` after an enum's name as the enum;
+# sourcekit-lsp answers each name of a tuple pattern at the name, and
+# nothing at the pattern's `(`.
 NAMES = {
     "clangd-outline": [
         (1, [((0, 7), (0, 13)), ((1, 3), (1, 9)), ((2, 24), (2, 30)), ((7, 0), (7, 6)),
@@ -54,6 +56,10 @@ NAMES = {
     "dart-outline": [
         (1, [((0, 21), (0, 24)), ((1, 19), (1, 22))]),
         (1, [((4, 5), (4, 6))]),
+    ],
+    "sourcekit-outline": [
+        (1, [((0, 5), (0, 7)), ((1, 20), (1, 22))]),
+        (1, [((0, 9), (0, 11)), ((1, 25), (1, 27))]),
     ],
 }
 
@@ -153,6 +159,14 @@ while True:
             symbol("Widget::set", 6, (10, 0), (10, 24), ((10, 13), (10, 16))),
             symbol("use", 12, (12, 0), (12, 59), ((12, 5), (12, 8))),
         ]
+    elif method == "textDocument/documentSymbol" and mode == "sourcekit-outline":
+        # sourcekit-lsp's outline of a Swift tuple pattern is one variable
+        # selected over the whole pattern.
+        def symbol(name, kind, start, end, selection):
+            return {"name": name, "kind": kind, "range": lsp_range(start, end),
+                    "selectionRange": lsp_range(*selection), "children": []}
+        result = [symbol("(ta, tb)", 13, (0, 0), (0, 21), ((0, 4), (0, 12))),
+                  symbol("use()", 12, (1, 0), (1, 29), ((1, 5), (1, 8)))]
     elif method == "textDocument/documentSymbol" and mode == "pyright-outline":
         # pyright's outline of a method with two `@overload` stubs lists the
         # implementation alone.
