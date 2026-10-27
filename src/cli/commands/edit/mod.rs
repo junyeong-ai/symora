@@ -70,8 +70,8 @@ pub enum EditCommand {
         with_diagnostics: bool,
 
         /// After an applied edit, also pull diagnostics for the edited
-        /// symbol's caller files (its one-hop references), closing the
-        /// read->edit->verify loop across callers. Ignored on dry runs.
+        /// symbol's caller files (its one-hop references). Ignored on dry
+        /// runs.
         #[arg(long)]
         verify_callers: bool,
     },
@@ -99,8 +99,8 @@ pub enum EditCommand {
         with_diagnostics: bool,
 
         /// After an applied edit, also pull diagnostics for the edited
-        /// symbol's caller files (its one-hop references), closing the
-        /// read->edit->verify loop across callers. Ignored on dry runs.
+        /// symbol's caller files (its one-hop references). Ignored on dry
+        /// runs.
         #[arg(long)]
         verify_callers: bool,
     },
@@ -128,8 +128,8 @@ pub enum EditCommand {
         with_diagnostics: bool,
 
         /// After an applied edit, also pull diagnostics for the edited
-        /// symbol's caller files (its one-hop references), closing the
-        /// read->edit->verify loop across callers. Ignored on dry runs.
+        /// symbol's caller files (its one-hop references). Ignored on dry
+        /// runs.
         #[arg(long)]
         verify_callers: bool,
     },
@@ -444,8 +444,8 @@ async fn symbol_edit(
     }
     // Resolve the caller files BEFORE the edit lands: editing a symbol does not
     // move which files reference it, and resolving against the pre-edit state
-    // avoids any post-edit position drift. The diagnostics for those files are
-    // pulled AFTER the write, so they reflect the edit's effect.
+    // avoids any post-edit position drift. Their diagnostics are pulled after
+    // the write.
     let caller_files = if verify_callers && !dry_run {
         Some(collect_caller_files(app, addressed).await)
     } else {
@@ -462,14 +462,10 @@ async fn symbol_edit(
     output.diagnostics =
         pull_diagnostics(app, file, dry_run, with_diagnostics || verify_callers).await;
     if let Some(callers) = caller_files {
-        // Caller diagnostics must judge the edit's NEW signature. Sync the
-        // edited file to the language server before pulling them. `finish`
-        // re-syncs after this returns, but that later note is a no-op (the
-        // content is already current), so there is no real double work. Without
-        // this pre-sync the caller files are analysed against the server's stale
-        // pre-edit view of the edited file (its overlay was opened at the old
-        // content during the reference lookup), so a freshly introduced caller
-        // break reads as clean — a false negative independent of --with-diagnostics.
+        // Caller diagnostics can reflect the edit only once the server holds
+        // it, and the reference lookup opened the edited file's overlay at the
+        // old content, so sync it before pulling them. `finish` re-syncs after
+        // this returns, which is then a no-op.
         let edited = [file.to_path_buf()];
         app.lsp.note_files_edited(&edited).await;
         output.caller_verification = Some(verify_caller_files(app, callers).await);

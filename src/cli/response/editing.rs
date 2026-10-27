@@ -55,8 +55,8 @@ pub struct EditOutput {
 /// caller set, never the transitive caller graph. The `Section` carries the
 /// honest set completeness (count/showing/truncated/indexing); each file's own
 /// `EditDiagnostics.status` carries its confirmation state. Every listed file's
-/// diagnostics are its CURRENT full state, not a delta caused by this edit, so
-/// a pre-existing error is never misattributed to the edit.
+/// diagnostics are its full list as the server last published it, not a delta
+/// caused by this edit, so a pre-existing error is never misattributed to it.
 #[derive(Debug, Serialize)]
 pub struct CallerVerification {
     #[serde(flatten)]
