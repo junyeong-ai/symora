@@ -763,9 +763,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         (
                             "verify_callers",
                             "boolean",
-                            "Also attach diagnostics for the edited symbol's caller files \
-                             (its one-hop references), closing read->edit->verify across \
-                             callers (default false)",
+                            "Also attach diagnostics for the edited symbol's caller files, its \
+                             one-hop references (default false)",
                         ),
                     ],
                 ),
@@ -795,9 +794,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         (
                             "verify_callers",
                             "boolean",
-                            "Also attach diagnostics for the edited symbol's caller files \
-                             (its one-hop references), closing read->edit->verify across \
-                             callers (default false)",
+                            "Also attach diagnostics for the edited symbol's caller files, its \
+                             one-hop references (default false)",
                         ),
                     ],
                 ),
@@ -827,9 +825,8 @@ pub fn build_catalog() -> Vec<ToolDefinition> {
                         (
                             "verify_callers",
                             "boolean",
-                            "Also attach diagnostics for the edited symbol's caller files \
-                             (its one-hop references), closing read->edit->verify across \
-                             callers (default false)",
+                            "Also attach diagnostics for the edited symbol's caller files, its \
+                             one-hop references (default false)",
                         ),
                     ],
                 ),
