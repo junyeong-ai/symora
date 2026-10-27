@@ -61,6 +61,15 @@ impl IndexingState {
 pub(super) struct IndexingStatus {
     pub(super) state: IndexingState,
     pub(super) revision: u64,
+    /// Whether the server has reported a workspace status at all.
+    pub(super) reported: bool,
+}
+
+impl IndexingStatus {
+    /// Whether the server reports its workspace is not ready to answer from.
+    pub(super) fn reports_not_ready(&self) -> bool {
+        self.reported && self.state != IndexingState::Ready
+    }
 }
 
 /// Qualifies a result across the request, including a complete busy/ready cycle.
@@ -128,6 +137,9 @@ impl LspClient {
             .expect("indexing status lock poisoned");
         let previous = status.state;
         let next = previous.on_event(event);
+        if event != IndexingEvent::WaitUnconfirmed {
+            status.reported = true;
+        }
         if matches!(
             event,
             IndexingEvent::ServerBusy | IndexingEvent::ServerUnconfirmed

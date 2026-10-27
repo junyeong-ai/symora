@@ -81,7 +81,7 @@ pub struct CallerFileDiagnostics {
 /// list is never mistaken for a verified-clean file:
 /// `ok` (server confirmed analyzing the written content),
 /// `unconfirmed` (no confirmation within the wait window),
-/// `unsupported` (language server doesn't publish diagnostics),
+/// `unsupported` (language server provides no diagnostics),
 /// `unavailable` (the pull itself failed, so nothing was counted and `count`
 /// is absent).
 #[derive(Debug, Serialize)]

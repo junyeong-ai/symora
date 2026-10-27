@@ -37,7 +37,7 @@ pub struct DiagnosticsOutput {
     pub file: String,
     /// Present only when the result is *not* authoritative:
     /// `unconfirmed` (server never confirmed analyzing this content) or
-    /// `unsupported` (the language's server doesn't publish diagnostics).
+    /// `unsupported` (the language's server provides no diagnostics).
     /// Absent means the server confirmed the listed diagnostics.
     #[serde(skip_serializing_if = "DiagnosticsStatus::is_ok")]
     pub status: DiagnosticsStatus,

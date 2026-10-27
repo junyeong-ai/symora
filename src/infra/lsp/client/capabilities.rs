@@ -9,7 +9,21 @@ use crate::infra::lsp::protocol::{
     WorkspaceClientCapabilities,
 };
 
-/// Negotiate static providers and the client's implemented file-watching registrations.
+/// Whether `language`'s server is offered pull diagnostics.
+///
+/// A pulled report is read as the server's analysis of the document's
+/// current content. pyright answers a pull once it has analyzed the
+/// document, and rust-analyzer once its workspace status reports the
+/// workspace loaded, for a file in a project it names
+/// (`LspClient::pull_diagnostics`). sourcekit-lsp answers with an empty
+/// report until its build settings load. A server offered pulls may stop
+/// publishing, so every other server stays on publishes, which it sends
+/// once it has analyzed the document.
+pub(super) fn offers_pull_diagnostics(language: Language) -> bool {
+    matches!(language, Language::Python | Language::Rust)
+}
+
+/// Negotiate static providers and the client's implemented dynamic registrations.
 pub(super) fn client_capabilities(language: Language, file_watching: bool) -> ClientCapabilities {
     let general = GeneralClientCapabilities {
         position_encodings: Some(vec!["utf-8".to_string(), "utf-16".to_string()]),
@@ -196,9 +210,12 @@ pub(super) fn client_capabilities(language: Language, file_watching: bool) -> Cl
                 "properties": ["tooltip", "textEdits", "label.tooltip", "label.location", "label.command"]
             }
         })),
-        // Diagnostics are read from publishes. A server offered pull
-        // diagnostics stops publishing them, and symora sends no pull.
-        diagnostic: None,
+        diagnostic: offers_pull_diagnostics(language).then(|| {
+            serde_json::json!({
+                "dynamicRegistration": true,
+                "relatedDocumentSupport": false
+            })
+        }),
     };
 
     let workspace = WorkspaceClientCapabilities {
@@ -319,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn only_file_watching_supports_dynamic_registration() {
+    fn dynamic_registration_is_offered_for_watching_and_pulling_only() {
         fn offered(value: &Value, path: &str, dynamic: &mut Vec<String>) {
             if let Some(object) = value.as_object() {
                 for (key, value) in object {
@@ -338,32 +355,15 @@ mod tests {
                     serde_json::to_value(client_capabilities(language, watching)).unwrap();
                 let mut dynamic = Vec::new();
                 offered(&capabilities, "", &mut dynamic);
-                let expected: Vec<&str> = if watching {
-                    vec![".workspace.didChangeWatchedFiles.dynamicRegistration"]
-                } else {
-                    vec![]
-                };
+                let mut expected = Vec::new();
+                if offers_pull_diagnostics(language) {
+                    expected.push(".textDocument.diagnostic.dynamicRegistration");
+                }
+                if watching {
+                    expected.push(".workspace.didChangeWatchedFiles.dynamicRegistration");
+                }
                 assert_eq!(dynamic, expected, "{language:?}");
             }
-        }
-    }
-
-    #[test]
-    fn diagnostics_are_offered_only_as_publishes() {
-        for language in Language::all() {
-            let capabilities = serde_json::to_value(client_capabilities(language, true)).unwrap();
-            assert!(
-                capabilities["textDocument"]["publishDiagnostics"].is_object(),
-                "{language:?}"
-            );
-            assert!(
-                capabilities["textDocument"].get("diagnostic").is_none(),
-                "{language:?}"
-            );
-            assert!(
-                capabilities["workspace"].get("diagnostics").is_none(),
-                "{language:?}"
-            );
         }
     }
 }

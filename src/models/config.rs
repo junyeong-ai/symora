@@ -78,9 +78,9 @@ pub struct LspConfig {
     #[serde(default = "defaults::tests_limit")]
     pub tests_limit: usize,
 
-    /// How long to wait for the server to publish diagnostics for the
-    /// synced content. Confirmation returns immediately; the window only
-    /// runs out when the server stays silent, in which case results are
+    /// How long to wait for the server's diagnostics for the synced
+    /// content, pulled or published. An answer returns immediately; the
+    /// window only runs out when none comes, in which case results are
     /// reported as unconfirmed rather than synthesized as clean.
     #[serde(default = "defaults::diagnostics_wait_ms")]
     pub diagnostics_wait_ms: u64,
